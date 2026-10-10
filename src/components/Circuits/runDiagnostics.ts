@@ -248,6 +248,7 @@ export function buildCircuitProbeRows(
         }
         if (needle !== '') {
           visibleRuns = visibleRuns.filter((run) =>
+            Object.values(parseRunContext(run.run.context_json)).some((value) => value.toLowerCase().includes(needle)) ||
             run.run.trigger_identity.toLowerCase().includes(needle) ||
             String(run.run.id).includes(needle) ||
             row.circuit.name.toLowerCase().includes(needle)

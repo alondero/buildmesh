@@ -20,8 +20,7 @@
  * `review_classifier:completed · attempt 2`, and a review step with a
  * retained report offers it behind its own toggle.
  *
- * Live and failed diagnostics default to expanded; terminal runs are
- * collapsed until the user asks for their detail. Errors remain visible in
+ * Runs start collapsed; attention remains visible with a Resolve action. Errors remain visible in
  * the card headline even when a terminal card is collapsed.
  * `expanded` is lifted to the parent so a `circuit-run-updated` refetch
  * can't reset a card the user deliberately opened or closed.
@@ -31,8 +30,10 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import { CircuitEvidenceHistory } from '../Circuits/CircuitEvidenceHistory';
 import { RunNextSteps, runNeedsNextSteps } from '../Circuits/RunNextStepsPanel';
+import { describeProblem } from '../Circuits/runNextSteps';
 import type { CircuitRunDetail } from '../../lib/tauri';
 import {
   formatDurationMs,
@@ -85,19 +86,25 @@ function RunTimingSpans({
   run,
   steps,
   now,
+  compact = false,
 }: {
   run: CircuitRunDetail['run'];
   steps: CircuitRunDetail['steps'];
   now: Date;
+  compact?: boolean;
 }) {
   const started = runStartedMs(steps);
   const finished = runFinishedMs(run);
   const duration = runActiveDurationMs(run, steps, now);
-  const stale = isRunStale(run, now);
+  const stale = run.state === 'running' && isRunStale(run, now);
   const staleMs = runStaleMs(run, now);
   return (
     <>
-      {started === null ? (
+      {compact && duration !== null ? (
+        <span data-testid={`run-times-${run.id}`} title={started === null ? undefined : `Started ${formatWallClock(started, now)}`}>
+          {formatDurationMs(duration)} {finished === null ? 'elapsed' : 'total'}
+        </span>
+      ) : started === null ? (
         <span data-testid={`run-times-${run.id}`}>
           {isTerminalRunState(run.state) ? 'Never started' : 'Starting…'}
         </span>
@@ -131,7 +138,7 @@ function RunTimingSpans({
  * Terminal runs render a static reading with no interval. Cleared on unmount
  * or when the run reaches a terminal state.
  */
-export function LiveRunDuration({ run, steps }: { run: CircuitRunDetail['run']; steps: CircuitRunDetail['steps'] }) {
+export function LiveRunDuration({ run, steps, compact = false }: { run: CircuitRunDetail['run']; steps: CircuitRunDetail['steps']; compact?: boolean }) {
   const terminal = isTerminalRunState(run.state);
   const [now, setNow] = useState(() => new Date());
   useEffect(() => {
@@ -139,7 +146,7 @@ export function LiveRunDuration({ run, steps }: { run: CircuitRunDetail['run']; 
     const id = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(id);
   }, [terminal]);
-  return <RunTimingSpans run={run} steps={steps} now={now} />;
+  return <RunTimingSpans run={run} steps={steps} now={now} compact={compact} />;
 }
 
 interface CircuitRunCardProps {
@@ -166,6 +173,7 @@ interface CircuitRunCardProps {
   onFocusAgent: (nodeId: number) => void;
   /** True for a beat after the user linked here from that agent node. */
   focused?: boolean;
+  slot?: number;
 }
 
 export function CircuitRunCard({
@@ -185,6 +193,7 @@ export function CircuitRunCard({
   agentName,
   onFocusAgent,
   focused = false,
+  slot,
 }: CircuitRunCardProps) {
   const { run, steps } = detail;
   const review = reviewResult(detail, reviewCircuit);
@@ -198,20 +207,28 @@ export function CircuitRunCard({
   // When the "what to do next" box is shown it explains the problem in plain
   // words, so the raw scheduler reason would only repeat it.
   const showNextSteps = runNeedsNextSteps(run, steps);
+  const problemStep = firstError ?? steps.find((step) => step.status === 'unverified');
   // Parsing a potentially large `context_json` (issue/PR bodies, prompts) is
   // memoised: the duration clock re-renders a live card every second and must
   // not re-parse the blob each tick.
   const context = useMemo(() => parseRunContext(run.context_json), [run.context_json]);
-  // Name the run after its implementation node, not the reviewer that happens
-  // to be active, and link there; fall back to whichever agent the run drove.
+  // Issue identity stays stable while the agent link follows the current step.
   const subject = useMemo(
     () => runSubject(run, steps, context, nodeIndex, agentName),
     [run, steps, context, nodeIndex, agentName],
   );
-  const linkedAgent = subject.agentNodeId ?? linkedAgentNodeId(run, steps);
+  const currentSteps = steps.filter((step) => ['running', 'unverified', 'blocked', 'pending_slot'].includes(step.status));
+  const currentAgents = [...new Set(currentSteps.flatMap((step) => {
+    const kind = nodeIndex.get(step.node_id)?.type;
+    const target = kind && 'target_node_id' in kind ? kind.target_node_id : null;
+    const agent = step.agent_node_id ?? (target ? steps.find((candidate) => candidate.node_id === target)?.agent_node_id : null);
+    return agent == null ? [] : [agent];
+  }))];
+  const linkedAgent = currentAgents[0] ?? subject.agentNodeId ?? linkedAgentNodeId(run, steps);
   const linkedAgentLabel = linkedAgent === null ? null : agentName(linkedAgent);
 
   const panelId = `run-detail-${run.id}`;
+  const prUrl = /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+$/.test(context['pr.url'] ?? '') ? context['pr.url'] : null;
 
   return (
     <li
@@ -222,6 +239,7 @@ export function CircuitRunCard({
       data-run-state={run.state}
       data-run-focused={focused ? 'true' : undefined}
     >
+      {slot !== undefined && <div className="px-2 pt-2 text-2xs font-medium text-text-secondary">Slot {slot}</div>}
       {/* Headline row. The whole row is the disclosure control so the hit
           target stays comfortable at narrow widths; the buttons below sit
           outside it so they don't inherit the toggle. */}
@@ -254,7 +272,7 @@ export function CircuitRunCard({
             }`}
             data-testid={`run-state-${run.id}`}
           >
-            {review?.label ?? runStateLabel(run.state)}
+            {review && steps.some((step) => step.node_id === 'close_implementer' && step.status === 'completed') && !review.needsAttention ? 'Shipped' : review?.label ?? runStateLabel(run.state)}
           </span>
           {reviewCircuit && context['retry.attempt'] && context['retry.max_retries'] && (
             <span className="text-2xs text-text-muted" data-testid={`run-review-rounds-${run.id}`}>
@@ -266,11 +284,11 @@ export function CircuitRunCard({
             than clips so it stays readable at the 240px Probe minimum. */}
         <span className="mt-0.5 flex items-baseline gap-x-1.5 flex-wrap text-2xs text-text-muted">
           {now !== undefined ? (
-            <RunTimingSpans run={run} steps={steps} now={now} />
+            <RunTimingSpans run={run} steps={steps} now={now} compact={!expanded} />
           ) : (
-            <LiveRunDuration run={run} steps={steps} />
+            <LiveRunDuration run={run} steps={steps} compact={!expanded} />
           )}
-          <span className="font-mono shrink-0" data-testid={`run-id-${run.id}`}>
+          <span hidden={!expanded} className="font-mono shrink-0" data-testid={`run-id-${run.id}`}>
             #{run.id}
           </span>
         </span>
@@ -282,17 +300,17 @@ export function CircuitRunCard({
           className="mt-0.5 flex items-baseline gap-1 flex-wrap text-2xs"
           data-testid={`run-activity-${run.id}`}
         >
-          <span className={statusTextClass(review?.needsAttention ? 'failed' : activityStatusToken(activity.kind, run.state))}>
+          {(review?.needsAttention || activity.label !== runStateLabel(run.state)) && <span className={statusTextClass(review?.needsAttention ? 'failed' : activityStatusToken(activity.kind, run.state))}>
             {review?.needsAttention ? 'Needs attention' : activity.label}
-          </span>
+          </span>}
           {activity.nodeId !== null && (
-            <span className="font-mono text-text-secondary break-words min-w-0">
-              {activity.nodeId}
+            <span className="text-text-secondary break-words min-w-0">
+              {nodeRoleLabel(activity.nodeId, nodeIndex.get(activity.nodeId)?.type)}
             </span>
           )}
         </span>
         )}
-        {activity.detail !== null && !showNextSteps && (
+        {activity.detail !== null && !showNextSteps && (expanded || run.state !== 'paused') && (
           <span
             className="mt-0.5 block text-2xs text-text-muted break-words"
             data-testid={`run-reason-${run.id}`}
@@ -302,7 +320,11 @@ export function CircuitRunCard({
         )}
       </button>
 
-      {review && <p className="px-2 pb-1.5 text-2xs text-text-secondary break-words">{review.detail}</p>}
+      {prUrl && <a href={prUrl} onClick={(event) => { event.preventDefault(); void openUrl(prUrl); }} className="mx-2 mb-1 inline-flex min-h-[24px] items-center text-xs text-accent-cyan">
+        Pull request {context['pr.number'] ? `#${context['pr.number']}` : ''}
+      </a>}
+
+      {expanded && review && <p className="px-2 pb-1.5 text-2xs text-text-secondary break-words">{review.detail}</p>}
       {canContinueReview(detail, reviewCircuit) && onContinueReview && (
         <div className="px-2 pb-2">
           <button type="button" disabled={busy} onClick={onContinueReview}
@@ -310,15 +332,14 @@ export function CircuitRunCard({
             className="px-1.5 py-1 text-2xs rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40">
             Review again · +1 round
           </button>
-          <p className="mt-1 text-2xs text-text-muted break-words">Adds one round to this run and resumes the saved implementation agent if needed. Earlier findings remain in Run History.</p>
+          <p hidden={!expanded} className="mt-1 text-2xs text-text-muted break-words">Adds one round to this run and resumes the saved implementation agent if needed. Earlier findings remain in Run History.</p>
         </div>
       )}
-      {context['recovery.from_run_id'] && <p className="px-2 pb-1.5 text-2xs text-text-secondary">Continues run #{context['recovery.from_run_id']} on the same worktree.</p>}
+      {expanded && context['recovery.from_run_id'] && <p className="px-2 pb-1.5 text-2xs text-text-secondary">Continues run #{context['recovery.from_run_id']} on the same worktree.</p>}
       {blockedSteps.length > 0 && <p className="px-2 pb-1.5 text-2xs text-status-warning break-words">
-        {blockedSteps.some((s) => s.node_id === 'confirm_source')
-          ? 'The source agent may be waiting for input. Check its terminal, then approve when it is ready for review.'
-          : 'This circuit requires human authorization before its next step. Issue-triggered runs use this to check collaborator trust.'}
-        {' '}Waiting does not expire. This is separate from the reviewer approving the code.
+        {blockedSteps.some((step) => step.node_id === 'confirm_source')
+          ? 'Check the source agent, then approve to start review.'
+          : 'Approval needed to continue.'}
       </p>}
 
       {/* The Agent Node this run drives — the answer to "which node is this
@@ -329,9 +350,9 @@ export function CircuitRunCard({
           className="px-2 pb-1.5 flex items-baseline gap-1.5 flex-wrap text-2xs"
           data-testid={`run-agent-${run.id}`}
         >
-          <span className="text-text-muted">Agent node</span>
+          <span className="text-text-muted">{currentAgents.length > 0 ? 'Working on' : 'Agent node'}</span>
           {/* The headline already names it; repeat only a different node. */}
-          {(linkedAgentLabel === null || linkedAgentLabel !== subject.label) && (
+          {(
             <span className="font-mono text-text-secondary break-words min-w-0">
               {linkedAgentLabel ?? `#${linkedAgent}`}
             </span>
@@ -342,7 +363,7 @@ export function CircuitRunCard({
               onClick={() => onFocusAgent(linkedAgent)}
               data-testid={`run-agent-open-${run.id}`}
               title="Show this Agent Node on the canvas"
-              className="px-1 rounded-md text-accent-cyan hover:bg-accent-cyan/10"
+              className="min-h-[24px] px-1 rounded-md text-accent-cyan hover:bg-accent-cyan/10"
             >
               Open
             </button>
@@ -356,7 +377,7 @@ export function CircuitRunCard({
         run.state === 'paused' ||
         blockedSteps.length > 0) && (
         <div className="px-2 pb-1.5 flex items-center gap-1 flex-wrap">
-          {run.state === 'running' && (
+          {expanded && run.state === 'running' && (
             <button
               type="button"
               onClick={onPause}
@@ -378,7 +399,7 @@ export function CircuitRunCard({
               Resume
             </button>
           )}
-          {(run.state === 'running' || run.state === 'paused') && (
+          {expanded && (run.state === 'running' || run.state === 'paused') && (
             <button
               type="button"
               onClick={onCancel}
@@ -414,7 +435,17 @@ export function CircuitRunCard({
       {/* A run that needs a person says what happened and what to do right here,
           with the actions that advance it. A collapsed card still surfaces it:
           a failure you have to expand to find is a failure you miss. */}
-      {showNextSteps ? (
+      {showNextSteps && !expanded && (
+        <div className="px-2 pb-2">
+        {problemStep && <p className="text-2xs text-status-warning break-words mb-1">
+          {describeProblem({ state: run.state, role: nodeRoleLabel(problemStep.node_id, nodeIndex.get(problemStep.node_id)?.type), status: problemStep.status, error: problemStep.error_message }).happened}
+        </p>}
+        <button type="button" onClick={onToggleExpanded} aria-expanded={expanded} aria-controls={panelId} className="min-h-[24px] px-2 rounded-md bg-status-warning/15 text-status-warning text-xs">
+          Resolve {run.state === 'failed' ? 'failed step' : 'uncertain result'}
+        </button>
+        </div>
+      )}
+      {showNextSteps && expanded ? (
         <RunNextSteps
           run={run}
           steps={steps}
@@ -422,7 +453,7 @@ export function CircuitRunCard({
           busy={busy}
         />
       ) : (
-        firstError !== null && (
+        !showNextSteps && firstError !== null && (
           <p
             className="px-2 pb-1.5 text-2xs text-status-error break-words"
             data-testid={`run-error-${run.id}`}
@@ -564,7 +595,7 @@ export function CircuitRunCard({
                         data-testid={`run-review-report-${run.id}-${s.node_id}`}
                       >
                         <summary className="cursor-pointer text-accent-cyan">
-                          View review report
+                          {context[`node.${s.node_id}.review_verdict_source`] === 'operator' ? 'View human review note' : 'View review report'}
                         </summary>
                         <pre className="mt-0.5 whitespace-pre-wrap break-words text-text-secondary font-mono">
                           {report}

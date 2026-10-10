@@ -58,6 +58,7 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { formatError } from '../../lib/errorUtils';
+import { queueWaitText } from '../Circuits/CircuitEvidenceHistory';
 import { CircuitRunCapacity } from './CircuitRunCapacity';
 import {
   approveCircuitStep,
@@ -78,7 +79,8 @@ import {
   type CircuitTriggerKind,
   type CircuitWithRuns,
 } from '../../lib/tauri';
-import { isTerminalRunState } from '../Circuits/circuitGraphModel';
+import { recordedLabel } from '../Circuits/runIdentity';
+import { parseRunContext } from '../Circuits/runStepPresentation';
 import {
   buildCircuitProbeRows,
   annotateCircuitRows,
@@ -241,6 +243,7 @@ function SortableQueueRow({
   onToggleSelected,
   meshRunCapacity,
   meshActiveRuns,
+  waitReason,
   onMove,
   onCancel,
 }: {
@@ -252,6 +255,7 @@ function SortableQueueRow({
   onToggleSelected: () => void;
   meshRunCapacity: number;
   meshActiveRuns: number;
+  waitReason?: string;
   onMove: (runId: number, direction: 'up' | 'down' | 'top' | 'bottom') => void;
   onCancel: (runId: number) => void;
 }) {
@@ -297,8 +301,7 @@ function SortableQueueRow({
           {entry.queue_rank}
         </span>
         <span className="text-xs text-text-primary break-words min-w-0 flex-1">
-          {entry.circuit_name}{' '}
-          <span className="font-mono text-text-muted">#{entry.run.id}</span>
+          {recordedLabel(parseRunContext(entry.run.context_json)) ?? entry.circuit_name}
         </span>
       </div>
       <div className="mt-1 flex flex-wrap items-center gap-1 pl-4">
@@ -308,7 +311,7 @@ function SortableQueueRow({
           disabled={busy || index === 0}
           aria-label={`Move run ${entry.run.id} up`}
           title="Move up one"
-          className="px-1 text-xs text-text-muted hover:text-text-primary disabled:opacity-30"
+          className="min-h-[24px] min-w-[24px] px-1 text-xs text-text-muted hover:text-text-primary disabled:opacity-30"
         >
           ↑
         </button>
@@ -318,7 +321,7 @@ function SortableQueueRow({
           disabled={busy || index === total - 1}
           aria-label={`Move run ${entry.run.id} down`}
           title="Move down one"
-          className="px-1 text-xs text-text-muted hover:text-text-primary disabled:opacity-30"
+          className="min-h-[24px] min-w-[24px] px-1 text-xs text-text-muted hover:text-text-primary disabled:opacity-30"
         >
           ↓
         </button>
@@ -328,7 +331,7 @@ function SortableQueueRow({
           disabled={busy || index === 0}
           aria-label={`Move run ${entry.run.id} to top`}
           title="Move to top"
-          className="px-1 text-2xs text-text-muted hover:text-text-primary disabled:opacity-30"
+          className="min-h-[24px] min-w-[24px] px-1 text-2xs text-text-muted hover:text-text-primary disabled:opacity-30"
         >
           ⤒
         </button>
@@ -338,7 +341,7 @@ function SortableQueueRow({
           disabled={busy || index === total - 1}
           aria-label={`Move run ${entry.run.id} to bottom`}
           title="Move to bottom"
-          className="px-1 text-2xs text-text-muted hover:text-text-primary disabled:opacity-30"
+          className="min-h-[24px] min-w-[24px] px-1 text-2xs text-text-muted hover:text-text-primary disabled:opacity-30"
         >
           ⤓
         </button>
@@ -353,7 +356,7 @@ function SortableQueueRow({
         </button>
       </div>
       <p className="mt-1 text-2xs font-mono text-text-muted break-all pl-4">
-        {entry.run.trigger_identity}
+        {entry.circuit_name} · Run #{entry.run.id}
       </p>
       {/* Pending runs live in the queue (not the ledger); surface
           the same admission detail a run card would so users
@@ -363,10 +366,7 @@ function SortableQueueRow({
         className="mt-1 text-2xs text-text-muted break-words pl-4"
         data-testid={`queue-pending-reason-${entry.run.id}`}
       >
-        {pendingAdmissionDetail({
-          meshRunCapacity,
-          meshActiveRuns,
-        })}
+        {waitReason ? `Last checked: ${queueWaitText(waitReason)}` : pendingAdmissionDetail({ meshRunCapacity, meshActiveRuns })}
       </p>
     </li>
   );
@@ -383,6 +383,7 @@ export function CircuitsProbeTab() {
   );
   const meshRunCapacity = meshRow?.circuit_run_capacity ?? 0;
   const [rows, setRows] = useState<CircuitWithRuns[]>([]);
+  const [queueWaits, setQueueWaits] = useState<Record<string, string>>({});
   const [queue, setQueue] = useState<CircuitQueueEntry[]>([]);
   /**
    * The mesh whose snapshot is currently in `rows`/`queue`, or null while a
@@ -430,6 +431,7 @@ export function CircuitsProbeTab() {
     () => viewRows.flatMap(({ visibleRuns }) => visibleRuns.map((d) => d.run.id)),
     [viewRows]
   );
+  const runSlots = useMemo(() => new Map(viewRows.flatMap((row) => row.visibleRuns).map((detail, index) => [detail.run.id, index + 1])), [viewRows]);
   const queueVisible = useMemo(() => queue.slice(0, queueVisibleCount), [queue, queueVisibleCount]);
   const queueSensors = useSensors(
     useSensor(PointerSensor),
@@ -437,8 +439,7 @@ export function CircuitsProbeTab() {
   );
   /**
    * Explicit run-card disclosure overrides, keyed by run id. Absent means
-   * "use the computed default" — live and failed diagnostics open while
-   * terminal runs stay collapsed. Storing
+   * "start collapsed". Storing
    * only deliberate toggles is what lets the `circuit-run-updated`
    * refetch land without snapping a card the user just opened shut.
    */
@@ -547,6 +548,7 @@ export function CircuitsProbeTab() {
     if (activeMeshId === null) {
       setRows([]);
       setQueue([]);
+      setQueueWaits({});
       setLoadedMeshId(null);
       return;
     }
@@ -559,6 +561,7 @@ export function CircuitsProbeTab() {
       if (requestId !== loadRequestRef.current) return;
       setRows(snapshot.circuits);
       setQueue(snapshot.queue);
+      setQueueWaits(snapshot.queue_waits ?? {});
       setQueueSelection((prev) => {
         const live = new Set(snapshot.queue.map((e) => e.run.id));
         const next = new Set<number>();
@@ -717,9 +720,9 @@ export function CircuitsProbeTab() {
     <div className="flex flex-col h-full min-h-0 text-sm" data-testid="circuits-probe-tab">
       <div className="px-3 py-2 border-b border-border-subtle shrink-0">
         <p className="text-xs text-text-secondary mb-2" role="status" data-testid="circuits-status">
-          {statusText}
+          {loadedMeshId === activeMeshId ? statusText : loadError ? 'Circuits unavailable' : 'Loading circuits…'}
         </p>
-        {meshRow && <CircuitRunCapacity key={activeMeshId} meshId={activeMeshId} capacity={meshRunCapacity} />}
+
         <div
           className="grid grid-cols-2 gap-1"
           role="tablist"
@@ -788,46 +791,16 @@ export function CircuitsProbeTab() {
           {focusNotice}
         </div>
       )}
-      {view === 'manage' && <CircuitCreateForm
-        busy={busy}
-        newName={newName}
-        setNewName={setNewName}
-        handleCreate={handleCreate}
-        blueprint={blueprint}
-        setBlueprint={setBlueprint}
-        effectiveTriggerKind={effectiveTriggerKind}
-        setTriggerKind={setTriggerKind}
-        isReviewBlueprint={isReviewBlueprint}
-        needsLabel={needsLabel}
-        triggerLabel={triggerLabel}
-        setTriggerLabel={setTriggerLabel}
-        intervalSeconds={intervalSeconds}
-        setIntervalSeconds={setIntervalSeconds}
-      />}
       {/* View toolbars sit outside the scroller as shrink-0 siblings (probe
           checklist): filters and bulk actions must not scroll away from the
           list they control. */}
-      {view === 'activity' && activityStats.activeCount > 1 && (
-        <div className="px-3 py-1.5 border-b border-border-subtle shrink-0 flex items-center justify-between gap-2">
-          <span className="text-2xs text-text-muted">{activityStats.activeCount} active runs hold a circuit-run slot</span>
-          <button
-            type="button"
-            onClick={() => runAction(() => cancelCircuitRuns(visibleActiveRunIds))}
-            disabled={busy || visibleActiveRunIds.length === 0}
-            data-testid="activity-cancel-all"
-            className="px-1.5 py-0.5 text-2xs rounded-md text-status-error hover:bg-status-error/10 disabled:opacity-40"
-          >
-            Cancel all
-          </button>
-        </div>
-      )}
       {view === 'history' && (
         <div className="px-3 py-1.5 border-b border-border-subtle shrink-0" data-testid="circuit-history-filters">
           <div className="flex flex-wrap items-center gap-1.5">
             <input
               value={historySearch}
               onChange={(e) => setHistorySearch(e.target.value)}
-              placeholder="Filter by trigger, id, circuit…"
+              placeholder="Find issue, PR or circuit…"
               aria-label="Filter history"
               data-testid="history-search-input"
               className="flex-1 min-w-0 px-2 py-1 bg-bg-surface border border-border-subtle rounded-md text-xs text-text-primary focus:outline-none"
@@ -843,10 +816,7 @@ export function CircuitsProbeTab() {
               Needs attention ({activityStats.historyAttentionCount})
             </label>
           </div>
-          <p className="mt-1 text-2xs text-text-muted break-words">
-            History shows finished runs (completed · failed · cancelled). Failed and unapproved reviews sort first.
-            Old throwaway runs are pruned by retention; issue/PR runs are kept as dedupe tombstones.
-          </p>
+
         </div>
       )}
       {view === 'queue' && queue.length > 0 && (
@@ -890,6 +860,56 @@ export function CircuitsProbeTab() {
         className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden"
         data-testid="circuits-probe-body"
       >
+        {view === 'manage' && <section className="p-3 border-b border-border-subtle space-y-3">
+          <h3 className="text-xs font-semibold text-text-primary">Run capacity</h3>
+          {meshRow && <CircuitRunCapacity key={activeMeshId} meshId={activeMeshId} capacity={meshRunCapacity} />}
+          <p className="text-2xs text-text-secondary">Paused runs keep their slot. Disabling a circuit stops new automatic runs; work already in progress continues.</p>
+          <details><summary className="cursor-pointer text-xs text-accent-cyan min-h-[24px]">Create a circuit</summary>
+      <CircuitCreateForm
+        busy={busy}
+        newName={newName}
+        setNewName={setNewName}
+        handleCreate={handleCreate}
+        blueprint={blueprint}
+        setBlueprint={setBlueprint}
+        effectiveTriggerKind={effectiveTriggerKind}
+        setTriggerKind={setTriggerKind}
+        isReviewBlueprint={isReviewBlueprint}
+        needsLabel={needsLabel}
+        triggerLabel={triggerLabel}
+        setTriggerLabel={setTriggerLabel}
+        intervalSeconds={intervalSeconds}
+        setIntervalSeconds={setIntervalSeconds}
+      />
+          </details>
+        </section>}
+        {view === 'activity' && loadedMeshId === activeMeshId && <section className="p-3 border-b border-border-subtle" aria-label="Run slots">
+          <div className="flex justify-between gap-2 text-xs mb-2">
+            <span className="font-semibold text-text-primary">{meshActiveRuns} / {meshRunCapacity || '—'} slots occupied</span>
+            <button type="button" className="text-accent-cyan min-h-[24px]" onClick={() => setView('manage')}>Configure</button>
+          </div>
+          <div className="flex gap-1" aria-hidden="true">
+            {Array.from({ length: Math.max(meshRunCapacity, meshActiveRuns) }, (_, index) => <span key={index} className={`h-1.5 flex-1 rounded-sm ${index < meshActiveRuns ? 'bg-accent-cyan' : 'bg-border-strong'}`} />)}
+          </div>
+          {meshActiveRuns < meshRunCapacity && <p className="mt-2 text-2xs text-text-secondary">
+            {meshRunCapacity - meshActiveRuns} available · {queue.length === 0 ? 'Waiting for work' : queueWaits[String(queue[0].run.id)] ? `Last checked: ${queueWaitText(queueWaits[String(queue[0].run.id)])}` : 'Checking admission for queued work'}
+          </p>}
+          {activityStats.activeCount > 1 && <details className="mt-2 text-2xs text-text-secondary">
+            <summary className="cursor-pointer min-h-[24px]">Run actions</summary>
+          <button
+            type="button"
+            onClick={() => runAction(() => cancelCircuitRuns(visibleActiveRunIds))}
+            disabled={busy || visibleActiveRunIds.length === 0}
+            data-testid="activity-cancel-all"
+            className="px-1.5 py-0.5 text-2xs rounded-md text-status-error hover:bg-status-error/10 disabled:opacity-40"
+          >
+            Cancel all
+          </button>
+          </details>}
+          {activityStats.historyAttentionCount > 0 && <button type="button" onClick={() => { setHistoryAttentionOnly(true); setView('history'); }} className="mt-2 text-xs text-status-warning min-h-[24px]">
+            {activityStats.historyAttentionCount} finished runs need attention
+          </button>}
+        </section>}
         {view === 'activity' && queue.length > 0 && (
           <section className="mx-2 mt-2 rounded-md border border-status-warning/30 bg-status-warning/5 p-2" data-testid="circuit-activity-queue-summary">
             <div className="flex items-center justify-between gap-2">
@@ -899,11 +919,11 @@ export function CircuitsProbeTab() {
               </button>
             </div>
             <p className="mt-0.5 text-2xs text-text-muted break-words">
-              {queue.length} {queue.length === 1 ? 'run is' : 'runs are'} waiting for circuit-run capacity.
+              {queue.length} waiting to start
             </p>
             <ul className="mt-1 text-2xs text-text-secondary">
-              {queue.slice(0, 3).map((entry) => (
-                <li key={entry.run.id} className="break-words">{entry.circuit_name} #{entry.run.id}</li>
+              {queue.slice(0, 1).map((entry) => (
+                <li key={entry.run.id} className="break-words">{recordedLabel(parseRunContext(entry.run.context_json)) ?? entry.circuit_name}</li>
               ))}
             </ul>
           </section>
@@ -922,6 +942,7 @@ export function CircuitsProbeTab() {
                     <SortableQueueRow
                       key={entry.run.id}
                       entry={entry}
+                      waitReason={queueWaits[String(entry.run.id)]}
                       index={index}
                       total={queue.length}
                       busy={busy}
@@ -948,17 +969,19 @@ export function CircuitsProbeTab() {
             )}
           </section>
         )}
+        {view === 'activity' && loadedMeshId === activeMeshId && activityStats.activeCount === 0 && rows.length > 0 && <EmptyState label="Ready for work" hint="No runs are active. Check the queue or trigger a circuit in Manage." />}
+        {view === 'history' && loadedMeshId === activeMeshId && viewRows.every((row) => row.visibleRuns.length === 0) && rows.length > 0 && <EmptyState label="No matching outcomes" hint="Finished runs appear here. Try clearing your filters." />}
         {view !== 'queue' && (rows.length === 0 ? (
           <div className="p-4">
             <EmptyState
-              label="No circuits yet"
-              hint="Open Manage to create a circuit in the flow editor."
+              label={loadedMeshId === activeMeshId ? 'No circuits yet' : loadError ? 'Circuits unavailable' : 'Loading circuits…'}
+              hint={loadedMeshId === activeMeshId ? 'Open Manage to create a circuit in the flow editor.' : undefined}
             />
           </div>
         ) : (
           <ul className="flex flex-col gap-1 p-2">
-            {view === 'history' && <li className="text-2xs text-text-muted px-1">History · failed and needs-review runs first, then newest finished runs (windowed per circuit)</li>}
-            {viewRows.map(({ circuit, visibleRuns, reviewCircuit, nodeIndex }) => {
+            {view === 'history' && <li className="text-2xs text-text-muted px-1">Recent outcomes · attention first</li>}
+            {viewRows.filter((row) => view === 'manage' || row.visibleRuns.length > 0).map(({ circuit, visibleRuns, reviewCircuit, nodeIndex }) => {
               // The row model computes this once when the backend payload
               // changes; the duration clock does not repeat the scan.
               const capacity = {
@@ -967,7 +990,7 @@ export function CircuitsProbeTab() {
               };
               return (
               <li key={circuit.id} className="rounded-md border border-border-subtle p-2" data-testid="circuit-row">
-                {circuit.is_preset ? (
+                {view !== 'manage' ? <div className="text-2xs text-text-muted break-words">{circuit.name}</div> : circuit.is_preset ? (
                   <div className="flex flex-col items-start gap-1">
                     <span className="text-xs font-semibold text-text-primary">Review Blueprint</span>
                     <button type="button" className="text-2xs text-accent-cyan" onClick={() => openCircuitEditor(circuit.id)}>Inspect Review Blueprint</button>
@@ -990,9 +1013,9 @@ export function CircuitsProbeTab() {
                       <span className="truncate text-text-primary" title={circuit.name}>
                         {circuit.name}
                       </span>
-                      {!circuit.enabled && view === 'activity' && visibleRuns.length > 0 && (
+                      {!circuit.enabled && (
                         <span className="text-2xs text-status-warning shrink-0" title="In-flight runs continue to completion; new background runs stay parked until re-enabled.">
-                          · disabled — in-flight continues
+                          Disabled
                         </span>
                       )}
                     </label>
@@ -1068,11 +1091,12 @@ export function CircuitsProbeTab() {
                 {view !== 'manage' && visibleRuns.length > 0 && (
                   <ul className="mt-1.5 flex flex-col gap-1" data-testid={`circuit-runs-${circuit.id}`}>
                     {visibleRuns.map((detail) => {
-                      const defaultExpanded = detail.run.state === 'failed' || !isTerminalRunState(detail.run.state);
+                      const defaultExpanded = false;
                       return (
                         <CircuitRunCard
                           key={detail.run.id}
                           detail={detail}
+                          slot={view === 'activity' ? runSlots.get(detail.run.id) : undefined}
                           reviewCircuit={reviewCircuitForRun(detail, reviewCircuit)}
                           nodeIndex={nodeIndex}
                           agentName={agentName}

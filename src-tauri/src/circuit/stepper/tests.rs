@@ -5851,7 +5851,7 @@ fn issue_review_explicit_approval_completes_without_requesting_more_changes() {
 }
 
 #[test]
-fn issue_review_blocked_verdict_fails_immediately_and_notifies() {
+fn issue_review_inconclusive_verdict_waits_for_human_resolution() {
     let mut run = issue_review_run();
     issue_review_to_first_verdict(&mut run, 702);
     let transition = advance_with_report_evidence(
@@ -5862,15 +5862,16 @@ fn issue_review_blocked_verdict_fails_immediately_and_notifies() {
             Some("Cannot review: provider access is unavailable."),
         ),
     );
-    let terminal = advance(&mut run, &tick(8));
-    assert_eq!(run.state, RunState::Failed);
-    assert_eq!(status_of(&run, "review_blocked"), StepStatus::Completed);
-    assert!(transition
+    let next = advance(&mut run, &tick(8));
+    assert_eq!(run.state, RunState::Running);
+    assert_eq!(status_of(&run, "review_classifier"), StepStatus::Unverified);
+    assert!(run.can_record_review("review_classifier", StepOutcome::Completed));
+    assert!(run.can_record_review("review_classifier", StepOutcome::Working));
+    assert!(!transition
         .effects
         .iter()
-        .chain(&terminal.effects)
-        .any(|effect| matches!(effect,
-        Effect::Notify { message } if message.contains("Review is blocked"))));
+        .chain(&next.effects)
+        .any(|effect| matches!(effect, Effect::CloseAgentNode { .. })));
 }
 
 #[test]

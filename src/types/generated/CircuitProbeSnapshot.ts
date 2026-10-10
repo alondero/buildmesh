@@ -7,4 +7,8 @@ import type { CircuitWithRuns } from "./CircuitWithRuns";
  * mesh queue in one response preserves the Probe's single-IPC load contract
  * while retaining the standalone commands for older clients.
  */
-export type CircuitProbeSnapshot = { circuits: Array<CircuitWithRuns>, queue: Array<CircuitQueueEntry>, };
+export type CircuitProbeSnapshot = { circuits: Array<CircuitWithRuns>, queue: Array<CircuitQueueEntry>, 
+/**
+ * Latest worker admission observation for each pending run.
+ */
+queue_waits?: { [key in string]: string }, };

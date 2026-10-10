@@ -294,9 +294,19 @@ fn checkpoint_actions(
             }
             actions
         }
+        Some(CircuitNodeKind::ReviewVerdict { .. }) => {
+            use crate::circuit::model::StepOutcome;
+            let mut actions = vec![CheckpointAction::Recheck];
+            if view.can_record_review(&step.node_id, StepOutcome::Completed) {
+                actions.push(CheckpointAction::ReviewPass);
+            }
+            if view.can_record_review(&step.node_id, StepOutcome::Working) {
+                actions.push(CheckpointAction::ReviewFail);
+            }
+            actions
+        }
         Some(
             CircuitNodeKind::LlmTurnClassifier { .. }
-            | CircuitNodeKind::ReviewVerdict { .. }
             | CircuitNodeKind::AwaitAgentTurn { .. }
             | CircuitNodeKind::SpawnAgentNode { .. },
         ) => {
@@ -857,6 +867,8 @@ pub enum CheckpointAction {
     NotPerformed,
     Retry,
     Recheck,
+    ReviewPass,
+    ReviewFail,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, ts_rs::TS)]
@@ -906,7 +918,86 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
         })
         .ok_or("This checkpoint changed. Refresh before acting.")?;
     let graph = run_graph(&tx, run.id)?;
-    // An attestation cannot authorize tool use or supply a review verdict.
+    // Review decisions are explicitly attributed to the operator, never the agent.
+    if matches!(
+        request.action,
+        CheckpointAction::ReviewPass | CheckpointAction::ReviewFail
+    ) {
+        use crate::circuit::model::StepOutcome;
+        let passed = matches!(request.action, CheckpointAction::ReviewPass);
+        let outcome = if passed {
+            StepOutcome::Completed
+        } else {
+            StepOutcome::Working
+        };
+        let mut view = recovery_view(&tx, &run)?;
+        if !view.can_record_review(&step.node_id, outcome) {
+            return Err("This review cannot accept that verdict. Resolve outstanding work or input requests, then refresh.".into());
+        }
+        let verdict = if passed {
+            "approved"
+        } else {
+            "changes_requested"
+        };
+        view.context.set(
+            &format!("node.{}.status", step.node_id),
+            if passed { "completed" } else { "working" },
+        );
+        view.context.set(
+            &format!("node.{}.operator_review_note", step.node_id),
+            request.reason.trim(),
+        );
+        // The old evaluated report may belong to an earlier attempt. Keep its
+        // immutable history entry; this decision's displayed evidence is the note.
+        view.context.set(
+            &format!("node.{}.evaluated_output", step.node_id),
+            request.reason.trim(),
+        );
+        view.context
+            .set(&format!("node.{}.review_verdict", step.node_id), verdict);
+        view.context.set(
+            &format!("node.{}.review_verdict_attempt", step.node_id),
+            step.attempt.to_string(),
+        );
+        view.context.set(
+            &format!("node.{}.review_verdict_source", step.node_id),
+            "operator",
+        );
+        view.context
+            .set(&format!("node.{}.wait.attempt", step.node_id), "");
+        let commit = super::ledger::commit_circuit_advance_inner(
+            &tx,
+            run.id,
+            None,
+            Some(&view.context.to_json()?),
+            &[super::CircuitStepOp {
+                node_id: step.node_id.clone(),
+                status: "completed".into(),
+                attempt: step.attempt,
+                outcome: Some(Some(if passed { "completed" } else { "working" }.into())),
+                error: Some(None),
+                agent_node_id: None,
+                fresh_attempt: false,
+            }],
+        )
+        .map_err(|error| error.to_string())?;
+        if !commit.applied {
+            return Err("The run changed before the verdict was recorded.".into());
+        }
+        append_history(
+            &tx,
+            run.id,
+            Some(&step.node_id),
+            Some(step.attempt),
+            "operator_review",
+            &format!("Human review {verdict}: {}", request.reason.trim()),
+            Some(SOURCE_OPERATOR),
+            Some(verdict),
+        )
+        .map_err(|error| error.to_string())?;
+        return tx.commit().map_err(|error| error.to_string());
+    }
+    // A completion attestation cannot authorize tool use or supply a review verdict.
     use crate::circuit::model::CircuitNodeKind;
     if matches!(request.action, CheckpointAction::Completed)
         && matches!(
@@ -1111,7 +1202,9 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
                 "The earlier action must be recorded as not performed before a deliberate retry."
                     .into(),
             ),
-            CheckpointAction::Recheck => unreachable!("handled above"),
+            CheckpointAction::Recheck
+            | CheckpointAction::ReviewPass
+            | CheckpointAction::ReviewFail => unreachable!("handled above"),
         };
     let reason = format!(
         "Operator-recorded outcome ({:?}): {}",
@@ -1124,6 +1217,9 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
         CheckpointAction::NotPerformed => "not_performed",
         CheckpointAction::Retry => "retry",
         CheckpointAction::Recheck => "recheck",
+        CheckpointAction::ReviewPass | CheckpointAction::ReviewFail => {
+            unreachable!("handled above")
+        }
     };
     let op = super::CircuitStepOp {
         node_id: request.node_id.clone(),
@@ -1211,6 +1307,25 @@ pub(crate) enum QueueWaitReason {
         available: Option<i64>,
     },
     ReservationUnavailable,
+}
+
+pub(crate) fn queue_waits(mesh_id: i64) -> SqlResult<std::collections::HashMap<String, String>> {
+    let db = crate::db::read_conn();
+    queue_waits_inner(&db, mesh_id)
+}
+
+fn queue_waits_inner(
+    db: &Connection,
+    mesh_id: i64,
+) -> SqlResult<std::collections::HashMap<String, String>> {
+    let mut statement = db.prepare(
+        "SELECT CAST(r.id AS TEXT), h.detail
+        FROM autopilot_circuit_runs r JOIN circuit_run_history h ON h.id =
+        (SELECT MAX(id) FROM circuit_run_history WHERE run_id=r.id AND kind='queue_wait')
+        WHERE r.mesh_id=?1 AND r.state='pending'",
+    )?;
+    let rows = statement.query_map([mesh_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect()
 }
 
 pub(crate) fn record_queue_wait(run_id: i64, reason: QueueWaitReason) -> SqlResult<()> {
@@ -2312,12 +2427,21 @@ mod tests {
         assert!(history_inner(&db, 1).unwrap()[1]
             .detail
             .contains("mesh_capacity"));
+        assert_eq!(
+            queue_waits_inner(&db, 1)
+                .unwrap()
+                .get("1")
+                .map(String::as_str),
+            Some(r#"{"reason":"mesh_capacity","capacity":3}"#)
+        );
+        assert!(queue_waits_inner(&db, 2).unwrap().is_empty());
         db.execute(
             "UPDATE autopilot_circuit_runs SET state='cancelled' WHERE id=1",
             [],
         )
         .unwrap();
         record_queue_wait_locked(&mut db, 1, QueueWaitReason::ReservationUnavailable).unwrap();
+        assert!(queue_waits_inner(&db, 1).unwrap().is_empty());
         assert_eq!(
             history_inner(&db, 1).unwrap().len(),
             2,
@@ -5206,5 +5330,80 @@ mod tests {
                     .contains("GitHub confirmed no matching pull request existed")
         }));
         assert_eq!(history.last().unwrap().kind, "effect_reconciled");
+    }
+    #[test]
+    fn operator_review_records_verdict_and_rejects_stale_or_blocked_decisions() {
+        use crate::circuit::{context::CircuitContext, model::CircuitGraph};
+        for (action, verdict, outcome) in [
+            (CheckpointAction::ReviewPass, "approved", "completed"),
+            (CheckpointAction::ReviewFail, "changes_requested", "working"),
+        ] {
+            let mut db = Connection::open_in_memory().unwrap();
+            crate::db::init_schema(&db).unwrap();
+            db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+                INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(9,1,'reviewer','/repo');
+                INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'review');
+                INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');
+                INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,agent_node_id)
+                    VALUES(1,'reviewer',1,'completed',9),(1,'verdict',1,'unverified',9);").unwrap();
+            let graph = CircuitGraph::agent_review(None, None, 3);
+            db.execute(
+                "UPDATE autopilot_circuits SET graph_json=?1",
+                [graph.to_json().unwrap()],
+            )
+            .unwrap();
+            let mut request = CheckpointRequest {
+                run_id: 1,
+                node_id: "verdict".into(),
+                attempt: 1,
+                expected_revision: 0,
+                action,
+                reason: "Inspected the review and current diff".into(),
+            };
+            request.expected_revision = 99;
+            assert!(record_outcome_locked(&mut db, &request).is_err());
+            request.expected_revision = 0;
+            request.attempt = 2;
+            assert!(record_outcome_locked(&mut db, &request).is_err());
+            request.attempt = 1;
+            db.execute(
+                "UPDATE autopilot_circuit_runs SET context_json=?1",
+                [r#"{"node.verdict.human_wait":"1"}"#],
+            )
+            .unwrap();
+            assert!(record_outcome_locked(&mut db, &request).is_err());
+            db.execute("UPDATE autopilot_circuit_runs SET context_json='{}'", [])
+                .unwrap();
+            request.reason.clear();
+            assert!(record_outcome_locked(&mut db, &request).is_err());
+            request.reason = "Inspected the review and current diff".into();
+            db.execute("UPDATE autopilot_circuit_runs SET context_json=?1", [r#"{"node.verdict.evaluated_output":"obsolete earlier report","node.verdict.review_verdict_attempt":"0"}"#]).unwrap();
+            record_outcome_locked(&mut db, &request).unwrap();
+            assert!(record_outcome_locked(&mut db, &request).is_err());
+            let run = super::super::ledger::get_circuit_run_inner(&db, 1)
+                .unwrap()
+                .unwrap();
+            let context = CircuitContext::from_json(&run.context_json).unwrap();
+            assert_eq!(context.get("node.verdict.review_verdict"), Some(verdict));
+            assert_eq!(context.get("node.verdict.status"), Some(outcome));
+            assert_eq!(
+                context.get("node.verdict.evaluated_output"),
+                Some("Inspected the review and current diff")
+            );
+            assert_eq!(
+                context.get("node.verdict.review_verdict_source"),
+                Some("operator")
+            );
+            let steps = super::super::ledger::list_circuit_run_steps_inner(&db, 1).unwrap();
+            let step = steps.iter().find(|step| step.node_id == "verdict").unwrap();
+            assert_eq!(step.status, "completed");
+            assert_eq!(step.outcome.as_deref(), Some(outcome));
+            assert!(history_inner(&db, 1)
+                .unwrap()
+                .iter()
+                .any(|entry| entry.kind == "operator_review"
+                    && entry.source.as_deref() == Some("operator")
+                    && entry.disposition.as_deref() == Some(verdict)));
+        }
     }
 }

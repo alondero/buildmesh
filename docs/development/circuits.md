@@ -35,6 +35,38 @@ The application automation runtime is a composable trigger-action graph. A **Cir
 - **Built-in local review configuration:** new runs pin graph JSON, behavior revision and resolved reviewer launch configurations before acquiring the database writer. Review again increases the failed run's round allowance and sets a review-only graph as the same Circuit Run's executable snapshot. Each replaced graph is archived in per-run snapshot history, preserving the original pinned graph and intervening review snapshots. The reviewer launch configuration stays frozen, and no implementation or publication step is replayed. An explicit extension can admit on a disabled issue-review Circuit, and its formerly owned implementation agent still counts against the optional global pool. Existing Continued Review circuits are consolidated under their original Circuit on startup. Later preference edits apply to future runs. The preset is read-only; its independent editable copy starts disabled with a Manual trigger and no transferred history.
 - **Transcript-driven observer recovery:** active circuits recover session identity and restore missing Command Code and Muse passive watchers before waiting for a lifecycle yield (issue #1794 added Muse to the per-harness recovery dispatch). Attaching a circuit to an already-silent source starts its quiet-observation clock without inventing a turn/report boundary. Command Code native committed model messages are distinct from legacy split message records; late watcher replay publishes only the current terminal state, never a historical completion followed by newer work.
 
+## Monitoring and intervening from Probe
+
+Activity shows admitted runs with issue-led names, elapsed time, current stage,
+and a link to the agent currently working. Each run occupies one numbered slot;
+paused runs keep their slot. The capacity overview shows spare slots and the
+latest worker-recorded admission reason for queued work, including the global
+agent pool, disabled circuits and reservation failures. Recorded reasons describe
+the last worker check, not a promised start time. Queue retains admission order,
+keyboard/drag reordering and cancellation, with issue titles as the primary label.
+
+Run cards start collapsed. Open a card for the step timeline, reports and evidence;
+Resolve reveals recovery actions for uncertain or failed steps. Review gates that
+are unverified offer explicit **Review passed** and **Request changes** decisions
+when their graph routes those outcomes and no known work/input/evidence blocker
+remains. An inconclusive automatic review stays unverified with its reviewer
+available for inspection. Earlier terminal reviews use Review again to recover.
+Both decisions require a note, validate the current revision and attempt, and record
+a human review decision separately from an agent verdict. The next worker tick
+follows the existing approval or feedback branch. Human findings accompany
+feedback prompts that consume the reviewer report; human approvals are attributed
+to the operator in the merge handoff. **Check again** rereads evidence;
+**Review again** on an eligible failed review adds a round. Generic completion
+attestation still cannot supply review approval. Other failures retain their
+backend-selected retry and already-done recovery actions.
+
+History shows issue-led outcomes, PR links when retained, and a **Shipped** label
+only when the run recorded GitHub merge confirmation. Review approval alone is
+not shipment. Search includes retained issue/PR context. Details and technical
+history stay behind disclosure; the history window and retention policy still
+apply. Manage owns capacity, enable/disable, flow editing, manual triggers and
+circuit creation. Its creation form expands inside the scrolling body.
+
 ## Circuit architecture (spec #1205)
 - **Capacity has separate run and agent leases (ADR-0028).** `meshes.circuit_run_capacity` admits pending Circuit Runs. Before admission, the worker reserves the blueprint's declared SpawnAgentNode footprint in `autopilot_circuit_run_agent_leases`; every spawn consumes that lease and remains bounded by the optional app-wide `circuit_agent_pool_size` when configured. Admission counts durable worst-case leases; a running Tick counts live circuit agents when applying that optional host-wide pool, so the two snapshots are intentionally not interchangeable. The legacy `meshes.autopilot_concurrency_limit` is not a circuit gate. Do not infer run authorization from mutable step agent ids.
 - **The pending queue is durable and user-controlled.** `autopilot_circuit_runs.queue_position` is scoped per Mesh; worker admission and the Probe's complete queue both read it nearest-first. Moving a pending run swaps adjacent positions. Cancelling first commits the terminal `cancelled` state, then retires attached Agent Nodes; the worker rechecks durable state before every external effect. Cancellation and circuit deletion quiesce in-flight two-stage spawns under a worker barrier, and an aborted spawn retains its step ownership until process/worktree retirement succeeds. Circuit deletion disables triggers, applies the same cleanup contract to active and terminal runs (including retrying cleanup for already-cancelled runs), and removes the circuit ledger only after every retirement succeeds; failures retain the disabled ledger as the retry anchor.

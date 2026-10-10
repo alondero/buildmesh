@@ -173,6 +173,9 @@ pub struct CircuitWithRuns {
 pub struct CircuitProbeSnapshot {
     pub circuits: Vec<CircuitWithRuns>,
     pub queue: Vec<CircuitQueueEntry>,
+    /// Latest worker admission observation for each pending run.
+    #[ts(optional)]
+    pub queue_waits: Option<std::collections::HashMap<String, String>>,
 }
 
 fn map_circuit_rows(
@@ -243,7 +246,14 @@ pub fn list_circuit_probe(
         crate::db::list_circuit_probe(mesh_id, limit).map_err(|e| e.to_string())?;
     let circuits = map_circuit_rows(circuits);
     let queue = map_queue_rows(queue);
-    Ok(CircuitProbeSnapshot { circuits, queue })
+    let queue_waits = Some(
+        crate::db::circuit::evidence::queue_waits(mesh_id).map_err(|error| error.to_string())?,
+    );
+    Ok(CircuitProbeSnapshot {
+        circuits,
+        queue,
+        queue_waits,
+    })
 }
 
 /// Create a circuit with the canonical blueprint.

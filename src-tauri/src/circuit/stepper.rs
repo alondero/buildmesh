@@ -254,6 +254,21 @@ impl RunView {
             && !self.report_has_known_blockers(node_id)
     }
 
+    /// An explicit operator verdict is separate from a completion attestation.
+    pub(crate) fn can_record_review(&self, node_id: &str, outcome: StepOutcome) -> bool {
+        self.state == RunState::Running
+            && self
+                .step(node_id)
+                .is_some_and(|step| step.status == StepStatus::Unverified)
+            && matches!(
+                self.graph.node(node_id).map(|node| &node.kind),
+                Some(CircuitNodeKind::ReviewVerdict { .. })
+            )
+            && self.resolve_target_agent(node_id).is_some()
+            && !self.report_has_known_blockers(node_id)
+            && classifier_outcome_is_routed(self, node_id, outcome)
+    }
+
     fn accepts_report_binding(
         &self,
         node_id: &str,
@@ -1956,7 +1971,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 if is_running_inject {
                     t.effects.push(Effect::InjectPty {
                         node_id: node_id.clone(),
-                        prompt: run.context.resolve(&prompt),
+                        prompt: resolve_operator_review_prompt(run, &prompt),
                         target_node_id,
                     });
                     run.context.set(&delivery_key, "intent");
@@ -2355,6 +2370,8 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                         run.graph.node(node_id).map(|n| &n.kind),
                         Some(CircuitNodeKind::ReviewVerdict { .. })
                     ) {
+                        run.context
+                            .set(&format!("node.{node_id}.review_verdict_source"), "agent");
                         run.context.set(
                             &format!("node.{node_id}.review_verdict_attempt"),
                             attempt.to_string(),
@@ -2381,6 +2398,15 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                         Classification::Blocked => StepOutcome::Blocked,
                         Classification::Working | Classification::Continue => StepOutcome::Working,
                     };
+                    if outcome == StepOutcome::Blocked
+                        && matches!(
+                            run.graph.node(node_id).map(|node| &node.kind),
+                            Some(CircuitNodeKind::ReviewVerdict { .. })
+                        )
+                    {
+                        unverify_step(run, &mut t, node_id, "Review is inconclusive. Inspect the reviewer, then record a verdict or check again.".into());
+                        return t;
+                    }
                     // A classifier outcome only terminalizes the gate when the
                     // blueprint wires that outcome somewhere. An unwired
                     // BLOCKED/WORKING result is deliberately parked so a human
@@ -2882,6 +2908,38 @@ fn complete_with_outcome(
         attempt,
         fresh_attempt: false,
     });
+}
+
+/// Keep human findings and approval attribution in the prompts that advance work.
+fn resolve_operator_review_prompt(run: &RunView, template: &str) -> String {
+    let mut prompt = run.context.resolve(template);
+    for node in &run.graph.nodes {
+        let CircuitNodeKind::ReviewVerdict { target_node_id } = &node.kind else {
+            continue;
+        };
+        let prefix = format!("node.{}", node.id);
+        let current_attempt = run.step(&node.id).map(|step| step.attempt.to_string());
+        if run.context.get(&format!("{prefix}.review_verdict_source")) != Some("operator")
+            || current_attempt.as_deref()
+                != run.context.get(&format!("{prefix}.review_verdict_attempt"))
+        {
+            continue;
+        }
+        if run.context.get(&format!("{prefix}.review_verdict")) == Some("approved") {
+            prompt = prompt.replace(
+                "The independent reviewer approved",
+                "The human reviewer approved",
+            );
+        } else if let (Some(target), Some(note)) = (
+            target_node_id,
+            run.context.get(&format!("{prefix}.operator_review_note")),
+        ) {
+            if template.contains(&format!("{{{{node.{target}.output}}}}")) {
+                prompt.push_str(&format!("\n\nHuman review findings (operator):\n{note}"));
+            }
+        }
+    }
+    prompt
 }
 
 /// Whether a classifier result has an explicit downstream route. `Always`

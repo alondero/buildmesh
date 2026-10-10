@@ -465,12 +465,35 @@ mod tests {
         let mut run = reviewing(3);
         let mut result = classified(&mut run, "verdict", Classification::Blocked);
         result.effects.extend(tick(&mut run).effects);
-        assert!(result.effects.iter().any(
-            |e| matches!(e, Effect::Notify { message } if message.contains("needs attention"))
-        ));
+        assert!(!result
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::CloseAgentNode { .. })));
         assert!(run.step("feedback").is_none());
         assert!(run.step("merge").is_none());
-        assert_eq!(run.state, RunState::Failed);
+        assert_eq!(run.state, RunState::Running);
+        assert_eq!(run.step("verdict").unwrap().status, StepStatus::Unverified);
+        assert!(run.can_record_review("verdict", O::Completed));
+    }
+
+    #[test]
+    fn human_review_findings_reach_the_next_feedback_prompt() {
+        let mut run = reviewing(3);
+        classified(&mut run, "verdict", Classification::Working);
+        let attempt = run.step("verdict").unwrap().attempt.to_string();
+        run.context
+            .set("node.verdict.review_verdict_source", "operator");
+        run.context
+            .set("node.verdict.review_verdict_attempt", attempt);
+        run.context.set(
+            "node.verdict.operator_review_note",
+            "Fix the unchecked null before merging.",
+        );
+        let (effects, _) = inject(&mut run, "feedback");
+        let prompt = injected_prompt(&effects, "feedback", "$source");
+        assert!(prompt
+            .contains("Human review findings (operator):\nFix the unchecked null before merging."));
+        assert!(prompt.contains("review report"));
     }
 
     #[test]

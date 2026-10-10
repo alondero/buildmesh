@@ -287,3 +287,19 @@ describe('a running run waiting on evidence', () => {
     );
   });
 });
+
+it('records an explicit human review verdict only after evidence is supplied', async () => {
+  vi.mocked(circuitRunAttention).mockResolvedValue(recoverable({
+    checkpoints: [{ node_id: 'verdict', attempt: 2, actions: ['recheck', 'review_pass', 'review_fail'] }],
+  }));
+  renderPanel({ state: 'running' }, [step({ node_id: 'verdict', status: 'unverified', attempt: 2 })]);
+  fireEvent.click(await screen.findByRole('button', { name: 'Review passed' }));
+  const confirm = screen.getByRole('button', { name: 'Confirm: Review passed' });
+  expect(confirm.hasAttribute('disabled')).toBe(true);
+  fireEvent.change(screen.getByTestId('run-checkpoint-note-7'), { target: { value: 'Inspected the diff and passing checks' } });
+  fireEvent.click(confirm);
+  await waitFor(() => expect(recordCircuitOutcome).toHaveBeenCalledWith({
+    run_id: 7, node_id: 'verdict', attempt: 2, expected_revision: 41, action: 'review_pass',
+    reason: 'Inspected the diff and passing checks',
+  }));
+});

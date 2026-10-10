@@ -29,7 +29,7 @@ function parseDetail<T>(detail: string): T | null {
 }
 
 /** Humanise a persisted `queue_wait` reason without dropping its capacity inputs. */
-function queueWaitText(detail: string): string {
+export function queueWaitText(detail: string): string {
   const reason = parseDetail<{ reason?: string; capacity?: number; required?: number; available?: number | null }>(detail);
   switch (reason?.reason) {
     case 'circuit_disabled':
@@ -37,7 +37,7 @@ function queueWaitText(detail: string): string {
     case 'mesh_capacity':
       return `Waiting for admission — all ${reason.capacity ?? 0} circuit-run slot(s) busy.`;
     case 'agent_capacity':
-      return `Waiting for admission — needs ${reason.required ?? 0} agent slot(s); ${reason.available ?? 'unknown'} free.`;
+      return `Global agent limit — needs ${reason.required ?? 0} agent slot(s); ${reason.available ?? 'unknown'} free.`;
     case 'reservation_unavailable':
       return "Waiting for admission — the run's agent-slot reservation was unavailable.";
     default:
@@ -259,15 +259,15 @@ export function CircuitEvidenceHistory({ runId, updatedAt, nodeLabel }: {
       {checkpoints.length > 0 && <div className="space-y-2">
         <p>Inspect the agent or external result, then choose how to continue. Record completed advances this step without replaying its action.</p>
         <p>For a staged prompt, submit it in the agent terminal first. Record completed only after confirming it was accepted.</p>
-        <p>An operator-recorded outcome is an attestation. It does not grant permission or review approval.</p>
+        <p>Completion does not grant review approval. Explicit review decisions are recorded as human verdicts.</p>
         <label className="block">Reason and supporting evidence
           <textarea value={reason} onChange={(event) => setReason(event.target.value)} disabled={pending}
             className="block w-full min-w-0 rounded-sm border border-border-subtle bg-bg-card p-1" />
         </label>
         {checkpoints.map((step) => <fieldset key={step.node_id} disabled={pending || rows === null || reason.trim() === ''} className="flex flex-wrap gap-2">
           <legend>{step.node_id}</legend>
-          {step.actions.map((action) => <button key={action} type="button" className="text-accent-cyan disabled:opacity-50" onClick={() => void record(step, action)}>
-            {{ completed: 'Record completed', not_performed: 'Record not performed', retry: 'Retry as new attempt', recheck: 'Recheck evidence' }[action]}
+          {step.actions.map((action) => <button key={action} type="button" disabled={pending || reason.trim() === ''} className="text-accent-cyan disabled:opacity-50" onClick={() => void record(step, action)}>
+            {{ completed: 'Record completed', not_performed: 'Record not performed', retry: 'Retry as new attempt', recheck: 'Recheck evidence', review_pass: 'Review passed', review_fail: 'Request changes' }[action]}
           </button>)}
         </fieldset>)}
       </div>}

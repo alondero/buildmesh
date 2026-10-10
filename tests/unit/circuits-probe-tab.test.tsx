@@ -162,6 +162,7 @@ function mockBackend(overrides: {
   circuits?: AutopilotCircuit[];
   runs?: CircuitRunDetail[];
   queue?: CircuitQueueEntry[];
+  queueWaits?: Record<string, string>;
 } = {}) {
   const circuits = overrides.circuits ?? [CIRCUIT];
   const runs = overrides.runs ?? [RUN_DONE, RUN_RUNNING];
@@ -180,6 +181,7 @@ function mockBackend(overrides: {
           runs: runs.filter((r) => r.run.circuit_id === circuit.id),
         })),
         queue,
+        queue_waits: overrides.queueWaits,
       });
     }
     if (cmd === 'list_circuits_with_runs') {
@@ -232,6 +234,7 @@ describe('CircuitsProbeTab', () => {
   it('exposes the built-in Review Blueprint before it has any runs', async () => {
     mockBackend({ circuits: [{ ...CIRCUIT, is_preset: true, enabled: false }], runs: [] });
     openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('circuits-view-manage'));
     const inspect = await screen.findByRole(
       'button',
       { name: 'Inspect Review Blueprint' },
@@ -300,6 +303,7 @@ describe('CircuitsProbeTab', () => {
     });
 
     openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('circuits-view-manage'));
     await waitFor(() => expect(vi.mocked(listen)).toHaveBeenCalledWith(
       'circuit-run-updated',
       expect.any(Function),
@@ -338,6 +342,7 @@ describe('CircuitsProbeTab', () => {
     });
 
     openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('circuits-view-manage'));
     const user = userEvent.setup();
     await user.click(await screen.findByTestId('circuit-trigger-7'));
     expect(vi.mocked(invoke)).toHaveBeenCalledWith('trigger_circuit_now', { circuitId: 7 });
@@ -363,6 +368,7 @@ describe('CircuitsProbeTab', () => {
     });
 
     openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('circuits-view-manage'));
     const user = userEvent.setup();
     await user.click(await screen.findByTestId('circuit-trigger-7'));
 
@@ -396,6 +402,18 @@ describe('CircuitsProbeTab', () => {
     expect(screen.getByTestId('run-card-9')).toBeTruthy();
   });
 
+  it('shows issue-led queued work and the recorded global limit beside spare run slots', async () => {
+    const queue = [{ ...QUEUE[0], run: { ...QUEUE[0].run, context_json: JSON.stringify({ 'issue.number': '2185', 'issue.title': 'Reduce agent launch time' }) } }];
+    mockBackend({ runs: [RUN_RUNNING], queue, queueWaits: { [queue[0].run.id]: JSON.stringify({ reason: 'agent_capacity', required: 2, available: 1 }) } });
+    openProbeDestination('circuits');
+    expect(await screen.findByText('1 / 2 slots occupied')).toBeTruthy();
+    expect(screen.getByText(/Global agent limit/).textContent).toContain('2 agent slot(s); 1 free');
+    expect(screen.getByTestId('circuit-activity-queue-summary').textContent).toContain('#2185 Reduce agent launch time');
+    fireEvent.click(screen.getByTestId('circuits-view-queue'));
+    expect(screen.getByTestId(`queue-run-${queue[0].run.id}`).textContent).toContain('#2185 Reduce agent launch time');
+    expect(screen.getByTestId(`queue-pending-reason-${queue[0].run.id}`).textContent).toContain('Global agent limit');
+  });
+
   it('prioritizes attention in History and separates activity, queue, and configuration', async () => {
     const failed = { ...RUN_DONE, run: { ...RUN_DONE.run, id: 13, circuit_id: 8, state: 'failed' } };
     mockBackend({
@@ -414,8 +432,8 @@ describe('CircuitsProbeTab', () => {
     expect(screen.queryByTestId('circuit-name-input')).toBeNull();
     expect(screen.getByTestId('circuits-status').textContent).toContain('2 queued');
     expect(screen.getByTestId('circuit-activity-queue-summary').textContent).toContain('Waiting in queue');
-    expect(screen.getByTestId('circuit-trigger-7')).toBeTruthy();
-    expect(screen.getByTestId('circuit-edit-flow-7')).toBeTruthy();
+    expect(screen.queryByTestId('circuit-trigger-7')).toBeNull();
+    expect(screen.queryByTestId('circuit-edit-flow-7')).toBeNull();
     expect(screen.getByTestId('circuits-view-queue').textContent).toContain('(2)');
     fireEvent.click(screen.getByTestId('circuits-view-history'));
     // History is attention-first: failed before completed.
@@ -837,6 +855,7 @@ describe('CircuitsProbeTab', () => {
         error_message:'Owned work completion is unavailable.',completed_at:null}],
     }] });
     openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('run-toggle-15'));
     expect((await screen.findByTestId('run-step-15-spawn')).textContent).toContain('Unverified Checkpoint');
     expect(screen.queryByTestId('run-error-15')).toBeNull();
     expect(screen.queryByTestId('approve-15-spawn')).toBeNull();
@@ -864,6 +883,7 @@ describe('CircuitsProbeTab', () => {
     mockBackend({ runs: [RUN_BLOCKED] });
     const user = userEvent.setup();
     openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('run-toggle-15'));
 
     expect(
       await screen.findByTestId('blocked-badge-15-approval'),
@@ -887,6 +907,7 @@ describe('CircuitsProbeTab', () => {
     mockBackend({ runs: [RUN_RUNNING, RUN_PAUSED] });
     const user = userEvent.setup();
     openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('run-toggle-12'));
 
     await user.click(await screen.findByTestId('run-pause-12'));
     await waitFor(() => {
@@ -963,6 +984,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     };
     mockBackend({ runs: [RUN_LONG] });
     openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('run-toggle-20'));
 
     expect((await screen.findByTestId('run-toggle-20')).getAttribute('aria-expanded')).toBe('true');
     const timeline = await screen.findByTestId('run-steps-20');
@@ -1072,6 +1094,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
 
     // Failed runs live in History now — switch views first.
     fireEvent.click(await screen.findByTestId('circuits-view-history'));
+    fireEvent.click(await screen.findByTestId('run-toggle-25'));
     // Failed runs open by default, and a failure is never hidden.
     const collapsedError = await screen.findByTestId('run-error-25');
     expect(collapsedError.textContent).toContain('classifier verdict could not be parsed');
@@ -1112,6 +1135,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     };
     mockBackend({ runs: [RUN_RETRIED] });
     openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('run-toggle-26'));
 
     const row = await screen.findByTestId('run-step-26-review_classifier');
     expect(row.getAttribute('data-step-status')).toBe('completed');
@@ -1207,6 +1231,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     });
     openProbeDestination('circuits');
     fireEvent.click(await screen.findByTestId('circuits-view-history'));
+    fireEvent.click(await screen.findByTestId('run-toggle-28'));
 
     const card = await screen.findByTestId('run-card-28');
     expect(screen.getByTestId('run-state-28').textContent).toBe('Review limit reached');
@@ -1263,11 +1288,10 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
       expect((await screen.findByTestId('run-subject-41')).textContent).toBe('ai-loading-spinner');
       // The run id is still there, but as a small tag, not the headline.
       expect(screen.getByTestId('run-id-41').textContent).toBe('#41');
-      // The link goes to the implementation node, not the active reviewer; the
-      // headline already names it, so the row does not repeat the name.
-      expect(screen.getByTestId('run-agent-41').textContent).not.toContain('ebony-unhelpful-cudgel');
+      // Keep the subject stable while linking directly to the active reviewer.
+      expect(screen.getByTestId('run-agent-41').textContent).toContain('ebony-unhelpful-cudgel');
       fireEvent.click(screen.getByTestId('run-agent-open-41'));
-      expect(useAgentNodeStore.getState().activeNodeId).toBe(900);
+      expect(useAgentNodeStore.getState().activeNodeId).toBe(901);
     });
 
     it('keeps a recognisable name once the implementation node has been closed', async () => {
@@ -1311,6 +1335,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
       const user = userEvent.setup();
       openProbeDestination('circuits');
       fireEvent.click(await screen.findByTestId('circuits-view-history'));
+      fireEvent.click(await screen.findByTestId('run-toggle-44'));
 
       const times = (await screen.findByTestId('run-times-44')).textContent ?? '';
       const now = new Date();
@@ -1321,8 +1346,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
       expect(times).toContain('took 15m 11s');
       expect(times).not.toContain('1h');
 
-      // Each step carries its own start and finish wall-clock times.
-      await user.click(screen.getByTestId('run-toggle-44'));
+      // The expanded card also shows each step's wall-clock times.
       const spawn = screen.getByTestId('run-step-times-44-spawn').textContent ?? '';
       expect(spawn).toContain(wall('2026-08-22T10:05:00Z'));
       expect(spawn).toContain(wall('2026-08-22T10:20:11Z'));
@@ -1379,7 +1403,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
 
     // The headline names the node; the row beneath it is just the way there.
     expect((await screen.findByTestId('run-subject-29')).textContent).toBe('impl-agent');
-    expect(screen.getByTestId('run-agent-29').textContent).not.toContain('impl-agent');
+    expect(screen.getByTestId('run-agent-29').textContent).toContain('impl-agent');
     fireEvent.click(screen.getByTestId('run-agent-open-29'));
     expect(useAgentNodeStore.getState().activeNodeId).toBe(900);
     expect(useMeshStore.getState().selectedMeshId).toBe(42);
@@ -1501,6 +1525,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     mockBackend({ circuits: [REVIEW_CIRCUIT], runs: [RUN_EXHAUSTED] });
     openProbeDestination('circuits');
     fireEvent.click(await screen.findByTestId('circuits-view-history'));
+    fireEvent.click(await screen.findByTestId('run-toggle-32'));
 
     expect((await screen.findByTestId('run-state-32')).textContent).toBe('Review limit reached');
     // The review line below already explains the ending; a reason line
@@ -1509,13 +1534,13 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     expect(screen.getByText(/No final approval is recorded/)).toBeTruthy();
   });
 
-  it('opens live and failed runs, collapses completed runs, and honours a manual toggle', async () => {
+  it('collapses runs by default and preserves deliberate disclosure across views', async () => {
     mockBackend({ runs: [RUN_DONE, RUN_RUNNING] });
     const user = userEvent.setup();
     openProbeDestination('circuits');
 
     await waitFor(() => {
-      expect(screen.getByTestId('run-toggle-12').getAttribute('aria-expanded')).toBe('true');
+      expect(screen.getByTestId('run-toggle-12').getAttribute('aria-expanded')).toBe('false');
     });
     await user.click(screen.getByTestId('circuits-view-history'));
     expect(screen.getByTestId('run-toggle-11').getAttribute('aria-expanded')).toBe('false');
@@ -1527,9 +1552,9 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     expect(screen.getByTestId('run-steps-11')).toBeTruthy();
 
     await user.click(screen.getByTestId('circuits-view-activity'));
-    expect(screen.getByTestId('run-toggle-12').getAttribute('aria-expanded')).toBe('true');
-    await user.click(screen.getByTestId('run-toggle-12'));
     expect(screen.getByTestId('run-toggle-12').getAttribute('aria-expanded')).toBe('false');
+    await user.click(screen.getByTestId('run-toggle-12'));
+    expect(screen.getByTestId('run-toggle-12').getAttribute('aria-expanded')).toBe('true');
   });
 
   it('keeps the disclosure control accessible', async () => {
@@ -1702,7 +1727,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
 
     expect(body.contains(screen.getByTestId('circuits-view-manage'))).toBe(false);
     fireEvent.click(screen.getByTestId('circuits-view-manage'));
-    expect(body.contains(screen.getByTestId('circuit-name-input'))).toBe(false);
+    expect(body.contains(screen.getByTestId('circuit-name-input'))).toBe(true);
   });
 });
 
