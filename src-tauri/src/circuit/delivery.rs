@@ -57,6 +57,11 @@ const ENTER_ACK_WINDOW: Duration = Duration::from_secs(6);
 /// node for human attention.
 const MAX_ENTER_ATTEMPTS: u32 = 3;
 
+/// True when the prompt contains newlines that require bracketed-paste staging.
+fn is_multiline_prompt(text: &str) -> bool {
+    text.contains('\n') || text.contains('\r')
+}
+
 /// The bytes staged into the PTY input box — WITHOUT the Enter keystroke.
 /// Multi-line text is wrapped in bracketed-paste markers so the agent CLI
 /// treats it as one pasted block instead of submitting at every newline.
@@ -66,10 +71,6 @@ const MAX_ENTER_ATTEMPTS: u32 = 3;
 /// burst as a bracketed paste is treated as part of the paste — the prompt
 /// sits staged in the input box and is never submitted (issue #874, node
 /// 2328: the correction was visibly pasted, the run stalled forever).
-pub(crate) fn is_multiline_prompt(text: &str) -> bool {
-    text.contains('\n') || text.contains('\r')
-}
-
 pub(crate) fn injection_payload(text: &str) -> String {
     if is_multiline_prompt(text) {
         format!("\x1b[200~{}\x1b[201~", text)
@@ -190,6 +191,12 @@ fn stage_prompt_write(
                     "could not identify prompt target {node_id}: {error}"
                 ));
             }
+            // Best effort: an unknown or unpersisted non-circuit node (such as
+            // test fixtures or nodes in ephemeral states) keeps the text as
+            // given without conversion.
+            tracing::warn!(
+                "could not identify prompt target {node_id} for newline normalization: {error}"
+            );
             text.to_string()
         }
     };
@@ -217,7 +224,6 @@ fn stage_prompt_write(
         else {
             return Ok(None);
         };
-
         Some(next)
     } else {
         retry_backpressured(|| {
@@ -991,6 +997,148 @@ mod tests {
         let expected_payload = b"\x1b[200~one\rtwo\rthree\x1b[201~".to_vec();
         assert_eq!(written, expected_payload);
         assert!(!written.contains(&b'\n'));
+
+        evaluator::unregister(id);
+        registry.kill_session(id);
+    }
+
+    #[test]
+    fn piloted_node_without_db_row_fails_staging_loudly() {
+        let _db = crate::db::test_support::isolated();
+        let id = 999_999;
+        let (registry, _) = crate::agent::process::testing::capturing_registry(id);
+        evaluator::register(id);
+
+        let err = stage_prompt_write(&registry, id, "prompt", None).unwrap_err();
+        assert!(
+            err.contains("could not identify prompt target 999999"),
+            "expected target identification error, got: {err}"
+        );
+
+        evaluator::unregister(id);
+        registry.kill_session(id);
+    }
+
+    #[test]
+    fn grok_staged_prompt_write_unguarded_normalizes_newlines() {
+        let _db = crate::db::test_support::isolated();
+        let path =
+            std::env::temp_dir().join(format!("grok-stage-unguarded-test-{}", std::process::id()));
+        let path = path.to_string_lossy();
+        let mesh = crate::db::create_mesh("grok stage unguarded mesh", &path).unwrap();
+        let node = crate::db::create_agent_node(
+            mesh.id,
+            "worker",
+            &path,
+            "main",
+            crate::models::EnvType::Windows,
+            "grok",
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let id = node.id;
+        let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
+
+        let prompt = "line1\nline2\r\nline3";
+        let (guard, _) = stage_prompt_write(&registry, id, prompt, None)
+            .unwrap()
+            .unwrap();
+        assert!(guard.is_none());
+
+        let written = writes.recv_timeout(Duration::from_secs(1)).unwrap();
+        let expected_payload = b"\x1b[200~line1\rline2\rline3\x1b[201~".to_vec();
+        assert_eq!(written, expected_payload);
+        assert!(!written.contains(&b'\n'));
+
+        registry.kill_session(id);
+    }
+
+    #[test]
+    fn grok_opted_in_adapter_recorded_digest_equals_submission_digest_of_written_text() {
+        let _db = crate::db::test_support::isolated();
+        let path = std::env::temp_dir().join(format!("grok-digest-test-{}", std::process::id()));
+        let path = path.to_string_lossy();
+        let mesh = crate::db::create_mesh("grok digest mesh", &path).unwrap();
+        let node = crate::db::create_agent_node(
+            mesh.id,
+            "worker",
+            &path,
+            "main",
+            crate::models::EnvType::Windows,
+            "grok",
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let id = node.id;
+        let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
+        evaluator::register(id);
+
+        let raw_prompt = "one\ntwo\r\nthree";
+        let resolved = crate::preferences::resolve_harness_provider(&node.provider);
+        let delivered_prompt = paste_text_for(resolved.adapter(), raw_prompt);
+
+        let circuit = crate::db::create_autopilot_circuit(
+            mesh.id,
+            "test-circuit",
+            "",
+            &crate::circuit::model::CircuitGraph::walking_skeleton("task")
+                .to_json()
+                .unwrap(),
+        )
+        .unwrap();
+        let run_id =
+            crate::db::create_circuit_run(circuit.id, mesh.id, "manual:digest-test", "{}").unwrap();
+        crate::db::circuit::evidence::record_prompt_submission(
+            run_id,
+            "step-1",
+            1,
+            id,
+            &delivered_prompt,
+        )
+        .unwrap();
+
+        let expected = registry.input_stamp(id).unwrap();
+        let (guard, _) = stage_prompt_write(&registry, id, &delivered_prompt, Some(&expected))
+            .unwrap()
+            .unwrap();
+        assert!(guard.is_some());
+
+        let written = writes.recv_timeout(Duration::from_secs(1)).unwrap();
+        let written_str = String::from_utf8(written).unwrap();
+        let inner_text = written_str
+            .strip_prefix("\x1b[200~")
+            .and_then(|s| s.strip_suffix("\x1b[201~"))
+            .unwrap();
+
+        let conn = crate::db::read_conn();
+        let detail: String = conn
+            .query_row(
+                "SELECT detail FROM circuit_run_history WHERE kind='prompt_submitted'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let submission: crate::db::circuit::evidence::PromptSubmission =
+            serde_json::from_str(&detail).unwrap();
+
+        assert_eq!(
+            submission.prompt_digest,
+            crate::circuit::strategy::submission_digest(inner_text)
+        );
 
         evaluator::unregister(id);
         registry.kill_session(id);

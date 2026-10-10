@@ -2047,7 +2047,12 @@ pub(super) fn execute_effects(
                             &prompt,
                             requests_result,
                         );
-                        let delivered_prompt = staged.delivered;
+                        let resolved =
+                            crate::preferences::resolve_harness_provider(&target_node.provider);
+                        let delivered_prompt = crate::circuit::delivery::paste_text_for(
+                            resolved.adapter(),
+                            &staged.delivered,
+                        );
                         crate::circuit::handoff::set_agent_turn(
                             active.run.id,
                             target,
@@ -2185,6 +2190,8 @@ pub(super) fn execute_effects(
                     node.env,
                     prompt,
                 );
+                let resolved = crate::preferences::resolve_harness_provider(&node.provider);
+                let prompt = crate::circuit::delivery::paste_text_for(resolved.adapter(), &prompt);
                 match crate::circuit::delivery::write_prompt_to_pty_guarded(
                     &crate::agent::process::PROCESS_REGISTRY,
                     *target_agent_id,
@@ -2273,6 +2280,9 @@ pub(super) fn execute_effects(
                     .context
                     .get(&format!("node.{node_id}.nudge.input"))
                     .ok_or_else(|| "Wake-up lacks an input ownership stamp".to_string())?;
+                let resolved = crate::preferences::resolve_harness_provider(&node.provider);
+                let prompt_text =
+                    crate::circuit::delivery::paste_text_for(resolved.adapter(), prompt);
                 // The nudge is a real prompt submission, so it is recorded the
                 // same way an injected one is: the receipt it may produce has to
                 // bind to a submission Buildmesh itself made.
@@ -2281,7 +2291,7 @@ pub(super) fn execute_effects(
                     node_id,
                     attempt,
                     *target_agent_id,
-                    prompt,
+                    &prompt_text,
                 ) {
                     tracing::warn!(
                         "circuits: run {}: could not record wake-up submission: {}",
@@ -2300,7 +2310,7 @@ pub(super) fn execute_effects(
                 match crate::circuit::delivery::write_prompt_to_pty_guarded(
                     &crate::agent::process::PROCESS_REGISTRY,
                     *target_agent_id,
-                    prompt,
+                    &prompt_text,
                     app,
                     Some(expected),
                 ) {

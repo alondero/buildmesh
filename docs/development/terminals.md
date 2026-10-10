@@ -31,9 +31,10 @@ retains its existing semantics.
 
 Backend prompt injection (`circuit::delivery::stage_prompt_write`, used by
 "Handover to node" and by Circuit prompt dispatches including turns, continuations,
-and nudges) cannot use the clipboard, so it fixes the paste body instead. ConPTY turns
-every pasted byte into a key event: an LF is dropped and a CRLF is an Enter. A terminal
-selection is CRLF-joined on Windows, so an unmodified Grok handover submitted line 1 and
+and nudges; coordinator `send_prompt` is single-line by contract) cannot use the
+clipboard, so it fixes the paste body instead. ConPTY turns every pasted byte
+into a key event: an LF is dropped and a CRLF is an Enter. A terminal selection
+is CRLF-joined on Windows, so an unmodified Grok handover submitted line 1 and
 queued the rest as separate messages. A harness whose adapter returns true from
 `paste_requires_cr_newlines` (Grok) gets CR line endings inside the bracketed
 paste, which is what xterm.js sends for a manual paste. Other harnesses keep

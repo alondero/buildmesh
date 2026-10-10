@@ -626,10 +626,11 @@ pub trait AgentProvider: Send + Sync {
     /// Windows ConPTY turns each paste byte into a key event, so inside the
     /// bracketed-paste markers LF is dropped (lines glue together) and CRLF
     /// submits the first line and queues the rest as separate messages. Applied
-    /// at `circuit::delivery::stage_prompt_write` for all PTY prompt writes
-    /// (circuit turns, continuations, nudges, and handovers). CR is what xterm.js
-    /// sends for a manual paste; harnesses whose composer is only correct with
-    /// it opt in (Grok, `docs/learning/grok-terminal-paste.md`).
+    /// at `circuit::delivery::stage_prompt_write` for circuit prompt dispatches
+    /// (turns, continuations, nudges) and terminal handovers. (The coordinator's
+    /// `AgentDriver::send_prompt` is single-line by contract and bypasses staged
+    /// delivery.) CR is what xterm.js sends for a manual paste; harnesses whose
+    /// composer is only correct with it opt in (Grok, `docs/learning/grok-terminal-paste.md`).
     fn paste_requires_cr_newlines(&self) -> bool {
         false
     }
