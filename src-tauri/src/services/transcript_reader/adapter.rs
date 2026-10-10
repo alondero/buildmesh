@@ -98,15 +98,25 @@ pub(crate) trait TranscriptReader: Send + Sync {
         None
     }
 
-    /// A finished background task this harness recorded but cannot deliver to
-    /// an idle session on its own (issue #2105).
+    /// A finished background task this harness recorded but cannot deliver to an
+    /// idle session on its own (issue #2105).
+    ///
+    /// `lines` is this session's own transcript, `spawn_path` the CLI's cwd
+    /// (which decides which data dir holds its runtime state), and `now_ms` the
+    /// caller's clock, so a harness that judges quiescence can be driven
+    /// deterministically from a test.
     ///
     /// The default is `None`: a harness that delegates background work to the
     /// session and never announces its completion has no such gap, and one that
-    /// does announce it is not stalled. Each reader owns the record shape that
-    /// carries its own evidence, so the worker never guesses a harness's
-    /// transcript format.
-    fn stalled_background_task(&self, _lines: &str) -> Option<String> {
+    /// does announce it is not stalled. Each reader owns both the record shape
+    /// that names a task and the on-disk layout that reports its end, so the
+    /// worker never guesses a harness's private formats.
+    fn stalled_background_task(
+        &self,
+        _lines: &str,
+        _spawn_path: &str,
+        _now_ms: i64,
+    ) -> Option<String> {
         None
     }
 

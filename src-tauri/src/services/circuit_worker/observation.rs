@@ -729,7 +729,24 @@ pub(super) fn live_wait(view: &RunView, step: &StepView, id: i64) -> Option<Wait
         node.status,
         SessionStatus::AwaitingInput | SessionStatus::Ready | SessionStatus::Completed
     );
-    let stalled_task_id = yielded.then(|| stalled_background_task(&node)).flatten();
+    // Ask the stepper whether a wake-up is even possible *before* touching the
+    // transcript. `live_wait` runs on every poll tick, so probing a session
+    // whose wake-up is already spent, already claimed, or not owned would read
+    // the whole transcript for a decision that cannot change. The revision and
+    // stamp come from the report read above, so this gate costs no extra I/O.
+    let nudge_possible = match &progress {
+        Some(revision) => {
+            let stamp = db::agent_turn_stamp(id).ok().flatten().unwrap_or_default();
+            matches!(
+                view.nudge_decision(&step.node_id, step.attempt, revision, &stamp),
+                crate::circuit::stepper::NudgeDecision::Nudge
+            )
+        }
+        None => false,
+    };
+    let stalled_task_id = (yielded && nudge_possible)
+        .then(|| stalled_background_task(&node))
+        .flatten();
     Some(WaitObservation {
         observed: node
             .cli_session_id
@@ -745,12 +762,12 @@ pub(super) fn live_wait(view: &RunView, step: &StepView, id: i64) -> Option<Wait
 }
 
 /// The finished background task a yielded session has not read, when its
-/// harness's own transcript says so.
+/// harness's own runtime state says so.
 ///
-/// Pure file I/O against the session's transcript — never a database read, so
-/// it cannot hold a connection across disk. Any failure (unknown harness,
-/// missing transcript, unparsable record) yields `None`: an unreadable session
-/// is not evidence of a stall.
+/// Pure file I/O against the session's transcript and the harness's task store —
+/// never a database read, so it cannot hold a connection across disk. Any
+/// failure (unknown harness, missing transcript, unparsable record, no task
+/// store) yields `None`: an unreadable session is not evidence of a stall.
 fn stalled_background_task(node: &crate::models::AgentNode) -> Option<String> {
     let harness = crate::circuit::strategy::selector_for_agent(node)
         .provider()
@@ -760,5 +777,6 @@ fn stalled_background_task(node: &crate::models::AgentNode) -> Option<String> {
         format,
         node.cli_session_id.as_deref(),
         node.worktree_path.as_deref().unwrap_or_default(),
+        chrono::Utc::now().timestamp_millis(),
     )
 }

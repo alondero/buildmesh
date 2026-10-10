@@ -136,8 +136,7 @@ Node Digest rich layer, and feeds circuit assistant reports.
 ## Background tasks — the CLI never wakes an idle session (issue #2105)
 
 A `custom` record carries the CLI's task-completion reminder. It is not a turn,
-so the reader above skips it, but it is the only place the transcript names a
-finished background task:
+so the reader above skips it:
 
 ```json
 {"message_id": "msg-…", "turn_id": "…", "message": {
@@ -166,31 +165,55 @@ this: the task ended at `…267253`, the last assistant message was at `…15627
 has *not yet pushed*, so it keeps its last value for the whole idle window —
 precisely the state that needs detecting.
 
-**The mitigation.** `readers::mcode::detect_background_task_stall` is a pure
-function over the raw transcript that reports a finished task whose `endedAtMs`
-is **newer than the last assistant message**. That ordering is what separates
-"the agent is working on it" from "the agent will never learn of it"; terminal
-silence alone is never evidence. `live_wait` calls it only for a *yielded*
-`mcode` session, so a session still producing output is never nudged.
+**Why the reminder cannot drive the wake-up.** A detector built on the reminder
+never fires during the stall it exists to break — the record it needs does not
+exist until something else has already woken the session. So the detector is
+built on two records that *do* exist while the session is idle:
+
+1. **Which task this session launched** — the `bash_background`
+   acknowledgement, written during the turn that starts the task:
+
+   ```json
+   {"role": "toolResult", "toolName": "bash",
+    "content": [{"type": "text", "text": "<bash_background task_id=\"bg_…\">…"}],
+    "details": {"status": "started", "task_id": "bg_…", "description": "…"},
+    "timestamp": 1791205002057}
+   ```
+
+2. **When it ended** — the CLI's on-disk task store,
+   `<dataDir>/background-tasks/<taskId>/`. `output.log` grows while the task
+   runs and stops when it ends, so its modification time is the CLI's own record
+   of the task's end: measured to **0 s** against the `endedAtMs` the reminder
+   carries for the same task. `summary.txt` appears only once a task has
+   finished and is the stronger signal where present.
+
+`readers::mcode::detect_background_task_stall` combines them with the
+transcript's last assistant message and reports a task that is over **and**
+newer than it. That ordering is what separates "the agent is working on it"
+from "the agent will never learn of it"; terminal silence alone is never
+evidence. A task whose output has been written within `TASK_QUIESCENCE_MS` is
+treated as still running, so a live task cannot consume the single wake-up an
+attempt owns.
 
 The worker turns that into `CircuitEvent::NudgeIdleSession`, which the stepper
 turns into at most one `Effect::NudgeIdleAgent` per step attempt, fenced to the
-observed turn's `(report revision, turn stamp)` — so a re-observation of the
-same turn cannot re-nudge, and a spent nudge is never replayed. Delivery reuses
-the continuation input-ownership guard and is recorded through
+observed turn's `(report revision, turn stamp)`. Delivery reuses the
+continuation input-ownership guard and is recorded through
 `record_prompt_submission`, so the wake-up appears in `circuit_run_history` as
 an ordinary `prompt_submitted` row.
 
 Known limits, stated rather than papered over:
 
-- The nudge needs the reminder record to exist. While a session is *completely*
-  idle the CLI has not written one, so the wake fires from the first reminder
-  the session does receive — it unsticks the stall, it does not predict the
-  task's completion.
 - One wake per step attempt. A second stall inside the same attempt is left to
   the operator rather than nudged again.
+- The quiescence window is a fixed 3 minutes. A task that flushes output less
+  often than that could be nudged while still running; the agent then reports it
+  as still running and the budget is spent.
 - A borrowed source agent is never nudged: the nudge is not the user's session
   to interrupt.
+- A wake-up claimed but never settled (the worker died mid-delivery) is settled
+  as `uncertain` and the step is surfaced. It is never re-sent, because the
+  prompt may already have reached the terminal.
 
 ## Attention — validated against a live 0.4.12 TUI (issue #1797)
 

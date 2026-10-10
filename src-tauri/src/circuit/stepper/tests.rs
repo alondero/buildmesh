@@ -2632,16 +2632,6 @@ fn a_stalled_idle_session_is_woken_once_and_never_replayed() {
     );
     assert_eq!(run.context.get("node.classify.nudges.1"), Some("1"));
 
-    assert!(
-        advance(
-            &mut run,
-            &stalled_session("classify", 1, "report-1", "100:ready")
-        )
-        .effects
-        .is_empty(),
-        "the same observed turn is never woken twice"
-    );
-
     advance(
         &mut run,
         &CircuitEvent::NudgeDelivered {
@@ -2652,6 +2642,16 @@ fn a_stalled_idle_session_is_woken_once_and_never_replayed() {
     assert_eq!(
         run.context.get("node.classify.nudge.delivery"),
         Some("delivered")
+    );
+
+    assert!(
+        advance(
+            &mut run,
+            &stalled_session("classify", 1, "report-1", "100:ready")
+        )
+        .effects
+        .is_empty(),
+        "the same observed turn is never woken twice"
     );
 
     // A later, distinct turn may stall again — but the attempt's single wake-up
@@ -2669,6 +2669,50 @@ fn a_stalled_idle_session_is_woken_once_and_never_replayed() {
 
 /// A nudge for another attempt is ignored outright, so a stale observation
 /// cannot wake a session the current attempt already moved past.
+#[test]
+fn a_wake_up_claimed_by_a_crashed_worker_is_surfaced_and_never_replayed() {
+    // `execute_effects` settles a claim in the cycle that claims it, so a claim
+    // still reading `claimed` on a later observation means that cycle died
+    // mid-delivery. Re-sending could put a second prompt in a live terminal.
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    advance(
+        &mut run,
+        &stalled_session("classify", 1, "report-1", "100:ready"),
+    );
+    assert_eq!(
+        run.context.get("node.classify.nudge.delivery"),
+        Some("claimed")
+    );
+
+    // The worker dies here: nothing settles the claim.
+    let next = advance(
+        &mut run,
+        &stalled_session("classify", 1, "report-1", "100:ready"),
+    );
+    assert!(
+        next.effects.is_empty(),
+        "a stranded wake-up must never be re-sent"
+    );
+    assert_eq!(
+        run.context.get("node.classify.nudge.delivery"),
+        Some("uncertain"),
+        "a stranded claim is settled rather than left waiting forever"
+    );
+    assert_eq!(status_of(&run, "classify"), StepStatus::Unverified);
+    let error = run.step("classify").unwrap().error.clone().unwrap();
+    assert!(
+        error.contains("will not be replayed"),
+        "the operator is told the wake-up may or may not have landed: {error}"
+    );
+}
+
 #[test]
 fn a_stall_observed_for_another_attempt_is_ignored() {
     let mut run = gate_run(

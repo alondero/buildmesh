@@ -1581,6 +1581,9 @@ pub(super) fn prepare_turn_boundaries(
                 .filter(|id| crate::agent::process::PROCESS_REGISTRY.is_alive(id)),
             crate::circuit::stepper::Effect::ContinueAgentTurn {
                 target_agent_id, ..
+            }
+            | crate::circuit::stepper::Effect::NudgeIdleAgent {
+                target_agent_id, ..
             } => crate::agent::process::PROCESS_REGISTRY
                 .is_alive(target_agent_id)
                 .then_some(*target_agent_id),
@@ -1602,14 +1605,20 @@ pub(super) fn prepare_turn_boundaries(
                 node_id,
                 target_agent_id,
                 ..
-            } if *target_agent_id == agent_node_id => Some(node_id),
+            } if *target_agent_id == agent_node_id => Some((node_id, "continuation")),
+            // A wake-up carries its own revision, so the boundary must be taken
+            // against the report the nudge actually observed — falling back to a
+            // live re-read here would let a report that changed in between mark
+            // the nudge's turn as if it had not.
+            crate::circuit::stepper::Effect::NudgeIdleAgent {
+                node_id,
+                target_agent_id,
+                ..
+            } if *target_agent_id == agent_node_id => Some((node_id, "nudge")),
             _ => None,
         });
         let revision = continuation_node
-            .and_then(|id| {
-                view.context
-                    .get(&format!("node.{id}.continuation.revision"))
-            })
+            .and_then(|(id, prefix)| view.context.get(&format!("node.{id}.{prefix}.revision")))
             .map(str::to_string)
             .unwrap_or_else(|| {
                 crate::coordinator::enrichment::assistant_report(&agent)
