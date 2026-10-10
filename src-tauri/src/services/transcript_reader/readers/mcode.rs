@@ -37,11 +37,11 @@ use crate::services::transcript_reader::types::{
 /// MiniMax Code records task completion out of band: the CLI's
 /// `background_task_cadence_reminder` is injected **at the start of the next
 /// turn**, never when the task actually ends. An idle session therefore takes
-/// no turn, the reminder never appears, and the finished result is never read —
-/// the stall in issue #2105. The transcript's own reminder is therefore
-/// evidence only *after* a turn has already started, so it cannot drive the
-/// wake-up; [`BackgroundTaskStall`] pairs the ids the harness has announced
-/// with the on-disk task store, which is written the moment a task ends.
+/// no turn, never receives the reminder, and never reads the finished result —
+/// the stall in issue #2105. The reminder is thus evidence only once a turn
+/// has already begun, which is what [`detect_background_task_stall`] turns into
+/// a wake-up: the reminder names the finished task, and the assistant-message
+/// ordering says whether this session has had a chance to read it yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BackgroundTaskStall {
     /// Newest finished task that has not been read in this session.

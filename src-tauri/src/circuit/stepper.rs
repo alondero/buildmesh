@@ -528,8 +528,8 @@ impl RunView {
         if self.result_reminder_target(node_id).is_none() {
             return NudgeDecision::NotOwned;
         }
-        if self.context.get(&format!("node.{node_id}.nudge_revision")) == Some(revision)
-            && self.context.get(&format!("node.{node_id}.nudge_stamp")) == Some(stamp)
+        if self.context.get(&format!("node.{node_id}.nudge.revision")) == Some(revision)
+            && self.context.get(&format!("node.{node_id}.nudge.stamp")) == Some(stamp)
         {
             return NudgeDecision::Ignore;
         }
@@ -1608,9 +1608,9 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                     run.context
                         .set(&format!("node.{node_id}.nudges.{attempt}"), "1");
                     run.context
-                        .set(&format!("node.{node_id}.nudge_revision"), revision.clone());
+                        .set(&format!("node.{node_id}.nudge.revision"), revision.clone());
                     run.context
-                        .set(&format!("node.{node_id}.nudge_stamp"), stamp.clone());
+                        .set(&format!("node.{node_id}.nudge.stamp"), stamp.clone());
                     run.context
                         .set(&format!("node.{node_id}.nudge.input"), input_stamp.clone());
                     run.context.set(

@@ -2698,6 +2698,72 @@ fn circuit_continuation_rejects_user_input_regeneration_and_new_report() {
 }
 
 #[test]
+fn a_wake_up_is_fenced_against_its_own_claim_not_the_continuation_s() {
+    // Issue #2105: the nudge keeps its own `nudge.*` delivery bookkeeping. If
+    // the shared fence read the continuation's keys, every wake-up would be
+    // judged obsolete the moment the two lifecycles diverged, and the stall
+    // would never actually be broken.
+    let mut view = report_gate_view();
+    let node_id = "finish_classifier";
+    view.context
+        .set(&format!("node.{node_id}.nudge.stamp"), "100:yield");
+    view.context
+        .set(&format!("node.{node_id}.nudge.revision"), "report-1");
+    let target = 900;
+    let fence = |stamp: &str, revision: &str| {
+        continuation_is_current_for(
+            &view,
+            node_id,
+            target,
+            SessionStatus::Ready,
+            true,
+            Some(stamp),
+            Some(revision),
+            "nudge",
+        )
+    };
+    assert!(
+        fence("100:yield", "report-1"),
+        "the nudge's own claim must satisfy the fence"
+    );
+    assert!(!fence("200:yield", "report-1"), "a new turn invalidates it");
+    assert!(
+        !fence("100:yield", "report-2"),
+        "a new report invalidates it"
+    );
+    // The continuation's keys are a different lifecycle and must not satisfy a
+    // wake-up's fence, nor vice versa.
+    assert!(
+        !continuation_is_current(
+            &view,
+            node_id,
+            target,
+            SessionStatus::Ready,
+            true,
+            Some("100:yield"),
+            Some("report-1")
+        ),
+        "a continuation must not read the nudge's claim as its own"
+    );
+    view.context
+        .set(&format!("node.{node_id}.continuation.stamp"), "100:yield");
+    view.context
+        .set(&format!("node.{node_id}.continuation.revision"), "report-1");
+    assert!(
+        continuation_is_current(
+            &view,
+            node_id,
+            target,
+            SessionStatus::Ready,
+            true,
+            Some("100:yield"),
+            Some("report-1")
+        ),
+        "the continuation keeps its own fence"
+    );
+}
+
+#[test]
 fn circuit_continuation_accepts_only_the_agent_a_spawn_step_owns() {
     let spawn_node = CircuitNode {
         id: "implement".into(),

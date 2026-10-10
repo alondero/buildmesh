@@ -1748,6 +1748,33 @@ fn continuation_is_current(
     stamp: Option<&str>,
     revision: Option<&str>,
 ) -> bool {
+    continuation_is_current_for(
+        view,
+        node_id,
+        target,
+        status,
+        alive,
+        stamp,
+        revision,
+        "continuation",
+    )
+}
+
+/// The same fence, parameterised by the run-context key prefix that owns the
+/// delivery. A wake-up keeps its own `nudge.*` bookkeeping, so it must compare
+/// against the stamp and revision its own claim recorded — reading the
+/// continuation's keys would make every nudge look obsolete the moment the two
+/// lifecycles diverged.
+fn continuation_is_current_for(
+    view: &RunView,
+    node_id: &str,
+    target: i64,
+    status: SessionStatus,
+    alive: bool,
+    stamp: Option<&str>,
+    revision: Option<&str>,
+    prefix: &str,
+) -> bool {
     alive
         && matches!(
             status,
@@ -1756,15 +1783,12 @@ fn continuation_is_current(
         && view.context.source_agent_id() != Some(target)
         && view.continuation_target(node_id) == Some(target)
         && stamp.is_some()
-        && stamp
-            == view
-                .context
-                .get(&format!("node.{node_id}.continuation.stamp"))
+        && stamp == view.context.get(&format!("node.{node_id}.{prefix}.stamp"))
         && revision.is_some()
         && revision
             == view
                 .context
-                .get(&format!("node.{node_id}.continuation.revision"))
+                .get(&format!("node.{node_id}.{prefix}.revision"))
 }
 
 /// Dispatch one `CallGithub` effect. App-free: the recheck lookup and the
@@ -2208,9 +2232,10 @@ pub(super) fn execute_effects(
                     .map(|step| step.attempt)
                     .unwrap_or_default();
                 // The wake-up is only worth sending to the turn that was
-                // observed as stalled. Reuse the continuation fence: a turn that
-                // has since moved on needs nothing.
-                let valid = continuation_is_current(
+                // observed as stalled. Reuse the continuation fence, bound to
+                // this nudge's own claim keys: a turn that has since moved on
+                // needs nothing.
+                let valid = continuation_is_current_for(
                     view,
                     node_id,
                     *target_agent_id,
@@ -2218,6 +2243,7 @@ pub(super) fn execute_effects(
                     crate::agent::process::PROCESS_REGISTRY.is_alive(target_agent_id),
                     stamp.as_deref(),
                     revision.as_deref(),
+                    "nudge",
                 );
                 if !valid {
                     outcome_events.push(CircuitEvent::NudgeObsolete {
