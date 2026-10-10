@@ -4,7 +4,7 @@ Buildmesh is a Tauri 2 desktop app (React 19, Rust) for orchestrating AI coding 
 1. Check `git status --short` and the branch; record the base commit. Inside a worktree, every path you edit must be under the worktree root (see *Worktree path discipline* below).
 2. Read `docs/agents/engineering.md` (seams, scope-based checks, evidence). For a cross-cutting change (new harness/provider, Tauri command, HTTP route, user-visible feature) follow the matching list in `docs/development/README.md#common-change-checklists`.
 3. Read only the architecture you need. `docs/knowledge-primer.md` is an **index** (area → owner doc → owning module), not a manual: find your area's row, then read that doc in `docs/development/` by section (`rg -n "^#{2,3} " <file>`), and confirm it against the owning module (the code wins when they disagree). Don't read the primer *or* an owner doc whole. Domain language: `CONTEXT.md`. Rationale: `docs/adr/*.md`. Dated investigations live in `docs/archive/<yyyy-mm>/` and are not current contracts.
-4. Verify with `npm run verify` (scope-selected gates); iterate with the focused commands below.
+4. Verify with `npm run verify` (scope-selected gates); iterate with the focused commands below. Before committing, apply `docs/agents/self-review.md` to your own diff: reviewers keep finding the same few classes of defect, and `verify` prints where to look.
 
 ## Commands
 - **Development harness:** `npm run harness -- start --spec .tmp/task.json`, then `npm run verify` and `npm run harness -- finish`. Resume with `npm run harness -- status`. Receipts, evidence and blocked handoffs: `docs/agents/development-harness.md`. `.harness/` is ignored worktree-local state; never hand-edit receipts.

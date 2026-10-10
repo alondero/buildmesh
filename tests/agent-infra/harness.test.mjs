@@ -102,6 +102,12 @@ test('product runner and shared failure parser edits select product verification
   }
 });
 
+test('editing the advisory self-review script does not select product verification', () => {
+  const ids = planGates(['scripts/self-review.mjs']).map(gate => gate.id);
+  for (const id of ['rust-tests', 'frontend-build', 'frontend-tests', 'browser-smoke']) assert.ok(!ids.includes(id), id);
+  assert.ok(ids.includes('agent-tests'), 'the agent-infra tests still run');
+});
+
 test('uncached ConPTY checks its network prerequisite before compilation; cached packages work offline', async t => {
   const fixture = repo(t);
   const unavailable = await conptyPrerequisite(fixture.cwd, async () => { throw new Error('offline'); });
@@ -576,6 +582,8 @@ test('the format gate passes baseline rustfmt debt and fails touched or unexplai
   // Bare `rustfmt <file>` also rewrites child modules, so the gate must not recommend it.
   assert.match(touched.reason, /node scripts\/rustfmt-touched\.mjs "src-tauri\/src\/new\.rs"/);
   assert.doesNotMatch(touched.reason, /rustfmt --edition 2021/);
+  // The gate checks the final tree, so formatting goes in its own commit after the behaviour change.
+  assert.match(touched.reason, /commit your behaviour change first.*`style\(rust\)/);
   // A worktree path can contain spaces; the suggested command must stay copy-pasteable.
   const spaced = await gate('Diff in /r/src-tauri/src/new module.rs:3:', ['src-tauri/src/new module.rs']);
   assert.match(spaced.reason, /node scripts\/rustfmt-touched\.mjs "src-tauri\/src\/new module\.rs"/);
@@ -613,7 +621,7 @@ test('canonical verification rejects a source mutation even when every child che
   const fixture = repo(t);
   // Stand-in executables keep this a process/orchestration regression, without
   // coupling it to a full Tauri or frontend installation.
-  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-test-failures.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
+  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-test-failures.mjs', 'scripts/self-review.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
   for (const path of ['scripts/check-agent-diff.mjs', 'scripts/check-docs.mjs', 'scripts/check-readme-drift.mjs', 'scripts/check-process-spawn-discipline.mjs']) fixture.put(path, 'process.exit(0);\n');
   fixture.put('.gitignore', '.harness/\n.task.json\nnode_modules/\n');
   fixture.put('node_modules/eslint/package.json', '{"version":"fixture"}');
@@ -970,7 +978,7 @@ test('wait never reports a stale or missing result as success', async t => {
 });
 test('verify queues a heavy gate behind held machine-wide slots and runs it once one frees', async t => {
   const fixture = repo(t);
-  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-test-failures.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
+  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-test-failures.mjs', 'scripts/self-review.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
   for (const path of ['scripts/check-agent-diff.mjs', 'scripts/check-docs.mjs', 'scripts/check-readme-drift.mjs', 'scripts/check-process-spawn-discipline.mjs']) fixture.put(path, 'process.exit(0);\n');
   fixture.put('.gitignore', '.harness/\n.task.json\nnode_modules/\n');
   fixture.put('node_modules/eslint/package.json', '{"version":"fixture"}');
@@ -1063,6 +1071,42 @@ test('a passed gate is reused until a file it reads changes, not until anything 
   fixture.commit();
   await run();
   assert.deepEqual(ran(), ['docs-fake']);
+});
+
+test('verify prints the self-review prompts before the gates and a trailer when they flagged something', async t => {
+  const fixture = repo(t);
+  const { gate } = fakeGates(fixture);
+  fixture.put('docs/note.md', 'Nothing here can ever go wrong.\n');
+  const plan = () => [gate('docs-fake', ['^src/'])];
+  const lines = [];
+  t.mock.method(console, 'log', (...args) => { lines.push(args.join(' ')); });
+
+  // A substituted plan is a test double: it does not pay for a git scan it did not ask for.
+  await verify(fixture.cwd, { base: fixture.base, plan });
+  assert.equal(lines.some(line => /Self-review prompts/.test(line)), false);
+
+  lines.length = 0;
+  await verify(fixture.cwd, { base: fixture.base, plan, selfReview: true });
+  const text = lines.join('\n');
+  assert.match(text, /Self-review prompts \(advisory/);
+  assert.match(text, /docs\/note\.md:1/);
+  assert.ok(text.indexOf('Self-review prompts (advisory') < text.indexOf('PASS docs-fake'), 'prompts come before the gate rows');
+  assert.match(lines.at(-1), /Self-review prompts above flagged 1 item\b/);
+
+  // An agent that ran verify in the background only reads `wait`'s summary, so the flags must reach it too.
+  const summary = (await waitForVerify(fixture.cwd, { graceMs: 0 })).lines.join('\n');
+  assert.match(summary, /^PASS: 1\/1 gates/);
+  assert.match(summary, new RegExp(`Self-review prompts flagged 1 item.*npm run self-review -- --base ${fixture.base.slice(0, 8)}`));
+});
+
+test('verify keeps going when the self-review prompts cannot be produced', async t => {
+  const fixture = repo(t);
+  const { gate } = fakeGates(fixture);
+  const lines = [];
+  t.mock.method(console, 'log', (...args) => { lines.push(args.join(' ')); });
+  const receipt = await verify(fixture.cwd, { base: fixture.base, plan: () => [gate('docs-fake')], selfReview: () => { throw new Error('boom'); } });
+  assert.equal(receipt.outcome, 'PASS');
+  assert.ok(lines.some(line => /Self-review prompts unavailable: boom/.test(line)));
 });
 
 test('a failed attempt keeps the gates it passed across attempts', async t => {
