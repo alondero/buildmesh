@@ -70,6 +70,38 @@
  * most callers treat `null` as a real state ("no open PR", "no files
  * changed", etc.), so we can't rely on `Map.get` returning `undefined` to
  * mean "uncached".
+ *
+ * Retention and inactive freshness (issue #2017)
+ * ---------------------------------------------
+ * These clients are process-lifetime singletons, so "who is still watching
+ * this key" is load-bearing state, not bookkeeping. A key with a live keyed
+ * subscriber is ACTIVE and pinned — exempt from both bounds below, so a
+ * mounted panel never loses its value to churn or to the clock. When its
+ * last subscriber leaves it becomes an inactive entry in `inactiveSince`,
+ * which is at once the LRU (Map iteration order is eviction order) and the
+ * TTL store (the stamp is the value in that same entry). Restamping an
+ * already-present key must DELETE it first — `Map.prototype.set` leaves an
+ * existing key at its original position, so stamping alone would make
+ * eviction FIFO-by-first-release and discard the entry used most recently:
+ *
+ *   - `maxInactiveEntries` (default 200) caps how many inactive entries a
+ *     client retains. This is what bounds a long session that walks
+ *     thousands of repo paths — deleted worktree paths included, since
+ *     those keys never come back.
+ *   - `inactiveEntryTtlMs` (default 5 min) bounds how stale an inactive
+ *     entry may be when it is read. `GIT_CHANGED` only reaches mounted
+ *     subscribers, so a key nobody is watching cannot be invalidated by an
+ *     edit that lands off screen; past the TTL a revisit reports uncached
+ *     and refetches, while inside it a quick remount stays a cache hit.
+ *
+ * Expiry is lazy — it happens in `read`/`lastError`, not in a sweep timer.
+ * Eviction deletes the key's `pending` slot, which IS the late-completion
+ * fence: a completion still in flight checks `pending.get(key) !== p`
+ * before writing, so it adopts whatever is current rather than
+ * resurrecting the entry. No generation counter or tombstone map is
+ * needed, and adding one would grow unbounded for exactly the deleted
+ * entities this policy exists to reclaim. The full contract is in
+ * `docs/development/git-query-cache.md`.
  */
 
 import { listen } from '@tauri-apps/api/event';
@@ -273,6 +305,27 @@ export interface PathInvalidatedCacheOptions<K, V> {
    * original behaviour).
    */
   minRefetchIntervalMs?: number;
+  /**
+   * Freshness window for an entry whose last subscriber has gone away,
+   * in milliseconds (issue #2017). `GIT_CHANGED` only reaches mounted
+   * subscribers, so a key nobody is watching cannot be invalidated by an
+   * edit that lands while it is off screen. Revisiting such a key within
+   * this window still serves the cached value (a remount stays a cache
+   * hit); past it, the entry is retired and the revisit refetches.
+   *
+   * Keys with a live subscriber are never affected — an active key is
+   * pinned until its last subscriber leaves. Defaults to 5 minutes; `0`
+   * disables expiry, leaving only the `maxInactiveEntries` cap.
+   */
+  inactiveEntryTtlMs?: number;
+  /**
+   * Hard ceiling on entries this client retains for keys with no live
+   * subscriber (issue #2017). Exceeding it evicts the least-recently
+   * inactive key. This is what bounds a long session that walks
+   * thousands of repo paths — including deleted worktrees, whose paths
+   * never come back. Defaults to 200.
+   */
+  maxInactiveEntries?: number;
 }
 
 // ------------------------------------------------------------------
@@ -482,6 +535,16 @@ function addPathSubscriber(sub: PathSubscriber, path: string, extraPaths?: Array
 // factories.
 // ------------------------------------------------------------------
 
+// Issue #2017 — retention defaults for settled-but-inactive entries.
+// The TTL is long enough that an ordinary remount (panel close/reopen,
+// switching nodes and back) still reads from cache, and short enough that
+// a revisit after being away lands on fresh data. The cap is a hard
+// ceiling on retained keys per client, so a long session that walks
+// thousands of repo paths — including deleted worktrees, whose paths never
+// come back — settles at a bounded size instead of growing forever.
+const DEFAULT_INACTIVE_TTL_MS = 5 * 60_000;
+const DEFAULT_MAX_INACTIVE_ENTRIES = 200;
+
 interface InternalClient<K, V> {
   /** Returns the cached value for `key`, or `undefined` if no entry exists.
    * A cached `null` is returned as `null` (not `undefined`). */
@@ -506,6 +569,8 @@ function createInternalClient<K, V>(
   fetcher: (key: K) => Promise<V | null>,
   name: string,
   minRefetchIntervalMs = 0,
+  inactiveEntryTtlMs = DEFAULT_INACTIVE_TTL_MS,
+  maxInactiveEntries = DEFAULT_MAX_INACTIVE_ENTRIES,
 ): InternalClient<K, V> {
   // Per-client state. A `Symbol` clientId is the load-bearing piece that
   // makes the cross-client dispatch scoping work — see module docstring.
@@ -535,12 +600,107 @@ function createInternalClient<K, V>(
   // unrelated event).
   const trailingTimers = new Map<K, ReturnType<typeof setTimeout>>();
   const trailingSubscribers = new Map<K, Set<KeyedPathSubscriber<K>>>();
+  // Inactive-key bookkeeping (issue #2017). `activeCounts` is the live
+  // keyed-subscriber refcount per key; `inactiveSince` is the LRU of keys
+  // with no live subscriber that still hold state, and its VALUE is the
+  // timestamp at which the key's last subscriber left. Map iteration order
+  // is the LRU order, so the cap evicts oldest-first with no extra index,
+  // and the TTL reads the stamp off the same entry.
+  const activeCounts = new Map<K, number>();
+  const inactiveSince = new Map<K, number>();
 
   const cancelTrailing = (key: K) => {
     const timer = trailingTimers.get(key);
     if (timer !== undefined) clearTimeout(timer);
     trailingTimers.delete(key);
     trailingSubscribers.delete(key);
+  };
+
+  // Full retirement for an inactive key. Dropping `pending` IS the
+  // late-completion fence: a completion already in flight checks
+  // `pending.get(key) !== p` before writing, so it adopts the current
+  // result instead of resurrecting the entry. No generation counter or
+  // tombstone map is needed — the pending slot's identity is the fence.
+  const evictInactive = (key: K) => {
+    known.delete(key);
+    values.delete(key);
+    errors.delete(key);
+    lastFetchedAt.delete(key);
+    pending.delete(key);
+    cancelTrailing(key);
+    inactiveSince.delete(key);
+  };
+
+  const enforceInactiveCap = () => {
+    while (inactiveSince.size > maxInactiveEntries) {
+      const oldest = inactiveSince.keys().next();
+      if (oldest.done) return;
+      evictInactive(oldest.value);
+    }
+  };
+
+  // A key occupies a retention slot if it holds a cached result
+  // (including a cached `null`, which lives in `known` only), a recorded
+  // error, OR an in-flight request — whose promise chain is itself
+  // retained memory. Tracking the pending-only case is what makes the
+  // fence below reachable: a key that no subscriber is watching and that
+  // has not settled yet still has to be a cap candidate, otherwise it
+  // escapes eviction and its late completion repopulates state.
+  const retainsSlot = (key: K) => known.has(key) || errors.has(key) || pending.has(key);
+
+  const markActive = (key: K) => {
+    activeCounts.set(key, (activeCounts.get(key) ?? 0) + 1);
+    // A live key is pinned: it is never an LRU candidate and never
+    // TTL-expires, so a mounted subscriber's value cannot be pulled out
+    // from under it by the cap or by the passage of time.
+    inactiveSince.delete(key);
+  };
+
+  // `Map.prototype.set` does NOT move an already-present key to the back —
+  // it preserves the key's original iteration position. Stamping without
+  // the delete therefore yields FIFO-by-first-release, not LRU, and the cap
+  // would evict the entry used most recently while keeping older untouched
+  // ones. The delete is what makes this a real LRU.
+  const recordInactive = (key: K) => {
+    inactiveSince.delete(key);
+    inactiveSince.set(key, Date.now());
+  };
+
+  const markInactive = (key: K) => {
+    const remaining = (activeCounts.get(key) ?? 1) - 1;
+    if (remaining > 0) {
+      activeCounts.set(key, remaining);
+      return;
+    }
+    activeCounts.delete(key);
+    // Stamp only keys that actually hold something. A mount/unmount
+    // cycle that never fetched must not occupy an LRU slot — otherwise
+    // subscription churn would evict genuinely cached values. A key whose
+    // state was already wiped (bus eviction, manual `invalidate`) drops
+    // any stale stamp instead, so the LRU never counts empty entries
+    // against the cap.
+    if (retainsSlot(key)) recordInactive(key);
+    else inactiveSince.delete(key);
+    enforceInactiveCap();
+  };
+
+  // Revisit freshness: `GIT_CHANGED` dispatches only to mounted
+  // subscribers, so an inactive key can miss changes that land while
+  // nothing is watching. A revisit past the TTL therefore retires the
+  // entry so the caller refetches. Within the TTL the cached value is
+  // served, which is what keeps a quick remount a cache hit.
+  const expireIfStale = (key: K) => {
+    if (inactiveEntryTtlMs <= 0) return;
+    // Presence in `inactiveSince` already implies "no live subscriber".
+    const since = inactiveSince.get(key);
+    if (since === undefined) return;
+    // Never TTL-retire a key whose request is still running: the hook
+    // reads the cache before it subscribes, so retiring here would cancel
+    // a fetch the returning subscriber is about to adopt. The completion
+    // re-stamps the key when it settles.
+    if (pending.has(key)) return;
+    if (Date.now() - since < inactiveEntryTtlMs) return;
+    evictInactive(key);
   };
 
   const fireTrailing = (key: K) => {
@@ -582,6 +742,8 @@ function createInternalClient<K, V>(
     trailingTimers.forEach((timer) => clearTimeout(timer));
     trailingTimers.clear();
     trailingSubscribers.clear();
+    activeCounts.clear();
+    inactiveSince.clear();
   });
 
   // Matching subscribers share one eviction per dispatch. Events during a
@@ -623,6 +785,12 @@ function createInternalClient<K, V>(
 
   return {
     read(key) {
+      // Revisit freshness (issue #2017): an entry whose last subscriber
+      // left longer ago than the TTL retires here, so a key that missed
+      // offscreen GIT_CHANGED events reads as uncached instead of serving
+      // a value nothing could have invalidated. Active keys are exempt —
+      // they are not in `inactiveSince`.
+      expireIfStale(key);
       if (!known.has(key)) return undefined;
       return values.get(key) ?? null;
     },
@@ -655,6 +823,15 @@ function createInternalClient<K, V>(
           // A success erases the previous failure for this key — the hook
           // layer's `error` field will read `null` on the next state read.
           errors.delete(key);
+          // Issue #2017 — `refresh` is reachable without a subscriber
+          // (imperative callers). A key nobody is watching is an inactive
+          // entry from the moment it settles: record it in the LRU so the
+          // cap and TTL apply to it exactly as they would after an
+          // unsubscribe. This also makes a re-refresh count as a USE, so
+          // the entry moves to the MRU position instead of being evicted
+          // for being old. Keys with a live subscriber are pinned instead.
+          if (!activeCounts.has(key)) recordInactive(key);
+          enforceInactiveCap();
           scheduleTrailing(key, minRefetchIntervalMs);
           return result;
         })
@@ -672,6 +849,12 @@ function createInternalClient<K, V>(
           // `console.warn` is in the eslint allow-list (see eslint.config.js);
           // the no-console rule only flags `console.log` / `console.info`.
           console.warn(`${name}: fetch failed for key`, key, err);
+          // A recorded error is retained state too — same inactive-LRU
+          // treatment as a settled value, so a repeatedly-failing
+          // never-subscribed key cannot grow `errors` without bound, and a
+          // retry counts as a use.
+          if (!activeCounts.has(key)) recordInactive(key);
+          enforceInactiveCap();
           scheduleTrailing(key, 0);
           return null;
         });
@@ -680,6 +863,10 @@ function createInternalClient<K, V>(
     },
 
     lastError(key) {
+      // Same freshness gate as `read` (issue #2017) — a recorded failure is
+      // per-key retained state, so it expires on the same clock as the
+      // value it belongs to and can never outlive it in the LRU.
+      expireIfStale(key);
       return errors.get(key) ?? null;
     },
 
@@ -694,6 +881,11 @@ function createInternalClient<K, V>(
       // own refresh — a deferred second eviction would race it).
       lastFetchedAt.delete(key);
       cancelTrailing(key);
+      // The LRU only tracks keys that still retain something. Once an
+      // explicit invalidation wipes the value, a stale TTL stamp would
+      // otherwise survive in `inactiveSince` and make `evictInactive` a
+      // no-op for a key that is already empty.
+      if (!retainsSlot(key)) inactiveSince.delete(key);
     },
 
     subscribeOn(key, path, onInvalidate, extraPaths?) {
@@ -704,12 +896,23 @@ function createInternalClient<K, V>(
       installListener();
       const sub: KeyedPathSubscriber<K> = { kind: 'keyed', clientId, key, active: true, notify: onInvalidate };
       const unsubscribe = addPathSubscriber(sub, path, extraPaths);
+      // Issue #2017 — the first subscriber pins the key: from here until
+      // the last one leaves, the retention policy cannot evict or expire
+      // it, so a mounted panel never loses its value to the cap.
+      markActive(key);
+      // The closure is idempotent (callers may invoke it twice), and the
+      // refcount must drop exactly once per subscription or the key would
+      // look permanently pinned.
+      let released = false;
       return () => {
+        if (released) return;
+        released = true;
         sub.active = false;
         unsubscribe();
         const subscribers = trailingSubscribers.get(key);
         subscribers?.delete(sub);
         if (subscribers?.size === 0) cancelTrailing(key);
+        markInactive(key);
       };
     },
 
@@ -773,8 +976,8 @@ function createInternalClient<K, V>(
 export function createPathKeyedCache<V>(
   options: PathInvalidatedCacheOptions<string, V>,
 ): PathKeyedClient<V> {
-  const { fetcher, name = 'pathInvalidatedCache', minRefetchIntervalMs } = options;
-  const internal = createInternalClient<string, V>(fetcher, name, minRefetchIntervalMs);
+  const { fetcher, name = 'pathInvalidatedCache', minRefetchIntervalMs, inactiveEntryTtlMs, maxInactiveEntries } = options;
+  const internal = createInternalClient<string, V>(fetcher, name, minRefetchIntervalMs, inactiveEntryTtlMs, maxInactiveEntries);
 
   return {
     ...internal,
@@ -802,8 +1005,8 @@ export function createPathKeyedCache<V>(
 export function createDualKeyCache<K, V>(
   options: PathInvalidatedCacheOptions<K, V>,
 ): DualKeyClient<K, V> {
-  const { fetcher, name = 'pathInvalidatedCache', minRefetchIntervalMs } = options;
-  const internal = createInternalClient<K, V>(fetcher, name, minRefetchIntervalMs);
+  const { fetcher, name = 'pathInvalidatedCache', minRefetchIntervalMs, inactiveEntryTtlMs, maxInactiveEntries } = options;
+  const internal = createInternalClient<K, V>(fetcher, name, minRefetchIntervalMs, inactiveEntryTtlMs, maxInactiveEntries);
 
   // The `subscribe` and `subscribeOn` members are intentionally NOT
   // exposed on the dual-key public type — `subscribeByPath` is the only
