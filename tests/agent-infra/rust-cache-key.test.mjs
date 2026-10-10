@@ -79,17 +79,32 @@ test('every Linux Rust job shares one rust-cache entry', () => {
 
 test('the Rust jobs declare identical cache-keyed environment variables', () => {
   // The precise defect: rust-build hashed `CARGO_BUILD_JOBS` into a key the
-  // shards never read. Comparing the hashed *sets* catches that, and catches a
+  // shards never read. Comparing the hashed entries catches that, and catches a
   // future variable added to one job only, which is the same bug wearing a
   // different name.
-  const hashed = new Map(JOBS.map((job) => [job, new Set([...envVars(job).keys()].filter(rustCacheHashes))]));
-  const reference = [...hashed.get('rust-tests')].sort();
+  //
+  // Compared as `NAME=VALUE`, not as bare names, because that is what rust-cache
+  // feeds its hasher (`hasher.update(`${key}=${value}`)` in its `config.ts`). A
+  // variable declared in all three jobs but with a different value — say
+  // `CARGO_PROFILE_DEV_DEBUG: "1"` in `rust-build` and `"0"` in the shards —
+  // splits the cache key exactly as surely as omitting it, and a set comparison
+  // would wave that through.
+  const hashed = new Map(
+    JOBS.map((job) => [
+      job,
+      [...envVars(job).entries()]
+        .filter(([name]) => rustCacheHashes(name))
+        .map(([name, value]) => `${name}=${value}`)
+        .sort(),
+    ]),
+  );
+  const reference = hashed.get('rust-tests');
   for (const job of JOBS) {
     assert.deepEqual(
-      [...hashed.get(job)].sort(),
+      hashed.get(job),
       reference,
-      `\`${job}\` sets cache-keyed env vars ${[...hashed.get(job)].sort().join(', ')}, but \`rust-tests\` sets ${reference.join(', ') || '(none)'}. ` +
-        'rust-cache hashes every CARGO*/RUST* variable into its key, so one job setting a variable the others do not gives it a private cache entry that the others never restore.',
+      `\`${job}\` sets cache-keyed env ${hashed.get(job).join(', ') || '(none)'}, but \`rust-tests\` sets ${reference.join(', ') || '(none)'}. ` +
+        'rust-cache hashes every CARGO*/RUST* variable into its key, so one job declaring a different variable or a different value gives it a private cache entry that the others never restore.',
     );
   }
 });
