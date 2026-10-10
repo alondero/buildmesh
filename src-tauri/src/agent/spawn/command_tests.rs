@@ -2,6 +2,7 @@ use super::command::{cascade_inputs_for, resolve_spawn_config};
 use super::{ExplicitSpawnOverrides, SpawnIntent, SpawnRequest, TerminalSize};
 use crate::agent::capabilities::{
     resolve_agent_config, FieldInputs, HarnessCapabilities, ResolvedAgentConfig,
+    PERMISSION_MODE_UNATTENDED,
 };
 use crate::agent::launch::{HarnessLaunchInput, SessionIdModeRef};
 use crate::agent::provider::Platform;
@@ -109,6 +110,87 @@ fn mcode_spawn_validates_final_model_for_fresh_and_resumed_sessions() {
     }
 }
 
+/// The Codex launch carries this node's attention hooks as `-c` overrides, on
+/// every runtime, for a fresh and a resumed session. Where the command line is
+/// a re-encoded PowerShell script (Windows) it must stay inside the 32,767
+/// character process limit even with a long initial prompt.
+#[test]
+fn codex_spawn_carries_attention_hooks_for_the_launched_node() {
+    use super::command::build_spawn_command;
+    use super::reader::SessionIdMode;
+
+    for runtime in [EnvType::Windows, EnvType::WindowsInterop, EnvType::Wsl] {
+        let resolved = crate::env::ResolvedPath {
+            host_path: ".".into(),
+            spawn_path: ".".into(),
+            raw_path: ".".into(),
+            env_type: runtime,
+        };
+        for (label, session) in [
+            ("fresh", SessionIdMode::None),
+            (
+                "resumed",
+                SessionIdMode::Resume("019dcb2e-1111-7222-8333-444455556666".into()),
+            ),
+        ] {
+            let command = build_spawn_command(
+                &resolved,
+                Provider::Codex,
+                &[],
+                &session,
+                4242,
+                &ResolvedAgentConfig::default(),
+                None,
+                false,
+            )
+            .unwrap();
+            let argv: Vec<String> = command
+                .get_argv()
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            // On a PowerShell-wrapped launch the arguments live inside the
+            // encoded script; otherwise they are plain argv entries.
+            let launch = match argv.last().filter(|_| {
+                (cfg!(windows) && runtime == EnvType::Windows) || runtime == EnvType::WindowsInterop
+            }) {
+                Some(encoded) => {
+                    use base64::Engine;
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(encoded.as_bytes())
+                        .unwrap();
+                    let utf16: Vec<_> = bytes
+                        .chunks_exact(2)
+                        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                        .collect();
+                    String::from_utf16(&utf16).unwrap()
+                }
+                None => argv.join(" "),
+            };
+            for event in [
+                "SessionStart",
+                "Stop",
+                "PermissionRequest",
+                "UserPromptSubmit",
+                "PreToolUse",
+                "PostToolUse",
+                "Interrupt",
+            ] {
+                assert!(
+                    launch.contains(&format!("hooks.{event}=[")),
+                    "{runtime:?} {label} launch lacks the {event} hook"
+                );
+            }
+            assert!(launch.contains("features.hooks=true"), "{runtime:?}");
+            let command_line: usize = argv.iter().map(|arg| arg.len() + 1).sum();
+            assert!(
+                command_line < 32_767 - 4_000,
+                "{runtime:?}: {command_line} characters leave no room for a prompt"
+            );
+        }
+    }
+}
+
 // -----------------------------------------------------------------
 // Issue #1179: capability / recipe coherence table.
 //
@@ -189,6 +271,7 @@ fn capability_recipe_coherence() {
             model: Some(model_value.to_string()),
             effort: Some(effort_value.to_string()),
             extra_args: None,
+            permission_mode: None,
         };
         let prefill_text = "fix the auth bug in handler.rs";
         let input = make_input(
@@ -309,6 +392,85 @@ fn capability_recipe_coherence() {
             sandbox_args,
             sandbox_prepared.recipe.base_args
         );
+
+        // 5. Permission-flag coherence (issue #2151). The bare base
+        //    recipe carries no approval flags; `default_prepare`
+        //    contributes the effective mode's args. The descriptor must
+        //    match the adapter's own mode list (the `capabilities()`
+        //    composition), and with no resolved mode the harness default
+        //    applies — so the prepared recipe carries exactly the
+        //    default mode's contribution. A second pass with prompt mode
+        //    must drop the unattended contribution.
+        assert_eq!(
+            caps.permission_modes,
+            adapter.permission_modes(),
+            "permission_modes / descriptor mismatch for {}",
+            adapter.id(),
+        );
+        assert_eq!(
+            caps.default_permission_mode,
+            adapter.default_permission_mode(),
+            "default_permission_mode / descriptor mismatch for {}",
+            adapter.id(),
+        );
+        // Literal product rule (issue #2151, review round 1): any harness
+        // with permission modes defaults to unattended — today's
+        // behavior — so a flipped default trips this pin even though the
+        // descriptor-identity assertion above would follow it.
+        if !caps.permission_modes.is_empty() {
+            assert_eq!(
+                caps.default_permission_mode.as_deref(),
+                Some(PERMISSION_MODE_UNATTENDED),
+                "default must be unattended for {}",
+                adapter.id(),
+            );
+        }
+        let default_args = caps
+            .default_permission_mode
+            .as_deref()
+            .map(|m| adapter.permission_args(m))
+            .unwrap_or_default();
+        for expected in &default_args {
+            assert!(
+                args.contains(expected),
+                "permission-flag / default mismatch for {}: \
+                 prepared recipe must carry the default mode's {:?}; args = {:?}",
+                adapter.id(),
+                expected,
+                args
+            );
+        }
+        if caps
+            .permission_modes
+            .iter()
+            .any(|m| m.id == crate::agent::capabilities::PERMISSION_MODE_PROMPT)
+        {
+            let prompt_config = ResolvedAgentConfig {
+                permission_mode: Some(
+                    crate::agent::capabilities::PERMISSION_MODE_PROMPT.to_string(),
+                ),
+                ..config.clone()
+            };
+            let prompt_input = make_input(
+                Platform::Linux,
+                SessionIdModeRef::None,
+                &prompt_config,
+                Some(prefill_text),
+            );
+            let prompt_prepared = crate::agent::launch::default_prepare(adapter, prompt_input);
+            let unattended_args =
+                adapter.permission_args(crate::agent::capabilities::PERMISSION_MODE_UNATTENDED);
+            for dropped in &unattended_args {
+                assert!(
+                    !prompt_prepared.recipe.base_args.contains(dropped),
+                    "permission-flag / prompt mismatch for {}: \
+                     prompt recipe must not carry the unattended {:?}; args = {:?}",
+                    adapter.id(),
+                    dropped,
+                    prompt_prepared.recipe.base_args
+                );
+            }
+        }
     }
     assert!(
         any_adapters >= 9,
@@ -350,6 +512,7 @@ fn mcode_recipe_carries_model_arg_under_coherence_matrix() {
         model: Some("minimax/MiniMax-Text-01".to_string()),
         effort: None,
         extra_args: None,
+        permission_mode: None,
     };
     let input = make_input(
         Platform::Macos,
@@ -387,6 +550,7 @@ fn cascade_inputs_for_populates_explicit_slot_for_both_fields() {
     let app_default = HarnessConfigValue {
         model: Some("opus-4-1".into()),
         effort: Some("high".into()),
+        permission_mode: None,
     };
     let inputs = cascade_inputs_for(
         Some("sonnet-4"),
@@ -425,6 +589,7 @@ fn cascade_inputs_for_collapses_whitespace_explicit_to_none() {
     let app_default = HarnessConfigValue {
         model: Some("opus-4-1".into()),
         effort: Some("high".into()),
+        permission_mode: None,
     };
     let inputs = cascade_inputs_for(
         Some("   "),
@@ -468,6 +633,7 @@ fn cascade_inputs_for_independent_fields() {
     let app_default = HarnessConfigValue {
         model: Some("opus-4-1".into()),
         effort: Some("high".into()),
+        permission_mode: None,
     };
 
     // Explicit model only — effort falls through to the app default.
@@ -495,6 +661,7 @@ fn cascade_inputs_for_layer1_wins_over_mesh_and_application_at_resolver() {
     let app_default = HarnessConfigValue {
         model: Some("opus-4-1".into()),
         effort: Some("high".into()),
+        permission_mode: None,
     };
     let inputs = cascade_inputs_for(
         Some("sonnet-4"),
@@ -530,6 +697,7 @@ fn cascade_inputs_for_empty_explicit_falls_through_at_resolver() {
     let app_default = HarnessConfigValue {
         model: Some("opus-4-1".into()),
         effort: Some("high".into()),
+        permission_mode: None,
     };
     let inputs = cascade_inputs_for(
         Some("   "),
@@ -605,6 +773,7 @@ fn spawn_request_explicit_wins_at_resolver() {
     let app_default = HarnessConfigValue {
         model: Some("sonnet-4".into()),
         effort: Some("medium".into()),
+        permission_mode: None,
     };
     let resolved = resolve_spawn_config(
         Provider::Anthropic,
@@ -652,6 +821,7 @@ fn spawn_request_whitespace_explicit_falls_through_at_resolver() {
     let app_default = HarnessConfigValue {
         model: Some("opus-4-1".into()),
         effort: Some("high".into()),
+        permission_mode: None,
     };
     let resolved = resolve_spawn_config(
         Provider::Anthropic,

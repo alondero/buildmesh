@@ -189,12 +189,25 @@ export default function App() {
   const [prSheet, setPrSheet] = useState<{
     node: AgentNode;
     branch: string;
+    instanceId: number;
   } | null>(null);
   const [prCreatedUrl, setPrCreatedUrl] = useState<string | null>(null);
   const nextWorkVisitId = useCallback(() => ++workVisitIdRef.current, []);
 
   const prSheetRef = useRef(prSheet);
   prSheetRef.current = prSheet;
+  // Distinguishes successive sheets so a create request can be scoped to
+  // the one that started it (issue #2024 rank 9).
+  const nextPrSheetIdRef = useRef(0);
+  // Whether the open sheet has a create request in flight. The sheet gates
+  // Cancel and the backdrop itself; the back route reads this so all three
+  // dismissal paths honour one decision instead of drifting apart.
+  // A ref (not state) because the popstate handler is registered once with
+  // [] deps and must stay stable.
+  const prSheetBusyRef = useRef(false);
+  const handlePrSheetBusy = useCallback((busy: boolean) => {
+    prSheetBusyRef.current = busy;
+  }, []);
   // Recovery is a transition, not an event. The guard makes concurrent 401s
   // share one clear-and-connect transition, while the version invalidates
   // callbacks retained by screens that were unmounted during recovery.
@@ -217,6 +230,16 @@ export default function App() {
     const onPop = () => {
       // A sheet counts as the topmost "screen": back closes it first.
       if (prSheetRef.current) {
+        // While the sheet has a request in flight it owns the dismissal
+        // decision — the same decision its Cancel button and backdrop make.
+        // Consume the gesture and re-push the entry we just popped, so the
+        // stack keeps its depth and the deferred request keeps its sheet
+        // (issue #2024 rank 9).
+        if (prSheetBusyRef.current) {
+          window.history.pushState({ bm: true }, "");
+          return;
+        }
+        prSheetBusyRef.current = false;
         setPrSheet(null);
         return;
       }
@@ -262,6 +285,7 @@ export default function App() {
     // also calls window.history.back().
     const sheetWasOpen = prSheetRef.current !== null;
     prSheetRef.current = null;
+    prSheetBusyRef.current = false;
     setPrSheet(null);
     setPrCreatedUrl(null);
     setOffline(false);
@@ -274,7 +298,9 @@ export default function App() {
   const openPrSheet = useCallback((node: AgentNode, branch: string) => {
     if (authRecoveryRef.current) return;
     window.history.pushState({ bm: true }, "");
-    setPrSheet({ node, branch });
+    prSheetBusyRef.current = false;
+    nextPrSheetIdRef.current += 1;
+    setPrSheet({ node, branch, instanceId: nextPrSheetIdRef.current });
   }, []);
 
   const activeRecoveryVersion = recoveryVersionRef.current;
@@ -493,12 +519,24 @@ export default function App() {
       {prSheet && (
         <Suspense fallback={null}>
           <CreatePrSheet
+            key={prSheet.instanceId}
             meshId={prSheet.node.mesh_id}
+            nodeId={prSheet.node.id}
+            sheetId={prSheet.instanceId}
             currentBranch={prSheet.branch}
             onClose={goBack}
+            onBusyChange={handlePrSheetBusy}
             onAuthFailed={handleAuthFailedForActiveScreen}
-            onCreated={(url) => {
+            onCreated={(url, sheetId) => {
               if (activeRecoveryVersion !== recoveryVersionRef.current) return;
+              // Scope the completion to the sheet that started it. An auth
+              // recovery or a second sheet can retire this one while the
+              // request is in flight; popping history then would navigate
+              // the screen underneath, silently undoing the user's place.
+              if (prSheetRef.current?.instanceId !== sheetId) return;
+              // Release the busy gate first so popstate closes the sheet
+              // instead of re-pushing its entry.
+              prSheetBusyRef.current = false;
               setPrCreatedUrl(url);
               window.history.back(); // pops the sheet's history entry
             }}

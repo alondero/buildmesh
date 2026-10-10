@@ -186,6 +186,20 @@ disk](docs/user-guide.md#attention-hooks-buildmesh-installs-on-disk).
 - **Not a guarantee the agent binary is trustworthy.** It confines what the agent process can touch; it doesn't vet the agent or its dependencies.
 - **Not cross-runtime.** It cannot contain a process running inside WSL from a Windows host, or vice versa.
 
+### Harness permission modes
+
+Separately from the sandbox, each harness has a **Permission mode** in
+**Settings → Harnesses → Agent Harness defaults**: its auto/unattended mode
+(the harness's own flag, e.g. Claude Code's
+`--dangerously-skip-permissions`) or prompt mode (launch the CLI bare so it
+asks). Buildmesh passes the flag through unchanged — what acts is the agent;
+Buildmesh only facilitates the launch. The effective mode shows in the
+harness's own words on its Settings card and under its Spawn Menu row;
+changing it changes the next spawn's arguments, and existing meshes keep
+today's unattended behavior until you change it. Full details, including the
+per-harness flag table, are in [Harness permission
+modes](docs/user-guide.md#harness-permission-modes).
+
 ## Keyboard shortcuts
 
 - `Ctrl + T` / `Cmd + T` — new agent node

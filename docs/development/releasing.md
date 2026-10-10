@@ -271,6 +271,17 @@ is claimed, which `npm run check:rust-shards`
 the unit tests from the test binary and fails if any is unclaimed or claimed
 twice. Run it after adding a module, not only in CI.
 
+That gate is a CI step in `Rust build (compile)`, immediately after
+`cargo test --locked --no-run`, and the placement is load-bearing: listing the
+tests needs the compiled binary, so it must not be the step that pays to build
+it. It used to sit in the non-shard pass ahead of the fuzz smoke, where
+`cargo test --lib -- --list` compiled the crate (56.6s on run 38000250072) and
+the fuzz smoke then compiled the same target again (48.8s) — 105s of a 185s job
+to reach a test run of 0.3s. Running it where the binary already exists also
+fails fast: a matrix that does not cover the suite now fails before the seven
+shards are dispatched. The gate is still on the merge path, because
+`Rust tests + TS bindings` already requires `Rust build (compile)`.
+
 Seven shards were re-measured after #2048 and deliberately kept: the seven
 shards now run 13-39s of tests each, so per-shard setup is back on the critical
 path instead of the tests, and consolidating into fewer, larger shards would
@@ -296,6 +307,24 @@ changes keep the budget sustainable:
   resolves and verifies every package and runs its maintainer scripts, and only
   the transfer is skipped. A stale or partial entry costs a download, not a
   broken job.
+
+`shared-key` alone does not make one entry. rust-cache also folds a hash of
+every environment variable named `CARGO*`, `CC*`, `CFLAGS*`, `CXX*`, `CMAKE*`, or
+`RUST*` into its key, so two jobs share an entry only when `shared-key` *and*
+those variables match. `rust-build` set `CARGO_BUILD_JOBS: "4"` and the shards
+did not, and because that variable is invisible to cargo's fingerprint nothing
+failed and every job still reported a cache hit: `rust-build` saved
+`…-65c564bd-47ff76ef` while all eight downstream jobs read `…-ecb08f1d-47ff76ef`
+(run 38000250072). The published compile was therefore read by nobody, and each
+job recompiled the crate anyway — ~39s in `rust-build` and ~59s per shard.
+
+The runner has four cores and cargo already parallelises across them, so the
+variable was removed from all three jobs rather than added to the other eight.
+`tests/agent-infra/rust-cache-key.test.mjs` (`npm run test:agent`) now fails the
+build if the Linux Rust jobs' cache-keyed variables drift apart, if their
+`RUSTFLAGS`/profile-debug fingerprint inputs differ, or if `CARGO_BUILD_JOBS`
+reappears. The failure is otherwise silent: no annotation, no red job, just
+minutes per pull request.
 
 Check the budget before adding another cache:
 

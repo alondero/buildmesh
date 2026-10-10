@@ -31,6 +31,8 @@
 import { formatError } from '../../lib/errorUtils';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getPrFiles, type PrFileEntry } from '../../lib/tauri';
+import { FeedCompletenessNote } from '../Probe/FeedCompletenessNote';
+import type { GitHubPageCompleteness } from '../../types/generated/GitHubPageCompleteness';
 import { useUIStore, type DiffContext } from '../../stores/uiStore';
 import { fileDiffStatusMeta } from '../../lib/status';
 import { splitPath, parsePatchIntoHunks } from '../Diff/diffFormat';
@@ -61,6 +63,10 @@ export function PrDiffView({ diff }: PrDiffViewProps) {
   // and decide what to *render*, not whether to *run*.
 
   const [files, setFiles] = useState<PrFileEntry[] | null>(null);
+  // Issue #2024 rank 6 — a PR with more changed files than one page holds
+  // must not render as a whole diff, so the truncation rides with the list.
+  const [completeness, setCompleteness] =
+    useState<GitHubPageCompleteness | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Monotonic token — identical pattern to CenterDiffOverlay.
@@ -81,7 +87,8 @@ export function PrDiffView({ diff }: PrDiffViewProps) {
     getPrFiles(diff.meshId, prNumber)
       .then((result) => {
         if (reqId.current !== myId) return;
-        setFiles(result);
+        setFiles(result.items);
+        setCompleteness(result.completeness);
       })
       .catch((e) => {
         if (reqId.current !== myId) return;
@@ -130,13 +137,16 @@ export function PrDiffView({ diff }: PrDiffViewProps) {
       );
     }
     return (
-      <PrFileList
-        files={files}
-        prNumber={prNumber}
-        onSelectFile={(filename) =>
-          openDiff({ ...diff, filePath: filename })
-        }
-      />
+      <div>
+        <FeedCompletenessNote completeness={completeness} label="changed files" />
+        <PrFileList
+          files={files}
+          prNumber={prNumber}
+          onSelectFile={(filename) =>
+            openDiff({ ...diff, filePath: filename })
+          }
+        />
+      </div>
     );
   }
 

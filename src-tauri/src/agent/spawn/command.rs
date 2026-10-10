@@ -125,6 +125,9 @@ pub fn build_spawn_command_prepared(
     // is the orchestrator's knowledge (the pairing's verified endpoint
     // identity), so it cannot live in the adapter recipe.
     let mut recipe = prepared.recipe;
+    recipe
+        .base_args
+        .extend(adapter.launch_hook_args(session_id, resolved.env_type));
     if let crate::agent::launch_routing::PreparedLaunchRouting::CodexProxy {
         profile_name,
         descriptor,
@@ -306,6 +309,14 @@ pub(crate) fn cascade_inputs_for<'a>(
             explicit: explicit_effort.and_then(non_empty_trim),
             mesh: mesh_effort,
             application: app_default.and_then(|v| v.effort.as_deref()),
+        },
+        // Issue #2151: only the application layer carries a permission
+        // mode today (the per-harness Settings default) — there is no
+        // per-launch or per-mesh permission slot yet.
+        permission_mode: crate::agent::capabilities::FieldInputs {
+            explicit: None,
+            mesh: None,
+            application: app_default.and_then(|v| v.permission_mode.as_deref()),
         },
     }
 }

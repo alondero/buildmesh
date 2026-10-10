@@ -205,9 +205,14 @@ pub fn default_prepare(
     // Subcommand resume (Codex) returns options in `base_args` and the session
     // id in `trailing_args`. Layer flags onto `base_args` only — never pop
     // from the adapter's argv.
+    // True when the resume path took the subcommand-style recipe
+    // (`codex resume [OPTIONS] <id>`): its leading subcommand token must
+    // stay at index 0 when the permission layer below splices options in.
+    let mut subcommand_resume = false;
     let mut recipe = match input.session {
         SessionIdModeRef::Resume(id) => {
             if let Some(resume_recipe) = adapter.spawn_recipe_for_resume(input.platform, id) {
+                subcommand_resume = true;
                 resume_recipe
             } else {
                 let mut r = base_recipe;
@@ -228,6 +233,42 @@ pub fn default_prepare(
         }
         SessionIdModeRef::None => base_recipe,
     };
+
+    // Issue #2151 — permission mode. The bare base recipe carries no
+    // approval flags; the effective mode contributes them here, at the
+    // FRONT of `base_args` — exactly where the base recipe used to carry
+    // them — so today's argv order is preserved byte-for-byte and no
+    // harness re-parses a changed argv. `None` (no layer supplied a mode)
+    // launches with the harness's unattended default (today's flags), so
+    // existing meshes keep working until the person changes the setting.
+    //
+    // The one exception is a subcommand-style resume (`codex resume
+    // [OPTIONS] <id>` via `spawn_recipe_for_resume`): the leading
+    // subcommand token stays at index 0 and the permission options
+    // follow it, matching the old `[resume, <base flags...>]`
+    // composition. (A flag-style resume such as muse's `resume <uuid>`
+    // pair takes the front like everything else, reproducing the old
+    // `[flags..., resume, <uuid>]` order.)
+    //
+    // Defence in depth, mirroring the model/effort branches below: the
+    // shared fallback re-checks the resolved id against the adapter's
+    // own mode list, so a caller that bypasses the resolver cannot
+    // smuggle an unknown mode into argv (`permission_args` is
+    // prompt-equivalent for unknown ids anyway).
+    {
+        let modes = adapter.permission_modes();
+        if let Some(option) = crate::agent::capabilities::effective_permission_mode(
+            &modes,
+            adapter.default_permission_mode().as_deref(),
+            input.config.permission_mode.as_deref(),
+        ) {
+            let args = adapter.permission_args(&option.id);
+            if !args.is_empty() {
+                let insert_at = usize::from(subcommand_resume);
+                recipe.base_args.splice(insert_at..insert_at, args);
+            }
+        }
+    }
 
     // The resolver already applied the capability mask; `Some` here means
     // the harness accepts this control AND the value is in its vocabulary
@@ -527,7 +568,13 @@ mod tests {
         };
         let prepared = default_prepare(adapter, input);
         let base = adapter.spawn_recipe(Platform::Windows, EnvType::Windows);
-        let mut expected = base.base_args.clone();
+        // Issue #2151: the unattended permission default contributes its
+        // flags at the front (where the base recipe used to carry them);
+        // the session-assign pair follows. The flag content is literal
+        // here (Anthropic's own unattended flag) so a wrong default is
+        // caught at this seam too, not only in the adapter tests.
+        let mut expected = vec!["--dangerously-skip-permissions".to_string()];
+        expected.extend(base.base_args.clone());
         expected.extend(["--session-id".to_string(), "abc-uuid".to_string()]);
         assert_eq!(prepared.recipe.base_args, expected);
     }

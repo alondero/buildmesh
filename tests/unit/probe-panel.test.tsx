@@ -8,6 +8,23 @@ import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import type { DiffResult, FileNode, GitStatus } from '../../src/lib/tauri';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
+/**
+ * Issue #2024 rank 6 - the GitHub feed commands return `{ items, completeness }`
+ * rather than a bare array, so a truncated read can be stated instead of
+ * silently looking complete. Fixtures below stay plain arrays; this wraps them
+ * at the IPC boundary. `complete: true` keeps these tests focused on the
+ * behaviour they were written for.
+ */
+const feed = <T,>(items: T[]) => ({
+  items,
+  completeness: {
+    returned: items.length,
+    pages_fetched: items.length > 0 ? 1 : 0,
+    complete: true,
+    incomplete_reason: null,
+    reported_total: null,
+  },
+});
 
 const MESH: Mesh = {
   id: 1,
@@ -272,7 +289,7 @@ describe('ProbePanel', () => {
     // "Loading issues..." canary is enough to prove the tab mounted
     // before the mocked `get_repo_issues` resolves.
     vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === 'get_repo_issues') return Promise.resolve([]);
+      if (cmd === 'get_repo_issues') return Promise.resolve(feed([]));
       if (cmd === 'list_providers') return Promise.resolve([]);
       return Promise.resolve({});
     });

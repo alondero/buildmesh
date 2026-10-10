@@ -37,9 +37,7 @@ pub enum CircuitCompatibilityReason {
     /// Harness. Covers hand-edited `preferences.json`, future harness
     /// un-installs leaving stale selections, and any third-party composite
     /// id the user typed in directly.
-    UnknownHarness {
-        harness_id: String,
-    },
+    UnknownHarness { harness_id: String },
 
     /// The harness is a plain shell (Terminal) — there is no LLM agent
     /// loop, so the entire Circuit has nothing to drive.
@@ -48,9 +46,7 @@ pub enum CircuitCompatibilityReason {
     /// The harness has neither an attention hook nor a supported passive
     /// transcript watcher, so the turn-driven Circuit
     /// (the Circuit observation worker) never fires for its nodes.
-    MissingAttentionHook {
-        harness_id: String,
-    },
+    MissingAttentionHook { harness_id: String },
 
     /// The mesh disabled worktrees (`meshes.use_worktree = 0`). Autopilot
     /// forces worktree usage on every spawn (the wrap-up PR needs a real
@@ -140,7 +136,8 @@ pub fn resolve_circuit_spawn_option(
         .or_else(|| non_empty(mesh_default_provider).map(str::to_string))
         .or_else(|| non_empty(app_default_provider).map(str::to_string))
         .unwrap_or_else(|| "claude".to_string());
-    let selected = crate::preferences::launch_configurations::selection_option(&spawn_option).unwrap_or_else(|_| spawn_option.clone());
+    let selected = crate::preferences::launch_configurations::selection_option(&spawn_option)
+        .unwrap_or_else(|_| spawn_option.clone());
     let id = SpawnOptionId::from(selected.as_str());
     let harness_id_string = id.harness_id().to_string();
     ResolvedCircuitSpawnOption {
@@ -258,7 +255,10 @@ pub fn validate_reviewer_provider_id(value: &str) -> Result<(), String> {
         return Ok(());
     }
     let selected = crate::preferences::launch_configurations::selection_option(trimmed)?;
-    let harness_id = SpawnOptionId::from(selected.as_str()).harness_id().trim().to_string();
+    let harness_id = SpawnOptionId::from(selected.as_str())
+        .harness_id()
+        .trim()
+        .to_string();
     match reviewer_harness_reason(&harness_id) {
         None => Ok(()),
         Some(reason) => Err(reviewer_refusal_message(&reason)),
@@ -425,11 +425,7 @@ mod tests {
     /// precedence over the Mesh default when determining compatibility").
     #[test]
     fn resolve_explicit_autopilot_wins_over_mesh_default() {
-        let r = resolve_circuit_spawn_option(
-            Some("codex"),
-            Some("claude"),
-            Some("agy"),
-        );
+        let r = resolve_circuit_spawn_option(Some("codex"), Some("claude"), Some("agy"));
         assert_eq!(r.spawn_option, "codex");
         assert_eq!(r.harness_id, "codex");
         assert!(r.explicit_circuit_provider);
@@ -442,11 +438,7 @@ mod tests {
     /// is not the same as "explicitly empty" — it falls through.
     #[test]
     fn resolve_whitespace_explicit_falls_through_to_mesh_default() {
-        let r = resolve_circuit_spawn_option(
-            Some("   "),
-            Some("claude"),
-            None,
-        );
+        let r = resolve_circuit_spawn_option(Some("   "), Some("claude"), None);
         assert_eq!(r.spawn_option, "claude");
         assert_eq!(r.harness_id, "claude");
         assert!(
@@ -481,11 +473,7 @@ mod tests {
     /// label still shows "Claude Code · MiniMax" on the UI).
     #[test]
     fn resolve_proxied_provider_splits_harness_and_preserves_provider() {
-        let r = resolve_circuit_spawn_option(
-            Some("claude:minimax"),
-            None,
-            None,
-        );
+        let r = resolve_circuit_spawn_option(Some("claude:minimax"), None, None);
         assert_eq!(r.spawn_option, "claude:minimax");
         assert_eq!(r.harness_id, "claude");
         assert!(r.explicit_circuit_provider);
@@ -503,15 +491,27 @@ mod tests {
         assert_eq!(resolve_harness_adapter_id("claude"), Some("anthropic"));
         assert_eq!(resolve_harness_adapter_id("anthropic"), Some("anthropic"));
         assert_eq!(resolve_harness_adapter_id("Claude"), Some("anthropic"));
-        assert_eq!(resolve_harness_adapter_id("  ANTHROPIC  "), Some("anthropic"));
+        assert_eq!(
+            resolve_harness_adapter_id("  ANTHROPIC  "),
+            Some("anthropic")
+        );
     }
 
     #[test]
     fn resolve_harness_adapter_id_maps_commandcode_and_aliases() {
-        assert_eq!(resolve_harness_adapter_id("commandcode"), Some("commandcode"));
-        assert_eq!(resolve_harness_adapter_id("command-code"), Some("commandcode"));
+        assert_eq!(
+            resolve_harness_adapter_id("commandcode"),
+            Some("commandcode")
+        );
+        assert_eq!(
+            resolve_harness_adapter_id("command-code"),
+            Some("commandcode")
+        );
         assert_eq!(resolve_harness_adapter_id("cmdc"), Some("commandcode"));
-        assert_eq!(resolve_harness_adapter_id("CommandCode"), Some("commandcode"));
+        assert_eq!(
+            resolve_harness_adapter_id("CommandCode"),
+            Some("commandcode")
+        );
         assert_eq!(resolve_harness_adapter_id("  CMDC  "), Some("commandcode"));
     }
 
@@ -557,7 +557,10 @@ mod tests {
         assert_eq!(resolve_harness_adapter_id("minimax-code"), Some("mcode"));
         assert_eq!(resolve_harness_adapter_id("deepseek"), Some("dsh"));
         assert_eq!(resolve_harness_adapter_id("deepseek-harness"), Some("dsh"));
-        assert_eq!(resolve_harness_adapter_id("command-code"), Some("commandcode"));
+        assert_eq!(
+            resolve_harness_adapter_id("command-code"),
+            Some("commandcode")
+        );
         assert_eq!(resolve_harness_adapter_id("cmdc"), Some("commandcode"));
     }
 
@@ -673,7 +676,11 @@ mod tests {
             mesh_use_worktree: true,
             explicit_circuit_provider: true,
         });
-        assert!(result.allowed, "codex should be allowed: {:?}", result.reasons);
+        assert!(
+            result.allowed,
+            "codex should be allowed: {:?}",
+            result.reasons
+        );
         assert!(result.explicit_circuit_provider);
     }
 
@@ -753,6 +760,8 @@ mod tests {
             is_plain_terminal: false,
             effort_control: EffortControlKind::None,
             available_on: vec!["windows".into()],
+            permission_modes: Vec::new(),
+            default_permission_mode: None,
         };
         let result = evaluate(CircuitCompatibilityInput {
             resolved_spawn_option: "opencode",
@@ -817,7 +826,11 @@ mod tests {
             mesh_use_worktree: true,
             explicit_circuit_provider: false,
         });
-        assert!(result.allowed, "Command Code watcher should allow Autopilot: {:?}", result.reasons);
+        assert!(
+            result.allowed,
+            "Command Code watcher should allow Autopilot: {:?}",
+            result.reasons
+        );
         assert!(result.reasons.is_empty());
     }
 
@@ -832,7 +845,10 @@ mod tests {
         for harness in ["freebuff", "dsh"] {
             let caps = lookup_capabilities(harness).unwrap_or_else(|| panic!("{harness} known"));
             assert!(!caps.requires_attention_hook, "{harness} must lack a hook");
-            assert!(!caps.supports_passive_turn_watcher, "{harness} must lack a watcher");
+            assert!(
+                !caps.supports_passive_turn_watcher,
+                "{harness} must lack a watcher"
+            );
             let result = evaluate(CircuitCompatibilityInput {
                 resolved_spawn_option: harness,
                 resolved_harness_id: harness,
@@ -908,15 +924,26 @@ mod tests {
             }
         }
         // Uppercase input resolves through the same table for the message.
-        let message = reviewer_refusal_message(
-            &CircuitCompatibilityReason::MissingAttentionHook { harness_id: "CLINE".to_string() },
-        );
+        let message = reviewer_refusal_message(&CircuitCompatibilityReason::MissingAttentionHook {
+            harness_id: "CLINE".to_string(),
+        });
         assert_eq!(
             message,
             "Cline cannot be used as the reviewer provider: it has no turn-completion signal."
         );
         // Eligible harnesses (hook or passive watcher) yield no reason.
-        for harness in ["claude", "codex", "cursor", "agy", "commandcode", "muse", "antigravity", "claude_code", "cmd", "cline"] {
+        for harness in [
+            "claude",
+            "codex",
+            "cursor",
+            "agy",
+            "commandcode",
+            "muse",
+            "antigravity",
+            "claude_code",
+            "cmd",
+            "cline",
+        ] {
             assert_eq!(
                 reviewer_harness_reason(harness),
                 None,
@@ -970,6 +997,8 @@ mod tests {
             is_plain_terminal: false,
             effort_control: EffortControlKind::None,
             available_on: vec!["windows".into()],
+            permission_modes: Vec::new(),
+            default_permission_mode: None,
         };
         let result = evaluate(CircuitCompatibilityInput {
             resolved_spawn_option: "futuristic",
@@ -1082,7 +1111,10 @@ mod tests {
         // The spawn_option field differs by construction (one is bare, one
         // is composite), but the resolved_harness_id and the verdict are
         // identical.
-        assert_eq!(result_native.resolved_harness_id, result_proxied.resolved_harness_id);
+        assert_eq!(
+            result_native.resolved_harness_id,
+            result_proxied.resolved_harness_id
+        );
     }
 
     // -- Combined reasons --------------------------------------------------
@@ -1113,6 +1145,8 @@ mod tests {
             is_plain_terminal: false,
             effort_control: EffortControlKind::None,
             available_on: vec!["windows".into()],
+            permission_modes: Vec::new(),
+            default_permission_mode: None,
         };
         let result = evaluate(CircuitCompatibilityInput {
             resolved_spawn_option: "futuristic-no-hook",
@@ -1150,7 +1184,11 @@ mod tests {
     #[test]
     fn compute_for_mesh_uses_explicit_when_present() {
         let result = compute_for_mesh(Some("codex"), Some("claude"), Some("agy"), true);
-        assert!(result.allowed, "codex should be allowed: {:?}", result.reasons);
+        assert!(
+            result.allowed,
+            "codex should be allowed: {:?}",
+            result.reasons
+        );
         assert_eq!(result.resolved_harness_id.as_deref(), Some("codex"));
         assert_eq!(result.resolved_spawn_option.as_deref(), Some("codex"));
         assert!(result.explicit_circuit_provider);

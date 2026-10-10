@@ -40,6 +40,7 @@ is pure, the worker is not).
 | Agent Node lifecycle, process registry, worktrees | [agent-nodes.md](development/agent-nodes.md) | `src-tauri/src/services/agent_node.rs`, `src-tauri/src/agent/`, `src-tauri/src/git/worktree/` |
 | Attention system, hooks, turn counting, node naming | [attention.md](development/attention.md) | `src-tauri/src/http/routes/attention.rs`, `src-tauri/src/commands/attention.rs`, `src-tauri/src/agent/session_lifecycle/` |
 | Probe panel, view modes, context lenses | [probe-ui.md](development/probe-ui.md) | `src/components/Probe/`, `src/stores/` |
+| Git query cache: freshness and retention | [git-query-cache.md](development/git-query-cache.md) | `src/lib/pathInvalidatedCache.ts`, `src/hooks/usePathInvalidatedQuery.ts` |
 | Windows, WSL paths, frameless window, shortcuts | [windows.md](development/windows.md) | `src-tauri/src/env/host_path.rs`, `src/components/TitleBar/` |
 | Startup, profiles, crash recovery, environment detection | [startup-and-profiles.md](development/startup-and-profiles.md) | `src-tauri/src/lib.rs`, `src-tauri/src/instance_guard.rs`, `src-tauri/src/env/environment.rs` |
 | Autopilot circuits | [circuits.md](development/circuits.md) | `src-tauri/src/circuit/`, `src-tauri/src/services/circuit_worker/`, `src-tauri/src/db/circuit/` |

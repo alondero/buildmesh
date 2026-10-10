@@ -22,6 +22,23 @@ import { useUIStore, type DiffContext } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
+/**
+ * Issue #2024 rank 6 - the GitHub feed commands return `{ items, completeness }`
+ * rather than a bare array, so a truncated read can be stated instead of
+ * silently looking complete. Fixtures below stay plain arrays; this wraps them
+ * at the IPC boundary. `complete: true` keeps these tests focused on the
+ * behaviour they were written for.
+ */
+const feed = <T,>(items: T[]) => ({
+  items,
+  completeness: {
+    returned: items.length,
+    pages_fetched: items.length > 0 ? 1 : 0,
+    complete: true,
+    incomplete_reason: null,
+    reported_total: null,
+  },
+});
 
 const MESH: Mesh = {
   id: 42,
@@ -84,7 +101,7 @@ const FILE_CTX: DiffContext = {
 
 function mockBackend() {
   vi.mocked(invoke).mockImplementation((cmd: string) => {
-    if (cmd === 'get_pr_files') return Promise.resolve(FILES);
+    if (cmd === 'get_pr_files') return Promise.resolve(feed(FILES));
     return Promise.resolve({});
   });
 }
@@ -185,7 +202,7 @@ describe('PrDiffView (#421)', () => {
   it('renders a "No files changed" empty state for a PR with zero files', async () => {
     vi.mocked(invoke).mockReset();
     vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === 'get_pr_files') return Promise.resolve([]);
+      if (cmd === 'get_pr_files') return Promise.resolve(feed([]));
       return Promise.resolve({});
     });
     render(<CenterDiffOverlay diff={LIST_CTX} />);

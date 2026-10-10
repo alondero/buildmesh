@@ -158,6 +158,7 @@ owner document per subsystem, reachable from the
 | [agent-nodes.md](agent-nodes.md) | Agent Node lifecycle, process registry, worktrees |
 | [attention.md](attention.md) | Attention system, hooks, turn counting, node naming |
 | [probe-ui.md](probe-ui.md) | Probe panel, view modes, context lenses |
+| [git-query-cache.md](git-query-cache.md) | Git query cache: freshness and retention contract |
 | [windows.md](windows.md) | Windows, WSL paths, frameless window, shortcuts |
 | [startup-and-profiles.md](startup-and-profiles.md) | Startup, profiles, crash recovery, environment detection |
 | [circuits.md](circuits.md) | Autopilot circuits |

@@ -685,7 +685,11 @@ mod tests {
         assert_eq!(recipe.binary, "codex");
         assert_eq!(recipe.base_args[0], "resume");
         assert_eq!(recipe.trailing_args, vec!["abc-123".to_string()]);
-        assert!(recipe.base_args.contains(&"--ask-for-approval".into()));
+        // Issue #2151: the raw recipe is bare of approval flags;
+        // `default_prepare` contributes `--ask-for-approval never` from
+        // the effective permission mode (pinned in
+        // `codex::tests::permission_mode_changes_argv_of_next_spawn`).
+        assert!(!recipe.base_args.contains(&"--ask-for-approval".into()));
     }
 
     #[test]

@@ -174,6 +174,10 @@ function mockBackend(
     poolCount?: number;
     saveUseWorktreeFails?: boolean;
     saveBaseRefFails?: boolean;
+    /** Issue #2024 rank 8 — reject the rename IPC so the tab's success
+     *  branch can be caught reporting "Saved" for a write the backend
+     *  refused. */
+    saveNameFails?: boolean;
     sandboxDevMode?: boolean;
   } = {},
 ) {
@@ -241,6 +245,13 @@ function mockBackend(
       case 'update_worktree_base_ref':
         return overrides.saveBaseRefFails
           ? Promise.reject(new Error('mock: update_worktree_base_ref failed'))
+          : Promise.resolve();
+      case 'update_mesh_name':
+        // Issue #2024 rank 8. `updateMeshName` must reject so the tab's
+        // `wrappedSave` takes its failure branch instead of reporting a
+        // successful save for a write the backend refused.
+        return overrides.saveNameFails
+          ? Promise.reject(new Error('mock: update_mesh_name rejected'))
           : Promise.resolve();
       case 'list_meshes':
         // `useMeshStore.deleteMesh` refetches the mesh list after deletion.
@@ -1412,5 +1423,57 @@ describe('ProjectSettingsTab — worktree strategy (moved from the Worktree Mana
     // returns the deepest element that matches).
     const effective = (await screen.findByText(/Effective:/)).textContent ?? '';
     expect(effective).toContain('/repos/demo/.claude/worktrees');
+  });
+});
+
+// Issue #2024 rank 8 — a rejected rename must not report success.
+//
+// `saveName` awaits `meshStore.updateMeshName`, which used to catch the
+// `update_mesh_name` IPC failure and resolve. `wrappedSave` then ran its
+// success branch, so the tab showed "Saved" for a write the backend had
+// refused, while the sidebar (which only updates on success) kept the old
+// name. The contract pinned here: the rejection propagates, the draft the
+// user typed survives, the sidebar is untouched, and a successful retry
+// makes both views agree.
+describe('ProjectSettingsTab — rejected rename reports failure (issue #2024 rank 8)', () => {
+  it('keeps the draft, shows no Saved, and leaves the sidebar on the old name — then converges on retry', async () => {
+    const user = userEvent.setup();
+    mockBackend({ saveNameFails: true });
+    openProbeDestination('properties');
+
+    const input = (await screen.findByLabelText('Name')) as HTMLInputElement;
+    expect(input.value).toBe('demo');
+
+    await user.clear(input);
+    await user.type(input, 'renamed');
+    await user.tab();
+
+    // The rejection is surfaced, not swallowed into a success.
+    await waitFor(() => {
+      expect(screen.getByTestId('save-indicator').textContent).toContain('Save failed');
+    });
+    expect(screen.getByTestId('save-indicator').textContent).toContain(
+      'mock: update_mesh_name rejected',
+    );
+    // No "Saved" anywhere in the indicator — the decisive assertion: this
+    // is the exact string the old swallowed rejection produced.
+    expect(screen.getByTestId('save-indicator').textContent).not.toContain('Saved');
+
+    // The draft survives the failure so the user can fix and retry.
+    expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('renamed');
+
+    // The sidebar source of truth did not move.
+    expect(useMeshStore.getState().meshesById.get(MESH.id)?.name).toBe('demo');
+
+    // Retry against a backend that accepts: both views converge.
+    mockBackend({});
+    await user.clear(input);
+    await user.type(input, 'renamed');
+    await user.tab();
+
+    await waitFor(() => {
+      expect(useMeshStore.getState().meshesById.get(MESH.id)?.name).toBe('renamed');
+    });
+    expect(screen.getByTestId('save-indicator').textContent).toContain('Saved');
   });
 });

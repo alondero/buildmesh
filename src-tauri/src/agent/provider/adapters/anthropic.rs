@@ -1,5 +1,7 @@
 use super::hook_contract;
-use crate::agent::capabilities::{EffortControlKind, CLAUDE_EFFORT_ALLOWED};
+use crate::agent::capabilities::{
+    EffortControlKind, PermissionModeOption, CLAUDE_EFFORT_ALLOWED, PERMISSION_MODE_UNATTENDED,
+};
 use crate::agent::provider::{
     claude_direct_recipe, AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta,
 };
@@ -185,5 +187,108 @@ impl AgentProvider for AnthropicAdapter {
                 .map(|s| s.to_string())
                 .collect(),
         }
+    }
+
+    /// Issue #2151: Buildmesh passes Claude Code's own flag through.
+    /// Unattended keeps today's `--dangerously-skip-permissions` (required
+    /// for human-out-of-the-loop runs, including Circuits); prompt launches
+    /// the CLI bare so it asks like a human-launched session.
+    fn permission_modes(&self) -> Vec<PermissionModeOption> {
+        vec![
+            PermissionModeOption::unattended(
+                "--dangerously-skip-permissions",
+                "Prompts off — tools run without asking (today's behavior; required for unattended runs).",
+            ),
+            PermissionModeOption::prompt(
+                "Prompts on (no flag)",
+                "Claude Code asks for approval like a human-launched session.",
+            ),
+        ]
+    }
+
+    fn permission_args(&self, mode_id: &str) -> Vec<String> {
+        if mode_id == PERMISSION_MODE_UNATTENDED {
+            vec!["--dangerously-skip-permissions".into()]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::capabilities::{
+        ResolvedAgentConfig, PERMISSION_MODE_PROMPT, PERMISSION_MODE_UNATTENDED,
+    };
+    use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
+    use crate::models::EnvType;
+
+    /// Issue #2151: the Claude-backed base recipe is bare — no adapter
+    /// keeps a hidden unattended argv.
+    #[test]
+    fn spawn_recipe_is_bare_on_every_platform() {
+        for platform in [Platform::Windows, Platform::Macos, Platform::Linux] {
+            let recipe = ANTHROPIC.spawn_recipe(platform, EnvType::Windows);
+            assert!(
+                recipe.base_args.is_empty(),
+                "base recipe must carry no approval flags on {platform:?}; got {:?}",
+                recipe.base_args
+            );
+        }
+    }
+
+    /// Issue #2151 regression pin: changing the permission-mode setting
+    /// changes the argv of the next spawn. The default (no stored value)
+    /// keeps today's `--dangerously-skip-permissions`; prompt drops it.
+    #[test]
+    fn permission_mode_changes_argv_of_next_spawn() {
+        fn prepared_argv(mode: Option<&str>) -> Vec<String> {
+            let config = ResolvedAgentConfig {
+                model: None,
+                effort: None,
+                extra_args: None,
+                permission_mode: mode.map(str::to_string),
+            };
+            let input = HarnessLaunchInput {
+                platform: Platform::Linux,
+                runtime: EnvType::Windows,
+                session: SessionIdModeRef::None,
+                config: &config,
+                prefill: None,
+                sandbox: false,
+            };
+            default_prepare(&ANTHROPIC, input).recipe.base_args
+        }
+
+        // No stored value: today's unattended behavior is preserved.
+        assert!(
+            prepared_argv(None).contains(&"--dangerously-skip-permissions".to_string()),
+            "default spawn must carry --dangerously-skip-permissions"
+        );
+        // Explicit unattended: same flag.
+        assert!(
+            prepared_argv(Some(PERMISSION_MODE_UNATTENDED))
+                .contains(&"--dangerously-skip-permissions".to_string()),
+            "unattended spawn must carry --dangerously-skip-permissions"
+        );
+        // Prompt: the flag is gone.
+        let prompt_argv = prepared_argv(Some(PERMISSION_MODE_PROMPT));
+        assert!(
+            !prompt_argv
+                .iter()
+                .any(|a| a == "--dangerously-skip-permissions"),
+            "prompt spawn must not carry --dangerously-skip-permissions; got {prompt_argv:?}"
+        );
+        // The mode descriptor the setting UI renders stays in sync with
+        // the argv the spawn path emits.
+        let modes = ANTHROPIC.permission_modes();
+        assert_eq!(modes.len(), 2);
+        assert_eq!(modes[0].id, PERMISSION_MODE_UNATTENDED);
+        assert!(modes[0].label.contains("--dangerously-skip-permissions"));
+        assert_eq!(
+            ANTHROPIC.default_permission_mode().as_deref(),
+            Some(PERMISSION_MODE_UNATTENDED)
+        );
     }
 }

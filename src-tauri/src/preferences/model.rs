@@ -338,6 +338,15 @@ pub struct HarnessConfigValue {
     /// harness's `effort_control.allowed` vocabulary.
     #[serde(default)]
     pub effort: Option<String>,
+    /// Optional launch permission-mode id for this harness (`"unattended"`
+    /// or `"prompt"`, issue #2151). `None` means "no permission override at
+    /// this layer — launch with the harness's unattended default (today's
+    /// flags)". The resolver drops the value when it isn't in the harness's
+    /// `permission_modes` vocabulary (including any value for a harness
+    /// with no modes). Additive on disk — older files without the key load
+    /// as `None` via `#[serde(default)]`.
+    #[serde(default)]
+    pub permission_mode: Option<String>,
 }
 
 impl HarnessConfigValue {
@@ -348,6 +357,7 @@ impl HarnessConfigValue {
     pub fn is_empty(&self) -> bool {
         self.model.as_deref().is_none_or(str::is_empty)
             && self.effort.as_deref().is_none_or(str::is_empty)
+            && self.permission_mode.as_deref().is_none_or(str::is_empty)
     }
 }
 

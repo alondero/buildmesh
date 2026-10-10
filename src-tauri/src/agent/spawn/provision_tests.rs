@@ -6,9 +6,6 @@ use crate::git::worktree::provision::{
 use crate::models::{EnvType, Provider};
 use tempfile::TempDir;
 
-/// Atomic counter for unique bare-repo paths (one per test run).
-static NEXT_FORK_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
 #[test]
 fn muse_context_repair_skips_native_wsl_filesystem() {
     assert!(!should_prepare_muse_context(
@@ -459,9 +456,24 @@ fn fork_remote_alias_uses_fork_prefix() {
 /// doesn't need a network round-trip) and a regular repo that will
 /// register the fork as a remote. The fork has a single commit on
 /// `main` plus a `feat/443-fork` branch so the fetch can target a
-/// non-default ref. Returns `(local, fork_bare_dir, fork_path)` —
-/// the caller holds the dirs for the duration of the test.
-fn init_fork_fixture() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
+/// non-default ref. Returns `(keepalive, fork_bare_dir, fork_path)` —
+/// the caller holds the keepalive for the duration of the test.
+///
+/// The bare dir is a [`TestDir::sibling`] of a `TestDir`, not a
+/// hand-built `%TEMP%\buildmesh_fork_bare_<pid>_<n>` path. The old path
+/// was cleared with `remove_dir_all` before `init_bare`, so it was not a
+/// source of cross-run object contamination — but nothing ever removed it
+/// afterwards, and the name was unique only per process id and counter,
+/// which Windows recycles. Measured on one machine: 10,300 leaked
+/// `buildmesh_fork_bare_*` directories, the oldest from 2026-09-01.
+/// `sibling()` clears on creation *and* removes on drop, so the fixture
+/// both stops leaking and stops depending on a hand-rolled unique name
+/// (issue #2123, convention at `docs/development/rust-conventions.md`).
+fn init_fork_fixture() -> (
+    crate::env::test_helpers::TestDir,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
     // Source: a regular repo with a feature branch we can fetch.
     let src = TempDir::new().unwrap();
     let src_path = src.path().to_path_buf();
@@ -496,15 +508,11 @@ fn init_fork_fixture() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
         .unwrap();
     // Bare clone target (so the fork has no working tree, like a real
     // remote on GitHub — `git fetch` reads its objects directly).
-    // Use a unique, path-safe name — avoid `{:?}` on the source path
-    // (it produces `C:\...` with backslashes and quotes that don't
-    // round-trip as a directory name on Windows).
-    let bare_dir = std::env::temp_dir().join(format!(
-        "buildmesh_fork_bare_{}_{}",
-        std::process::id(),
-        NEXT_FORK_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
-    ));
-    let _ = std::fs::remove_dir_all(&bare_dir);
+    // `TestDir` owns the lifetime: it creates a fresh, uniquely named
+    // directory and removes it (and the sibling bare repo) on drop, so a
+    // later run can never inherit this one's objects.
+    let local = crate::env::test_helpers::TestDir::new("fork");
+    let bare_dir = local.sibling("fork_bare");
     let clone = git2::Repository::init_bare(&bare_dir).unwrap();
     let mut remote = clone.remote("origin", src_path.to_str().unwrap()).unwrap();
     remote
@@ -512,7 +520,6 @@ fn init_fork_fixture() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
         .unwrap();
     // Local: a fresh repo with no remotes — this is what
     // `fetch_fork_head` will register the fork on.
-    let local = TempDir::new().unwrap();
     git2::Repository::init(local.path()).unwrap();
     (local, bare_dir, src_path)
 }
@@ -695,12 +702,11 @@ fn fetch_fork_head_returns_false_on_bad_clone_url() {
 
 /// Build a "remote + local" pair: the bare repo has a single commit on
 /// `main` plus a `feat/420-pr-spawn` branch; the local repo has `origin`
-/// pointed at the bare. Returns `(local, bare_path)` — the local TempDir
-/// owns its on-disk path; `bare_path` is a plain PathBuf that lives
-/// inside `std::env::temp_dir()` and is reused across calls (it gets
-/// re-populated with the same content each time, so the SHA is stable
-/// per-test-process).
-fn init_same_repo_fixture() -> (TempDir, std::path::PathBuf) {
+/// pointed at the bare. Returns `(keepalive, bare_path)` — the keepalive
+/// owns both on-disk paths and removes them on drop. Only the SOURCE repo
+/// is shared across calls (its content is deterministic, so the SHA is
+/// stable per-test-process); the bare repo is rebuilt per call.
+fn init_same_repo_fixture() -> (crate::env::test_helpers::TestDir, std::path::PathBuf) {
     // Source: a working repo with a feature branch we can fetch.
     // We reuse the same on-disk source across tests in a single
     // process — `init_same_repo_fixture` is only called from the
@@ -733,15 +739,14 @@ fn init_same_repo_fixture() -> (TempDir, std::path::PathBuf) {
         })
         .clone();
 
-    // Bare remote — same pattern as `init_fork_fixture`. A unique
-    // name per process so parallel `cargo test` invocations don't
-    // collide on the bare dir.
-    let bare_dir = std::env::temp_dir().join(format!(
-        "buildmesh_same_repo_bare_{}_{}",
-        std::process::id(),
-        NEXT_FORK_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
-    ));
-    let _ = std::fs::remove_dir_all(&bare_dir);
+    // Bare remote — same pattern as `init_fork_fixture`: a `TestDir`
+    // sibling, so the directory is uniquely named and removed on drop
+    // instead of accumulating in `%TEMP%` (10,154 leaked directories
+    // measured before this change, issue #2123). Only the SOURCE repo
+    // above is shared across calls; this bare repo is rebuilt per call,
+    // so it can be owned and cleaned like any other fixture directory.
+    let local = crate::env::test_helpers::TestDir::new("same_repo");
+    let bare_dir = local.sibling("same_repo_bare");
     let clone = git2::Repository::init_bare(&bare_dir).unwrap();
     let mut remote = clone.remote("origin", src_path.to_str().unwrap()).unwrap();
     remote
@@ -750,7 +755,6 @@ fn init_same_repo_fixture() -> (TempDir, std::path::PathBuf) {
 
     // Local repo with `origin` pointed at the bare. `fetch_single_ref`
     // will use this `origin` remote to materialise the ref.
-    let local = TempDir::new().unwrap();
     let local_repo = git2::Repository::init(local.path()).unwrap();
     local_repo
         .remote("origin", bare_dir.to_str().unwrap())

@@ -867,6 +867,7 @@ fn drive_run(app: &AppHandle, active: &db::ActiveCircuitRun) -> Result<(), Strin
                         crate::circuit::stepper::Effect::SpawnAgentNode { node_id }
                         | crate::circuit::stepper::Effect::InjectPty { node_id, .. }
                         | crate::circuit::stepper::Effect::ContinueAgentTurn { node_id, .. }
+                        | crate::circuit::stepper::Effect::NudgeIdleAgent { node_id, .. }
                         | crate::circuit::stepper::Effect::CloseAgentNode { node_id, .. }
                         | crate::circuit::stepper::Effect::CallGithub { node_id, .. } => {
                             Some(node_id.clone())
@@ -1101,6 +1102,7 @@ fn failed_effect_step_ops(
                 Effect::SpawnAgentNode { node_id }
                 | Effect::InjectPty { node_id, .. }
                 | Effect::ContinueAgentTurn { node_id, .. }
+                | Effect::NudgeIdleAgent { node_id, .. }
                 | Effect::SetNodeStatus { node_id, .. }
                 | Effect::CloseAgentNode { node_id, .. }
                 | Effect::CallGithub { node_id, .. } => node_id,
@@ -1198,10 +1200,14 @@ fn effect_persistence_writes(
                 });
                 None
             }
-            // Continuation prompts have their own pending/claimed delivery
-            // state in run context. Close is replayed idempotently while
-            // its spawn association remains; notifications are transient.
+            // Continuation and nudge prompts have their own pending/claimed
+            // delivery state in run context (`*.continuation.delivery`,
+            // `*.nudge.delivery`), so they must not claim the step's durable
+            // Prompt effect row — an `InjectPty` on the same step already owns
+            // it. Close is replayed idempotently while its spawn association
+            // remains; notifications are transient.
             Effect::ContinueAgentTurn { .. }
+            | Effect::NudgeIdleAgent { .. }
             | Effect::CloseAgentNode { .. }
             | Effect::Notify { .. } => None,
         };
@@ -1577,6 +1583,9 @@ pub(super) fn prepare_turn_boundaries(
                 .filter(|id| crate::agent::process::PROCESS_REGISTRY.is_alive(id)),
             crate::circuit::stepper::Effect::ContinueAgentTurn {
                 target_agent_id, ..
+            }
+            | crate::circuit::stepper::Effect::NudgeIdleAgent {
+                target_agent_id, ..
             } => crate::agent::process::PROCESS_REGISTRY
                 .is_alive(target_agent_id)
                 .then_some(*target_agent_id),
@@ -1598,14 +1607,20 @@ pub(super) fn prepare_turn_boundaries(
                 node_id,
                 target_agent_id,
                 ..
-            } if *target_agent_id == agent_node_id => Some(node_id),
+            } if *target_agent_id == agent_node_id => Some((node_id, "continuation")),
+            // A wake-up carries its own revision, so the boundary must be taken
+            // against the report the nudge actually observed — falling back to a
+            // live re-read here would let a report that changed in between mark
+            // the nudge's turn as if it had not.
+            crate::circuit::stepper::Effect::NudgeIdleAgent {
+                node_id,
+                target_agent_id,
+                ..
+            } if *target_agent_id == agent_node_id => Some((node_id, "nudge")),
             _ => None,
         });
         let revision = continuation_node
-            .and_then(|id| {
-                view.context
-                    .get(&format!("node.{id}.continuation.revision"))
-            })
+            .and_then(|(id, prefix)| view.context.get(&format!("node.{id}.{prefix}.revision")))
             .map(str::to_string)
             .unwrap_or_else(|| {
                 crate::coordinator::enrichment::assistant_report(&agent)
@@ -1742,6 +1757,33 @@ fn continuation_is_current(
     stamp: Option<&str>,
     revision: Option<&str>,
 ) -> bool {
+    continuation_is_current_for(
+        view,
+        node_id,
+        target,
+        status,
+        alive,
+        stamp,
+        revision,
+        "continuation",
+    )
+}
+
+/// The same fence, parameterised by the run-context key prefix that owns the
+/// delivery. A wake-up keeps its own `nudge.*` bookkeeping, so it must compare
+/// against the stamp and revision its own claim recorded — reading the
+/// continuation's keys would make every nudge look obsolete the moment the two
+/// lifecycles diverged.
+fn continuation_is_current_for(
+    view: &RunView,
+    node_id: &str,
+    target: i64,
+    status: SessionStatus,
+    alive: bool,
+    stamp: Option<&str>,
+    revision: Option<&str>,
+    prefix: &str,
+) -> bool {
     alive
         && matches!(
             status,
@@ -1750,15 +1792,12 @@ fn continuation_is_current(
         && view.context.source_agent_id() != Some(target)
         && view.continuation_target(node_id) == Some(target)
         && stamp.is_some()
-        && stamp
-            == view
-                .context
-                .get(&format!("node.{node_id}.continuation.stamp"))
+        && stamp == view.context.get(&format!("node.{node_id}.{prefix}.stamp"))
         && revision.is_some()
         && revision
             == view
                 .context
-                .get(&format!("node.{node_id}.continuation.revision"))
+                .get(&format!("node.{node_id}.{prefix}.revision"))
 }
 
 /// Dispatch one `CallGithub` effect. App-free: the recheck lookup and the
@@ -2179,6 +2218,109 @@ pub(super) fn execute_effects(
                                 .step(node_id)
                                 .map(|step| step.attempt)
                                 .unwrap_or_default(),
+                            error,
+                        });
+                    }
+                }
+            }
+            Effect::NudgeIdleAgent {
+                node_id,
+                target_agent_id,
+                prompt,
+            } => {
+                let key = format!("node.{node_id}.nudge.delivery");
+                if view.context.get(&key) != Some("claimed") {
+                    continue;
+                }
+                let node = db::get_agent_node_by_id(*target_agent_id).map_err(|e| e.to_string())?;
+                let stamp = db::agent_turn_stamp(*target_agent_id).map_err(|e| e.to_string())?;
+                let revision =
+                    crate::coordinator::enrichment::assistant_report(&node).map(|r| r.revision);
+                let attempt = view
+                    .step(node_id)
+                    .map(|step| step.attempt)
+                    .unwrap_or_default();
+                // The wake-up is only worth sending to the turn that was
+                // observed as stalled. Reuse the continuation fence, bound to
+                // this nudge's own claim keys: a turn that has since moved on
+                // needs nothing.
+                let valid = continuation_is_current_for(
+                    view,
+                    node_id,
+                    *target_agent_id,
+                    node.status,
+                    crate::agent::process::PROCESS_REGISTRY.is_alive(target_agent_id),
+                    stamp.as_deref(),
+                    revision.as_deref(),
+                    "nudge",
+                );
+                if !valid {
+                    outcome_events.push(CircuitEvent::NudgeObsolete {
+                        node_id: node_id.clone(),
+                        attempt,
+                    });
+                    continue;
+                }
+                if effect_batch.is_cancelled()
+                    || db::get_circuit_run(active.run.id)
+                        .ok()
+                        .flatten()
+                        .is_none_or(|r| r.state != "running")
+                {
+                    return Ok(outcome_events);
+                }
+                let expected = view
+                    .context
+                    .get(&format!("node.{node_id}.nudge.input"))
+                    .ok_or_else(|| "Wake-up lacks an input ownership stamp".to_string())?;
+                // The nudge is a real prompt submission, so it is recorded the
+                // same way an injected one is: the receipt it may produce has to
+                // bind to a submission Buildmesh itself made.
+                if let Err(error) = db::circuit::evidence::record_prompt_submission(
+                    active.run.id,
+                    node_id,
+                    attempt,
+                    *target_agent_id,
+                    prompt,
+                ) {
+                    tracing::warn!(
+                        "circuits: run {}: could not record wake-up submission: {}",
+                        active.run.id,
+                        error
+                    );
+                    outcome_events.push(CircuitEvent::NudgeUncertain {
+                        node_id: node_id.clone(),
+                        attempt,
+                        error: format!(
+                            "Wake-up submission could not be recorded for correlation: {error}"
+                        ),
+                    });
+                    continue;
+                }
+                match crate::circuit::delivery::write_prompt_to_pty_guarded(
+                    &crate::agent::process::PROCESS_REGISTRY,
+                    *target_agent_id,
+                    prompt,
+                    app,
+                    Some(expected),
+                ) {
+                    Ok(true) => {
+                        let _ =
+                            db::update_agent_node_status(*target_agent_id, SessionStatus::Running);
+                        outcome_events.push(CircuitEvent::NudgeDelivered {
+                            node_id: node_id.clone(),
+                            attempt,
+                        });
+                    }
+                    Ok(false) => outcome_events.push(CircuitEvent::NudgeObsolete {
+                        node_id: node_id.clone(),
+                        attempt,
+                    }),
+                    Err(error) => {
+                        crate::commands::attention::mark_attention(*target_agent_id, app);
+                        outcome_events.push(CircuitEvent::NudgeUncertain {
+                            node_id: node_id.clone(),
+                            attempt,
                             error,
                         });
                     }

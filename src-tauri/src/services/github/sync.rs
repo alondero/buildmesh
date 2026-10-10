@@ -9,8 +9,9 @@
 
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
-use serde::Deserialize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::process_util::command_no_window;
@@ -30,6 +31,22 @@ pub enum GitHubError {
     /// POST-only — DELETE on `/labels/{name}` returns 404 for a missing
     /// label, which collapses to a no-op success there.
     LabelNotFound(String),
+    /// A multi-page read stopped early (page budget, cancellation, or GitHub's
+    /// 1,000-result search ceiling) and the caller required the *whole* feed
+    /// rather than a partial one. Reconciliation ingest (Autopilot / Circuits)
+    /// is the only such caller: acting on a truncated trigger set would
+    /// silently skip work. Read-only consumers get a
+    /// `Page` with `completeness` instead — see `pagination::require_complete_read`.
+    Incomplete {
+        /// What was being read (e.g. `"open issues labelled buildmesh:run"`).
+        what: String,
+        /// Why it stopped short.
+        reason: super::pagination::GitHubIncompleteReason,
+        /// Items that did arrive.
+        returned: i64,
+        /// GitHub's own count for the query, when it reports one.
+        reported_total: Option<i64>,
+    },
 }
 
 impl std::fmt::Display for GitHubError {
@@ -39,6 +56,17 @@ impl std::fmt::Display for GitHubError {
             GitHubError::Http(e) => write!(f, "HTTP error: {}", e),
             GitHubError::Api(status, msg) => write!(f, "GitHub API error ({}): {}", status, msg),
             GitHubError::LabelNotFound(label) => write!(f, "Label `{}` doesn't exist on the repo — create it on GitHub first", label),
+            GitHubError::Incomplete { what, reason, returned, reported_total } => {
+                let of_total = match reported_total {
+                    Some(total) => format!(" of {total} matches"),
+                    None => String::new(),
+                };
+                write!(
+                    f,
+                    "Incomplete GitHub read of {what}: got {returned} items{of_total}, stopping at {reason:?}. \
+                     Treat this as a partial feed, not the full list — narrow the query if it must be complete."
+                )
+            }
         }
     }
 }
@@ -112,6 +140,11 @@ pub struct GitHubClient {
     /// than read from env per-call) so tests can point one client at a fake
     /// server without process-global env races.
     base_url: String,
+    /// Set by [`GitHubClient::cancel`] and polled by the page walk *before*
+    /// each request. Shared via `Arc` so a caller holding only a `&client`
+    /// can stop an in-flight multi-page read; without it a cancelled read
+    /// would keep spending API calls until the page budget ran out.
+    cancelled: Arc<AtomicBool>,
 }
 
 impl GitHubClient {
@@ -131,6 +164,7 @@ impl GitHubClient {
             client,
             token,
             base_url: base_url.trim_end_matches('/').to_string(),
+            cancelled: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -170,48 +204,71 @@ impl GitHubClient {
         }
     }
 
-    /// Run one `/search/issues` query and parse the `{items: [...]}`
-    /// envelope. Shared by the labelled issue/PR ingest queries (issue
-    /// #482 / #1208) so the hand-rolled URL encoding lives in exactly
-    /// one place: spaces become `+` (GitHub's search-query form),
-    /// `"`, `#`, and `&` are percent-encoded.
-    pub(super) fn search_issues<T: serde::de::DeserializeOwned>(
+    /// Ask an in-flight multi-page read to stop after the page it is currently
+    /// on. The page walk polls [`Self::is_cancelled`] before every request, so
+    /// the returned [`Page`](super::pagination::Page) holds whatever arrived
+    /// so far and reports
+    /// [`GitHubIncompleteReason::Cancelled`](super::pagination::GitHubIncompleteReason::Cancelled).
+    /// One-shot and idempotent: a client is single-use per read today, so there
+    /// is no reset, and a second `cancel()` is a no-op rather than an error.
+    // The caller that would invoke this — a command that holds the client
+    // across a cancellable UI read — lives in `commands::pr`, which is outside
+    // this module. `#[cfg_attr(not(test), allow(dead_code))]` matches the
+    // `PROBE_FETCH_TTL` precedent below for the same situation: the seam and
+    // its tests exist, the wiring lands with the command change.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether [`Self::cancel`] has been called on this client.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// Run a `/search/issues` query to completion and parse the
+    /// `{items, total_count, incomplete_results}` envelope on every page.
+    ///
+    /// Shared by the labelled issue/PR ingest queries (issue #482 / #1208) so
+    /// the hand-rolled query encoding lives in exactly one place — see
+    /// [`encode_search_query`]. Pagination and the search-result ceiling are
+    /// the adapter's job ([`super::pagination`]); callers that must not act on
+    /// a partial feed run the result through
+    /// [`require_complete_read`](super::pagination::require_complete_read).
+    pub(super) fn search_issues<T, K, F>(
         &self,
         query: &str,
-    ) -> Result<Vec<T>, GitHubError> {
-        let encoded: String = query
-            .chars()
-            .map(|c| match c {
-                ' ' => "+".to_string(),
-                '"' => "%22".to_string(),
-                '#' => "%23".to_string(),
-                '&' => "%26".to_string(),
-                other => other.to_string(),
-            })
-            .collect();
-        let url = self.rest_url(&format!("/search/issues?q={}&per_page=100", encoded));
-        let resp = self
-            .client
-            .get(&url)
-            .header(AUTHORIZATION, format!("Bearer {}", self.token))
-            .header(USER_AGENT, "buildmesh")
-            .header(ACCEPT, "application/vnd.github+json")
-            .send()?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().unwrap_or_default();
-            return Err(rest_failure(status, body));
-        }
-
-        #[derive(Deserialize)]
-        struct SearchResult<T> {
-            items: Vec<T>,
-        }
-
-        let result: SearchResult<T> = resp.json()?;
-        Ok(result.items)
+        key_of: F,
+    ) -> Result<super::pagination::Page<T>, GitHubError>
+    where
+        T: serde::de::DeserializeOwned,
+        K: Eq + std::hash::Hash,
+        F: Fn(&T) -> K,
+    {
+        let url = self.rest_url(&format!(
+            "/search/issues?q={}&per_page={}",
+            encode_search_query(query),
+            super::pagination::DEFAULT_PER_PAGE
+        ));
+        self.search_all_pages(&url, &Default::default(), key_of)
     }
+}
+
+/// Percent-encode a GitHub search query for the `q=` parameter. Spaces become
+/// `+` (GitHub's own query form); `"`, `#`, and `&` are percent-encoded so a
+/// label name containing one cannot terminate the qualifier early. Shared by
+/// every search path so the encoding cannot drift between callers.
+pub(super) fn encode_search_query(query: &str) -> String {
+    query
+        .chars()
+        .map(|c| match c {
+            ' ' => "+".to_string(),
+            '"' => "%22".to_string(),
+            '#' => "%23".to_string(),
+            '&' => "%26".to_string(),
+            other => other.to_string(),
+        })
+        .collect()
 }
 
 /// Resolve a GitHub token from environment or gh CLI config.
@@ -446,7 +503,8 @@ pub fn parse_clone_input(input: &str) -> Option<CloneTarget> {
     // (scheme, backslash, whitespace) so a typo'd host is an error instead of
     // being laundered into a "github.com/…" clone.
     let mut segments = trimmed.split('/');
-    let (Some(owner), Some(repo), None) = (segments.next(), segments.next(), segments.next()) else {
+    let (Some(owner), Some(repo), None) = (segments.next(), segments.next(), segments.next())
+    else {
         return None;
     };
     let owner = owner.trim();

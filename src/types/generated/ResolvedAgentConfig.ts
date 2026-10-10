@@ -27,4 +27,12 @@ effort: string | null,
  * string — the launch path's `adapter.extra_args_args(...)` (added in
  * the same slice) splits on whitespace into the final argv tokens.
  */
-extra_args: string | null, };
+extra_args: string | null, 
+/**
+ * Capability-masked permission-mode id (issue #2151), or `None` when
+ * no layer supplied one, the value wasn't in the harness's mode
+ * vocabulary, or the harness has no permission flag. `None` launches
+ * with the harness's unattended default (today's flags) — see
+ * `default_prepare`.
+ */
+permission_mode: string | null, };

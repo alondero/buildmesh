@@ -25,6 +25,23 @@ import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { addToast } from '../../src/stores/toastStore';
 import type { GitHubIssue } from '../../src/types/generated/GitHubIssue';
+/**
+ * Issue #2024 rank 6 - the GitHub feed commands return `{ items, completeness }`
+ * rather than a bare array, so a truncated read can be stated instead of
+ * silently looking complete. Fixtures below stay plain arrays; this wraps them
+ * at the IPC boundary. `complete: true` keeps these tests focused on the
+ * behaviour they were written for.
+ */
+const feed = <T,>(items: T[]) => ({
+  items,
+  completeness: {
+    returned: items.length,
+    pages_fetched: items.length > 0 ? 1 : 0,
+    complete: true,
+    incomplete_reason: null,
+    reported_total: null,
+  },
+});
 
 // `@tauri-apps/plugin-opener`'s `openUrl` shells out to the OS to open an
 // external URL. Tauri 2's WebView silently drops `target="_blank"` without
@@ -124,7 +141,7 @@ function mockBackend(opts: { issues?: GitHubIssue[]; providers?: Array<Record<st
   vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
     switch (cmd) {
       case 'get_repo_issues':
-        return Promise.resolve(opts.issues ?? ISSUES);
+        return Promise.resolve(feed(opts.issues ?? ISSUES));
       case 'list_providers':
         return Promise.resolve(opts.providers ?? PROVIDERS);
       case 'get_default_provider':
@@ -276,7 +293,7 @@ describe('GitIssuesTab (#378)', () => {
   it('disables the split button while a spawn is in flight to block double-clicks', async () => {
     let resolveCreate!: (v: typeof DRAFT) => void;
     vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === 'get_repo_issues') return Promise.resolve(ISSUES);
+      if (cmd === 'get_repo_issues') return Promise.resolve(feed(ISSUES));
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
       if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
       if (cmd === 'create_issue_node') return new Promise((res) => { resolveCreate = res; });
@@ -334,7 +351,7 @@ describe('GitIssuesTab (#378)', () => {
     // Symmetric case — a failed spawn should NOT close the dock, the
     // user needs to be able to retry (e.g. transient `gh` hiccup).
     vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === 'get_repo_issues') return Promise.resolve(ISSUES);
+      if (cmd === 'get_repo_issues') return Promise.resolve(feed(ISSUES));
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
       if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
       if (cmd === 'create_issue_node') return Promise.reject(new Error('boom'));
@@ -567,7 +584,7 @@ describe('GitIssuesTab (#378)', () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
       if (cmd === 'get_repo_issues') {
         const meshId = (args as { meshId: number } | undefined)?.meshId;
-        return Promise.resolve(meshId === MESH.id ? ISSUES : []);
+        return Promise.resolve(feed(meshId === MESH.id ? ISSUES : []));
       }
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
       if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
@@ -725,7 +742,7 @@ describe('GitIssuesTab (#378)', () => {
     // surfaces as a test failure rather than a confusing first paint.
     let resolveIssues!: (issues: GitHubIssue[]) => void;
     vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === 'get_repo_issues') return new Promise((res) => { resolveIssues = res as never; });
+      if (cmd === 'get_repo_issues') return new Promise((res) => { resolveIssues = ((items: GitHubIssue[]) => res(feed(items))) as never; });
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
       if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
       if (cmd === 'create_issue_node') return Promise.resolve(DRAFT);
@@ -776,7 +793,7 @@ describe('GitIssuesTab (#378)', () => {
 
   it('renders a "View on GitHub" header link to the repo issues list', async () => {
     vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === 'get_repo_issues') return Promise.resolve(ISSUES);
+      if (cmd === 'get_repo_issues') return Promise.resolve(feed(ISSUES));
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
       if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
       if (cmd === 'get_github_url_for_mesh') {
@@ -797,7 +814,7 @@ describe('GitIssuesTab (#378)', () => {
 
   it('clicking the "View on GitHub" header link opens the issues list URL', async () => {
     vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === 'get_repo_issues') return Promise.resolve(ISSUES);
+      if (cmd === 'get_repo_issues') return Promise.resolve(feed(ISSUES));
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
       if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
       if (cmd === 'get_github_url_for_mesh') {
@@ -831,7 +848,7 @@ describe('GitIssuesTab (#378)', () => {
     // the cyan/hover classes to the fallback is caught at the seam
     // that is most directly named in the user's bug report.
     vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === 'get_repo_issues') return Promise.resolve(ISSUES);
+      if (cmd === 'get_repo_issues') return Promise.resolve(feed(ISSUES));
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
       if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
       if (cmd === 'get_github_url_for_mesh') return Promise.resolve(null);

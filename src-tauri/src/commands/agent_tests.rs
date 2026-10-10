@@ -237,6 +237,7 @@ mod tests {
                     mesh: None,
                     application: None,
                 },
+                permission_mode: crate::agent::capabilities::FieldInputs::default(),
             },
             None,
         );
@@ -554,6 +555,7 @@ mod tests {
                         model: Some("MiniMax-M3".into()),
                         effort: Some(effort.into()),
                         extra_args: None,
+                        permission_mode: None,
                     },
                     None,
                     false,
@@ -1151,6 +1153,47 @@ mod tests {
         );
     }
 
+    /// A Codex launch also carries this node's attention hooks as `-c`
+    /// overrides (their content is pinned in `adapters/codex.rs`). Pin here
+    /// that the feature flag and all seven events are present, then hand back
+    /// the rest of the argv so these tests keep pinning everything else.
+    fn without_attention_hooks(args: Vec<String>) -> Vec<String> {
+        let mut rest = Vec::new();
+        let mut hooks = Vec::new();
+        let mut args = args.into_iter().peekable();
+        while let Some(arg) = args.next() {
+            let is_hook = arg == "-c"
+                && args
+                    .peek()
+                    .is_some_and(|v| v == "features.hooks=true" || v.starts_with("hooks."));
+            if is_hook {
+                hooks.push(args.next().unwrap());
+            } else {
+                rest.push(arg);
+            }
+        }
+        assert_eq!(hooks[0], "features.hooks=true", "{hooks:?}");
+        for event in [
+            "SessionStart",
+            "Stop",
+            "PermissionRequest",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "Interrupt",
+        ] {
+            assert!(
+                hooks
+                    .iter()
+                    .any(|h| h.starts_with(&format!("hooks.{event}=["))
+                        && h.contains("/api/attention/42")),
+                "Codex launch lacks the {event} hook for node 42"
+            );
+        }
+        assert_eq!(hooks.len(), 8, "{hooks:?}");
+        rest
+    }
+
     /// Codex provides a dedicated resume recipe (`codex resume [OPTIONS] <id>`)
     /// via `spawn_recipe_for_resume`, which `build_spawn_command` must use
     /// instead of the default `spawn_recipe` + `--resume`.
@@ -1168,7 +1211,7 @@ mod tests {
         );
 
         assert_eq!(
-            argv(&cmd),
+            without_attention_hooks(argv(&cmd)),
             expected_wsl(
                 "codex",
                 &[
@@ -1199,7 +1242,7 @@ mod tests {
             false,
         );
 
-        let args = argv(&cmd);
+        let args = without_attention_hooks(argv(&cmd));
         assert_eq!(
             args,
             expected_wsl(
@@ -1234,7 +1277,7 @@ mod tests {
         );
 
         assert_eq!(
-            argv(&cmd),
+            without_attention_hooks(argv(&cmd)),
             expected_wsl(
                 "codex",
                 &[
