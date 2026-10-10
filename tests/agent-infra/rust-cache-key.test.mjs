@@ -55,7 +55,7 @@ function envVars(jobId) {
     // Indent 6 is the level of a variable inside `env:`; anything deeper belongs
     // to a step's own `env:`, which does not affect this job's cache key.
     const match = line.match(/^ {6}([A-Z_][A-Z0-9_]*):\s*(.*)$/);
-    if (match) found.set(match[1], match[2].trim().replace(/^"(.*)"$/, '$1'));
+    if (match) found.set(match[1], match[2].trim().replace(/^["'](.*)["']$/, '$1'));
   }
   return found;
 }
@@ -158,6 +158,87 @@ test('the shard-coverage gate runs where the test binary is already built', () =
     jobBlock('rust-nonshard').includes('check-rust-shard-coverage.mjs'),
     false,
     'the shard-coverage gate is back in `rust-nonshard`, where listing the tests forces a second compile of the same binary',
+  );
+});
+
+/**
+ * Every `cargo test` invocation in the workflow, as `{ line, lineNumber }`.
+ * The optional `-- ` prefix covers YAML block-scalar continuation lines, which
+ * is how the shard matrix and the fuzz smoke spell their commands.
+ */
+function cargoTestInvocations() {
+  return workflow
+    .split('\n')
+    .map((line, index) => ({ line: line.trim().replace(/^(--\s+)?run:\s*/, ''), index }))
+    .filter(({ line }) => /^cargo test\b/.test(line))
+    .map(({ line, index }) => ({ line, lineNumber: index + 1 }));
+}
+
+/**
+ * The longest run of consecutive non-flag arguments *before* the `--`
+ * separator, excluding the leading `cargo test`. Two in a row means cargo has
+ * been handed more than the single positional `[TESTNAME]` it accepts, which is
+ * the bug this exists to catch. Tokens after `--` are cargo's to forward, not to
+ * parse, so they are excluded; a filter that is a flag's value
+ * (`--skip commands::agent::`) is preceded by that flag and never pairs up.
+ */
+function longestPositionalRun(tokens) {
+  const beforeSeparator = tokens.slice(0, tokens.indexOf('--') === -1 ? tokens.length : tokens.indexOf('--'));
+  let longest = 0;
+  let run = 0;
+  for (const token of beforeSeparator) {
+    if (token.startsWith('-')) {
+      run = 0;
+      continue;
+    }
+    run += 1;
+    longest = Math.max(longest, run);
+  }
+  return longest;
+}
+
+test('no `cargo test` invocation hands cargo more than one positional filter', () => {
+  // `cargo test` accepts exactly one positional `[TESTNAME]`; a second bare
+  // filter is rejected before anything builds:
+  //   error: unexpected argument 'agent::background::tests' found
+  // libtest ORs its filters, but only for filters that reach it, which is what
+  // the `--` separator is for. An earlier revision of `platform-smoke` passed
+  // both filters bare and was caught only in review: `platform-smoke` runs
+  // post-merge and on manual dispatch, never on a pull request, so no PR CI run
+  // would have exercised it. Verified locally against a scratch crate — the bare
+  // form exits 1 with that error, and the `--` form runs the union of both
+  // filters.
+  const invocations = cargoTestInvocations();
+  assert.ok(invocations.length > 0, 'no `cargo test` invocations found in verify.yml; this gate would pass vacuously');
+  for (const { line, lineNumber } of invocations) {
+    const tokens = line.split(/\s+/).filter(Boolean).slice(2); // drop `cargo test`
+    assert.ok(
+      longestPositionalRun(tokens) < 2,
+      `verify.yml:${lineNumber} passes more than one positional filter to cargo: \`${line}\`. ` +
+        'Separate them with `--` so libtest receives them instead of cargo, e.g. `cargo test --locked --lib -- <filterA> <filterB>`.',
+    );
+  }
+});
+
+test('the Windows-only contracts still select every test they did separately', () => {
+  // The merge is only safe if the single invocation selects the same tests the
+  // two original steps did. `conpty_preserves_synchronized_cursor_frames` is an
+  // exact name and `agent::background::tests` a path prefix; libtest substring
+  // matches OR them, so both contracts must still be named after the separator.
+  const smoke = jobBlock('platform-smoke');
+  const invocation = cargoTestInvocations().find(({ line }) => line.includes('conpty_preserves_synchronized_cursor_frames'));
+  assert.ok(invocation, 'the Windows ConPTY contract is no longer run in `platform-smoke`');
+  assert.match(
+    invocation.line,
+    /--\s+conpty_preserves_synchronized_cursor_frames\s+agent::background::tests\s*$/,
+    `the Windows contracts must both follow the \`--\` separator, got: \`${invocation.line}\``,
+  );
+  // Counted over real invocations, not raw text: the job's comment explains the
+  // merge and names `cargo test` while doing so.
+  assert.equal(
+    cargoTestInvocations().filter(({ line }) => jobBlock('platform-smoke').includes(line)).length,
+    1,
+    '`platform-smoke` should run the Windows contracts in one `cargo test`, or the recompile it was merged to remove is back',
   );
 });
 

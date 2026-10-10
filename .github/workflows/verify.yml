@@ -1172,7 +1172,15 @@ jobs:
       # filters, so one invocation selects exactly the same 17 tests and pays the
       # link once. The two contracts stay separately named in the output because
       # libtest prints every test it runs.
+      #
+      # The `--` is load-bearing, not decoration. `cargo test` takes a single
+      # positional `[TESTNAME]`; a second bare filter is rejected by cargo before
+      # anything builds ("error: unexpected argument 'agent::background::tests'
+      # found"). Filters for libtest must sit after the separator, where cargo
+      # stops parsing and forwards them to the test binary. An earlier revision of
+      # this step omitted it and only failed on `main`, because `platform-smoke`
+      # runs post-merge and on manual dispatch, never on a pull request.
       - name: Verify the Windows-only Rust contracts
         if: runner.os == 'Windows'
-        run: cargo test --locked --lib conpty_preserves_synchronized_cursor_frames agent::background::tests
+        run: cargo test --locked --lib -- conpty_preserves_synchronized_cursor_frames agent::background::tests
         working-directory: src-tauri
