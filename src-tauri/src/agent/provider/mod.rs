@@ -622,6 +622,16 @@ pub trait AgentProvider: Send + Sync {
         PasteGatePolicy::Generic
     }
 
+    /// Whether a staged multi-line paste must carry CR line endings.
+    /// Windows ConPTY turns each paste byte into a key event, so inside the
+    /// bracketed-paste markers LF is dropped (lines glue together) and CRLF
+    /// submits the first line and queues the rest as separate messages. CR
+    /// is what xterm.js sends for a manual paste; harnesses whose composer
+    /// is only correct with it opt in (Grok, `docs/learning/grok-terminal-paste.md`).
+    fn paste_requires_cr_newlines(&self) -> bool {
+        false
+    }
+
     /// Platforms where this provider is available. Used to filter `list_providers`.
     fn available_on(&self) -> &'static [Platform];
 

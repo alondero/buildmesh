@@ -2,7 +2,7 @@
 
 use super::evaluator;
 use crate::agent::process::{AgentProcessRegistry, InputDisposition, InputWriteError};
-use crate::agent::provider::PasteGatePolicy;
+use crate::agent::provider::{AgentProvider, PasteGatePolicy};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::AppHandle;
@@ -67,8 +67,24 @@ const MAX_ENTER_ATTEMPTS: u32 = 3;
 /// sits staged in the input box and is never submitted (issue #874, node
 /// 2328: the correction was visibly pasted, the run stalled forever).
 pub(crate) fn injection_payload(text: &str) -> String {
-    if text.contains('\n') {
+    if text.contains('\n') || text.contains('\r') {
         format!("\x1b[200~{}\x1b[201~", text)
+    } else {
+        text.to_string()
+    }
+}
+
+/// The prompt text with the line endings the target harness's composer needs
+/// inside a bracketed paste (`AgentProvider::paste_requires_cr_newlines`).
+///
+/// Windows ConPTY delivers paste bytes as key events: LF is dropped, so lines
+/// glue together, and CRLF submits the first line and queues the rest. A
+/// terminal selection reaches here as CRLF (xterm.js joins with `\r\n` on
+/// Windows), so a Grok handover used to arrive as one message per line. CR
+/// is the ending xterm.js itself emits for a manual paste.
+pub(crate) fn paste_text_for(adapter: &dyn AgentProvider, text: &str) -> String {
+    if adapter.paste_requires_cr_newlines() {
+        text.replace("\r\n", "\r").replace('\n', "\r")
     } else {
         text.to_string()
     }
@@ -98,10 +114,19 @@ pub(crate) fn output_seen_within(ms_since_output: Option<u128>, ms_since_mark: u
 /// retried remote requests, which an in-process turn reaction doesn't
 /// have. If `AgentDriver` grows multi-line paste support, converge on it.
 pub(crate) fn write_prompt_to_pty(node_id: i64, text: &str, app: &AppHandle) -> Result<(), String> {
+    // Best effort: an unknown node keeps the text as given, and the liveness
+    // gate in the guarded writer reports it.
+    let text = crate::db::get_agent_node_by_id(node_id)
+        .ok()
+        .map(|node| crate::preferences::resolve_harness_provider(&node.provider))
+        .map_or_else(
+            || text.to_string(),
+            |resolved| paste_text_for(resolved.adapter(), text),
+        );
     write_prompt_to_pty_guarded(
         &crate::agent::process::PROCESS_REGISTRY,
         node_id,
-        text,
+        &text,
         app,
         None,
     )
@@ -876,6 +901,46 @@ mod tests {
     #[test]
     fn single_line_payload_is_written_verbatim() {
         assert_eq!(injection_payload("do the thing"), "do the thing");
+    }
+
+    #[test]
+    fn cr_separated_payload_is_still_bracketed() {
+        // A CR-only body is multi-line too: unbracketed, its first CR would
+        // submit the prompt.
+        assert_eq!(injection_payload("a\rb"), "\x1b[200~a\rb\x1b[201~");
+    }
+
+    #[test]
+    fn grok_paste_text_uses_cr_for_lf_crlf_and_mixed_endings() {
+        use crate::agent::provider::adapters::GROK;
+        // Windows xterm selections arrive as CRLF; programmatic prompts as LF.
+        assert_eq!(
+            paste_text_for(&GROK, "one\r\ntwo\r\nthree"),
+            "one\rtwo\rthree"
+        );
+        assert_eq!(paste_text_for(&GROK, "one\ntwo\nthree"), "one\rtwo\rthree");
+        assert_eq!(
+            paste_text_for(&GROK, "one\r\ntwo\nthree\rfour"),
+            "one\rtwo\rthree\rfour"
+        );
+        assert_eq!(paste_text_for(&GROK, "no newline"), "no newline");
+    }
+
+    #[test]
+    fn grok_handover_payload_is_one_bracketed_paste_with_no_lf() {
+        use crate::agent::provider::adapters::GROK;
+        let payload = injection_payload(&paste_text_for(&GROK, "one\r\ntwo\r\nthree"));
+        assert_eq!(payload, "\x1b[200~one\rtwo\rthree\x1b[201~");
+        assert!(!payload.contains('\n'));
+    }
+
+    #[test]
+    fn harnesses_that_did_not_opt_in_keep_their_line_endings() {
+        use crate::agent::provider::adapters::{ANTHROPIC, CODEX};
+        for text in ["a\r\nb", "a\nb"] {
+            assert_eq!(paste_text_for(&ANTHROPIC, text), text);
+            assert_eq!(paste_text_for(&CODEX, text), text);
+        }
     }
 
     #[test]
