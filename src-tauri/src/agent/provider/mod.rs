@@ -504,8 +504,9 @@ pub trait AgentProvider: Send + Sync {
     /// calls back to the local attention endpoint on turn end / permission
     /// prompts. Each adapter owns its harness's config format (issue #886):
     /// the Claude-backed `anthropic` adapter writes
-    /// `.claude/settings.local.json`; Codex writes `.codex/config.toml` +
-    /// `.codex/hooks.json`. Implementations must be idempotent and are called
+    /// `.claude/settings.local.json`; Codex delivers its hooks through
+    /// [`AgentProvider::launch_hook_args`] and only retires the project files
+    /// older versions wrote. Implementations must be idempotent and are called
     /// before every spawn. A failure is logged and the spawn proceeds (the
     /// agent still works, only the attention callback is lost).
     /// Antigravity writes `.agents/hooks.json`.
@@ -525,6 +526,16 @@ pub trait AgentProvider: Send + Sync {
     ) -> Result<(), String> {
         let _ = resolved;
         Ok(())
+    }
+
+    /// Command-line arguments that deliver this harness's attention hooks for
+    /// exactly this launch, for harnesses that cannot be trusted to find a
+    /// project hook file (Codex reads a git worktree's *main checkout* file,
+    /// never the worktree's own). Per-launch hooks carry the node id in the
+    /// process arguments, so concurrent nodes in one repository never share
+    /// or overwrite each other's callback.
+    fn launch_hook_args(&self, _node_id: i64, _env_type: EnvType) -> Vec<String> {
+        Vec::new()
     }
 
     /// Environment variables this harness needs carried from the Windows host

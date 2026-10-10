@@ -516,12 +516,20 @@ jobs:
     # Codex dispatch smoke. A lost runner is caught well before this cap.
     timeout-minutes: 90
     env:
-      # Four crates compile concurrently instead of one. The old
-      # `CARGO_BUILD_JOBS: "1"` was a blunt workaround for the hosted runner
-      # losing communication with the server under memory pressure; an 8 GB
-      # swapfile (created below) plus a lower-peak linker is the real fix, and
-      # this job is not on an interactive path either way.
-      CARGO_BUILD_JOBS: "4"
+      # `CARGO_BUILD_JOBS` is deliberately absent, and must stay absent. Cargo
+      # defaults it to the runner's core count (4 on ubuntu-latest, measured by
+      # the `nproc` below), so naming it here buys nothing — but rust-cache
+      # hashes every `CARGO*`/`RUST*` variable into its cache key, so setting it
+      # *only* here gave this job a different key from all seven shards and the
+      # non-shard pass. Measured on run 38000250072: this job restored
+      # `...-65c564bd-47ff76ef` and wrote its compile to that entry, while every
+      # other Rust job restored `...-ecb08f1d-47ff76ef`. The shared entry the
+      # compile was supposed to publish was therefore read by nobody: all eight
+      # downstream jobs recompiled the crate anyway (~39s here, ~59s per shard).
+      # The old `CARGO_BUILD_JOBS: "1"` was a memory-pressure workaround; the 8
+      # GB swapfile below plus the lower-peak linker is the real fix, and cargo
+      # already parallelises across the runner's four cores without being told.
+      #
       # Debug symbols are the bulk of this crate's build output and buy a
       # pass/fail test run nothing. They also cost memory and link time.
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -567,6 +575,16 @@ jobs:
       # budget, so that duplication is what evicts the very entries that make
       # this job's compile 54s instead of minutes (issue #2046). One key means
       # one entry: the first job to finish saves it and the rest no-op.
+      #
+      # `shared-key` is necessary but NOT sufficient, and that is the trap this
+      # step sat in until issue #2046's second pass. rust-cache also folds a
+      # hash of every `CARGO*`/`RUST*` variable into the key, so two jobs only
+      # share an entry when those match as well — and this job's env had one the
+      # shards did not (`CARGO_BUILD_JOBS`). It still *reported* a hit, so nothing
+      # failed: it saved `...-65c564bd-47ff76ef` while all eight downstream jobs
+      # read `...-ecb08f1d-47ff76ef`, and each of them recompiled the crate. The
+      # env blocks above are now identical across the three jobs and
+      # `tests/agent-infra/rust-cache-key.test.mjs` fails the build if they drift.
       - name: Cache Rust build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -621,6 +639,25 @@ jobs:
       - name: Compile the Rust test binaries
         run: cargo test --locked --no-run
         working-directory: src-tauri
+
+      # The filters in the `rust-tests` matrix below are exact only for today's
+      # test list, and libtest cannot express "first path segment is X", so a new
+      # top-level module would silently go unrun. This gate lists the unit tests
+      # from the test binary and fails if any is unclaimed or doubly claimed.
+      #
+      # It runs HERE, immediately after `--no-run`, and that placement is the
+      # whole point: the listing needs the compiled binary, so it must not be the
+      # step that pays to build it. It used to sit in `rust-nonshard`, ahead of
+      # the fuzz smoke, where `cargo test --lib -- --list` compiled the crate
+      # (56.6s on run 38000250072) and the fuzz smoke then compiled the *same*
+      # target again (48.8s) — 105s of a 185s job to reach a test run of 0.3s.
+      # Here the binary is already built, so the listing is a re-run of a warm
+      # binary. Moving it also fails fast: a shard matrix that does not cover
+      # the suite now fails before the seven shards are dispatched, instead of
+      # after, and `rust-bindings` already requires this job, so the gate is
+      # still on the merge path.
+      - name: Verify the Rust shards cover every unit test
+        run: node scripts/check-rust-shard-coverage.mjs
 
       # `http::assets::tests::mobile_assets_include_built_index_html` reads
       # dist/mobile/index.html, so the shards need the built output. Handing
@@ -690,12 +727,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      # Only the compiler *fingerprint* inputs need to match `rust-build` (which
-      # owns the compile): a differing RUSTFLAGS or profile-debug value forces
-      # every shard to recompile the crate the previous job just built.
-      # `CARGO_BUILD_JOBS` is deliberately absent — it is not a fingerprint
-      # input, the shards normally only run the prebuilt binary, and they have
-      # no swapfile, so they must not raise their own link peak.
+      # These must stay *identical* to `rust-build`'s and `rust-nonshard`'s, and
+      # that set is now exactly these four variables. Two separate things depend
+      # on it: cargo's own fingerprint (a differing RUSTFLAGS or profile-debug
+      # value forces every shard to recompile the crate the previous job just
+      # built), and rust-cache's cache key, which hashes every `CARGO*`/`RUST*`
+      # variable in the environment. A variable present here but absent in
+      # `rust-build` splits the one shared entry into two and silently throws
+      # away that job's compile — which is exactly what `CARGO_BUILD_JOBS` did
+      # (issue #2046). `tests/agent-infra/rust-cache-key.test.mjs` gates the set
+      # so the two jobs cannot drift apart again.
+      #
+      # No swapfile here, so these jobs must not raise their own link peak; they
+      # normally only run the prebuilt binary anyway.
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_INCREMENTAL: "0"
@@ -837,13 +881,6 @@ jobs:
         with:
           name: mobile-dist
           path: dist/mobile
-
-      # The filters above are exact only for today's test list, and libtest
-      # cannot express "first path segment is X", so a new top-level module
-      # would silently go unrun. This gate lists the unit tests from the test
-      # binary and fails if any is unclaimed or doubly claimed.
-      - name: Verify the Rust shards cover every unit test
-        run: node scripts/check-rust-shard-coverage.mjs
 
       # Issue #2156. The `http::fuzz` tests are already claimed by the
       # `commands-http` shard, so this adds no coverage — it is the explicit,
@@ -1127,12 +1164,23 @@ jobs:
       - name: Compile Tauri app without installers
         run: npm run tauri build -- --debug --no-bundle
 
-      - name: Verify Windows ConPTY frame ordering
+      # Both Windows-only contracts in ONE `cargo test` invocation. They were two
+      # steps, and that cost a full recompile of the crate: each `cargo test
+      # --lib <filter>` in this job rebuilt `buildmesh_lib` from scratch — 1m33s
+      # for the first filter and 1m27s for the second on run 38000860311 — to run
+      # 2 and 15 tests that take under 5s in total. libtest ORs its positional
+      # filters, so one invocation selects exactly the same 17 tests and pays the
+      # link once. The two contracts stay separately named in the output because
+      # libtest prints every test it runs.
+      #
+      # The `--` is load-bearing, not decoration. `cargo test` takes a single
+      # positional `[TESTNAME]`; a second bare filter is rejected by cargo before
+      # anything builds ("error: unexpected argument 'agent::background::tests'
+      # found"). Filters for libtest must sit after the separator, where cargo
+      # stops parsing and forwards them to the test binary. An earlier revision of
+      # this step omitted it and only failed on `main`, because `platform-smoke`
+      # runs post-merge and on manual dispatch, never on a pull request.
+      - name: Verify the Windows-only Rust contracts
         if: runner.os == 'Windows'
-        run: cargo test --locked --lib conpty_preserves_synchronized_cursor_frames
-        working-directory: src-tauri
-
-      - name: Verify Windows background inference
-        if: runner.os == 'Windows'
-        run: cargo test --locked --lib agent::background::tests
+        run: cargo test --locked --lib -- conpty_preserves_synchronized_cursor_frames agent::background::tests
         working-directory: src-tauri
