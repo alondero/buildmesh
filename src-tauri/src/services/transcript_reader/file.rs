@@ -130,6 +130,30 @@ pub(super) fn assistant_report<R: TranscriptReader + ?Sized>(
     })
 }
 
+/// Read the tail of a transcript as raw records, bounded so a long session
+/// costs a fixed read rather than its whole history.
+///
+/// The wake-up probe needs both the launch record and the session's last
+/// assistant message, and the launch can be far back in the file, so a window
+/// that is merely "recent" is not sufficient. The bound is what keeps this
+/// honest: a probe that would miss its evidence is reported as truncated, so
+/// the caller can fall back rather than silently decide from a partial view.
+pub(super) fn tail_lines(path: &Path, max_bytes: u64) -> Option<(String, bool)> {
+    let mut file = fs::File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    let start = size.saturating_sub(max_bytes);
+    let truncated = start > 0;
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut reader = BufReader::new(file.take(size - start));
+    let mut body = String::new();
+    if truncated {
+        // The window may begin mid-record (and mid UTF-8 character); drop it.
+        reader.read_until(b'\n', &mut Vec::new()).ok()?;
+    }
+    reader.read_to_string(&mut body).ok()?;
+    Some((body, truncated))
+}
+
 pub(super) fn assistant_revision(position: &str, preview: &str, text: &str) -> String {
     use sha2::{Digest, Sha256};
     let legacy = format!("{position}:{:x}", Sha256::digest(preview.as_bytes()));

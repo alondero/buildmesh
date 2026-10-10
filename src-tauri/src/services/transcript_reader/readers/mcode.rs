@@ -32,6 +32,188 @@ use crate::services::transcript_reader::types::{
     MAX_TOOL_STRING,
 };
 
+/// A background task the harness finished but never delivered to the session.
+///
+/// MiniMax Code records task completion out of band, and its own
+/// `background_task_cadence_reminder` is injected **at the start of the next
+/// turn**, never when the task actually ends. An idle session therefore takes
+/// no turn, receives no reminder, and never reads the finished result — the
+/// stall in issue #2105. A detector driven by that reminder would never fire
+/// during the stall it exists to break, so this is built on the CLI's on-disk
+/// task store instead, which is written as the task runs and stops growing
+/// when it ends. See [`detect_background_task_stall`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BackgroundTaskStall {
+    /// Newest finished task that has not been read in this session.
+    pub task_id: String,
+    /// When the harness recorded the task's terminal state.
+    pub ended_at_ms: i64,
+    /// When the session last produced an assistant message. A turn that
+    /// started after the task ended would have consumed it.
+    pub last_assistant_at_ms: Option<i64>,
+}
+
+/// Timestamp of the newest assistant message in the stream, if any.
+fn newest_assistant_at(lines: &str) -> Option<i64> {
+    lines
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|record| {
+            let message = record_message(&record)?;
+            if message_role(message) != Some("assistant") {
+                return None;
+            }
+            message.get("timestamp").and_then(|t| t.as_i64())
+        })
+        .max()
+}
+
+/// A background task this session launched, from the `bash_background`
+/// acknowledgement the CLI writes **during the turn that starts it**.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LaunchedTask {
+    pub task_id: String,
+    pub started_at_ms: i64,
+}
+
+/// What the CLI's own on-disk task store says about a launched task.
+///
+/// This is the load-bearing input. Unlike the cadence reminder, the store is
+/// written when the task actually ends, so it is readable during exactly the
+/// idle window the reminder cannot reach.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TaskStoreFact {
+    pub task_id: String,
+    /// When the CLI last wrote this task's output — for a finished task, when
+    /// it finished. Measured to the second against the reminder's `endedAtMs`.
+    pub settled_at_ms: i64,
+    /// The CLI wrote a terminal summary, so the task is definitively over.
+    pub finished: bool,
+}
+
+/// How long a task's output must have been quiet before a wake-up is spent on
+/// it. The CLI flushes a running task's output periodically, so a task that
+/// merely wrote recently is still running and must not consume the single
+/// wake-up an attempt is allowed.
+pub(crate) const TASK_QUIESCENCE_MS: i64 = 3 * 60_000;
+
+/// Pull every background task this session launched out of the transcript.
+///
+/// Only the launch acknowledgement counts: it carries `details.task_id` and
+/// `details.status == "started"`, and it is written while the turn that
+/// started the task is still running — so it is present during the stall.
+pub(crate) fn launched_background_tasks(lines: &str) -> Vec<LaunchedTask> {
+    let mut tasks: Vec<LaunchedTask> = Vec::new();
+    for line in lines.lines() {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(message) = record_message(&record) else {
+            continue;
+        };
+        let Some(details) = message.get("details") else {
+            continue;
+        };
+        if details.get("status").and_then(|s| s.as_str()) != Some("started") {
+            continue;
+        }
+        let Some(task_id) = details.get("task_id").and_then(|t| t.as_str()) else {
+            continue;
+        };
+        if tasks.iter().any(|task| task.task_id == task_id) {
+            continue;
+        }
+        tasks.push(LaunchedTask {
+            task_id: task_id.to_string(),
+            started_at_ms: message
+                .get("timestamp")
+                .and_then(|t| t.as_i64())
+                .unwrap_or_default(),
+        });
+    }
+    tasks
+}
+
+/// Pure detector: has this session launched a background task that finished
+/// without the session ever reading it?
+///
+/// A task counts as stalled when the CLI's store says it is over **and** its
+/// last write is newer than the session's last assistant message. A turn that
+/// began after the task ended would have seen the cadence reminder and could
+/// have read the result, so that ordering is what separates "the agent is
+/// working on it" from "the agent will never learn of it". Terminal silence on
+/// its own is never evidence.
+pub(crate) fn detect_background_task_stall(
+    launched: &[LaunchedTask],
+    facts: &[TaskStoreFact],
+    last_assistant_at_ms: Option<i64>,
+    now_ms: i64,
+) -> Option<BackgroundTaskStall> {
+    let mut stall: Option<BackgroundTaskStall> = None;
+    for fact in facts {
+        if !launched.iter().any(|task| task.task_id == fact.task_id) {
+            continue;
+        }
+        // Still running: a recent write means the CLI may append more.
+        let quiet = now_ms - fact.settled_at_ms;
+        if !fact.finished && quiet < TASK_QUIESCENCE_MS {
+            continue;
+        }
+        if let Some(last) = last_assistant_at_ms {
+            if last >= fact.settled_at_ms {
+                // The session has spoken since the task finished.
+                continue;
+            }
+        }
+        let newer = stall
+            .as_ref()
+            .is_none_or(|current| fact.settled_at_ms > current.ended_at_ms);
+        if newer {
+            stall = Some(BackgroundTaskStall {
+                task_id: fact.task_id.clone(),
+                ended_at_ms: fact.settled_at_ms,
+                last_assistant_at_ms,
+            });
+        }
+    }
+    stall
+}
+
+/// Read the CLI's own completion facts for these tasks from its task store.
+///
+/// `<dataDir>/background-tasks/<taskId>/` is written as the task runs and stops
+/// growing when it ends, so `output.log`'s modification time is the CLI's
+/// record of the task's end — measured to the second against the `endedAtMs`
+/// the cadence reminder carries. `summary.txt` appears only once the task has
+/// finished, and is the stronger signal when present.
+fn task_store_facts(tasks_dir: &Path, launched: &[LaunchedTask]) -> Vec<TaskStoreFact> {
+    launched
+        .iter()
+        .filter_map(|task| {
+            let dir = tasks_dir.join(&task.task_id);
+            let output = dir.join("output.log");
+            // A missing or unreadable store entry is not evidence: another
+            // session may own the task, or the CLI may not have written yet.
+            let settled_at_ms = mtime_ms(&output)?;
+            Some(TaskStoreFact {
+                task_id: task.task_id.clone(),
+                settled_at_ms,
+                finished: dir.join("summary.txt").is_file(),
+            })
+        })
+        .collect()
+}
+
+/// Modification time as epoch milliseconds.
+fn mtime_ms(path: &Path) -> Option<i64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let millis = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    i64::try_from(millis).ok()
+}
+
 /// Drop-in [`TranscriptAdapter`] for MiniMax Code.
 pub(crate) struct McodeAdapter;
 
@@ -61,6 +243,22 @@ impl TranscriptAdapter for McodeAdapter {
         record_message(&value).is_some_and(|message| {
             message_role(message) == Some("assistant") && !message_text(message).trim().is_empty()
         })
+    }
+
+    fn stalled_background_task(
+        &self,
+        lines: &str,
+        spawn_path: &str,
+        now_ms: i64,
+    ) -> Option<String> {
+        let launched = launched_background_tasks(lines);
+        if launched.is_empty() {
+            return None;
+        }
+        let tasks_dir = minimax_data_dir_for_spawn(spawn_path)?.join("background-tasks");
+        let facts = task_store_facts(&tasks_dir, &launched);
+        detect_background_task_stall(&launched, &facts, newest_assistant_at(lines), now_ms)
+            .map(|stall| stall.task_id)
     }
 }
 
@@ -292,6 +490,254 @@ pub(crate) fn parse_mcode_turns_with_text_limit(
         turns: turns.into(),
         last_assistant_message,
         saw_malformed,
+    }
+}
+
+#[cfg(test)]
+#[cfg(test)]
+mod stall_tests {
+    use super::*;
+
+    const TASK: &str = "bg_f1045ea6-225e-46cf-bc5f-10249ffa83ca";
+
+    /// The `bash_background` acknowledgement the CLI writes when the turn that
+    /// starts a task accepts it (issue #2105, run 335, real record).
+    fn launch(timestamp: i64, task_id: &str) -> String {
+        serde_json::json!({
+            "message_id": format!("msg-launch-{timestamp}"),
+            "turn_id": "turn_1",
+            "message": {
+                "role": "toolResult",
+                "toolCallId": "call_1",
+                "toolName": "bash",
+                "content": [{
+                    "type": "text",
+                    "text": format!("<bash_background task_id=\"{task_id}\">\nBackground Bash task accepted\n</bash_background>"),
+                }],
+                "details": {
+                    "description": "Run clippy on all targets",
+                    "timing": {},
+                    "status": "started",
+                    "task_id": task_id,
+                },
+                "timestamp": timestamp,
+            },
+        })
+        .to_string()
+    }
+
+    fn assistant(timestamp: i64) -> String {
+        serde_json::json!({
+            "message_id": format!("msg-{timestamp}"),
+            "turn_id": "turn_1",
+            "message": {
+                "role": "assistant",
+                "timestamp": timestamp,
+                "content": [{"type": "text", "text": "working"}],
+            },
+        })
+        .to_string()
+    }
+
+    /// Join records into the `messages.jsonl` shape the detector reads.
+    fn stream(records: impl IntoIterator<Item = String>) -> String {
+        records.into_iter().collect::<Vec<_>>().join("\n")
+    }
+
+    fn launched(lines: &str) -> Vec<LaunchedTask> {
+        launched_background_tasks(lines)
+    }
+
+    fn fact(task_id: &str, settled_at_ms: i64, finished: bool) -> TaskStoreFact {
+        TaskStoreFact {
+            task_id: task_id.to_string(),
+            settled_at_ms,
+            finished,
+        }
+    }
+
+    const T_END: i64 = 1_791_205_267_253; // task finished
+    const T_LAST_TALK: i64 = 1_791_205_156_271; // session's last assistant message
+    const NOW: i64 = 1_791_216_000_000; // well after the task ended
+
+    #[test]
+    fn reads_the_task_id_from_the_launch_acknowledgement() {
+        let lines = stream([assistant(T_LAST_TALK - 60_000), launch(T_LAST_TALK, TASK)]);
+        assert_eq!(
+            launched(&lines),
+            vec![LaunchedTask {
+                task_id: TASK.to_string(),
+                started_at_ms: T_LAST_TALK,
+            }]
+        );
+    }
+
+    #[test]
+    fn detects_a_finished_task_the_session_never_saw() {
+        // The stall: the task ended 111s after the session last spoke, and the
+        // session said nothing for 3h14m afterwards.
+        let lines = stream([launch(T_LAST_TALK - 60_000, TASK), assistant(T_LAST_TALK)]);
+        let stall = detect_background_task_stall(
+            &launched(&lines),
+            &[fact(TASK, T_END, false)],
+            newest_assistant_at(&lines),
+            NOW,
+        )
+        .expect("stall");
+        assert_eq!(stall.task_id, TASK);
+        assert_eq!(stall.ended_at_ms, T_END);
+        assert_eq!(stall.last_assistant_at_ms, Some(T_LAST_TALK));
+    }
+
+    #[test]
+    fn no_stall_when_the_session_spoke_after_the_task_finished() {
+        let lines = stream([assistant(T_END + 1_000)]);
+        assert_eq!(
+            detect_background_task_stall(
+                &launched(&lines),
+                &[fact(TASK, T_END, true)],
+                newest_assistant_at(&lines),
+                NOW,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_running_task_is_not_a_stall() {
+        // Output flushed a second ago: the task is still going, and spending the
+        // single wake-up now would strand the real stall later.
+        let lines = stream([launch(T_LAST_TALK - 60_000, TASK), assistant(T_LAST_TALK)]);
+        let now = T_END + 1_000;
+        assert_eq!(
+            detect_background_task_stall(
+                &launched(&lines),
+                &[fact(TASK, T_END, false)],
+                newest_assistant_at(&lines),
+                now,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_finished_summary_settles_a_task_whose_output_is_still_recent() {
+        // `summary.txt` is the CLI's own terminal marker, so no waiting for
+        // quiescence is needed.
+        let lines = stream([launch(T_LAST_TALK - 60_000, TASK), assistant(T_LAST_TALK)]);
+        assert!(detect_background_task_stall(
+            &launched(&lines),
+            &[fact(TASK, T_END, true)],
+            newest_assistant_at(&lines),
+            T_END + 1_000,
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn a_task_this_session_never_launched_is_ignored() {
+        let lines = stream([assistant(T_LAST_TALK)]);
+        assert_eq!(
+            detect_background_task_stall(
+                &launched(&lines),
+                &[fact("bg_someone_elses", T_END, true)],
+                newest_assistant_at(&lines),
+                NOW,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn newest_finished_task_wins() {
+        let lines = stream([launch(T_LAST_TALK - 60_000, TASK), assistant(T_LAST_TALK)]);
+        let facts = [
+            fact("bg_older", T_END, true),
+            fact(TASK, T_END + 60_000, true),
+        ];
+        let stall = detect_background_task_stall(
+            &launched(&lines),
+            &facts,
+            newest_assistant_at(&lines),
+            NOW,
+        )
+        .expect("stall");
+        assert_eq!(stall.task_id, TASK);
+    }
+
+    #[test]
+    fn a_duplicate_launch_acknowledgement_is_one_task() {
+        let lines = stream([launch(T_LAST_TALK, TASK), launch(T_LAST_TALK + 1, TASK)]);
+        assert_eq!(launched(&lines).len(), 1);
+    }
+
+    #[test]
+    fn a_stall_with_no_assistant_message_at_all_is_reported() {
+        let lines = launch(T_LAST_TALK, TASK);
+        let stall = detect_background_task_stall(
+            &launched(&lines),
+            &[fact(TASK, T_END, true)],
+            newest_assistant_at(&lines),
+            NOW,
+        )
+        .expect("stall");
+        assert_eq!(stall.last_assistant_at_ms, None);
+    }
+
+    #[test]
+    fn malformed_lines_are_skipped_without_panicking() {
+        let lines = stream([
+            "not json at all".to_string(),
+            launch(T_LAST_TALK - 60_000, TASK),
+            "{ broken".to_string(),
+            assistant(T_LAST_TALK),
+        ]);
+        assert_eq!(launched(&lines).len(), 1);
+        assert!(detect_background_task_stall(
+            &launched(&lines),
+            &[fact(TASK, T_END, true)],
+            newest_assistant_at(&lines),
+            NOW,
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn the_quiescence_window_is_longer_than_a_running_tasks_flush_cadence() {
+        // Guards the constant against being tuned down to something that would
+        // let a still-running task consume the one wake-up an attempt owns.
+        assert!(TASK_QUIESCENCE_MS >= 60_000);
+    }
+
+    #[test]
+    fn only_minimax_code_declares_the_idle_wake_up_gap() {
+        // The nudge is a MiniMax Code behaviour, not a Circuit-wide rule: every
+        // other reader must keep the default "no gap", or a transcript that
+        // happens to look like a launch record could wake an unrelated harness.
+        // mcode's own end-to-end path needs its real on-disk task store, so it
+        // is covered by the pure detector tests above.
+        let lines = stream([launch(T_LAST_TALK - 60_000, TASK), assistant(T_LAST_TALK)]);
+        let readers = crate::services::transcript_reader::adapter::registered();
+        assert_eq!(
+            readers.len(),
+            10,
+            "the registry gained a reader; this contract must cover it"
+        );
+        let others: Vec<&str> = readers
+            .iter()
+            .map(|reader| reader.id())
+            .filter(|id| *id != "mcode")
+            .collect();
+        assert_eq!(others.len(), 9, "every non-mcode reader is covered");
+        for id in others {
+            let reader =
+                crate::services::transcript_reader::adapter::dispatch(id).expect("registered");
+            assert_eq!(
+                reader.stalled_background_task(&lines, "/repo", NOW),
+                None,
+                "{id} must not inherit mcode's rule"
+            );
+        }
     }
 }
 
