@@ -162,7 +162,19 @@ export const listMeshes = () =>
   _invoke<Mesh[]>('list_meshes');
 
 export const deleteMesh = (meshId: number) =>
-  _invoke('delete_mesh', { meshId });
+  _invoke('delete_mesh', { meshId }).then((result) => {
+    // Issue #2017 — the per-mesh promise maps below are keyed by Mesh id
+    // and have no size bound, so a deleted Mesh kept its slot (and the
+    // promise chain behind it) for the rest of the process. Evict on the
+    // success path only: a rejected delete means the Mesh survives.
+    // Unconditional rather than identity-checked, because a Mesh id can
+    // be reused by SQLite after the highest row is deleted — dropping a
+    // stale slot is exactly right for the Mesh that inherits the id.
+    deleteDefaultProviderPromise(meshId);
+    scratchpadByMesh.delete(meshId);
+    scratchpadWritesByMesh.delete(meshId);
+    return result;
+  });
 
 export const updateMeshLayout = (meshId: number, layout: 'grid' | 'single') =>
   _invoke('update_mesh_layout', { meshId, layout });

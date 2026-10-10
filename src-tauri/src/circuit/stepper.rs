@@ -500,6 +500,63 @@ impl RunView {
             .unwrap_or(0)
     }
 
+    /// Whether this turn has already been woken, or whether a nudge may still
+    /// be claimed for it.
+    ///
+    /// One wake per observed turn, keyed on the same (revision, stamp) pair the
+    /// result reminder uses: the report can stay identical across turns, so the
+    /// lifecycle stamp is what distinguishes a new turn from a re-observation
+    /// of the same one. Without that fence a stalled session would be nudged on
+    /// every poll.
+    pub fn nudge_decision(
+        &self,
+        node_id: &str,
+        attempt: i32,
+        revision: &str,
+        stamp: &str,
+    ) -> NudgeDecision {
+        if self.state != RunState::Running {
+            return NudgeDecision::Ignore;
+        }
+        // A wake-up claimed for this attempt is settled by the
+        // observation pass, which emits `NudgeUncertain` and stops the
+        // turn being classified. It must not be re-decided here: the
+        // delivery key still reads `claimed` while the claim is in
+        // flight, so answering `Nudge` would double-send and answering
+        // anything else would leave the in-flight case unhandled.
+        if self.context.get(&format!("node.{node_id}.nudge.delivery")) == Some("claimed") {
+            return NudgeDecision::Ignore;
+        }
+        if !self.step(node_id).is_some_and(|step| {
+            step.attempt == attempt
+                && matches!(step.status, StepStatus::Running | StepStatus::Unverified)
+        }) {
+            return NudgeDecision::Ignore;
+        }
+        // A borrowed source agent belongs to the user, not the circuit.
+        if self.result_reminder_target(node_id).is_none() {
+            return NudgeDecision::NotOwned;
+        }
+        if self.context.get(&format!("node.{node_id}.nudge.revision")) == Some(revision)
+            && self.context.get(&format!("node.{node_id}.nudge.stamp")) == Some(stamp)
+        {
+            return NudgeDecision::Ignore;
+        }
+        // Never more than one wake per step attempt: if the nudge was already
+        // spent on this attempt, the operator is the escalation path.
+        if self.nudges_sent(node_id, attempt) >= 1 {
+            return NudgeDecision::Exhausted;
+        }
+        NudgeDecision::Nudge
+    }
+
+    fn nudges_sent(&self, node_id: &str, attempt: i32) -> u32 {
+        self.context
+            .get(&format!("node.{node_id}.nudges.{attempt}"))
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(0)
+    }
+
     /// Durable per-attempt read failures, with the same ownership fence for
     /// the pure transition and the worker's attention decision.
     pub fn result_read_failures(
@@ -791,6 +848,31 @@ pub enum CircuitEvent {
         attempt: i32,
         error: String,
     },
+    /// An idle session has a finished background task it cannot learn about on
+    /// its own (issue #2105). The stepper answers with one bounded wake-up
+    /// prompt, fenced to the observed turn, and never repeats it.
+    NudgeIdleSession {
+        node_id: String,
+        attempt: i32,
+        stamp: String,
+        revision: String,
+        input_stamp: String,
+        /// The finished task the wake-up names, so the prompt can point at it.
+        task_id: String,
+    },
+    NudgeDelivered {
+        node_id: String,
+        attempt: i32,
+    },
+    NudgeObsolete {
+        node_id: String,
+        attempt: i32,
+    },
+    NudgeUncertain {
+        node_id: String,
+        attempt: i32,
+        error: String,
+    },
     /// The agent's turn finished but the result file its prompt asked for is
     /// missing. The stepper answers with a bounded reminder, or fails the step
     /// once the reminders are spent.
@@ -965,6 +1047,21 @@ impl StepWrite {
     }
 }
 
+/// What an idle session with a finished background task it cannot learn about
+/// calls for. Produced by [`RunView::nudge_decision`] so the stepper and the
+/// worker cannot disagree about whether a wake-up is owed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NudgeDecision {
+    /// This turn was already woken, a delivery is in flight, or the step moved on.
+    Ignore,
+    /// Send the single wake-up prompt for this attempt.
+    Nudge,
+    /// The wake-up is already spent for this attempt.
+    Exhausted,
+    /// The agent is borrowed from the source, so it may not be woken.
+    NotOwned,
+}
+
 /// An explicit action the impure seam executes after committing the
 /// transition. Kept small on purpose — milestone 1 covers the action
 /// subset; gate/GitHub effects join in later milestones.
@@ -982,6 +1079,17 @@ pub enum Effect {
     /// verdict. This has a separate lifecycle from author-authored PTY
     /// injections because delivery is claimed and settled independently.
     ContinueAgentTurn {
+        node_id: String,
+        target_agent_id: i64,
+        prompt: String,
+    },
+    /// Wake an idle session whose finished background task it can never learn
+    /// about on its own (issue #2105). MiniMax Code injects its task-completion
+    /// reminder only at the start of the next turn, so an idle session never
+    /// takes one and the finished result is never read. Delivery is claimed and
+    /// settled under its own run-context keys and recorded as a
+    /// `prompt_submitted` row, like an ordinary injection.
+    NudgeIdleAgent {
         node_id: String,
         target_agent_id: i64,
         prompt: String,
@@ -1102,6 +1210,19 @@ fn continuation_effect(node_id: &str, target_agent_id: i64) -> Effect {
         node_id: node_id.into(),
         target_agent_id,
         prompt: "Continue the remaining work already assigned to you and run its relevant checks. Do not expand scope, approve permissions, or guess answers to questions requiring the user. If you are blocked on such a decision, report the blocker explicitly.".into(),
+    }
+}
+
+/// Wake a session whose background task finished without waking it. The task
+/// id is named because the CLI only tells the agent about finished tasks at
+/// the start of a turn, and this prompt is what starts that turn.
+fn nudge_effect(node_id: &str, target_agent_id: i64, task_id: &str) -> Effect {
+    Effect::NudgeIdleAgent {
+        node_id: node_id.into(),
+        target_agent_id,
+        prompt: format!(
+            "Your background task {task_id} has finished and its result has not been reported yet. Read it with task_output and report the outcome, then continue the work already assigned to you. Do not start unrelated work."
+        ),
     }
 }
 
@@ -1472,6 +1593,72 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 run.context.set(&key, delivery);
                 if let CircuitEvent::ContinuationUncertain { error, .. } = event {
                     unverify_step(run, &mut t, node_id, format!("Continuation delivery is unverified: {error}. Inspect the agent; the prompt will not be replayed."));
+                }
+                t.context_changed = true;
+            }
+        }
+        CircuitEvent::NudgeIdleSession {
+            node_id,
+            attempt,
+            stamp,
+            revision,
+            input_stamp,
+            task_id,
+        } => {
+            // One wake-up per observed turn, bounded to one per attempt. The
+            // decision is shared with the worker so neither can send on a
+            // different rule.
+            match run.nudge_decision(node_id, *attempt, revision, stamp) {
+                NudgeDecision::Ignore => {}
+                NudgeDecision::Nudge => {
+                    let Some(target_agent_id) = run.result_reminder_target(node_id) else {
+                        return t;
+                    };
+                    run.context
+                        .set(&format!("node.{node_id}.nudges.{attempt}"), "1");
+                    run.context
+                        .set(&format!("node.{node_id}.nudge.revision"), revision.clone());
+                    run.context
+                        .set(&format!("node.{node_id}.nudge.stamp"), stamp.clone());
+                    run.context
+                        .set(&format!("node.{node_id}.nudge.input"), input_stamp.clone());
+                    run.context.set(
+                        &format!("node.{node_id}.nudge.attempt"),
+                        attempt.to_string(),
+                    );
+                    run.context
+                        .set(&format!("node.{node_id}.nudge.delivery"), "claimed");
+                    t.context_changed = true;
+                    t.effects
+                        .push(nudge_effect(node_id, target_agent_id, task_id));
+                }
+                // The wake-up is spent or the agent is not ours to wake: leave
+                // the step alone and let the normal wait budget decide, rather
+                // than blocking the run on a session we cannot help.
+                NudgeDecision::Exhausted | NudgeDecision::NotOwned => {}
+            }
+        }
+        CircuitEvent::NudgeDelivered { node_id, attempt }
+        | CircuitEvent::NudgeObsolete { node_id, attempt }
+        | CircuitEvent::NudgeUncertain {
+            node_id, attempt, ..
+        } => {
+            let key = format!("node.{node_id}.nudge.delivery");
+            if run.state == RunState::Running
+                && run
+                    .step(node_id)
+                    .is_some_and(|s| s.status == StepStatus::Running && s.attempt == *attempt)
+                && run.context.get(&key) == Some("claimed")
+            {
+                let delivery = match event {
+                    CircuitEvent::NudgeDelivered { .. } => "delivered",
+                    CircuitEvent::NudgeObsolete { .. } => "obsolete",
+                    CircuitEvent::NudgeUncertain { .. } => "uncertain",
+                    _ => unreachable!(),
+                };
+                run.context.set(&key, delivery);
+                if let CircuitEvent::NudgeUncertain { error, .. } = event {
+                    unverify_step(run, &mut t, node_id, format!("Wake-up delivery is unverified: {error}. Inspect the agent; the wake-up will not be replayed."));
                 }
                 t.context_changed = true;
             }
@@ -3457,7 +3644,9 @@ fn finish_run_if_done(run: &mut RunView, t: &mut Transition) {
     let has_pending_injection = t.effects.iter().any(|effect| {
         matches!(
             effect,
-            Effect::InjectPty { .. } | Effect::ContinueAgentTurn { .. }
+            Effect::InjectPty { .. }
+                | Effect::ContinueAgentTurn { .. }
+                | Effect::NudgeIdleAgent { .. }
         )
     });
     if any_completed && !has_eligible && !has_pending_injection {

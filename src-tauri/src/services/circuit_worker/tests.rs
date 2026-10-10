@@ -2698,6 +2698,72 @@ fn circuit_continuation_rejects_user_input_regeneration_and_new_report() {
 }
 
 #[test]
+fn a_wake_up_is_fenced_against_its_own_claim_not_the_continuation_s() {
+    // Issue #2105: the nudge keeps its own `nudge.*` delivery bookkeeping. If
+    // the shared fence read the continuation's keys, every wake-up would be
+    // judged obsolete the moment the two lifecycles diverged, and the stall
+    // would never actually be broken.
+    let mut view = report_gate_view();
+    let node_id = "finish_classifier";
+    view.context
+        .set(&format!("node.{node_id}.nudge.stamp"), "100:yield");
+    view.context
+        .set(&format!("node.{node_id}.nudge.revision"), "report-1");
+    let target = 900;
+    let fence = |stamp: &str, revision: &str| {
+        continuation_is_current_for(
+            &view,
+            node_id,
+            target,
+            SessionStatus::Ready,
+            true,
+            Some(stamp),
+            Some(revision),
+            "nudge",
+        )
+    };
+    assert!(
+        fence("100:yield", "report-1"),
+        "the nudge's own claim must satisfy the fence"
+    );
+    assert!(!fence("200:yield", "report-1"), "a new turn invalidates it");
+    assert!(
+        !fence("100:yield", "report-2"),
+        "a new report invalidates it"
+    );
+    // The continuation's keys are a different lifecycle and must not satisfy a
+    // wake-up's fence, nor vice versa.
+    assert!(
+        !continuation_is_current(
+            &view,
+            node_id,
+            target,
+            SessionStatus::Ready,
+            true,
+            Some("100:yield"),
+            Some("report-1")
+        ),
+        "a continuation must not read the nudge's claim as its own"
+    );
+    view.context
+        .set(&format!("node.{node_id}.continuation.stamp"), "100:yield");
+    view.context
+        .set(&format!("node.{node_id}.continuation.revision"), "report-1");
+    assert!(
+        continuation_is_current(
+            &view,
+            node_id,
+            target,
+            SessionStatus::Ready,
+            true,
+            Some("100:yield"),
+            Some("report-1")
+        ),
+        "the continuation keeps its own fence"
+    );
+}
+
+#[test]
 fn circuit_continuation_accepts_only_the_agent_a_spawn_step_owns() {
     let spawn_node = CircuitNode {
         id: "implement".into(),
@@ -3807,6 +3873,101 @@ impl Drop for ResultReadFixture {
         evaluator::unregister(self.agent_id);
         crate::preferences::reset_for_tests();
     }
+}
+
+#[test]
+fn a_wake_up_stranded_by_a_crash_is_settled_without_a_stall_being_observed() {
+    // Round-2 finding: recovery used to hang off `NudgeDecision::Abandon`,
+    // reachable only when a task stall was also observed — so a stranded claim
+    // left the step Running until the wait budget expired. Recovery is now
+    // driven by the claim alone, with no transcript fact required.
+    let mut fixture = ResultReadFixture::new();
+    let node = fixture.view.steps[1].node_id.clone();
+    let attempt = fixture.view.steps[1].attempt;
+    fixture
+        .view
+        .context
+        .set(&format!("node.{node}.nudge.delivery"), "claimed");
+    fixture
+        .view
+        .context
+        .set(&format!("node.{node}.nudge.attempt"), attempt.to_string());
+
+    let (events, _, _) = fixture.probe();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, CircuitEvent::NudgeUncertain { .. })),
+        "a claim stranded at `claimed` must be settled by observation alone: {events:?}"
+    );
+    assert_eq!(
+        fixture
+            .view
+            .context
+            .get(&format!("node.{node}.nudge.delivery")),
+        Some("uncertain"),
+        "the claim is settled rather than left waiting forever"
+    );
+    assert!(
+        fixture.view.steps[1]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("will not be replayed")),
+        "the operator is told the wake-up may or may not have landed"
+    );
+}
+
+#[test]
+fn a_wake_up_in_flight_stops_the_turn_being_classified() {
+    // Round-2 finding: continuations halt classification while their delivery
+    // is claimed; the nudge did not, so a turn could be judged before its
+    // wake-up had landed.
+    let mut fixture = ResultReadFixture::new();
+    let node = fixture.view.steps[1].node_id.clone();
+    let attempt = fixture.view.steps[1].attempt;
+    fixture
+        .view
+        .context
+        .set(&format!("node.{node}.nudge.delivery"), "claimed");
+    fixture
+        .view
+        .context
+        .set(&format!("node.{node}.nudge.attempt"), attempt.to_string());
+
+    let (events, _, _) = fixture.probe();
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            CircuitEvent::TurnClassified { .. }
+                | CircuitEvent::ClassifierErrorObserved { .. }
+                | CircuitEvent::ClassifierUnavailable { .. }
+        )),
+        "a turn must not be classified while a wake-up is in flight: {events:?}"
+    );
+}
+
+#[test]
+fn a_claimed_wake_up_for_another_attempt_does_not_block_classification() {
+    // The guard is attempt-scoped: a claim left over from a previous attempt
+    // must not wedge the current one.
+    let mut fixture = ResultReadFixture::new();
+    let node = fixture.view.steps[1].node_id.clone();
+    fixture
+        .view
+        .context
+        .set(&format!("node.{node}.nudge.delivery"), "claimed");
+    fixture
+        .view
+        .context
+        .set(&format!("node.{node}.nudge.attempt"), "99");
+
+    let (events, _, _) = fixture.probe();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, CircuitEvent::NudgeUncertain { .. })),
+        "a stale claim from another attempt is not this step's problem: {events:?}"
+    );
 }
 
 #[test]
@@ -6596,6 +6757,7 @@ fn yielded_wait_after_a_working_verdict_gets_the_full_yielded_allowance() {
                 yielded: true,
                 yielded_budget_ms: HARNESS_LIFECYCLE_BUDGET_MS,
                 active_budget_ms: ACTIVE_WAIT_MS,
+                stalled_task_id: None,
             })
         });
         match wait_event(&events) {
