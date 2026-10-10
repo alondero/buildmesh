@@ -519,11 +519,17 @@ pub(crate) fn record_prompt_submission(
     run_id: i64,
     node_id: &str,
     attempt: i32,
-    agent_node_id: i64,
-    prompt: &str,
+    prompt: &crate::circuit::delivery::PreparedPrompt,
 ) -> Result<i64, String> {
     let db = crate::db::write_conn();
-    record_prompt_submission_locked(&db, run_id, node_id, attempt, agent_node_id, prompt)
+    record_prompt_submission_locked(
+        &db,
+        run_id,
+        node_id,
+        attempt,
+        prompt.node_id(),
+        prompt.text(),
+    )
 }
 
 pub(crate) fn record_prompt_submission_locked(

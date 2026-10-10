@@ -352,6 +352,10 @@ impl AgentProvider for GrokAdapter {
         true
     }
 
+    fn paste_requires_cr_newlines(&self) -> bool {
+        true
+    }
+
     fn background_recipe(
         &self,
         platform: Platform,
