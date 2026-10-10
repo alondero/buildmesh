@@ -332,9 +332,10 @@ mod tests {
         fs::write(payload.path().join("artifact.bin"), b"x").unwrap();
         junction_dir(&_repo.path().join("cache"), payload.path());
 
-        let summary =
-            crate::commands::git::get_git_summary_blocking(_repo.path().to_string_lossy().into_owned())
-                .unwrap();
+        let summary = crate::commands::git::get_git_summary_blocking(
+            _repo.path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
         assert_eq!(
             summary.total, 0,
             "the junctioned cache/ must not be counted (#2193)"

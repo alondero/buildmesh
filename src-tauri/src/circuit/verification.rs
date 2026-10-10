@@ -34,7 +34,9 @@ pub(crate) fn wrapup_reasons(state: &WrapupState) -> Vec<String> {
             reasons.push("the worktree still has uncommitted changes".to_string());
         }
         if !state.pushed {
-            reasons.push("the branch has not been pushed to origin (or has unpushed commits)".to_string());
+            reasons.push(
+                "the branch has not been pushed to origin (or has unpushed commits)".to_string(),
+            );
         }
         if state.pr_required && state.pr_url.is_none() {
             reasons.push("no open pull request exists for the branch".to_string());
@@ -69,9 +71,7 @@ pub(crate) fn correction_prompt(reasons: &[String], recent_output: &str) -> Stri
     prompt
 }
 
-pub(crate) fn observe_wrapup_git_state(
-    node: &crate::models::AgentNode,
-) -> WrapupState {
+pub(crate) fn observe_wrapup_git_state(node: &crate::models::AgentNode) -> WrapupState {
     // `node_working_path` resolves Worktree and Root Nodes alike (host path +
     // env), so the self-heal below covers both; on a Root Node the sanitize
     // is a no-op (`.git` is a directory, not a gitlink).
@@ -90,8 +90,7 @@ pub(crate) fn observe_wrapup_git_state(
             node.id,
             first_err
         );
-        if let Err(e) = crate::git::worktree::sanitize_git_worktree(&host_path, resolved.env_type)
-        {
+        if let Err(e) = crate::git::worktree::sanitize_git_worktree(&host_path, resolved.env_type) {
             tracing::warn!("circuit verification({}): sanitize failed: {}", node.id, e);
         }
         git2::Repository::open(&host_path)
@@ -135,10 +134,15 @@ pub(crate) fn observe_wrapup_git_state(
     };
 
     WrapupState {
-        dirty, pushed, branch, pr_url: None, pr_number: None, pr_required: false, repo_error,
+        dirty,
+        pushed,
+        branch,
+        pr_url: None,
+        pr_number: None,
+        pr_required: false,
+        repo_error,
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -186,20 +190,39 @@ mod tests {
         let tree_id = repo.index().unwrap().write_tree().unwrap();
         let tree = repo.find_tree(tree_id).unwrap();
         let signature = git2::Signature::now("test", "test@example.com").unwrap();
-        let commit = repo.commit(Some("HEAD"), &signature, &signature, "initial", &tree, &[]).unwrap();
-        repo.branch("renamed-implementation", &repo.find_commit(commit).unwrap(), false).unwrap();
+        let commit = repo
+            .commit(Some("HEAD"), &signature, &signature, "initial", &tree, &[])
+            .unwrap();
+        repo.branch(
+            "renamed-implementation",
+            &repo.find_commit(commit).unwrap(),
+            false,
+        )
+        .unwrap();
         repo.set_head("refs/heads/renamed-implementation").unwrap();
-        repo.remote("origin", "https://github.com/example/repo.git").unwrap();
-        repo.reference("refs/remotes/origin/renamed-implementation", commit, true, "test").unwrap();
-        repo.find_branch("renamed-implementation", git2::BranchType::Local).unwrap()
-            .set_upstream(Some("origin/renamed-implementation")).unwrap();
+        repo.remote("origin", "https://github.com/example/repo.git")
+            .unwrap();
+        repo.reference(
+            "refs/remotes/origin/renamed-implementation",
+            commit,
+            true,
+            "test",
+        )
+        .unwrap();
+        repo.find_branch("renamed-implementation", git2::BranchType::Local)
+            .unwrap()
+            .set_upstream(Some("origin/renamed-implementation"))
+            .unwrap();
         let worktree_path = dir.path().join("original-worktree-name");
-        let branch_ref = repo.find_reference("refs/heads/renamed-implementation").unwrap();
+        let branch_ref = repo
+            .find_reference("refs/heads/renamed-implementation")
+            .unwrap();
         let mut options = git2::WorktreeAddOptions::new();
         options.reference(Some(&branch_ref));
         // Release the branch from the main checkout before attaching it.
         repo.set_head_detached(commit).unwrap();
-        repo.worktree("original-worktree-name", &worktree_path, Some(&options)).unwrap();
+        repo.worktree("original-worktree-name", &worktree_path, Some(&options))
+            .unwrap();
         let mut node = wrapup_test_node();
         node.path = dir.path().to_string_lossy().into_owned();
         node.worktree_name = Some("original-worktree-name".into());
@@ -282,5 +305,4 @@ mod tests {
             "a modified tracked file is real uncommitted work and must be reported"
         );
     }
-
 }

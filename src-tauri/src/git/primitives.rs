@@ -240,8 +240,7 @@ pub fn ff_pull_blockers(repo: &Repository) -> Result<Vec<String>, String> {
         .map_err(|e| format!("Failed to read HEAD: {}", e))?
         .peel_to_commit()
         .map_err(|e| format!("HEAD is not a commit: {}", e))?;
-    let branch =
-        head_branch_name(repo).ok_or_else(|| "HEAD is not on a branch".to_string())?;
+    let branch = head_branch_name(repo).ok_or_else(|| "HEAD is not on a branch".to_string())?;
     let upstream_oid = upstream_oid_for_branch(repo, &branch)
         .ok_or_else(|| format!("no upstream configured for refs/heads/{}", branch))?;
     let upstream = repo
@@ -375,7 +374,11 @@ pub fn upstream_oid_for_branch(repo: &Repository, branch: &str) -> Option<Oid> {
 ///
 /// Uses git2's `graph_ahead_behind` rather than `git rev-list ...@{u}`: the
 /// `@{u}` brace syntax is silently mangled by `Command::args` on Windows.
-pub fn ahead_behind(repo: &Repository, local: Oid, upstream: Oid) -> Result<(u32, u32), git2::Error> {
+pub fn ahead_behind(
+    repo: &Repository,
+    local: Oid,
+    upstream: Oid,
+) -> Result<(u32, u32), git2::Error> {
     let (ahead, behind) = repo.graph_ahead_behind(local, upstream)?;
     Ok((
         ahead.try_into().unwrap_or(u32::MAX),
@@ -449,9 +452,12 @@ mod tests {
                 1,
                 "the junction must resolve to the payload for this fixture to mean anything"
             );
-            assert!(!is_dirty(&repo).unwrap(), "a junction under a \
+            assert!(
+                !is_dirty(&repo).unwrap(),
+                "a junction under a \
              directory-only ignore rule must be ignored, matching \
-             `git status --porcelain` (#2193)");
+             `git status --porcelain` (#2193)"
+            );
 
             // ... and the gate must still see real work in the same tree.
             fs::write(td.path().join("f.txt"), "changed\n").unwrap();
@@ -517,10 +523,7 @@ mod tests {
 
         // 2. Parent repo.
         let parent = init_repo_with_commit(td.path(), &[("root.txt", "r\n")]);
-        let url = format!(
-            "file://{}",
-            sub_root.to_str().unwrap().replace('\\', "/")
-        );
+        let url = format!("file://{}", sub_root.to_str().unwrap().replace('\\', "/"));
 
         // 3. Register + init + add gitlink to index.
         let mut sm = parent.submodule(&url, Path::new("sub"), true).unwrap();
@@ -681,8 +684,13 @@ mod tests {
             )
             .unwrap();
         }
-        repo.reference(&format!("refs/remotes/origin/{}", branch), ahead, true, "test")
-            .unwrap();
+        repo.reference(
+            &format!("refs/remotes/origin/{}", branch),
+            ahead,
+            true,
+            "test",
+        )
+        .unwrap();
 
         {
             let base_commit = repo.find_commit(base).unwrap();
@@ -751,7 +759,10 @@ mod tests {
         let td = TestDir::new("ff_blockers_untracked_collision");
         let repo = repo_behind_upstream(&td, &[("local.txt", "l0\n")], "new.txt", "incoming\n");
         fs::write(td.path().join("new.txt"), "untracked local\n").unwrap();
-        assert_eq!(ff_pull_blockers(&repo).unwrap(), vec!["new.txt".to_string()]);
+        assert_eq!(
+            ff_pull_blockers(&repo).unwrap(),
+            vec!["new.txt".to_string()]
+        );
     }
 
     #[test]
@@ -811,9 +822,13 @@ mod tests {
         )
         .unwrap();
         let mut cfg = repo.config().unwrap();
-        cfg.set_str(&format!("branch.{}.remote", branch), "origin").unwrap();
-        cfg.set_str(&format!("branch.{}.merge", branch), &format!("refs/heads/{}", branch))
+        cfg.set_str(&format!("branch.{}.remote", branch), "origin")
             .unwrap();
+        cfg.set_str(
+            &format!("branch.{}.merge", branch),
+            &format!("refs/heads/{}", branch),
+        )
+        .unwrap();
         let local = commit_file(&repo, td.path(), "f.txt", "b\n");
 
         let upstream = upstream_oid_for_branch(&repo, &branch).expect("upstream resolves");
@@ -877,6 +892,9 @@ mod tests {
         let td = TestDir::new("prim_normalize");
         let p = td.path().to_string_lossy().to_string();
         let with_slash = format!("{}/", p.trim_end_matches(['/', '\\']));
-        assert_eq!(normalize_for_compare(&p), normalize_for_compare(&with_slash));
+        assert_eq!(
+            normalize_for_compare(&p),
+            normalize_for_compare(&with_slash)
+        );
     }
 }

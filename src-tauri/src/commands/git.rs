@@ -64,7 +64,8 @@ fn line_stats_by_path(repo: &Repository) -> HashMap<String, (usize, usize)> {
 
     let mut stats: HashMap<String, (usize, usize)> = HashMap::new();
 
-    let diff = match repo.diff_tree_to_workdir_with_index(head_tree.as_ref(), Some(&mut diff_opts)) {
+    let diff = match repo.diff_tree_to_workdir_with_index(head_tree.as_ref(), Some(&mut diff_opts))
+    {
         Ok(diff) => diff,
         Err(_) => return stats,
     };
@@ -85,7 +86,10 @@ fn line_stats_by_path(repo: &Repository) -> HashMap<String, (usize, usize)> {
         // Key on both old and new path so deleted (old) and added (new) files
         // are both found by the status loop's relative path.
         let delta = patch.delta();
-        for file in [delta.new_file().path(), delta.old_file().path()].into_iter().flatten() {
+        for file in [delta.new_file().path(), delta.old_file().path()]
+            .into_iter()
+            .flatten()
+        {
             stats.insert(file.to_string_lossy().to_string(), (additions, deletions));
         }
     }
@@ -165,8 +169,7 @@ pub(crate) fn get_git_branch_status_blocking(
         .unwrap_or_default();
 
     let (mut ahead, mut behind) = (0u32, 0u32);
-    if let (Some(local), Some(up)) =
-        (local_oid, primitives::upstream_oid_for_branch(&repo, &name))
+    if let (Some(local), Some(up)) = (local_oid, primitives::upstream_oid_for_branch(&repo, &name))
     {
         if let Ok((a, b)) = primitives::ahead_behind(&repo, local, up) {
             ahead = a;
@@ -196,11 +199,9 @@ pub(crate) fn get_git_status_blocking(path: String) -> Result<Vec<GitStatus>, St
     let repo = primitives::open_from_host_path(&path).map_err(|e| e.to_string())?;
 
     let mut opts = StatusOptions::new();
-    opts.include_untracked(true)
-        .recurse_untracked_dirs(true);
+    opts.include_untracked(true).recurse_untracked_dirs(true);
 
-    let statuses = repo.statuses(Some(&mut opts))
-        .map_err(|e| e.to_string())?;
+    let statuses = repo.statuses(Some(&mut opts)).map_err(|e| e.to_string())?;
 
     let line_stats = line_stats_by_path(&repo);
 
@@ -256,11 +257,9 @@ pub(crate) fn get_git_summary_blocking(path: String) -> Result<GitSummary, Strin
     let repo = primitives::open_from_host_path(&path).map_err(|e| e.to_string())?;
 
     let mut opts = StatusOptions::new();
-    opts.include_untracked(true)
-        .recurse_untracked_dirs(true);
+    opts.include_untracked(true).recurse_untracked_dirs(true);
 
-    let statuses = repo.statuses(Some(&mut opts))
-        .map_err(|e| e.to_string())?;
+    let statuses = repo.statuses(Some(&mut opts)).map_err(|e| e.to_string())?;
 
     let mut total = 0usize;
     let mut added = 0usize;
@@ -436,8 +435,7 @@ fn git_sync_blocking(path: String) -> Result<GitSyncResult, String> {
     // `locked_fetch_origin`, the PR-spawn's `locked_fetch_pr_head`,
     // and the prune's `locked_prune_remote_tracking`. The wrap body
     // used to live inline here.
-    let outcome =
-        crate::git::sync::locked_do_sync(&path, &host_path, &remote, None);
+    let outcome = crate::git::sync::locked_do_sync(&path, &host_path, &remote, None);
 
     // Ref-freshness (issue #613 AC3): a manual Sync that pulled new commits
     // moved the mesh's base ref, so its warm pool entries are now stale.
@@ -468,9 +466,7 @@ fn git_sync_blocking(path: String) -> Result<GitSyncResult, String> {
 /// shape the frontend expects from the `git_sync` Tauri command. The
 /// four wire fields are unchanged; the messages match the prior
 /// `format!` strings where the variant maps cleanly.
-fn sync_outcome_to_git_sync_result(
-    outcome: crate::git::sync::SyncOutcome,
-) -> GitSyncResult {
+fn sync_outcome_to_git_sync_result(outcome: crate::git::sync::SyncOutcome) -> GitSyncResult {
     use crate::git::sync::SyncOutcome;
     match outcome {
         SyncOutcome::FetchedButDirty {
@@ -516,13 +512,12 @@ fn sync_outcome_to_git_sync_result(
             fetched: true,
             pulled: true,
             new_commits,
-            message: format!(
-                "Pulled {} new commit{}",
-                new_commits,
-                plural_s(new_commits)
-            ),
+            message: format!("Pulled {} new commit{}", new_commits, plural_s(new_commits)),
         },
-        SyncOutcome::FetchedButDiverged { new_commits, reason } => GitSyncResult {
+        SyncOutcome::FetchedButDiverged {
+            new_commits,
+            reason,
+        } => GitSyncResult {
             fetched: true,
             pulled: false,
             new_commits,
@@ -533,7 +528,10 @@ fn sync_outcome_to_git_sync_result(
                 reason
             ),
         },
-        SyncOutcome::PullTimedOut { new_commits, reason } => GitSyncResult {
+        SyncOutcome::PullTimedOut {
+            new_commits,
+            reason,
+        } => GitSyncResult {
             fetched: true,
             pulled: false,
             new_commits,
@@ -567,7 +565,11 @@ fn sync_outcome_to_git_sync_result(
 /// `""` for `n == 1`, `"s"` otherwise. Used four times in
 /// `sync_outcome_to_git_sync_result` for the "N new commit[s]" wording.
 fn plural_s(n: u32) -> &'static str {
-    if n == 1 { "" } else { "s" }
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
 }
 
 /// Render the ff-pull blocking paths for the Sync toast. Caps at three names
@@ -625,16 +627,14 @@ pub struct FreeResult {
 /// of ms on a large repo and must not park a Tauri tokio worker.
 #[command]
 pub async fn get_mesh_health(mesh_id: i64) -> Result<MeshHealth, String> {
-    crate::commands::run_blocking("get_mesh_health", move || {
-        get_mesh_health_blocking(mesh_id)
-    })
-    .await
+    crate::commands::run_blocking("get_mesh_health", move || get_mesh_health_blocking(mesh_id))
+        .await
 }
 
 /// Sync core for [`get_mesh_health`].
 pub(crate) fn get_mesh_health_blocking(mesh_id: i64) -> Result<MeshHealth, String> {
-    let mesh = db::get_mesh_by_id(mesh_id)
-        .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+    let mesh =
+        db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
     let host_path = to_host_path(&mesh.path);
     let repo = Repository::open(&host_path)
         .map_err(|e| format!("failed to open repo at {}: {}", host_path, e))?;
@@ -724,7 +724,10 @@ pub(crate) fn restore_mesh_to_base_blocking(
         format!("already on {}", local_base)
     };
 
-    Ok(RestoreResult { restored: moved, message })
+    Ok(RestoreResult {
+        restored: moved,
+        message,
+    })
 }
 
 /// Detach the holding worktree's HEAD at its current commit, releasing
@@ -928,7 +931,9 @@ pub(crate) fn stage_file_blocking(repo_path: &str, file_path: &str) -> Result<()
             .remove_path(rel)
             .map_err(|e| format!("failed to stage deletion of {}: {}", file_path, e))?;
     }
-    index.write().map_err(|e| format!("failed to write index: {}", e))?;
+    index
+        .write()
+        .map_err(|e| format!("failed to write index: {}", e))?;
     Ok(())
 }
 
@@ -1078,10 +1083,7 @@ fn assert_inside_repo(repo_root: &Path, file_path: &Path) -> Result<(), String> 
         .canonicalize()
         .map_err(|e| format!("repo root canonicalize: {}", e))?;
     if !canon_abs.starts_with(&canon_root) {
-        return Err(format!(
-            "path escapes repository: {}",
-            file_path.display()
-        ));
+        return Err(format!("path escapes repository: {}", file_path.display()));
     }
     Ok(())
 }
