@@ -32,6 +32,128 @@ use crate::services::transcript_reader::types::{
     MAX_TOOL_STRING,
 };
 
+/// A background task the harness finished but never delivered to the session.
+///
+/// MiniMax Code records task completion out of band: the CLI's
+/// `background_task_cadence_reminder` is injected **at the start of the next
+/// turn**, never when the task actually ends. An idle session therefore takes
+/// no turn, the reminder never appears, and the finished result is never read —
+/// the stall in issue #2105. The transcript's own reminder is therefore
+/// evidence only *after* a turn has already started, so it cannot drive the
+/// wake-up; [`BackgroundTaskStall`] pairs the ids the harness has announced
+/// with the on-disk task store, which is written the moment a task ends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BackgroundTaskStall {
+    /// Newest finished task that has not been read in this session.
+    pub task_id: String,
+    /// When the harness recorded the task's terminal state.
+    pub ended_at_ms: i64,
+    /// When the session last produced an assistant message. A turn that
+    /// started after the task ended would have consumed it.
+    pub last_assistant_at_ms: Option<i64>,
+}
+
+/// A task the session launched, as announced by a cadence reminder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemindedTask {
+    task_id: String,
+    ended_at_ms: i64,
+}
+
+/// Pull `endedAtMs` for every task the harness has announced as terminal out of
+/// a `background_task_cadence_reminder` record's `details.tasks` array.
+///
+/// `undeliveredTotal` is deliberately not trusted as a completion signal: it
+/// counts messages the harness has *not yet pushed*, so it stays at its last
+/// value while the session is idle — precisely the state we need to detect.
+fn reminded_tasks(record: &serde_json::Value) -> Vec<RemindedTask> {
+    let Some(message) = record_message(record) else {
+        return Vec::new();
+    };
+    if message
+        .as_object()
+        .and_then(|m| m.get("customType"))
+        .and_then(|v| v.as_str())
+        != Some("background_task_cadence_reminder")
+    {
+        return Vec::new();
+    }
+    let Some(details) = message
+        .as_object()
+        .and_then(|m| m.get("details"))
+        .and_then(|d| d.get("tasks"))
+        .and_then(|t| t.as_array())
+    else {
+        return Vec::new();
+    };
+    details
+        .iter()
+        .filter_map(|task| {
+            let task_id = task.get("taskId")?.as_str()?.to_string();
+            // A queued task has no `endedAtMs`: it has not finished, so it is
+            // not a stall.
+            let ended_at_ms = task.get("endedAtMs")?.as_i64()?;
+            Some(RemindedTask {
+                task_id,
+                ended_at_ms,
+            })
+        })
+        .collect()
+}
+
+/// Timestamp of the newest assistant message in the stream, if any.
+fn newest_assistant_at(lines: &str) -> Option<i64> {
+    lines
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|record| {
+            let message = record_message(&record)?;
+            if message_role(message) != Some("assistant") {
+                return None;
+            }
+            message.get("timestamp").and_then(|t| t.as_i64())
+        })
+        .max()
+}
+
+/// Pure detector: does this transcript show a finished background task the
+/// session has not consumed?
+///
+/// A task counts as stalled when the harness recorded a terminal `endedAtMs`
+/// **after** the session's last assistant message. A turn that began after the
+/// task ended would have received the reminder and could have read it, so the
+/// ordering is what separates "the agent is working on it" from "the agent
+/// will never know". Terminal silence is not evidence on its own — the
+/// comparison against a real timestamp is.
+pub(crate) fn detect_background_task_stall(lines: &str) -> Option<BackgroundTaskStall> {
+    let last_assistant_at_ms = newest_assistant_at(lines);
+    let mut stall: Option<BackgroundTaskStall> = None;
+    for line in lines.lines() {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        for task in reminded_tasks(&record) {
+            if let Some(last) = last_assistant_at_ms {
+                if last >= task.ended_at_ms {
+                    // The session has spoken since the task ended.
+                    continue;
+                }
+            }
+            let newer = stall
+                .as_ref()
+                .is_none_or(|current| task.ended_at_ms > current.ended_at_ms);
+            if newer {
+                stall = Some(BackgroundTaskStall {
+                    task_id: task.task_id,
+                    ended_at_ms: task.ended_at_ms,
+                    last_assistant_at_ms,
+                });
+            }
+        }
+    }
+    stall
+}
+
 /// Drop-in [`TranscriptAdapter`] for MiniMax Code.
 pub(crate) struct McodeAdapter;
 
@@ -61,6 +183,10 @@ impl TranscriptAdapter for McodeAdapter {
         record_message(&value).is_some_and(|message| {
             message_role(message) == Some("assistant") && !message_text(message).trim().is_empty()
         })
+    }
+
+    fn stalled_background_task(&self, lines: &str) -> Option<String> {
+        detect_background_task_stall(lines).map(|stall| stall.task_id)
     }
 }
 
@@ -292,6 +418,196 @@ pub(crate) fn parse_mcode_turns_with_text_limit(
         turns: turns.into(),
         last_assistant_message,
         saw_malformed,
+    }
+}
+
+#[cfg(test)]
+mod stall_tests {
+    use super::*;
+
+    const TASK: &str = "bg_f1045ea6-225e-46cf-bc5f-10249ffa83ca";
+
+    /// Join records into the `messages.jsonl` shape the detector reads.
+    fn stream(records: impl IntoIterator<Item = String>) -> String {
+        records.into_iter().collect::<Vec<_>>().join("\n")
+    }
+
+    fn assistant(timestamp: i64) -> String {
+        serde_json::json!({
+            "message_id": format!("msg-{timestamp}"),
+            "turn_id": "turn_1",
+            "message": {
+                "role": "assistant",
+                "timestamp": timestamp,
+                "content": [{"type": "text", "text": "working"}],
+            },
+        })
+        .to_string()
+    }
+
+    /// A real `background_task_cadence_reminder` record, reduced to the
+    /// fields the detector reads (issue #2105, run 335).
+    fn reminder(timestamp: i64, task_id: &str, ended_at_ms: i64, status: &str) -> String {
+        serde_json::json!({
+            "message_id": format!("msg-reminder-{timestamp}"),
+            "turn_id": "turn_1",
+            "message": {
+                "role": "custom",
+                "customType": "background_task_cadence_reminder",
+                "content": "<system-reminder>task done</system-reminder>",
+                "display": false,
+                "details": {
+                    "version": 1,
+                    "tasks": [{"taskId": task_id, "status": status, "endedAtMs": ended_at_ms}],
+                    "undeliveredTotal": 1,
+                    "queuedTotal": 0,
+                    "terminalTotal": 39,
+                    "cadence": {"assistantIterationsBeforeReminder": 0},
+                },
+                "timestamp": timestamp,
+            },
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn detects_task_that_finished_after_the_last_assistant_message() {
+        let lines = stream([
+            assistant(1_791_205_156_271),
+            reminder(1_791_206_756_792, TASK, 1_791_205_267_253, "failed"),
+        ]);
+
+        let stall = detect_background_task_stall(&lines).expect("stall");
+        assert_eq!(stall.task_id, TASK);
+        assert_eq!(stall.ended_at_ms, 1_791_205_267_253);
+        assert_eq!(stall.last_assistant_at_ms, Some(1_791_205_156_271));
+    }
+
+    #[test]
+    fn no_stall_when_the_session_spoke_after_the_task_finished() {
+        // The agent read the result and kept working: no nudge, no loop.
+        let lines = stream([
+            assistant(1_791_205_156_271),
+            reminder(1_791_206_756_792, TASK, 1_791_205_267_253, "failed"),
+            assistant(1_791_210_000_000),
+        ]);
+
+        assert_eq!(detect_background_task_stall(&lines), None);
+    }
+
+    #[test]
+    fn queued_task_without_an_end_time_is_not_a_stall() {
+        // A task still running carries no `endedAtMs` at all; nudging would be noise.
+        let queued = serde_json::json!({
+            "message_id": "msg-queued",
+            "turn_id": "turn_1",
+            "message": {
+                "role": "custom",
+                "customType": "background_task_cadence_reminder",
+                "details": {
+                    "version": 1,
+                    "tasks": [{"taskId": TASK, "status": "running"}],
+                    "undeliveredTotal": 1,
+                    "queuedTotal": 1,
+                },
+                "timestamp": 1_791_206_756_792i64,
+            },
+        })
+        .to_string();
+        let lines = stream([assistant(1_791_205_156_271), queued]);
+
+        assert_eq!(detect_background_task_stall(&lines), None);
+    }
+
+    #[test]
+    fn newest_finished_task_wins() {
+        let lines = stream([
+            assistant(1_791_205_156_271),
+            reminder(1_791_206_756_792, "bg_older", 1_791_205_267_253, "failed"),
+            reminder(1_791_206_756_792, TASK, 1_791_206_000_000, "succeeded"),
+        ]);
+
+        let stall = detect_background_task_stall(&lines).expect("stall");
+        assert_eq!(stall.task_id, TASK);
+        assert_eq!(stall.ended_at_ms, 1_791_206_000_000);
+    }
+
+    #[test]
+    fn a_reminder_for_a_still_running_session_is_not_a_stall() {
+        // An equal timestamp means the turn that received the reminder already
+        // produced its message, so there is nothing to wake.
+        let lines = stream([
+            assistant(1_791_205_267_253),
+            reminder(1_791_206_756_792, TASK, 1_791_205_267_253, "failed"),
+        ]);
+        assert_eq!(detect_background_task_stall(&lines), None);
+    }
+
+    #[test]
+    fn other_custom_reminders_are_ignored() {
+        let todo = serde_json::json!({
+            "message_id": "msg-todo",
+            "turn_id": "turn_1",
+            "message": {
+                "role": "custom",
+                "customType": "todo_cadence_reminder",
+                "details": {"tasks": [{"taskId": TASK, "endedAtMs": 1_791_205_267_253i64}]},
+                "timestamp": 1_791_206_756_792i64,
+            },
+        })
+        .to_string();
+        let lines = stream([assistant(1_791_205_156_271), todo]);
+        assert_eq!(detect_background_task_stall(&lines), None);
+    }
+
+    #[test]
+    fn malformed_lines_are_skipped_without_panicking() {
+        let lines = stream([
+            "not json at all".to_string(),
+            assistant(1_791_205_156_271),
+            "{ broken".to_string(),
+            reminder(1_791_206_756_792, TASK, 1_791_205_267_253, "failed"),
+        ]);
+        assert!(detect_background_task_stall(&lines).is_some());
+    }
+
+    #[test]
+    fn a_stall_with_no_assistant_message_at_all_is_reported() {
+        let lines = reminder(1_791_206_756_792, TASK, 1_791_205_267_253, "failed");
+        let stall = detect_background_task_stall(&lines).expect("stall");
+        assert_eq!(stall.last_assistant_at_ms, None);
+    }
+
+    #[test]
+    fn only_minimax_code_declares_the_idle_wake_up_gap() {
+        // The nudge is a MiniMax Code behaviour, not a Circuit-wide rule. Every
+        // other harness must keep the default "no gap", or an unrelated
+        // transcript could be read as a stall and woken.
+        let mcode_lines = stream([
+            assistant(1_791_205_156_271),
+            reminder(1_791_206_756_792, TASK, 1_791_205_267_253, "failed"),
+        ]);
+        assert_eq!(
+            McodeAdapter
+                .stalled_background_task(&mcode_lines)
+                .as_deref(),
+            Some(TASK)
+        );
+        let readers = crate::services::transcript_reader::adapter::registered();
+        assert_eq!(
+            readers.len(),
+            10,
+            "the registry gained a reader; this contract must cover it"
+        );
+        for adapter in readers {
+            let expected = (adapter.id() == "mcode").then_some(TASK);
+            assert_eq!(
+                adapter.stalled_background_task(&mcode_lines).as_deref(),
+                expected,
+                "{} must not inherit another harness's transcript rule",
+                adapter.id()
+            );
+        }
     }
 }
 

@@ -98,6 +98,18 @@ pub(crate) trait TranscriptReader: Send + Sync {
         None
     }
 
+    /// A finished background task this harness recorded but cannot deliver to
+    /// an idle session on its own (issue #2105).
+    ///
+    /// The default is `None`: a harness that delegates background work to the
+    /// session and never announces its completion has no such gap, and one that
+    /// does announce it is not stalled. Each reader owns the record shape that
+    /// carries its own evidence, so the worker never guesses a harness's
+    /// transcript format.
+    fn stalled_background_task(&self, _lines: &str) -> Option<String> {
+        None
+    }
+
     /// Verify the attention-route token gate (issue #1366 round-2 +
     /// round-3). The default accepts every callback; Grok's adapter
     /// implements the strict minted-token check.
@@ -144,6 +156,13 @@ static ADAPTERS: [&'static dyn TranscriptAdapter; 10] = [
 /// harness ids. Transcript reads never fall back to another harness.
 pub(crate) fn dispatch(harness_id: &str) -> Option<&'static dyn TranscriptAdapter> {
     ADAPTERS.iter().copied().find(|a| a.id() == harness_id)
+}
+
+/// Every registered reader. Used by contract tests that must hold for all of
+/// them, so a new harness cannot quietly skip a reader-wide rule.
+#[cfg_attr(not(test), expect(dead_code, reason = "Contract-test surface"))]
+pub(crate) fn registered() -> &'static [&'static dyn TranscriptAdapter] {
+    &ADAPTERS
 }
 
 /// Default adapter (Claude Code). Returned for any harness id without an

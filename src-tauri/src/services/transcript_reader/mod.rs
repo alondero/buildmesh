@@ -103,6 +103,26 @@ fn resolve<'a>(
     Ok((path, session_id))
 }
 
+/// Read the finished background task a session cannot learn about on its own
+/// (issue #2105), through the reader that owns the harness's record shape.
+///
+/// The wake-up probe needs the raw records, not the parsed tail: the finished
+/// background task lives in a `custom` reminder record the turn parser skips by
+/// design.
+///
+/// A transcript the CLI has not finished flushing is not evidence of a stall,
+/// so an unreadable file is "no signal" rather than a fault, and a harness
+/// whose reader reports no such gap contributes nothing.
+pub(crate) fn stalled_background_task(
+    format: TranscriptFormat,
+    session_id: Option<&str>,
+    node_path: &str,
+) -> Option<String> {
+    let (path, _) = resolve(format, session_id, node_path).ok()?;
+    let lines = std::fs::read_to_string(path).ok()?;
+    reader(format).stalled_background_task(&lines)
+}
+
 fn result(parsed: Result<Parsed, UnavailableReason>, digest: bool) -> TranscriptTail {
     let mut tail = match parsed {
         Ok(parsed) => build_tail(parsed),

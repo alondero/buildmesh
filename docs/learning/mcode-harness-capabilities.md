@@ -133,6 +133,65 @@ This flip surfaces mcode in the archived-node resume picker (`resumable =
 supports_resume && produces_readable_transcript`), hydrates the Coordinator
 Node Digest rich layer, and feeds circuit assistant reports.
 
+## Background tasks — the CLI never wakes an idle session (issue #2105)
+
+A `custom` record carries the CLI's task-completion reminder. It is not a turn,
+so the reader above skips it, but it is the only place the transcript names a
+finished background task:
+
+```json
+{"message_id": "msg-…", "turn_id": "…", "message": {
+  "role": "custom",
+  "customType": "background_task_cadence_reminder",
+  "display": false,
+  "details": {
+    "version": 1,
+    "tasks": [{"taskId": "bg_…", "status": "failed", "endedAtMs": 1791205267253}],
+    "undeliveredTotal": 1, "queuedTotal": 0, "terminalTotal": 39,
+    "cadence": {"assistantIterationsBeforeReminder": 0}
+  },
+  "timestamp": 1791216756792
+}}
+```
+
+**The gap.** The reminder is injected at the *start of the next turn*, never
+when the task ends. Measured across every reminder in recent sessions, each one
+is preceded by a `user` record — the reminder follows a wake, it never causes
+one. An idle session therefore takes no turn, receives no reminder, never reads
+the finished task, and never reports it. Run 335 stalled 3 h 14 m on exactly
+this: the task ended at `…267253`, the last assistant message was at `…156271`
+(111 s earlier), and the next record of any kind was 3 h 14 m later.
+
+`undeliveredTotal` is not a usable trigger either: it counts messages the CLI
+has *not yet pushed*, so it keeps its last value for the whole idle window —
+precisely the state that needs detecting.
+
+**The mitigation.** `readers::mcode::detect_background_task_stall` is a pure
+function over the raw transcript that reports a finished task whose `endedAtMs`
+is **newer than the last assistant message**. That ordering is what separates
+"the agent is working on it" from "the agent will never learn of it"; terminal
+silence alone is never evidence. `live_wait` calls it only for a *yielded*
+`mcode` session, so a session still producing output is never nudged.
+
+The worker turns that into `CircuitEvent::NudgeIdleSession`, which the stepper
+turns into at most one `Effect::NudgeIdleAgent` per step attempt, fenced to the
+observed turn's `(report revision, turn stamp)` — so a re-observation of the
+same turn cannot re-nudge, and a spent nudge is never replayed. Delivery reuses
+the continuation input-ownership guard and is recorded through
+`record_prompt_submission`, so the wake-up appears in `circuit_run_history` as
+an ordinary `prompt_submitted` row.
+
+Known limits, stated rather than papered over:
+
+- The nudge needs the reminder record to exist. While a session is *completely*
+  idle the CLI has not written one, so the wake fires from the first reminder
+  the session does receive — it unsticks the stall, it does not predict the
+  task's completion.
+- One wake per step attempt. A second stall inside the same attempt is left to
+  the operator rather than nudged again.
+- A borrowed source agent is never nudged: the nudge is not the user's session
+  to interrupt.
+
 ## Attention — validated against a live 0.4.12 TUI (issue #1797)
 
 mcode exposes a twelve-event hook surface. For mcode 0.4.0+ the plugin format

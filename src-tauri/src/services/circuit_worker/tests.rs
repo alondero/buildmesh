@@ -6596,6 +6596,7 @@ fn yielded_wait_after_a_working_verdict_gets_the_full_yielded_allowance() {
                 yielded: true,
                 yielded_budget_ms: HARNESS_LIFECYCLE_BUDGET_MS,
                 active_budget_ms: ACTIVE_WAIT_MS,
+                stalled_task_id: None,
             })
         });
         match wait_event(&events) {

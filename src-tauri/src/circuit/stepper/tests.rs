@@ -2585,6 +2585,150 @@ fn result_file_missing_at(
     }
 }
 
+const STALLED_TASK: &str = "bg_f1045ea6-225e-46cf-bc5f-10249ffa83ca";
+
+fn stalled_session(node_id: &str, attempt: i32, revision: &str, stamp: &str) -> CircuitEvent {
+    CircuitEvent::NudgeIdleSession {
+        node_id: node_id.into(),
+        attempt,
+        stamp: stamp.into(),
+        revision: revision.into(),
+        input_stamp: "1:0".into(),
+        task_id: STALLED_TASK.into(),
+    }
+}
+
+/// Issue #2105: an idle session with a finished background task it cannot
+/// learn about is woken exactly once, and the prompt names the task.
+#[test]
+fn a_stalled_idle_session_is_woken_once_and_never_replayed() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+
+    let first = advance(
+        &mut run,
+        &stalled_session("classify", 1, "report-1", "100:ready"),
+    );
+    assert_eq!(
+        first.effects,
+        vec![Effect::NudgeIdleAgent {
+            node_id: "classify".into(),
+            target_agent_id: 900,
+            prompt: format!(
+                "Your background task {STALLED_TASK} has finished and its result has not been reported yet. Read it with task_output and report the outcome, then continue the work already assigned to you. Do not start unrelated work."
+            ),
+        }]
+    );
+    assert_eq!(
+        run.context.get("node.classify.nudge.delivery"),
+        Some("claimed"),
+        "the wake-up is claimed before delivery, like a continuation"
+    );
+    assert_eq!(run.context.get("node.classify.nudges.1"), Some("1"));
+
+    assert!(
+        advance(
+            &mut run,
+            &stalled_session("classify", 1, "report-1", "100:ready")
+        )
+        .effects
+        .is_empty(),
+        "the same observed turn is never woken twice"
+    );
+
+    advance(
+        &mut run,
+        &CircuitEvent::NudgeDelivered {
+            node_id: "classify".into(),
+            attempt: 1,
+        },
+    );
+    assert_eq!(
+        run.context.get("node.classify.nudge.delivery"),
+        Some("delivered")
+    );
+
+    // A later, distinct turn may stall again — but the attempt's single wake-up
+    // is spent, so the operator is the escalation path rather than a nudge loop.
+    assert!(
+        advance(
+            &mut run,
+            &stalled_session("classify", 1, "report-2", "200:ready")
+        )
+        .effects
+        .is_empty(),
+        "a spent nudge is not replayed on a later turn of the same attempt"
+    );
+}
+
+/// A nudge for another attempt is ignored outright, so a stale observation
+/// cannot wake a session the current attempt already moved past.
+#[test]
+fn a_stall_observed_for_another_attempt_is_ignored() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+
+    assert!(advance(
+        &mut run,
+        &stalled_session("classify", 2, "report-1", "100:ready")
+    )
+    .effects
+    .is_empty());
+    assert_eq!(run.context.get("node.classify.nudge.delivery"), None);
+}
+
+/// An unverified wake-up leaves the step inspectable rather than silent, and is
+/// never replayed.
+#[test]
+fn an_unverifiable_wake_up_unverifies_the_step_instead_of_replaying() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    advance(
+        &mut run,
+        &stalled_session("classify", 1, "report-1", "100:ready"),
+    );
+
+    advance(
+        &mut run,
+        &CircuitEvent::NudgeUncertain {
+            node_id: "classify".into(),
+            attempt: 1,
+            error: "PTY closed".into(),
+        },
+    );
+    assert_eq!(status_of(&run, "classify"), StepStatus::Unverified);
+    assert_eq!(
+        run.context.get("node.classify.nudge.delivery"),
+        Some("uncertain")
+    );
+    assert!(
+        run.step("classify")
+            .unwrap()
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("PTY closed")),
+        "the operator is told why the wake-up could not be delivered"
+    );
+}
+
 fn delivered(node_id: &str) -> CircuitEvent {
     CircuitEvent::ContinuationDelivered {
         node_id: node_id.into(),
