@@ -212,4 +212,75 @@ mod tests {
         assert!(state.pr_url.is_none());
     }
 
+    /// The #2193 wrap-up gate: a worktree whose `src-tauri/target` is a
+    /// directory junction must verify clean, or `wrapup_reasons` sends the
+    /// agent to fix uncommitted changes that do not exist. `CLAUDE.md` points
+    /// an agent at the `node_modules` junction in a fresh worktree, and sharing
+    /// the cargo cache the same way is the natural extension.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn observe_wrapup_git_state_clean_when_target_is_a_junction() {
+        use crate::env::test_helpers::{init_repo_with_commit, junction_dir};
+        let td = crate::env::test_helpers::TestDir::new("wrapup_junction");
+        let repo = init_repo_with_commit(
+            td.path(),
+            &[("f.txt", "a\n"), ("src-tauri/.gitignore", "/target/\n")],
+        );
+        let branch = crate::git::primitives::head_branch_name(&repo).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        // Everything else the gate checks holds, so a dirty verdict is the only
+        // thing that can fail this.
+        repo.remote("origin", "https://github.com/example/repo.git")
+            .unwrap();
+        repo.reference(
+            &format!("refs/remotes/origin/{}", branch),
+            head.id(),
+            true,
+            "test",
+        )
+        .unwrap();
+        repo.find_branch(&branch, git2::BranchType::Local)
+            .unwrap()
+            .set_upstream(Some(&format!("origin/{}", branch)))
+            .unwrap();
+
+        let payload = td.sibling("payload");
+        std::fs::create_dir_all(payload.join("debug")).unwrap();
+        std::fs::write(payload.join("debug").join("build.bin"), b"x").unwrap();
+        junction_dir(&td.path().join("src-tauri").join("target"), &payload);
+
+        let mut node = wrapup_test_node();
+        node.path = td.path().to_string_lossy().into_owned();
+        node.worktree_name = None;
+        node.use_worktree = false;
+        node.worktree_path = None;
+
+        let state = observe_wrapup_git_state(&node);
+        assert!(
+            state.repo_error.is_none(),
+            "the fixture worktree must open: {:?}",
+            state.repo_error
+        );
+        assert!(
+            !state.dirty,
+            "a junctioned `target/` must not read as uncommitted changes (#2193)"
+        );
+        assert!(
+            !wrapup_reasons(&state)
+                .iter()
+                .any(|r| r.contains("uncommitted changes")),
+            "the wrap-up correction must not blame changes that do not exist: {:?}",
+            wrapup_reasons(&state)
+        );
+
+        // The gate must still catch a genuinely modified tracked file.
+        // (A plain write, not `commit_file`, which would commit the change and
+        // leave the tree clean.)
+        std::fs::write(td.path().join("f.txt"), "changed\n").unwrap();
+        assert!(
+            observe_wrapup_git_state(&node).dirty,
+            "a modified tracked file is real uncommitted work and must be reported"
+        );
+    }
+
 }

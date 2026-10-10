@@ -211,6 +211,11 @@ pub(crate) fn get_git_status_blocking(path: String) -> Result<Vec<GitStatus>, St
         if path.is_empty() {
             continue;
         }
+        // `is_ignored_entry`, not `Status::is_ignored`: the latter leaves a
+        // junctioned `src-tauri/target` listed as a changed file (#2193).
+        if primitives::is_ignored_entry(&repo, &entry) {
+            continue;
+        }
 
         let status_flag = entry.status();
         let status_str = if status_flag.is_index_new() || status_flag.is_wt_new() {
@@ -221,8 +226,6 @@ pub(crate) fn get_git_status_blocking(path: String) -> Result<Vec<GitStatus>, St
             "deleted"
         } else if status_flag.is_index_renamed() || status_flag.is_wt_renamed() {
             "renamed"
-        } else if status_flag.is_ignored() {
-            continue;
         } else {
             "untracked"
         };
@@ -266,7 +269,9 @@ pub(crate) fn get_git_summary_blocking(path: String) -> Result<GitSummary, Strin
 
     for entry in statuses.iter() {
         let status_flag = entry.status();
-        if status_flag.is_ignored() {
+        // Same shared verdict as the changed-file list above, so the summary count
+        // cannot report a different set than the rows it summarises (#2193).
+        if primitives::is_ignored_entry(&repo, &entry) {
             continue;
         }
 

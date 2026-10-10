@@ -133,6 +133,33 @@ pub(crate) mod test_helpers {
         }
     }
 
+    /// Create a Windows **directory junction** at `link` pointing at `target`
+    /// — the same `mklink /J` a developer uses to share `node_modules` or a
+    /// cargo cache into a fresh worktree (issue #2193).
+    ///
+    /// `mklink /J` rather than `CreateSymbolicLinkW`: a mount point is a
+    /// reparse point the kernel resolves without `SeCreateSymbolicLinkPrivilege`,
+    /// so the fixture does not need Developer Mode or an elevated runner.
+    /// Windows-only; callers gate their own tests with `#[cfg(target_os =
+    /// "windows")]` so no other platform compiles against a helper that cannot
+    /// make one.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn junction_dir(link: &Path, target: &Path) {
+        let output = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .expect("running mklink must succeed");
+        assert!(
+            output.status.success(),
+            "mklink /J {} -> {} failed: {}",
+            link.display(),
+            target.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     /// A spawned test child that is killed *and reaped* when it goes out of
     /// scope.
     ///
@@ -211,12 +238,13 @@ pub(crate) mod test_helpers {
     /// changes. Used as a precondition assertion by the dirty-parent tests
     /// so a silent failure to dirty the repo doesn't make the test pass
     /// for the wrong reason.
+    ///
+    /// Delegates rather than re-walking `statuses()`: a second copy of this
+    /// question is how the ignore verdict drifted from production in the
+    /// first place (#2193).
     pub(crate) fn repo_is_dirty(path: &Path) -> bool {
         let repo = git2::Repository::open(path).unwrap();
-        let mut opts = git2::StatusOptions::new();
-        opts.include_untracked(true).recurse_untracked_dirs(true);
-        let statuses = repo.statuses(Some(&mut opts)).unwrap();
-        statuses.iter().any(|entry| !entry.status().is_ignored())
+        crate::git::primitives::is_dirty(&repo).unwrap()
     }
 
     /// Add a commit on top of current HEAD with the given file content,

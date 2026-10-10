@@ -144,7 +144,7 @@ mod tests {
 
         for entry in statuses.iter() {
             let status_flag = entry.status();
-            if status_flag.is_ignored() {
+            if crate::git::primitives::is_ignored_entry(repo, &entry) {
                 continue;
             }
             total += 1;
@@ -309,6 +309,45 @@ mod tests {
 
         let (total, _, _, _) = count_status(&repo);
         assert_eq!(total, 0, "ignored files should not appear in count");
+    }
+
+    /// The #2193 sibling of the test above. libgit2's status walker reports a
+    /// Windows directory junction as an untracked *file*, so a **directory-only**
+    /// rule (`/cache/`) did not match it and the Probe panel listed it as a
+    /// changed file while `git status` reported the tree clean. Both the
+    /// changed-file list and the summary count have to use the shared verdict.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_junction_under_directory_only_rule_is_not_reported() {
+        use crate::env::test_helpers::junction_dir;
+        let _repo = TempGitRepo::new();
+        let repo = init_git_repo(_repo.path());
+        fs::write(_repo.path().join(".gitignore"), "/cache/\n").unwrap();
+        stage_file(&repo, _repo.path(), ".gitignore", "/cache/\n");
+        commit_staged(&repo, "add gitignore");
+
+        // A second TempGitRepo is a RAII-guarded directory outside the repo to
+        // stand in for the shared cache the junction points at.
+        let payload = TempGitRepo::new();
+        fs::write(payload.path().join("artifact.bin"), b"x").unwrap();
+        junction_dir(&_repo.path().join("cache"), payload.path());
+
+        let summary =
+            crate::commands::git::get_git_summary_blocking(_repo.path().to_string_lossy().into_owned())
+                .unwrap();
+        assert_eq!(
+            summary.total, 0,
+            "the junctioned cache/ must not be counted (#2193)"
+        );
+
+        let statuses = crate::commands::git::get_git_status_blocking(
+            _repo.path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        assert!(
+            statuses.is_empty(),
+            "the junctioned cache/ must not be listed as a changed file: {statuses:?}"
+        );
     }
 
     #[test]
