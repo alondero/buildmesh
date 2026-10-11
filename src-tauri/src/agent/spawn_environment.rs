@@ -7,7 +7,13 @@
 //!   (Seatbelt containment to the worktree — see `agent::sandbox`, issue #497)
 //! - macOS, sandbox not requested: direct invocation
 //! - Windows native + PowerShell shell: `powershell.exe -NoLogo -EncodedCommand <base64>`
-//!   (used by Codex so ANSI escapes propagate correctly through ConPTY)
+//!   (used by Codex so ANSI escapes propagate correctly through ConPTY). When
+//!   the node's directory is UNC and the executable is a batch shim, this
+//!   becomes `cmd.exe /d /c <temp-batch.cmd>`, where the batch `pushd`s the
+//!   quoted directory and then runs the same `-EncodedCommand` payload — cmd.exe
+//!   rejects a UNC current directory, and a batch file is the only place a
+//!   `&`-containing directory can be quoted so cmd parses it as one argument.
+//!   See [`needs_unc_pushd`] and [`mapped_launch_batch`].
 //! - Windows native + Cmd shell: `cmd.exe /c "<binary> <args>"`
 //!   (used by node-shim providers whose binary is a `.cmd` batch file)
 //! - Windows native + Direct: spawn the binary directly (rare; mainly for tests)
@@ -124,6 +130,325 @@ fn format_powershell_command(binary: &str, args: &[String]) -> String {
     format!("& {}", parts.join(" "))
 }
 
+/// True when `path` is a Windows UNC path in either separator style — the form
+/// both cmd.exe and PowerShell treat as "not a drive".
+fn is_unc_path(path: &str) -> bool {
+    path.starts_with("\\\\") || path.starts_with("//")
+}
+
+/// True when the file can only be executed by handing it to `cmd.exe`.
+fn is_batch_shim(executable: &str) -> bool {
+    matches!(
+        std::path::Path::new(executable)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("cmd" | "bat")
+    )
+}
+
+/// Whether this spawn has to establish a UNC directory through cmd's `pushd`
+/// rather than inherit one.
+///
+/// PowerShell runs a `.cmd`/`.bat` shim by delegating to `cmd.exe /c`, and
+/// cmd.exe rejects a UNC current directory: it reports that UNC paths are
+/// unsupported and silently continues in `C:\Windows`, leaving the agent with
+/// no repository, no worktree, and no transcript where Buildmesh expects one.
+/// A node whose runtime is Windows but whose directory lives in WSL is spawned
+/// with exactly such a directory, because `apply_harness_runtime` hands the
+/// spawn that directory's UNC host path.
+///
+/// A `.exe` or a bare stem is launched by PowerShell itself and never reaches
+/// cmd.exe, so it needs no mapping, and PowerShell accepts a UNC current
+/// directory. A drive-letter directory is not UNC at all, and the `.cmd`
+/// launch works there today.
+///
+/// This is deliberately a property of the *command* and not a filesystem
+/// probe. On the `WindowsInterop` arm Buildmesh runs on the Linux host, so
+/// asking whether a Windows path exists would query the wrong filesystem and
+/// silently decline — which is what an earlier revision of this fix did, and
+/// why it never fired on the route that needed it.
+///
+/// This covers the PowerShell arms only. The `Cmd` arms run their own `pushd`
+/// with the directory as a plain command-line argument and so keep the
+/// metacharacter exposure cmd brings with that — a pre-existing defect that
+/// reaches every npm-shimmed harness, not just Codex. It is recorded here
+/// rather than fixed here because that arm has its own live WSL test, and
+/// reshaping it belongs in a change that can exercise it end to end.
+fn needs_unc_pushd(executable: &str, spawn_path: &str) -> bool {
+    is_unc_path(spawn_path) && is_batch_shim(executable)
+}
+
+/// The batch file the mapped spawn runs.
+///
+/// The node directory is written **literally into the file**, quoted, rather
+/// than passed through an environment variable. That is not a stylistic
+/// choice. cmd.exe re-parses the result of `%VAR%` expansion, so a directory
+/// containing `&` splits the line even when the expansion sits inside quotes:
+///
+/// ```text
+/// pushd "%BUILDMESH_SPAWN_DIR%"     ->  ...interop R
+///                                      'D-x5RP8H]' is not recognized
+/// ```
+///
+/// Verified against a live `\\wsl.localhost\...` directory with an ampersand in
+/// its name. Quotes written into the file are real tokens to cmd's parser, so
+/// the whole path arrives as one `pushd` argument. That also removes the
+/// `WSLENV` dependency this route had, along with the silent-wrong-directory
+/// failure that came with it.
+///
+/// The Base64 payload is safe to inline: it is `A-Za-z0-9+/=` with no
+/// metacharacters.
+fn mapped_launch_batch(encoded: &str, directory: &str) -> String {
+    format!(
+        "@echo off\r\n\
+         rem The node directory is quoted here, in the file, rather than expanded\r\n\
+         rem from a variable: cmd re-parses %VAR% expansion, so an `&` in a node\r\n\
+         rem directory would split this line even inside quotes.\r\n\
+         rem Fail closed if the share cannot be mapped, so the agent reports it\r\n\
+         rem instead of quietly running somewhere else.\r\n\
+         pushd \"{}\"\r\n\
+         if errorlevel 1 exit /b 1\r\n\
+         powershell.exe -NoLogo -NoProfile -EncodedCommand {encoded}\r\n",
+        directory.replace('"', "\"\"")
+    )
+}
+
+/// The directory the one-shot batch file goes in.
+///
+/// On `WindowsInterop` Buildmesh runs on the Linux host, so
+/// `std::env::temp_dir()` is the guest's `/tmp` — a path Windows cannot open.
+/// Handing that to `cmd.exe` fails with *is not recognized as an internal or
+/// external command*. The Windows-side temp directory is the only place the
+/// file can live.
+/// Where the one-shot batch file is written, and the name `cmd.exe` is given.
+///
+/// The two differ on `WindowsInterop`. Buildmesh runs on the Linux host and
+/// writes through `/mnt/c/...`, which is the same directory as
+/// `C:\Users\...` — but `cmd.exe` is a Windows process and cannot resolve a
+/// `/mnt/c/...` path. Passing the host path is how this route hung with a
+/// Windows-format argument that Windows could not open: `cmd.exe` reported an
+/// unrecognised path and then blocked on a PTY the spawner was not reading.
+struct MappedLaunchTarget {
+    /// The filesystem Buildmesh writes the file through.
+    write_path: std::path::PathBuf,
+    /// The path handed to `cmd.exe /c`, in Windows form.
+    windows_path: String,
+}
+
+impl MappedLaunchTarget {
+    fn native() -> Self {
+        let directory = std::env::temp_dir();
+        Self {
+            windows_path: directory.to_string_lossy().into_owned(),
+            write_path: directory,
+        }
+    }
+}
+
+fn mapped_launch_directory(env_type: EnvType) -> Result<MappedLaunchTarget, String> {
+    // `is_wsl_host` is the discriminator, not just the env type. On a Windows
+    // host an interop spawn is not a real configuration, so the native shape is
+    // harmless and keeps this path testable there; on a WSL host `/tmp` is the
+    // guest's and must never be handed to cmd.exe.
+    if env_type != EnvType::WindowsInterop || !crate::env::is_wsl_host() {
+        return Ok(MappedLaunchTarget::native());
+    }
+    let home = crate::env::windows_home().ok_or_else(|| {
+        "a mapped WindowsInterop spawn needs a Windows-visible batch file, but the Windows \
+         user profile could not be resolved from the WSL host"
+            .to_string()
+    })?;
+    // Built as a Windows path, and deliberately *not* run through
+    // `windows_cli_home`: that returns the host-side spelling of a Windows
+    // path, which is correct for opening a file from Linux and wrong for
+    // telling Windows where it is.
+    let windows_dir = format!(
+        "{}\\{}",
+        home.trim_end_matches('\\'),
+        "AppData\\Local\\Temp"
+    );
+    let write_path = std::path::PathBuf::from(crate::env::to_host_path(&windows_dir));
+    Ok(MappedLaunchTarget {
+        windows_path: windows_dir,
+        write_path,
+    })
+}
+
+/// Characters cmd.exe treats as something other than path text when they appear
+/// on its command line.
+///
+/// `%` is here for a different reason than the rest. `pushd "%VAR%"` is safe
+/// *inside a batch file* because the quotes come from the script, but this path
+/// is passed as `cmd.exe /c <path>` — command text, which cmd expands before it
+/// runs. A temp directory containing a segment like `%USERNAME%` is therefore
+/// substituted before the script is even opened, and the spawn fails or reaches
+/// the wrong file. `!` is included for the same reason: delayed expansion is off
+/// by default, but it is a policy setting rather than a guarantee.
+fn has_cmd_metacharacter(path: &str) -> bool {
+    path.chars().any(|c| "&|<>()^\"%!".contains(c))
+}
+
+/// Delete batch files abandoned by an earlier run, once per process.
+///
+/// The file cannot be deleted by the batch itself: cmd.exe reads a batch file
+/// incrementally, so `del "%~f0"` removes it and the *next* read fails with
+/// *The batch file cannot be found*. Nor can the child clean up after itself.
+/// So the leftovers are swept instead, by age — long enough that no live
+/// agent's script is a candidate, and a locked file simply fails to delete.
+fn sweep_stale_mapped_batches(directory: &std::path::Path) {
+    static SWEPT: std::sync::Once = std::sync::Once::new();
+    SWEPT.call_once(|| {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return;
+        };
+        let cutoff =
+            std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(24 * 60 * 60));
+        let Some(cutoff) = cutoff else { return };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with(MAPPED_BATCH_PREFIX) || !name.ends_with(".cmd") {
+                continue;
+            }
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            let Ok(modified) = metadata.modified() else {
+                continue;
+            };
+            if modified < cutoff {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    });
+}
+
+const MAPPED_BATCH_PREFIX: &str = "buildmesh-mapped-spawn-";
+
+/// Write the one-shot batch file.
+///
+/// The name carries a random suffix from `tempfile`: a pid-and-counter name
+/// restarts its counter after a process restart, so the same pid could
+/// overwrite a file a still-running `cmd.exe` holds open.
+fn write_mapped_launch_batch(
+    target: &MappedLaunchTarget,
+    contents: &str,
+) -> Result<String, String> {
+    sweep_stale_mapped_batches(&target.write_path);
+    let mut file = tempfile::Builder::new()
+        .prefix(MAPPED_BATCH_PREFIX)
+        .suffix(".cmd")
+        .tempfile_in(&target.write_path)
+        .map_err(|error| {
+            format!(
+                "creating the mapped spawn script in {}: {error}",
+                target.write_path.display()
+            )
+        })?;
+    std::io::Write::write_all(&mut file, contents.as_bytes()).map_err(|error| {
+        format!(
+            "writing the mapped spawn script in {}: {error}",
+            target.write_path.display()
+        )
+    })?;
+    let (_handle, path) = file.keep().map_err(|error| {
+        format!(
+            "releasing the mapped spawn script in {}: {error}",
+            target.write_path.display()
+        )
+    })?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| "the mapped spawn script has no file name".to_string())?;
+    let windows_path = format!("{}\\{}", target.windows_path, name.to_string_lossy());
+    if has_cmd_metacharacter(&windows_path) {
+        // Unlike the node directory, this path cannot travel in an environment
+        // variable: it is what tells cmd.exe which script to run. A Windows
+        // account name containing `&` would otherwise split the command line
+        // and execute the tail, so refuse rather than mis-spawn.
+        return Err(format!(
+            "the temp directory for a mapped spawn contains a character cmd.exe treats as a \
+             command operator: {windows_path}"
+        ));
+    }
+    Ok(windows_path)
+}
+
+/// Build the Windows-native invocation for a PowerShell-wrapped spawn.
+///
+/// Normally that is `powershell.exe -EncodedCommand <script>`. When `mapped`
+/// carries a directory, cmd's `pushd` establishes it first and PowerShell runs
+/// inside the drive it mapped: cmd.exe can only be given a drive-letter current
+/// directory, so cmd is the shell that has to do the mapping. That mapping runs
+/// from [`mapped_launch_batch`] so the directory never appears on a command
+/// line. The agent's argv stays inside the Base64 payload, so none of it
+/// crosses cmd's tokenizer — the property `format_powershell_command` exists
+/// to preserve.
+///
+/// The batch file is swept by age rather than deleted when the child exits:
+/// cmd.exe reads a batch file incrementally, so neither the batch's own
+/// `del "%~f0"` nor an early delete works — both leave cmd unable to read the
+/// next line. See [`sweep_stale_mapped_batches`].
+fn powershell_spawn(
+    env_type: EnvType,
+    script: &str,
+    mapped: Option<&str>,
+) -> Result<CommandBuilder, String> {
+    let encoded = encode_for_powershell(script);
+    // -NoProfile skips loading the user's PowerShell profile, which can add
+    // hundreds of ms (modules, prompt frameworks) to *every* agent spawn. This
+    // shell only needs to relay the agent CLI's ANSI output through ConPTY — it
+    // never touches profile state, and the agent binary is already resolved to
+    // an absolute path.
+    let Some(directory) = mapped else {
+        tracing::info!("spawn_environment: building powershell.exe for the spawn script");
+        let mut c = CommandBuilder::new("powershell.exe");
+        c.args(["-NoLogo", "-NoProfile", "-EncodedCommand", &encoded]);
+        return Ok(c);
+    };
+    tracing::info!("spawn_environment: mapping the UNC spawn directory through a cmd pushd script");
+    let launch = mapped_launch_directory(env_type)?;
+    let batch = write_mapped_launch_batch(&launch, &mapped_launch_batch(&encoded, directory))?;
+    let mut c = CommandBuilder::new("cmd.exe");
+    c.args(["/d", "/c", &batch]);
+    Ok(c)
+}
+
+/// The single decision of how a Windows-side spawn establishes its working
+/// directory, consumed by all three sites that need to agree on it: the
+/// interop branch that builds the script, the native `PowerShell` arm that
+/// builds the command, and the gate that decides whether the process inherits a
+/// working directory at all.
+///
+/// They have to agree. A mapped spawn that still receives the UNC makes cmd.exe
+/// print *Defaulting to Windows directory* and continue, so the agent looks
+/// broken while quietly working; an unmapped spawn that drops the directory
+/// falls back to `USERPROFILE` and opens in the home folder instead of the
+/// node's. `WindowsShell::Direct` is the case that proves it — it establishes
+/// no location of its own, so it must both map and keep the directory.
+///
+/// Only the PowerShell arms map. The `Cmd` arms run `pushd` inside their own
+/// command already and keep the working directory they have always had; see
+/// the note in [`needs_unc_pushd`] about why that arm still hands cmd.exe a
+/// UNC path.
+fn maps_directory_with_pushd(
+    env_type: EnvType,
+    windows_shell: WindowsShell,
+    executable: &str,
+    spawn_path: &str,
+) -> bool {
+    match env_type {
+        // Built by `wsl.exe`; the agent runs in the guest, where a Windows
+        // drive mapping would mean nothing.
+        EnvType::Wsl => false,
+        EnvType::Windows | EnvType::WindowsInterop => {
+            windows_shell == WindowsShell::PowerShell && needs_unc_pushd(executable, spawn_path)
+        }
+    }
+}
+
 /// Pipe-based background tasks still need the adapter's Windows shell for npm shims.
 pub(crate) fn background_command(
     recipe: &SpawnRecipe,
@@ -184,8 +509,13 @@ pub fn wrap(
         .base_args
         .extend(std::mem::take(&mut recipe.trailing_args));
     let executable = executable_override.unwrap_or(recipe.binary);
+    // Captured before the arms below move `base_args` out of the recipe.
+    let windows_shell = recipe.windows_shell;
+    // One decision, read by the interop script, the native arm, and the
+    // working-directory gate below.
+    let mapped = maps_directory_with_pushd(env_type, windows_shell, executable, spawn_path);
     let mut cmd = if env_type == EnvType::WindowsInterop {
-        let script = if recipe.windows_shell == WindowsShell::Cmd {
+        let script = if windows_shell == WindowsShell::Cmd {
             let mut args = vec![
                 "/d".into(),
                 "/c".into(),
@@ -196,6 +526,11 @@ pub fn wrap(
             ];
             args.extend(recipe.base_args.clone());
             format_powershell_command("cmd.exe", &args)
+        } else if mapped {
+            // `pushd` already established the directory. Re-issuing
+            // `Set-Location` to the UNC form would hand the cmd.exe that runs
+            // the shim the very directory cmd refuses.
+            format_powershell_command(executable, &recipe.base_args)
         } else {
             format!(
                 "Set-Location -LiteralPath {}; {}",
@@ -203,13 +538,11 @@ pub fn wrap(
                 format_powershell_command(executable, &recipe.base_args)
             )
         };
-        let mut command = CommandBuilder::new("powershell.exe");
-        command.args([
-            "-NoLogo",
-            "-NoProfile",
-            "-EncodedCommand",
-            &encode_for_powershell(&format!("{script}; exit $LASTEXITCODE")),
-        ]);
+        let mut command = powershell_spawn(
+            env_type,
+            &format!("{script}; exit $LASTEXITCODE"),
+            mapped.then_some(spawn_path),
+        )?;
         if let Ok(distro) = std::env::var("WSL_DISTRO_NAME") {
             command.env("BUILDMESH_WSL_HOST", distro);
         }
@@ -300,16 +633,7 @@ pub fn wrap(
                 // backticks) would otherwise be parsed as separate PowerShell
                 // statements after newline boundaries.
                 let cmd_str = format_powershell_command(executable, &recipe.base_args);
-                let encoded = encode_for_powershell(&cmd_str);
-                let mut c = CommandBuilder::new("powershell.exe");
-                // -NoProfile skips loading the user's PowerShell profile, which
-                // can add hundreds of ms (modules, prompt frameworks) to *every*
-                // agent spawn. This shell only needs to relay the agent CLI's
-                // ANSI output through ConPTY — it never touches profile state,
-                // and the agent binary is resolved from the process
-                // environment's PATH, not the profile.
-                c.args(["-NoLogo", "-NoProfile", "-EncodedCommand", &encoded]);
-                c
+                powershell_spawn(env_type, &cmd_str, mapped.then_some(spawn_path))?
             }
             WindowsShell::Cmd => {
                 tracing::info!(
@@ -317,7 +641,7 @@ pub fn wrap(
                     executable
                 );
                 let mut c = CommandBuilder::new("cmd.exe");
-                if spawn_path.starts_with("\\\\") || spawn_path.starts_with("//") {
+                if is_unc_path(spawn_path) {
                     // cmd cannot use a UNC current directory. Its own pushd
                     // maps the share for the lifetime of this shell.
                     c.args(["/d", "/c", "pushd", spawn_path, "&&", executable]);
@@ -339,10 +663,23 @@ pub fn wrap(
         })
     }?;
 
-    if (cfg!(windows) && env_type == EnvType::Wsl) || env_type == EnvType::WindowsInterop {
-        cmd.cwd(crate::env::to_host_path(spawn_path));
-    } else {
-        cmd.cwd(spawn_path);
+    // A mapped spawn hands cmd.exe the very directory cmd refuses, which makes
+    // it print "UNC paths are not supported. Defaulting to Windows directory."
+    // and continue in `C:\Windows` — so the agent would look broken while
+    // quietly working. It must not also receive it as a current directory.
+    //
+    // Every other spawn keeps the working directory it has always had, which
+    // is not optional for several arms: `Direct` never establishes a
+    // location, and a PowerShell spawn of a native executable or bare stem
+    // neither `pushd`s nor `Set-Location`s. Suppressing the cwd for all of
+    // them would make portable-pty fall back to `USERPROFILE` and open those
+    // agents in the home folder.
+    if !maps_directory_with_pushd(env_type, windows_shell, executable, spawn_path) {
+        if (cfg!(windows) && env_type == EnvType::Wsl) || env_type == EnvType::WindowsInterop {
+            cmd.cwd(crate::env::to_host_path(spawn_path));
+        } else {
+            cmd.cwd(spawn_path);
+        }
     }
     if crate::env::is_wsl_host() && env_type != EnvType::WindowsInterop {
         if let Some(path) = crate::agent::detection::native_wsl_path() {
@@ -808,6 +1145,838 @@ mod tests {
                 .trim(),
             "native-in-guest"
         );
+    }
+
+    /// The same Windows-runtime-in-a-WSL-directory node as
+    /// `live_wsl_directory_runs_windows_cmd_harness`, but on the
+    /// `WindowsShell::PowerShell` arm Codex uses. PowerShell runs the `.cmd`
+    /// shim by delegating to cmd.exe, which rejects the UNC directory and
+    /// starts the agent in `C:\Windows`; the fix maps the share with `pushd`
+    /// first, so the probe must land in the node's directory.
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "requires an installed default WSL distribution"]
+    fn live_wsl_directory_runs_windows_powershell_harness_in_the_node_directory() {
+        let home = crate::env::wsl_home().unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix("buildmesh-native-ps-")
+            .tempdir_in(crate::env::to_host_path(&home.to_string_lossy()))
+            .unwrap();
+        let npm_dir = tempfile::tempdir().unwrap();
+        let cmd_shim = npm_dir.path().join("probe.cmd");
+        std::fs::write(
+            &cmd_shim,
+            "@echo off\r\necho shim-ran-in-node-dir> probe.txt\r\n",
+        )
+        .unwrap();
+        let mut resolved = crate::env::resolve_raw_path(directory.path().to_str().unwrap());
+        crate::env::apply_harness_runtime(&mut resolved, crate::models::EnvType::Windows);
+        let recipe = crate::agent::provider::SpawnRecipe {
+            binary: "probe",
+            base_args: vec![],
+            trailing_args: vec![],
+            windows_shell: crate::agent::provider::WindowsShell::PowerShell,
+        };
+        let command = super::wrap(
+            recipe,
+            resolved.env_type,
+            None,
+            cmd_shim.to_str(),
+            &resolved.spawn_path,
+            8125,
+            false,
+        )
+        .unwrap();
+        let pair = crate::agent::spawn::open_pty_pair(24, 80).unwrap();
+        let mut child = crate::agent::spawn::spawn_child(&pair, command).unwrap();
+        assert!(child.wait().unwrap().success());
+        // Existence first: a `read_to_string().unwrap()` here would report
+        // NotFound, which is exactly the symptom and hides the cause.
+        let probe = directory.path().join("probe.txt");
+        assert!(
+            probe.is_file(),
+            "the .cmd shim never wrote into the node directory at {} — cmd.exe rejected the \
+             UNC working directory and ran in its own default instead",
+            probe.display()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&probe).unwrap().trim(),
+            "shim-ran-in-node-dir"
+        );
+    }
+
+    /// The command `wrap` built, so a test can assert on the working directory as
+    /// well as the argv. `CommandBuilder::get_cwd` is the only place the
+    /// decision is observable — a mapped spawn leaves it unset on purpose.
+    fn wrap_command(
+        executable: &str,
+        spawn_path: &str,
+        env_type: EnvType,
+        windows_shell: WindowsShell,
+    ) -> portable_pty::CommandBuilder {
+        let recipe = SpawnRecipe {
+            binary: "codex",
+            base_args: vec!["--sandbox".into(), "danger-full-access".into()],
+            trailing_args: vec![],
+            windows_shell,
+        };
+        super::wrap(
+            recipe,
+            env_type,
+            None,
+            Some(executable),
+            spawn_path,
+            8126,
+            false,
+        )
+        .unwrap()
+    }
+
+    /// The argv `wrap` built, so a test can assert on the chosen shell as well
+    /// as on the decoded `-EncodedCommand` payload.
+    fn wrap_argv(
+        executable: &str,
+        spawn_path: &str,
+        env_type: EnvType,
+        windows_shell: WindowsShell,
+    ) -> Vec<String> {
+        wrap_command(executable, spawn_path, env_type, windows_shell)
+            .get_argv()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The whole batch file a mapped command runs.
+    fn batch_file(command: &portable_pty::CommandBuilder) -> String {
+        let path =
+            mapped_batch_path(command).expect("the mapped arm passes a batch file to cmd.exe");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("reading the mapped batch {}: {error}", path.display()))
+    }
+
+    /// The decoded PowerShell script, wherever in the command it ended up: the
+    /// plain arm carries it as an argument, the mapped arm buries it in a batch
+    /// file that argv never shows.
+    fn encoded_script(command: &portable_pty::CommandBuilder) -> String {
+        let argv: Vec<String> = command
+            .get_argv()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        if let Some(index) = argv.iter().position(|arg| arg == "-EncodedCommand") {
+            return decode_ps(&argv[index + 1]);
+        }
+        // Mapped arm: cmd.exe runs a batch file, so the payload is on disk —
+        // at the host spelling of the Windows path in the argv.
+        let batch =
+            mapped_batch_path(command).expect("the mapped arm passes a batch file to cmd.exe");
+        let contents = std::fs::read_to_string(&batch)
+            .unwrap_or_else(|error| panic!("reading the mapped batch {batch:?}: {error}"));
+        let payload = contents
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line
+                    .split_ascii_whitespace()
+                    .skip_while(|f| *f != "-EncodedCommand");
+                fields.next().map(|_| fields.next())
+            })
+            .flatten()
+            .next()
+            .unwrap_or_else(|| panic!("no -EncodedCommand payload in {contents}"));
+        decode_ps(payload)
+    }
+
+    /// Assert the spawn maps the UNC directory through cmd's ``pushd`` without
+    /// ever putting the directory on a command line.
+    ///
+    /// The absence assertions are the load-bearing ones. portable-pty quotes an
+    /// argument only when it contains whitespace or a quote, so ``&``, ``|``,
+    /// ``<``, ``>``, ``^``, ``(``, ``)`` and ``%`` in a node's directory reach
+    /// cmd.exe bare, where cmd treats them as operators — a node in ``R&D``
+    /// would run whatever followed the ampersand. Quoting inside the argument
+    /// is not available either: portable-pty escapes a ``"`` inside an
+    /// argument, so a pre-quoted path arrives as ``"\"<dir>\""`` and ``pushd``
+    /// rejects the line outright. The directory therefore travels as an
+    /// environment variable, and the only thing on the command line is the
+    /// batch file that expands it.
+    fn assert_maps_through_pushd(
+        command: &portable_pty::CommandBuilder,
+        spawn_path: &str,
+        script: &str,
+    ) {
+        let argv: Vec<String> = command
+            .get_argv()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            argv.first().map(String::as_str),
+            Some("cmd.exe"),
+            "a batch shim in a UNC directory has to be reached through cmd.exe, because \
+             PowerShell delegates to it and cmd.exe is what rejects the directory; got: {argv:?}"
+        );
+        assert!(
+            !argv.iter().any(|arg| arg.contains(spawn_path)),
+            "the node directory must not appear on the command line at all: cmd parses \
+             & | < > ^ ( ) % in an argument as operators once portable-pty leaves it \
+             unquoted. It belongs quoted inside the batch file; got: {argv:?}"
+        );
+        assert!(
+            batch_file(command).contains(&format!("pushd \"{spawn_path}\"")),
+            "the batch must pushd the node directory as one quoted argument, which is the \
+             only form cmd parses without splitting on a metacharacter; got: {}",
+            batch_file(command)
+        );
+        assert!(
+            !script.contains("Set-Location"),
+            "once pushd has mapped the share, re-setting the location to the UNC form would \
+             hand the inner cmd.exe the directory it rejects; got: {script}"
+        );
+    }
+    /// Actually runs the mapped form: cmd.exe `pushd`s the directory and the
+    /// PowerShell inside it writes a probe.
+    ///
+    /// This is the test that catches a malformed argument, and it is the one
+    /// the earlier revision was missing — `get_argv()` is the serialiser's
+    /// *input*, so an argv assertion cannot see quoting applied afterwards. A
+    /// directory with a space is used deliberately, because that is the case
+    /// that tempts a fix into pre-quoting the path.
+    ///
+    /// The directory is local, so the test needs neither WSL nor a share and
+    /// runs on any Windows machine. `pushd` treats a local path and a UNC one
+    /// the same way, which is the whole of the difference that matters here.
+    ///
+    /// It runs through `spawn_child`, the production spawn, rather than
+    /// re-serialising the argv through `std::process::Command`. That re-serialisation
+    /// tests an equivalent quoting algorithm, not the one that actually runs:
+    /// portable-pty has its own. Reintroducing the pre-quoted `pushd` argument
+    /// fails this test with cmd's own error.
+    #[test]
+    #[cfg(windows)]
+    fn mapped_powershell_spawn_runs_the_script_in_the_mapped_directory() {
+        // A space, which portable-pty quotes on its own.
+        let directory = tempfile::Builder::new()
+            .prefix("bm mapped pushd ")
+            .tempdir()
+            .unwrap();
+        let script = "[IO.File]::WriteAllText((Join-Path ($PWD).Path 'probe.txt'), 'mapped')";
+        let command = super::powershell_spawn(
+            EnvType::Windows,
+            script,
+            Some(directory.path().to_str().unwrap()),
+        )
+        .expect("the mapped spawn should be buildable");
+        run_and_expect_probe(&command, &directory.path().join("probe.txt"));
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("probe.txt")).unwrap(),
+            "mapped"
+        );
+    }
+
+    /// The same run with a directory name carrying `&` and **no** space.
+    ///
+    /// The space is what makes this matter: portable-pty quotes an argument
+    /// that contains whitespace, so a round-3 test whose directory had one
+    /// would have passed even with the directory on the command line. `&` with
+    /// no whitespace is the case cmd splits on, and the one the node's real
+    /// directory decides.
+    #[test]
+    #[cfg(windows)]
+    fn mapped_powershell_spawn_survives_shell_metacharacters_in_the_directory() {
+        // `&` is legal in a Windows directory name and is the character cmd
+        // splits on. (`|` and `>` are not legal at all, so they cannot be
+        // tested this way — which is a small comfort: a node's real directory
+        // cannot contain them either.)
+        let directory = tempfile::Builder::new()
+            .prefix("bm&R&D-")
+            .tempdir()
+            .unwrap();
+        assert!(
+            !directory.path().to_string_lossy().contains(' '),
+            "a space here would let portable-pty quote the argument and hide the defect \
+             this test exists to catch"
+        );
+        let script = "[IO.File]::WriteAllText((Join-Path ($PWD).Path 'probe.txt'), 'mapped')";
+        let command = super::powershell_spawn(
+            EnvType::Windows,
+            script,
+            Some(directory.path().to_str().unwrap()),
+        )
+        .expect("the mapped spawn should be buildable");
+        run_and_expect_probe(&command, &directory.path().join("probe.txt"));
+    }
+
+    /// The batch must fail closed when the share cannot be mapped.
+    ///
+    /// The alternative is the failure this guard exists for: the agent starts in
+    /// whatever directory cmd fell back to and reports success, so the node
+    /// looks launched while silently working somewhere else. The host is on a
+    /// reserved `.invalid` TLD and resolves to NXDOMAIN, so `pushd` fails
+    /// immediately instead of waiting on a real network share.
+    #[test]
+    #[cfg(windows)]
+    fn mapped_spawn_of_an_unmappable_directory_fails_closed() {
+        let unmappable = ["\\\\", "nope.invalid", "share", "directory"].join("\\");
+        let command = super::powershell_spawn(EnvType::Windows, "exit 0", Some(&unmappable))
+            .expect("the mapped spawn should be buildable");
+        let batch = mapped_batch_path(&command);
+        let pair = crate::agent::spawn::open_pty_pair(24, 80).unwrap();
+        let mut child = crate::agent::spawn::spawn_child(&pair, command).unwrap();
+        let success = child.wait().unwrap().success();
+        if let Some(batch) = batch {
+            let _ = std::fs::remove_file(batch);
+        }
+        assert!(
+            !success,
+            "a directory cmd cannot pushd must fail the spawn rather than start the agent \
+             somewhere else and report success"
+        );
+    }
+
+    /// The same runtime check for the interop route, through `wrap` rather than
+    /// the builder, so the `Set-Location`/`exit` wrapper is exercised too. It
+    /// needs no WSL: a drive-letter directory is not mapped, so the interop arm
+    /// takes its normal path and the agent still has to land in the node's
+    /// directory.
+    #[test]
+    #[cfg(windows)]
+    fn interop_drive_letter_spawn_runs_in_the_node_directory() {
+        let directory = tempfile::Builder::new()
+            .prefix("bm R&D interop ")
+            .tempdir()
+            .unwrap();
+        let shim = directory.path().join("probe.cmd");
+        std::fs::write(&shim, "@echo off\r\necho shim-ran> probe.txt\r\n").unwrap();
+        let command = wrap_command(
+            shim.to_str().unwrap(),
+            directory.path().to_str().unwrap(),
+            EnvType::WindowsInterop,
+            WindowsShell::PowerShell,
+        );
+        run_and_expect_probe(&command, &directory.path().join("probe.txt"));
+    }
+
+    /// Spawn `command` through the production PTY path and assert it wrote the
+    /// probe where it was supposed to be, then remove the batch file the child
+    /// could not remove for itself.
+    #[cfg(windows)]
+    fn run_and_expect_probe(command: &portable_pty::CommandBuilder, probe: &std::path::Path) {
+        let batch = mapped_batch_path(command);
+        let pair = crate::agent::spawn::open_pty_pair(24, 80).unwrap();
+        let mut child = crate::agent::spawn::spawn_child(&pair, command.clone()).unwrap();
+        let status = child.wait().unwrap().success();
+        // The batch cannot delete itself — cmd reads it incrementally, so a
+        // `del "%~f0"` leaves cmd unable to read the next line — and in
+        // production the file is swept by age instead. A test knows its child
+        // has exited, so it can clean up directly rather than leaving 28 files
+        // behind per run.
+        if let Some(batch) = batch {
+            let _ = std::fs::remove_file(batch);
+        }
+        assert!(
+            status,
+            "the mapped spawn exited non-zero, so pushd or the agent failed"
+        );
+        assert!(
+            probe.is_file(),
+            "no probe at {}. The node directory never took effect: a directory name \
+             containing & is a command separator to cmd.exe unless the mapping script \
+             quotes it, so this is the metacharacter defect.",
+            probe.display()
+        );
+    }
+
+    /// The batch file a mapped command runs, as a path **this host** can open.
+    ///
+    /// The argv entry is a Windows path — it has to be, since it is what
+    /// `cmd.exe` is told — but a Linux host opens the same file through its
+    /// host spelling. Converting is not belt-and-braces: reading the Windows
+    /// spelling directly is exactly what broke these tests on Linux CI.
+    ///
+    /// Not gated on Windows: this is path inspection with no platform API, and
+    /// the structural tests that call it run on every platform.
+    fn mapped_batch_path(command: &portable_pty::CommandBuilder) -> Option<std::path::PathBuf> {
+        let windows = command.get_argv().last()?;
+        let host = std::path::PathBuf::from(crate::env::to_host_path(&windows.to_string_lossy()));
+        let is_batch = host.file_name().is_some_and(|name| {
+            name.to_string_lossy()
+                .starts_with(super::MAPPED_BATCH_PREFIX)
+        });
+        is_batch.then_some(host)
+    }
+
+    /// Remove a batch file a test created but never ran. The child cannot clean
+    /// up after itself and production reclaims these by age, so a test that only
+    /// inspects the command would otherwise leave one behind per run.
+    fn remove_mapped_batch(command: &portable_pty::CommandBuilder) {
+        if let Some(batch) = mapped_batch_path(command) {
+            let _ = std::fs::remove_file(batch);
+        }
+    }
+
+    /// The mapped interop route end to end: Buildmesh on the Linux host, a
+    /// Windows-side batch shim, and a node directory reached through the WSL
+    /// boundary.
+    ///
+    /// This is the route the whole change exists for and the one no hermetic
+    /// test can cover. Three things can only go wrong here, and all three did:
+    /// the batch file must be written somewhere Windows can open it (the Linux
+    /// `std::env::temp_dir()` is the guest's `/tmp`), `BUILDMESH_SPAWN_DIR` must
+    /// cross into Windows via WSLENV, and an unset variable must fail the batch
+    /// rather than `pushd ""` silently. A hermetic test on a Windows host runs
+    /// the interop *code* with a Windows filesystem behind it, which is why the
+    /// round-4 interop test passed while this route was broken.
+    #[test]
+    #[cfg(target_os = "linux")]
+    #[ignore = "requires WSL with Windows interop enabled"]
+    fn live_wsl_mapped_interop_spawn_runs_in_the_node_directory() {
+        assert!(crate::env::is_wsl_host());
+        // The Windows user profile is what makes this test possible at all: the
+        // batch file has to land somewhere Windows can open. A bare `unwrap`
+        // here would report only "called Option::unwrap() on a None value", so
+        // name the real cause — `windows_home` runs PowerShell through interop
+        // under a 10s timeout, and a cold WSL start can miss it.
+        let windows_temp =
+            crate::env::windows_cli_home("AppData/Local/Temp").unwrap_or_else(|| {
+                panic!(
+                    "the Windows user profile did not resolve from WSL, so no Windows-visible \
+                 batch file can be written. PowerShell interop either failed or missed its \
+                 10s timeout; a warm start usually resolves this."
+                )
+            });
+        let npm_dir = tempfile::tempdir_in(&windows_temp).unwrap();
+        let shim = npm_dir.path().join("probe.cmd");
+        std::fs::write(&shim, "@echo off\r\necho shim-ran> probe.txt\r\n").unwrap();
+        // PowerShell is a Windows process, so it needs the *Windows* spelling
+        // of the shim. `windows_cli_home` returns the host spelling — correct
+        // for writing the file, wrong for telling Windows where it is — which
+        // is the same trap the batch file had.
+        let shim_windows = crate::env::windows_path_from_wsl(shim.to_str().unwrap());
+        // A WSL-side directory whose Windows form is UNC, with an `&` in the
+        // name so a directory that reached cmd.exe on the command line would be
+        // split rather than mapped.
+        let directory = tempfile::Builder::new()
+            .prefix("buildmesh mapped interop R&D-")
+            .tempdir()
+            .unwrap();
+        let spawn_path = crate::env::windows_path_from_wsl(directory.path().to_str().unwrap());
+        let recipe = SpawnRecipe {
+            binary: "probe",
+            base_args: vec![],
+            trailing_args: vec![],
+            windows_shell: WindowsShell::PowerShell,
+        };
+        let mut command = super::wrap(
+            recipe,
+            EnvType::WindowsInterop,
+            None,
+            Some(&shim_windows),
+            &spawn_path,
+            8127,
+            false,
+        )
+        .expect("an unsandboxed command always assembles");
+        apply_wsl_env(&mut command, EnvType::WindowsInterop, &[], &[]);
+        // The batch file carries the directory itself, quoted, so this route
+        // needs no WSLENV entry for it and cannot be broken by a forwarding
+        // regression. Assert the batch is where cmd.exe can actually open it:
+        // a Windows path on the command line, even though Buildmesh wrote the
+        // file through the host spelling.
+        let batch = command
+            .get_argv()
+            .last()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .expect("the mapped spawn passes a batch file to cmd.exe");
+        assert!(
+            batch.starts_with(r"C:\") || batch.contains(":\\"),
+            "cmd.exe must be given a Windows path, not the host spelling; got: {batch}"
+        );
+        assert!(
+            std::path::Path::new(&crate::env::to_host_path(&batch)).exists(),
+            "the batch file was written through the host spelling, which is the same directory; \
+             it should be openable from here: {batch}"
+        );
+        let script = std::fs::read_to_string(crate::env::to_host_path(&batch)).unwrap();
+        assert!(
+            script.contains(&format!("pushd \"{spawn_path}\"")),
+            "the batch must pushd the node directory quoted, which is the only form cmd parses \
+             without splitting on a metacharacter; got: {script}"
+        );
+        let pair = crate::agent::spawn::open_pty_pair(24, 80).unwrap();
+        // Stands in for xterm.js: the only thing that answers the child's
+        // cursor-position query. `take_writer` may be called once per master.
+        let mut console = pair
+            .master
+            .take_writer()
+            .expect("a PTY master hands out one writer");
+        let mut master = pair.master.try_clone_reader().unwrap();
+        let mut child = crate::agent::spawn::spawn_child(&pair, command).unwrap();
+        // Drain the PTY. Without this the console output is discarded, and a
+        // failure inside the batch — `pushd` refusing a share, `powershell.exe`
+        // not resolving — is invisible: all the test can report is that the
+        // probe never appeared.
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let sink = std::sync::Arc::clone(&captured);
+        let reader = std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = master.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                if let Ok(mut text) = sink.lock() {
+                    text.push_str(&String::from_utf8_lossy(&buf[..n]));
+                }
+            }
+        });
+        // Poll for the probe rather than waiting on the child. cmd.exe holds the
+        // console open for the life of an interactive agent — that is normal
+        // for a node, not a failure — so `wait()` would never return here even
+        // on a completely successful spawn. What matters is whether the shim
+        // ran *in the node's directory*, which is what the probe records.
+        //
+        // Answer the cursor-position query while polling. cmd.exe opens with
+        // `ESC[6n` ("Device Status Report": where is your cursor?) and blocks
+        // until a terminal replies. In the app that reply comes from xterm.js
+        // in the frontend; a bare PTY has no terminal behind it and so nobody
+        // answers, which is the whole of this test's hang. Answering it here is
+        // emulating the frontend, not patching the spawn.
+        const CURSOR_REPLY: &[u8] = b"\x1b[1;1R";
+        use std::io::Write as _;
+        // Reply once. The captured text keeps containing the query, so a sticky
+        // check spams the reply and buries the real output under repaints.
+        let mut answered_cursor_query = false;
+        let probe = directory.path().join("probe.txt");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        loop {
+            if probe.is_file() {
+                break;
+            }
+            if !answered_cursor_query {
+                let asked = captured
+                    .lock()
+                    .map(|text| text.contains("\u{1b}[6n"))
+                    .unwrap_or(false);
+                if asked {
+                    answered_cursor_query = true;
+                    if console.write_all(CURSOR_REPLY).is_err() {
+                        break;
+                    }
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let ran_in_node_directory = probe.is_file();
+        let _ = child.kill();
+        drop(pair);
+        let _ = reader.join();
+        // Tail only: the console is full of repaint escapes once PowerShell is
+        // up, and the error that matters is the last thing it printed.
+        let tail: String = captured
+            .lock()
+            .map(|text| {
+                text.chars()
+                    .rev()
+                    .take(1500)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            ran_in_node_directory,
+            "the mapped interop spawn did not run the shim in the node directory at {}.\n\
+             Console output (tail):\n{tail}",
+            directory.path().display()
+        );
+    }
+
+    /// The batch path is passed as `cmd.exe /c` command text, which cmd expands
+    /// before it runs — so `%` is a hazard there in a way it is not inside the
+    /// batch, where the quotes come from the script.
+    #[test]
+    fn a_batch_path_carrying_percent_or_bang_is_refused() {
+        for path in [
+            r"C:\Users\%USERNAME%\Temp\launch.cmd",
+            r"C:\Users\me!x\Temp\launch.cmd",
+            r"C:\Users\R&D\Temp\launch.cmd",
+            r"C:\Users\a|b\Temp\launch.cmd",
+            r"C:\Users\a(b)\Temp\launch.cmd",
+            r"C:\Users\a>b\Temp\launch.cmd",
+            r"C:\Users\a^b\Temp\launch.cmd",
+            "C:\\Users\\a\"b\\Temp\\launch.cmd",
+        ] {
+            assert!(
+                super::has_cmd_metacharacter(path),
+                "{path} reaches cmd.exe as command text and must be refused"
+            );
+        }
+        assert!(
+            !super::has_cmd_metacharacter(r"C:\Users\alond\AppData\Local\Temp\launch.cmd"),
+            "an ordinary temp path must still be accepted"
+        );
+    }
+
+    /// A `Direct` shell establishes no location of its own, so the spawn must
+    /// carry the node's working directory. Suppressing it makes portable-pty
+    /// fall back to `USERPROFILE` and opens the agent in the home folder —
+    /// which is what regressed for every non-mapped arm.
+    #[test]
+    fn direct_shell_keeps_the_unc_working_directory() {
+        let argv = wrap_argv(
+            "claude.exe",
+            UNC_SPAWN_PATH,
+            EnvType::Windows,
+            WindowsShell::Direct,
+        );
+        assert_eq!(argv.first().map(String::as_str), Some("claude.exe"));
+
+        let command = wrap_command(
+            "claude.exe",
+            UNC_SPAWN_PATH,
+            EnvType::Windows,
+            WindowsShell::Direct,
+        );
+        assert_eq!(
+            command
+                .get_cwd()
+                .map(|cwd| cwd.to_string_lossy().into_owned()),
+            Some(UNC_SPAWN_PATH.to_string()),
+            "a Direct shell never calls Set-Location or pushd, so it depends entirely on \
+             the inherited working directory"
+        );
+    }
+
+    /// PowerShell runs a native executable directly and accepts a UNC current
+    /// directory, so this arm maps nothing — and must therefore still receive
+    /// the directory.
+    #[test]
+    fn powershell_spawn_of_a_native_executable_keeps_the_unc_working_directory() {
+        let bin_dir = tempfile::tempdir().unwrap();
+        let native = bin_dir.path().join("codex.exe");
+        std::fs::write(&native, "MZ").unwrap();
+
+        let command = wrap_command(
+            native.to_str().unwrap(),
+            UNC_SPAWN_PATH,
+            EnvType::Windows,
+            WindowsShell::PowerShell,
+        );
+
+        assert_eq!(
+            command
+                .get_cwd()
+                .map(|cwd| cwd.to_string_lossy().into_owned()),
+            Some(UNC_SPAWN_PATH.to_string()),
+            "this arm neither pushds nor Set-Locations, so without the cwd the agent opens \
+             in USERPROFILE instead of the node's directory"
+        );
+    }
+
+    /// The mapped arm drops the working directory, because `pushd` replaces it
+    /// with a drive-letter mapping. The arms that must *keep* theirs are
+    /// covered by the tests above.
+    #[test]
+    fn mapped_spawn_drops_the_working_directory() {
+        let npm_dir = tempfile::tempdir().unwrap();
+        let shim = npm_dir.path().join("codex.cmd");
+        std::fs::write(&shim, "@echo off\r\n").unwrap();
+
+        let command = wrap_command(
+            shim.to_str().unwrap(),
+            UNC_SPAWN_PATH,
+            EnvType::Windows,
+            WindowsShell::PowerShell,
+        );
+
+        assert!(
+            command.get_cwd().is_none(),
+            "cmd.exe must not be handed the UNC it is about to pushd, or it prints \
+             'Defaulting to Windows directory' and the spawn looks broken"
+        );
+        remove_mapped_batch(&command);
+    }
+
+    /// The interop arms keep the working directory they have always had for a
+    /// drive-letter directory; only the mapped case drops it.
+    #[test]
+    fn interop_drive_letter_spawn_keeps_its_working_directory() {
+        let npm_dir = tempfile::tempdir().unwrap();
+        let shim = npm_dir.path().join("codex.cmd");
+        std::fs::write(&shim, "@echo off\r\n").unwrap();
+
+        let command = wrap_command(
+            shim.to_str().unwrap(),
+            npm_dir.path().to_str().unwrap(),
+            EnvType::WindowsInterop,
+            WindowsShell::PowerShell,
+        );
+
+        assert!(
+            command.get_cwd().is_some(),
+            "a drive-letter interop directory is not the shape this change addresses, and \
+             the in-script Set-Location must not become the only thing establishing it"
+        );
+    }
+
+    /// A generic UNC share, not a WSL one: the behaviour under test is "the
+    /// spawn directory is UNC", which cmd.exe rejects for any share, so the
+    /// test stays hermetic and platform-independent.
+    const UNC_SPAWN_PATH: &str = r"\\server\share\project";
+
+    /// The regression, native arm: Codex is the one `WindowsShell::PowerShell`
+    /// holder, and a Windows node whose directory is a UNC host path is exactly
+    /// the shape that lost its working directory.
+    #[test]
+    #[cfg(windows)]
+    fn powershell_spawn_in_a_unc_directory_maps_it_through_pushd() {
+        let npm_dir = tempfile::tempdir().unwrap();
+        let shim = npm_dir.path().join("codex.cmd");
+        std::fs::write(&shim, "@echo off\r\n").unwrap();
+
+        let command = wrap_command(
+            shim.to_str().unwrap(),
+            UNC_SPAWN_PATH,
+            EnvType::Windows,
+            WindowsShell::PowerShell,
+        );
+        let script = encoded_script(&command);
+        assert_maps_through_pushd(&command, UNC_SPAWN_PATH, &script);
+        remove_mapped_batch(&command);
+        assert!(
+            script.contains(&shim.to_string_lossy().into_owned()),
+            "the agent is still the resolved .cmd shim — the fix maps the directory rather \
+             than substituting a different executable; got: {script}"
+        );
+    }
+
+    /// The same shape on the `WindowsInterop` arm, where Buildmesh runs on the
+    /// Linux host. A filesystem probe cannot answer there (a Windows path is
+    /// not on the Linux filesystem), so this arm must be driven by the command
+    /// itself. `CodexProxy` is the route that puts a `.cmd` here at all, and it
+    /// is the one that was still broken.
+    #[test]
+    #[cfg(windows)]
+    fn windows_interop_powershell_spawn_in_a_unc_directory_maps_it_through_pushd() {
+        let npm_dir = tempfile::tempdir().unwrap();
+        let shim = npm_dir.path().join("codex.cmd");
+        std::fs::write(&shim, "@echo off\r\n").unwrap();
+
+        let command = wrap_command(
+            shim.to_str().unwrap(),
+            UNC_SPAWN_PATH,
+            EnvType::WindowsInterop,
+            WindowsShell::PowerShell,
+        );
+        let script = encoded_script(&command);
+        assert_maps_through_pushd(&command, UNC_SPAWN_PATH, &script);
+        remove_mapped_batch(&command);
+        assert!(
+            script.contains(&shim.to_string_lossy().into_owned()),
+            "the interop arm must still launch the resolved shim; got: {script}"
+        );
+    }
+
+    /// The control that keeps this narrow: a drive-letter directory is not the
+    /// shape cmd.exe rejects, so it must keep today's direct launch.
+    #[test]
+    fn powershell_spawn_in_a_drive_letter_directory_is_not_mapped() {
+        let npm_dir = tempfile::tempdir().unwrap();
+        let shim = npm_dir.path().join("codex.cmd");
+        std::fs::write(&shim, "@echo off\r\n").unwrap();
+
+        let argv = wrap_argv(
+            shim.to_str().unwrap(),
+            npm_dir.path().to_str().unwrap(),
+            EnvType::Windows,
+            WindowsShell::PowerShell,
+        );
+
+        assert_eq!(
+            argv.first().map(String::as_str),
+            Some("powershell.exe"),
+            "a drive-letter directory launches through the shim exactly as before; got: {argv:?}"
+        );
+        assert!(
+            !argv.iter().any(|arg| arg == "pushd"),
+            "no share mapping is needed for a local directory; got: {argv:?}"
+        );
+    }
+
+    /// A native executable never reaches cmd.exe — PowerShell runs it directly
+    /// and accepts a UNC current directory — so it must not be mapped.
+    #[test]
+    fn powershell_spawn_of_a_native_executable_is_not_mapped() {
+        let bin_dir = tempfile::tempdir().unwrap();
+        let native = bin_dir.path().join("codex.exe");
+        std::fs::write(&native, "MZ").unwrap();
+
+        let command = wrap_command(
+            native.to_str().unwrap(),
+            UNC_SPAWN_PATH,
+            EnvType::Windows,
+            WindowsShell::PowerShell,
+        );
+        let script = encoded_script(&command);
+
+        assert_eq!(
+            command
+                .get_argv()
+                .first()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .as_deref(),
+            Some("powershell.exe")
+        );
+        assert!(
+            script.contains(&native.to_string_lossy().into_owned()),
+            "a .exe is executed by PowerShell directly; got: {script}"
+        );
+    }
+
+    /// A bare stem is resolved by PowerShell itself, which prefers the `.ps1`
+    /// twin over the `.cmd` shim — so cmd.exe never enters the chain and there
+    /// is nothing to map. This is the interop non-proxy route.
+    #[test]
+    fn powershell_spawn_of_a_bare_stem_is_not_mapped() {
+        let argv = wrap_argv(
+            "codex",
+            UNC_SPAWN_PATH,
+            EnvType::WindowsInterop,
+            WindowsShell::PowerShell,
+        );
+
+        assert_eq!(argv.first().map(String::as_str), Some("powershell.exe"));
+        assert!(
+            !argv.iter().any(|arg| arg == "pushd"),
+            "PowerShell resolves a bare stem without cmd.exe, so the UNC directory is \
+             never handed to it; got: {argv:?}"
+        );
+    }
+
+    /// Both spellings the code accepts but no test covered: an uppercase
+    /// batch extension, and the forward-slash UNC form external tools emit.
+    #[test]
+    #[cfg(windows)]
+    fn uppercase_batch_extension_and_forward_slash_unc_still_map() {
+        let npm_dir = tempfile::tempdir().unwrap();
+        let shim = npm_dir.path().join("codex.CMD");
+        std::fs::write(&shim, "@echo off\r\n").unwrap();
+        let forward_slash = "//server/share/project";
+
+        let command = wrap_command(
+            shim.to_str().unwrap(),
+            forward_slash,
+            EnvType::Windows,
+            WindowsShell::PowerShell,
+        );
+
+        assert_maps_through_pushd(&command, forward_slash, &encoded_script(&command));
+        remove_mapped_batch(&command);
     }
 
     #[test]

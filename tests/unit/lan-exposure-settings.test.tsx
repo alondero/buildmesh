@@ -71,17 +71,20 @@ describe('LAN / VPN exposure settings section (issue #501)', () => {
     expect((toggle as HTMLInputElement).checked).toBe(false);
   });
 
-  it('makes the self-signed-TLS / loopback-default nature clear', async () => {
+  it('explains the self-signed-TLS / loopback-default nature once, in the section tooltip', async () => {
     mockBackend(false);
+    const user = userEvent.setup();
     render(<AppSettingsModal onClose={() => {}} />);
     await openSettingsPane(/remote access/i);
 
     await screen.findByRole('checkbox', { name: /expose to lan/i });
-    // "self-signed" and "loopback" each appear in more than one place (the
-    // explainer copy, the toggle label, the coordinator section), so assert
-    // presence with getAllByText rather than the single-match getByText.
-    expect(screen.getAllByText(/self-signed/i).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/loopback/i).length).toBeGreaterThan(0);
+    // Nothing on the page repeats it beside the checkbox...
+    expect(screen.queryByText(/self-signed/i)).toBeNull();
+    // ...the one explanation sits behind the section's info tip.
+    await user.hover(screen.getByRole('button', { name: 'About LAN / VPN Exposure' }));
+    const tip = await screen.findByRole('tooltip');
+    expect(tip.textContent).toMatch(/self-signed certificate/i);
+    expect(tip.textContent).toMatch(/loopback/i);
   });
 
   it('enables exposure, calling the backend to rebind the listeners', async () => {

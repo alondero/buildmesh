@@ -1390,36 +1390,67 @@ mod tests {
     /// wrap() gives every agent PTY a colour-capable TERM, including harnesses
     /// that do not impersonate VS Code. Pins the every-agent path so a
     /// Command Code-only assertion cannot hide a wrap() regression.
+    ///
+    /// The baseline is planted, not inherited. `CommandBuilder` seeds itself
+    /// from the live process environment, so a VS Code / Command Code
+    /// integrated terminal's `TERM_PROGRAM=vscode` made this assert on the
+    /// developer's shell (issue #1820), and a CI-shaped parent's
+    /// `TERM=dumb` / `NO_COLOR=1` would let every colour assertion pass
+    /// without `wrap()` doing anything. The process environment is shared
+    /// state, so the mutation holds the one crate-wide lock.
     #[test]
     fn agent_pty_gets_colour_capable_env() {
-        for resolved in [windows_resolved(), wsl_resolved()] {
-            let cmd = cmd_for(
-                &resolved,
-                Provider::Anthropic,
-                &SessionIdMode::None,
-                SESSION_ID,
-                None,
-                None,
-                None,
-                false,
-            );
-            assert_eq!(env_of(&cmd, "TERM").as_deref(), Some("xterm-256color"));
-            assert_eq!(env_of(&cmd, "COLORTERM").as_deref(), Some("truecolor"));
-            assert_eq!(env_of(&cmd, "FORCE_COLOR").as_deref(), Some("3"));
-            assert_eq!(env_of(&cmd, "NO_COLOR"), None);
-            assert_ne!(env_of(&cmd, "TERM_PROGRAM").as_deref(), Some("vscode"));
-            if resolved.env_type == EnvType::Wsl {
-                let wslenv = env_of(&cmd, "WSLENV").unwrap_or_default();
-                for key in ["TERM", "COLORTERM", "FORCE_COLOR"] {
-                    assert!(
-                        wslenv
-                            .split(':')
-                            .any(|entry| entry.split('/').next() == Some(key)),
-                        "{key} must be on WSLENV so the guest sees it; got {wslenv:?}"
+        let _env = crate::env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::env::with_env_vars(
+            &[
+                ("TERM", Some(std::ffi::OsStr::new("dumb"))),
+                ("COLORTERM", Some(std::ffi::OsStr::new("none"))),
+                ("FORCE_COLOR", Some(std::ffi::OsStr::new("0"))),
+                ("NO_COLOR", Some(std::ffi::OsStr::new("1"))),
+                // Only the Command Code harness policy sets this (see
+                // `agent::launch`); an inherited one would arrive in
+                // `get_env` and make this test assert on the host terminal.
+                ("TERM_PROGRAM", None),
+            ],
+            || {
+                for resolved in [windows_resolved(), wsl_resolved()] {
+                    let cmd = cmd_for(
+                        &resolved,
+                        Provider::Anthropic,
+                        &SessionIdMode::None,
+                        SESSION_ID,
+                        None,
+                        None,
+                        None,
+                        false,
                     );
+                    assert_eq!(env_of(&cmd, "TERM").as_deref(), Some("xterm-256color"));
+                    assert_eq!(env_of(&cmd, "COLORTERM").as_deref(), Some("truecolor"));
+                    assert_eq!(env_of(&cmd, "FORCE_COLOR").as_deref(), Some("3"));
+                    assert_eq!(env_of(&cmd, "NO_COLOR"), None);
+                    assert_eq!(
+                        env_of(&cmd, "TERM_PROGRAM"),
+                        None,
+                        "a Claude-backed agent must neither inherit nor be \
+                         stamped as VS Code; only the Command Code harness \
+                         policy sets TERM_PROGRAM"
+                    );
+                    if resolved.env_type == EnvType::Wsl {
+                        let wslenv = env_of(&cmd, "WSLENV").unwrap_or_default();
+                        for key in ["TERM", "COLORTERM", "FORCE_COLOR"] {
+                            assert!(
+                                wslenv
+                                    .split(':')
+                                    .any(|entry| entry.split('/').next() == Some(key)),
+                                "{key} must be on WSLENV so the guest sees it; got {wslenv:?}"
+                            );
+                        }
+                    }
                 }
-            }
-        }
+            },
+        );
     }
 
     /// Command Code skips its kitty keyboard probe when TERM_PROGRAM=vscode.

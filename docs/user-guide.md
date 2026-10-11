@@ -199,7 +199,7 @@ while the Issues inspector is open and with **Refresh issues**.
 
 Open **Circuits** to configure automated flows and their triggers. **Max concurrent
 circuit runs** controls how many runs the selected mesh can admit at once.
-Settings > General > **Circuit agent pool size** adds an optional cap on agents
+Settings > Autopilot > **Circuit agent pool size** adds an optional cap on agents
 across all meshes; leave it empty for no global cap, or use 0 to pause new launches.
 
 Agent steps use their explicit launch configuration, then the mesh default, then
@@ -600,7 +600,8 @@ current text visible so you can retry editing before leaving the tool.
 
 ## Launch Configurations
 
-Use **Settings → Launch Configurations** to name the recipes you launch. Choose
+Use **Settings → Launch Configurations** to name the recipes you launch (the
+list is collapsed; open it with **Show launch configurations**). Choose
 a harness, native authentication or a provider, then a model, supported effort,
 and optional extra arguments. Known providers supply catalogue choices; generic
 providers retain manual model entry. The same editor opens from **New configuration**
@@ -729,12 +730,15 @@ answer there too.
 
 | Settings area | Use it for |
 |---|---|
-| General | Appearance, quit confirmation, global Circuit agent capacity, the default worktree directory, and the Probe spawn prompts |
-| Providers | Credentials, provider routing, accounts, and custom compatible endpoints |
-| Launch Configurations | Named recipes, harness ordering, fallback defaults, and advanced provider routes |
+| General | Appearance, quit confirmation, and the default worktree directory |
+| Providers | Routing defaults, plus a compact expandable row per provider account for its API key and billing mode |
+| Launch Configurations | Spawn menu order, per-harness model, effort and permission defaults, advanced provider routes, and (behind a **Show launch configurations** toggle) named recipes |
+| Autopilot | The global Circuit agent pool size |
+| Prompts | The Probe spawn prompts for Issues and Pull Requests |
 | Remote Access | LAN/VPN exposure, the Coordinator Read API, certificate management, and paired-device revocation |
+| Data & Diagnostics | Snapshots, integrity checks, export and restore, and the data folder location |
 
-**Probe spawn prompts** (Settings → General) customise the initial prompt
+**Probe spawn prompts** (Settings → Prompts) customise the initial prompt
 for agents spawned from the Probe's GitHub Issues and Pull Requests tabs.
 The built-in templates appear as editable text, so you can adjust their wording
 directly. Changes save when you leave the editor. Click a placeholder button to
@@ -782,11 +786,12 @@ CLI's approvals. Each harness decides for itself when to ask before acting,
 and Buildmesh passes the harness's own flag through unchanged. What acts is
 the agent; Buildmesh only facilitates the launch.
 
-Per harness, **Settings → Harnesses → Agent Harness defaults** offers a
+Per harness, **Settings → Launch Configurations → Agent Harness defaults** offers a
 **Permission mode**: the harness's auto/unattended mode (its own flag) or
 prompt mode (launch the CLI bare so it asks the way a human-launched session
-would). The card shows the effective mode in the harness's own words, and the
-Spawn Menu shows it under each harness name. Changing the setting changes the
+would). The select names the harness default in the harness's own words, and
+a harness with nothing to set (such as Terminal) has no card. The Spawn Menu
+does not repeat the mode. Changing the setting changes the
 arguments of the next spawn; existing meshes keep today's unattended behavior
 until you change it — unattended runs, including Autopilot Circuits, need the
 auto mode because there is nobody to answer a prompt.
@@ -827,8 +832,8 @@ an app restart.
 
 Remote access is optional and off by default.
 
-1. Open **Settings → Remote Access** and enable **Expose to LAN / VPN over
-   self-signed TLS**, or choose **Enable remote access** from the Remote Access
+1. Open **Settings → Remote Access** and enable **Expose to LAN / VPN**
+   (hover its section's info icon for the self-signed TLS details), or choose **Enable remote access** from the Remote Access
    dialog. The setting applies immediately.
 2. Open the **Remote Access** modal and scan the one-time pairing QR code from
    the phone you want to authorize. The invitation expires after five minutes.
@@ -968,7 +973,7 @@ and preferences — but no credentials. After the restart you re-enter your
 provider API keys, Buildmesh mints a **new** remote-access token, and paired
 devices need to sign in again.
 
-**Where this data lives** shows your data directory, and **Open data folder**
+**Data folder location** shows your data directory, and **Open data folder**
 opens it in Explorer or Finder.
 
 ### Uninstall

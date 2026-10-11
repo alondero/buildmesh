@@ -1,5 +1,5 @@
 /**
- * Settings → General → Circuit agent pool size: the app-wide cap on concurrently
+ * Settings → Autopilot → Circuit agent pool size: the app-wide cap on concurrently
  * active autopilot nodes across ALL meshes (the pool the per-mesh
  * `autopilot_concurrency_limit` slots draw from). These tests pin the UI
  * contract: hydration from preferences, commit-on-blur (not per keystroke),
@@ -14,6 +14,7 @@ import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { AppSettingsModal } from '../../src/components/AppSettings/AppSettingsModal';
+import { openSettingsPane } from '../utils/settings-panes';
 
 function mockBackend(poolSize: number | null = null) {
   const calls: Record<string, unknown[]> = {};
@@ -47,10 +48,12 @@ function mockBackend(poolSize: number | null = null) {
   return calls;
 }
 
-/** The pool-size input lives on the General pane, which is the default
- *  active tab — no navigation needed. Number inputs expose role spinbutton. */
-const poolInput = async () =>
-  (await screen.findByRole('spinbutton', { name: /Circuit agent pool size/i })) as HTMLInputElement;
+/** The pool-size input lives on the Autopilot pane. Number inputs expose role
+ *  spinbutton, and role queries skip the hidden panes, so open the tab first. */
+const poolInput = async () => {
+  await openSettingsPane('Autopilot');
+  return (await screen.findByRole('spinbutton', { name: /Circuit agent pool size/i })) as HTMLInputElement;
+};
 
 describe('Settings — Circuit agent pool size', () => {
   beforeEach(() => vi.mocked(invoke).mockReset());
@@ -115,8 +118,8 @@ describe('Settings — Circuit agent pool size', () => {
     const input = await poolInput();
     await waitFor(() => expect(input.disabled).toBe(false));
     await user.type(input, '8');
-    // While the draft is uncommitted, the nav rail flags the General pane.
-    screen.getByTestId('settings-tab-dirty-general');
+    // While the draft is uncommitted, the nav rail flags the Autopilot pane.
+    screen.getByTestId('settings-tab-dirty-autopilot');
 
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).not.toHaveBeenCalled();
@@ -126,7 +129,7 @@ describe('Settings — Circuit agent pool size', () => {
     // already saved (nothing can be lost) and the dirty dot clears.
     await waitFor(() => expect(calls['set_app_circuit_agent_pool_size']).toBeTruthy());
     expect(calls['set_app_circuit_agent_pool_size']![0]).toEqual({ size: 8 });
-    expect(screen.queryByTestId('settings-tab-dirty-general')).toBeNull();
+    expect(screen.queryByTestId('settings-tab-dirty-autopilot')).toBeNull();
   });
 });
 
@@ -143,15 +146,15 @@ describe('Settings — sub-pane navigation', () => {
     await user.type(input, '5');
 
     // Away to Remote Access: the LAN checkbox becomes reachable by role,
-    // the General content no longer is.
+    // the Autopilot content no longer is.
     fireEvent.click(screen.getByRole('tab', { name: /remote access/i }));
     await screen.findByRole('checkbox', { name: /expose to lan/i });
     expect(screen.queryByRole('spinbutton', { name: /Circuit agent pool size/i })).toBeNull();
 
-    // Back to General: the draft survived the round-trip because the pane
+    // Back to Autopilot: the draft survived the round-trip because the pane
     // was hidden, not unmounted (the modal's dirty tracking lives in
     // component state — issue #730).
-    fireEvent.click(screen.getByRole('tab', { name: 'General' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Autopilot' }));
     expect(((await poolInput())).value).toBe('5');
   });
 });

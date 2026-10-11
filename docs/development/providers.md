@@ -251,7 +251,7 @@ The Buildmesh-managed OAuth secrets live in Windows Credential Manager under `CR
 
 - **Provider API keys** (`src-tauri/src/preferences/secrets.rs`, issue #830) are ordinary `api_key` / `minimax_api_key` fields in memory and never fields on disk. `storage::write_to_disk` calls `secrets::externalize` (store each key, blank the ones the store accepted, delete the entry of a cleared key or removed account); `storage::read_state` calls `secrets::hydrate_json` through `recovery::classify_with` **before** the read-time migrations, because ADR-0025's migration creates a pairing only for an account that has a key. Rules a change must keep: a key leaves the file only after the store accepted it (no store means it stays in the file, never lost); a key present in the file wins over the stored one (hand edit, restored backup); a file from an older build is scrubbed in place on first load (`secrets::scrub_file`: only the secret fields change, no shape migration and no fabricated backup, preserving the read-never-persists rule), and so is its `.bak`; a recovery reset deletes nothing; a full-fidelity bundle (`state_recovery::build_bundle`) inlines the keys back through `secrets::with_keys_inlined`. Non-Windows builds have no store, so keys stay in the file. Tests use a per-thread in-memory vault (`secrets::test_support`), so they never touch the real Credential Manager; the OS wrapper has its own round-trip test that skips where Credential Manager is unreachable.
 
-- **In-app notice when the fallback is active** (issue #2154). `preferences::secrets::account_ids_with_keys_on_disk` reads the **raw files** — `preferences.json` and its `.bak` — and returns the account ids whose `api_key` is still a non-empty string there; `resolver::provider_accounts_with_keys_in_preferences` re-exports it and `commands::preferences::get_provider_accounts_with_preferences_keys` puts it on the wire. `AccountsPane` passes each id to `AccountCard` as `keyInPreferences`, which renders a per-account notice outside the "Edit credentials" disclosure. Two rules a change must keep: it reads the files rather than the hydrated `AppPreferences`, because after `hydrate` a key from the file is indistinguishable from one from the store — that is the whole question; and it is deliberately **not** a field on `ProviderAccount`, which is both the persisted shape and the wire type, so a storage-location flag there would be written into the very file being reported on. The deprecated flat `minimax_api_key` is reported against the `minimax` account only when that account has no key of its own, matching the fold `resolver::accounts::provider_accounts` applies.
+- **In-app notice when the fallback is active** (issue #2154). `preferences::secrets::account_ids_with_keys_on_disk` reads the **raw files** — `preferences.json` and its `.bak` — and returns the account ids whose `api_key` is still a non-empty string there; `resolver::provider_accounts_with_keys_in_preferences` re-exports it and `commands::preferences::get_provider_accounts_with_preferences_keys` puts it on the wire. `AccountsPane` passes each id to `AccountCard` as `keyInPreferences`, which renders a warning `InfoTip` (an amber "!" with the message on hover) beside the account name, outside the row's expander. Two rules a change must keep: it reads the files rather than the hydrated `AppPreferences`, because after `hydrate` a key from the file is indistinguishable from one from the store — that is the whole question; and it is deliberately **not** a field on `ProviderAccount`, which is both the persisted shape and the wire type, so a storage-location flag there would be written into the very file being reported on. The deprecated flat `minimax_api_key` is reported against the `minimax` account only when that account has no key of its own, matching the fold `resolver::accounts::provider_accounts` applies.
 
 - **Operator commands** for diagnosing drift:
   - `cmdkey /list | findstr antigravity` — confirm the legacy `gemini:antigravity` keyring target is present (metadata only; does not dump the blob).
@@ -286,6 +286,63 @@ remembering:
 - `Direct` — the provider ships a native executable. The plain terminal
   harness is one of these: it *is* the terminal, so there is nothing to wrap.
 
+A Windows-runtime node whose directory lives in WSL spawns with a UNC current
+directory, and **cmd.exe rejects one** — it silently starts in `C:\Windows`
+instead. `Cmd` answers that with its own `pushd`, which maps the share for the
+lifetime of that shell. `PowerShell` has the same problem for a different
+reason: it cannot run a `.cmd`/`.bat` shim at all, so it delegates to
+`cmd.exe /c` and lands straight back on the rejection. So when the spawn is a
+batch shim in a UNC directory, the PowerShell arm runs *inside* cmd's `pushd`:
+`cmd.exe /d /c <temp-batch.cmd>`, where the batch reads the directory from a
+`BUILDMESH_SPAWN_DIR` environment variable and `pushd`s it before invoking the
+same `-EncodedCommand` payload. The agent's argv stays in that Base64 payload,
+so none of it crosses cmd's tokenizer.
+
+The decision is taken from the command and never by probing the filesystem: on
+the `WindowsInterop` arm Buildmesh runs on the Linux host, so a Windows path is
+not on a filesystem it can see and a probe would silently decline. A `.exe` or a
+bare stem is launched by PowerShell itself and never reaches cmd.exe, so it
+needs no mapping — which also leaves a drive-letter directory, a `.exe`, and a
+bare stem on today's behaviour, and keeps any host PowerShell execution policy
+out of the picture entirely.
+
+Two mechanical traps in that mapping, both learned the hard way:
+
+- **The directory must never appear on a command line.** portable-pty quotes an
+  argument only when it contains whitespace or a quote, so `&`, `|`, `<`, `>`,
+  `^`, `(`, `)` and `%` in a node's directory reach cmd.exe bare, where cmd
+  treats them as operators — a node in `R&D` would run whatever followed the
+  ampersand. Quoting inside the argument is not available either, because
+  portable-pty escapes a `"` inside an argument, so a pre-quoted path arrives as
+  `"\"<unc>\""` and `pushd` rejects the line with *The filename, directory name,
+  or volume label syntax is incorrect.* The mapping therefore runs from a
+  one-shot batch file that expands a `BUILDMESH_SPAWN_DIR` environment variable
+  inside quotes, so the only thing on the command line is the batch file's own
+  path. The `Cmd` arm still passes its UNC path as a plain argument and keeps
+  that exposure; see [`needs_unc_pushd`] in the module for why it is out of scope
+  for this change.
+
+On `WindowsInterop` the batch file crosses the WSL boundary and needs three
+things the native arm does not: a **Windows-visible** directory to live in
+(`std::env::temp_dir()` on the Linux host is the guest's `/tmp`), the node
+directory forwarded through `WSLENV`, and a fail-closed guard, because a batch
+expands an unset variable to nothing and `pushd ""` succeeds. The last one is
+what turns a forwarding regression from a failure into a silent wrong-directory
+spawn.
+
+The same split governs the batch file's own path: written through the host
+spelling of a Windows directory (`/mnt/c/...`), because that is how Linux opens
+it, but handed to `cmd.exe` in the Windows spelling (`C:\...`), because that is
+how Windows resolves it. `windows_cli_home` returns the host spelling — correct
+for opening a file, wrong for telling Windows where it is.
+- **Only a mapped spawn drops its working directory.** Handing cmd.exe the UNC
+  anyway prints *Defaulting to Windows directory* and makes a correct spawn look
+  broken. But `Direct` never establishes a location, and PowerShell running a
+  `.exe` or bare stem neither `pushd`s nor `Set-Location`s — suppressing the cwd
+  for those arms makes `portable-pty` fall back to `USERPROFILE` and opens the
+  agent in the home folder. All three sites read one decision,
+  `maps_directory_with_pushd`, because they have to agree.
+
 Read the adapter rather than trusting any list, including this one; a per-adapter
 table rots silently as adapters are added, which is why the adapter is the only
 place that decides and its own unit test is what pins the value.
@@ -304,11 +361,12 @@ contributes the harness's own flag(s) in `default_prepare`
 (`AgentProvider::permission_args`), spliced at the front of `base_args`
 exactly where the base recipe used to carry them (behind a leading `resume`
 subcommand token for `spawn_recipe_for_resume` adapters, so today's argv
-order is preserved byte-for-byte). The descriptor the Settings card and the
-Spawn Menu render (`permission_modes`, `default_permission_mode` on
-`HarnessCapabilities`) comes from the same adapter methods, so the UI and
-the argv cannot disagree; `capability_recipe_coherence` pins the agreement
-per adapter. Harnesses with no flag expose no modes, and mcode's Full Access
+order is preserved byte-for-byte). The descriptor the Settings card renders
+(`permission_modes`, `default_permission_mode` on `HarnessCapabilities`)
+comes from the same adapter methods, so the UI and the argv cannot disagree;
+`capability_recipe_coherence` pins the agreement per adapter. The Spawn Menu
+does not display the mode, although `effective_permission` is still stamped on
+`ProviderInfo` rows. Harnesses with no flag expose no modes, and mcode's Full Access
 is a singleton mode (a `config.yaml` pin, not argv). Static descriptors such
 as the attention launch mode describe the unattended launch: a harness
 switched to prompt mode in Settings can raise approval prompts. The orchestrator's
@@ -390,5 +448,5 @@ and stored snapshots that bypass save validation. MiniMax Code restricts
 Windows Cmd cannot split or expand the reference. Syntax validation does not
 prove account availability or CLI-version compatibility.
 
-`preferences::spawn_configurations` owns named, capability-validated launch overrides scoped to one Spawn Option. Configurations live in application preferences; the backend menu includes each option's saved choices for mobile, while desktop management reads the same collection through IPC. The shared editor creates and edits configurations from Settings and spawn menus. Launch targets include unattached credentialed providers; saving a new route and recipe uses one preference transaction. Draft verification resolves the selected model without persisting the draft; verification records distinguish endpoint/model/runtime so checking one recipe does not replace another model's proof. Provider model metadata is independent of tier remaps, and allowed efforts intersect provider/model/surface metadata with harness capabilities. New-node creation commits the selected snapshot in `agent_nodes.spawn_configuration` in the same transaction as the node. Explicit per-call overrides win; omitted native fields retain the mesh/application/native cascade, while proxy models default to their route and do not inherit native harness model/effort defaults. A resolved proxy model reaches Codex as a single `--model`: `agent::spawn::command::build_spawn_command_prepared` folds the routing descriptor's model into the resolved config before `default_prepare` composes the recipe, so the adapter remains the single owner of the model flag and the orchestrator layer adds only `--profile` and the reasoning `-c` keys. The fold is load-bearing in both directions: the generated `<profile>.config.toml` carries only `model_provider`, so an empty cascade model would leave Codex on an OpenAI model against a foreign endpoint, and a second occurrence is rejected by the CLI as a repeated argument. Resume reads the snapshot, not the editable preference. A provider change cannot reuse another Spawn Option's snapshot.
+`preferences::spawn_configurations` owns named, capability-validated launch overrides scoped to one Spawn Option. Configurations live in application preferences; the backend menu includes each option's saved choices for mobile, while desktop management reads the same collection through IPC. The shared editor creates and edits configurations from Settings and spawn menus. Launch targets include unattached credentialed providers; saving a new route and recipe uses one preference transaction. Draft verification resolves the selected model without persisting the draft; verification records distinguish endpoint/model/runtime so checking one recipe does not replace another model's proof. Provider model metadata is independent of tier remaps, and allowed efforts intersect provider/model/surface metadata with harness capabilities. New-node creation commits the selected snapshot in `agent_nodes.spawn_configuration` in the same transaction as the node. Explicit per-call overrides win; omitted native fields retain the mesh/application/native cascade, while proxy models default to their route and do not inherit native harness model/effort defaults. `preferences::harness_default_for` is where that exclusion lives — it takes the parsed `SpawnOptionId`, reads the harness half's map entry (native and proxied rows share one key), and strips model/effort for a proxied row — so the frozen-configuration resolver and the live `agent::spawn::launch` seam cannot drift apart. Permission mode stays: it is a harness-CLI flag, not an endpoint fact, so a proxied spawn still inherits it. A resolved proxy model reaches Codex as a single `--model`: `agent::spawn::command::build_spawn_command_prepared` folds the routing descriptor's model into the resolved config before `default_prepare` composes the recipe, so the adapter remains the single owner of the model flag and the orchestrator layer adds only `--profile` and the reasoning `-c` keys. The fold is load-bearing in both directions: the generated `<profile>.config.toml` carries only `model_provider`, so an empty cascade model would leave Codex on an OpenAI model against a foreign endpoint, and a second occurrence is rejected by the CLI as a repeated argument. Resume reads the snapshot, not the editable preference. A provider change cannot reuse another Spawn Option's snapshot.
 

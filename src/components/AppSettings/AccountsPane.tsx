@@ -156,7 +156,7 @@ export function AccountsPane() {
         <>
           Self-auth brands always appear (enable + billing). Add keyed first-class
           or generic providers for API keys. Base URL and model names are
-          configured when you attach a provider under Harnesses. Usage Meters live
+          configured when you attach a provider under Launch Configurations. Usage Meters live
           on the <span className="font-medium">Usage</span> tab in the side panel.
         </>
       }
@@ -175,7 +175,7 @@ export function AccountsPane() {
           onRetry={() => retryResource('accounts')}
         />
       ) : (
-        <div className="space-y-4">
+        <div className="space-y-2">
           {accounts.map(account => (
             <AccountCard
               key={account.id}

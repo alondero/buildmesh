@@ -5,17 +5,18 @@
  * component) into per-pane modules. What remains here is deliberately
  * only what belongs to the shell:
  *
- *   - the nav rail and the five `SETTINGS_TABS`,
+ *   - the nav rail and the seven `SETTINGS_TABS`,
  *   - the modal-wide dirty-site aggregator (issue #730),
  *   - the shared error surface and the corrupt-preferences recovery panel,
  *     both of which sit *above* the panes because they apply app-wide,
  *   - composition: `SettingsDataProvider` wrapping the panes.
  *
  * Each pane owns its own drafts, toggles and mutation handlers:
- * `GeneralPane` (appearance, exit prompt, agent runtime, probe prompts),
+ * `GeneralPane` (appearance, exit prompt, worktree directory),
  * `ProvidersPane` (routing defaults), `AccountsPane` (credentials),
- * `HarnessesPane` (launch configurations, spawn order, provider routes,
- * harness defaults), and `RemoteAccessPane` (LAN, coordinator, devices).
+ * `HarnessesPane` (spawn order, harness defaults, provider routes, launch
+ * configurations), `AutopilotPane` (Circuit agent pool), `PromptsPane`
+ * (probe spawn prompts), and `RemoteAccessPane` (LAN, coordinator, devices).
  *
  * ## Two invariants worth preserving
  *
@@ -44,6 +45,8 @@ import { GeneralPane } from './GeneralPane';
 import { ProvidersPane } from './ProvidersPane';
 import { AccountsPane } from './AccountsPane';
 import { HarnessesPane } from './HarnessesPane';
+import { AutopilotPane } from './AutopilotPane';
+import { PromptsPane } from './PromptsPane';
 import { RemoteAccessPane } from './RemoteAccessPane';
 import { SettingsError, useDirtySites } from './settingsShell';
 import { useSettingsData } from './SettingsDataContext';
@@ -270,6 +273,28 @@ function SettingsShell({
           >
             <ProvidersPane />
             <AccountsPane />
+          </section>
+
+          <section
+            role="tabpanel"
+            id={`${tabIdPrefix}-panel-autopilot`}
+            aria-labelledby={`${tabIdPrefix}-tab-autopilot`}
+            tabIndex={0}
+            hidden={activeTab !== 'autopilot'}
+            className="space-y-2"
+          >
+            <AutopilotPane />
+          </section>
+
+          <section
+            role="tabpanel"
+            id={`${tabIdPrefix}-panel-prompts`}
+            aria-labelledby={`${tabIdPrefix}-tab-prompts`}
+            tabIndex={0}
+            hidden={activeTab !== 'prompts'}
+            className="space-y-2"
+          >
+            <PromptsPane />
           </section>
 
           <section

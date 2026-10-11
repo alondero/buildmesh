@@ -1003,18 +1003,29 @@ mod tests {
 
     #[test]
     fn curated_env_prepends_git_and_redirects_temp() {
-        // `curated_env` reads the command's *full* env, which inherits the
-        // process environment, and the assertion below is about every var in
-        // it. A parallel test that redirects a var at a temp dir would
-        // otherwise inject a host-temp path and fail this test for a reason
-        // that has nothing to do with `curated_env` (issue #2048).
-        let _env = crate::env::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        // `curated_env` reads the command's *full* env, and
+        // `portable_pty::CommandBuilder::new` seeds that from the live process
+        // environment. `env_clear` drops that inherited baseline, so every
+        // value below is one this test planted: an ambient variable whose
+        // *value* happens to live under `%TEMP%` (an IDE or agent-runtime
+        // capability-lease path, for example) reached `curated_env` and failed
+        // this test for a reason that had nothing to do with it (issues #1820,
+        // #2048). The planted input makes this test independent of the process
+        // env, so it needs no ENV_LOCK.
         let mut cmd = CommandBuilder::new("x.exe");
+        cmd.env_clear();
         cmd.env("PATH", r"C:\msys64\usr\bin");
         cmd.env("TEMP", r"C:\Users\me\AppData\Local\Temp");
         cmd.env("TMPDIR", r"C:\Users\me\AppData\Local\Temp");
+        // Not a temp *name*, but a value under the host temp. `curated_env`
+        // redirects temp vars, it does not scrub every path that mentions one,
+        // so this is planted to survive: it keeps the assertion below about
+        // temp leakage rather than about a blanket host-temp scrub that was
+        // never promised.
+        cmd.env(
+            "TOOLING_CLAIM_FILE",
+            r"C:\Users\me\AppData\Local\Temp\tooling-claim.cap",
+        );
         let env = curated_env(&cmd, r"C:\wt\.bm-sandbox-tmp");
 
         let path = env
@@ -1042,22 +1053,19 @@ mod tests {
                 "{key} redirected to sandbox tmp"
             );
         }
-        // No temp-shaped var may still carry the host temp value. Scoped to
-        // temp vars by NAME: `curated_env` rewrites TEMP/TMP/TMPDIR and cannot
-        // be responsible for unrelated ambient variables whose *value* merely
-        // happens to live under the host temp dir (a tooling capability-lease
-        // path, for example). Asserting over every var made this test fail for
-        // reasons unrelated to the production behaviour it is pinning.
-        for (key, value) in &env {
-            if key.eq_ignore_ascii_case("temp")
-                || key.eq_ignore_ascii_case("tmp")
-                || key.eq_ignore_ascii_case("tmpdir")
-            {
-                assert!(
-                    !value.contains(r"AppData\Local\Temp"),
-                    "{key} still carries the host temp: {value}"
-                );
-            }
-        }
+        // Nothing but the planted non-temp var may still carry a host-temp value.
+        // `curated_env` rewrites TEMP/TMP/TMPDIR by name and passes every other
+        // variable through verbatim, so a temp var that escaped the rewrite
+        // would appear beside TOOLING_CLAIM_FILE rather than instead of it.
+        let host_temp_vars: Vec<&str> = env
+            .iter()
+            .filter(|(_, value)| value.contains(r"AppData\Local\Temp"))
+            .map(|(key, _)| key.as_str())
+            .collect();
+        assert_eq!(
+            host_temp_vars,
+            vec!["TOOLING_CLAIM_FILE"],
+            "only the planted non-temp var may keep a host-temp value; got {host_temp_vars:?}"
+        );
     }
 }

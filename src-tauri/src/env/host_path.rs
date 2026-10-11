@@ -33,24 +33,40 @@ use super::{current_env, Environment};
 
 pub(crate) fn is_windows_path(path: &str) -> bool {
     let bytes = path.as_bytes();
-    (bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && matches!(bytes[2], b'/' | b'\\'))
-        || path.starts_with("\\\\") || path.starts_with("//wsl")
+    (bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\'))
+        || path.starts_with("\\\\")
+        || path.starts_with("//wsl")
 }
 
 /// Cached startup mappings keep node resolution free of subprocesses.
 pub(crate) fn windows_path_from_wsl(path: &str) -> String {
-    if is_windows_path(path) { return path.to_string(); }
-    let default_mounts: Vec<_> = ('a'..='z').map(|drive| (drive, format!("/mnt/{drive}"))).collect();
+    if is_windows_path(path) {
+        return path.to_string();
+    }
+    let default_mounts: Vec<_> = ('a'..='z')
+        .map(|drive| (drive, format!("/mnt/{drive}")))
+        .collect();
     let mounts = WSL_DRIVE_MOUNTS.get().unwrap_or(&default_mounts);
     for (drive, mount) in mounts {
         if let Some(tail) = path.strip_prefix(mount.trim_end_matches('/')) {
             if tail.is_empty() || tail.starts_with('/') {
-                return format!("{}:\\{}", drive.to_ascii_uppercase(), tail.trim_start_matches('/').replace('/', "\\"));
+                return format!(
+                    "{}:\\{}",
+                    drive.to_ascii_uppercase(),
+                    tail.trim_start_matches('/').replace('/', "\\")
+                );
             }
         }
     }
     let distro = std::env::var("WSL_DISTRO_NAME").unwrap_or_default();
-    format!("\\\\wsl.localhost\\{}\\{}", distro, path.trim_start_matches('/').replace('/', "\\"))
+    format!(
+        "\\\\wsl.localhost\\{}\\{}",
+        distro,
+        path.trim_start_matches('/').replace('/', "\\")
+    )
 }
 
 static WSL_DRIVE_MOUNTS: std::sync::OnceLock<Vec<(char, String)>> = std::sync::OnceLock::new();
@@ -125,8 +141,15 @@ pub(crate) fn windows_to_wsl(path: &str) -> String {
 /// sequences in the path body are preserved byte-for-byte (a byte-iter
 /// `push(b as char)` would split them and produce invalid UTF-8).
 fn rewrite_with_drive(body: &str, drive_lc: char) -> String {
-    if let Some(mount) = WSL_DRIVE_MOUNTS.get().and_then(|mounts| mounts.iter().find(|(drive, _)| *drive == drive_lc)) {
-        return format!("{}{}", mount.1.trim_end_matches('/'), body.replace('\\', "/"));
+    if let Some(mount) = WSL_DRIVE_MOUNTS
+        .get()
+        .and_then(|mounts| mounts.iter().find(|(drive, _)| *drive == drive_lc))
+    {
+        return format!(
+            "{}{}",
+            mount.1.trim_end_matches('/'),
+            body.replace('\\', "/")
+        );
     }
     // Exact size: "/mnt/" (5) + drive char + body bytes (backslashes stay
     // single-byte when replaced with forward slashes — same UTF-8 width).
@@ -150,9 +173,7 @@ fn rewrite_with_drive(body: &str, drive_lc: char) -> String {
 pub fn to_spawn_path(path: &Path) -> PathBuf {
     // UNC → POSIX rewrite runs on every call but is zero-alloc on the
     // non-UNC hot path (`normalize_unc_to_wsl` returns `Cow::Borrowed`).
-    if let std::borrow::Cow::Owned(normalized) =
-        normalize_unc_to_wsl(&path.to_string_lossy())
-    {
+    if let std::borrow::Cow::Owned(normalized) = normalize_unc_to_wsl(&path.to_string_lossy()) {
         return PathBuf::from(normalized);
     }
     match current_env() {
@@ -167,9 +188,7 @@ pub fn to_spawn_path(path: &Path) -> PathBuf {
             // doesn't exist (issue #1226 review).
             PathBuf::from(windows_to_wsl(path.to_string_lossy().as_ref()))
         }
-        Environment::Windows => {
-            path.to_path_buf()
-        }
+        Environment::Windows => path.to_path_buf(),
     }
 }
 
@@ -215,6 +234,26 @@ pub fn env_for_path(path: &Path) -> Environment {
 /// the `\\`-prefixed input is returned unchanged — both forms keep their
 /// distro embedded rather than being rewritten to the default distro.
 pub fn to_host_path(path: &str) -> String {
+    to_host_path_with_distro(path, default_wsl_distro)
+}
+
+/// The live distro lookup behind [`to_host_path`]. Reading the cached
+/// `Lazy` can force a `wsl.exe -l -v` spawn, so it stays behind a closure
+/// that only the UNC branches call.
+fn default_wsl_distro() -> Option<String> {
+    super::environment::get_default_wsl_distro()
+}
+
+/// Injectable core of [`to_host_path`] (issue #2082): the distribution name
+/// is a parameter rather than a live probe, so the WSL to UNC translation is
+/// testable on a Windows host that has no running distribution. `distro` is
+/// only consulted by the branches that build a `\\wsl$\…` UNC path, and it
+/// resolves lazily, so the ordinary `/mnt/…` and drive-letter arms never
+/// spawn `wsl.exe`.
+pub(crate) fn to_host_path_with_distro<F: FnOnce() -> Option<String>>(
+    path: &str,
+    distro: F,
+) -> String {
     // Only a Windows host has a WSL filesystem to translate into (`\\wsl$\...`
     // UNC paths, drive letters). On macOS and native Linux the path is already
     // host-native, so return it unchanged — otherwise a normal Linux
@@ -224,8 +263,14 @@ pub fn to_host_path(path: &str) -> String {
         if super::is_wsl_host() && is_windows_path(path) {
             let normalized = normalize_unc_to_wsl(path);
             if normalized != path {
-                let parts: Vec<_> = path.split(['\\', '/']).filter(|part| !part.is_empty()).collect();
-                if !parts.get(1).is_some_and(|distro| std::env::var("WSL_DISTRO_NAME").is_ok_and(|current| distro.eq_ignore_ascii_case(&current))) {
+                let parts: Vec<_> = path
+                    .split(['\\', '/'])
+                    .filter(|part| !part.is_empty())
+                    .collect();
+                if !parts.get(1).is_some_and(|distro| {
+                    std::env::var("WSL_DISTRO_NAME")
+                        .is_ok_and(|current| distro.eq_ignore_ascii_case(&current))
+                }) {
                     return path.to_string();
                 }
             }
@@ -260,9 +305,7 @@ pub fn to_host_path(path: &str) -> String {
             // - The drive letter must be followed by end-of-string or a
             //   separator; `/mnt/cfoo` is not a Windows mount, so refuse
             //   rather than produce a garbage `Cfoo:` path.
-            if after_mnt.is_empty()
-                || !after_mnt.as_bytes()[0].is_ascii_alphabetic()
-            {
+            if after_mnt.is_empty() || !after_mnt.as_bytes()[0].is_ascii_alphabetic() {
                 return path.to_string();
             }
             let drive = (after_mnt.as_bytes()[0] as char).to_ascii_uppercase();
@@ -277,8 +320,7 @@ pub fn to_host_path(path: &str) -> String {
             format!("{}:{}", drive, tail.replace('/', "\\"))
         } else if path.starts_with("/home/") {
             // /home/user -> \\wsl$\Ubuntu\home\user
-            let distro = super::environment::get_default_wsl_distro()
-                .unwrap_or_else(|| "Ubuntu".to_string());
+            let distro = distro().unwrap_or_else(|| "Ubuntu".to_string());
             format!("\\\\wsl$\\{}{}", distro, path.replace('/', "\\"))
         } else if path.len() >= 2
             && path.as_bytes()[0] == b'/'
@@ -291,8 +333,7 @@ pub fn to_host_path(path: &str) -> String {
             let tail = &path[2..];
             format!("{}:{}", drive, tail.replace('/', "\\"))
         } else if path == "/root" || path.starts_with("/root/") {
-            let distro = super::environment::get_default_wsl_distro()
-                .unwrap_or_else(|| "Ubuntu".to_string());
+            let distro = distro().unwrap_or_else(|| "Ubuntu".to_string());
             format!("\\\\wsl$\\{}{}", distro, path.replace('/', "\\"))
         } else {
             path.to_string()
@@ -314,8 +355,8 @@ pub(crate) fn to_host_path_for_runtime(path: &str, env_type: EnvType) -> String 
         && path.starts_with('/')
         && host == path
     {
-        let distro = super::environment::get_default_wsl_distro()
-            .unwrap_or_else(|| "Ubuntu".to_string());
+        let distro =
+            super::environment::get_default_wsl_distro().unwrap_or_else(|| "Ubuntu".to_string());
         format!("\\\\wsl$\\{}{}", distro, path.replace('/', "\\"))
     } else {
         host
@@ -330,7 +371,8 @@ pub(crate) fn codex_sessions_dir(env_type: EnvType, spawn_path: &str) -> Option<
     match env_type {
         EnvType::Windows => Some(home.join("sessions")),
         EnvType::Wsl | EnvType::WindowsInterop => Some(
-            PathBuf::from(to_host_path_for_runtime(&home.to_string_lossy(), env_type)).join("sessions"),
+            PathBuf::from(to_host_path_for_runtime(&home.to_string_lossy(), env_type))
+                .join("sessions"),
         ),
     }
 }
@@ -344,9 +386,9 @@ pub(crate) fn commandcode_projects_dir(env_type: EnvType, spawn_path: &str) -> O
     let home = super::environment::commandcode_dir_for_env(env_type, spawn_path)?;
     match env_type {
         EnvType::Windows => Some(home.join("projects")),
-        EnvType::Wsl | EnvType::WindowsInterop => Some(
-            PathBuf::from(to_host_path(&home.to_string_lossy())).join("projects"),
-        ),
+        EnvType::Wsl | EnvType::WindowsInterop => {
+            Some(PathBuf::from(to_host_path(&home.to_string_lossy())).join("projects"))
+        }
     }
 }
 
@@ -358,9 +400,9 @@ pub(crate) fn agy_brain_dir_for_env(env_type: EnvType, spawn_path: &str) -> Opti
     let home = super::environment::agy_dir_for_env(env_type, spawn_path)?;
     match env_type {
         EnvType::Windows => Some(home.join("brain")),
-        EnvType::Wsl | EnvType::WindowsInterop => Some(
-            PathBuf::from(to_host_path(&home.to_string_lossy())).join("brain"),
-        ),
+        EnvType::Wsl | EnvType::WindowsInterop => {
+            Some(PathBuf::from(to_host_path(&home.to_string_lossy())).join("brain"))
+        }
     }
 }
 
@@ -646,7 +688,10 @@ pub fn normalize_relative_worktree_dir(value: &str) -> Result<String, String> {
                 "worktree directory '{value}' must stay inside the mesh — '.' and '..' segments are not allowed (got '{seg}')"
             ));
         }
-        if let Some(bad) = seg.chars().find(|c| FORBIDDEN_WORKTREE_SEGMENT_CHARS.contains(c)) {
+        if let Some(bad) = seg
+            .chars()
+            .find(|c| FORBIDDEN_WORKTREE_SEGMENT_CHARS.contains(c))
+        {
             return Err(format!(
                 "worktree directory '{value}' contains forbidden character '{bad}' — use letters, numbers, '-', '_', or '.'"
             ));
@@ -732,10 +777,7 @@ pub fn effective_worktree_dir_raw(
 /// Effective raw path for one Worktree Node: `<effective_dir>/<trimmed_name>`.
 /// `effective_dir_raw` comes from `effective_worktree_dir_raw`; `node_name`
 /// is trimmed and must be non-empty (callers gate on `worktree_segment`).
-pub fn resolve_worktree_node_raw(
-    effective_dir_raw: &str,
-    node_name: &str,
-) -> String {
+pub fn resolve_worktree_node_raw(effective_dir_raw: &str, node_name: &str) -> String {
     let trimmed = node_name.trim();
     let dir = effective_dir_raw.trim_end_matches(['/', '\\']);
     format!("{}/{}", dir, trimmed)
@@ -874,8 +916,10 @@ mod harness_runtime_tests {
     #[test]
     fn runtime_changes_execution_paths_without_moving_the_mesh() {
         let mut path = ResolvedPath {
-            host_path: "F:/Code/My Repo".into(), raw_path: "F:/Code/My Repo".into(),
-            spawn_path: "F:/Code/My Repo".into(), env_type: EnvType::Windows,
+            host_path: "F:/Code/My Repo".into(),
+            raw_path: "F:/Code/My Repo".into(),
+            spawn_path: "F:/Code/My Repo".into(),
+            env_type: EnvType::Windows,
         };
         apply_harness_runtime(&mut path, EnvType::Wsl);
         assert_eq!(path.spawn_path, "/mnt/f/Code/My Repo");
@@ -974,13 +1018,25 @@ mod tests {
     /// matcher — silently loses such a node. (issue #1709 live smoke)
     #[test]
     fn directories_match_tolerates_windows_verbatim_prefix() {
-        assert!(directories_match(r"\\?\C:\Users\me\repo", r"C:\Users\me\repo"));
-        assert!(directories_match(r"C:\Users\me\repo", r"\\?\c:\users\ME\repo"));
-        assert!(directories_match(r"\\?\UNC\srv\share\repo", r"\\srv\share\repo"));
+        assert!(directories_match(
+            r"\\?\C:\Users\me\repo",
+            r"C:\Users\me\repo"
+        ));
+        assert!(directories_match(
+            r"C:\Users\me\repo",
+            r"\\?\c:\users\ME\repo"
+        ));
+        assert!(directories_match(
+            r"\\?\UNC\srv\share\repo",
+            r"\\srv\share\repo"
+        ));
         // Plain and POSIX forms are unaffected.
         assert!(directories_match("/home/me/repo/", "/home/me/repo"));
         // A different directory must still not match.
-        assert!(!directories_match(r"\\?\C:\Users\me\other", r"C:\Users\me\repo"));
+        assert!(!directories_match(
+            r"\\?\C:\Users\me\other",
+            r"C:\Users\me\repo"
+        ));
     }
 
     #[test]
@@ -1148,8 +1204,12 @@ mod tests {
     /// `<mesh>/\\wsl.localhost\...`.
     #[test]
     fn is_absolute_worktree_path_accepts_wsl_localhost_form() {
-        assert!(is_absolute_worktree_path(r"\\wsl.localhost\Debian\home\u\wt"));
-        assert!(is_absolute_worktree_path("//wsl.localhost/Debian/home/u/wt"));
+        assert!(is_absolute_worktree_path(
+            r"\\wsl.localhost\Debian\home\u\wt"
+        ));
+        assert!(is_absolute_worktree_path(
+            "//wsl.localhost/Debian/home/u/wt"
+        ));
     }
 
     /// Issue #1227 (round-trip, host side): `to_host_path` must pass a
@@ -1168,7 +1228,10 @@ mod tests {
         assert_eq!(to_host_path(raw), raw);
         // Empty-tail case (root only, no trailing path) — same branch, just
         // past the start of the distro name.
-        assert_eq!(to_host_path(r"\\wsl.localhost\Debian"), r"\\wsl.localhost\Debian");
+        assert_eq!(
+            to_host_path(r"\\wsl.localhost\Debian"),
+            r"\\wsl.localhost\Debian"
+        );
         // Legacy form must keep passing through too — no regression on the
         // path every existing fixture uses.
         assert_eq!(
@@ -1211,10 +1274,7 @@ mod tests {
         // tools serialize). The output must still be POSIX.
         assert_eq!(windows_to_wsl("D:/Code/MyRepo"), "/mnt/d/Code/MyRepo");
         // Mixed-case drive letter is lowercased; the body is verbatim.
-        assert_eq!(
-            windows_to_wsl("d:\\Code\\MyRepo"),
-            "/mnt/d/Code/MyRepo"
-        );
+        assert_eq!(windows_to_wsl("d:\\Code\\MyRepo"), "/mnt/d/Code/MyRepo");
     }
 
     /// Case preservation — only the drive letter is case-folded; directory
@@ -1232,10 +1292,7 @@ mod tests {
             "/mnt/c/CODE/lowercase"
         );
         // Lowercase body stays lowercase.
-        assert_eq!(
-            windows_to_wsl(r"c:\code\lower"),
-            "/mnt/c/code/lower"
-        );
+        assert_eq!(windows_to_wsl(r"c:\code\lower"), "/mnt/c/code/lower");
     }
 
     /// Git-Bash drive style — what an MSYS git writes into worktree link
@@ -1268,7 +1325,10 @@ mod tests {
         assert_eq!(windows_to_wsl("/mnt/c/Users/Adam"), "/mnt/c/Users/Adam");
         assert_eq!(windows_to_wsl("/usr/bin/bash"), "/usr/bin/bash");
         // UNC strings are NOT silently rewritten (issue #1226 finding #3).
-        assert_eq!(windows_to_wsl(r"\\server\share\repo"), r"\\server\share\repo");
+        assert_eq!(
+            windows_to_wsl(r"\\server\share\repo"),
+            r"\\server\share\repo"
+        );
         // Relative paths pass through.
         assert_eq!(windows_to_wsl("relative/path"), "relative/path");
         // Empty string passes through.
@@ -1388,11 +1448,7 @@ mod tests {
     #[test]
     fn effective_dir_mesh_override_wins_over_app_default() {
         assert_eq!(
-            effective_worktree_dir_raw(
-                "/repo/mesh",
-                Some("mesh-wt"),
-                Some("app-wt")
-            ),
+            effective_worktree_dir_raw("/repo/mesh", Some("mesh-wt"), Some("app-wt")),
             "/repo/mesh/mesh-wt"
         );
         // Clearing the override restores inheritance.
@@ -1519,7 +1575,10 @@ mod tests {
 
     #[test]
     fn validate_relative_and_blank_collapse() {
-        assert_eq!(validate_worktree_directory("/repo/mesh", None).unwrap(), None);
+        assert_eq!(
+            validate_worktree_directory("/repo/mesh", None).unwrap(),
+            None
+        );
         assert_eq!(
             validate_worktree_directory("/repo/mesh", Some("   ")).unwrap(),
             None

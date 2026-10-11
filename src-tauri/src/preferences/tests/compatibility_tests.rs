@@ -8,6 +8,7 @@ use super::super::compatibility::{
 use super::super::model::{HarnessConfigValue, ModelTiers, ProviderPairing};
 use super::super::storage::{load, save};
 use super::with_temp_dir;
+use crate::agent::provider::SpawnOptionId;
 use crate::preferences::ApiSurface;
 use crate::preferences::{AppPreferences, ProviderAccount};
 
@@ -259,8 +260,58 @@ fn harness_default_for_reads_back_stored_value() {
             permission_mode: None,
         },
     );
-    let read = harness_default_for(&prefs, "claude").unwrap();
+    let read = harness_default_for(&prefs, &SpawnOptionId::from("claude")).unwrap();
     assert_eq!(read.model.as_deref(), Some("opus-4-1"));
+}
+
+/// Issue #2038: a Proxied Spawn Option reads the harness half's entry (so
+/// native and proxied rows share one map key) but never inherits the native
+/// model/effort — those name a model on the harness's own endpoint.
+#[test]
+fn harness_default_for_proxy_drops_native_model_and_effort() {
+    let mut prefs = AppPreferences::default();
+    prefs.harness_defaults.insert(
+        "codex".to_string(),
+        HarnessConfigValue {
+            model: Some("gpt-5.1-codex".to_string()),
+            effort: Some("high".to_string()),
+            permission_mode: None,
+        },
+    );
+    let read = harness_default_for(&prefs, &SpawnOptionId::from("codex:minimax"));
+    assert_eq!(read, None);
+    // The same stored default still applies to the native row.
+    let native = harness_default_for(&prefs, &SpawnOptionId::from("codex")).unwrap();
+    assert_eq!(native.model.as_deref(), Some("gpt-5.1-codex"));
+    assert_eq!(native.effort.as_deref(), Some("high"));
+}
+
+/// The permission mode is a harness-CLI concern, not an endpoint concern, so
+/// a proxied spawn keeps it — only model/effort are endpoint-scoped.
+#[test]
+fn harness_default_for_proxy_keeps_permission_mode() {
+    let mut prefs = AppPreferences::default();
+    prefs.harness_defaults.insert(
+        "claude".to_string(),
+        HarnessConfigValue {
+            model: Some("opus-4-1".to_string()),
+            effort: None,
+            permission_mode: Some("prompt".to_string()),
+        },
+    );
+    let read = harness_default_for(&prefs, &SpawnOptionId::from("claude:minimax")).unwrap();
+    assert_eq!(read.model, None);
+    assert_eq!(read.effort, None);
+    assert_eq!(read.permission_mode.as_deref(), Some("prompt"));
+}
+
+/// No stored entry for the harness half is absent for both row shapes — the
+/// proxy exclusion is not what makes an absent default absent.
+#[test]
+fn harness_default_for_unset_harness_is_absent_for_both_row_shapes() {
+    let prefs = AppPreferences::default();
+    assert!(harness_default_for(&prefs, &SpawnOptionId::from("codex")).is_none());
+    assert!(harness_default_for(&prefs, &SpawnOptionId::from("codex:minimax")).is_none());
 }
 
 #[test]

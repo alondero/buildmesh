@@ -1203,7 +1203,34 @@ fn probe_codex_version(
     Ok(CodexVersion(version))
 }
 
+/// The first line of a Windows executable-locator answer that names a runnable
+/// file, or `""` when it names none.
+///
+/// `where.exe` and `Get-Command -CommandType Application` both answer with
+/// *every* match, and an npm Windows prefix holds `codex.cmd` beside the
+/// extensionless POSIX shim npm also writes there. Taking the whole answer put
+/// a CRLF inside the single-quoted PowerShell literal this path is destined
+/// for, so the resolved executable was unusable — the `WindowsInterop` Codex
+/// probe read the entire stdout, and the native arm read every line it could
+/// not filter.
+fn first_runnable_windows_path(candidates: &str) -> &str {
+    candidates
+        .lines()
+        .map(str::trim)
+        .find(|path| {
+            [".exe", ".cmd", ".bat", ".com"]
+                .iter()
+                .any(|extension| path.to_ascii_lowercase().ends_with(extension))
+        })
+        .unwrap_or_default()
+}
+
 /// Step 2: resolve the absolute path of this runtime's Codex executable.
+///
+/// Both locators answer with *every* match on PATH, and an npm Windows prefix
+/// holds both `codex.cmd` and the extensionless POSIX shim beside it, so each
+/// answer is filtered by [`first_runnable_windows_path`] rather than taken
+/// whole. An empty result is left to the caller's emptiness check.
 fn probe_codex_executable(
     env_type: EnvType,
     wsl_distro: Option<&str>,
@@ -1215,7 +1242,7 @@ fn probe_codex_executable(
             "Windows Codex location",
             CODEX_LOOKUP_TIMEOUT,
         )?;
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
+        first_runnable_windows_path(&String::from_utf8_lossy(&output.stdout)).to_string()
     } else if env_type == EnvType::Wsl {
         let mut locate = crate::process_util::command_no_window("wsl.exe");
         locate.args([
@@ -1254,16 +1281,7 @@ fn probe_codex_executable(
         )?;
         let candidates = String::from_utf8_lossy(&out.stdout);
         if cfg!(target_os = "windows") {
-            candidates
-                .lines()
-                .map(str::trim)
-                .find(|path| {
-                    [".exe", ".cmd", ".bat", ".com"]
-                        .iter()
-                        .any(|extension| path.to_ascii_lowercase().ends_with(extension))
-                })
-                .unwrap_or_default()
-                .to_string()
+            first_runnable_windows_path(&candidates).to_string()
         } else {
             candidates
                 .lines()
@@ -2582,6 +2600,33 @@ mod tests {
     /// slow) and drop the path — this is the value-level coverage for the
     /// successful-probe arm of the derivation log (driving a real probe
     /// here would need a live Codex install per runtime).
+    /// Both Windows locators answer with every match, and an npm Windows
+    /// prefix holds the runnable `.cmd` beside the extensionless POSIX shim.
+    /// Taking the whole answer put a CRLF inside the single-quoted PowerShell
+    /// literal this path is destined for, which made the resolved executable
+    /// unusable — so the parser must take one line, and the runnable one.
+    #[test]
+    fn windows_locator_answer_keeps_only_the_first_runnable_line() {
+        let answer = "C:\\Users\\alond\\AppData\\Roaming\\npm\\codex.cmd\r\n\
+                      C:\\Users\\alond\\AppData\\Roaming\\npm\\codex\r\n";
+        assert_eq!(
+            super::first_runnable_windows_path(answer),
+            r"C:\Users\alond\AppData\Roaming\npm\codex.cmd",
+            "the runnable shim must be chosen and the trailing shim dropped, or the \
+             resolved executable carries a CRLF into a single-quoted literal"
+        );
+    }
+
+    /// An answer with no runnable entry resolves to empty, which the caller
+    /// reports as an unusable install rather than passing on a bare stem.
+    #[test]
+    fn windows_locator_answer_without_a_runnable_entry_is_empty() {
+        assert_eq!(
+            super::first_runnable_windows_path("/usr/local/bin/codex\n/usr/bin/codex\n"),
+            ""
+        );
+    }
+
     #[test]
     fn log_safe_runtime_identity_omits_wsl_codex_home() {
         let wsl = CodexInstall {
@@ -3832,10 +3877,16 @@ trust_level = "trusted"
                     "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
                     crate::env::encode_powershell(&script)
                 );
+                // The POST is the observable readiness signal; the budget only
+                // has to outlast a cold shell start on a *loaded* machine —
+                // the shell under test plus the hook's own PowerShell, per
+                // iteration. The old 15 s bound sat close enough to the real
+                // cost that concurrent `cargo test` runs elsewhere produced
+                // `received == None` — the hook never arriving (issue #2173).
+                // Measured under load: ~32 s for all four iterations.
+                const HOOK_POST_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
                 let receiver = std::thread::spawn(move || {
-                    let mut request = server
-                        .recv_timeout(std::time::Duration::from_secs(15))
-                        .unwrap()?;
+                    let mut request = server.recv_timeout(HOOK_POST_BUDGET).unwrap()?;
                     let mut body = String::new();
                     request.as_reader().read_to_string(&mut body).unwrap();
                     let path = request.url().to_owned();

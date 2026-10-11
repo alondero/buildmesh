@@ -74,7 +74,7 @@ export function AddProviderForm({
         <>
           <p className="text-base text-text-secondary">
             Add a first-class provider, or configure any other provider with a name and API key.
-            Endpoint URL and models are set when you attach it under Harnesses.
+            Endpoint URL and models are set when you attach it under Launch Configurations.
           </p>
           {catalog.length > 0 && (
             <ul className="space-y-2">
@@ -115,7 +115,7 @@ export function AddProviderForm({
       ) : (
         <>
           <p className="text-base text-text-secondary">
-            Generic provider — name and API key only. Attach under Harnesses to set base URL
+            Generic provider — name and API key only. Attach under Launch Configurations to set base URL
             (and Claude model tiers when using Claude Code).
           </p>
           <input

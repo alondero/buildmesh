@@ -12,6 +12,16 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+# Test and crash-diagnosis IPC commands (`create_test_mesh`,
+# `debug_list_agents`, `debug_crash_snapshot`) are gated in `lib.rs` behind
+# `#[cfg(any(debug_assertions, feature = "dev-tools"))]` so a shipped release
+# window never answers those names (issue #2153). `debug_assertions` covers
+# `cargo build` and `tauri dev`; the dev profile is built by `tauri build`
+# (release mode, see scripts/run-dev.ps1), so it opts in with this feature via
+# `npm run tauri:build:dev`. Default-off: the release build never passes it.
+dev-tools = []
+
 [dependencies]
 # `#[blocking_command]` proc-macro attribute — wraps async Tauri command
 # bodies in `crate::commands::run_blocking(label, move || { ... }).await`

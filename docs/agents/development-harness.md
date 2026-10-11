@@ -293,6 +293,15 @@ its parent shell exports both color variables; clear `FORCE_COLOR` there too.
 Building under the test environment includes development React code and makes
 the production bundle budget check the wrong artifact.
 
+A gate chooses its own environment by declaring `nodeEnv: 'production'` in the
+plan (`scripts/harness-plan.mjs`); a gate without that property runs with the
+harness-wide `test` value. The declaration travels with the gate rather than
+living in a list of gate ids in the executor, so a new build gate is visibly
+undeclared instead of quietly defaulting to the test environment. `scripts/check.ps1`
+makes the same choice for its own `npm run build` and `npm run build:mobile`
+calls, scoped to those invocations so its vitest calls still get the test
+environment React's `act` requires.
+
 | Outcome | Meaning and next action | Exit |
 |---|---|---|
 | PASS | Every required gate passed, including executed tests | 0 |

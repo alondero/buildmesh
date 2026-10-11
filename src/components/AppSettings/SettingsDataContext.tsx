@@ -36,7 +36,7 @@
  * A review flagged this as a god-context: `coordinator` / `devices` /
  * `network` are read by one pane and `pairings` by another, yet all panes
  * subscribe to the same value. That was measured rather than assumed. With a
- * `MutationObserver` on the General pane's pool input — a pane the user is
+ * `MutationObserver` on the Autopilot pane's pool input — a pane the user is
  * *not* looking at — a full eight-resource settle produced **one** commit
  * on that inactive pane, not one per resource transition. React batches the
  * eight loaders' `setResource` calls into a single render pass, so the

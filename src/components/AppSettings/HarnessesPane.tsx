@@ -1,8 +1,10 @@
 /**
  * `HarnessesPane` — spawn-menu composition and per-harness defaults
- * (issue #1880): launch configurations, the spawn-menu order, the
- * Advanced Provider Routes table, and the application-level harness
- * defaults.
+ * (issue #1880): the spawn-menu order, the Advanced Provider Routes table,
+ * the application-level harness defaults, and the launch configurations.
+ * Spawn menu order leads because it is the part people actually adjust; the
+ * launch-configuration list is long and rarely edited from here (the same
+ * editor opens from a harness's spawn submenu), so it sits behind a toggle.
  *
  * This pane owns the pairing state, because pairing is a harnesses-only
  * concern: a pairing row is always a (harness, provider) edge, and nothing
@@ -13,7 +15,7 @@
  * named resource loaders (issue #1534), so a failed refresh surfaces in a
  * banner instead of leaving a green "loaded" status over stale data.
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import * as api from '../../lib/tauri';
 import { formatError } from '../../lib/errorUtils';
@@ -137,6 +139,8 @@ export function HarnessesPane({
   }, [providers]);
 
   const loadDirtyChange = launchDirtyChange;
+  const [launchOpen, setLaunchOpen] = useState(false);
+  const launchPanelId = useId();
 
   // Re-read verifications when the backend says a pairing verification
   // changed (a verify call, or an external attach). Best-effort: a failure
@@ -365,7 +369,6 @@ export function HarnessesPane({
 
   return (
     <>
-      <SettingsSection title="Launch Configurations"><LaunchConfigurations api={launchConfigurationApi} onDirtyChange={loadDirtyChange} onChanged={() => { void loadRouting(); void loadProviders(); }} refreshToken={providers} /></SettingsSection>
       {/* Issue #1534 — the Agent Harness defaults section below is
           preferences-backed, so a failed preferences load must be visible
           here rather than silently disabling the per-harness inputs. */}
@@ -377,10 +380,10 @@ export function HarnessesPane({
         />
       )}
       {getOrderableHarnesses(providers).length >= 2 && (
-        <SettingsSection title="Spawn menu order">
-          <p className="pb-2 text-sm text-text-muted">
-            Drag to reorder how harnesses appear in every spawn menu. Terminal stays pinned last.
-          </p>
+        <SettingsSection
+          title="Spawn menu order"
+          description="Drag to reorder how harnesses appear in every spawn menu. Terminal stays pinned last."
+        >
           <HarnessOrderList
             providers={providers}
             onReorder={handleReorderHarnesses}
@@ -388,6 +391,36 @@ export function HarnessesPane({
           />
         </SettingsSection>
       )}
+
+      {/* The list stays MOUNTED while collapsed (`hidden`, not unmounted): an
+          open editor holds a draft and reports a dirty site, and unmounting
+          on collapse would drop the draft while the modal still reads dirty
+          (issue #730). */}
+      <SettingsSection
+        title="Launch Configurations"
+        description="Named recipes (harness, provider, model, effort and extra arguments) that appear in each harness's spawn submenu. The same editor opens from New configuration there."
+      >
+        <button
+          type="button"
+          aria-expanded={launchOpen}
+          aria-controls={launchPanelId}
+          onClick={() => setLaunchOpen(open => !open)}
+          className="flex items-center gap-2 text-base text-text-secondary hover:text-text-primary"
+        >
+          <svg
+            viewBox="0 0 16 16"
+            className={`h-3.5 w-3.5 shrink-0 transition-transform ${launchOpen ? 'rotate-90' : ''}`}
+            fill="none"
+            aria-hidden="true"
+          >
+            <path d="M6 3.5 10.5 8 6 12.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+          {launchOpen ? 'Hide launch configurations' : 'Show launch configurations'}
+        </button>
+        <div id={launchPanelId} hidden={!launchOpen} className="mt-3">
+          <LaunchConfigurations api={launchConfigurationApi} onDirtyChange={loadDirtyChange} onChanged={() => { void loadRouting(); void loadProviders(); }} refreshToken={providers} />
+        </div>
+      </SettingsSection>
 
       <SettingsSection
         title="Advanced Provider Routes"
