@@ -399,6 +399,9 @@ pub(super) fn record_failed_attempt(node_id: i64) -> u8 {
 // Diagnostic helpers
 // ---------------------------------------------------------------------------
 
+/// Only consumer is the dev-only `debug_crash_snapshot` command (issue #2153),
+/// so a shipped build drops it with the command.
+#[cfg(any(debug_assertions, feature = "dev-tools"))]
 pub fn buffers_size_bytes() -> usize {
     naming().values().map(|st| st.buffer.len()).sum()
 }

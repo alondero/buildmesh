@@ -258,6 +258,12 @@ pub fn run() {
             commands::mesh::create_mesh,
             commands::mesh::clone_mesh_repo,
             commands::mesh::update_mesh_color,
+            // Dev-only test fixture (issue #2153): it writes a Mesh into the
+            // user's real database, so a shipped build must not answer the
+            // name. See "Dev-only IPC commands" in
+            // docs/development/rust-conventions.md for the gate and why the
+            // dev profile needs the explicit feature opt-in.
+            #[cfg(any(debug_assertions, feature = "dev-tools"))]
             commands::mesh::create_test_mesh,
             commands::mesh::list_meshes,
             commands::mesh::delete_mesh,
@@ -377,6 +383,9 @@ pub fn run() {
             agent::process::resize_agent,
             agent::process::kill_agent,
             agent::process::is_agent_running,
+            // Process-registry introspection for crash diagnosis (issue
+            // #2153): no product UI caller, dev builds only.
+            #[cfg(any(debug_assertions, feature = "dev-tools"))]
             agent::process::debug_list_agents,
             agent::process::send_to_agent,
             agent::process::write_to_agent,
@@ -388,6 +397,8 @@ pub fn run() {
             agent::output::subscribe_agent_output,
             agent::output::unsubscribe_agent_output,
             commands::agent::auto_resume_agent_nodes,
+            // Same dev-only gate as `debug_list_agents` (issue #2153).
+            #[cfg(any(debug_assertions, feature = "dev-tools"))]
             agent::process::debug_crash_snapshot,
             agent::provider_menu::list_providers,
             agent::provider_menu::list_routing_options,
