@@ -52,7 +52,9 @@ are unverified offer explicit **Review passed** and **Request changes** decision
 when no known work/input/evidence blocker remains. Request changes is available
 only when the feedback injection is scheduler-eligible for every possible
 outcome, with all required incoming edges satisfied in the same run. Mutually
-exclusive branches cannot combine to satisfy an all-incoming join. An
+exclusive branches cannot combine to satisfy an all-incoming join. A possible
+`Failed` outcome also needs a `RetryLimit` recovery edge; without one, the run
+fails before the scheduler can deliver feedback. An
 inconclusive automatic review emits a circuit
 notification and stays unverified with its reviewer available for inspection. It
 notifies once

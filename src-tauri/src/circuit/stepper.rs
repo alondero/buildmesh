@@ -3083,6 +3083,13 @@ fn operator_feedback_injection_reachable(
 
         let newly_scheduled = scheduled.insert(next_id.clone());
         for outcome in possible_outcomes {
+            // A Failed result can be routed to another node, but the real
+            // scheduler stops immediately unless a RetryLimit owns that
+            // failure. Do not accept a hypothetical route that would only
+            // deliver the operator note after a fail-fast run has stopped.
+            if *outcome == StepOutcome::Failed && !has_retry_path(run, &next_id) {
+                return false;
+            }
             outcomes.insert(next_id.clone(), Some(*outcome));
             if !every_scheduled_outcome_reaches_feedback(
                 run,
