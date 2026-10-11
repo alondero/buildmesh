@@ -304,19 +304,28 @@ needs no mapping — which also leaves a drive-letter directory, a `.exe`, and a
 bare stem on today's behaviour, and keeps any host PowerShell execution policy
 out of the picture entirely.
 
-Two mechanical traps in that `pushd` argv, both learned the hard way:
+Two mechanical traps in that mapping, both learned the hard way:
 
-- **Pass the directory raw, never pre-quoted.** `CommandBuilder::args` applies
-  the Windows command-line quoting rules itself and escapes a `"` inside an
-  argument, so `"<unc>"` reaches cmd as `"\"<unc>\""`, `pushd` rejects it with
-  *The filename, directory name, or volume label syntax is incorrect.*, and the
-  `&&` means the agent never starts. The `Cmd` arm passes its path the same way.
+- **The directory must never appear on a command line.** portable-pty quotes an
+  argument only when it contains whitespace or a quote, so `&`, `|`, `<`, `>`,
+  `^`, `(`, `)` and `%` in a node's directory reach cmd.exe bare, where cmd
+  treats them as operators — a node in `R&D` would run whatever followed the
+  ampersand. Quoting inside the argument is not available either, because
+  portable-pty escapes a `"` inside an argument, so a pre-quoted path arrives as
+  `"\"<unc>\""` and `pushd` rejects the line with *The filename, directory name,
+  or volume label syntax is incorrect.* The mapping therefore runs from a
+  one-shot batch file that expands a `BUILDMESH_SPAWN_DIR` environment variable
+  inside quotes, so the only thing on the command line is the batch file's own
+  path. The `Cmd` arm still passes its UNC path as a plain argument and keeps
+  that exposure; see [`needs_unc_pushd`] in the module for why it is out of scope
+  for this change.
 - **Only a mapped spawn drops its working directory.** Handing cmd.exe the UNC
   anyway prints *Defaulting to Windows directory* and makes a correct spawn look
   broken. But `Direct` never establishes a location, and PowerShell running a
   `.exe` or bare stem neither `pushd`s nor `Set-Location`s — suppressing the cwd
   for those arms makes `portable-pty` fall back to `USERPROFILE` and opens the
-  agent in the home folder.
+  agent in the home folder. All three sites read one decision,
+  `maps_directory_with_pushd`, because they have to agree.
 
 Read the adapter rather than trusting any list, including this one; a per-adapter
 table rots silently as adapters are added, which is why the adapter is the only
