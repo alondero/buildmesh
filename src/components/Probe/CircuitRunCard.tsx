@@ -34,6 +34,7 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { CircuitEvidenceHistory } from '../Circuits/CircuitEvidenceHistory';
 import { RunNextSteps, runNeedsNextSteps } from '../Circuits/RunNextStepsPanel';
 import { describeProblem } from '../Circuits/runNextSteps';
+import { isTerminalStepStatus } from '../Circuits/circuitVocabulary';
 import type { CircuitRunDetail } from '../../lib/tauri';
 import {
   formatDurationMs,
@@ -220,7 +221,7 @@ export function CircuitRunCard({
     () => runSubject(run, steps, context, nodeIndex, agentName),
     [run, steps, context, nodeIndex, agentName],
   );
-  const currentSteps = steps.filter((step) => ['running', 'unverified', 'blocked', 'pending_slot'].includes(step.status));
+  const currentSteps = steps.filter((step) => !isTerminalStepStatus(step.status));
   const currentAgents = [...new Set(currentSteps.flatMap((step) => {
     const kind = nodeIndex.get(step.node_id)?.type;
     const target = kind && 'target_node_id' in kind ? kind.target_node_id : null;

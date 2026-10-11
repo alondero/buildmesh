@@ -81,6 +81,7 @@ import {
 } from '../../lib/tauri';
 import { recordedLabel } from '../Circuits/runIdentity';
 import { parseRunContext } from '../Circuits/runStepPresentation';
+import { isTerminalRunState } from '../Circuits/circuitVocabulary';
 import {
   buildCircuitProbeRows,
   annotateCircuitRows,
@@ -415,9 +416,7 @@ export function CircuitsProbeTab() {
     [annotatedRows, view, historyAttentionOnly, historySearch]
   );
   const historyEmptyState = useMemo(() => {
-    const hasFinishedRuns = rows.some((row) => row.runs.some((run) =>
-      ['completed', 'failed', 'cancelled'].includes(run.run.state)
-    ));
+    const hasFinishedRuns = rows.some((row) => row.runs.some((run) => isTerminalRunState(run.run.state)));
     return hasFinishedRuns
       ? { label: 'No matching outcomes', hint: 'Finished runs appear here. Try clearing your filters.' }
       : { label: 'No finished runs yet', hint: 'Completed and failed runs will appear here.' };
