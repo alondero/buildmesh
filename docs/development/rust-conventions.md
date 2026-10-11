@@ -19,7 +19,13 @@ Two consequences worth knowing. Every isolated database owns a disjoint range of
 
 **Fixture directories next to a `TestDir`** (a bare origin, a clone) come from `TestDir::sibling(suffix)`, which clears a stale directory and removes it on drop. Hand-built siblings leaked, and Windows recycles process ids, so a later run found the earlier run's bare repository and every push to it was rejected. Sweep for stragglers: a fixture still building `%TEMP%\buildmesh_*_<pid>_<n>` by hand has the same leak, whether or not it has failed yet — the two bare repos in `agent::spawn::provision_tests` had accumulated over 20,000 such directories by the time #2123 moved them onto the seam. Clearing the directory yourself before use hides the leak but not the unbounded accumulation.
 
-**Waits and locks with a wall-clock budget** (a lock-wait timeout, a "finishes within N ms" assertion) are the other source of load-dependent failures. Inject the budget (`prepare_waiting(path, wait)`) or assert the mechanism (a flag that records the watchdog firing), not a stopwatch; see #2049.
+**Waits and locks with a wall-clock budget** (a lock-wait timeout, a "finishes within N ms" assertion) are the other source of load-dependent failures. Inject the budget (`prepare_waiting(path, wait)`) or assert the mechanism (a flag that records the watchdog firing), not a stopwatch; see #2049. A test that spawns a real process, or waits on an OS handle, needs a budget a *loaded* machine can meet: four Windows tests failed only while other worktrees ran `cargo test` (issue #2173). Poll with a sleep, not `yield_now` — a busy spin steals the CPU the wait is competing for.
+
+**Probing the Windows error before matching on it.** Which error a lock contention produces is an empirical question, and guessing it ships the wrong predicate. Three measured facts on Windows 11:
+
+- A `create_new` against a file another handle holds with `share_mode(0)` reports `ERROR_FILE_EXISTS` (os error 80) — *not* an access-denied or sharing error. Matching only `AlreadyExists` is therefore not "the contention case".
+- The same `create_new` reports os error 5 when the *directory* refuses the write — a deny ACE, a scanner, a filesystem filter. That is indistinguishable from a busy lock by probing the lock file, so `acquire_transaction` retries it inside its existing budget rather than failing the launch (issue #2173). A write-denying ACE (`icacls <dir> /deny <user>:(W)`) reproduces it deterministically, and a test can assert that precondition so it cannot pass vacuously.
+- An open handle *inside* a directory blocks the directory's rename-into-staging with os error 5, and the delete that follows is never reached. So `remove_worktree_dir_with_retry`'s retry budget is the entire close-node window, and widening that budget is the fix — there is no second stage to retry.
 
 ## Process-group signals
 
