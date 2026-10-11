@@ -319,6 +319,14 @@ Two mechanical traps in that mapping, both learned the hard way:
   path. The `Cmd` arm still passes its UNC path as a plain argument and keeps
   that exposure; see [`needs_unc_pushd`] in the module for why it is out of scope
   for this change.
+
+On `WindowsInterop` the batch file crosses the WSL boundary and needs three
+things the native arm does not: a **Windows-visible** directory to live in
+(`std::env::temp_dir()` on the Linux host is the guest's `/tmp`), the node
+directory forwarded through `WSLENV`, and a fail-closed guard, because a batch
+expands an unset variable to nothing and `pushd ""` succeeds. The last one is
+what turns a forwarding regression from a failure into a silent wrong-directory
+spawn.
 - **Only a mapped spawn drops its working directory.** Handing cmd.exe the UNC
   anyway prints *Defaulting to Windows directory* and makes a correct spawn look
   broken. But `Direct` never establishes a location, and PowerShell running a
