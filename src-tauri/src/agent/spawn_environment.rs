@@ -187,8 +187,10 @@ fn needs_unc_pushd(executable: &str, spawn_path: &str) -> bool {
 /// choice. cmd.exe re-parses the result of `%VAR%` expansion, so a directory
 /// containing `&` splits the line even when the expansion sits inside quotes:
 ///
-///     pushd "%BUILDMESH_SPAWN_DIR%"     ->  ...interop R
-///                                          'D-x5RP8H]' is not recognized
+/// ```text
+/// pushd "%BUILDMESH_SPAWN_DIR%"     ->  ...interop R
+///                                      'D-x5RP8H]' is not recognized
+/// ```
 ///
 /// Verified against a live `\\wsl.localhost\...` directory with an ampersand in
 /// its name. Quotes written into the file are real tokens to cmd's parser, so
