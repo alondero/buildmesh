@@ -845,3 +845,119 @@ fn fetch_origin_syncs_when_remote_has_no_fetch_refspec() {
          even with no remote.origin.fetch config"
     );
 }
+
+// ── Issue #1992 — the leaked bare origin ───────────────────────────────────
+//
+// A full serial Windows run failed nine tests in this file during fixture
+// *setup*: the process id matched one from an earlier run, so the fixture
+// landed on that run's bare origin, `git init --bare` re-initialised it in
+// place ("Reinitialized existing Git repository"), and the first push was
+// rejected with `! [rejected] HEAD -> main (fetch first)`. `create_dir_all`
+// and `git init` both leave existing contents alone, so the previous run's
+// commits were still there.
+//
+// A fixture that owns its origin must start from independent history.
+
+/// The incident, reproduced end to end: seed the exact directory this
+/// fixture's origin will occupy with a real commit from "an earlier run",
+/// then build the fixture the way the tests above do. The first push must
+/// succeed, `origin/main` must be the fixture's own commit with no ancestor
+/// beyond it, the leaked commit must not be findable, and the origin must
+/// leave with the fixture.
+#[test]
+fn fetch_origin_fixture_starts_from_independent_history_over_a_leaked_origin() {
+    let (parent, origin_dir) = {
+        let td = TestDir::new("autosync_leaked_origin");
+        let parent = td.path().to_path_buf();
+
+        // Seed the leaked origin before the fixture claims the name.
+        let mut name = parent.file_name().unwrap().to_os_string();
+        name.push("_origin");
+        let leaked = parent.parent().unwrap().join(name);
+        let leaked_commit = {
+            let bare = git2::Repository::init_bare(&leaked).unwrap();
+            // Scoped so the tree/builder borrows end before the repository
+            // itself is released.
+            let oid = {
+                let sig = git2::Signature::now("test", "test@example.com").unwrap();
+                let blob = bare.blob(b"from an earlier run\n").unwrap();
+                let mut builder = bare.treebuilder(None).unwrap();
+                builder
+                    .insert("earlier.txt", blob, git2::FileMode::Blob.into())
+                    .unwrap();
+                let tree_id = builder.write().unwrap();
+                let tree = bare.find_tree(tree_id).unwrap();
+                bare.commit(
+                    Some("refs/heads/main"),
+                    &sig,
+                    &sig,
+                    "earlier run commit",
+                    &tree,
+                    &[],
+                )
+                .unwrap()
+            };
+            // Release the repository before anything re-inits or removes
+            // the directory — an open handle pins it on Windows.
+            drop(bare);
+            oid
+        };
+
+        // The fixture's own construction.
+        let origin_dir = td.sibling("origin");
+        let status = Command::new("git")
+            .args(["init", "--bare", "--initial-branch=main"])
+            .arg(&origin_dir)
+            .status()
+            .expect("git init --bare failed");
+        assert!(status.success());
+        let repo = init_repo_with_commit(&parent, &[("README.md", "v1\n")]);
+        set_local_origin(&parent, &origin_dir);
+        let status = Command::new("git")
+            .args(["push", "-u", "origin", "HEAD:main"])
+            .current_dir(&parent)
+            .status()
+            .expect("git push failed");
+        assert!(
+            status.success(),
+            "the fixture's first push must not be rejected as a non-fast-forward \
+             against another run's commits (issue #1992)"
+        );
+
+        let own_commit = repo.head().unwrap().peel_to_commit().unwrap().id();
+        let bare = git2::Repository::open_bare(&origin_dir).unwrap();
+        let remote_main = bare
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .target()
+            .unwrap();
+        assert_eq!(
+            remote_main, own_commit,
+            "origin/main must be the commit this fixture pushed"
+        );
+        let mut depth = 0;
+        let mut cursor = bare.find_commit(remote_main).unwrap();
+        loop {
+            depth += 1;
+            match cursor.parent(0) {
+                Ok(ancestor) => cursor = ancestor,
+                Err(_) => break,
+            }
+        }
+        assert_eq!(
+            depth, 1,
+            "the origin must hold only this fixture's initial commit"
+        );
+        assert!(
+            bare.find_commit(leaked_commit).is_err(),
+            "the earlier run's commit must not survive in the fixture's origin"
+        );
+
+        (parent, origin_dir)
+    };
+    assert!(!parent.exists(), "the fixture root is removed on drop");
+    assert!(
+        !origin_dir.exists(),
+        "the fixture's bare origin is removed on drop too"
+    );
+}
