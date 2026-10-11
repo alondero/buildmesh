@@ -1265,12 +1265,12 @@ mod tests {
         if let Some(index) = argv.iter().position(|arg| arg == "-EncodedCommand") {
             return decode_ps(&argv[index + 1]);
         }
-        // Mapped arm: cmd.exe runs a batch file, so the payload is on disk.
-        let batch = argv
-            .last()
-            .expect("the mapped arm passes a batch file to cmd.exe");
-        let contents = std::fs::read_to_string(batch)
-            .unwrap_or_else(|error| panic!("reading the mapped batch {batch}: {error}"));
+        // Mapped arm: cmd.exe runs a batch file, so the payload is on disk —
+        // at the host spelling of the Windows path in the argv.
+        let batch =
+            mapped_batch_path(command).expect("the mapped arm passes a batch file to cmd.exe");
+        let contents = std::fs::read_to_string(&batch)
+            .unwrap_or_else(|error| panic!("reading the mapped batch {batch:?}: {error}"));
         let payload = contents
             .lines()
             .filter_map(|line| {
@@ -1485,17 +1485,23 @@ mod tests {
         );
     }
 
-    /// The batch file a mapped command runs, taken from the last argv entry.
+    /// The batch file a mapped command runs, as a path **this host** can open.
+    ///
+    /// The argv entry is a Windows path — it has to be, since it is what
+    /// `cmd.exe` is told — but a Linux host opens the same file through its
+    /// host spelling. Converting is not belt-and-braces: reading the Windows
+    /// spelling directly is exactly what broke these tests on Linux CI.
     ///
     /// Not gated on Windows: this is path inspection with no platform API, and
     /// the structural tests that call it run on every platform.
     fn mapped_batch_path(command: &portable_pty::CommandBuilder) -> Option<std::path::PathBuf> {
-        let path = std::path::PathBuf::from(command.get_argv().last()?);
-        let is_batch = path.file_name().is_some_and(|name| {
+        let windows = command.get_argv().last()?;
+        let host = std::path::PathBuf::from(crate::env::to_host_path(&windows.to_string_lossy()));
+        let is_batch = host.file_name().is_some_and(|name| {
             name.to_string_lossy()
                 .starts_with(super::MAPPED_BATCH_PREFIX)
         });
-        is_batch.then_some(path)
+        is_batch.then_some(host)
     }
 
     /// Remove a batch file a test created but never ran. The child cannot clean
@@ -1825,6 +1831,7 @@ mod tests {
     /// holder, and a Windows node whose directory is a UNC host path is exactly
     /// the shape that lost its working directory.
     #[test]
+    #[cfg(windows)]
     fn powershell_spawn_in_a_unc_directory_maps_it_through_pushd() {
         let npm_dir = tempfile::tempdir().unwrap();
         let shim = npm_dir.path().join("codex.cmd");
@@ -1852,6 +1859,7 @@ mod tests {
     /// itself. `CodexProxy` is the route that puts a `.cmd` here at all, and it
     /// is the one that was still broken.
     #[test]
+    #[cfg(windows)]
     fn windows_interop_powershell_spawn_in_a_unc_directory_maps_it_through_pushd() {
         let npm_dir = tempfile::tempdir().unwrap();
         let shim = npm_dir.path().join("codex.cmd");
@@ -1951,6 +1959,7 @@ mod tests {
     /// Both spellings the code accepts but no test covered: an uppercase
     /// batch extension, and the forward-slash UNC form external tools emit.
     #[test]
+    #[cfg(windows)]
     fn uppercase_batch_extension_and_forward_slash_unc_still_map() {
         let npm_dir = tempfile::tempdir().unwrap();
         let shim = npm_dir.path().join("codex.CMD");
