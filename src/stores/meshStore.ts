@@ -60,7 +60,6 @@ interface MeshState {
   /** Refresh the mesh snapshot and reject on failure for callers that must confirm it succeeded. */
   refreshMeshes: () => Promise<void>;
   addMesh: () => Promise<void>;
-  addTestMesh: (name: string) => Promise<Mesh | null>;
   createMesh: (name: string, path: string, color?: string | null) => Promise<Mesh | null>;
   // Clone a GitHub repo into `<parentDir>/<repo>` and register it as a mesh.
   // Returns the created mesh or the backend's error text: clone failures are
@@ -118,20 +117,6 @@ export const useMeshStore = create<MeshState>((set) => {
       }));
     } catch (e) {
       set({ error: formatError(e) });
-    }
-  },
-
-  addTestMesh: async (name) => {
-    try {
-      const mesh = await api.createTestMesh(name);
-      set((state) => ({
-        meshes: [...state.meshes, mesh],
-        meshesById: new Map([...state.meshesById, [mesh.id, mesh]])
-      }));
-      return mesh;
-    } catch (e) {
-      set({ error: formatError(e) });
-      return null;
     }
   },
 

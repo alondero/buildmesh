@@ -155,9 +155,6 @@ export const cloneMeshRepo = (url: string, parentDir: string, color?: string | n
 export const updateMeshColor = (meshId: number, color: string | null) =>
   _invoke('update_mesh_color', { meshId, color });
 
-export const createTestMesh = (name: string) =>
-  _invoke<Mesh>('create_test_mesh', { name });
-
 export const listMeshes = () =>
   _invoke<Mesh[]>('list_meshes');
 

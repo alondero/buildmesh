@@ -2951,6 +2951,12 @@ pub async fn is_agent_running(session_id: i64) -> bool {
 // ---------------------------------------------------------------------------
 // Debug
 // ---------------------------------------------------------------------------
+//
+// The two commands below are dev-only (issue #2153): they expose
+// process-registry state and have no product UI caller. The `cfg` mirrors the
+// handler entry in `lib.rs` — a shipped build drops both, and gating only one
+// side leaves a dead `#[command]` (release dead-code warning) or a handler
+// that cannot resolve (compile error).
 
 #[derive(Serialize)]
 pub struct AgentDebugState {
@@ -2958,6 +2964,7 @@ pub struct AgentDebugState {
     pub is_alive: bool,
 }
 
+#[cfg(any(debug_assertions, feature = "dev-tools"))]
 #[command]
 pub async fn debug_list_agents() -> Vec<AgentDebugState> {
     PROCESS_REGISTRY
@@ -2982,6 +2989,7 @@ pub struct CrashSnapshot {
     pub turn_counters_entries: usize,
 }
 
+#[cfg(any(debug_assertions, feature = "dev-tools"))]
 #[command]
 pub async fn debug_crash_snapshot() -> CrashSnapshot {
     let process_ids = PROCESS_REGISTRY.session_ids();
