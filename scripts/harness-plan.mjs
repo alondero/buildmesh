@@ -71,13 +71,20 @@ export function planGates(paths, { full = false } = {}) {
   // Everything above is quick and runs first, in order. The product gates split
   // into a frontend and a Rust lane that run concurrently (#2104), each keeping
   // its own order and fail-fast. `heavy` gates share a machine-wide slot limit.
+  // A gate that produces the bundle under test declares `nodeEnv: 'production'`.
+  // Vite resolves `process.env.NODE_ENV` when it builds, and a gate without
+  // this property runs with the harness-wide `test` value, so an undeclared
+  // build ships the React development runtime and `check:bundle` measures the
+  // wrong artifact (issue #2013). The property travels with the gate rather
+  // than living in a list of gate ids here, so a new build gate is visibly
+  // undeclared instead of quietly defaulting to the test environment.
   if (frontend) {
-    npm('frontend-build', 'build', { minutes: 10, ignores: FRONTEND_BUILD_IGNORES, lane: 'frontend' });
+    npm('frontend-build', 'build', { minutes: 10, ignores: FRONTEND_BUILD_IGNORES, lane: 'frontend', nodeEnv: 'production' });
     npm('bundle', 'check:bundle', { ignores: FRONTEND_BUILD_IGNORES, lane: 'frontend' });
     npm('frontend-tests', 'test', { tests: 'vitest', minutes: 10, ignores: FRONTEND_TEST_IGNORES, lane: 'frontend', heavy: true });
     node('browser-smoke', ['node_modules/@playwright/test/cli.js', 'test', '--project=verify-smoke', '--reporter=line'], { tests: 'playwright', browser: true, ignores: FRONTEND_BUILD_IGNORES, lane: 'frontend' });
   } else if (rust) {
-    npm('mobile-build', 'build:mobile', { minutes: 10, ignores: FRONTEND_BUILD_IGNORES, lane: 'rust' });
+    npm('mobile-build', 'build:mobile', { minutes: 10, ignores: FRONTEND_BUILD_IGNORES, lane: 'rust', nodeEnv: 'production' });
   }
   if (rust) {
     // `vite build` empties dist/ (including dist/mobile/), which the Rust crate

@@ -34,7 +34,9 @@ pub(crate) fn wrapup_reasons(state: &WrapupState) -> Vec<String> {
             reasons.push("the worktree still has uncommitted changes".to_string());
         }
         if !state.pushed {
-            reasons.push("the branch has not been pushed to origin (or has unpushed commits)".to_string());
+            reasons.push(
+                "the branch has not been pushed to origin (or has unpushed commits)".to_string(),
+            );
         }
         if state.pr_required && state.pr_url.is_none() {
             reasons.push("no open pull request exists for the branch".to_string());
@@ -69,9 +71,7 @@ pub(crate) fn correction_prompt(reasons: &[String], recent_output: &str) -> Stri
     prompt
 }
 
-pub(crate) fn observe_wrapup_git_state(
-    node: &crate::models::AgentNode,
-) -> WrapupState {
+pub(crate) fn observe_wrapup_git_state(node: &crate::models::AgentNode) -> WrapupState {
     // `node_working_path` resolves Worktree and Root Nodes alike (host path +
     // env), so the self-heal below covers both; on a Root Node the sanitize
     // is a no-op (`.git` is a directory, not a gitlink).
@@ -90,8 +90,7 @@ pub(crate) fn observe_wrapup_git_state(
             node.id,
             first_err
         );
-        if let Err(e) = crate::git::worktree::sanitize_git_worktree(&host_path, resolved.env_type)
-        {
+        if let Err(e) = crate::git::worktree::sanitize_git_worktree(&host_path, resolved.env_type) {
             tracing::warn!("circuit verification({}): sanitize failed: {}", node.id, e);
         }
         git2::Repository::open(&host_path)
@@ -135,10 +134,15 @@ pub(crate) fn observe_wrapup_git_state(
     };
 
     WrapupState {
-        dirty, pushed, branch, pr_url: None, pr_number: None, pr_required: false, repo_error,
+        dirty,
+        pushed,
+        branch,
+        pr_url: None,
+        pr_number: None,
+        pr_required: false,
+        repo_error,
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -186,20 +190,39 @@ mod tests {
         let tree_id = repo.index().unwrap().write_tree().unwrap();
         let tree = repo.find_tree(tree_id).unwrap();
         let signature = git2::Signature::now("test", "test@example.com").unwrap();
-        let commit = repo.commit(Some("HEAD"), &signature, &signature, "initial", &tree, &[]).unwrap();
-        repo.branch("renamed-implementation", &repo.find_commit(commit).unwrap(), false).unwrap();
+        let commit = repo
+            .commit(Some("HEAD"), &signature, &signature, "initial", &tree, &[])
+            .unwrap();
+        repo.branch(
+            "renamed-implementation",
+            &repo.find_commit(commit).unwrap(),
+            false,
+        )
+        .unwrap();
         repo.set_head("refs/heads/renamed-implementation").unwrap();
-        repo.remote("origin", "https://github.com/example/repo.git").unwrap();
-        repo.reference("refs/remotes/origin/renamed-implementation", commit, true, "test").unwrap();
-        repo.find_branch("renamed-implementation", git2::BranchType::Local).unwrap()
-            .set_upstream(Some("origin/renamed-implementation")).unwrap();
+        repo.remote("origin", "https://github.com/example/repo.git")
+            .unwrap();
+        repo.reference(
+            "refs/remotes/origin/renamed-implementation",
+            commit,
+            true,
+            "test",
+        )
+        .unwrap();
+        repo.find_branch("renamed-implementation", git2::BranchType::Local)
+            .unwrap()
+            .set_upstream(Some("origin/renamed-implementation"))
+            .unwrap();
         let worktree_path = dir.path().join("original-worktree-name");
-        let branch_ref = repo.find_reference("refs/heads/renamed-implementation").unwrap();
+        let branch_ref = repo
+            .find_reference("refs/heads/renamed-implementation")
+            .unwrap();
         let mut options = git2::WorktreeAddOptions::new();
         options.reference(Some(&branch_ref));
         // Release the branch from the main checkout before attaching it.
         repo.set_head_detached(commit).unwrap();
-        repo.worktree("original-worktree-name", &worktree_path, Some(&options)).unwrap();
+        repo.worktree("original-worktree-name", &worktree_path, Some(&options))
+            .unwrap();
         let mut node = wrapup_test_node();
         node.path = dir.path().to_string_lossy().into_owned();
         node.worktree_name = Some("original-worktree-name".into());
@@ -212,4 +235,74 @@ mod tests {
         assert!(state.pr_url.is_none());
     }
 
+    /// The #2193 wrap-up gate: a worktree whose `src-tauri/target` is a
+    /// directory junction must verify clean, or `wrapup_reasons` sends the
+    /// agent to fix uncommitted changes that do not exist. `CLAUDE.md` points
+    /// an agent at the `node_modules` junction in a fresh worktree, and sharing
+    /// the cargo cache the same way is the natural extension.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn observe_wrapup_git_state_clean_when_target_is_a_junction() {
+        use crate::env::test_helpers::{init_repo_with_commit, junction_dir};
+        let td = crate::env::test_helpers::TestDir::new("wrapup_junction");
+        let repo = init_repo_with_commit(
+            td.path(),
+            &[("f.txt", "a\n"), ("src-tauri/.gitignore", "/target/\n")],
+        );
+        let branch = crate::git::primitives::head_branch_name(&repo).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        // Everything else the gate checks holds, so a dirty verdict is the only
+        // thing that can fail this.
+        repo.remote("origin", "https://github.com/example/repo.git")
+            .unwrap();
+        repo.reference(
+            &format!("refs/remotes/origin/{}", branch),
+            head.id(),
+            true,
+            "test",
+        )
+        .unwrap();
+        repo.find_branch(&branch, git2::BranchType::Local)
+            .unwrap()
+            .set_upstream(Some(&format!("origin/{}", branch)))
+            .unwrap();
+
+        let payload = td.sibling("payload");
+        std::fs::create_dir_all(payload.join("debug")).unwrap();
+        std::fs::write(payload.join("debug").join("build.bin"), b"x").unwrap();
+        junction_dir(&td.path().join("src-tauri").join("target"), &payload);
+
+        let mut node = wrapup_test_node();
+        node.path = td.path().to_string_lossy().into_owned();
+        node.worktree_name = None;
+        node.use_worktree = false;
+        node.worktree_path = None;
+
+        let state = observe_wrapup_git_state(&node);
+        assert!(
+            state.repo_error.is_none(),
+            "the fixture worktree must open: {:?}",
+            state.repo_error
+        );
+        assert!(
+            !state.dirty,
+            "a junctioned `target/` must not read as uncommitted changes (#2193)"
+        );
+        assert!(
+            !wrapup_reasons(&state)
+                .iter()
+                .any(|r| r.contains("uncommitted changes")),
+            "the wrap-up correction must not blame changes that do not exist: {:?}",
+            wrapup_reasons(&state)
+        );
+
+        // The gate must still catch a genuinely modified tracked file.
+        // (A plain write, not `commit_file`, which would commit the change and
+        // leave the tree clean.)
+        std::fs::write(td.path().join("f.txt"), "changed\n").unwrap();
+        assert!(
+            observe_wrapup_git_state(&node).dirty,
+            "a modified tracked file is real uncommitted work and must be reported"
+        );
+    }
 }

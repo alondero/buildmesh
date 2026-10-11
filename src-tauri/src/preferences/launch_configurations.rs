@@ -278,12 +278,10 @@ fn resolve_plan(
         return Err("Harness is unavailable; install it for the selected runtime".into());
     }
     let caps = capabilities_for(Provider::from_db_str(&harness.harness).adapter());
-    // Harness defaults describe its native provider. A proxy has its own model default.
-    let native_defaults = !id.is_proxied();
-    let app = prefs
-        .harness_defaults
-        .get(&harness.id)
-        .filter(|_| native_defaults);
+    // Harness defaults describe the harness's native provider, so a proxy
+    // row takes its model from the route instead — the shared reader applies
+    // that exclusion here and on the live launch seam (#2038).
+    let app = super::harness_default_for(prefs, &id);
     let configured_model = configuration.and_then(|c| c.model.as_deref());
     let configured_effort = configuration.and_then(|c| c.effort.as_deref());
     let nonblank = |value: Option<&str>| {
@@ -302,12 +300,12 @@ fn resolve_plan(
             model: FieldInputs {
                 explicit: model.as_deref(),
                 mesh: None,
-                application: app.and_then(|c| c.model.as_deref()),
+                application: app.as_ref().and_then(|c| c.model.as_deref()),
             },
             effort: FieldInputs {
                 explicit: effort.as_deref(),
                 mesh: None,
-                application: app.and_then(|c| c.effort.as_deref()),
+                application: app.as_ref().and_then(|c| c.effort.as_deref()),
             },
             // Issue #2151, review round 1: launch recipes carry no
             // permission slot of their own, and the plan carries none
