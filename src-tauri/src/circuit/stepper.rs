@@ -69,7 +69,7 @@ use super::model::{
     consumes_agent_slot, is_executable, CircuitGraph, CircuitNodeKind, EdgeCondition,
     GithubActionKind, SessionStatusKind, StepOutcome,
 };
-use super::model_node_review::LOCAL_REVIEW_INCONCLUSIVE_MESSAGE;
+use super::model_node_review::{LOCAL_REVIEW_INCONCLUSIVE_MESSAGE, PR_REVIEW_INCONCLUSIVE_MESSAGE};
 use crate::circuit::evaluator::Classification;
 
 pub(crate) const MAX_CLASSIFIER_FAILURES: u32 = 5;
@@ -2410,8 +2410,13 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                             node_id,
                             "Review is inconclusive. Inspect the reviewer, then record a verdict or check again.".into(),
                         ) {
+                            let message = if run.graph.is_issue_driven_autopilot_review() {
+                                PR_REVIEW_INCONCLUSIVE_MESSAGE
+                            } else {
+                                LOCAL_REVIEW_INCONCLUSIVE_MESSAGE
+                            };
                             t.effects.push(Effect::Notify {
-                                message: run.context.resolve(LOCAL_REVIEW_INCONCLUSIVE_MESSAGE),
+                                message: run.context.resolve(message),
                             });
                         }
                         return t;
@@ -2978,8 +2983,8 @@ fn classifier_outcome_is_routed(run: &RunView, node_id: &str, outcome: StepOutco
 
 /// A request-changes verdict must have a downstream injection to an agent
 /// other than the reviewer. Follow the selected verdict branch and each
-/// completed intermediate outcome so editable graphs can put joins or
-/// notifications between the verdict and feedback prompt.
+/// recorded intermediate outcome; a node without one can still take any
+/// outcome, matching the path the scheduler can deliver after the decision.
 fn operator_feedback_injection_reachable(
     run: &RunView,
     review_node_id: &str,
@@ -3011,7 +3016,9 @@ fn operator_feedback_injection_reachable(
         for edge in run.graph.edges.iter().filter(|edge| edge.from == from) {
             let follows_route = match edge.condition {
                 EdgeCondition::Always => true,
-                EdgeCondition::OnOutcome(expected) => outcome == Some(expected),
+                EdgeCondition::OnOutcome(expected) => {
+                    outcome.is_none() || outcome == Some(expected)
+                }
             };
             if !follows_route {
                 continue;

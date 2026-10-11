@@ -225,9 +225,13 @@ export interface CircuitProbeRow extends CircuitWithRuns {
   nodeIndex: NodeIndex;
 }
 
+const SEARCHABLE_CONTEXT_PREFIXES = ['issue.', 'pr.'] as const;
+
 function runSearchContext(context: Record<string, string>): string {
   return Object.entries(context)
-    .filter(([key]) => key.startsWith('issue.') || key.startsWith('pr.') || key.startsWith('source.'))
+    .filter(([key]) =>
+      key === 'source.name' || SEARCHABLE_CONTEXT_PREFIXES.some((prefix) => key.startsWith(prefix))
+    )
     .map(([, value]) => value)
     .join(' ')
     .toLowerCase();

@@ -121,7 +121,6 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
             "merge_blocked",
             "merge_unconfirmed",
             "review_exhausted",
-            "review_blocked",
             "complete",
         ],
         required_edges: &[
@@ -171,11 +170,6 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
                 "review_classifier",
                 "close_approved",
                 EdgeCondition::OnOutcome(StepOutcome::Completed),
-            ),
-            (
-                "review_classifier",
-                "review_blocked",
-                EdgeCondition::OnOutcome(StepOutcome::Blocked),
             ),
             // Approval closes the reviewer, then hands the PR to the
             // implementation agent to squash-merge. GitHub must confirm the

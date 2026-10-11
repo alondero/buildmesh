@@ -2,7 +2,11 @@
 
 Status: current
 
-When a review stops, History distinguishes a review limit from an unclear verdict and shows the failure reason and retained report. A graph finishing never counts as reviewer approval.
+A review that reaches its round limit ends in a recoverable failed run, and
+History retains the failure reason and report. An unclear verdict keeps the run
+active with an Unverified step and a one-time notification; inspect the reviewer,
+then record a verdict or recheck the evidence. A graph finishing never counts
+as reviewer approval.
 
 | Journey | Recovery |
 |---|---|

@@ -5863,10 +5863,33 @@ fn issue_review_inconclusive_verdict_waits_for_human_resolution() {
         ),
     );
     let next = advance(&mut run, &tick(8));
+    let repeated = advance_with_report_evidence(
+        &mut run,
+        &classified_with_output(
+            "review_classifier",
+            Some(Classification::Blocked),
+            Some("Cannot review: provider access is unavailable."),
+        ),
+    );
     assert_eq!(run.state, RunState::Running);
     assert_eq!(status_of(&run, "review_classifier"), StepStatus::Unverified);
     assert!(run.can_record_review("review_classifier", StepOutcome::Completed));
     assert!(run.can_record_review("review_classifier", StepOutcome::Working));
+    let notifications: Vec<_> = transition
+        .effects
+        .iter()
+        .chain(&next.effects)
+        .chain(&repeated.effects)
+        .filter_map(|effect| match effect {
+            Effect::Notify { message } if message.contains("Review needs attention") => {
+                Some(message.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notifications.len(), 1, "parking notifies exactly once");
+    assert!(notifications[0].contains("PR #314"), "{notifications:?}");
+    assert!(!notifications[0].contains("for :"), "{notifications:?}");
     assert!(!transition
         .effects
         .iter()

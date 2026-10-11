@@ -932,7 +932,7 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
         };
         let mut view = recovery_view(&tx, &run)?;
         if !view.can_record_review(&step.node_id, outcome) {
-            return Err("This review cannot accept that verdict. Resolve outstanding work or input requests, then refresh.".into());
+            return Err("This review cannot accept that verdict. Resolve outstanding work or input requests, and ensure the Request changes route reaches a feedback injection, then refresh.".into());
         }
         let verdict = if passed {
             "approved"
@@ -5413,6 +5413,61 @@ mod tests {
     }
 
     #[test]
+    fn operator_review_request_changes_without_a_feedback_route_explains_what_is_missing() {
+        use crate::circuit::{context::CircuitContext, model::CircuitGraph};
+
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch(
+            "INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(8,1,'source','/repo/source');
+            INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(9,1,'reviewer','/repo/reviewer');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'review');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state,context_json)
+                VALUES(1,1,1,'running','{\"source.agent_id\":\"8\"}');
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,agent_node_id)
+                VALUES(1,'reviewer',1,'completed',9),(1,'verdict',1,'unverified',9);",
+        )
+        .unwrap();
+        let mut graph = CircuitGraph::agent_review(None, None, 3);
+        graph
+            .edges
+            .retain(|edge| !(edge.from == "verdict" && edge.to == "feedback"));
+        db.execute(
+            "UPDATE autopilot_circuits SET graph_json=?1",
+            [graph.to_json().unwrap()],
+        )
+        .unwrap();
+
+        let error = record_outcome_locked(
+            &mut db,
+            &CheckpointRequest {
+                run_id: 1,
+                node_id: "verdict".into(),
+                attempt: 1,
+                expected_revision: 0,
+                action: CheckpointAction::ReviewFail,
+                reason: "Fix the unchecked null.".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.to_lowercase().contains("feedback injection"),
+            "{error}"
+        );
+
+        let stored = super::super::ledger::get_circuit_run_inner(&db, 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            CircuitContext::from_json(&stored.context_json)
+                .unwrap()
+                .get("node.verdict.review_verdict"),
+            None
+        );
+    }
+
+    #[test]
     fn recorded_operator_review_drives_the_next_tick_and_injected_prompt() {
         use crate::circuit::{
             model::{
@@ -5472,7 +5527,7 @@ mod tests {
                 graph.edges.push(CircuitEdge {
                     from: "feedback_notice".into(),
                     to: "feedback".into(),
-                    condition: EdgeCondition::Always,
+                    condition: EdgeCondition::OnOutcome(StepOutcome::Completed),
                 });
             }
             db.execute(
@@ -5480,6 +5535,18 @@ mod tests {
                 [graph.to_json().unwrap()],
             )
             .unwrap();
+
+            if next_node == "feedback" {
+                let stored = super::super::ledger::get_circuit_run_inner(&db, 1)
+                    .unwrap()
+                    .unwrap();
+                let view = recovery_view(&db, &stored).unwrap();
+                assert!(view.step("feedback_notice").is_none());
+                assert!(
+                    view.can_record_review("verdict", StepOutcome::Working),
+                    "a not-yet-run completed-outcome intermediate can reach feedback"
+                );
+            }
 
             let request = CheckpointRequest {
                 run_id: 1,

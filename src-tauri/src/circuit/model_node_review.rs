@@ -5,6 +5,7 @@ use super::model::{
 
 pub(crate) const LOCAL_APPROVED_MESSAGE: &str = "Review approved for {{source.name}} (agent {{source.agent_id}}). It was asked to squash-merge its pull request and has been handed back to you.";
 pub(crate) const LOCAL_REVIEW_INCONCLUSIVE_MESSAGE: &str = "Review needs attention for {{source.name}}: the reviewer could not give a verdict. See the review report in the run context.";
+pub(crate) const PR_REVIEW_INCONCLUSIVE_MESSAGE: &str = "Review needs attention for PR #{{pr.number}}: the reviewer could not give a verdict. See the review report in the run context.";
 pub(crate) const LEGACY_LOCAL_APPROVED_MESSAGE: &str =
     "Review approved for {{source.name}} (agent {{source.agent_id}}).";
 

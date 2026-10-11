@@ -65,7 +65,6 @@ import {
 import {
   linkedAgentNodeId,
   nodeRoleLabel,
-  parseRunContext,
   reviewReport,
   runFailureStep,
   stepPassLabel,
@@ -151,6 +150,7 @@ export function LiveRunDuration({ run, steps, compact = false }: { run: CircuitR
 
 interface CircuitRunCardProps {
   detail: CircuitRunDetail;
+  context: Record<string, string>;
   capacity: CircuitCapacity;
   expanded: boolean;
   onToggleExpanded: () => void;
@@ -185,6 +185,7 @@ function isRunShipped(
 
 export function CircuitRunCard({
   detail,
+  context,
   capacity,
   expanded,
   onToggleExpanded,
@@ -202,7 +203,7 @@ export function CircuitRunCard({
   focused = false,
 }: CircuitRunCardProps) {
   const { run, steps } = detail;
-  const review = reviewResult(detail, reviewCircuit);
+  const review = reviewResult(detail, reviewCircuit, context);
   const activity = runActivity(run, steps, capacity, review);
   const progress = runStepProgress(steps);
   const blockedSteps = steps.filter((s) => s.status === 'blocked');
@@ -214,10 +215,6 @@ export function CircuitRunCard({
   // words, so the raw scheduler reason would only repeat it.
   const showNextSteps = runNeedsNextSteps(run, steps);
   const problemStep = firstError ?? steps.find((step) => step.status === 'unverified');
-  // Parsing a potentially large `context_json` (issue/PR bodies, prompts) is
-  // memoised: the duration clock re-renders a live card every second and must
-  // not re-parse the blob each tick.
-  const context = useMemo(() => parseRunContext(run.context_json), [run.context_json]);
   // Issue identity stays stable while the agent link follows the current step.
   const subject = useMemo(
     () => runSubject(run, steps, context, nodeIndex, agentName),
@@ -330,7 +327,7 @@ export function CircuitRunCard({
       </a>}
 
       {expanded && review && <p className="px-2 pb-1.5 text-2xs text-text-secondary break-words">{review.detail}</p>}
-      {canContinueReview(detail, reviewCircuit) && onContinueReview && (
+      {canContinueReview(detail, reviewCircuit, context) && onContinueReview && (
         <div className="px-2 pb-2">
           <button type="button" disabled={busy} onClick={onContinueReview}
             data-testid={`run-continue-review-${run.id}`}

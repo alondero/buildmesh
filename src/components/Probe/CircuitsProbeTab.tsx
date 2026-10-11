@@ -414,6 +414,14 @@ export function CircuitsProbeTab() {
     () => buildCircuitProbeRows(annotatedRows, view, { attentionOnly: historyAttentionOnly, search: historySearch }),
     [annotatedRows, view, historyAttentionOnly, historySearch]
   );
+  const historyEmptyState = useMemo(() => {
+    const hasFinishedRuns = rows.some((row) => row.runs.some((run) =>
+      ['completed', 'failed', 'cancelled'].includes(run.run.state)
+    ));
+    return hasFinishedRuns
+      ? { label: 'No matching outcomes', hint: 'Finished runs appear here. Try clearing your filters.' }
+      : { label: 'No finished runs yet', hint: 'Completed and failed runs will appear here.' };
+  }, [rows]);
   const activityStats = useMemo(
     () => circuitActivityStats(annotatedRows, queue.length),
     [annotatedRows, queue.length]
@@ -650,9 +658,9 @@ export function CircuitsProbeTab() {
   };
 
   // Keep deliberate disclosures across live refreshes and view changes.
-  const toggleRunExpanded = (runId: number, defaultExpanded: boolean) => {
+  const toggleRunExpanded = (runId: number) => {
     setRunExpandOverrides((prev) => {
-      const current = prev[runId] ?? defaultExpanded;
+      const current = prev[runId] ?? false;
       return { ...prev, [runId]: !current };
     });
   };
@@ -971,8 +979,8 @@ export function CircuitsProbeTab() {
         {view === 'activity' && loadedMeshId === activeMeshId && activityStats.activeCount === 0 && rows.length > 0 && <EmptyState label="Ready for work" hint="No runs are active. Check the queue or trigger a circuit in Manage." />}
         {view === 'history' && loadedMeshId === activeMeshId && viewRows.every((row) => row.visibleRuns.length === 0) && rows.length > 0 && (
           <EmptyState
-            label={rows.some((row) => row.runs.some((run) => ['completed', 'failed', 'cancelled'].includes(run.run.state))) ? 'No matching outcomes' : 'No finished runs yet'}
-            hint={rows.some((row) => row.runs.some((run) => ['completed', 'failed', 'cancelled'].includes(run.run.state))) ? 'Finished runs appear here. Try clearing your filters.' : 'Completed and failed runs will appear here.'}
+            label={historyEmptyState.label}
+            hint={historyEmptyState.hint}
           />
         )}
         {view !== 'queue' && (rows.length === 0 ? (
@@ -985,7 +993,7 @@ export function CircuitsProbeTab() {
         ) : (
           <ul className="flex flex-col gap-1 p-2">
             {view === 'history' && <li className="text-2xs text-text-muted px-1">Recent outcomes · attention first</li>}
-            {viewRows.filter((row) => view === 'manage' || row.visibleRuns.length > 0).map(({ circuit, visibleRuns, reviewCircuit, nodeIndex }) => {
+            {viewRows.filter((row) => view === 'manage' || row.visibleRuns.length > 0).map(({ circuit, visibleRuns, reviewCircuit, nodeIndex, contextByRunId }) => {
               // The row model computes this once when the backend payload
               // changes; the duration clock does not repeat the scan.
               const capacity = {
@@ -1095,18 +1103,20 @@ export function CircuitsProbeTab() {
                 {view !== 'manage' && visibleRuns.length > 0 && (
                   <ul className="mt-1.5 flex flex-col gap-1" data-testid={`circuit-runs-${circuit.id}`}>
                     {visibleRuns.map((detail) => {
+                      const context = contextByRunId.get(detail.run.id) ?? {};
                       return (
                         <CircuitRunCard
                           key={detail.run.id}
                           detail={detail}
-                          reviewCircuit={reviewCircuitForRun(detail, reviewCircuit)}
+                          context={context}
+                          reviewCircuit={reviewCircuitForRun(detail, reviewCircuit, context)}
                           nodeIndex={nodeIndex}
                           agentName={agentName}
                           onFocusAgent={handleFocusAgent}
                           focused={highlightRunId === detail.run.id}
                           capacity={capacity}
                           expanded={runExpandOverrides[detail.run.id] ?? false}
-                          onToggleExpanded={() => toggleRunExpanded(detail.run.id, false)}
+                          onToggleExpanded={() => toggleRunExpanded(detail.run.id)}
                           busy={busy}
                           onPause={() => runAction(() => pauseCircuitRun(detail.run.id))}
                           onResume={() => runAction(() => resumeCircuitRun(detail.run.id))}

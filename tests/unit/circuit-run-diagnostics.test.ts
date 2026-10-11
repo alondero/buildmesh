@@ -288,6 +288,7 @@ describe('run diagnostics', () => {
         'issue.title': 'Investigate worker queue',
         'pr.title': 'Worker queue cleanup',
         'source.name': 'Buildmesh agent',
+        'source.output': 'Looks approved',
         'node.reviewer.output': 'The report mentions approved and completed work.',
         'node.verdict.status': 'completed',
       });
