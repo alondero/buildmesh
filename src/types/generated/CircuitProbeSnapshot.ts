@@ -11,4 +11,4 @@ export type CircuitProbeSnapshot = { circuits: Array<CircuitWithRuns>, queue: Ar
 /**
  * Latest worker admission observation for each pending run.
  */
-queue_waits?: { [key in string]: string }, };
+queue_waits: { [key in string]: string }, };

@@ -431,7 +431,6 @@ export function CircuitsProbeTab() {
     () => viewRows.flatMap(({ visibleRuns }) => visibleRuns.map((d) => d.run.id)),
     [viewRows]
   );
-  const runSlots = useMemo(() => new Map(viewRows.flatMap((row) => row.visibleRuns).map((detail, index) => [detail.run.id, index + 1])), [viewRows]);
   const queueVisible = useMemo(() => queue.slice(0, queueVisibleCount), [queue, queueVisibleCount]);
   const queueSensors = useSensors(
     useSensor(PointerSensor),
@@ -863,7 +862,7 @@ export function CircuitsProbeTab() {
         {view === 'manage' && <section className="p-3 border-b border-border-subtle space-y-3">
           <h3 className="text-xs font-semibold text-text-primary">Run capacity</h3>
           {meshRow && <CircuitRunCapacity key={activeMeshId} meshId={activeMeshId} capacity={meshRunCapacity} />}
-          <p className="text-2xs text-text-secondary">Paused runs keep their slot. Disabling a circuit stops new automatic runs; work already in progress continues.</p>
+          <p className="text-2xs text-text-secondary">Paused runs still count toward run capacity. Disabling a circuit stops new automatic runs; work already in progress continues.</p>
           <details><summary className="cursor-pointer text-xs text-accent-cyan min-h-[24px]">Create a circuit</summary>
       <CircuitCreateForm
         busy={busy}
@@ -970,7 +969,12 @@ export function CircuitsProbeTab() {
           </section>
         )}
         {view === 'activity' && loadedMeshId === activeMeshId && activityStats.activeCount === 0 && rows.length > 0 && <EmptyState label="Ready for work" hint="No runs are active. Check the queue or trigger a circuit in Manage." />}
-        {view === 'history' && loadedMeshId === activeMeshId && viewRows.every((row) => row.visibleRuns.length === 0) && rows.length > 0 && <EmptyState label="No matching outcomes" hint="Finished runs appear here. Try clearing your filters." />}
+        {view === 'history' && loadedMeshId === activeMeshId && viewRows.every((row) => row.visibleRuns.length === 0) && rows.length > 0 && (
+          <EmptyState
+            label={rows.some((row) => row.runs.some((run) => ['completed', 'failed', 'cancelled'].includes(run.run.state))) ? 'No matching outcomes' : 'No finished runs yet'}
+            hint={rows.some((row) => row.runs.some((run) => ['completed', 'failed', 'cancelled'].includes(run.run.state))) ? 'Finished runs appear here. Try clearing your filters.' : 'Completed and failed runs will appear here.'}
+          />
+        )}
         {view !== 'queue' && (rows.length === 0 ? (
           <div className="p-4">
             <EmptyState
@@ -1091,20 +1095,18 @@ export function CircuitsProbeTab() {
                 {view !== 'manage' && visibleRuns.length > 0 && (
                   <ul className="mt-1.5 flex flex-col gap-1" data-testid={`circuit-runs-${circuit.id}`}>
                     {visibleRuns.map((detail) => {
-                      const defaultExpanded = false;
                       return (
                         <CircuitRunCard
                           key={detail.run.id}
                           detail={detail}
-                          slot={view === 'activity' ? runSlots.get(detail.run.id) : undefined}
                           reviewCircuit={reviewCircuitForRun(detail, reviewCircuit)}
                           nodeIndex={nodeIndex}
                           agentName={agentName}
                           onFocusAgent={handleFocusAgent}
                           focused={highlightRunId === detail.run.id}
                           capacity={capacity}
-                          expanded={runExpandOverrides[detail.run.id] ?? defaultExpanded}
-                          onToggleExpanded={() => toggleRunExpanded(detail.run.id, defaultExpanded)}
+                          expanded={runExpandOverrides[detail.run.id] ?? false}
+                          onToggleExpanded={() => toggleRunExpanded(detail.run.id, false)}
                           busy={busy}
                           onPause={() => runAction(() => pauseCircuitRun(detail.run.id))}
                           onResume={() => runAction(() => resumeCircuitRun(detail.run.id))}

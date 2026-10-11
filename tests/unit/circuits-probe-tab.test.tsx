@@ -414,6 +414,21 @@ describe('CircuitsProbeTab', () => {
     expect(screen.getByTestId(`queue-pending-reason-${queue[0].run.id}`).textContent).toContain('Global agent limit');
   });
 
+  it('does not present reordered activity cards as stable numbered slots', async () => {
+    const running = { ...RUN_RUNNING, run: { ...RUN_RUNNING.run, updated_at: '2026-08-22 10:01:00' } };
+    const paused = {
+      ...RUN_RUNNING,
+      run: { ...RUN_RUNNING.run, id: 13, circuit_id: 8, state: 'paused', updated_at: '2026-08-22 10:02:00' },
+    };
+    mockBackend({ circuits: [CIRCUIT, { ...CIRCUIT, id: 8, name: 'review' }], runs: [running, paused] });
+    openProbeDestination('circuits');
+
+    expect(await screen.findByTestId('run-card-12')).toBeTruthy();
+    expect(screen.getByTestId('run-card-13')).toBeTruthy();
+    expect(screen.getByText('2 / 2 slots occupied')).toBeTruthy();
+    expect(screen.queryByText(/^Slot \d+$/)).toBeNull();
+  });
+
   it('prioritizes attention in History and separates activity, queue, and configuration', async () => {
     const failed = { ...RUN_DONE, run: { ...RUN_DONE.run, id: 13, circuit_id: 8, state: 'failed' } };
     mockBackend({
@@ -1094,8 +1109,16 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
 
     // Failed runs live in History now — switch views first.
     fireEvent.click(await screen.findByTestId('circuits-view-history'));
-    fireEvent.click(await screen.findByTestId('run-toggle-25'));
-    // Failed runs open by default, and a failure is never hidden.
+    // A collapsed failed card gives a plain-language summary and a clear action.
+    expect(await screen.findByText(/could not read the agent's report/i)).toBeTruthy();
+    expect(screen.getByText('Resolve failed step')).toBeTruthy();
+    const collapsedExcerpt = screen.getByTestId('run-error-summary-25');
+    expect(collapsedExcerpt.textContent).toContain('classifier verdict could not be parsed');
+    expect(collapsedExcerpt.className).toContain('line-clamp-2');
+    expect(screen.getByTestId('run-toggle-25').getAttribute('aria-controls')).toBe('run-detail-25');
+    expect((document.getElementById('run-detail-25') as HTMLElement).hidden).toBe(true);
+    fireEvent.click(screen.getByTestId('run-toggle-25'));
+    // The expanded timeline keeps the complete classifier error available.
     const collapsedError = await screen.findByTestId('run-error-25');
     expect(collapsedError.textContent).toContain('classifier verdict could not be parsed');
     expect(collapsedError.className).toContain('break-words');
@@ -1565,9 +1588,13 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     const toggle = await screen.findByTestId('run-toggle-11');
     expect(toggle.tagName).toBe('BUTTON');
     expect(toggle.getAttribute('aria-controls')).toBe('run-detail-11');
+    expect((document.getElementById('run-detail-11') as HTMLElement).hidden).toBe(true);
     // Controls live outside the disclosure button — a button nested in a
     // button is invalid HTML and breaks keyboard semantics.
     expect(toggle.querySelector('button')).toBeNull();
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-controls')).toBe('run-detail-11');
+    expect((document.getElementById('run-detail-11') as HTMLElement).hidden).toBe(false);
   });
 
   it('uses tab semantics for the mutually exclusive views', async () => {

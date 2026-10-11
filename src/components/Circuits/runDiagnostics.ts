@@ -57,8 +57,11 @@ export function reviewCircuitMetadata(
 }
 
 /** Extensions use the stock review-only snapshot even for issue circuits. */
-export function reviewCircuitForRun(detail: CircuitRunDetail, circuit: ReviewCircuitMetadata | null): ReviewCircuitMetadata | null {
-  const context = parseRunContext(detail.run.context_json);
+export function reviewCircuitForRun(
+  detail: CircuitRunDetail,
+  circuit: ReviewCircuitMetadata | null,
+  context = parseRunContext(detail.run.context_json),
+): ReviewCircuitMetadata | null {
   return context['review.extended'] === '1' || context['recovery.from_run_id']
     ? { verdictNodeId: 'verdict', retryNodeIds: ['retry'], mergeNodeId: MERGE_HAND_OFF_NODE_ID, supportsContinuation: true }
     : circuit;
@@ -99,7 +102,11 @@ export function circuitGraphFacts(
 }
 
 /** Historical completion meant the graph stopped, not that a review approved. */
-export function reviewResult(detail: CircuitRunDetail, reviewCircuit: ReviewCircuitMetadata | null = null): { label: string; detail: string; needsAttention: boolean } | null {
+export function reviewResult(
+  detail: CircuitRunDetail,
+  reviewCircuit: ReviewCircuitMetadata | null = null,
+  context = parseRunContext(detail.run.context_json),
+): { label: string; detail: string; needsAttention: boolean } | null {
   if (reviewCircuit === null || !isTerminalRunState(detail.run.state)) return null;
   const review = detail.steps.find((s) => s.node_id === reviewCircuit.verdictNodeId);
   if (!review) return null;
@@ -111,7 +118,7 @@ export function reviewResult(detail: CircuitRunDetail, reviewCircuit: ReviewCirc
   // Which pass the recorded verdict belongs to, when the context still
   // carries it. Retention empties `context_json` on pruned runs, so this is
   // a flourish on the run-level summary, never a requirement.
-  const pass = reviewPassCount(parseRunContext(detail.run.context_json), reviewCircuit.verdictNodeId);
+  const pass = reviewPassCount(context, reviewCircuit.verdictNodeId);
   // Runs approved before the merge hand-off existed never delivered it.
   const mergeRequested = reviewCircuit.mergeNodeId !== undefined
     && detail.steps.some((s) => s.node_id === reviewCircuit.mergeNodeId && s.status === 'completed');
@@ -141,22 +148,29 @@ export function reviewResult(detail: CircuitRunDetail, reviewCircuit: ReviewCirc
       }
     : {
         label: exhausted ? 'Review limit reached' : 'Review needs attention',
-        detail: `${exhausted && pass !== null ? `Ran out of review attempts after pass ${pass}. ` : ''}No final approval is recorded. ${canContinueReview(detail, reviewCircuit) ? 'Inspect the latest findings. If the work is ready, add one review round to this run on the same worktree. If the approach needs changing, open the implementation agent first.' : 'Open the implementation agent, or resume its saved session from Archive. Address the failed step and latest findings before starting a fresh review. If the session is unavailable, recover from the PR branch.'}`,
+        detail: `${exhausted && pass !== null ? `Ran out of review attempts after pass ${pass}. ` : ''}No final approval is recorded. ${canContinueReview(detail, reviewCircuit, context) ? 'Inspect the latest findings. If the work is ready, add one review round to this run on the same worktree. If the approach needs changing, open the implementation agent first.' : 'Open the implementation agent, or resume its saved session from Archive. Address the failed step and latest findings before starting a fresh review. If the session is unavailable, recover from the PR branch.'}`,
         needsAttention: true,
       };
 }
 
-export function canContinueReview(detail: CircuitRunDetail, reviewCircuit: ReviewCircuitMetadata | null): boolean {
+export function canContinueReview(
+  detail: CircuitRunDetail,
+  reviewCircuit: ReviewCircuitMetadata | null,
+  context = parseRunContext(detail.run.context_json),
+): boolean {
   if (detail.run.state !== 'failed' || reviewCircuit === null) return false;
-  const context = parseRunContext(detail.run.context_json);
   const supported = reviewCircuit.supportsContinuation || context['source.review_preset'] === '1' || Boolean(context['recovery.from_run_id']);
   return Boolean(supported && detail.steps.some((s) => s.node_id === reviewCircuit.verdictNodeId)
     && (detail.run.source_agent_node_id !== null || detail.steps.some((s) => s.node_id === 'implementer' && s.agent_node_id !== null)));
 }
 
 /** A run needs a user's attention before the circuit can make progress. */
-export function runNeedsAttention(detail: CircuitRunDetail, reviewCircuit: ReviewCircuitMetadata | null = null): boolean {
-  return detail.run.state === 'failed' || detail.run.state === 'paused' || reviewResult(detail, reviewCircuit)?.needsAttention === true ||
+export function runNeedsAttention(
+  detail: CircuitRunDetail,
+  reviewCircuit: ReviewCircuitMetadata | null = null,
+  context = parseRunContext(detail.run.context_json),
+): boolean {
+  return detail.run.state === 'failed' || detail.run.state === 'paused' || reviewResult(detail, reviewCircuit, context)?.needsAttention === true ||
     detail.steps.some((step) => step.status === 'blocked' || step.status === 'unverified');
 }
 
@@ -203,18 +217,34 @@ export interface CircuitProbeRow extends CircuitWithRuns {
   visibleRuns: CircuitRunDetail[];
   hasAttention: boolean;
   reviewCircuit: ReviewCircuitMetadata | null;
+  /** Parsed once per snapshot for attention and search derivations. */
+  contextByRunId: ReadonlyMap<number, Record<string, string>>;
+  /** Searchable issue, PR and source identity, parsed once per snapshot. */
+  searchContextByRunId: ReadonlyMap<number, string>;
   /** Circuit `node_id` → blueprint node, for the run card's role labels. */
   nodeIndex: NodeIndex;
+}
+
+function runSearchContext(context: Record<string, string>): string {
+  return Object.entries(context)
+    .filter(([key]) => key.startsWith('issue.') || key.startsWith('pr.') || key.startsWith('source.'))
+    .map(([, value]) => value)
+    .join(' ')
+    .toLowerCase();
 }
 
 /** Parse each persisted graph once per backend snapshot. */
 export function annotateCircuitRows(rows: CircuitWithRuns[]): CircuitProbeRow[] {
   return rows.map((row) => {
     const { reviewCircuit, nodeIndex } = circuitGraphFacts(row.circuit);
+    const contextByRunId = new Map(row.runs.map((run) => [run.run.id, parseRunContext(run.run.context_json)]));
+    const searchContextByRunId = new Map(row.runs.map((run) => [run.run.id, runSearchContext(contextByRunId.get(run.run.id)!)]));
     return {
       ...row,
       reviewCircuit,
       nodeIndex,
+      contextByRunId,
+      searchContextByRunId,
       visibleRuns: [],
       hasAttention: false,
     };
@@ -236,7 +266,15 @@ export function buildCircuitProbeRows(
       const facts = 'reviewCircuit' in row
         ? { reviewCircuit: row.reviewCircuit, nodeIndex: row.nodeIndex }
         : circuitGraphFacts(row.circuit);
+      const contextByRunId = 'contextByRunId' in row
+        ? row.contextByRunId
+        : new Map(row.runs.map((run) => [run.run.id, parseRunContext(run.run.context_json)]));
+      const searchContextByRunId = 'searchContextByRunId' in row
+        ? row.searchContextByRunId
+        : new Map(row.runs.map((run) => [run.run.id, runSearchContext(contextByRunId.get(run.run.id) ?? {})]));
       const reviewCircuit = facts.reviewCircuit;
+      const contextFor = (run: CircuitRunDetail) => contextByRunId.get(run.run.id) ?? {};
+      const reviewFor = (run: CircuitRunDetail) => reviewCircuitForRun(run, reviewCircuit, contextFor(run));
       let visibleRuns = view === 'history'
         ? row.runs.filter(runBelongsToHistory)
         : view === 'activity'
@@ -244,11 +282,11 @@ export function buildCircuitProbeRows(
           : [];
       if (view === 'history') {
         if (options.attentionOnly) {
-          visibleRuns = visibleRuns.filter((run) => runNeedsAttention(run, reviewCircuitForRun(run, reviewCircuit)));
+          visibleRuns = visibleRuns.filter((run) => runNeedsAttention(run, reviewFor(run), contextFor(run)));
         }
         if (needle !== '') {
           visibleRuns = visibleRuns.filter((run) =>
-            Object.values(parseRunContext(run.run.context_json)).some((value) => value.toLowerCase().includes(needle)) ||
+            (searchContextByRunId.get(run.run.id) ?? '').includes(needle) ||
             run.run.trigger_identity.toLowerCase().includes(needle) ||
             String(run.run.id).includes(needle) ||
             row.circuit.name.toLowerCase().includes(needle)
@@ -257,7 +295,7 @@ export function buildCircuitProbeRows(
         // Attention-first, then newest — so the 63-failure case reads as
         // actionable items on top, not an endless completed tail.
         visibleRuns.sort((a, b) =>
-          Number(runNeedsAttention(b, reviewCircuitForRun(b, reviewCircuit))) - Number(runNeedsAttention(a, reviewCircuitForRun(a, reviewCircuit))) ||
+          Number(runNeedsAttention(b, reviewFor(b), contextFor(b))) - Number(runNeedsAttention(a, reviewFor(a), contextFor(a))) ||
           compareRunsNewestFirst(a, b));
       } else {
         visibleRuns.sort(compareRunsNewestFirst);
@@ -265,8 +303,10 @@ export function buildCircuitProbeRows(
       return {
         ...row,
         visibleRuns,
-        hasAttention: visibleRuns.some((run) => runNeedsAttention(run, reviewCircuitForRun(run, reviewCircuit))),
+        hasAttention: visibleRuns.some((run) => runNeedsAttention(run, reviewFor(run), contextFor(run))),
         reviewCircuit,
+        contextByRunId,
+        searchContextByRunId,
         nodeIndex: facts.nodeIndex,
       };
     })
@@ -311,17 +351,21 @@ export function circuitActivityStats(
     const reviewCircuit = 'reviewCircuit' in row
       ? row.reviewCircuit
       : reviewCircuitMetadata(circuit);
+    const contextByRunId = 'contextByRunId' in row
+      ? row.contextByRunId
+      : new Map(runs.map((detail) => [detail.run.id, parseRunContext(detail.run.context_json)]));
     for (const detail of runs) {
+      const context = contextByRunId.get(detail.run.id) ?? {};
       if (runBelongsToActivity(detail)) {
         activeCount += 1;
-        if (runNeedsAttention(detail, reviewCircuitForRun(detail, reviewCircuit))) {
+        if (runNeedsAttention(detail, reviewCircuitForRun(detail, reviewCircuit, context), context)) {
           activeAttentionCount += 1;
           attentionCount += 1;
         }
       }
       if (runBelongsToHistory(detail)) {
         historyCount += 1;
-        if (runNeedsAttention(detail, reviewCircuitForRun(detail, reviewCircuit))) {
+        if (runNeedsAttention(detail, reviewCircuitForRun(detail, reviewCircuit, context), context)) {
           historyAttentionCount += 1;
           attentionCount += 1;
         }

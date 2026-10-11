@@ -20,8 +20,8 @@
  * `review_classifier:completed · attempt 2`, and a review step with a
  * retained report offers it behind its own toggle.
  *
- * Runs start collapsed; attention remains visible with a Resolve action. Errors remain visible in
- * the card headline even when a terminal card is collapsed.
+ * Runs start collapsed; attention remains visible with a Resolve action and a
+ * clamped error excerpt. Expanded details show the full report and evidence.
  * `expanded` is lifted to the parent so a `circuit-run-updated` refetch
  * can't reset a card the user deliberately opened or closed.
  *
@@ -173,7 +173,14 @@ interface CircuitRunCardProps {
   onFocusAgent: (nodeId: number) => void;
   /** True for a beat after the user linked here from that agent node. */
   focused?: boolean;
-  slot?: number;
+}
+
+function isRunShipped(
+  review: ReturnType<typeof reviewResult>,
+  steps: CircuitRunDetail['steps'],
+): boolean {
+  return review !== null && !review.needsAttention &&
+    steps.some((step) => step.node_id === 'close_implementer' && step.status === 'completed');
 }
 
 export function CircuitRunCard({
@@ -193,7 +200,6 @@ export function CircuitRunCard({
   agentName,
   onFocusAgent,
   focused = false,
-  slot,
 }: CircuitRunCardProps) {
   const { run, steps } = detail;
   const review = reviewResult(detail, reviewCircuit);
@@ -239,7 +245,6 @@ export function CircuitRunCard({
       data-run-state={run.state}
       data-run-focused={focused ? 'true' : undefined}
     >
-      {slot !== undefined && <div className="px-2 pt-2 text-2xs font-medium text-text-secondary">Slot {slot}</div>}
       {/* Headline row. The whole row is the disclosure control so the hit
           target stays comfortable at narrow widths; the buttons below sit
           outside it so they don't inherit the toggle. */}
@@ -272,7 +277,7 @@ export function CircuitRunCard({
             }`}
             data-testid={`run-state-${run.id}`}
           >
-            {review && steps.some((step) => step.node_id === 'close_implementer' && step.status === 'completed') && !review.needsAttention ? 'Shipped' : review?.label ?? runStateLabel(run.state)}
+            {isRunShipped(review, steps) ? 'Shipped' : review?.label ?? runStateLabel(run.state)}
           </span>
           {reviewCircuit && context['retry.attempt'] && context['retry.max_retries'] && (
             <span className="text-2xs text-text-muted" data-testid={`run-review-rounds-${run.id}`}>
@@ -439,6 +444,13 @@ export function CircuitRunCard({
         <div className="px-2 pb-2">
         {problemStep && <p className="text-2xs text-status-warning break-words mb-1">
           {describeProblem({ state: run.state, role: nodeRoleLabel(problemStep.node_id, nodeIndex.get(problemStep.node_id)?.type), status: problemStep.status, error: problemStep.error_message }).happened}
+          {problemStep.error_message && <span
+            className="mt-0.5 block line-clamp-2 break-words text-text-secondary"
+            data-testid={`run-error-summary-${run.id}`}
+            title={problemStep.error_message}
+          >
+            {problemStep.error_message}
+          </span>}
         </p>}
         <button type="button" onClick={onToggleExpanded} aria-expanded={expanded} aria-controls={panelId} className="min-h-[24px] px-2 rounded-md bg-status-warning/15 text-status-warning text-xs">
           Resolve {run.state === 'failed' ? 'failed step' : 'uncertain result'}
@@ -463,8 +475,9 @@ export function CircuitRunCard({
         )
       )}
 
-      {expanded && (
-          <div id={panelId} className="px-2 pb-2 border-t border-border-subtle pt-1.5">
+      <div id={panelId} hidden={!expanded}>
+        {expanded && (
+          <div className="px-2 pb-2 border-t border-border-subtle pt-1.5">
             <CircuitEvidenceHistory
               key={run.id}
               runId={run.id}
@@ -624,8 +637,9 @@ export function CircuitRunCard({
               })}
             </ol>
           )}
-        </div>
-      )}
+          </div>
+        )}
+      </div>
     </li>
   );
 }

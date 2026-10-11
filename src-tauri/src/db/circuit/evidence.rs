@@ -5340,12 +5340,17 @@ mod tests {
         ] {
             let mut db = Connection::open_in_memory().unwrap();
             crate::db::init_schema(&db).unwrap();
-            db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            db.execute_batch(
+                "INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+                INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(8,1,'source','/repo/source');
                 INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(9,1,'reviewer','/repo');
                 INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'review');
-                INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');
+                INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state,context_json)
+                    VALUES(1,1,1,'running','{\"source.agent_id\":\"8\"}');
                 INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,agent_node_id)
-                    VALUES(1,'reviewer',1,'completed',9),(1,'verdict',1,'unverified',9);").unwrap();
+                    VALUES(1,'reviewer',1,'completed',9),(1,'verdict',1,'unverified',9);",
+            )
+            .unwrap();
             let graph = CircuitGraph::agent_review(None, None, 3);
             db.execute(
                 "UPDATE autopilot_circuits SET graph_json=?1",
@@ -5377,7 +5382,7 @@ mod tests {
             request.reason.clear();
             assert!(record_outcome_locked(&mut db, &request).is_err());
             request.reason = "Inspected the review and current diff".into();
-            db.execute("UPDATE autopilot_circuit_runs SET context_json=?1", [r#"{"node.verdict.evaluated_output":"obsolete earlier report","node.verdict.review_verdict_attempt":"0"}"#]).unwrap();
+            db.execute("UPDATE autopilot_circuit_runs SET context_json=?1", [r#"{"source.agent_id":"8","node.verdict.evaluated_output":"obsolete earlier report","node.verdict.review_verdict_attempt":"0"}"#]).unwrap();
             record_outcome_locked(&mut db, &request).unwrap();
             assert!(record_outcome_locked(&mut db, &request).is_err());
             let run = super::super::ledger::get_circuit_run_inner(&db, 1)
@@ -5404,6 +5409,126 @@ mod tests {
                 .any(|entry| entry.kind == "operator_review"
                     && entry.source.as_deref() == Some("operator")
                     && entry.disposition.as_deref() == Some(verdict)));
+        }
+    }
+
+    #[test]
+    fn recorded_operator_review_drives_the_next_tick_and_injected_prompt() {
+        use crate::circuit::{
+            model::{
+                CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind, EdgeCondition, StepOutcome,
+            },
+            stepper::{advance, Capacity, CircuitEvent, Effect, StepStatus},
+        };
+
+        for (action, next_node, expected_prompt, note) in [
+            (
+                CheckpointAction::ReviewPass,
+                "merge",
+                "The human reviewer approved",
+                "I checked the current PR and its required checks.",
+            ),
+            (
+                CheckpointAction::ReviewFail,
+                "feedback",
+                "Human review findings (operator):\nFix the unchecked null before merging.",
+                "Fix the unchecked null before merging.",
+            ),
+        ] {
+            let mut db = Connection::open_in_memory().unwrap();
+            crate::db::init_schema(&db).unwrap();
+            db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+                INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(9,1,'source','/repo');
+                INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(10,1,'reviewer','/repo/reviewer');
+                INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'review');
+                INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state,context_json)
+                    VALUES(1,1,1,'running','{\"source.agent_id\":\"9\",\"source.name\":\"issue #42\"}');
+                INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,agent_node_id)
+                    VALUES(1,'reviewer',1,'completed',10),(1,'verdict',1,'unverified',10);").unwrap();
+            let mut graph = CircuitGraph::agent_review(None, None, 3);
+            if let Some(node) = graph.nodes.iter_mut().find(|node| node.id == "feedback") {
+                let crate::circuit::model::CircuitNodeKind::InjectPty { prompt, .. } =
+                    &mut node.kind
+                else {
+                    panic!("feedback must inject a prompt");
+                };
+                *prompt = "Address the requested changes and summarize your work.".into();
+            }
+            if next_node == "feedback" {
+                graph
+                    .edges
+                    .retain(|edge| !(edge.from == "verdict" && edge.to == "feedback"));
+                graph.nodes.push(CircuitNode {
+                    id: "feedback_notice".into(),
+                    kind: CircuitNodeKind::Notify {
+                        message: "An operator requested changes.".into(),
+                    },
+                });
+                graph.edges.push(CircuitEdge {
+                    from: "verdict".into(),
+                    to: "feedback_notice".into(),
+                    condition: EdgeCondition::OnOutcome(StepOutcome::Working),
+                });
+                graph.edges.push(CircuitEdge {
+                    from: "feedback_notice".into(),
+                    to: "feedback".into(),
+                    condition: EdgeCondition::Always,
+                });
+            }
+            db.execute(
+                "UPDATE autopilot_circuits SET graph_json=?1",
+                [graph.to_json().unwrap()],
+            )
+            .unwrap();
+
+            let request = CheckpointRequest {
+                run_id: 1,
+                node_id: "verdict".into(),
+                attempt: 1,
+                expected_revision: 0,
+                action,
+                reason: note.into(),
+            };
+            record_outcome_locked(&mut db, &request).unwrap();
+            let stored = super::super::ledger::get_circuit_run_inner(&db, 1)
+                .unwrap()
+                .unwrap();
+            let mut view = recovery_view(&db, &stored).unwrap();
+            let tick = advance(
+                &mut view,
+                &CircuitEvent::Tick(Capacity {
+                    agent_free_slots: 1,
+                }),
+            );
+            assert_eq!(view.step(next_node).unwrap().status, StepStatus::Running);
+            if next_node == "feedback" {
+                assert_eq!(
+                    view.step("verdict").unwrap().outcome,
+                    Some(StepOutcome::Working)
+                );
+                assert!(tick.effects.iter().any(|effect| matches!(effect, Effect::Notify { message } if message == "An operator requested changes.")));
+            } else {
+                assert!(tick.effects.iter().any(|effect| matches!(effect, Effect::CloseAgentNode { node_id, .. } if node_id == "close_approved")));
+            }
+
+            let ready = advance(
+                &mut view,
+                &CircuitEvent::AgentReady {
+                    node_id: next_node.into(),
+                },
+            );
+            let prompt = ready
+                .effects
+                .iter()
+                .find_map(|effect| match effect {
+                    Effect::InjectPty {
+                        node_id, prompt, ..
+                    } if node_id == next_node => Some(prompt),
+                    _ => None,
+                })
+                .expect("the next scheduled prompt is injected when its target is ready");
+            assert!(prompt.contains(expected_prompt), "prompt was: {prompt}");
+            assert!(prompt.contains("Address the requested changes") || next_node == "merge");
         }
     }
 }

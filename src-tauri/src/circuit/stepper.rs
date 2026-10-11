@@ -69,6 +69,7 @@ use super::model::{
     consumes_agent_slot, is_executable, CircuitGraph, CircuitNodeKind, EdgeCondition,
     GithubActionKind, SessionStatusKind, StepOutcome,
 };
+use super::model_node_review::LOCAL_REVIEW_INCONCLUSIVE_MESSAGE;
 use crate::circuit::evaluator::Classification;
 
 pub(crate) const MAX_CLASSIFIER_FAILURES: u32 = 5;
@@ -267,6 +268,11 @@ impl RunView {
             && self.resolve_target_agent(node_id).is_some()
             && !self.report_has_known_blockers(node_id)
             && classifier_outcome_is_routed(self, node_id, outcome)
+            && (outcome != StepOutcome::Working
+                || self.graph.nodes.iter().any(|candidate| {
+                    matches!(&candidate.kind, CircuitNodeKind::InjectPty { .. })
+                        && operator_feedback_injection_reachable(self, node_id, &candidate.id)
+                }))
     }
 
     fn accepts_report_binding(
@@ -1971,7 +1977,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 if is_running_inject {
                     t.effects.push(Effect::InjectPty {
                         node_id: node_id.clone(),
-                        prompt: resolve_operator_review_prompt(run, &prompt),
+                        prompt: resolve_operator_review_prompt(run, node_id, &prompt),
                         target_node_id,
                     });
                     run.context.set(&delivery_key, "intent");
@@ -2360,12 +2366,6 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                         }
                         return t;
                     }
-                    if run
-                        .step(node_id)
-                        .is_some_and(|step| step.status == StepStatus::Unverified)
-                    {
-                        set_step(run, &mut t, node_id, StepStatus::Running);
-                    }
                     if matches!(
                         run.graph.node(node_id).map(|n| &n.kind),
                         Some(CircuitNodeKind::ReviewVerdict { .. })
@@ -2404,8 +2404,23 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                             Some(CircuitNodeKind::ReviewVerdict { .. })
                         )
                     {
-                        unverify_step(run, &mut t, node_id, "Review is inconclusive. Inspect the reviewer, then record a verdict or check again.".into());
+                        if unverify_step(
+                            run,
+                            &mut t,
+                            node_id,
+                            "Review is inconclusive. Inspect the reviewer, then record a verdict or check again.".into(),
+                        ) {
+                            t.effects.push(Effect::Notify {
+                                message: run.context.resolve(LOCAL_REVIEW_INCONCLUSIVE_MESSAGE),
+                            });
+                        }
                         return t;
+                    }
+                    if run
+                        .step(node_id)
+                        .is_some_and(|step| step.status == StepStatus::Unverified)
+                    {
+                        set_step(run, &mut t, node_id, StepStatus::Running);
                     }
                     // A classifier outcome only terminalizes the gate when the
                     // blueprint wires that outcome somewhere. An unwired
@@ -2806,18 +2821,18 @@ fn record_classifier_failure(
 /// writes nothing. Every emitted `StepWrite` becomes a `step_transition` row and,
 /// for `unverified`, a `checkpoint_reason` row (`db::circuit::ledger`), so an
 /// unchanged observation must not append identical ledger rows on every tick.
-fn unverify_step(run: &mut RunView, t: &mut Transition, node_id: &str, reason: String) {
+fn unverify_step(run: &mut RunView, t: &mut Transition, node_id: &str, reason: String) -> bool {
     let Some(step) = run.step_mut(node_id) else {
-        return;
+        return false;
     };
     if step.status.is_terminal() {
-        return;
+        return false;
     }
     if step.status == StepStatus::Unverified
         && step.outcome.is_none()
         && step.error.as_deref() == Some(reason.as_str())
     {
-        return;
+        return false;
     }
     step.status = StepStatus::Unverified;
     step.outcome = None;
@@ -2826,6 +2841,7 @@ fn unverify_step(run: &mut RunView, t: &mut Transition, node_id: &str, reason: S
     write.outcome = Some(None);
     write.error = Some(Some(reason));
     t.step_writes.push(write);
+    true
 }
 
 fn set_step(run: &mut RunView, t: &mut Transition, node_id: &str, status: StepStatus) {
@@ -2911,10 +2927,14 @@ fn complete_with_outcome(
 }
 
 /// Keep human findings and approval attribution in the prompts that advance work.
-fn resolve_operator_review_prompt(run: &RunView, template: &str) -> String {
+fn resolve_operator_review_prompt(
+    run: &RunView,
+    injection_node_id: &str,
+    template: &str,
+) -> String {
     let mut prompt = run.context.resolve(template);
     for node in &run.graph.nodes {
-        let CircuitNodeKind::ReviewVerdict { target_node_id } = &node.kind else {
+        let CircuitNodeKind::ReviewVerdict { .. } = &node.kind else {
             continue;
         };
         let prefix = format!("node.{}", node.id);
@@ -2930,12 +2950,12 @@ fn resolve_operator_review_prompt(run: &RunView, template: &str) -> String {
                 "The independent reviewer approved",
                 "The human reviewer approved",
             );
-        } else if let (Some(target), Some(note)) = (
-            target_node_id,
-            run.context.get(&format!("{prefix}.operator_review_note")),
-        ) {
-            if template.contains(&format!("{{{{node.{target}.output}}}}")) {
-                prompt.push_str(&format!("\n\nHuman review findings (operator):\n{note}"));
+        } else if run.context.get(&format!("{prefix}.review_verdict")) == Some("changes_requested")
+        {
+            if let Some(note) = run.context.get(&format!("{prefix}.operator_review_note")) {
+                if operator_feedback_injection_reachable(run, &node.id, injection_node_id) {
+                    prompt.push_str(&format!("\n\nHuman review findings (operator):\n{note}"));
+                }
             }
         }
     }
@@ -2954,6 +2974,57 @@ fn classifier_outcome_is_routed(run: &RunView, node_id: &str, outcome: StepOutco
                 EdgeCondition::OnOutcome(expected) => expected == outcome,
             }
     })
+}
+
+/// A request-changes verdict must have a downstream injection to an agent
+/// other than the reviewer. Follow the selected verdict branch and each
+/// completed intermediate outcome so editable graphs can put joins or
+/// notifications between the verdict and feedback prompt.
+fn operator_feedback_injection_reachable(
+    run: &RunView,
+    review_node_id: &str,
+    injection_node_id: &str,
+) -> bool {
+    if !matches!(
+        run.graph.node(review_node_id).map(|node| &node.kind),
+        Some(CircuitNodeKind::ReviewVerdict { .. })
+    ) || !matches!(
+        run.graph.node(injection_node_id).map(|node| &node.kind),
+        Some(CircuitNodeKind::InjectPty { .. })
+    ) {
+        return false;
+    }
+    let reviewer = run.resolve_target_agent(review_node_id);
+    let feedback_agent = run.resolve_target_agent(injection_node_id);
+    if feedback_agent.is_none() || feedback_agent == reviewer {
+        return false;
+    }
+
+    let mut pending = std::collections::VecDeque::from([review_node_id.to_owned()]);
+    let mut visited = std::collections::HashSet::from([review_node_id.to_owned()]);
+    while let Some(from) = pending.pop_front() {
+        let outcome = if from == review_node_id {
+            Some(StepOutcome::Working)
+        } else {
+            run.step(&from).and_then(|step| step.outcome)
+        };
+        for edge in run.graph.edges.iter().filter(|edge| edge.from == from) {
+            let follows_route = match edge.condition {
+                EdgeCondition::Always => true,
+                EdgeCondition::OnOutcome(expected) => outcome == Some(expected),
+            };
+            if !follows_route {
+                continue;
+            }
+            if edge.to == injection_node_id {
+                return true;
+            }
+            if visited.insert(edge.to.clone()) {
+                pending.push_back(edge.to.clone());
+            }
+        }
+    }
+    false
 }
 
 fn fail_step(run: &mut RunView, t: &mut Transition, node_id: &str, error: String) {
@@ -3709,8 +3780,8 @@ fn finish_run_if_done(run: &mut RunView, t: &mut Transition) {
     });
     if any_completed && !has_eligible && !has_pending_injection {
         // A handled failure may have run its notification, but exhausting a
-        // retry budget still needs attention. Likewise a blocked review is
-        // not approval merely because its notification finished.
+        // retry budget still needs attention. An inconclusive review remains
+        // unresolved even after its attention notification is emitted.
         let has_review = run.steps.iter().any(|step| {
             matches!(
                 run.graph.node(&step.node_id).map(|n| &n.kind),

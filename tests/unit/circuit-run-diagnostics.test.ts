@@ -282,6 +282,23 @@ describe('run diagnostics', () => {
         .toEqual([]);
     });
 
+    it('searches issue, PR, and source context without matching internal status or reports', () => {
+      const completed = detail(10, 'completed');
+      completed.run.context_json = JSON.stringify({
+        'issue.title': 'Investigate worker queue',
+        'pr.title': 'Worker queue cleanup',
+        'source.name': 'Buildmesh agent',
+        'node.reviewer.output': 'The report mentions approved and completed work.',
+        'node.verdict.status': 'completed',
+      });
+      const [annotated] = annotateCircuitRows([row(completed)]);
+
+      expect(buildCircuitProbeRows([annotated], 'history', { search: 'completed' })[0].visibleRuns).toEqual([]);
+      expect(buildCircuitProbeRows([annotated], 'history', { search: 'approved' })[0].visibleRuns).toEqual([]);
+      expect(buildCircuitProbeRows([annotated], 'history', { search: 'queue' })[0].visibleRuns).toHaveLength(1);
+      expect(buildCircuitProbeRows([annotated], 'history', { search: 'buildmesh' })[0].visibleRuns).toHaveLength(1);
+    });
+
     it('flags a live run stale after the quiet window, never a terminal run', () => {
       const now = new Date('2026-08-22T10:10:00Z');
       expect(isRunStale({ state: 'running', updated_at: '2026-08-22 10:00:00' }, now)).toBe(true);
