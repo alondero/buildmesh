@@ -166,6 +166,8 @@ function mockBackend(overrides: {
 queueWaits?: Record<string, string>;
   /** Backend-reported outstanding attention, independent of the ledger window. */
   outstandingAttention?: number;
+  /** Make the unbounded count fail, as a transient backend failure would. */
+  countAttentionFails?: boolean;
 } = {}) {
   const circuits = overrides.circuits ?? [CIRCUIT];
   const runs = overrides.runs ?? [RUN_DONE, RUN_RUNNING];
@@ -215,6 +217,7 @@ queueWaits?: Record<string, string>;
     // The outstanding count is backend-computed and deliberately independent of
     // the windowed ledger payload (which caps attention at 50/circuit).
     if (cmd === 'count_circuit_run_attention') {
+      if (overrides.countAttentionFails) return Promise.reject(new Error('count unavailable'));
       return Promise.resolve(overrides.outstandingAttention ?? runs.filter((r) => r.run.state === 'failed').length);
     }
     if (cmd === 'trigger_circuit_now') return Promise.resolve(13);
@@ -825,6 +828,22 @@ describe('CircuitsProbeTab', () => {
 
     await screen.findByTestId('history-dismiss-all');
     expect(invoke).not.toHaveBeenCalledWith('dismiss_all_circuit_run_attention', expect.anything());
+  });
+
+  it('withholds the bulk action when the unbounded count is unavailable', async () => {
+    // A windowed count is exactly the understatement the backend count exists to
+    // prevent, so a failed count must hide the control rather than label it with a
+    // number that does not describe what the command will do.
+    mockBackend({
+      runs: [{ ...RUN_DONE, run: { ...RUN_DONE.run, id: 9, state: 'failed' } }],
+      countAttentionFails: true,
+    });
+    openProbeDestination('circuits');
+
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+    // The ledger still renders — a failed count must not blank the tab.
+    await screen.findByTestId('run-card-9');
+    expect(screen.queryByTestId('history-dismiss-all')).toBeNull();
   });
 
   it('offers no bulk dismissal when nothing is asking for attention', async () => {

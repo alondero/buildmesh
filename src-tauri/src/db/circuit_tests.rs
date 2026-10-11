@@ -1098,6 +1098,74 @@ fn bulk_dismissal_covers_exactly_the_attention_runs_on_the_mesh() {
     );
 }
 
+/// The outstanding predicate joins steps one-to-many, so counting joined rows
+/// instead of distinct runs would inflate the confirmation: a run with three
+/// steps would be counted three times and the label would promise more runs than
+/// exist. The count must be a count of runs.
+#[test]
+fn the_attention_count_counts_runs_not_joined_step_rows() {
+    let mut conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "multi-step", "/tmp/multi-step").unwrap();
+    let circuit =
+        create_autopilot_circuit_inner(&conn, mesh.id, "attn", "", &sample_graph_json()).unwrap();
+
+    // One failed run carrying several step rows — each one joins in.
+    let run = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "issue:1", "{}").unwrap();
+    let step = |node_id: &str| CircuitStepOp {
+        node_id: node_id.into(),
+        status: "completed".into(),
+        outcome: Some(Some("completed".into())),
+        error: None,
+        agent_node_id: None,
+        attempt: 1,
+        fresh_attempt: false,
+    };
+    commit_circuit_advance_locked(
+        &mut conn,
+        run,
+        Some("running"),
+        None,
+        &[
+            step("implementer"),
+            step("review_classifier"),
+            step("verdict"),
+        ],
+    )
+    .unwrap();
+    commit_circuit_advance_locked(
+        &mut conn,
+        run,
+        Some("failed"),
+        None,
+        &[
+            step("implementer"),
+            step("review_classifier"),
+            step("verdict"),
+        ],
+    )
+    .unwrap();
+
+    let steps: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM autopilot_circuit_run_steps WHERE run_id = ?1",
+            params![run],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(steps > 1, "this test needs a multi-step run (got {steps})");
+
+    assert_eq!(
+        count_outstanding_circuit_run_attention_inner(&conn, mesh.id).unwrap(),
+        1,
+        "one run needing attention is one run, however many steps it has"
+    );
+    assert_eq!(
+        dismiss_all_circuit_run_attention_inner(&conn, mesh.id).unwrap(),
+        1,
+        "the mutation agrees with the count"
+    );
+}
+
 /// The toolbar's confirmation count must equal what "Dismiss all" actually
 /// acknowledges.
 ///

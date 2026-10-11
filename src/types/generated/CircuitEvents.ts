@@ -12,4 +12,11 @@ severity: string, };
  */
 export type CircuitPrReadyPayload = { run_id: number, node_id: number, };
 
+/**
+ * The mesh-wide "Dismiss all (N)" acknowledgement. `changed` is the number of
+ * runs actually stamped, so a client showing a confirmation can report the
+ * real count instead of the count it predicted before the call.
+ */
+export type CircuitRunAttentionDismissedPayload = { mesh_id: number, changed: number, };
+
 export type CircuitRunUpdatedPayload = { run_id: number, state: string, };

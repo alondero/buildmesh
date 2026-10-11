@@ -72,31 +72,6 @@ pub fn circuit_run_attention(
     crate::db::circuit::evidence::attention(run_id)
 }
 
-/// Acknowledge (or un-acknowledge) one run's outstanding attention.
-///
-/// Purely a notification flag: no run state, step or review verdict changes, so
-/// the card still reports *why* it wants attention while the run stops being
-/// sorted/filtered/counted as outstanding. Emitted so open Probes re-read rather
-/// than showing a stale count.
-#[command]
-pub fn dismiss_circuit_run_attention(
-    app: AppHandle,
-    run_id: i64,
-    dismissed: Option<bool>,
-) -> Result<(), String> {
-    crate::db::dismiss_circuit_run_attention(run_id, dismissed.unwrap_or(true))
-        .map(|_| ())
-        .map_err(|e| e.to_string())?;
-    let _ = app.emit(
-        "circuit-run-updated",
-        crate::services::circuit_worker::CircuitRunUpdatedPayload {
-            run_id,
-            state: "attention-dismissed".into(),
-        },
-    );
-    Ok(())
-}
-
 /// How many runs on this mesh are still asking for attention.
 ///
 /// Counted against the same unbounded predicate `dismiss_all_circuit_run_attention`

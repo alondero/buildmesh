@@ -886,19 +886,6 @@ const SPECS: &[ColumnSpec] = &[
         read_default: ReadDefault::CoalesceInt(0),
     },
     // ============================================================
-    // autopilot_circuit_runs
-    // ============================================================
-    // v48: the user's acknowledgement that a derived-attention run needs
-    // nothing further. Genuinely nullable — NULL *is* "still needs
-    // attention", so there is no COALESCE fallback that would invent one.
-    ColumnSpec {
-        version: 48,
-        table: "autopilot_circuit_runs",
-        column: "attention_dismissed_at",
-        type_with_default: "INTEGER",
-        read_default: ReadDefault::Nullable,
-    },
-    // ============================================================
     // autopilot_runs
     // ============================================================
     ColumnSpec {
@@ -1003,6 +990,17 @@ const SPECS: &[ColumnSpec] = &[
         table: "autopilot_circuit_runs",
         column: "source_agent_node_id",
         type_with_default: "INTEGER REFERENCES agent_nodes(id) ON DELETE SET NULL",
+        read_default: ReadDefault::Nullable,
+    },
+    // v48: the user's acknowledgement that a derived-attention run needs
+    // nothing further. Genuinely nullable — NULL *is* "still needs
+    // attention", so there is no COALESCE fallback that would invent one.
+    // Sits after v41 because the registry must stay ascending within a table.
+    ColumnSpec {
+        version: 48,
+        table: "autopilot_circuit_runs",
+        column: "attention_dismissed_at",
+        type_with_default: "INTEGER",
         read_default: ReadDefault::Nullable,
     },
     // v42 - durable presentation relationship for related circuit agents.
@@ -2428,5 +2426,83 @@ mod tests {
             rusqlite::params![&ok_name, 8i32],
         )
         .expect("in-range update must succeed");
+    }
+
+    /// v48 — `autopilot_circuit_runs.attention_dismissed_at`.
+    ///
+    /// A test that builds a database fresh proves nothing about this column:
+    /// every fresh database is created straight at the current version, so the
+    /// column is present whether or not the registry knows about it. This
+    /// exercises the path an existing install actually takes — the column is
+    /// missing, as it is on any database that stopped at v47, and the runner has
+    /// to notice and re-add it.
+    ///
+    /// `evolve_to` re-walks the whole registry rather than only the entries above
+    /// the requested version (that is what the always-run safety net is for), so
+    /// the fixture simulates the old schema by dropping the column instead of
+    /// trying to stop the runner early.
+    ///
+    /// The assertion is that the column comes back AND reads NULL for a
+    /// pre-existing row. A migration that backfilled a non-NULL default would
+    /// mark every historical run as already acknowledged and hide real attention.
+    #[test]
+    fn v48_restores_a_missing_attention_dismissal_column_as_null() {
+        let _db = crate::db::test_support::isolated();
+        let conn = crate::db::write_conn();
+
+        // The runs table references a real mesh row.
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let mesh_name = format!("v48-{unique}");
+        conn.execute(
+            "INSERT INTO meshes (name, path) VALUES (?1, ?2)",
+            rusqlite::params![&mesh_name, format!("/tmp/{mesh_name}")],
+        )
+        .expect("the fixture mesh");
+        let mesh_id = conn
+            .query_row(
+                "SELECT id FROM meshes WHERE name = ?1",
+                [&mesh_name],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO autopilot_circuits (mesh_id, name, description, graph_json, enabled, created_at, updated_at)
+             VALUES (?1, 'v47 circuit', '', '{}', 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00')",
+            [mesh_id],
+        )
+        .expect("the runs table's parent must exist");
+        conn.execute(
+            "INSERT INTO autopilot_circuit_runs
+                 (circuit_id, mesh_id, trigger_identity, state, context_json, source_agent_node_id, created_at, updated_at)
+             SELECT id, ?1, 'issue:1:agent', 'failed', '{}', NULL, '2026-01-01 00:00:00', '2026-01-01 00:00:00'
+             FROM autopilot_circuits WHERE mesh_id = ?1",
+            [mesh_id],
+        )
+        .expect("a pre-existing run must survive");
+
+        // Stand the database back up at v47: the column does not exist yet.
+        conn.execute(
+            "ALTER TABLE autopilot_circuit_runs DROP COLUMN attention_dismissed_at",
+            [],
+        )
+        .expect("simulating a v47 database requires dropping the column");
+
+        // An upgrade re-runs the runner, which must notice and re-add it.
+        evolve_to(SCHEMA_VERSION, &conn).expect("the runner must restore the column");
+
+        let stored: Option<i64> = conn
+            .query_row(
+                "SELECT attention_dismissed_at FROM autopilot_circuit_runs WHERE trigger_identity = 'issue:1:agent'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the upgraded database must expose the column");
+        assert_eq!(
+            stored, None,
+            "existing runs must read as outstanding after the upgrade, not pre-acknowledged"
+        );
     }
 }

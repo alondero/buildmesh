@@ -890,9 +890,9 @@ pub fn record_outcome(request: &CheckpointRequest) -> Result<(), String> {
 }
 
 fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Result<(), String> {
-    if request.reason.trim().is_empty() {
-        return Err("Give a reason and any supporting evidence.".into());
-    }
+    // The note annotates the history entry when given; it is not a gate. Every
+    // branch below therefore has to render a sensible sentence without one.
+    let note = request.reason.trim();
     let tx = db.transaction().map_err(|e| e.to_string())?;
     let revision: i64 = tx
         .query_row(
@@ -1018,7 +1018,11 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
         if !view.can_attest_completion(&request.node_id) {
             return Err("Resolve outstanding work, input requests and conflicting evidence before recording completion.".into());
         }
-        let reason = format!("Operator-recorded completion: {}", request.reason.trim());
+        let reason = if note.is_empty() {
+            "Operator recorded this checkpoint as completed.".to_string()
+        } else {
+            format!("Operator-recorded completion: {note}")
+        };
         view.context
             .set(&format!("node.{}.status", step.node_id), "completed");
         view.context
@@ -1125,7 +1129,11 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
             Some(&request.node_id),
             Some(request.attempt),
             "evidence_recheck",
-            request.reason.trim(),
+            if note.is_empty() {
+                "Operator requested an evidence recheck."
+            } else {
+                note
+            },
             Some(SOURCE_OPERATOR),
             Some(DISPOSITION_REQUESTED),
         )
@@ -1206,11 +1214,11 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
             | CheckpointAction::ReviewPass
             | CheckpointAction::ReviewFail => unreachable!("handled above"),
         };
-    let reason = format!(
-        "Operator-recorded outcome ({:?}): {}",
-        request.action,
-        request.reason.trim()
-    );
+    let reason = if note.is_empty() {
+        format!("Operator-recorded outcome ({:?}).", request.action)
+    } else {
+        format!("Operator-recorded outcome ({:?}): {note}", request.action)
+    };
     // The attestation's disposition is the action the operator recorded.
     let disposition = match request.action {
         CheckpointAction::Completed => "completed",
@@ -2308,6 +2316,20 @@ mod tests {
             found.len()
         );
         serde_json::from_str(&found[0].detail).unwrap()
+    }
+
+    /// The newest history entry for run 1 as `(id, detail, source)`, so an
+    /// attestation's wording can be asserted directly rather than inferred from
+    /// the absence of an error, and the next write can be fenced on it.
+    fn last_recorded_outcome(db: &Connection) -> (i64, String, Option<String>) {
+        let row: (i64, String, Option<String>) = db
+            .query_row(
+                "SELECT id, detail, source FROM circuit_run_history WHERE run_id=1 ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        row
     }
 
     /// How many native receipts the run has recorded.
@@ -4613,7 +4635,7 @@ mod tests {
     }
 
     #[test]
-    fn operator_outcome_requires_reason_and_fences_retry_attempt_and_history() {
+    fn operator_outcome_fences_retry_attempt_and_history() {
         let mut db = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&db).unwrap();
         db.execute_batch("INSERT INTO meshes (id,name,path) VALUES (1,'test','/repo');
@@ -4694,12 +4716,22 @@ mod tests {
             .unwrap_err()
             .contains("not performed"));
         request.action = CheckpointAction::NotPerformed;
-        request.reason.clear();
-        assert!(record_outcome_locked(&mut db, &request)
-            .unwrap_err()
-            .contains("reason"));
-        request.reason = "Confirmed request was rejected before dispatch".into();
+        // A blank note is not a gate: the attestation is still recorded, in its
+        // own words rather than quoting an empty string.
+        request.reason = "   ".into();
         record_outcome_locked(&mut db, &request).unwrap();
+        let (revision, noted, source) = last_recorded_outcome(&db);
+        assert_eq!(noted, "Operator-recorded outcome (NotPerformed).");
+        assert_eq!(source.as_deref(), Some("operator"));
+        request.reason = "Confirmed request was rejected before dispatch".into();
+        request.expected_revision = revision;
+        record_outcome_locked(&mut db, &request).unwrap();
+        let (_, noted, source) = last_recorded_outcome(&db);
+        assert!(
+            noted.contains("Confirmed request was rejected before dispatch"),
+            "{noted}"
+        );
+        assert_eq!(source.as_deref(), Some("operator"));
         assert!(
             commit_transition_locked(
                 &mut db,
@@ -4758,7 +4790,7 @@ mod tests {
                 .iter()
                 .filter(|e| e.kind == "operator_attestation")
                 .count(),
-            2
+            3
         );
         request.expected_revision = history_inner(&db, 1).unwrap().last().unwrap().id;
         request.attempt = 2;

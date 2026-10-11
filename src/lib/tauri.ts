@@ -1474,26 +1474,6 @@ export const resumeCircuitRun = (runId: number) =>
 /** Approve a CollaboratorCheck gate parked in `blocked` (#1207). */
 export const approveCircuitStep = (runId: number, nodeId: string) =>
   _invoke<void>('approve_circuit_step', { runId, nodeId });
-/**
- * Acknowledge (or un-acknowledge) one run's outstanding attention. The run keeps
- * its diagnostic; it just stops sorting/filtering/counting as outstanding.
- */
-export const dismissCircuitRunAttention = (runId: number, dismissed: boolean) =>
-  _invoke<void>('dismiss_circuit_run_attention', { runId, dismissed });
-
-/**
- * Acknowledge every outstanding attention run on a mesh - the History tab's
- * "Dismiss all (N)". Returns how many runs the backend actually changed, so the
- * UI can report the real count instead of the one it predicted.
- *
- * The rows are selected in SQL against the same predicate History counts with;
- * the UI deliberately does not send an id list that could drift from it.
- */
-export const countCircuitRunAttention = (meshId: number) =>
-  _invoke<number>('count_circuit_run_attention', { meshId });
-
-export const dismissAllCircuitRunAttention = (meshId: number) =>
-  _invoke<number>('dismiss_all_circuit_run_attention', { meshId });
 
 export const listCircuitRuns = (circuitId: number, limit?: number) =>
   _invoke<CircuitRunDetail[]>('list_circuit_runs', { circuitId, limit });

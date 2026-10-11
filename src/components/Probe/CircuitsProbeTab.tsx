@@ -64,10 +64,8 @@ import {
   approveCircuitStep,
   cancelCircuitRun,
   cancelCircuitRuns,
-  countCircuitRunAttention,
   createCircuit,
   deleteCircuit,
-  dismissAllCircuitRunAttention,
   listCircuitProbe,
   moveCircuitRun,
   pauseCircuitRun,
@@ -84,6 +82,10 @@ import {
 import { recordedLabel } from '../Circuits/runIdentity';
 import { parseRunContext } from '../Circuits/runStepPresentation';
 import { isTerminalRunState } from '../Circuits/circuitVocabulary';
+import {
+  countCircuitRunAttention,
+  dismissAllCircuitRunAttention,
+} from '../../lib/tauri/circuitEvidence';
 import {
   buildCircuitProbeRows,
   annotateCircuitRows,
@@ -404,8 +406,9 @@ export function CircuitsProbeTab() {
   const [historyAttentionOnly, setHistoryAttentionOnly] = useState(false);
   const [confirmDismissAllAttention, setConfirmDismissAllAttention] = useState(false);
   // Backend-computed, unbounded by the ledger's per-circuit window: this is the
-  // number "Dismiss all" will actually acknowledge.
-  const [outstandingAttention, setOutstandingAttention] = useState(0);
+  // number "Dismiss all" will actually acknowledge. `null` means the count is
+  // not known, and the bulk action stays hidden rather than guessing.
+  const [outstandingAttention, setOutstandingAttention] = useState<number | null>(null);
   const [queueSelection, setQueueSelection] = useState<Set<number>>(new Set());
   const [queueVisibleCount, setQueueVisibleCount] = useState(QUEUE_PAGE_SIZE);
   const mountedRef = useRef(false);
@@ -561,7 +564,7 @@ export function CircuitsProbeTab() {
       setRows([]);
       setQueue([]);
 setQueueWaits({});
-      setOutstandingAttention(0);
+      setOutstandingAttention(null);
       setLoadedMeshId(null);
       return;
     }
@@ -583,14 +586,19 @@ setQueueWaits({});
       });
       // The ledger payload is windowed (attention rides up to 50/circuit), so it
       // cannot count what "Dismiss all" will touch. Ask the backend for the
-      // unbounded number. A failure here must not discard the ledger we just
-      // read — fall back to the windowed count rather than blanking the tab.
-      let outstanding = 0;
+      // unbounded number instead.
+      //
+      // If that fails we deliberately show NO bulk action rather than falling
+      // back to the windowed count: a windowed number here is the exact
+      // understatement this count exists to prevent — the user would confirm
+      // "Dismiss 50" and watch more runs than that get acknowledged. The ledger
+      // we already read still renders; only the action that cannot describe
+      // itself honestly is withheld.
+      let outstanding: number | null = null;
       try {
         outstanding = await countCircuitRunAttention(activeMeshId);
       } catch (err) {
         console.error('Failed to count circuit attention:', err);
-        outstanding = circuitActivityStats(snapshot.circuits, snapshot.queue.length).historyAttentionCount;
       }
       if (requestId !== loadRequestRef.current) return;
       setOutstandingAttention(outstanding);
@@ -854,7 +862,7 @@ setQueueWaits({});
               />
               Needs attention ({activityStats.historyAttentionCount})
             </label>
-            {outstandingAttention > 0 && (
+            {outstandingAttention !== null && outstandingAttention > 0 && (
               confirmDismissAllAttention ? (
                 <>
                   <button

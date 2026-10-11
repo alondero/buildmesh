@@ -1571,26 +1571,21 @@ pub(crate) fn dismiss_circuit_run_attention_inner(
     )?)
 }
 
-/// Dismiss attention on every run on one mesh that the backend considers
-/// attention-bearing, returning how many rows changed.
-///
-/// The mesh-wide "Dismiss all" action. This intentionally mirrors the server's
-/// own attention predicate (the `attention_candidates` CTE in
-/// [`list_circuits_with_recent_runs_inner`]) rather than trusting a caller-
-/// supplied id list: a bulk action over ids the UI derived in TypeScript would
-/// silently drift from the SQL that decides which runs are surfaced. Runs the
-/// predicate no longer matches are left alone, so a run that recovers on its own
-/// does not get stamped with an acknowledgement the user never gave.
-///
-/// The outstanding-attention predicate, shared by [`count_outstanding_circuit_run_attention`]
-/// and [`dismiss_all_circuit_run_attention_inner`].
+/// The outstanding-attention predicate, shared by
+/// [`count_outstanding_circuit_run_attention`] and
+/// [`dismiss_all_circuit_run_attention_inner`].
 ///
 /// Both derive their rows from this one string: a count that did not match the
-/// mutation would have the toolbar promising a smaller number than the command
-/// then acknowledges — the user reads "Dismiss 50" and 75 runs are cleared,
-/// 25 of which they never saw.
+/// mutation would have the toolbar promising a different number than the command
+/// then acknowledges.
+///
+/// It selects `DISTINCT` run ids. The joins below are one-to-many (a run has
+/// many steps, and the review step is joined across every node in the graph), so
+/// a plain `SELECT r.id` yields one row per matching join combination and
+/// `COUNT(*)` over it would count a three-step run three times. `DISTINCT` keeps
+/// this a set of runs, which is what both callers mean.
 const OUTSTANDING_ATTENTION_RUNS: &str = "\
-             SELECT r.id \
+             SELECT DISTINCT r.id \
              FROM autopilot_circuit_runs r \
              LEFT JOIN autopilot_circuits c ON c.id = r.circuit_id \
              LEFT JOIN autopilot_circuit_run_steps s ON s.run_id = r.id \
@@ -1630,6 +1625,16 @@ pub(crate) fn count_outstanding_circuit_run_attention_inner(
     )?)
 }
 
+/// Dismiss attention on every run on one mesh that the backend considers
+/// attention-bearing, returning how many rows changed.
+///
+/// The mesh-wide "Dismiss all" action. It selects rows in SQL against
+/// [`OUTSTANDING_ATTENTION_RUNS`] rather than trusting a caller-supplied id list:
+/// a bulk action over ids the UI derived in TypeScript would silently drift from
+/// the SQL that decides which runs are surfaced. Runs the predicate no longer
+/// matches are left alone, so a run that recovers on its own does not get
+/// stamped with an acknowledgement the user never gave.
+///
 /// Idempotent: already-dismissed runs match no branch and are not re-stamped.
 pub fn dismiss_all_circuit_run_attention(mesh_id: i64) -> SqlResult<usize> {
     let db = crate::db::write_conn();
