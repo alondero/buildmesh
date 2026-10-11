@@ -989,11 +989,19 @@ fn head_is_reachable_from_another_branch_or_remote(
 
 // ── Remove ──────────────────────────────────────────────────────────────────
 
-/// How many times to attempt the working-tree removal, and how long to wait
+/// How many times to attempt the rename-into-staging, and how long to wait
 /// between tries. Windows releases a just-killed process's directory handles
-/// asynchronously, so the removal can briefly fail with "being used by another
-/// process" even after the agent is gone; a short backoff rides that out.
-const WORKTREE_REMOVE_ATTEMPTS: u32 = 5;
+/// asynchronously, so the rename can briefly fail with "being used by another
+/// process" even after the agent is gone; the backoff rides that out. An open
+/// handle *inside* the tree is what blocks it — probed on Windows, the rename
+/// fails with os error 5 while the handle is held, so this budget is the whole
+/// close-node window, and the window is load-dependent rather than bounded by
+/// anything the caller can predict. The original 5 x 100 ms left a tombstone
+/// queued for a worktree that was about to become removable; even 20 x 100 ms
+/// was not enough under a four-way parallel test run (issue #2173). Only a
+/// genuinely blocked removal waits this long, and that one is retried by the
+/// cleanup worker either way.
+const WORKTREE_REMOVE_ATTEMPTS: u32 = 60;
 const WORKTREE_REMOVE_BACKOFF_MS: u64 = 100;
 
 /// Stable identifier for the removal step that failed, persisted per blocked

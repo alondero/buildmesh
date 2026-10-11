@@ -1056,6 +1056,55 @@ fn remove_worktree_succeeds_after_killing_process_tree() {
     assert!(!pinned.path().exists(), "working directory should be gone");
 }
 
+/// Issue #2173, second half: the removal's retry budget was 5 x 100 ms, and
+/// that is a stopwatch against the OS close-node window rather than a bound on
+/// it. A handle that a killed agent's tree is still releasing can outlive the
+/// old 400 ms on a loaded machine, and the caller then gets a failure for a
+/// worktree that was about to become removable — a tombstone stuck for a
+/// handle on its way out.
+///
+/// Probed on this machine: an open handle *inside* the tree blocks the
+/// rename-into-staging (os error 5) and the delete is never reached, so the
+/// rename's budget is the whole window. Releasing the handle at 1 s therefore
+/// fails under the old 5 x 100 ms budget and succeeds under the widened one,
+/// with margin on both sides of the boundary.
+#[cfg(windows)]
+#[test]
+fn remove_worktree_rides_out_a_handle_released_after_the_old_budget() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let dir = TempDir::new();
+    let repo = init_repo(dir.path());
+    branch_from_head(&repo, "wt-branch");
+    let wt_dir = TempDir::new();
+    repo.worktree(
+        "wt1",
+        wt_dir.path(),
+        Some(
+            git2::WorktreeAddOptions::new()
+                .reference(Some(&repo.find_reference("refs/heads/wt-branch").unwrap())),
+        ),
+    )
+    .unwrap();
+
+    // Share mode zero denies delete/rename of this file while it is open, which
+    // is what pins the directory exactly as a live agent's tree does.
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(wt_dir.path().join("file.txt"))
+        .expect("hold a handle inside the worktree");
+
+    let path = wt_dir.path_str();
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1_000));
+        drop(held);
+    });
+    remove_one_worktree(&path).expect("removal must ride out the release window");
+    releaser.join().unwrap();
+    assert!(!wt_dir.path().exists(), "working directory should be gone");
+}
+
 /// #239 regression: a removal that fails because a live agent still pins the
 /// worktree must leave the working tree *fully intact*, never half-deleted.
 /// The old `remove_dir_all` walked entries one by one, gutting the source files
