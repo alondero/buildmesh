@@ -299,6 +299,13 @@ pub async fn update_mesh_color(mesh_id: i64, color: Option<String>) -> Result<()
 }
 
 /// Create a mesh for testing without dialog (uses temp directory)
+///
+/// Dev-only (issue #2153): it writes a Mesh row into the user's real database,
+/// so a shipped build must not answer the name. The `cfg` mirrors the handler
+/// entry in `lib.rs`; e2e and ui-shot use the HTTP test bridge, which calls
+/// `db::create_mesh` directly. See "Dev-only IPC commands" in
+/// docs/development/rust-conventions.md.
+#[cfg(any(debug_assertions, feature = "dev-tools"))]
 #[command]
 pub async fn create_test_mesh(name: String) -> Result<Mesh, String> {
     crate::commands::run_blocking("create_test_mesh", move || {

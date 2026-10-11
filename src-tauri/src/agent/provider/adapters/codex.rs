@@ -3832,10 +3832,16 @@ trust_level = "trusted"
                     "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
                     crate::env::encode_powershell(&script)
                 );
+                // The POST is the observable readiness signal; the budget only
+                // has to outlast a cold shell start on a *loaded* machine —
+                // the shell under test plus the hook's own PowerShell, per
+                // iteration. The old 15 s bound sat close enough to the real
+                // cost that concurrent `cargo test` runs elsewhere produced
+                // `received == None` — the hook never arriving (issue #2173).
+                // Measured under load: ~32 s for all four iterations.
+                const HOOK_POST_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
                 let receiver = std::thread::spawn(move || {
-                    let mut request = server
-                        .recv_timeout(std::time::Duration::from_secs(15))
-                        .unwrap()?;
+                    let mut request = server.recv_timeout(HOOK_POST_BUDGET).unwrap()?;
                     let mut body = String::new();
                     request.as_reader().read_to_string(&mut body).unwrap();
                     let path = request.url().to_owned();

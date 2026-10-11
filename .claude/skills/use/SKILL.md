@@ -84,7 +84,7 @@ $ws.ConnectAsync([Uri]"ws://localhost:2992/ws/terminal/<node_id>?ticket=$ticket"
 # A timeout means no bytes were observed; it does not prove which layer failed.
 ```
 
-For "Rust thinks the agent is alive?", use the headless IPC commands registered in `lib.rs` from devtools or a Playwright/CDP harness. Check the current route table before relying on a historical HTTP debug wrapper:
+For "Rust thinks the agent is alive?", use the headless IPC commands registered in `lib.rs` from devtools or a Playwright/CDP harness. Check the current route table before relying on a historical HTTP debug wrapper. Both names are dev-only (issue #2153): `/use` builds the dev profile, which opts into the `dev-tools` feature, so they are registered there but absent from a shipped release build.
 
 ```js
 await window.__TAURI_INTERNALS__.invoke('debug_list_agents');     // [] ⇒ PROCESS_REGISTRY empty
