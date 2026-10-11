@@ -121,6 +121,26 @@ fn is_claude_compatible_id_matches_table_self_auth_flag() {
 }
 
 #[test]
+fn kimi_builtin_row_matches_self_auth_doc_comment() {
+    // The `self_auth` doc comment on `BuiltInProviderAccount` must not claim
+    // `kimi` is self_auth — the table row below it keeps self_auth: false
+    // (kimi is a Claude-compatible keyed provider, matching the frontend's
+    // SELF_AUTH_PROVIDER_IDS list).
+    let kimi = BUILTIN_PROVIDER_ACCOUNTS
+        .iter()
+        .find(|b| b.id == "kimi")
+        .expect("kimi row in BUILTIN_PROVIDER_ACCOUNTS");
+    assert!(!kimi.self_auth, "kimi row should stay self_auth: false");
+
+    let source = include_str!("../resolver/catalog.rs");
+    assert!(
+        !source.contains("`kimi` is self_auth"),
+        "doc comment says `kimi` is self_auth, but its table row has self_auth: {}",
+        kimi.self_auth
+    );
+}
+
+#[test]
 fn minimax_default_tiers_is_the_source_for_minimax_surface() {
     let surfaces = first_class_surfaces("minimax");
     let anthropic = surfaces
