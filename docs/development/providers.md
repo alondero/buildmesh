@@ -292,9 +292,11 @@ instead. `Cmd` answers that with its own `pushd`, which maps the share for the
 lifetime of that shell. `PowerShell` has the same problem for a different
 reason: it cannot run a `.cmd`/`.bat` shim at all, so it delegates to
 `cmd.exe /c` and lands straight back on the rejection. So when the spawn is a
-batch shim in a UNC directory, the PowerShell arm runs *inside* cmd's `pushd` —
-`cmd.exe /d /c "pushd <unc> && powershell.exe -EncodedCommand …"` — and the
-agent's argv stays in the Base64 payload, so none of it crosses cmd's tokenizer.
+batch shim in a UNC directory, the PowerShell arm runs *inside* cmd's `pushd`:
+`cmd.exe /d /c <temp-batch.cmd>`, where the batch reads the directory from a
+`BUILDMESH_SPAWN_DIR` environment variable and `pushd`s it before invoking the
+same `-EncodedCommand` payload. The agent's argv stays in that Base64 payload,
+so none of it crosses cmd's tokenizer.
 
 The decision is taken from the command and never by probing the filesystem: on
 the `WindowsInterop` arm Buildmesh runs on the Linux host, so a Windows path is

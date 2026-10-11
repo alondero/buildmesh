@@ -9,9 +9,11 @@
 //! - Windows native + PowerShell shell: `powershell.exe -NoLogo -EncodedCommand <base64>`
 //!   (used by Codex so ANSI escapes propagate correctly through ConPTY). When
 //!   the node's directory is UNC and the executable is a batch shim, this
-//!   becomes `cmd.exe /d /c "pushd <unc> && powershell.exe -EncodedCommand"`,
-//!   because cmd.exe rejects a UNC current directory — see
-//!   [`needs_unc_pushd`].
+//!   becomes `cmd.exe /d /c <temp-batch.cmd>`, where the batch reads the
+//!   directory from `BUILDMESH_SPAWN_DIR` and `pushd`s it before running the
+//!   same `-EncodedCommand` payload — cmd.exe rejects a UNC current directory,
+//!   and it is the only way to get a `&`-containing directory past cmd without
+//!   putting it on a command line. See [`needs_unc_pushd`].
 //! - Windows native + Cmd shell: `cmd.exe /c "<binary> <args>"`
 //!   (used by node-shim providers whose binary is a `.cmd` batch file)
 //! - Windows native + Direct: spawn the binary directly (rare; mainly for tests)
@@ -231,11 +233,18 @@ fn mapped_launch_directory(env_type: EnvType) -> Result<std::path::PathBuf, Stri
     Ok(std::env::temp_dir())
 }
 
-/// Characters cmd.exe treats as operators rather than path text. A batch path
-/// carrying one would split the command line, which is the defect the batch
-/// file exists to avoid.
+/// Characters cmd.exe treats as something other than path text when they appear
+/// on its command line.
+///
+/// `%` is here for a different reason than the rest. `pushd "%VAR%"` is safe
+/// *inside a batch file* because the quotes come from the script, but this path
+/// is passed as `cmd.exe /c <path>` — command text, which cmd expands before it
+/// runs. A temp directory containing a segment like `%USERNAME%` is therefore
+/// substituted before the script is even opened, and the spawn fails or reaches
+/// the wrong file. `!` is included for the same reason: delayed expansion is off
+/// by default, but it is a policy setting rather than a guarantee.
 fn has_cmd_metacharacter(path: &str) -> bool {
-    path.chars().any(|c| "&|<>()^\"".contains(c))
+    path.chars().any(|c| "&|<>()^\"%!".contains(c))
 }
 
 /// Delete batch files abandoned by an earlier run, once per process.
@@ -1447,7 +1456,9 @@ mod tests {
     }
 
     /// The batch file a mapped command runs, taken from the last argv entry.
-    #[cfg(windows)]
+    ///
+    /// Not gated on Windows: this is path inspection with no platform API, and
+    /// the structural tests that call it run on every platform.
     fn mapped_batch_path(command: &portable_pty::CommandBuilder) -> Option<std::path::PathBuf> {
         let path = std::path::PathBuf::from(command.get_argv().last()?);
         let is_batch = path.file_name().is_some_and(|name| {
@@ -1460,12 +1471,12 @@ mod tests {
     /// Remove a batch file a test created but never ran. The child cannot clean
     /// up after itself and production reclaims these by age, so a test that only
     /// inspects the command would otherwise leave one behind per run.
-    #[cfg(windows)]
     fn remove_mapped_batch(command: &portable_pty::CommandBuilder) {
         if let Some(batch) = mapped_batch_path(command) {
             let _ = std::fs::remove_file(batch);
         }
     }
+
     /// The mapped interop route end to end: Buildmesh on the Linux host, a
     /// Windows-side batch shim, and a node directory reached through the WSL
     /// boundary.
@@ -1537,6 +1548,32 @@ mod tests {
             probe.is_file(),
             "the mapped interop spawn did not run the shim in the node directory at {}",
             directory.path().display()
+        );
+    }
+
+    /// The batch path is passed as `cmd.exe /c` command text, which cmd expands
+    /// before it runs — so `%` is a hazard there in a way it is not inside the
+    /// batch, where the quotes come from the script.
+    #[test]
+    fn a_batch_path_carrying_percent_or_bang_is_refused() {
+        for path in [
+            r"C:\Users\%USERNAME%\Temp\launch.cmd",
+            r"C:\Users\me!x\Temp\launch.cmd",
+            r"C:\Users\R&D\Temp\launch.cmd",
+            r"C:\Users\a|b\Temp\launch.cmd",
+            r"C:\Users\a(b)\Temp\launch.cmd",
+            r"C:\Users\a>b\Temp\launch.cmd",
+            r"C:\Users\a^b\Temp\launch.cmd",
+            "C:\\Users\\a\"b\\Temp\\launch.cmd",
+        ] {
+            assert!(
+                super::has_cmd_metacharacter(path),
+                "{path} reaches cmd.exe as command text and must be refused"
+            );
+        }
+        assert!(
+            !super::has_cmd_metacharacter(r"C:\Users\alond\AppData\Local\Temp\launch.cmd"),
+            "an ordinary temp path must still be accepted"
         );
     }
 
