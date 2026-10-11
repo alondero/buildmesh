@@ -10,7 +10,7 @@
  *   - Two-step Remove confirmation guard, busy gate on in-flight
  *     remove, busy recovery on rejected remove
  *   - API key editor for Claude-compatible accounts; billing for
- *     first-class only. Base URL / model tiers live on Harnesses attach.
+ *     first-class only. Base URL / model tiers live on the Launch Configurations attach flow.
  *   - No credential editor for self-authenticating harnesses (#568a)
  *
  * Meter rendering moved to `tests/unit/usage-panel.test.tsx`.
@@ -210,13 +210,15 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
     );
     await user.click(expander('Kimi'));
     expect(screen.getByLabelText(/kimi api key/i)).toBeTruthy();
-    // Model tiers moved to Harnesses attach (ADR-0025).
+    // Model tiers moved to the Launch Configurations attach flow (ADR-0025).
     expect(screen.queryByLabelText(/fable model/i)).toBeNull();
     expect(screen.queryByLabelText(/opus model/i)).toBeNull();
     // The reminder lives behind an info tip so the expanded row stays short.
     expect(screen.queryByText(/base url and model names are set when you attach/i)).toBeNull();
     await user.hover(screen.getByRole('button', { name: /about api key/i }));
-    expect(await screen.findByText(/base url and model names are set when you attach/i)).toBeTruthy();
+    const note = await screen.findByText(/base url and model names are set when you attach/i);
+    expect(note.textContent).toMatch(/under Launch Configurations\./);
+    expect(note.textContent).not.toMatch(/Harnesses/);
   });
 
   it('passes an edited API key through onSave', async () => {

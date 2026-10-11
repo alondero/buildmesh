@@ -352,7 +352,7 @@ export function AccountCard({
                 <div className="mb-1 flex items-center gap-1.5">
                   <span className="text-sm text-text-muted">API key</span>
                   <InfoTip label="API key">
-                    Base URL and model names are set when you attach this provider under Harnesses.
+                    Base URL and model names are set when you attach this provider under Launch Configurations.
                   </InfoTip>
                 </div>
                 <input
