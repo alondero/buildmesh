@@ -6191,6 +6191,202 @@ mod tests {
     }
 
     #[test]
+    fn operator_review_refuses_a_feedback_prompt_already_built_by_an_alternate_path() {
+        use crate::circuit::{
+            model::{
+                CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind, EdgeCondition, StepOutcome,
+            },
+            stepper::{advance, Capacity, CircuitEvent, Effect, StepStatus},
+        };
+
+        fn persist_stepper_transition(
+            db: &mut Connection,
+            view: &mut crate::circuit::stepper::RunView,
+            transition: &crate::circuit::stepper::Transition,
+        ) {
+            let steps = transition
+                .step_writes
+                .iter()
+                .map(|write| super::super::CircuitStepOp {
+                    node_id: write.node_id.clone(),
+                    status: write.status.as_db_str().into(),
+                    attempt: write.attempt,
+                    outcome: write
+                        .outcome
+                        .map(|outcome| outcome.map(|value| value.as_db_str().into())),
+                    error: write.error.clone(),
+                    agent_node_id: None,
+                    fresh_attempt: write.fresh_attempt,
+                })
+                .collect::<Vec<_>>();
+            let revision = commit_transition_locked(
+                db,
+                1,
+                transition
+                    .run_state_changed
+                    .then_some(view.state.as_db_str()),
+                &view.context.to_json().unwrap(),
+                &steps,
+                EvidenceWrite {
+                    expected: transition.expected.as_ref(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            view.context.set("evidence.revision", revision.to_string());
+        }
+
+        for delivered in [false, true] {
+            let mut db = Connection::open_in_memory().unwrap();
+            crate::db::init_schema(&db).unwrap();
+            db.execute_batch(
+                "INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+                INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(9,1,'source','/repo');
+                INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(10,1,'reviewer','/repo/reviewer');
+                INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'review');",
+            )
+            .unwrap();
+            let context = serde_json::json!({
+                "source.agent_id": "9",
+                "source.name": "issue #42",
+            });
+            db.execute(
+                "INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state,context_json)
+                    VALUES(1,1,1,'running',?1)",
+                [context.to_string()],
+            )
+            .unwrap();
+
+            let mut graph = CircuitGraph::agent_review(None, None, 3);
+            graph
+                .edges
+                .retain(|edge| !(edge.from == "verdict" && edge.to == "feedback"));
+            graph.nodes.extend([CircuitNode {
+                id: "alternate_join".into(),
+                kind: CircuitNodeKind::AnyCompleted,
+            }]);
+            graph.edges.extend([
+                CircuitEdge {
+                    from: "reviewer".into(),
+                    to: "alternate_join".into(),
+                    condition: EdgeCondition::Always,
+                },
+                CircuitEdge {
+                    from: "verdict".into(),
+                    to: "alternate_join".into(),
+                    condition: EdgeCondition::OnOutcome(StepOutcome::Working),
+                },
+                CircuitEdge {
+                    from: "alternate_join".into(),
+                    to: "feedback".into(),
+                    condition: EdgeCondition::Always,
+                },
+            ]);
+            db.execute(
+                "UPDATE autopilot_circuits SET graph_json=?1",
+                [graph.to_json().unwrap()],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO autopilot_circuit_run_steps
+                    (run_id,node_id,attempt,status,outcome,agent_node_id)
+                VALUES
+                    (1,'reviewer',1,'completed','completed',10),
+                    (1,'verdict',1,'unverified',NULL,10)",
+                [],
+            )
+            .unwrap();
+
+            let stored = super::super::ledger::get_circuit_run_inner(&db, 1)
+                .unwrap()
+                .unwrap();
+            let mut view = recovery_view(&db, &stored).unwrap();
+            let scheduled = advance(
+                &mut view,
+                &CircuitEvent::Tick(Capacity {
+                    agent_free_slots: 1,
+                }),
+            );
+            assert_eq!(
+                view.step("alternate_join").unwrap().status,
+                StepStatus::Completed
+            );
+            assert_eq!(view.step("feedback").unwrap().status, StepStatus::Running);
+            assert_eq!(view.step("verdict").unwrap().status, StepStatus::Unverified);
+            assert!(
+                view.can_record_review("verdict", StepOutcome::Working),
+                "an unbuilt prompt can still receive a newly recorded note"
+            );
+            persist_stepper_transition(&mut db, &mut view, &scheduled);
+
+            let attempt = view.step("feedback").unwrap().attempt;
+            let ready = advance(
+                &mut view,
+                &CircuitEvent::AgentReady {
+                    node_id: "feedback".into(),
+                },
+            );
+            assert!(ready.effects.iter().any(|effect| matches!(
+                effect,
+                Effect::InjectPty { node_id, .. } if node_id == "feedback"
+            )));
+            assert_eq!(
+                view.context
+                    .get(&format!("node.feedback.prompt_delivery.{attempt}")),
+                Some("intent")
+            );
+            assert!(
+                !view.can_record_review("verdict", StepOutcome::Working),
+                "a built prompt cannot acquire a note from a later operator decision"
+            );
+            persist_stepper_transition(&mut db, &mut view, &ready);
+
+            if delivered {
+                let acknowledged = advance(
+                    &mut view,
+                    &CircuitEvent::PromptDelivered {
+                        node_id: "feedback".into(),
+                        attempt,
+                    },
+                );
+                assert_eq!(view.step("feedback").unwrap().status, StepStatus::Completed);
+                assert_eq!(
+                    view.context
+                        .get(&format!("node.feedback.prompt_delivery.{attempt}")),
+                    Some("acknowledged")
+                );
+                persist_stepper_transition(&mut db, &mut view, &acknowledged);
+            }
+
+            let stored = super::super::ledger::get_circuit_run_inner(&db, 1)
+                .unwrap()
+                .unwrap();
+            let view = recovery_view(&db, &stored).unwrap();
+            assert!(
+                !view.can_record_review("verdict", StepOutcome::Working),
+                "Request changes must be refused after the alternate path builds the feedback prompt (delivered={delivered})"
+            );
+            let expected_revision = revision_inner(&db, 1).unwrap();
+            let error = record_outcome_locked(
+                &mut db,
+                &CheckpointRequest {
+                    run_id: 1,
+                    node_id: "verdict".into(),
+                    attempt: 1,
+                    expected_revision,
+                    action: CheckpointAction::ReviewFail,
+                    reason: "Fix the unchecked null.".into(),
+                },
+            )
+            .unwrap_err();
+            assert!(
+                error.contains("every possible outcome on the Request changes route"),
+                "the refusal should explain why feedback can no longer receive the note: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn recorded_operator_review_drives_the_next_tick_and_injected_prompt() {
         use crate::circuit::{
             model::{

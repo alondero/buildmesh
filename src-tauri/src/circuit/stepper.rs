@@ -3017,6 +3017,22 @@ fn operator_feedback_injection_reachable(
     }
     let decision_attempt = run.step(review_node_id).map_or(1, |step| step.attempt);
 
+    if let Some(injection_step) = run
+        .step(injection_node_id)
+        .filter(|step| step.attempt >= decision_attempt)
+    {
+        let delivery_key = format!(
+            "node.{injection_node_id}.prompt_delivery.{}",
+            injection_step.attempt
+        );
+        if injection_step.status.is_terminal() || run.context.get(&delivery_key).is_some() {
+            // A prompt intent snapshots its text before the operator decision
+            // can append a note. A terminal injection has already consumed
+            // that attempt, so neither state can carry a newly recorded note.
+            return false;
+        }
+    }
+
     if run
         .step(injection_node_id)
         .is_some_and(|step| step.status == StepStatus::Running && step.attempt >= decision_attempt)
