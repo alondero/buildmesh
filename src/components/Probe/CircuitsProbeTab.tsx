@@ -406,9 +406,14 @@ export function CircuitsProbeTab() {
   const [historyAttentionOnly, setHistoryAttentionOnly] = useState(false);
   const [confirmDismissAllAttention, setConfirmDismissAllAttention] = useState(false);
   // Backend-computed, unbounded by the ledger's per-circuit window: this is the
-  // number "Dismiss all" will actually acknowledge. `null` means the count is
-  // not known, and the bulk action stays hidden rather than guessing.
-  const [outstandingAttention, setOutstandingAttention] = useState<number | null>(null);
+  // number "Dismiss all" will actually acknowledge.
+  //
+  // The mesh id travels with the number because a count only describes the mesh
+  // that produced it. Until the new mesh's fetch lands, the outgoing mesh's count
+  // is still in state, and showing it above the incoming mesh's runs would have
+  // the user confirm a number that is about neither the list nor the action.
+  // `count: null` means the count is not known and the action stays hidden.
+  const [attentionCount, setAttentionCount] = useState<{ meshId: number; count: number | null } | null>(null);
   const [queueSelection, setQueueSelection] = useState<Set<number>>(new Set());
   const [queueVisibleCount, setQueueVisibleCount] = useState(QUEUE_PAGE_SIZE);
   const mountedRef = useRef(false);
@@ -564,7 +569,7 @@ export function CircuitsProbeTab() {
       setRows([]);
       setQueue([]);
 setQueueWaits({});
-      setOutstandingAttention(null);
+      setAttentionCount(null);
       setLoadedMeshId(null);
       return;
     }
@@ -601,7 +606,7 @@ setQueueWaits({});
         console.error('Failed to count circuit attention:', err);
       }
       if (requestId !== loadRequestRef.current) return;
-      setOutstandingAttention(outstanding);
+      setAttentionCount({ meshId: activeMeshId, count: outstanding });
       setLoadError(null);
       setLoadedMeshId(activeMeshId);
     } catch (err) {
@@ -619,6 +624,10 @@ setQueueWaits({});
     // to the outgoing mesh until the new fetch lands, and a focus request must
     // wait for that rather than resolve against stale data.
     setLoadedMeshId(null);
+    // A confirmation armed against the outgoing mesh must not survive the
+    // switch: its number describes runs the user was looking at, while the
+    // handler would act on the incoming mesh.
+    setConfirmDismissAllAttention(false);
     void load();
     return () => {
       // Invalidate an in-flight snapshot before a mesh switch or unmount.
@@ -862,7 +871,7 @@ setQueueWaits({});
               />
               Needs attention ({activityStats.historyAttentionCount})
             </label>
-            {outstandingAttention !== null && outstandingAttention > 0 && (
+            {attentionCount?.meshId === activeMeshId && attentionCount.count !== null && attentionCount.count > 0 && (
               confirmDismissAllAttention ? (
                 <>
                   <button
@@ -875,7 +884,7 @@ setQueueWaits({});
                     data-testid="history-dismiss-all-confirm"
                     className="px-1.5 py-0.5 text-2xs rounded-md bg-accent-cyan/15 text-accent-cyan disabled:opacity-40"
                   >
-                    Dismiss {outstandingAttention}
+                    Dismiss {attentionCount.count}
                   </button>
                   <button
                     type="button"
@@ -893,10 +902,10 @@ setQueueWaits({});
                   onClick={() => setConfirmDismissAllAttention(true)}
                   disabled={busy || activeMeshId === null}
                   data-testid="history-dismiss-all"
-                  title={`Acknowledge all ${outstandingAttention} runs still asking for attention on this mesh. The runs and their diagnostics stay; they stop sorting first and stop counting.`}
+                  title={`Acknowledge all ${attentionCount.count} runs still asking for attention on this mesh. The runs and their diagnostics stay; they stop sorting first and stop counting.`}
                   className="px-1.5 py-0.5 text-2xs rounded-md text-accent-cyan hover:bg-accent-cyan/10 disabled:opacity-40"
                 >
-                  Dismiss all ({outstandingAttention})
+                  Dismiss all ({attentionCount.count})
                 </button>
               )
             )}

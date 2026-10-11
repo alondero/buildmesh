@@ -846,6 +846,117 @@ describe('CircuitsProbeTab', () => {
     expect(screen.queryByTestId('history-dismiss-all')).toBeNull();
   });
 
+  /**
+   * A count belongs to the mesh that produced it. Between a mesh switch and the
+   * new fetch landing, mesh A's count is still in state — rendering it above
+   * mesh B's runs would have the user confirm a number that describes neither
+   * the list nor the action the handler would take.
+   */
+  it('never shows one mesh’s bulk count over another mesh’s runs', async () => {
+    mockBackend({
+      runs: [{ ...RUN_DONE, run: { ...RUN_DONE.run, id: 9, state: 'failed' } }],
+      outstandingAttention: 7,
+    });
+    openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+    expect(await screen.findByTestId('history-dismiss-all')).toHaveProperty(
+      'textContent',
+      expect.stringContaining('7'),
+    );
+
+    // Hold mesh B's fetch open so the switch is observed mid-flight.
+    const fallback = vi.mocked(invoke).getMockImplementation();
+    let releaseMeshB!: () => void;
+    const meshBPending = new Promise<void>((resolve) => { releaseMeshB = resolve; });
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      const meshId = (args as { meshId?: number })?.meshId;
+      if (meshId !== 43) return fallback?.(cmd, args) ?? Promise.resolve({ cmd });
+      // Mesh B's fetch is held open, then reports a backlog of its own.
+      if (cmd === 'list_circuit_probe') return meshBPending.then(() => ({ circuits: [], queue: [] }));
+      if (cmd === 'count_circuit_run_attention') {
+        return meshBPending.then(() => 0);
+      }
+      return fallback?.(cmd, args) ?? Promise.resolve({ cmd });
+    });
+
+    const otherMesh = { ...MESH, id: 43, name: 'other mesh' };
+    act(() => useMeshStore.setState({
+      meshes: [MESH, otherMesh],
+      meshesById: new Map([[MESH.id, MESH], [otherMesh.id, otherMesh]]),
+      selectedMeshId: otherMesh.id,
+    }));
+
+    // Mesh A's 7 must not survive into mesh B's view, pending or not.
+    await waitFor(() => {
+      expect(vi.mocked(invoke).mock.calls.filter(([cmd, args]) =>
+        cmd === 'list_circuit_probe' && (args as { meshId?: number })?.meshId === 43)).toHaveLength(1);
+    });
+    expect(screen.queryByTestId('history-dismiss-all')).toBeNull();
+
+    await act(async () => {
+      releaseMeshB();
+      await meshBPending;
+    });
+    expect(screen.queryByTestId('history-dismiss-all')).toBeNull();
+  });
+
+  it('does not fall back to the previous mesh’s count when the new one fails to load', async () => {
+    mockBackend({
+      runs: [{ ...RUN_DONE, run: { ...RUN_DONE.run, id: 9, state: 'failed' } }],
+      outstandingAttention: 7,
+    });
+    openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+    expect(await screen.findByTestId('history-dismiss-all')).toBeTruthy();
+
+    const fallback = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if ((args as { meshId?: number })?.meshId === 43) {
+        return Promise.reject(new Error('mesh B is unreachable'));
+      }
+      return fallback?.(cmd, args) ?? Promise.resolve({ cmd });
+    });
+
+    const otherMesh = { ...MESH, id: 43, name: 'other mesh' };
+    act(() => useMeshStore.setState({
+      meshes: [MESH, otherMesh],
+      meshesById: new Map([[MESH.id, MESH], [otherMesh.id, otherMesh]]),
+      selectedMeshId: otherMesh.id,
+    }));
+
+    // Mesh A's 7 must not linger over mesh B, which failed to report anything.
+    await waitFor(() => {
+      expect(screen.queryByTestId('history-dismiss-all')).toBeNull();
+    });
+    expect(invoke).not.toHaveBeenCalledWith('dismiss_all_circuit_run_attention', { meshId: 42 });
+  });
+
+  it('discards an armed confirmation when the mesh changes', async () => {
+    mockBackend({
+      runs: [{ ...RUN_DONE, run: { ...RUN_DONE.run, id: 9, state: 'failed' } }],
+      outstandingAttention: 3,
+    });
+    const user = userEvent.setup();
+    openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+
+    await user.click(await screen.findByTestId('history-dismiss-all'));
+    await screen.findByTestId('history-dismiss-all-confirm');
+
+    const otherMesh = { ...MESH, id: 43, name: 'other mesh' };
+    act(() => useMeshStore.setState({
+      meshes: [MESH, otherMesh],
+      meshesById: new Map([[MESH.id, MESH], [otherMesh.id, otherMesh]]),
+      selectedMeshId: otherMesh.id,
+    }));
+
+    // The confirmation was armed against mesh 42; it must not still be showing
+    // a number whose action would now target mesh 43.
+    await waitFor(() => {
+      expect(screen.queryByTestId('history-dismiss-all-confirm')).toBeNull();
+    });
+  });
+
   it('offers no bulk dismissal when nothing is asking for attention', async () => {
     mockBackend({ runs: [RUN_DONE] });
     openProbeDestination('circuits');
