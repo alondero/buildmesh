@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 // Brand asset generation.
 //
-// The brand sources are SVG under `docs/brand/`. Everything the app, the
-// README and the installers actually consume is produced from them by this
-// script, so there is exactly one copy of each piece of artwork to edit:
+// The brand artwork sources are SVG under `docs/brand/`. This script produces
+// the copies below; native platform wiring and bundled fonts are maintained
+// separately, as listed in docs/brand/README.md:
 //
 //   docs/brand/b3-relay-icon.svg       -> the two SVG copies below
 //                                      -> every small PNG (favicon, touch icons)
 //   docs/brand/b3-relay-lockup-*.svg   -> the README wordmark rasters
+//   docs/brand/b3-relay-{icon,mark}.svg -> Android vectors
 //
 // The SVG copies exist because Vite and the mobile SPA each need the mark at a
 // path they can serve; they are verbatim copies plus a generated-file banner,
@@ -46,15 +47,34 @@ const ANDROID_VECTORS = [
   { src: COMPACT, out: 'android/app/src/main/res/drawable/relay_monochrome.xml', monochrome: true },
 ];
 
-/** Convert the paths, rounded plates and nodes used by the canonical Relay SVGs. */
+const PAINT_ATTRIBUTES = ['fill', 'stroke', 'stroke-width', 'stroke-linecap'];
+const ANDROID_SVG_ATTRIBUTES = new Map(Object.entries({
+  svg: ['xmlns', 'viewBox', 'width', 'height', 'role', 'aria-labelledby', ...PAINT_ATTRIBUTES],
+  title: ['id'], g: PAINT_ATTRIBUTES,
+  path: ['d', ...PAINT_ATTRIBUTES],
+  circle: ['cx', 'cy', 'r', ...PAINT_ATTRIBUTES],
+  rect: ['x', 'y', 'width', 'height', 'rx', ...PAINT_ATTRIBUTES],
+}).map(([name, attributes]) => [name, new Set(attributes)]));
+
+/** Untransformed paths, circles and rounded rects with solid six-digit hex paint
+ *  or none. Reject other SVG paint features rather than silently changing art. */
 export function androidVector(svgMarkup, source, monochrome = false) {
   const dom = new JSDOM(svgMarkup, { contentType: 'image/svg+xml' });
   try {
     const svg = dom.window.document.documentElement;
-    const plate = monochrome ? svg.querySelector('rect') : null;
+    const area = element => Number(element.getAttribute('width')) * Number(element.getAttribute('height'));
+    const plate = monochrome ? [...svg.querySelectorAll('rect[rx]')].sort((a, b) => area(b) - area(a))[0] : null;
     const [, , width, height] = svg.getAttribute('viewBox').split(/\s+/).map(Number);
     const paths = [];
     function visit(element, inherited = { fill: 'none' }) {
+      const allowed = ANDROID_SVG_ATTRIBUTES.get(element.localName);
+      if (!allowed) throw new Error(`Unsupported Relay SVG element: ${element.localName}`);
+      for (const attribute of element.attributes) {
+        if (!allowed.has(attribute.name)) throw new Error(`Unsupported Relay SVG attribute: ${attribute.name}`);
+        if (['fill', 'stroke'].includes(attribute.name) && attribute.value !== 'none' && !/^#[0-9a-f]{6}$/i.test(attribute.value)) {
+          throw new Error(`Unsupported Relay SVG paint: ${attribute.value}`);
+        }
+      }
       if (element === plate) return;
       const attrs = { ...inherited, ...Object.fromEntries([...element.attributes].map(attr => [attr.name, attr.value])) };
       const number = name => Number(attrs[name] ?? 0);
@@ -66,13 +86,13 @@ export function androidVector(svgMarkup, source, monochrome = false) {
       } else if (element.localName === 'rect') {
         const x = number('x'), y = number('y'), w = number('width'), h = number('height'), r = number('rx');
         data = `M${x + r},${y}h${w - 2 * r}a${r},${r} 0,0 1,${r},${r}v${h - 2 * r}a${r},${r} 0,0 1,${-r},${r}h${2 * r - w}a${r},${r} 0,0 1,${-r},${-r}v${2 * r - h}a${r},${r} 0,0 1,${r},${-r}z`;
-      } else if (!['svg', 'g', 'title'].includes(element.localName)) {
-        throw new Error(`Unsupported Relay SVG element: ${element.localName}`);
       }
       if (data) {
         const fields = [`android:fillColor="${attrs.fill === 'none' ? '@android:color/transparent' : monochrome ? '#ffffff' : attrs.fill}"`, `android:pathData="${data}"`];
         for (const [svgAttr, androidAttr] of [['stroke', 'strokeColor'], ['stroke-width', 'strokeWidth'], ['stroke-linecap', 'strokeLineCap']]) {
-          if (attrs[svgAttr]) fields.push(`android:${androidAttr}="${monochrome && svgAttr === 'stroke' ? '#ffffff' : attrs[svgAttr]}"`);
+          let value = attrs[svgAttr];
+          if (value && svgAttr === 'stroke') value = value === 'none' ? '@android:color/transparent' : monochrome ? '#ffffff' : value;
+          if (value) fields.push(`android:${androidAttr}="${value}"`);
         }
         paths.push(`    <path ${fields.join(' ')} />`);
       }

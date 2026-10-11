@@ -39,15 +39,17 @@ fun BuildmeshApp(vm: BuildmeshViewModel, invitation: String = "") {
     LaunchedEffect(state.notice) {
         if (state.notice.isNotEmpty()) { snackbar.showSnackbar(state.notice); vm.dismissError() }
     }
-    val title = when (screen) {
-        "node", "terminal", "changes", "diff" -> selected?.text("name") ?: "Agent Node"
-        "issues" -> "Issues"; "archive" -> "Archive"; "capture" -> "New task"
-        "connection" -> "Connection"; "pr" -> "Create pull request"; else -> "Buildmesh"
-    }
     Scaffold(
         topBar = {
             if (state.paired) TopAppBar(title = {
-                if (screen == "home") BuildmeshWordmark() else Text(title, maxLines = 1)
+                if (screen == "home") BuildmeshWordmark() else {
+                    val title = when (screen) {
+                        "node", "terminal", "changes", "diff" -> selected?.text("name") ?: "Agent Node"
+                        "issues" -> "Issues"; "archive" -> "Archive"; "capture" -> "New task"
+                        "connection" -> "Connection"; "pr" -> "Create pull request"; else -> "Buildmesh"
+                    }
+                    Text(title, maxLines = 1)
+                }
             }, colors = TopAppBarDefaults.topAppBarColors(
                 containerColor = MeshColors.surface, scrolledContainerColor = MeshColors.surface,
                 navigationIconContentColor = MeshColors.secondary, actionIconContentColor = MeshColors.secondary,

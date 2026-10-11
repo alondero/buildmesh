@@ -34,7 +34,7 @@ fun BuildmeshWordmark(modifier: Modifier = Modifier, markSize: Dp = 32.dp) {
                 withStyle(SpanStyle(color = MeshColors.accent)) { append("mesh") }
             },
             fontFamily = Geist, fontWeight = FontWeight.ExtraBold,
-            // The wordmark is artwork: preserve its proportions at every system font scale.
+            // Match the canonical lockup's 42/96 ratio at every system font scale.
             fontSize = with(LocalDensity.current) { (markSize * (42f / 96f)).toSp() },
             letterSpacing = (-0.03).em,
             maxLines = 1,

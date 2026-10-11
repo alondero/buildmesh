@@ -81,6 +81,8 @@ monochrome silhouette for Android's themed icons. The vector resources
 are generated from `docs/brand/` by `npm run brand:build -- --android-only`;
 edit the canonical SVGs rather than native copies. The native client currently
 uses the dark theme regardless of the phone's system appearance.
+`MainActivity` owns the transparent system bars and their dark appearance through
+its edge-to-edge setup; the resource theme supplies the initial window background.
 
 Compose owns Overview/Work, mesh selection and search, node details and replies,
 task capture, issue spawning, archive import/resume, changed files, selectable

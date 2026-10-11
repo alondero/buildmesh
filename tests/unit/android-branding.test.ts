@@ -21,6 +21,30 @@ describe('Android brand sources', () => {
     expect(vector.match(/<path /g)).toHaveLength(9);
   });
 
+  it.each([
+    ['transform', 'translate(4 0)'], ['opacity', '0.5'],
+    ['fill-opacity', '0.5'], ['stroke-opacity', '0.5'],
+    ['clip-path', 'url(#clip)'], ['mask', 'url(#mask)'],
+    ['style', 'fill: #ffffff'], ['fill', 'url(#gradient)'], ['stroke', 'url(#gradient)'],
+  ])('rejects unsupported SVG paint %s', (attribute, value) => {
+    const source = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96"><path d="M0 0L1 1" ${attribute}="${value}"/></svg>`;
+    expect(() => androidVector(source, 'fixture.svg')).toThrow(/Unsupported Relay SVG/);
+  });
+
+  it('selects the monochrome plate by geometry when a node precedes it', () => {
+    const source = read('docs/brand/b3-relay-icon.svg').replace(
+      '<rect x="2"', '<rect x="0" y="0" width="4" height="4" rx="1" fill="#00d4ff"/><rect x="2"',
+    );
+    const vector = androidVector(source, 'fixture.svg', true);
+    expect(vector).not.toContain('M28,2h40a26,26');
+    expect(vector).toContain('android:pathData="M1,0h2a1,1');
+  });
+
+  it('preserves an explicitly absent stroke as transparent', () => {
+    const source = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96"><path d="M0 0L1 1" fill="#00d4ff" stroke="none"/></svg>';
+    expect(androidVector(source, 'fixture.svg')).toContain('android:strokeColor="@android:color/transparent"');
+  });
+
   it('mirrors desktop dark palette tokens', () => {
     const css = read('src/App.css').split('/* Light theme override')[0];
     const kotlin = read('android/app/src/main/java/dev/buildmesh/remote/Theme.kt');
