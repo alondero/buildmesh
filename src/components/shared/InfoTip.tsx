@@ -62,7 +62,9 @@ export function InfoTip({ label, children, testId, variant = 'info', triggerLabe
         aria-controls={open ? panelId : undefined}
         data-testid={triggerTestId}
         onClick={() => setOpen((value) => !value)}
-        className={`flex h-4 w-4 items-center justify-center rounded-full transition-colors focus:outline-none ${
+        // 24px target (DESIGN.md, explicit px: the root font is 13px); the -m-1
+        // margin keeps the 16px layout footprint so rows don't grow.
+        className={`-m-1 flex h-[24px] w-[24px] items-center justify-center rounded-full transition-colors focus-visible:outline focus-visible:outline-[1.5px] focus-visible:outline-accent-cyan ${
           variant === 'warning'
             ? 'text-status-warning hover:text-text-primary focus-visible:text-text-primary'
             : 'text-text-muted hover:text-accent-cyan focus-visible:text-accent-cyan'

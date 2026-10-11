@@ -189,7 +189,7 @@ disk](docs/user-guide.md#attention-hooks-buildmesh-installs-on-disk).
 ### Harness permission modes
 
 Separately from the sandbox, each harness has a **Permission mode** in
-**Settings → Harnesses → Agent Harness defaults**: its auto/unattended mode
+**Settings → Launch Configurations → Agent Harness defaults**: its auto/unattended mode
 (the harness's own flag, e.g. Claude Code's
 `--dangerously-skip-permissions`) or prompt mode (launch the CLI bare so it
 asks). Buildmesh passes the flag through unchanged — what acts is the agent;

@@ -276,7 +276,7 @@ function HarnessDefaultCard({
               onChange={(e) => onUpdate({ model: e.target.value || null })}
               onBlur={() => void onCommit()}
               disabled={disabled}
-              className="w-44 bg-bg-card border border-border-subtle rounded-md px-3 py-1.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+              className="w-44 bg-bg-input border border-border-default rounded-md px-3 py-1.5 text-base text-text-primary focus:outline-none focus:border-border-active disabled:opacity-50"
               aria-label={`${provider.label} default model`}
               data-testid={`harness-default-model-input-${provider.harness_id}`}
             />
@@ -288,7 +288,7 @@ function HarnessDefaultCard({
               onChange={(e) => onUpdate({ effort: e.target.value || null })}
               onBlur={() => void onCommit()}
               disabled={disabled}
-              className="w-32 bg-bg-card border border-border-subtle rounded-md px-3 py-1.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+              className="w-32 bg-bg-input border border-border-default rounded-md px-3 py-1.5 text-base text-text-primary focus:outline-none focus:border-border-active disabled:opacity-50"
               aria-label={`${provider.label} ${
                 effortKey(caps.effort_control) === 'model_reasoning_effort' ? 'reasoning effort' : 'effort'
               }`}
@@ -337,7 +337,7 @@ function HarnessDefaultCard({
               onChange={(e) => onUpdate({ permission_mode: e.target.value || null })}
               onBlur={() => void onCommit()}
               disabled={disabled}
-              className="w-full bg-bg-card border border-border-subtle rounded-md px-3 py-1.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+              className="w-full bg-bg-input border border-border-default rounded-md px-3 py-1.5 text-base text-text-primary focus:outline-none focus:border-border-active disabled:opacity-50"
               aria-label={`${provider.label} permission mode`}
               title={selectedMode?.description ?? ''}
               data-testid={`harness-permission-select-${provider.harness_id}`}

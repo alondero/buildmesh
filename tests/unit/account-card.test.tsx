@@ -793,6 +793,38 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
       expect(screen.queryByText(/preferences\.json/i)).toBeNull();
     });
 
+    it('gives the warning icon the 24px target and visible focus ring DESIGN.md requires', () => {
+      render(
+        <AccountCard
+          account={keyedAccount()}
+          onSave={vi.fn().mockResolvedValue(true)}
+          keyInPreferences
+        />,
+      );
+      const classes = screen.getByTestId('account-key-in-preferences-minimax').className.split(/\s+/);
+      // Explicit pixel bounds: the desktop root font is 13px, so h-6 would be 19.5px.
+      expect(classes).toContain('h-[24px]');
+      expect(classes).toContain('w-[24px]');
+      expect(classes).toContain('focus-visible:outline-accent-cyan');
+      expect(classes).not.toContain('focus:outline-none');
+    });
+
+    it('uses the input surface tokens for the API key and billing fields', async () => {
+      const user = userEvent.setup();
+      render(<AccountCard account={keyedAccount()} onSave={vi.fn().mockResolvedValue(true)} />);
+      await user.click(expander('MiniMax'));
+      for (const field of [
+        screen.getByLabelText(/minimax api key/i),
+        screen.getByLabelText(/minimax billing mode/i),
+      ]) {
+        const classes = field.className.split(/\s+/);
+        expect(classes).toContain('bg-bg-input');
+        expect(classes).toContain('border-border-default');
+        expect(classes).toContain('focus:border-border-active');
+        expect(classes).not.toContain('bg-bg-card');
+      }
+    });
+
     it('explains on hover which key is on disk, why, and the one thing to do', async () => {
       mockIsWindows = true;
       const user = userEvent.setup();

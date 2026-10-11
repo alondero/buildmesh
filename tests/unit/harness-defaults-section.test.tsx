@@ -241,6 +241,24 @@ describe('Settings — Agent Harness defaults', () => {
     await screen.findByTestId('harness-permission-select-opencode');
   });
 
+  it('styles the model, effort and permission fields with the input surface tokens', async () => {
+    mockBackend({ providers: [CLAUDE_ROW, AGY_ROW] });
+    render(<AppSettingsModal onClose={() => {}} />);
+
+    const fields = [
+      await screen.findByTestId('harness-default-model-input-claude'),
+      await screen.findByTestId('harness-default-effort-select-claude'),
+      await screen.findByTestId('harness-permission-select-agy'),
+    ];
+    for (const field of fields) {
+      const classes = field.className.split(/\s+/);
+      expect(classes).toContain('bg-bg-input');
+      expect(classes).toContain('border-border-default');
+      expect(classes).toContain('focus:border-border-active');
+      expect(classes).not.toContain('bg-bg-card');
+    }
+  });
+
   it('effort choices and guidance match each harness\'s declared vocabulary', async () => {
     mockBackend({ providers: [CLAUDE_ROW, CODEX_ROW] });
     render(<AppSettingsModal onClose={() => {}} />);

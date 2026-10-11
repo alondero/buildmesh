@@ -786,7 +786,7 @@ CLI's approvals. Each harness decides for itself when to ask before acting,
 and Buildmesh passes the harness's own flag through unchanged. What acts is
 the agent; Buildmesh only facilitates the launch.
 
-Per harness, **Settings → Harnesses → Agent Harness defaults** offers a
+Per harness, **Settings → Launch Configurations → Agent Harness defaults** offers a
 **Permission mode**: the harness's auto/unattended mode (its own flag) or
 prompt mode (launch the CLI bare so it asks the way a human-launched session
 would). The select names the harness default in the harness's own words, and

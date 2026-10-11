@@ -361,7 +361,7 @@ export function AccountCard({
                   disabled={busy}
                   onChange={e => editApiKey(e.target.value)}
                   placeholder="Enter API key..."
-                  className="w-full bg-bg-card border border-border-subtle rounded-md px-3 py-1.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+                  className="w-full bg-bg-input border border-border-default rounded-md px-3 py-1.5 text-base text-text-primary focus:outline-none focus:border-border-active disabled:opacity-50"
                   aria-label={`${account.name} API key`}
                 />
               </div>
@@ -373,7 +373,7 @@ export function AccountCard({
                   value={billingDisplay}
                   disabled={busy}
                   onChange={e => editBillingMode(e.target.value as ProviderAccount['billing_mode'])}
-                  className="w-full bg-bg-card border border-border-subtle rounded-md px-3 py-1.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+                  className="w-full bg-bg-input border border-border-default rounded-md px-3 py-1.5 text-base text-text-primary focus:outline-none focus:border-border-active disabled:opacity-50"
                   aria-label={`${account.name} billing mode`}
                 >
                   <option value="plan">Plan / subscription (percentage)</option>
