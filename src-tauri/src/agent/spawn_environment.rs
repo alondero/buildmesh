@@ -1591,23 +1591,46 @@ mod tests {
              without splitting on a metacharacter; got: {script}"
         );
         let pair = crate::agent::spawn::open_pty_pair(24, 80).unwrap();
+        let mut master = pair.master.try_clone_reader().unwrap();
         let mut child = crate::agent::spawn::spawn_child(&pair, command).unwrap();
+        // Drain the PTY. Without this the console output is discarded, and a
+        // failure inside the batch — `pushd` refusing a share, `powershell.exe`
+        // not resolving — is invisible: all the test can report is that the
+        // probe never appeared.
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let sink = std::sync::Arc::clone(&captured);
+        let reader = std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = master.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                if let Ok(mut text) = sink.lock() {
+                    text.push_str(&String::from_utf8_lossy(&buf[..n]));
+                }
+            }
+        });
         // Poll for the probe rather than waiting on the child. cmd.exe holds the
         // console open for the life of an interactive agent — that is normal
         // for a node, not a failure — so `wait()` would never return here even
         // on a completely successful spawn. What matters is whether the shim
         // ran *in the node's directory*, which is what the probe records.
         let probe = directory.path().join("probe.txt");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
         while !probe.is_file() && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
         let ran_in_node_directory = probe.is_file();
         let _ = child.kill();
+        drop(pair);
+        let _ = reader.join();
         assert!(
             ran_in_node_directory,
-            "the mapped interop spawn did not run the shim in the node directory at {}",
-            directory.path().display()
+            "the mapped interop spawn did not run the shim in the node directory at {}.\n\
+             Console output:\n{}",
+            directory.path().display(),
+            captured.lock().map(|text| text.clone()).unwrap_or_default()
         );
     }
 
