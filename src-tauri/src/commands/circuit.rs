@@ -97,6 +97,16 @@ pub fn dismiss_circuit_run_attention(
     Ok(())
 }
 
+/// How many runs on this mesh are still asking for attention.
+///
+/// Counted against the same unbounded predicate `dismiss_all_circuit_run_attention`
+/// updates, not against the Probe's per-circuit ledger window, so the toolbar's
+/// confirmation names every run the command will touch.
+#[command]
+pub fn count_circuit_run_attention(mesh_id: i64) -> Result<i64, String> {
+    crate::db::count_outstanding_circuit_run_attention(mesh_id).map_err(|e| e.to_string())
+}
+
 /// Acknowledge every outstanding attention run on a mesh — the History tab's
 /// "Dismiss all (N)". Returns how many runs changed so the UI can report the
 /// real number instead of an optimistic one.

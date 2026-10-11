@@ -428,6 +428,7 @@ pub fn run() {
             commands::circuit::record_circuit_outcome,
             commands::circuit::circuit_run_attention,
             commands::circuit::dismiss_circuit_run_attention,
+            commands::circuit::count_circuit_run_attention,
             commands::circuit::dismiss_all_circuit_run_attention,
             commands::circuit::recover_failed_circuit_run,
             commands::circuit::pause_circuit_run,

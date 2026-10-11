@@ -1582,6 +1582,54 @@ pub(crate) fn dismiss_circuit_run_attention_inner(
 /// predicate no longer matches are left alone, so a run that recovers on its own
 /// does not get stamped with an acknowledgement the user never gave.
 ///
+/// The outstanding-attention predicate, shared by [`count_outstanding_circuit_run_attention`]
+/// and [`dismiss_all_circuit_run_attention_inner`].
+///
+/// Both derive their rows from this one string: a count that did not match the
+/// mutation would have the toolbar promising a smaller number than the command
+/// then acknowledges — the user reads "Dismiss 50" and 75 runs are cleared,
+/// 25 of which they never saw.
+const OUTSTANDING_ATTENTION_RUNS: &str = "\
+             SELECT r.id \
+             FROM autopilot_circuit_runs r \
+             LEFT JOIN autopilot_circuits c ON c.id = r.circuit_id \
+             LEFT JOIN autopilot_circuit_run_steps s ON s.run_id = r.id \
+             LEFT JOIN agent_node_lifecycle_leases l ON l.node_id = s.agent_node_id \
+             LEFT JOIN json_each(CASE WHEN json_valid(c.graph_json) THEN c.graph_json ELSE '{}' END, '$.nodes') \
+                 review_node ON json_extract(review_node.value, '$.type.type') = 'review_verdict' \
+             LEFT JOIN autopilot_circuit_run_steps review_step \
+                 ON review_step.run_id = r.id \
+                AND review_step.node_id = json_extract(review_node.value, '$.id') \
+             WHERE r.mesh_id = ?1 \
+               AND r.attention_dismissed_at IS NULL \
+               AND r.state IN ('completed', 'failed', 'cancelled') \
+               AND (r.state = 'failed' OR l.cleanup_requested = 1 \
+                    OR (review_step.id IS NOT NULL AND COALESCE(review_step.outcome, '') <> 'completed'))";
+
+/// How many runs on this mesh are still asking for attention, unbounded by the
+/// per-circuit history window.
+///
+/// This exists because the Probe's ledger deliberately truncates (50 attention
+/// runs per circuit, so a long-dead circuit cannot stream its whole lifetime),
+/// while "Dismiss all" acknowledges every outstanding run on the mesh. Counting
+/// the ledger payload would understate the confirmation whenever the cap bites.
+pub fn count_outstanding_circuit_run_attention(mesh_id: i64) -> SqlResult<i64> {
+    let db = crate::db::read_conn();
+    count_outstanding_circuit_run_attention_inner(&db, mesh_id)
+}
+
+/// Per-test isolated variant of [`count_outstanding_circuit_run_attention`].
+pub(crate) fn count_outstanding_circuit_run_attention_inner(
+    db: &Connection,
+    mesh_id: i64,
+) -> SqlResult<i64> {
+    Ok(db.query_row(
+        &format!("SELECT COUNT(*) FROM ({OUTSTANDING_ATTENTION_RUNS})"),
+        params![mesh_id],
+        |row| row.get(0),
+    )?)
+}
+
 /// Idempotent: already-dismissed runs match no branch and are not re-stamped.
 pub fn dismiss_all_circuit_run_attention(mesh_id: i64) -> SqlResult<usize> {
     let db = crate::db::write_conn();
@@ -1595,26 +1643,11 @@ pub(crate) fn dismiss_all_circuit_run_attention_inner(
 ) -> SqlResult<usize> {
     let now = chrono::Utc::now().timestamp();
     Ok(db.execute(
-        "UPDATE autopilot_circuit_runs \
-         SET attention_dismissed_at = ?2 \
-         WHERE mesh_id = ?1 \
-           AND attention_dismissed_at IS NULL \
-           AND id IN ( \
-             SELECT r.id \
-             FROM autopilot_circuit_runs r \
-             LEFT JOIN autopilot_circuit_run_steps s ON s.run_id = r.id \
-             LEFT JOIN agent_node_lifecycle_leases l ON l.node_id = s.agent_node_id \
-             LEFT JOIN json_each(CASE WHEN json_valid(c.graph_json) THEN c.graph_json ELSE '{}' END, '$.nodes') \
-                 review_node ON json_extract(review_node.value, '$.type.type') = 'review_verdict' \
-             LEFT JOIN autopilot_circuit_run_steps review_step \
-                 ON review_step.run_id = r.id \
-                AND review_step.node_id = json_extract(review_node.value, '$.id') \
-             LEFT JOIN autopilot_circuits c ON c.id = r.circuit_id \
-             WHERE r.mesh_id = ?1 \
-               AND r.state IN ('completed', 'failed', 'cancelled') \
-               AND (r.state = 'failed' OR l.cleanup_requested = 1 \
-                    OR (review_step.id IS NOT NULL AND COALESCE(review_step.outcome, '') <> 'completed')) \
-           )",
+        &format!(
+            "UPDATE autopilot_circuit_runs \
+             SET attention_dismissed_at = ?2 \
+             WHERE id IN ({OUTSTANDING_ATTENTION_RUNS})"
+        ),
         params![mesh_id, now],
     )?)
 }

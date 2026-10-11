@@ -1098,6 +1098,66 @@ fn bulk_dismissal_covers_exactly_the_attention_runs_on_the_mesh() {
     );
 }
 
+/// The toolbar's confirmation count must equal what "Dismiss all" actually
+/// acknowledges.
+///
+/// The Probe's ledger deliberately surfaces at most `RECOVERY_RUNS_PER_CIRCUIT`
+/// (50) attention runs per circuit, while the bulk update reaches every
+/// outstanding run on the mesh. Counting the ledger payload therefore
+/// understates the confirmation exactly when it matters most: 75 failed runs in
+/// one circuit would read "Dismiss 50" and then clear 75 — including 25 the
+/// user never saw. This pins the count to the mutation's own predicate.
+#[test]
+fn the_attention_count_names_every_run_dismiss_all_will_touch_past_the_ledger_window() {
+    let mut conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "over-cap", "/tmp/over-cap").unwrap();
+    let circuit =
+        create_autopilot_circuit_inner(&conn, mesh.id, "attn", "", &sample_graph_json()).unwrap();
+
+    // 75 failed runs in ONE circuit: past the 50-per-circuit recovery window.
+    let outstanding = 75;
+    for index in 0..outstanding {
+        let run = create_circuit_run_locked(
+            &mut conn,
+            circuit.id,
+            mesh.id,
+            &format!("manual:fail{index}"),
+            "{}",
+        )
+        .unwrap();
+        commit_circuit_advance_locked(&mut conn, run, Some("failed"), Some("{}"), &[]).unwrap();
+    }
+
+    // The ledger really is capped — this is what made the old label wrong.
+    let surfaced = list_circuits_with_recent_runs_inner(&conn, mesh.id, 10)
+        .unwrap()
+        .into_iter()
+        .flat_map(|(_, runs)| runs.into_iter().map(|detail| detail.run.id))
+        .filter(|id| (1..=(outstanding as i64)).contains(id))
+        .count();
+    assert!(
+        surfaced < outstanding as usize,
+        "this test is only meaningful while the ledger window is narrower than the real backlog (surfaced {surfaced} of {outstanding})"
+    );
+
+    // The number the confirmation shows, and the number the command changes.
+    let counted = count_outstanding_circuit_run_attention_inner(&conn, mesh.id).unwrap();
+    assert_eq!(
+        counted, outstanding as i64,
+        "the count is unbounded by the ledger window, so the label cannot understate"
+    );
+    let changed = dismiss_all_circuit_run_attention_inner(&conn, mesh.id).unwrap();
+    assert_eq!(
+        changed as i64, counted,
+        "the confirmation names exactly the runs that are acknowledged"
+    );
+    assert_eq!(
+        count_outstanding_circuit_run_attention_inner(&conn, mesh.id).unwrap(),
+        0,
+        "everything the confirmation promised is now acknowledged"
+    );
+}
+
 /// A dismissed run must stop being force-surfaced by the 50-per-circuit recovery
 /// window, or the UI would drop it from the count while the ledger kept pulling
 /// it back over the ordinary history cap.

@@ -1489,6 +1489,9 @@ export const dismissCircuitRunAttention = (runId: number, dismissed: boolean) =>
  * The rows are selected in SQL against the same predicate History counts with;
  * the UI deliberately does not send an id list that could drift from it.
  */
+export const countCircuitRunAttention = (meshId: number) =>
+  _invoke<number>('count_circuit_run_attention', { meshId });
+
 export const dismissAllCircuitRunAttention = (meshId: number) =>
   _invoke<number>('dismiss_all_circuit_run_attention', { meshId });
 

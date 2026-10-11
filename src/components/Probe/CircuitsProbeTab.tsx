@@ -64,6 +64,7 @@ import {
   approveCircuitStep,
   cancelCircuitRun,
   cancelCircuitRuns,
+  countCircuitRunAttention,
   createCircuit,
   deleteCircuit,
   dismissAllCircuitRunAttention,
@@ -402,6 +403,9 @@ export function CircuitsProbeTab() {
   const [historySearch, setHistorySearch] = useState('');
   const [historyAttentionOnly, setHistoryAttentionOnly] = useState(false);
   const [confirmDismissAllAttention, setConfirmDismissAllAttention] = useState(false);
+  // Backend-computed, unbounded by the ledger's per-circuit window: this is the
+  // number "Dismiss all" will actually acknowledge.
+  const [outstandingAttention, setOutstandingAttention] = useState(0);
   const [queueSelection, setQueueSelection] = useState<Set<number>>(new Set());
   const [queueVisibleCount, setQueueVisibleCount] = useState(QUEUE_PAGE_SIZE);
   const mountedRef = useRef(false);
@@ -556,7 +560,8 @@ export function CircuitsProbeTab() {
     if (activeMeshId === null) {
       setRows([]);
       setQueue([]);
-      setQueueWaits({});
+setQueueWaits({});
+      setOutstandingAttention(0);
       setLoadedMeshId(null);
       return;
     }
@@ -576,6 +581,19 @@ export function CircuitsProbeTab() {
         for (const id of prev) if (live.has(id)) next.add(id);
         return next;
       });
+      // The ledger payload is windowed (attention rides up to 50/circuit), so it
+      // cannot count what "Dismiss all" will touch. Ask the backend for the
+      // unbounded number. A failure here must not discard the ledger we just
+      // read — fall back to the windowed count rather than blanking the tab.
+      let outstanding = 0;
+      try {
+        outstanding = await countCircuitRunAttention(activeMeshId);
+      } catch (err) {
+        console.error('Failed to count circuit attention:', err);
+        outstanding = circuitActivityStats(snapshot.circuits, snapshot.queue.length).historyAttentionCount;
+      }
+      if (requestId !== loadRequestRef.current) return;
+      setOutstandingAttention(outstanding);
       setLoadError(null);
       setLoadedMeshId(activeMeshId);
     } catch (err) {
@@ -836,7 +854,7 @@ export function CircuitsProbeTab() {
               />
               Needs attention ({activityStats.historyAttentionCount})
             </label>
-            {activityStats.historyAttentionCount > 0 && (
+            {outstandingAttention > 0 && (
               confirmDismissAllAttention ? (
                 <>
                   <button
@@ -849,7 +867,7 @@ export function CircuitsProbeTab() {
                     data-testid="history-dismiss-all-confirm"
                     className="px-1.5 py-0.5 text-2xs rounded-md bg-accent-cyan/15 text-accent-cyan disabled:opacity-40"
                   >
-                    Dismiss {activityStats.historyAttentionCount}
+                    Dismiss {outstandingAttention}
                   </button>
                   <button
                     type="button"
@@ -867,10 +885,10 @@ export function CircuitsProbeTab() {
                   onClick={() => setConfirmDismissAllAttention(true)}
                   disabled={busy || activeMeshId === null}
                   data-testid="history-dismiss-all"
-                  title="Acknowledge every run still asking for attention. The runs and their diagnostics stay; they stop sorting first and stop counting."
+                  title={`Acknowledge all ${outstandingAttention} runs still asking for attention on this mesh. The runs and their diagnostics stay; they stop sorting first and stop counting.`}
                   className="px-1.5 py-0.5 text-2xs rounded-md text-accent-cyan hover:bg-accent-cyan/10 disabled:opacity-40"
                 >
-                  Dismiss all ({activityStats.historyAttentionCount})
+                  Dismiss all ({outstandingAttention})
                 </button>
               )
             )}

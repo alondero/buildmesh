@@ -163,7 +163,9 @@ function mockBackend(overrides: {
   circuits?: AutopilotCircuit[];
   runs?: CircuitRunDetail[];
   queue?: CircuitQueueEntry[];
-  queueWaits?: Record<string, string>;
+queueWaits?: Record<string, string>;
+  /** Backend-reported outstanding attention, independent of the ledger window. */
+  outstandingAttention?: number;
 } = {}) {
   const circuits = overrides.circuits ?? [CIRCUIT];
   const runs = overrides.runs ?? [RUN_DONE, RUN_RUNNING];
@@ -210,6 +212,11 @@ function mockBackend(overrides: {
     }
     // The bulk acknowledgement returns the number of runs it changed.
     if (cmd === 'dismiss_all_circuit_run_attention') return Promise.resolve(2);
+    // The outstanding count is backend-computed and deliberately independent of
+    // the windowed ledger payload (which caps attention at 50/circuit).
+    if (cmd === 'count_circuit_run_attention') {
+      return Promise.resolve(overrides.outstandingAttention ?? runs.filter((r) => r.run.state === 'failed').length);
+    }
     if (cmd === 'trigger_circuit_now') return Promise.resolve(13);
     // Default-fall-through so failures surface the unexpected command.
     return Promise.resolve({ cmd });
@@ -827,6 +834,34 @@ describe('CircuitsProbeTab', () => {
     fireEvent.click(await screen.findByTestId('circuits-view-history'));
     await screen.findByTestId('run-card-11');
     expect(screen.queryByTestId('history-dismiss-all')).toBeNull();
+  });
+
+  /**
+   * The ledger payload is capped at 50 attention runs per circuit, so counting
+   * it would read "Dismiss 50" while the command acknowledged every outstanding
+   * run on the mesh — including runs the user never saw in the list. The label
+   * must come from the backend's unbounded count.
+   */
+  it('labels the bulk dismissal with the backend count, not the windowed list', async () => {
+    mockBackend({
+      runs: [{ ...RUN_DONE, run: { ...RUN_DONE.run, id: 9, state: 'failed' } }],
+      outstandingAttention: 137,
+    });
+    const user = userEvent.setup();
+    openProbeDestination('circuits');
+
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+
+    // One failed run is loaded, but the mesh genuinely has 137 outstanding.
+    expect(await screen.findByTestId('history-dismiss-all')).toHaveProperty(
+      'textContent',
+      expect.stringContaining('137'),
+    );
+    await user.click(screen.getByTestId('history-dismiss-all'));
+    expect(await screen.findByTestId('history-dismiss-all-confirm')).toHaveProperty(
+      'textContent',
+      expect.stringContaining('137'),
+    );
   });
 
   it('reorders queue ids purely for drag-drop', async () => {

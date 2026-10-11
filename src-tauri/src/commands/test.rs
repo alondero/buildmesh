@@ -204,11 +204,16 @@ fn process_request(request: &str, app: &AppHandle) -> String {
         match rpc_req.cmd.as_str() {
             "create_test_mesh" => handle_create_test_mesh(&rpc_req.args),
             "create_test_review_fixture" => handle_create_test_review_fixture(&rpc_req.args),
+            "create_attention_backlog_fixture" => {
+                handle_create_attention_backlog_fixture(&rpc_req.args)
+            }
             "delete_test_review_fixture" => handle_delete_test_review_fixture(&rpc_req.args),
             "create_test_review_continuation_fixture" => {
                 handle_create_test_review_continuation_fixture(&rpc_req.args)
             }
-            "concurrent_continue_review" => handle_concurrent_continue_review(&rpc_req.args, app.clone()),
+            "concurrent_continue_review" => {
+                handle_concurrent_continue_review(&rpc_req.args, app.clone())
+            }
             "create_agent_node" => handle_create_agent_node(&rpc_req.args, app.clone()),
             "list_meshes" => handle_list_meshes(),
             "list_agent_nodes" => handle_list_agent_nodes(),
@@ -282,6 +287,21 @@ fn handle_create_test_review_fixture(args: &serde_json::Value) -> String {
     }
 }
 
+fn handle_create_attention_backlog_fixture(args: &serde_json::Value) -> String {
+    let name = args
+        .get("name")
+        .and_then(|value| value.as_str())
+        .unwrap_or("Attention backlog");
+    let count = args
+        .get("count")
+        .and_then(|value| value.as_i64())
+        .unwrap_or(3);
+    match crate::services::test_fixtures::create_attention_backlog_fixture(name, count) {
+        Ok(data) => JsonRpcResponse::success(&data),
+        Err(error) => JsonRpcResponse::error(&error),
+    }
+}
+
 fn handle_delete_test_review_fixture(args: &serde_json::Value) -> String {
     let mesh_id = args
         .get("meshId")
@@ -332,7 +352,11 @@ fn handle_concurrent_continue_review(args: &serde_json::Value, app: AppHandle) -
         .collect();
     let results: Vec<Result<i64, String>> = threads
         .into_iter()
-        .map(|thread| thread.join().unwrap_or_else(|_| Err("continuation thread panicked".into())))
+        .map(|thread| {
+            thread
+                .join()
+                .unwrap_or_else(|_| Err("continuation thread panicked".into()))
+        })
         .collect();
     JsonRpcResponse::success(&serde_json::json!({ "results": results }))
 }
@@ -533,9 +557,8 @@ fn handle_write_to_agent(args: &serde_json::Value, app: AppHandle) -> String {
         .unwrap_or("")
         .to_string();
 
-    let result = tauri::async_runtime::block_on(crate::agent::process::write_to_agent(
-        app, node_id, data,
-    ));
+    let result =
+        tauri::async_runtime::block_on(crate::agent::process::write_to_agent(app, node_id, data));
 
     match result {
         // The disposition is echoed so a harness can assert the write was
