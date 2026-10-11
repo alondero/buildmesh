@@ -6387,6 +6387,284 @@ mod tests {
     }
 
     #[test]
+    fn operator_review_refuses_an_older_running_feedback_prompt_already_built() {
+        use crate::circuit::model::{
+            CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind, EdgeCondition, StepOutcome,
+        };
+
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch(
+            "INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(9,1,'source','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(10,1,'reviewer','/repo/reviewer');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'review');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state,context_json)
+                VALUES(1,1,1,'running','{\"source.agent_id\":\"9\"}');
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,outcome,agent_node_id)
+                VALUES(1,'reviewer',2,'completed','completed',10),
+                    (1,'verdict',2,'unverified',NULL,10),
+                    (1,'prior_notice',1,'completed','completed',NULL),
+                    (1,'feedback',1,'running',NULL,9);",
+        ).unwrap();
+        let mut graph = CircuitGraph::agent_review(None, None, 3);
+        graph
+            .nodes
+            .retain(|node| matches!(node.id.as_str(), "reviewer" | "verdict" | "feedback"));
+        graph
+            .edges
+            .retain(|edge| edge.from == "verdict" && edge.to == "feedback");
+        graph.edges.push(CircuitEdge {
+            from: "reviewer".into(),
+            to: "verdict".into(),
+            condition: EdgeCondition::Always,
+        });
+        graph.nodes.push(CircuitNode {
+            id: "prior_notice".into(),
+            kind: CircuitNodeKind::Notify {
+                message: "Round one notice".into(),
+            },
+        });
+        graph.edges.push(CircuitEdge {
+            from: "prior_notice".into(),
+            to: "feedback".into(),
+            condition: EdgeCondition::Always,
+        });
+        db.execute(
+            "UPDATE autopilot_circuits SET graph_json=?1",
+            [graph.to_json().unwrap()],
+        )
+        .unwrap();
+
+        let stored = super::super::ledger::get_circuit_run_inner(&db, 1)
+            .unwrap()
+            .unwrap();
+        let mut view = recovery_view(&db, &stored).unwrap();
+        view.context
+            .set("node.feedback.prompt_delivery.1", "intent");
+        db.execute(
+            "UPDATE autopilot_circuit_runs SET context_json=?1 WHERE id=1",
+            [view.context.to_json().unwrap()],
+        )
+        .unwrap();
+        assert!(
+            !view.can_record_review("verdict", StepOutcome::Working),
+            "an older Running injection cannot be rearmed to deliver a new note"
+        );
+        let error = record_outcome_locked(
+            &mut db,
+            &CheckpointRequest {
+                run_id: 1,
+                node_id: "verdict".into(),
+                attempt: 2,
+                expected_revision: 0,
+                action: CheckpointAction::ReviewFail,
+                reason: "These findings arrived after prompt intent.".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("Request changes route"),
+            "error was: {error}"
+        );
+    }
+
+    #[test]
+    fn operator_review_round_two_joins_a_prior_notify_and_delivers_the_note() {
+        use crate::circuit::{
+            model::{
+                CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind, EdgeCondition, StepOutcome,
+            },
+            stepper::{advance, Capacity, CircuitEvent, Effect, StepStatus},
+        };
+
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch(
+            "INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(9,1,'source','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(10,1,'reviewer','/repo/reviewer');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'review');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state,context_json)
+                VALUES(1,1,1,'running','{\"source.agent_id\":\"9\"}');
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,outcome,agent_node_id)
+                VALUES(1,'reviewer',2,'completed','completed',10),
+                    (1,'verdict',2,'unverified',NULL,10),
+                    (1,'prior_notice',1,'completed','completed',NULL),
+                    (1,'feedback',1,'completed','completed',9);",
+        ).unwrap();
+        let mut graph = CircuitGraph::agent_review(None, None, 3);
+        graph
+            .nodes
+            .retain(|node| matches!(node.id.as_str(), "reviewer" | "verdict" | "feedback"));
+        graph
+            .edges
+            .retain(|edge| edge.from == "verdict" && edge.to == "feedback");
+        graph.edges.push(CircuitEdge {
+            from: "reviewer".into(),
+            to: "verdict".into(),
+            condition: EdgeCondition::Always,
+        });
+        graph.nodes.push(CircuitNode {
+            id: "prior_notice".into(),
+            kind: CircuitNodeKind::Notify {
+                message: "Round one notice".into(),
+            },
+        });
+        graph.edges.push(CircuitEdge {
+            from: "prior_notice".into(),
+            to: "feedback".into(),
+            condition: EdgeCondition::Always,
+        });
+        db.execute(
+            "UPDATE autopilot_circuits SET graph_json=?1",
+            [graph.to_json().unwrap()],
+        )
+        .unwrap();
+
+        let stored = super::super::ledger::get_circuit_run_inner(&db, 1)
+            .unwrap()
+            .unwrap();
+        let view = recovery_view(&db, &stored).unwrap();
+        assert!(
+            view.can_record_review("verdict", StepOutcome::Working),
+            "a completed prior-attempt Notify still satisfies the feedback join"
+        );
+        record_outcome_locked(
+            &mut db,
+            &CheckpointRequest {
+                run_id: 1,
+                node_id: "verdict".into(),
+                attempt: 2,
+                expected_revision: 0,
+                action: CheckpointAction::ReviewFail,
+                reason: "Fix the round-two null check.".into(),
+            },
+        )
+        .unwrap();
+        let stored = super::super::ledger::get_circuit_run_inner(&db, 1)
+            .unwrap()
+            .unwrap();
+        let mut active = recovery_view(&db, &stored).unwrap();
+        advance(
+            &mut active,
+            &CircuitEvent::Tick(Capacity {
+                agent_free_slots: 1,
+            }),
+        );
+        let feedback = active.step("feedback").expect("feedback reruns");
+        assert_eq!(feedback.status, StepStatus::Running);
+        assert_eq!(feedback.attempt, 2);
+        assert_eq!(active.step("prior_notice").unwrap().attempt, 1);
+        let ready = advance(
+            &mut active,
+            &CircuitEvent::AgentReady {
+                node_id: "feedback".into(),
+            },
+        );
+        assert!(ready.effects.iter().any(|effect| matches!(effect,
+            Effect::InjectPty { node_id, prompt, .. } if node_id == "feedback"
+                && prompt.contains("Human review findings (operator):\nFix the round-two null check.")
+        )));
+    }
+
+    #[test]
+    fn operator_review_refuses_a_join_blocked_by_a_prior_failed_retry_limit() {
+        use crate::circuit::{
+            model::{
+                CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind, EdgeCondition, StepOutcome,
+            },
+            stepper::{advance, Capacity, CircuitEvent, StepStatus},
+        };
+
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch(
+            "INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(9,1,'source','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(10,1,'reviewer','/repo/reviewer');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'review');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state,context_json)
+                VALUES(1,1,1,'running','{\"source.agent_id\":\"9\"}');
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,outcome,agent_node_id)
+                VALUES(1,'reviewer',2,'completed','completed',10),
+                    (1,'verdict',2,'unverified',NULL,10),
+                    (1,'prior_retry',1,'completed','failed',NULL),
+                    (1,'feedback',1,'completed','completed',9);",
+        ).unwrap();
+        let mut graph = CircuitGraph::agent_review(None, None, 3);
+        graph
+            .nodes
+            .retain(|node| matches!(node.id.as_str(), "reviewer" | "verdict" | "feedback"));
+        graph
+            .edges
+            .retain(|edge| edge.from == "verdict" && edge.to == "feedback");
+        graph.edges.push(CircuitEdge {
+            from: "reviewer".into(),
+            to: "verdict".into(),
+            condition: EdgeCondition::Always,
+        });
+        graph.nodes.push(CircuitNode {
+            id: "prior_retry".into(),
+            kind: CircuitNodeKind::RetryLimit { max_retries: 1 },
+        });
+        graph.edges.push(CircuitEdge {
+            from: "prior_retry".into(),
+            to: "feedback".into(),
+            condition: EdgeCondition::OnOutcome(StepOutcome::Completed),
+        });
+        db.execute(
+            "UPDATE autopilot_circuits SET graph_json=?1",
+            [graph.to_json().unwrap()],
+        )
+        .unwrap();
+
+        let stored = super::super::ledger::get_circuit_run_inner(&db, 1)
+            .unwrap()
+            .unwrap();
+        let mut view = recovery_view(&db, &stored).unwrap();
+        assert!(
+            !view.can_record_review("verdict", StepOutcome::Working),
+            "the prior RetryLimit's failed outcome still blocks its Completed edge"
+        );
+        let error = record_outcome_locked(
+            &mut db,
+            &CheckpointRequest {
+                run_id: 1,
+                node_id: "verdict".into(),
+                attempt: 2,
+                expected_revision: 0,
+                action: CheckpointAction::ReviewFail,
+                reason: "Findings must reach the implementer.".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("Request changes route"),
+            "error was: {error}"
+        );
+        assert_eq!(view.step("verdict").unwrap().status, StepStatus::Unverified);
+
+        // Reproduce what the real scheduler would do if the refused verdict
+        // were nevertheless accepted: its retained RetryLimit edge blocks feedback.
+        let verdict = view
+            .steps
+            .iter_mut()
+            .find(|step| step.node_id == "verdict")
+            .unwrap();
+        verdict.status = StepStatus::Completed;
+        verdict.outcome = Some(StepOutcome::Working);
+        advance(
+            &mut view,
+            &CircuitEvent::Tick(Capacity {
+                agent_free_slots: 1,
+            }),
+        );
+        assert_eq!(view.step("feedback").unwrap().attempt, 1);
+        assert_eq!(view.step("feedback").unwrap().status, StepStatus::Completed);
+    }
+
+    #[test]
     fn recorded_operator_review_drives_the_next_tick_and_injected_prompt() {
         use crate::circuit::{
             model::{

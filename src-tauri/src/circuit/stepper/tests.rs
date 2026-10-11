@@ -104,6 +104,107 @@ fn status_of(run: &RunView, node: &str) -> StepStatus {
 
 // -- trigger --------------------------------------------------------------
 
+fn operator_review_fanout_run(checks: usize) -> RunView {
+    let mut run = linear_run();
+    run.state = RunState::Running;
+    run.context.set("source.agent_id", "9");
+    run.graph.nodes = vec![
+        CircuitNode {
+            id: "reviewer".into(),
+            kind: spawn_kind("Review"),
+        },
+        CircuitNode {
+            id: "verdict".into(),
+            kind: CircuitNodeKind::ReviewVerdict {
+                target_node_id: Some("reviewer".into()),
+            },
+        },
+        CircuitNode {
+            id: "feedback".into(),
+            kind: CircuitNodeKind::InjectPty {
+                prompt: "Fix findings".into(),
+                target_node_id: Some("$source".into()),
+            },
+        },
+    ];
+    run.graph.edges = vec![CircuitEdge {
+        from: "reviewer".into(),
+        to: "verdict".into(),
+        condition: EdgeCondition::Always,
+    }];
+    for index in 0..checks {
+        let id = format!("merge_check_{index}");
+        run.graph.nodes.push(CircuitNode {
+            id: id.clone(),
+            kind: CircuitNodeKind::GithubAction {
+                action: GithubActionKind::ConfirmPrMerged,
+                open_pr_policy: None,
+                label: None,
+                comment: None,
+            },
+        });
+        run.graph.edges.extend([
+            CircuitEdge {
+                from: "verdict".into(),
+                to: id.clone(),
+                condition: EdgeCondition::OnOutcome(StepOutcome::Working),
+            },
+            CircuitEdge {
+                from: id,
+                to: "feedback".into(),
+                condition: EdgeCondition::Always,
+            },
+        ]);
+    }
+    let mut reviewer = StepView::new("reviewer", StepStatus::Completed);
+    reviewer.agent_node_id = Some(10);
+    reviewer.outcome = Some(StepOutcome::Completed);
+    let mut verdict = StepView::new("verdict", StepStatus::Unverified);
+    verdict.agent_node_id = Some(10);
+    run.steps = vec![reviewer, verdict];
+    run
+}
+
+#[test]
+fn operator_review_feedback_fanout_reuses_equivalent_scheduler_snapshots() {
+    let mut run = operator_review_fanout_run(6);
+    assert!(run.can_record_review("verdict", StepOutcome::Working));
+    complete_with_outcome(
+        &mut run,
+        &mut Transition::default(),
+        "verdict",
+        StepOutcome::Working,
+    );
+    let mut search = FeedbackRouteSearch::default();
+    assert!(operator_feedback_scheduled_outcomes_reach_injection(
+        run,
+        "feedback",
+        &mut search
+    ));
+    // Six independent checks have three states apiece: pending, Completed,
+    // or routed Failed. Completion order does not create another snapshot.
+    assert_eq!(search.visited, 729);
+}
+
+#[test]
+fn operator_review_refuses_feedback_analysis_that_exceeds_its_state_budget() {
+    let mut run = operator_review_fanout_run(9);
+    assert!(!run.can_record_review("verdict", StepOutcome::Working));
+    complete_with_outcome(
+        &mut run,
+        &mut Transition::default(),
+        "verdict",
+        StepOutcome::Working,
+    );
+    let mut search = FeedbackRouteSearch::default();
+    assert!(!operator_feedback_scheduled_outcomes_reach_injection(
+        run,
+        "feedback",
+        &mut search
+    ));
+    assert_eq!(search.visited, 8192);
+}
+
 #[test]
 fn manual_trigger_starts_run_and_completes_trigger_roots() {
     let mut run = linear_run();

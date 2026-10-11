@@ -50,9 +50,15 @@ Run cards start collapsed. Open a card for the step timeline, reports and eviden
 Resolve reveals recovery actions for uncertain or failed steps. Review gates that
 are unverified offer explicit **Review passed** and **Request changes** decisions
 when no known work/input/evidence blocker remains. Request changes is available
-only when the feedback injection is scheduler-eligible for every possible
-outcome, with all required incoming edges satisfied in the same run. Mutually
-exclusive branches cannot combine to satisfy an all-incoming join. A fail-fast
+only when a simulation using the run scheduler reaches a pending feedback
+injection for the modeled outcomes and completion orders. Analysis is bounded
+to 8,192 distinct snapshots and 128 nested completions; if it cannot validate
+a complex route within those limits, simplify the feedback flow before recording
+the decision. A Running feedback prompt from an earlier round must finish before
+a new decision can target that injection. Joins use retained
+parent rows, including earlier attempts; a terminal step reruns only when a
+terminal parent's attempt advances past its own. Mutually exclusive branches
+cannot combine to satisfy an all-incoming join. A fail-fast
 execution error needs a `RetryLimit` recovery edge; without one, the run stops
 before feedback can be delivered. Explicit routed results keep following their
 configured route: an unmerged `ConfirmPrMerged` check, or a `RetryLimit` that

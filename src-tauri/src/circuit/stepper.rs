@@ -2981,10 +2981,9 @@ fn classifier_outcome_is_routed(run: &RunView, node_id: &str, outcome: StepOutco
     })
 }
 
-/// A request-changes verdict must deliver its note to an agent other than the
-/// reviewer for every outcome an unrun intermediate can produce. Simulate the
-/// scheduler's incoming-edge rules so mutually exclusive branches cannot
-/// falsely satisfy an all-incoming feedback join.
+/// Check delivery to an agent other than the reviewer using hypothetical
+/// pending outcomes. The scheduler handles joins and reruns on a cloned run,
+/// preserving earlier-attempt parent rows.
 fn operator_feedback_injection_reachable(
     run: &RunView,
     review_node_id: &str,
@@ -3017,6 +3016,15 @@ fn operator_feedback_injection_reachable(
     }
     let decision_attempt = run.step(review_node_id).map_or(1, |step| step.attempt);
 
+    if run
+        .step(injection_node_id)
+        .is_some_and(|step| step.status == StepStatus::Running && step.attempt < decision_attempt)
+    {
+        // Running rows cannot be rearmed by an advanced parent. Their prompt
+        // belongs to an older round and may already have snapshotted its text.
+        return false;
+    }
+
     if let Some(injection_step) = run
         .step(injection_node_id)
         .filter(|step| step.attempt >= decision_attempt)
@@ -3042,223 +3050,146 @@ fn operator_feedback_injection_reachable(
         return true;
     }
 
-    let mut scheduled = std::collections::HashSet::new();
-    let mut outcomes = std::collections::HashMap::new();
-    for step in &run.steps {
-        if step.attempt < decision_attempt {
-            continue;
-        }
-        scheduled.insert(step.node_id.clone());
-        if step.status.is_terminal() {
-            outcomes.insert(step.node_id.clone(), step.outcome);
-        }
-    }
-    scheduled.insert(review_node_id.to_owned());
-    outcomes.insert(review_node_id.to_owned(), Some(StepOutcome::Working));
-
-    fn every_scheduled_outcome_reaches_feedback(
-        run: &RunView,
-        injection_node_id: &str,
-        route_nodes: &std::collections::HashSet<String>,
-        scheduled: &mut std::collections::HashSet<String>,
-        outcomes: &mut std::collections::HashMap<String, Option<StepOutcome>>,
-    ) -> bool {
-        let injection_eligible = route_nodes.contains(injection_node_id)
-            && operator_feedback_node_is_eligible(run, injection_node_id, scheduled, outcomes);
-        let injection_was_scheduled = scheduled.contains(injection_node_id);
-        let added_injection = injection_eligible && scheduled.insert(injection_node_id.to_owned());
-        let feedback_pending = injection_eligible || injection_was_scheduled;
-
-        // The scheduler selects every eligible node in a pass. Keep the
-        // feedback injection pending while modeling its siblings: a
-        // fail-fast result can cancel the injection before AgentReady.
-        let next = run
-            .graph
-            .nodes
-            .iter()
-            .find(|node| {
-                node.id != injection_node_id
-                    && scheduled.contains(&node.id)
-                    && !outcomes.contains_key(&node.id)
-            })
-            .or_else(|| {
-                run.graph.nodes.iter().find(|node| {
-                    node.id != injection_node_id
-                        && !scheduled.contains(&node.id)
-                        && operator_feedback_node_is_eligible(run, &node.id, scheduled, outcomes)
-                })
-            });
-        let reaches_feedback = if let Some(next) = next {
-            let next_id = next.id.clone();
-            let possible_outcomes = operator_feedback_possible_outcomes(&next.kind);
-            if possible_outcomes.is_empty() {
-                false
-            } else {
-                let newly_scheduled = scheduled.insert(next_id.clone());
-                let mut all_outcomes_reach_feedback = true;
-                for outcome in possible_outcomes {
-                    // ConfirmPrMerged and an exhausted completed-parent
-                    // RetryLimit feedback cycle report routed Failed
-                    // outcomes without stopping the run. Other failures stop
-                    // the run unless a RetryLimit owns them.
-                    if *outcome == StepOutcome::Failed
-                        && !operator_feedback_failed_outcome_is_routed(run, &next_id, outcomes)
-                        && !has_retry_path(run, &next_id)
-                    {
-                        all_outcomes_reach_feedback = false;
-                        break;
-                    }
-                    outcomes.insert(next_id.clone(), Some(*outcome));
-                    if !every_scheduled_outcome_reaches_feedback(
-                        run,
-                        injection_node_id,
-                        route_nodes,
-                        scheduled,
-                        outcomes,
-                    ) {
-                        outcomes.remove(&next_id);
-                        all_outcomes_reach_feedback = false;
-                        break;
-                    }
-                    outcomes.remove(&next_id);
-                }
-                if newly_scheduled {
-                    scheduled.remove(&next_id);
-                }
-                all_outcomes_reach_feedback
-            }
-        } else {
-            feedback_pending
-        };
-        if added_injection {
-            scheduled.remove(injection_node_id);
-        }
-        reaches_feedback
-    }
-
-    every_scheduled_outcome_reaches_feedback(
-        run,
+    let mut hypothetical = run.clone();
+    let mut transition = Transition::default();
+    complete_with_outcome(
+        &mut hypothetical,
+        &mut transition,
+        review_node_id,
+        StepOutcome::Working,
+    );
+    operator_feedback_scheduled_outcomes_reach_injection(
+        hypothetical,
         injection_node_id,
-        &route_nodes,
-        &mut scheduled,
-        &mut outcomes,
+        &mut FeedbackRouteSearch::default(),
     )
 }
 
-fn operator_feedback_failed_outcome_is_routed(
-    run: &RunView,
-    node_id: &str,
-    outcomes: &std::collections::HashMap<String, Option<StepOutcome>>,
-) -> bool {
-    match run.graph.node(node_id).map(|node| &node.kind) {
-        Some(CircuitNodeKind::GithubAction {
-            action: GithubActionKind::ConfirmPrMerged,
-            ..
-        }) => true,
-        Some(CircuitNodeKind::RetryLimit { .. }) => {
-            let Some(retry_target) = run.graph.children(node_id).into_iter().next() else {
-                return false;
-            };
-            if !retry_gate_reaches_itself(run, node_id, &retry_target) {
-                return false;
-            }
-
-            let incoming = run.graph.incoming(node_id);
-            let failed_parent = incoming.iter().any(|edge| {
-                matches!(
-                    outcomes.get(&edge.from).copied().flatten(),
-                    Some(StepOutcome::Failed | StepOutcome::Red)
-                )
-            });
-            if failed_parent {
-                return false;
-            }
-
-            incoming.iter().any(|edge| {
-                matches!(
-                    edge.condition,
-                    EdgeCondition::Always | EdgeCondition::OnOutcome(StepOutcome::Completed)
-                ) && outcomes.get(&edge.from).copied().flatten() == Some(StepOutcome::Completed)
-            })
-        }
-        _ => false,
-    }
+#[derive(Default)]
+struct FeedbackRouteSearch {
+    visited: usize,
+    results: std::collections::HashMap<String, bool>,
+    active: std::collections::HashSet<String>,
 }
 
-/// Mirror [`is_eligible`] for a hypothetical execution. The maps contain only
-/// terminal current-attempt outcomes; `scheduled` also includes active steps.
-fn operator_feedback_node_is_eligible(
-    run: &RunView,
-    node_id: &str,
-    scheduled: &std::collections::HashSet<String>,
-    outcomes: &std::collections::HashMap<String, Option<StepOutcome>>,
+// Admission runs during ledger reads and writes. Fail closed on complex
+// authored graphs rather than tying up a connection or exhausting the stack.
+const MAX_FEEDBACK_ROUTE_STATES: usize = 8192;
+const MAX_FEEDBACK_ROUTE_DEPTH: usize = 128;
+
+/// Use the real scheduler on a private snapshot; effects and writes stay local.
+/// Retained rows participate in joins, and only the scheduler can rearm them.
+fn operator_feedback_scheduled_outcomes_reach_injection(
+    mut run: RunView,
+    injection_node_id: &str,
+    search: &mut FeedbackRouteSearch,
 ) -> bool {
-    let incoming: Vec<_> = run
+    let mut transition = Transition::default();
+    schedule_ready(
+        &mut run,
+        &mut transition,
+        Capacity {
+            agent_free_slots: i64::MAX,
+        },
+    );
+    if run.state != RunState::Running {
+        return false;
+    }
+    // This key is local to one analysis, with a fixed graph. Include context
+    // because review approval stamps and retry budgets affect scheduling.
+    let key = format!("{:?}|{:?}", run.steps, run.context);
+    if let Some(result) = search.results.get(&key) {
+        return *result;
+    }
+    if search.visited >= MAX_FEEDBACK_ROUTE_STATES
+        || search.active.len() >= MAX_FEEDBACK_ROUTE_DEPTH
+        || !search.active.insert(key.clone())
+    {
+        return false;
+    }
+    search.visited += 1;
+    let feedback_pending = run
+        .step(injection_node_id)
+        .is_some_and(|step| step.status == StepStatus::Running);
+    let pending: Vec<_> = run
         .graph
-        .incoming(node_id)
-        .into_iter()
-        .filter(|edge| {
-            if matches!(
-                run.graph.node(&edge.from).map(|node| &node.kind),
-                Some(CircuitNodeKind::RetryLimit { .. })
-            ) {
-                return outcomes.contains_key(&edge.from);
-            }
-            if matches!(
-                run.graph.node(&edge.from).map(|node| &node.kind),
-                Some(CircuitNodeKind::CollaboratorCheck {
-                    require_approval: true
-                })
-            ) && !scheduled.contains(&edge.from)
-            {
-                return false;
-            }
-            true
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.id != injection_node_id
+                && run
+                    .step(&node.id)
+                    .is_some_and(|step| !step.status.is_terminal())
         })
         .collect();
-    if incoming.is_empty() {
-        return false;
+    if pending.is_empty() {
+        search.active.remove(&key);
+        search.results.insert(key, feedback_pending);
+        return feedback_pending;
     }
-
-    if matches!(
-        run.graph.node(node_id).map(|node| &node.kind),
-        Some(CircuitNodeKind::AnyCompleted)
-    ) {
-        return incoming.iter().any(|edge| {
-            outcomes.get(&edge.from) == Some(&Some(StepOutcome::Completed))
-                && matches!(
-                    edge.condition,
-                    EdgeCondition::Always | EdgeCondition::OnOutcome(StepOutcome::Completed)
+    // Different completion orders can change which retained rows satisfy a
+    // join. Check each next completion as well as each possible outcome.
+    let reaches_feedback = pending.iter().all(|node| {
+        if run
+            .step(&node.id)
+            .is_some_and(|step| step.status == StepStatus::Unverified)
+        {
+            return false;
+        }
+        operator_feedback_possible_outcomes(&node.kind)
+            .iter()
+            .all(|outcome| {
+                let mut branch = run.clone();
+                let mut transition = Transition::default();
+                if *outcome == StepOutcome::Failed
+                    && !matches!(
+                        node.kind,
+                        CircuitNodeKind::GithubAction {
+                            action: GithubActionKind::ConfirmPrMerged,
+                            ..
+                        }
+                    )
+                {
+                    fail_step(
+                        &mut branch,
+                        &mut transition,
+                        &node.id,
+                        "Hypothetical execution failure".into(),
+                    );
+                } else if matches!(node.kind, CircuitNodeKind::ReviewVerdict { .. })
+                    && *outcome == StepOutcome::Blocked
+                {
+                    unverify_step(
+                        &mut branch,
+                        &mut transition,
+                        &node.id,
+                        "Hypothetical inconclusive review".into(),
+                    );
+                } else {
+                    complete_with_outcome(&mut branch, &mut transition, &node.id, *outcome);
+                    if matches!(node.kind, CircuitNodeKind::ReviewVerdict { .. })
+                        && *outcome == StepOutcome::Completed
+                    {
+                        let attempt = branch.step(&node.id).unwrap().attempt;
+                        branch
+                            .context
+                            .set(&format!("node.{}.review_verdict", node.id), "approved");
+                        branch.context.set(
+                            &format!("node.{}.review_verdict_attempt", node.id),
+                            attempt.to_string(),
+                        );
+                    }
+                }
+                operator_feedback_scheduled_outcomes_reach_injection(
+                    branch,
+                    injection_node_id,
+                    search,
                 )
-        });
-    }
-
-    incoming
-        .iter()
-        .all(|edge| operator_feedback_edge_is_satisfied(run, edge, outcomes))
-}
-
-fn operator_feedback_edge_is_satisfied(
-    run: &RunView,
-    edge: &super::model::CircuitEdge,
-    outcomes: &std::collections::HashMap<String, Option<StepOutcome>>,
-) -> bool {
-    let Some(outcome) = outcomes.get(&edge.from) else {
-        return false;
-    };
-    let condition_matches = match edge.condition {
-        EdgeCondition::Always => true,
-        EdgeCondition::OnOutcome(expected) => *outcome == Some(expected),
-    };
-    condition_matches
-        && (*outcome != Some(StepOutcome::Completed)
-            || !matches!(
-                run.graph.node(&edge.from).map(|node| &node.kind),
-                Some(CircuitNodeKind::ReviewVerdict { .. })
-            )
-            || run
-                .step(&edge.from)
-                .is_some_and(|step| has_current_review_approval(run, step)))
+            })
+    });
+    search.active.remove(&key);
+    search.results.insert(key, reaches_feedback);
+    reaches_feedback
 }
 
 /// Outcomes an unrun node can report through the stepper's current event
