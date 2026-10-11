@@ -1010,8 +1010,8 @@ mod tests {
         // *value* happens to live under `%TEMP%` (an IDE or agent-runtime
         // capability-lease path, for example) reached `curated_env` and failed
         // this test for a reason that had nothing to do with it (issues #1820,
-        // #2048). This test neither reads nor mutates the process env now,
-        // so it needs no ENV_LOCK.
+        // #2048). The planted input makes this test independent of the process
+        // env, so it needs no ENV_LOCK.
         let mut cmd = CommandBuilder::new("x.exe");
         cmd.env_clear();
         cmd.env("PATH", r"C:\msys64\usr\bin");
@@ -1053,12 +1053,10 @@ mod tests {
                 "{key} redirected to sandbox tmp"
             );
         }
-        // No temp-shaped var may still carry the host temp. Scoped by NAME:
-        // `curated_env` rewrites TEMP/TMP/TMPDIR and cannot be responsible for
-        // unrelated variables whose *value* merely lives under the host temp
-        // dir. With the input now planted, the planted non-temp var is the one
-        // surviving host-temp value, and any temp var that escaped the rewrite
-        // would show up beside it.
+        // Nothing but the planted non-temp var may still carry a host-temp value.
+        // `curated_env` rewrites TEMP/TMP/TMPDIR by name and passes every other
+        // variable through verbatim, so a temp var that escaped the rewrite
+        // would appear beside TOOLING_CLAIM_FILE rather than instead of it.
         let host_temp_vars: Vec<&str> = env
             .iter()
             .filter(|(_, value)| value.contains(r"AppData\Local\Temp"))
