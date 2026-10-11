@@ -23,6 +23,8 @@
 
 pub mod provision;
 
+use std::time::Duration;
+
 use git2::{Oid, Reference, Repository};
 use serde::Serialize;
 use ts_rs::TS;
@@ -31,6 +33,61 @@ use crate::env::to_host_path;
 use crate::env::windows_to_wsl;
 use crate::git::primitives;
 use crate::models::EnvType;
+
+// ── Spawn-path git CLI budgets (issue #1229) ───────────────────────────────
+//
+// Each of the shell-outs in this module and `provision` is reached only
+// from the provisioner, the PR-creation command (`commands/pr.rs`), or the
+// warm-pool refresh — the click-to-terminal path and the pool that feeds
+// it. A bare `cmd.output()` waits forever, and two
+// wedges are real — `git worktree add` runs a full checkout, so a slow
+// smudge/clean filter (git-LFS pulls over the network) can stall it
+// indefinitely; and checkout/reset can block on a `.git/index.lock`
+// another process holds. One wedged filter hangs the spawn task with no
+// feedback and no recovery, and a wedged `reset --hard` strands its
+// warm-pool entry in `refreshing` forever. That is why the network-facing
+// calls were already bounded (issue #762: `git::sync::SPAWN_FETCH_TIMEOUT`,
+// `git::health::CHECKOUT_TIMEOUT`).
+//
+// A timeout is not merely a shorter wait: `process_util::run_command_with_timeout`
+// kills the whole process tree (a hung git-LFS/credential helper would
+// otherwise outlive its parent), records the wedge on the diagnostics timeline
+// via `diagnostics::record_git_subprocess_timeout`, and returns a message
+// naming the command — so the spawn failure toast says which command gave up
+// rather than showing a bare git error.
+
+// Budget for a call that can materialise a working tree — `git worktree add`
+// and `git checkout -b/--detach <sha>`. 120s is generous headroom for a
+// legitimately slow large checkout, because these run on the user's click.
+const GIT_TREE_TIMEOUT: Duration = Duration::from_secs(120);
+
+// Budget for the remaining spawn-path calls — `git worktree move`,
+// `git reset --hard`, the `git remote get-url/add/set-url` trio, and
+// `git rev-parse`. All are local and normally sub-second; 30s only has to
+// outlast a contended index lock. `reset --hard` is deliberately on this
+// cheaper tier despite writing a tree: a wedged reset leaves a warm-pool
+// entry stuck in `refreshing` with no path back to `available`, so a
+// bounded failure the pool retries beats an unbounded one it cannot.
+const GIT_LOCAL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The single choke point for git CLI calls on the spawn-critical worktree
+/// path. Delegates to [`crate::process_util::run_command_with_timeout`], whose
+/// contract (kill the tree on deadline, record diagnostics, name the command in
+/// the error) is what makes a wedge recoverable; keeping the indirection here
+/// gives the test suite one seam to pin the budgets against, and
+/// `spawn_path_git_shellouts_are_all_budgeted` guards that every call site in
+/// this module and `provision` actually goes through it.
+///
+/// Module-private: the only callers are this module and its `provision`
+/// child, and a wider surface would invite a shell-out elsewhere to reach for
+/// the seam without also picking up one of the budgets above.
+fn run_bounded_git(
+    cmd: std::process::Command,
+    op_name: &str,
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
+    crate::process_util::run_command_with_timeout(cmd, op_name, timeout)
+}
 
 // ── Create ──────────────────────────────────────────────────────────────────
 
@@ -116,9 +173,8 @@ fn add_worktree_impl(
     }
     cmd.arg(host_path).arg(&base_sha);
 
-    let output = cmd.output().map_err(|e| {
-        AddWorktreeFailure::other(format!("failed to run `git worktree add`: {}", e))
-    })?;
+    let output = run_bounded_git(cmd, "git worktree add", GIT_TREE_TIMEOUT)
+        .map_err(AddWorktreeFailure::other)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(AddWorktreeFailure::new(
@@ -686,9 +742,7 @@ pub fn move_git_worktree(
         .arg(&old)
         .arg(&new);
 
-    let output = cmd
-        .output()
-        .map_err(|e| format!("failed to run `git worktree move`: {}", e))?;
+    let output = run_bounded_git(cmd, "git worktree move", GIT_LOCAL_TIMEOUT)?;
     if !output.status.success() {
         return Err(format!(
             "git worktree move failed: {}",
@@ -715,9 +769,7 @@ pub fn reset_warm_worktree(worktree_path: &str, sha: &str) -> Result<(), String>
     let mut cmd = crate::process_util::git_command();
     cmd.arg("-C").arg(&host).arg("reset").arg("--hard").arg(sha);
 
-    let output = cmd
-        .output()
-        .map_err(|e| format!("failed to run `git reset --hard`: {}", e))?;
+    let output = run_bounded_git(cmd, "git reset --hard", GIT_LOCAL_TIMEOUT)?;
     if !output.status.success() {
         return Err(format!(
             "git reset --hard {} failed in {}: {}",
@@ -1429,6 +1481,118 @@ mod tests {
     };
     use std::fs;
     use std::path::{Path, PathBuf};
+
+    // ── spawn-path subprocess budgets (issue #1229) ─────────────────────────
+
+    /// A command that hangs for ~N seconds before exiting, built the same way
+    /// `process_util`'s own timeout tests build one: `ping` on Windows (its
+    /// `-n N` sends one echo per second), `sleep` elsewhere. `ping` is the
+    /// Windows-safe choice because `timeout /T` exits immediately when stdin
+    /// isn't a console.
+    fn hang_cmd(secs: u64) -> std::process::Command {
+        #[cfg(target_os = "windows")]
+        {
+            let mut c = crate::process_util::command_no_window("ping");
+            c.args(["-n", &secs.to_string(), "127.0.0.1"]);
+            c
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut c = crate::process_util::command_no_window("sleep");
+            c.arg(secs.to_string());
+            c
+        }
+    }
+
+    /// The failure the issue is about, at the seam the spawn path now uses: a
+    /// wedged git (a hung git-LFS smudge filter during `worktree add`, a
+    /// contended `index.lock` during checkout/reset) must become a named
+    /// `Err` at the deadline instead of parking the spawn task forever.
+    ///
+    /// Passes the real op name a production call site uses, because the
+    /// message is what the user sees in the spawn-failure toast: the
+    /// assertion that it names the command is half the point.
+    #[test]
+    fn run_bounded_git_surfaces_a_hung_command_as_a_named_err() {
+        // Four thresholds, per issue #2049's rule about waits on loaded
+        // machines: the child outlives the deadline, the deadline must fire,
+        // and the kill (100ms poll plus `taskkill /F /T` walking the tree)
+        // must clear well inside the child's own lifetime. Measured kill
+        // latency reached ~3.8s on a loaded 24-core host, so 8s is ~2x that
+        // while staying far below the 12s natural exit.
+        const CHILD_LIFETIME: Duration = Duration::from_secs(12);
+        const KILL_BOUND: Duration = Duration::from_secs(8);
+
+        let started = std::time::Instant::now();
+        let result = run_bounded_git(hang_cmd(13), "git worktree add", Duration::from_secs(1));
+        let elapsed = started.elapsed();
+
+        // Mechanism: only the deadline path produces this Err, and the child
+        // could not have exited naturally within the elapsed time.
+        let msg = result.expect_err("a hung git must not report success");
+        assert!(
+            msg.contains("git worktree add") && msg.contains("timed out"),
+            "the spawn toast must name the command that gave up, got: {msg}"
+        );
+        assert!(
+            elapsed < KILL_BOUND,
+            "the deadline must kill the child well before its {CHILD_LIFETIME:?} \
+             natural exit, took {elapsed:?}"
+        );
+    }
+
+    /// Regression guard for the wiring, not just the helper: every git CLI
+    /// call in this module and in `provision` goes through
+    /// [`run_bounded_git`], because they all run on or directly feed the
+    /// click-to-terminal path.
+    ///
+    /// `Command::output()` and `Command::status()` are the unbounded forms —
+    /// they wait forever, which is precisely the #1229 defect. Scanning the
+    /// sources is what pins the *routing*: the helper's own behaviour is
+    /// covered by `process_util`'s tests, but those exercise the helper
+    /// directly and so would not notice a new call site opting out of it.
+    ///
+    /// Scope note: everything above the inline `mod tests` is treated as
+    /// production code, so a test-only helper declared above it must not
+    /// shell out with `.output()`. Comment text is stripped so this guard
+    /// does not trip on prose that merely names the pattern.
+    #[test]
+    fn spawn_path_git_shellouts_are_all_budgeted() {
+        const UNBOUNDED: [&str; 2] = [".output()", ".status()"];
+
+        for file in ["git/worktree/mod.rs", "git/worktree/provision.rs"] {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join(file);
+            let source = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            let production = source
+                .split_once("\n#[cfg(test)]\nmod tests {")
+                .map_or(source.as_str(), |(head, _)| head);
+
+            for (n, line) in production.lines().enumerate() {
+                // Drop line comments so doc prose naming the pattern is fine.
+                let code = line.split("//").next().unwrap_or(line);
+                for token in UNBOUNDED {
+                    assert!(
+                        !code.contains(token),
+                        "{file}:{} shells out with an unbounded `{token}` — route it \
+                         through `run_bounded_git` so the spawn path keeps a deadline (issue #1229):\n{line}",
+                        n + 1,
+                    );
+                }
+            }
+        }
+
+        // Not vacuous: the guard must be looking at code that really does
+        // shell out through the bounded seam.
+        let mod_source = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/git/worktree/mod.rs"),
+        )
+        .unwrap();
+        assert!(
+            mod_source.matches("run_bounded_git(").count() >= 4,
+            "expected the mutators to route through `run_bounded_git`"
+        );
+    }
 
     /// Create a branched worktree under `<root>/.claude/worktrees/<name>` via
     /// the production `create_git_worktree`, returning its path.

@@ -201,27 +201,40 @@ pub(crate) fn fetch_fork_head(
     // signal — easier to read, and works on every git version.
     let mut get_url = git_command();
     get_url.arg("remote").arg("get-url").arg(&alias);
-    let existing = get_url
-        .current_dir(&host_root)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    get_url.current_dir(&host_root);
+    let existing =
+        match super::run_bounded_git(get_url, "git remote get-url", super::GIT_LOCAL_TIMEOUT) {
+            Ok(o) if o.status.success() => {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            }
+            // A git that can't answer `remote get-url` inside 30s is wedged, so
+            // don't spend another budget on `remote add` to reach the same
+            // conclusion — fall back to the mesh base ref like any other failure
+            // here (best-effort by design, see the fn doc).
+            Ok(_) => None,
+            Err(e) => {
+                tracing::warn!("fetch_fork_head: git remote get-url failed: {}", e);
+                return false;
+            }
+        };
 
     let url_matches = existing.as_deref() == Some(head_repo_clone_url);
     if !url_matches {
         let mut cmd = git_command();
-        if existing.is_some() {
+        let op_name = if existing.is_some() {
             cmd.arg("remote").arg("set-url").arg(&alias).arg(head_repo_clone_url);
             tracing::info!("fetch_fork_head: updating remote {} URL", alias);
+            "git remote set-url"
         } else {
             cmd.arg("remote").arg("add").arg(&alias).arg(head_repo_clone_url);
             tracing::info!("fetch_fork_head: adding remote {}", alias);
-        }
-        let output = match cmd.current_dir(&host_root).output() {
+            "git remote add"
+        };
+        cmd.current_dir(&host_root);
+        let output = match super::run_bounded_git(cmd, op_name, super::GIT_LOCAL_TIMEOUT) {
             Ok(o) => o,
             Err(e) => {
-                tracing::warn!("fetch_fork_head: failed to spawn git remote: {}", e);
+                tracing::warn!("fetch_fork_head: {} failed: {}", op_name, e);
                 return false;
             }
         };
@@ -251,12 +264,11 @@ pub(crate) fn fetch_fork_head(
     // Bounded like `fetch_single_ref`'s `do_fetch_only` call: this is a
     // network fetch on the spawn path, run under the per-Mesh sync lock —
     // a half-open connection must abort at the spawn budget, not wedge
-    // the lock (and every later spawn on this mesh) indefinitely.
-    let output = match crate::process_util::run_command_with_timeout(
-        cmd,
-        "git fetch (fork head)",
-        crate::git::sync::SPAWN_FETCH_TIMEOUT,
-    ) {
+    // the lock (and every later spawn on this mesh) indefinitely. The budget
+    // is the network one, not the local tiers `GIT_TREE_TIMEOUT` /
+    // `GIT_LOCAL_TIMEOUT` cover.
+    let fetch_budget = crate::git::sync::SPAWN_FETCH_TIMEOUT;
+    let output = match super::run_bounded_git(cmd, "git fetch (fork head)", fetch_budget) {
         Ok(o) => o,
         Err(e) => {
             tracing::warn!("fetch_fork_head: {}", e);
@@ -361,7 +373,8 @@ pub(crate) fn read_origin_ref_sha(project_root: &str, remote_ref: &str) -> Optio
     // need a separate "is this a ref?" probe first.
     let mut cmd = git_command();
     cmd.arg("rev-parse").arg(remote_ref);
-    let output = cmd.current_dir(&host_root).output().ok()?;
+    cmd.current_dir(&host_root);
+    let output = super::run_bounded_git(cmd, "git rev-parse", super::GIT_LOCAL_TIMEOUT).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -529,9 +542,7 @@ fn run_git_checkout(host_path: &str, args: &[&str]) -> Result<(), String> {
     use crate::process_util::git_command;
     let mut cmd = git_command();
     cmd.arg("-C").arg(host_path).arg("checkout").args(args);
-    let output = cmd
-        .output()
-        .map_err(|e| format!("failed to spawn git checkout: {}", e))?;
+    let output = super::run_bounded_git(cmd, "git checkout", super::GIT_TREE_TIMEOUT)?;
     if !output.status.success() {
         return Err(format!(
             "git checkout {} failed: {}",
