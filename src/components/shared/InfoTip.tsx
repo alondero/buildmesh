@@ -8,8 +8,9 @@ interface InfoTipProps {
   /** Full explanation, revealed in the popover. */
   children: ReactNode;
   testId?: string;
-  /** `warning` swaps the ⓘ for an amber ! and reads as an alert on the trigger,
-   *  for a standing condition worth noticing without spending a line of text. */
+  /** `warning` swaps the ⓘ for an amber !, for a standing condition worth
+   *  noticing without spending a line of text. Give it a `triggerLabel` that
+   *  names the condition, since the glyph alone says nothing to a screen reader. */
   variant?: 'info' | 'warning';
   /** Overrides the trigger's accessible name (default "About {label}"). */
   triggerLabel?: string;

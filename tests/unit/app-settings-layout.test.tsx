@@ -78,8 +78,14 @@ function mockBackend() {
       case 'compatible_providers_for_harness':
       case 'list_device_sessions':
       case 'list_spawn_configurations':
-      case 'get_launch_targets':
         return Promise.resolve([]);
+      case 'get_launch_targets':
+        return Promise.resolve([
+          {
+            id: 'claude', harness_id: 'claude', harness_name: 'Claude Code', provider_name: 'Native authentication',
+            models: [], efforts: [], route_attached: false, manual_model: false, supports_model: false, supports_extra_args: true,
+          },
+        ]);
       case 'get_probe_spawn_prompt_defaults':
         return Promise.resolve({ issue_template: 'ISSUE DEFAULT', pr_template: 'PR DEFAULT', review_policy: '' });
       default:
@@ -120,14 +126,19 @@ describe('Settings dialog layout', () => {
       render(<AppSettingsModal onClose={() => {}} />);
       const box = await screen.findByRole('checkbox', { name: 'Confirm before quitting' });
       expect(owningTab(box)).toBe('General');
-      expect(screen.queryByText(/when agent sessions are active/i)).toBeNull();
+      // The whole row (label + control) carries nothing but the label text:
+      // no subtitle, no sentence beside the checkbox.
+      expect(box.parentElement?.parentElement?.textContent?.trim()).toBe('Confirm before quitting');
+      // The explanation exists, but only behind the info tip.
+      fireEvent.mouseEnter(screen.getByRole('button', { name: 'About Confirm before quitting' }));
+      expect((await screen.findByRole('tooltip')).textContent).toMatch(/agent sessions are active/i);
     });
 
     it('no longer carries the Circuit pool size or the probe prompts', async () => {
       render(<AppSettingsModal onClose={() => {}} />);
       await screen.findByRole('checkbox', { name: 'Confirm before quitting' });
       expect(screen.queryByRole('spinbutton', { name: /circuit agent pool size/i })).toBeNull();
-      expect(owningTab(screen.getByTestId('probe-prompt-card-issue'))).not.toBe('General');
+      expect(owningTab(screen.getByTestId('probe-prompt-card-issue'))).toBe('Prompts');
     });
   });
 
@@ -185,6 +196,29 @@ describe('Settings dialog layout', () => {
       fireEvent.click(toggle);
       expect(toggle.getAttribute('aria-expanded')).toBe('true');
       expect(await within(panel).findByRole('button', { name: /new launch configuration/i })).toBeTruthy();
+    });
+
+    it('keeps an open editor draft and the unsaved dot while the list is collapsed', async () => {
+      // Collapsing must hide the list, not unmount it: the editor holds the
+      // draft and reports the dirty site (issue #730). Unmounting would drop a
+      // half-typed configuration while the modal still reads dirty.
+      render(<AppSettingsModal onClose={() => {}} />);
+      await openSettingsPane('Launch Configurations');
+      const panel = await screen.findByRole('tabpanel', { name: 'Launch Configurations' });
+      const toggle = within(panel).getByRole('button', { name: /^(show|hide) launch configurations$/i });
+      fireEvent.click(toggle);
+      const add = await within(panel).findByRole('button', { name: 'New Launch Configuration' });
+      await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false));
+      fireEvent.click(add);
+      fireEvent.change(within(panel).getByLabelText('Name'), { target: { value: 'Half typed' } });
+      expect(screen.getByTestId('settings-tab-dirty-harnesses')).toBeTruthy();
+
+      fireEvent.click(toggle);
+      expect(toggle.getAttribute('aria-expanded')).toBe('false');
+      expect(screen.getByTestId('settings-tab-dirty-harnesses')).toBeTruthy();
+
+      fireEvent.click(toggle);
+      expect((within(panel).getByLabelText('Name') as HTMLInputElement).value).toBe('Half typed');
     });
 
     it('does not offer Terminal an Agent Harness default card, and drops the effort boilerplate', async () => {

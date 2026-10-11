@@ -8,7 +8,7 @@ import { SettingsSection } from './SettingsRow';
 /** A single harness's draft state. `committed` is the last value the
  *  backend confirmed saved; `draft` is the in-flight edit. `dirty` is the
  *  edit-diverged-from-committed signal that drives the modal's discard-
- *  confirm and the amber dot on the General pane nav rail. */
+ *  confirm and the amber dot on the Launch Configurations nav item. */
 interface HarnessDraft {
   committed: HarnessConfigValue;
   draft: HarnessConfigValue;
@@ -90,9 +90,9 @@ function uniqueNativeHarnesses(providers: ProviderInfo[]): ProviderInfo[] {
 
 /** App-wide Agent Harness defaults — one card per native Agent Harness
  *  (issue #1150 / #1148). The capability descriptor drives the visible
- *  controls: a harness with `supports_model_override = false` and
- *  `EffortControlKind::None` renders the no-configurable-defaults state
- *  rather than an empty form.
+ *  controls: a harness with `supports_model_override = false`,
+ *  `EffortControlKind::None` and no permission modes has nothing to set and
+ *  gets no card at all (see `hasConfigurableDefaults`).
  *
  *  Save / reset semantics mirror the existing App Settings fields
  *  (issue #730 / #581): optimistic save with rollback on failure, save

@@ -600,7 +600,8 @@ current text visible so you can retry editing before leaving the tool.
 
 ## Launch Configurations
 
-Use **Settings → Launch Configurations** to name the recipes you launch. Choose
+Use **Settings → Launch Configurations** to name the recipes you launch (the
+list is collapsed; open it with **Show launch configurations**). Choose
 a harness, native authentication or a provider, then a model, supported effort,
 and optional extra arguments. Known providers supply catalogue choices; generic
 providers retain manual model entry. The same editor opens from **New configuration**
@@ -831,8 +832,8 @@ an app restart.
 
 Remote access is optional and off by default.
 
-1. Open **Settings → Remote Access** and enable **Expose to LAN / VPN over
-   self-signed TLS**, or choose **Enable remote access** from the Remote Access
+1. Open **Settings → Remote Access** and enable **Expose to LAN / VPN**
+   (hover its section's info icon for the self-signed TLS details), or choose **Enable remote access** from the Remote Access
    dialog. The setting applies immediately.
 2. Open the **Remote Access** modal and scan the one-time pairing QR code from
    the phone you want to authorize. The invitation expires after five minutes.

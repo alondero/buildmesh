@@ -194,7 +194,7 @@ Separately from the sandbox, each harness has a **Permission mode** in
 `--dangerously-skip-permissions`) or prompt mode (launch the CLI bare so it
 asks). Buildmesh passes the flag through unchanged — what acts is the agent;
 Buildmesh only facilitates the launch. The effective mode shows in the
-harness's own words on its Settings card and under its Spawn Menu row;
+harness's own words on its Settings card;
 changing it changes the next spawn's arguments, and existing meshes keep
 today's unattended behavior until you change it. Full details, including the
 per-harness flag table, are in [Harness permission
