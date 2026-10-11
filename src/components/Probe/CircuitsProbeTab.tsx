@@ -628,6 +628,14 @@ setQueueWaits({});
     // switch: its number describes runs the user was looking at, while the
     // handler would act on the incoming mesh.
     setConfirmDismissAllAttention(false);
+    // Drop the count too. Scoping it to its mesh id stops it rendering over the
+    // wrong mesh, but it does not survive a round trip: if the new mesh's fetch
+    // fails, the count stays in state, and returning to the original mesh makes
+    // its id match again — re-showing a number fetched before that mesh's runs
+    // could have changed, next to a confirmation that would dismiss them.
+    // Invalidating here keeps the control hidden until the current load
+    // supplies a count of its own.
+    setAttentionCount(null);
     void load();
     return () => {
       // Invalidate an in-flight snapshot before a mesh switch or unmount.

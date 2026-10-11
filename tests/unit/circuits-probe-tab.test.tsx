@@ -847,6 +847,75 @@ describe('CircuitsProbeTab', () => {
   });
 
   /**
+   * Scoping the count to its mesh id is not sufficient on its own: on an
+   * A→B→A round trip the original mesh's id matches again, so a count fetched
+   * before A's runs could have changed would pass the guard and sit above a
+   * confirmation that dismisses those changed runs. The count must be dropped
+   * on every switch, not merely re-scoped.
+   */
+  it('does not resurrect a mesh’s old count after an A→B→A round trip', async () => {
+    mockBackend({
+      runs: [{ ...RUN_DONE, run: { ...RUN_DONE.run, id: 9, state: 'failed' } }],
+      outstandingAttention: 7,
+    });
+    openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+    expect(await screen.findByTestId('history-dismiss-all')).toHaveProperty(
+      'textContent',
+      expect.stringContaining('7'),
+    );
+
+    const fallback = vi.mocked(invoke).getMockImplementation();
+    // Mesh 42 (A) is asked twice through this override: the initial count of 7
+    // came from mockBackend before it was installed, so the first call this
+    // override sees is the return trip. That one is slow, and when it finally
+    // answers the backlog is 2 — not the 7 fetched on the first visit.
+    let aCountCalls = 0;
+    let releaseReturn!: () => void;
+    const returnPending = new Promise<void>((resolve) => { releaseReturn = resolve; });
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      const meshId = (args as { meshId?: number })?.meshId;
+      if (cmd === 'count_circuit_run_attention' && meshId === 42) {
+        aCountCalls += 1;
+        if (aCountCalls === 1) return returnPending.then(() => 2);
+        return Promise.resolve(7);
+      }
+      if (meshId === 43) return Promise.reject(new Error('mesh B is unreachable'));
+      return fallback?.(cmd, args) ?? Promise.resolve({ cmd });
+    });
+
+    const otherMesh = { ...MESH, id: 43, name: 'other mesh' };
+    const select = (id: number) => act(() => useMeshStore.setState({
+      meshes: [MESH, otherMesh],
+      meshesById: new Map([[MESH.id, MESH], [otherMesh.id, otherMesh]]),
+      selectedMeshId: id,
+    }));
+
+    select(43);
+    await waitFor(() => {
+      expect(vi.mocked(invoke).mock.calls.some(([, args]) =>
+        (args as { meshId?: number })?.meshId === 43)).toBe(true);
+    });
+    select(42);
+
+    // Back on A, whose refresh is still in flight: the old 7 must not return.
+    expect(screen.queryByTestId('history-dismiss-all')).toBeNull();
+
+    await act(async () => {
+      releaseReturn();
+      await returnPending;
+    });
+
+    // A's own fresh count is what may now be shown — 2, not the stale 7.
+    await waitFor(() => {
+      expect(screen.getByTestId('history-dismiss-all')).toHaveProperty(
+        'textContent',
+        expect.stringContaining('2'),
+      );
+    });
+  });
+
+  /**
    * A count belongs to the mesh that produced it. Between a mesh switch and the
    * new fetch landing, mesh A's count is still in state — rendering it above
    * mesh B's runs would have the user confirm a number that describes neither
