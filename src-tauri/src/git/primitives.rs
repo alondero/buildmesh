@@ -27,7 +27,7 @@ pub fn open_from_host_path(path: &str) -> Result<Repository, git2::Error> {
 /// Whether the working tree has any non-ignored change (modified, staged,
 /// untracked, deleted, renamed). The canonical dirty check.
 ///
-/// We filter only on `!is_ignored()`. A previous copy also excluded
+/// We filter only on [`is_ignored_entry`]. A previous copy also excluded
 /// `Status::CURRENT`, but `StatusOptions` here never sets `include_unmodified`,
 /// so libgit2 never emits a `CURRENT` entry — the extra clause was a no-op.
 ///
@@ -51,7 +51,85 @@ pub fn is_dirty(repo: &Repository) -> Result<bool, git2::Error> {
     Ok(repo
         .statuses(Some(&mut opts))?
         .iter()
-        .any(|e| !e.status().is_ignored()))
+        .any(|e| !is_ignored_entry(repo, &e)))
+}
+
+/// Whether a status entry's ignore verdict should count as ignored, with one
+/// documented exception: an untracked Windows **directory junction**.
+///
+/// This is the one ignore verdict for the `repo.statuses()` walkers:
+/// [`is_dirty`], [`dirty_paths_mirrors_git_status`], and the Probe panel's
+/// changed-file list and summary in `commands::git`. They read the same libgit2
+/// answer, so they all showed the same phantom file before.
+///
+/// libgit2's status walker does not resolve a reparse point when deciding
+/// whether an untracked path is a directory, so a directory-only rule does not
+/// match it. Measured against a live `mklink /J` worktree: `git status
+/// --porcelain` was empty while libgit2 reported `WT_NEW src-tauri/target` and
+/// `WT_NEW plaindir`, both with the ignore bit clear, under the anchored
+/// `/target/` and unanchored `plaindir/` rules respectively. The no-slash
+/// junction in the same tree was correctly ignored, which is why the rules
+/// carrying no trailing slash did not show the defect. Junctioning
+/// `src-tauri/target` at the main checkout's cargo cache is the natural
+/// extension of the `node_modules` junction `CLAUDE.md` points at for a fresh
+/// worktree, and it saves a ~5 minute rebuild — so every circuit wrap-up
+/// verification called a clean worktree dirty and sent the agent a correction it
+/// could not satisfy (issue #2193).
+///
+/// [`Repository::is_path_ignored`] resolves the reparse point, so it applies
+/// the directory-only rule correctly; one extra query per junction restores
+/// parity. Windows-only by construction: there a reparse point carrying
+/// `FILE_ATTRIBUTE_DIRECTORY` is a directory for ignore purposes, so the
+/// reparse check has to be the entry point. On Unix there is no reparse
+/// concept, so this leaves libgit2's verdict exactly as it found it rather
+/// than second-guessing a platform it cannot measure here.
+pub(crate) fn is_ignored_entry(repo: &Repository, entry: &git2::StatusEntry) -> bool {
+    if entry.status().is_ignored() {
+        return true;
+    }
+    // Only an untracked path can be a junction standing in for an ignored
+    // directory. A modified tracked path is dirt whatever the ignore rules say.
+    if !entry.status().is_wt_new() {
+        return false;
+    }
+    let Some(path) = entry.path() else {
+        return false;
+    };
+    let Some(workdir) = repo.workdir() else {
+        return false;
+    };
+    if !is_directory_reparse_point(&workdir.join(path)) {
+        return false;
+    }
+    // An unreadable ignore stack leaves the entry dirty — the direction every
+    // caller already assumes for an unreadable status.
+    repo.is_path_ignored(path).unwrap_or(false)
+}
+
+/// Whether `path` is a reparse point that resolves to a directory: `mklink /J`,
+/// or the directory symlink Windows 10+ can create without Developer Mode.
+/// Both carry `FILE_ATTRIBUTE_DIRECTORY`, which is what makes git treat them
+/// as directories when it matches ignore rules.
+///
+/// Requires *both* attributes deliberately. The point of the guard is the
+/// directory-only rule, and a `dir/` rule says nothing about a *file* of the
+/// same name — a symlink to a file carries `REPARSE_POINT` without
+/// `DIRECTORY`, so widening the check past the directory bit would extend the
+/// rule to paths it was never written for.
+#[cfg(target_os = "windows")]
+fn is_directory_reparse_point(path: &std::path::Path) -> bool {
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    use std::os::windows::fs::MetadataExt;
+    std::fs::symlink_metadata(path).is_ok_and(|m| {
+        let attrs = m.file_attributes();
+        attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 && attrs & FILE_ATTRIBUTE_DIRECTORY != 0
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_directory_reparse_point(_path: &std::path::Path) -> bool {
+    false
 }
 
 /// The `git status`-parity dirty path set: every non-ignored
@@ -106,7 +184,7 @@ fn dirty_paths_mirrors_git_status(
     let ignore_rules = read_submodule_ignore_rules(repo);
     let mut paths = BTreeSet::new();
     for e in statuses.iter() {
-        if e.status().is_ignored() {
+        if is_ignored_entry(repo, &e) {
             continue;
         }
         let path = match e.path() {
@@ -162,8 +240,7 @@ pub fn ff_pull_blockers(repo: &Repository) -> Result<Vec<String>, String> {
         .map_err(|e| format!("Failed to read HEAD: {}", e))?
         .peel_to_commit()
         .map_err(|e| format!("HEAD is not a commit: {}", e))?;
-    let branch =
-        head_branch_name(repo).ok_or_else(|| "HEAD is not on a branch".to_string())?;
+    let branch = head_branch_name(repo).ok_or_else(|| "HEAD is not on a branch".to_string())?;
     let upstream_oid = upstream_oid_for_branch(repo, &branch)
         .ok_or_else(|| format!("no upstream configured for refs/heads/{}", branch))?;
     let upstream = repo
@@ -297,7 +374,11 @@ pub fn upstream_oid_for_branch(repo: &Repository, branch: &str) -> Option<Oid> {
 ///
 /// Uses git2's `graph_ahead_behind` rather than `git rev-list ...@{u}`: the
 /// `@{u}` brace syntax is silently mangled by `Command::args` on Windows.
-pub fn ahead_behind(repo: &Repository, local: Oid, upstream: Oid) -> Result<(u32, u32), git2::Error> {
+pub fn ahead_behind(
+    repo: &Repository,
+    local: Oid,
+    upstream: Oid,
+) -> Result<(u32, u32), git2::Error> {
     let (ahead, behind) = repo.graph_ahead_behind(local, upstream)?;
     Ok((
         ahead.try_into().unwrap_or(u32::MAX),
@@ -322,6 +403,83 @@ mod tests {
     use super::*;
     use crate::env::test_helpers::{commit_file, init_repo_with_commit, TestDir};
     use std::fs;
+
+    /// The #2193 regression, in the shape a worktree actually takes: a
+    /// directory junction under a **directory-only** ignore rule
+    /// (`src-tauri/.gitignore`'s anchored `/target/`).
+    ///
+    /// The `CLAUDE.md` worktree setup points an agent at a `node_modules`
+    /// junction in a fresh worktree; junctioning `src-tauri/target` at the main
+    /// checkout's cargo cache is the natural extension and saves a ~5 minute
+    /// rebuild. libgit2 reported that junction as an untracked *file*, so the
+    /// directory-only rule never matched and every wrap-up verification called
+    /// a clean worktree dirty while `git status` reported it clean.
+    ///
+    /// Paired with [`is_dirty_true_for_junction_with_no_ignore_rule`] and the
+    /// modified-tracked-file half of this test: an ignored junction must not
+    /// register, but real work still must.
+    #[cfg(target_os = "windows")]
+    mod junction_tests {
+        use super::*;
+        use crate::env::test_helpers::{init_repo_with_commit, junction_dir, TestDir};
+        use std::fs;
+
+        /// A repo whose `src-tauri/.gitignore` ignores only `/target/`, plus a
+        /// payload directory to stand in for a shared cargo cache. Returns the
+        /// open repository, the test dir, and the payload path.
+        fn repo_with_ignored_target() -> (git2::Repository, TestDir, std::path::PathBuf) {
+            let td = TestDir::new("prim_junction");
+            let repo = init_repo_with_commit(
+                td.path(),
+                &[("f.txt", "a\n"), ("src-tauri/.gitignore", "/target/\n")],
+            );
+            let payload = td.sibling("payload");
+            fs::create_dir_all(payload.join("debug")).unwrap();
+            fs::write(payload.join("debug").join("build.bin"), b"x").unwrap();
+            (repo, td, payload)
+        }
+
+        #[test]
+        fn is_dirty_false_for_junction_under_directory_only_ignore_rule() {
+            let (repo, td, payload) = repo_with_ignored_target();
+            let target = td.path().join("src-tauri").join("target");
+            junction_dir(&target, &payload);
+
+            // The junction resolves, or the assertion below would be vacuous:
+            // a missing path would leave the tree clean for the wrong reason.
+            assert_eq!(
+                fs::read_dir(target.join("debug")).unwrap().count(),
+                1,
+                "the junction must resolve to the payload for this fixture to mean anything"
+            );
+            assert!(
+                !is_dirty(&repo).unwrap(),
+                "a junction under a \
+             directory-only ignore rule must be ignored, matching \
+             `git status --porcelain` (#2193)"
+            );
+
+            // ... and the gate must still see real work in the same tree.
+            fs::write(td.path().join("f.txt"), "changed\n").unwrap();
+            assert!(
+                is_dirty(&repo).unwrap(),
+                "a modified tracked file must still be dirty"
+            );
+        }
+
+        /// The control for the test above: the fix re-checks the ignore rules,
+        /// it does not hide junctions wholesale. This junction is covered by no
+        /// ignore rule, so both `git status` and the gate must report it.
+        #[test]
+        fn is_dirty_true_for_junction_with_no_ignore_rule() {
+            let (repo, td, payload) = repo_with_ignored_target();
+            junction_dir(&td.path().join("shared-cache"), &payload);
+            assert!(
+                is_dirty(&repo).unwrap(),
+                "an unignored junction is real untracked work and must stay dirty"
+            );
+        }
+    }
 
     #[test]
     fn is_dirty_false_on_clean_repo() {
@@ -365,10 +523,7 @@ mod tests {
 
         // 2. Parent repo.
         let parent = init_repo_with_commit(td.path(), &[("root.txt", "r\n")]);
-        let url = format!(
-            "file://{}",
-            sub_root.to_str().unwrap().replace('\\', "/")
-        );
+        let url = format!("file://{}", sub_root.to_str().unwrap().replace('\\', "/"));
 
         // 3. Register + init + add gitlink to index.
         let mut sm = parent.submodule(&url, Path::new("sub"), true).unwrap();
@@ -529,8 +684,13 @@ mod tests {
             )
             .unwrap();
         }
-        repo.reference(&format!("refs/remotes/origin/{}", branch), ahead, true, "test")
-            .unwrap();
+        repo.reference(
+            &format!("refs/remotes/origin/{}", branch),
+            ahead,
+            true,
+            "test",
+        )
+        .unwrap();
 
         {
             let base_commit = repo.find_commit(base).unwrap();
@@ -599,7 +759,10 @@ mod tests {
         let td = TestDir::new("ff_blockers_untracked_collision");
         let repo = repo_behind_upstream(&td, &[("local.txt", "l0\n")], "new.txt", "incoming\n");
         fs::write(td.path().join("new.txt"), "untracked local\n").unwrap();
-        assert_eq!(ff_pull_blockers(&repo).unwrap(), vec!["new.txt".to_string()]);
+        assert_eq!(
+            ff_pull_blockers(&repo).unwrap(),
+            vec!["new.txt".to_string()]
+        );
     }
 
     #[test]
@@ -659,9 +822,13 @@ mod tests {
         )
         .unwrap();
         let mut cfg = repo.config().unwrap();
-        cfg.set_str(&format!("branch.{}.remote", branch), "origin").unwrap();
-        cfg.set_str(&format!("branch.{}.merge", branch), &format!("refs/heads/{}", branch))
+        cfg.set_str(&format!("branch.{}.remote", branch), "origin")
             .unwrap();
+        cfg.set_str(
+            &format!("branch.{}.merge", branch),
+            &format!("refs/heads/{}", branch),
+        )
+        .unwrap();
         let local = commit_file(&repo, td.path(), "f.txt", "b\n");
 
         let upstream = upstream_oid_for_branch(&repo, &branch).expect("upstream resolves");
@@ -725,6 +892,9 @@ mod tests {
         let td = TestDir::new("prim_normalize");
         let p = td.path().to_string_lossy().to_string();
         let with_slash = format!("{}/", p.trim_end_matches(['/', '\\']));
-        assert_eq!(normalize_for_compare(&p), normalize_for_compare(&with_slash));
+        assert_eq!(
+            normalize_for_compare(&p),
+            normalize_for_compare(&with_slash)
+        );
     }
 }
