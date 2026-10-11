@@ -277,7 +277,11 @@ export async function runGate(root, gate, base, paths = [], extraEnv = {}, { def
     const command = commandFor(root, gate, base);
     const reportPath = `${log}.json`;
     if (gate.tests === 'vitest') command.push(...(gate.command[0] === 'npm' ? ['--'] : []), '--reporter=default', '--reporter=json', `--outputFile.json=${reportPath}`);
-    const nodeEnv = gate.id === 'frontend-build' || gate.id === 'mobile-build' ? 'production' : 'test';
+    // The gate owns its environment (issue #2013): a build gate declares
+    // `nodeEnv: 'production'` in the plan so Vite builds the artifact the bundle
+    // budget is written against, and a gate without it keeps the harness-wide
+    // test environment that React's `act` and the render suites require.
+    const nodeEnv = gate.nodeEnv ?? 'test';
     const env = { ...process.env, NODE_ENV: nodeEnv, NO_COLOR: '1', ...extraEnv };
     delete env.FORCE_COLOR;
     delete env.BUILDMESH_PREFILL;

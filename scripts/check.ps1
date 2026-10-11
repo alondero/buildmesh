@@ -84,6 +84,20 @@ if ($gitWrong -or $opensslWrong) {
   $env:PATH = "$($pin -join ';');$env:PATH"
 }
 
+function Invoke-ProductionBuild {
+  # Issue #2013 - run a build command under Vite's production environment and
+  # restore the caller's NODE_ENV afterwards, instead of inheriting whatever
+  # the calling shell exports. This repo documents running vitest with
+  # NODE_ENV=test, and a build under that environment ships the React
+  # development runtime, failing Invoke-BundleBudget against the production
+  # budget (1.68 MB vs 1.07 MB raw on the same tree). Scoping the export to the
+  # invocation is what keeps the vitest calls below working: React exports `act`
+  # only when NODE_ENV is not production.
+  $previous = $env:NODE_ENV
+  $env:NODE_ENV = 'production'
+  try { & npm run @args } finally { $env:NODE_ENV = $previous }
+}
+
 function Ensure-MobileBuilt {
   # Rebuild when index.html is missing OR empty — an interrupted prior build (Ctrl-C /
   # Defender lock) can leave a zero-byte/truncated index.html that a Test-Path-only gate
@@ -96,7 +110,7 @@ function Ensure-MobileBuilt {
   if (-not $present) {
     Write-Host '== dist/mobile missing or empty -> npm run build:mobile ==' -ForegroundColor Cyan
     Push-Location $repo
-    try { & npm run build:mobile } finally { Pop-Location }
+    try { Invoke-ProductionBuild build:mobile } finally { Pop-Location }
     if ($LASTEXITCODE -ne 0) { throw 'build:mobile failed' }
   }
 }
@@ -155,7 +169,7 @@ function Invoke-TsBuild {
   $prevPref = $ErrorActionPreference
   try {
     $ErrorActionPreference = 'Continue'
-    & npm run build
+    Invoke-ProductionBuild build
   } finally {
     $ErrorActionPreference = $prevPref
     Pop-Location
