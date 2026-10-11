@@ -166,6 +166,36 @@ fn operator_review_fanout_run(checks: usize) -> RunView {
 }
 
 #[test]
+fn operator_review_feedback_memo_does_not_grow_with_unrelated_reports() {
+    fn memo_bytes(mut run: RunView) -> usize {
+        complete_with_outcome(
+            &mut run,
+            &mut Transition::default(),
+            "verdict",
+            StepOutcome::Working,
+        );
+        let mut search = FeedbackRouteSearch::default();
+        assert!(operator_feedback_scheduled_outcomes_reach_injection(
+            run,
+            "feedback",
+            &mut search
+        ));
+        search.results.keys().map(String::len).sum()
+    }
+    let mut run = operator_review_fanout_run(1);
+    let without_reports = memo_bytes(run.clone());
+    run.context.set("source.output", "x".repeat(50_000));
+    run.context
+        .set("node.reviewer.evaluated_output", "y".repeat(25_000));
+    run.context.set("node.reviewer.output", "z".repeat(25_000));
+    assert_eq!(
+        memo_bytes(run),
+        without_reports,
+        "memo keys must exclude the 100 KB of unrelated agent reports"
+    );
+}
+
+#[test]
 fn operator_review_feedback_fanout_reuses_equivalent_scheduler_snapshots() {
     let mut run = operator_review_fanout_run(6);
     assert!(run.can_record_review("verdict", StepOutcome::Working));
@@ -181,15 +211,18 @@ fn operator_review_feedback_fanout_reuses_equivalent_scheduler_snapshots() {
         "feedback",
         &mut search
     ));
-    // Six independent checks have three states apiece: pending, Completed,
-    // or routed Failed. Completion order does not create another snapshot.
-    assert_eq!(search.visited, 729);
+    assert!(!search.limit_hit);
 }
 
 #[test]
-fn operator_review_refuses_feedback_analysis_that_exceeds_its_state_budget() {
+fn operator_review_refuses_feedback_analysis_that_exceeds_its_resource_budget() {
     let mut run = operator_review_fanout_run(9);
-    assert!(!run.can_record_review("verdict", StepOutcome::Working));
+    assert!(run.can_offer_review("verdict", StepOutcome::Working));
+    let reason = run
+        .check_review_decision("verdict", StepOutcome::Working)
+        .unwrap_err();
+    assert!(reason.contains("resource limit"));
+    assert!(reason.contains("Simplify"));
     complete_with_outcome(
         &mut run,
         &mut Transition::default(),
@@ -202,7 +235,43 @@ fn operator_review_refuses_feedback_analysis_that_exceeds_its_state_budget() {
         "feedback",
         &mut search
     ));
-    assert_eq!(search.visited, 8192);
+    assert!(search.limit_hit);
+    assert!(search.memo_bytes <= MAX_FEEDBACK_MEMO_BYTES);
+}
+
+#[test]
+fn operator_review_feedback_key_retains_scheduler_inputs() {
+    let mut run = operator_review_fanout_run(1);
+    let initial = feedback_schedule_key(&run, "feedback");
+    run.context.set("retry.max_retries", "7");
+    let retries = feedback_schedule_key(&run, "feedback");
+    assert_ne!(initial, retries);
+    run.context.set("node.verdict.review_verdict", "approved");
+    run.context.set("node.verdict.review_verdict_attempt", "1");
+    let approved = feedback_schedule_key(&run, "feedback");
+    assert_ne!(retries, approved);
+    run.context.set("node.verdict.review_verdict_attempt", "01");
+    assert_ne!(approved, feedback_schedule_key(&run, "feedback"));
+}
+
+#[test]
+fn operator_review_measures_report_heavy_fanout() {
+    for checks in [6, 9] {
+        let mut run = operator_review_fanout_run(checks);
+        run.context.set("source.output", "x".repeat(100_000));
+        let started = std::time::Instant::now();
+        let mut search = FeedbackRouteSearch::default();
+        let accepted =
+            operator_feedback_injection_reachable(&run, "verdict", "feedback", &mut search);
+        println!(
+            "100KB report, {checks} checks: accepted={accepted}, elapsed={:?}, states={}, charged_key_bytes={}, retained_key_bytes={}",
+            started.elapsed(), search.visited, search.memo_bytes,
+            search.results.keys().map(String::capacity).sum::<usize>()
+        );
+        assert_eq!(accepted, checks == 6);
+        assert_eq!(search.limit_hit, checks == 9);
+        assert!(search.memo_bytes <= MAX_FEEDBACK_MEMO_BYTES);
+    }
 }
 
 #[test]

@@ -255,8 +255,8 @@ impl RunView {
             && !self.report_has_known_blockers(node_id)
     }
 
-    /// An explicit operator verdict is separate from a completion attestation.
-    pub(crate) fn can_record_review(&self, node_id: &str, outcome: StepOutcome) -> bool {
+    /// Read-path availability is structural; the write boundary validates delivery.
+    pub(crate) fn can_offer_review(&self, node_id: &str, outcome: StepOutcome) -> bool {
         self.state == RunState::Running
             && self
                 .step(node_id)
@@ -270,9 +270,42 @@ impl RunView {
             && classifier_outcome_is_routed(self, node_id, outcome)
             && (outcome != StepOutcome::Working
                 || self.graph.nodes.iter().any(|candidate| {
-                    matches!(&candidate.kind, CircuitNodeKind::InjectPty { .. })
-                        && operator_feedback_injection_reachable(self, node_id, &candidate.id)
+                    operator_feedback_injection_can_receive_note(self, node_id, &candidate.id)
                 }))
+    }
+
+    pub(crate) fn check_review_decision(
+        &self,
+        node_id: &str,
+        outcome: StepOutcome,
+    ) -> Result<(), &'static str> {
+        const REVIEW_BLOCKED: &str = "Resolve outstanding work or input requests, then refresh.";
+        const FEEDBACK_BLOCKED: &str = "Resolve outstanding work or input requests, and ensure every possible outcome on the Request changes route reaches a feedback injection, then refresh.";
+        if !self.can_offer_review(node_id, outcome) {
+            return Err(if outcome == StepOutcome::Working {
+                FEEDBACK_BLOCKED
+            } else {
+                REVIEW_BLOCKED
+            });
+        }
+        if outcome != StepOutcome::Working {
+            return Ok(());
+        }
+        let mut search = FeedbackRouteSearch::default();
+        for candidate in &self.graph.nodes {
+            if operator_feedback_injection_reachable(self, node_id, &candidate.id, &mut search) {
+                return Ok(());
+            }
+            if search.limit_hit {
+                return Err("Feedback analysis reached its resource limit. Simplify the Request changes route before recording this verdict.");
+            }
+        }
+        Err(FEEDBACK_BLOCKED)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn can_record_review(&self, node_id: &str, outcome: StepOutcome) -> bool {
+        self.check_review_decision(node_id, outcome).is_ok()
     }
 
     fn accepts_report_binding(
@@ -2958,7 +2991,11 @@ fn resolve_operator_review_prompt(
         } else if run.context.get(&format!("{prefix}.review_verdict")) == Some("changes_requested")
         {
             if let Some(note) = run.context.get(&format!("{prefix}.operator_review_note")) {
-                if operator_feedback_injection_reachable(run, &node.id, injection_node_id) {
+                if operator_feedback_injection_can_receive_note(run, &node.id, injection_node_id)
+                    && run
+                        .step(injection_node_id)
+                        .is_some_and(|step| step.status == StepStatus::Running)
+                {
                     prompt.push_str(&format!("\n\nHuman review findings (operator):\n{note}"));
                 }
             }
@@ -2981,10 +3018,10 @@ fn classifier_outcome_is_routed(run: &RunView, node_id: &str, outcome: StepOutco
     })
 }
 
-/// Check delivery to an agent other than the reviewer using hypothetical
-/// pending outcomes. The scheduler handles joins and reruns on a cloned run,
-/// preserving earlier-attempt parent rows.
-fn operator_feedback_injection_reachable(
+/// Check the feedback target, graph ancestry and prompt freshness. Decisions
+/// additionally simulate pending outcomes; prompt construction uses this check
+/// alone because the injection is being delivered at that point.
+fn operator_feedback_injection_can_receive_note(
     run: &RunView,
     review_node_id: &str,
     injection_node_id: &str,
@@ -3041,53 +3078,147 @@ fn operator_feedback_injection_reachable(
         }
     }
 
-    if run
-        .step(injection_node_id)
-        .is_some_and(|step| step.status == StepStatus::Running && step.attempt >= decision_attempt)
-    {
-        // Prompt resolution calls this after the scheduler has selected the
-        // injection step, so its route is already proven for this attempt.
-        return true;
-    }
+    true
+}
 
-    let mut hypothetical = run.clone();
-    let mut transition = Transition::default();
+fn operator_feedback_injection_reachable(
+    run: &RunView,
+    review_node_id: &str,
+    injection_node_id: &str,
+    search: &mut FeedbackRouteSearch,
+) -> bool {
+    if !operator_feedback_injection_can_receive_note(run, review_node_id, injection_node_id) {
+        return false;
+    }
+    let mut hypothetical = feedback_scheduler_snapshot(run);
     complete_with_outcome(
         &mut hypothetical,
-        &mut transition,
+        &mut Transition::default(),
         review_node_id,
         StepOutcome::Working,
     );
-    operator_feedback_scheduled_outcomes_reach_injection(
-        hypothetical,
-        injection_node_id,
-        &mut FeedbackRouteSearch::default(),
+    operator_feedback_scheduled_outcomes_reach_injection(hypothetical, injection_node_id, search)
+}
+
+/// These are the context reads in eligibility, target resolution and retry
+/// scheduling. Reports, prompt text and operator notes do not affect them.
+fn feedback_scheduler_context(run: &RunView) -> CircuitContext {
+    let mut context = CircuitContext::new();
+    if let Some(agent_id) = run.context.source_agent_id() {
+        context.set("source.agent_id", agent_id.to_string());
+    }
+    if run.context.get("source.review_preset") == Some("1") {
+        context.set("source.review_preset", "1");
+    }
+    for key in ["retry.max_retries", "retry.attempt"] {
+        if let Some(value) = run
+            .context
+            .get(key)
+            .and_then(|value| value.parse::<i32>().ok())
+        {
+            context.set(key, value.to_string());
+        }
+    }
+    for node in &run.graph.nodes {
+        if !matches!(node.kind, CircuitNodeKind::ReviewVerdict { .. }) {
+            continue;
+        }
+        let verdict_key = format!("node.{}.review_verdict", node.id);
+        let attempt_key = format!("node.{}.review_verdict_attempt", node.id);
+        if run.context.get(&verdict_key) == Some("approved") {
+            context.set(&verdict_key, "approved");
+            // A longer stamp cannot equal a stringified i32 attempt.
+            if let Some(attempt) = run
+                .context
+                .get(&attempt_key)
+                .filter(|value| value.len() <= 11)
+            {
+                context.set(&attempt_key, attempt);
+            }
+        }
+    }
+    context
+}
+
+fn feedback_scheduler_snapshot(run: &RunView) -> RunView {
+    RunView {
+        run_id: run.run_id,
+        graph: run.graph.clone(),
+        state: run.state,
+        context: feedback_scheduler_context(run),
+        steps: run
+            .steps
+            .iter()
+            .map(|step| StepView {
+                node_id: step.node_id.clone(),
+                status: step.status,
+                outcome: step.outcome,
+                error: None,
+                agent_node_id: step.agent_node_id,
+                attempt: step.attempt,
+            })
+            .collect(),
+    }
+}
+
+fn feedback_schedule_key(run: &RunView, injection_node_id: &str) -> String {
+    let steps: Vec<_> = run
+        .steps
+        .iter()
+        .map(|step| {
+            (
+                &step.node_id,
+                step.status.as_db_str(),
+                step.outcome.map(StepOutcome::as_db_str),
+                step.attempt,
+                step.agent_node_id,
+            )
+        })
+        .collect();
+    format!(
+        "{injection_node_id}|{steps:?}|{:?}",
+        feedback_scheduler_context(run)
     )
 }
 
 #[derive(Default)]
 struct FeedbackRouteSearch {
     visited: usize,
+    memo_bytes: usize,
+    limit_hit: bool,
     results: std::collections::HashMap<String, bool>,
     active: std::collections::HashSet<String>,
 }
 
-// Admission runs during ledger reads and writes. Fail closed on complex
-// authored graphs rather than tying up a connection or exhausting the stack.
 const MAX_FEEDBACK_ROUTE_STATES: usize = 8192;
 const MAX_FEEDBACK_ROUTE_DEPTH: usize = 128;
+const MAX_FEEDBACK_MEMO_BYTES: usize = 2 * 1024 * 1024;
 
-/// Use the real scheduler on a private snapshot; effects and writes stay local.
-/// Retained rows participate in joins, and only the scheduler can rearm them.
 fn operator_feedback_scheduled_outcomes_reach_injection(
     mut run: RunView,
     injection_node_id: &str,
     search: &mut FeedbackRouteSearch,
 ) -> bool {
-    let mut transition = Transition::default();
+    run.context = feedback_scheduler_context(&run);
+    for step in &mut run.steps {
+        step.error = None;
+    }
+    visit_feedback_schedule(&mut run, injection_node_id, search)
+}
+
+/// The graph is shared across branches. Backtracking copies only compact
+/// scheduling rows and context; the real scheduler still owns eligibility.
+fn visit_feedback_schedule(
+    run: &mut RunView,
+    injection_node_id: &str,
+    search: &mut FeedbackRouteSearch,
+) -> bool {
+    if search.limit_hit {
+        return false;
+    }
     schedule_ready(
-        &mut run,
-        &mut transition,
+        run,
+        &mut Transition::default(),
         Capacity {
             agent_free_slots: i64::MAX,
         },
@@ -3095,18 +3226,24 @@ fn operator_feedback_scheduled_outcomes_reach_injection(
     if run.state != RunState::Running {
         return false;
     }
-    // This key is local to one analysis, with a fixed graph. Include context
-    // because review approval stamps and retry budgets affect scheduling.
-    let key = format!("{:?}|{:?}", run.steps, run.context);
+    let key = feedback_schedule_key(run, injection_node_id);
     if let Some(result) = search.results.get(&key) {
         return *result;
     }
+    // Charge both owned key copies (memo and active path). This conservatively
+    // retains the active-copy charge after that copy has been freed.
+    let key_bytes = key.capacity().saturating_mul(2);
     if search.visited >= MAX_FEEDBACK_ROUTE_STATES
         || search.active.len() >= MAX_FEEDBACK_ROUTE_DEPTH
-        || !search.active.insert(key.clone())
+        || key_bytes > MAX_FEEDBACK_MEMO_BYTES.saturating_sub(search.memo_bytes)
     {
+        search.limit_hit = true;
         return false;
     }
+    if !search.active.insert(key.clone()) {
+        return false;
+    }
+    search.memo_bytes += key_bytes;
     search.visited += 1;
     let feedback_pending = run
         .step(injection_node_id)
@@ -3121,72 +3258,70 @@ fn operator_feedback_scheduled_outcomes_reach_injection(
                     .step(&node.id)
                     .is_some_and(|step| !step.status.is_terminal())
         })
+        .map(|node| node.id.clone())
         .collect();
     if pending.is_empty() {
         search.active.remove(&key);
         search.results.insert(key, feedback_pending);
         return feedback_pending;
     }
-    // Different completion orders can change which retained rows satisfy a
-    // join. Check each next completion as well as each possible outcome.
-    let reaches_feedback = pending.iter().all(|node| {
-        if run
-            .step(&node.id)
-            .is_some_and(|step| step.status == StepStatus::Unverified)
+    let steps = run.steps.clone();
+    let context = run.context.clone();
+    let state = run.state;
+    let reaches_feedback = pending.iter().all(|node_id| {
+        if steps
+            .iter()
+            .any(|step| &step.node_id == node_id && step.status == StepStatus::Unverified)
         {
             return false;
         }
-        operator_feedback_possible_outcomes(&node.kind)
-            .iter()
-            .all(|outcome| {
-                let mut branch = run.clone();
-                let mut transition = Transition::default();
-                if *outcome == StepOutcome::Failed
-                    && !matches!(
-                        node.kind,
-                        CircuitNodeKind::GithubAction {
-                            action: GithubActionKind::ConfirmPrMerged,
-                            ..
-                        }
-                    )
-                {
-                    fail_step(
-                        &mut branch,
-                        &mut transition,
-                        &node.id,
-                        "Hypothetical execution failure".into(),
+        let kind = &run.graph.node(node_id).unwrap().kind;
+        let outcomes = operator_feedback_possible_outcomes(kind);
+        let routed_failure = matches!(
+            kind,
+            CircuitNodeKind::GithubAction {
+                action: GithubActionKind::ConfirmPrMerged,
+                ..
+            }
+        );
+        let review = matches!(kind, CircuitNodeKind::ReviewVerdict { .. });
+        outcomes.iter().all(|outcome| {
+            run.steps = steps.clone();
+            run.context = context.clone();
+            run.state = state;
+            let mut transition = Transition::default();
+            if *outcome == StepOutcome::Failed && !routed_failure {
+                fail_step(
+                    run,
+                    &mut transition,
+                    node_id,
+                    "Hypothetical execution failure".into(),
+                );
+            } else if review && *outcome == StepOutcome::Blocked {
+                unverify_step(
+                    run,
+                    &mut transition,
+                    node_id,
+                    "Hypothetical inconclusive review".into(),
+                );
+            } else {
+                complete_with_outcome(run, &mut transition, node_id, *outcome);
+                if review && *outcome == StepOutcome::Completed {
+                    let attempt = run.step(node_id).unwrap().attempt;
+                    run.context
+                        .set(&format!("node.{node_id}.review_verdict"), "approved");
+                    run.context.set(
+                        &format!("node.{node_id}.review_verdict_attempt"),
+                        attempt.to_string(),
                     );
-                } else if matches!(node.kind, CircuitNodeKind::ReviewVerdict { .. })
-                    && *outcome == StepOutcome::Blocked
-                {
-                    unverify_step(
-                        &mut branch,
-                        &mut transition,
-                        &node.id,
-                        "Hypothetical inconclusive review".into(),
-                    );
-                } else {
-                    complete_with_outcome(&mut branch, &mut transition, &node.id, *outcome);
-                    if matches!(node.kind, CircuitNodeKind::ReviewVerdict { .. })
-                        && *outcome == StepOutcome::Completed
-                    {
-                        let attempt = branch.step(&node.id).unwrap().attempt;
-                        branch
-                            .context
-                            .set(&format!("node.{}.review_verdict", node.id), "approved");
-                        branch.context.set(
-                            &format!("node.{}.review_verdict_attempt", node.id),
-                            attempt.to_string(),
-                        );
-                    }
                 }
-                operator_feedback_scheduled_outcomes_reach_injection(
-                    branch,
-                    injection_node_id,
-                    search,
-                )
-            })
+            }
+            visit_feedback_schedule(run, injection_node_id, search)
+        })
     });
+    run.steps = steps;
+    run.context = context;
+    run.state = state;
     search.active.remove(&key);
     search.results.insert(key, reaches_feedback);
     reaches_feedback

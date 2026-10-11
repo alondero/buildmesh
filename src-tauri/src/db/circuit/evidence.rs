@@ -297,10 +297,10 @@ fn checkpoint_actions(
         Some(CircuitNodeKind::ReviewVerdict { .. }) => {
             use crate::circuit::model::StepOutcome;
             let mut actions = vec![CheckpointAction::Recheck];
-            if view.can_record_review(&step.node_id, StepOutcome::Completed) {
+            if view.can_offer_review(&step.node_id, StepOutcome::Completed) {
                 actions.push(CheckpointAction::ReviewPass);
             }
-            if view.can_record_review(&step.node_id, StepOutcome::Working) {
+            if view.can_offer_review(&step.node_id, StepOutcome::Working) {
                 actions.push(CheckpointAction::ReviewFail);
             }
             actions
@@ -931,15 +931,8 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
             StepOutcome::Working
         };
         let mut view = recovery_view(&tx, &run)?;
-        if !view.can_record_review(&step.node_id, outcome) {
-            let route_guidance = if passed {
-                "Resolve outstanding work or input requests, then refresh."
-            } else {
-                "Resolve outstanding work or input requests, and ensure every possible outcome on the Request changes route reaches a feedback injection, then refresh."
-            };
-            return Err(format!(
-                "This review cannot accept that verdict. {route_guidance}"
-            ));
+        if let Err(reason) = view.check_review_decision(&step.node_id, outcome) {
+            return Err(format!("This review cannot accept that verdict. {reason}"));
         }
         let verdict = if passed {
             "approved"
@@ -6188,6 +6181,117 @@ mod tests {
             Effect::InjectPty { node_id, prompt, .. }
                 if node_id == "feedback" && prompt.contains("Human review findings (operator):\nFix the unchecked null.")
         )));
+    }
+
+    #[test]
+    fn operator_review_refuses_a_running_feedback_with_a_fail_fast_sibling() {
+        use crate::circuit::{
+            model::{
+                CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind, EdgeCondition,
+                GithubActionKind, StepOutcome,
+            },
+            stepper::{advance, CircuitEvent, RunState, StepStatus},
+        };
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch(
+            "INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(9,1,'source','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(10,1,'reviewer','/repo/reviewer');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'review');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state,context_json)
+                VALUES(1,1,1,'running','{\"source.agent_id\":\"9\"}');
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,outcome,agent_node_id)
+                VALUES(1,'reviewer',1,'completed','completed',10),
+                    (1,'verdict',1,'unverified',NULL,10),
+                    (1,'alternate_join',1,'completed','completed',NULL),
+                    (1,'feedback',1,'running',NULL,9),
+                    (1,'label_sibling',1,'running',NULL,NULL);",
+        ).unwrap();
+        let mut graph = CircuitGraph::agent_review(None, None, 3);
+        graph
+            .edges
+            .retain(|edge| !(edge.from == "verdict" && edge.to == "feedback"));
+        graph.nodes.extend([
+            CircuitNode {
+                id: "alternate_join".into(),
+                kind: CircuitNodeKind::AnyCompleted,
+            },
+            CircuitNode {
+                id: "label_sibling".into(),
+                kind: CircuitNodeKind::GithubAction {
+                    action: GithubActionKind::AddLabel,
+                    open_pr_policy: None,
+                    label: Some("reviewed".into()),
+                    comment: None,
+                },
+            },
+        ]);
+        graph.edges.extend([
+            CircuitEdge {
+                from: "reviewer".into(),
+                to: "alternate_join".into(),
+                condition: EdgeCondition::Always,
+            },
+            CircuitEdge {
+                from: "verdict".into(),
+                to: "alternate_join".into(),
+                condition: EdgeCondition::OnOutcome(StepOutcome::Working),
+            },
+            CircuitEdge {
+                from: "alternate_join".into(),
+                to: "feedback".into(),
+                condition: EdgeCondition::Always,
+            },
+            CircuitEdge {
+                from: "reviewer".into(),
+                to: "label_sibling".into(),
+                condition: EdgeCondition::Always,
+            },
+        ]);
+        db.execute(
+            "UPDATE autopilot_circuits SET graph_json=?1",
+            [graph.to_json().unwrap()],
+        )
+        .unwrap();
+        let stored = super::super::ledger::get_circuit_run_inner(&db, 1)
+            .unwrap()
+            .unwrap();
+        let mut view = recovery_view(&db, &stored).unwrap();
+        assert!(
+            !view.can_record_review("verdict", StepOutcome::Working),
+            "a fail-fast sibling can cancel the unbuilt feedback prompt"
+        );
+        let error = record_outcome_locked(
+            &mut db,
+            &CheckpointRequest {
+                run_id: 1,
+                node_id: "verdict".into(),
+                attempt: 1,
+                expected_revision: 0,
+                action: CheckpointAction::ReviewFail,
+                reason: "Findings must reach feedback.".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("Request changes route"),
+            "error was: {error}"
+        );
+        advance(
+            &mut view,
+            &CircuitEvent::GithubActionResult {
+                node_id: "label_sibling".into(),
+                success: false,
+                pr_number: None,
+                pr_url: None,
+                pr_head_ref: None,
+                pr_title: None,
+                error: Some("GitHub action failed".into()),
+            },
+        );
+        assert_eq!(view.state, RunState::Failed);
+        assert_eq!(view.step("feedback").unwrap().status, StepStatus::Cancelled);
     }
 
     #[test]
