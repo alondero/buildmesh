@@ -932,7 +932,14 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
         };
         let mut view = recovery_view(&tx, &run)?;
         if !view.can_record_review(&step.node_id, outcome) {
-            return Err("This review cannot accept that verdict. Resolve outstanding work or input requests, and ensure the Request changes route reaches a feedback injection, then refresh.".into());
+            let route_guidance = if passed {
+                "Resolve outstanding work or input requests, then refresh."
+            } else {
+                "Resolve outstanding work or input requests, and ensure every possible outcome on the Request changes route reaches a feedback injection, then refresh."
+            };
+            return Err(format!(
+                "This review cannot accept that verdict. {route_guidance}"
+            ));
         }
         let verdict = if passed {
             "approved"
@@ -5464,6 +5471,123 @@ mod tests {
                 .unwrap()
                 .get("node.verdict.review_verdict"),
             None
+        );
+    }
+
+    #[test]
+    fn operator_review_is_refused_when_an_unrun_outcome_can_bypass_feedback() {
+        use crate::circuit::model::{
+            CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind, EdgeCondition, StepOutcome,
+        };
+
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch(
+            "INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(9,1,'source','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(10,1,'reviewer','/repo/reviewer');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'review');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state,context_json)
+                VALUES(1,1,1,'running','{\"source.agent_id\":\"9\",\"source.name\":\"issue #42\"}');
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,agent_node_id)
+                VALUES(1,'reviewer',1,'completed',10),(1,'verdict',1,'unverified',10);",
+        )
+        .unwrap();
+
+        let mut graph = CircuitGraph::agent_review(None, None, 3);
+        graph
+            .edges
+            .retain(|edge| !(edge.from == "verdict" && edge.to == "feedback"));
+        graph.nodes.push(CircuitNode {
+            id: "await_feedback_gate".into(),
+            kind: CircuitNodeKind::AwaitAgentTurn {
+                target_node_id: Some("$source".into()),
+            },
+        });
+        graph.nodes.push(CircuitNode {
+            id: "feedback_blocked_notice".into(),
+            kind: CircuitNodeKind::Notify {
+                message: "The source turn was blocked.".into(),
+            },
+        });
+        // All other AwaitAgentTurn outcomes lead to feedback; Blocked is the bypass.
+        graph.edges.extend([
+            CircuitEdge {
+                from: "verdict".into(),
+                to: "await_feedback_gate".into(),
+                condition: EdgeCondition::OnOutcome(StepOutcome::Working),
+            },
+            CircuitEdge {
+                from: "await_feedback_gate".into(),
+                to: "feedback".into(),
+                condition: EdgeCondition::OnOutcome(StepOutcome::Completed),
+            },
+            CircuitEdge {
+                from: "await_feedback_gate".into(),
+                to: "feedback_blocked_notice".into(),
+                condition: EdgeCondition::OnOutcome(StepOutcome::Blocked),
+            },
+            CircuitEdge {
+                from: "await_feedback_gate".into(),
+                to: "feedback".into(),
+                condition: EdgeCondition::OnOutcome(StepOutcome::Working),
+            },
+            CircuitEdge {
+                from: "await_feedback_gate".into(),
+                to: "feedback".into(),
+                condition: EdgeCondition::OnOutcome(StepOutcome::Failed),
+            },
+        ]);
+        db.execute(
+            "UPDATE autopilot_circuits SET graph_json=?1",
+            [graph.to_json().unwrap()],
+        )
+        .unwrap();
+
+        let stored = super::super::ledger::get_circuit_run_inner(&db, 1)
+            .unwrap()
+            .unwrap();
+        let view = recovery_view(&db, &stored).unwrap();
+        assert!(view.step("await_feedback_gate").is_none());
+        assert!(
+            !view.can_record_review("verdict", StepOutcome::Working),
+            "Request changes must be refused if an unrun route can bypass feedback"
+        );
+        let error = record_outcome_locked(
+            &mut db,
+            &CheckpointRequest {
+                run_id: 1,
+                node_id: "verdict".into(),
+                attempt: 1,
+                expected_revision: 0,
+                action: CheckpointAction::ReviewFail,
+                reason: "The source turn might never reach feedback.".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("every possible outcome on the Request changes route"),
+            "the refusal should explain how to repair the route: {error}"
+        );
+
+        db.execute(
+            "INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,outcome,agent_node_id)
+             VALUES(1,'await_feedback_gate',1,'completed','completed',9)",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE autopilot_circuit_run_steps SET attempt=2 WHERE run_id=1 AND node_id='verdict'",
+            [],
+        )
+        .unwrap();
+        let stored = super::super::ledger::get_circuit_run_inner(&db, 1)
+            .unwrap()
+            .unwrap();
+        let later_round = recovery_view(&db, &stored).unwrap();
+        assert!(
+            !later_round.can_record_review("verdict", StepOutcome::Working),
+            "a completed outcome from an earlier review round must not hide a bypass"
         );
     }
 

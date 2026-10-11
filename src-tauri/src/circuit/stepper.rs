@@ -2981,10 +2981,9 @@ fn classifier_outcome_is_routed(run: &RunView, node_id: &str, outcome: StepOutco
     })
 }
 
-/// A request-changes verdict must have a downstream injection to an agent
-/// other than the reviewer. Follow the selected verdict branch and each
-/// recorded intermediate outcome; a node without one can still take any
-/// outcome, matching the path the scheduler can deliver after the decision.
+/// A request-changes verdict must deliver its note to an agent other than the
+/// reviewer for every outcome an unrun intermediate can produce. A configured
+/// branch that can bypass feedback is not enough to accept the verdict.
 fn operator_feedback_injection_reachable(
     run: &RunView,
     review_node_id: &str,
@@ -3004,34 +3003,119 @@ fn operator_feedback_injection_reachable(
     if feedback_agent.is_none() || feedback_agent == reviewer {
         return false;
     }
+    let decision_attempt = run.step(review_node_id).map_or(1, |step| step.attempt);
 
-    let mut pending = std::collections::VecDeque::from([review_node_id.to_owned()]);
-    let mut visited = std::collections::HashSet::from([review_node_id.to_owned()]);
-    while let Some(from) = pending.pop_front() {
-        let outcome = if from == review_node_id {
-            Some(StepOutcome::Working)
-        } else {
-            run.step(&from).and_then(|step| step.outcome)
-        };
-        for edge in run.graph.edges.iter().filter(|edge| edge.from == from) {
-            let follows_route = match edge.condition {
-                EdgeCondition::Always => true,
-                EdgeCondition::OnOutcome(expected) => {
-                    outcome.is_none() || outcome == Some(expected)
-                }
-            };
-            if !follows_route {
-                continue;
-            }
-            if edge.to == injection_node_id {
-                return true;
-            }
-            if visited.insert(edge.to.clone()) {
-                pending.push_back(edge.to.clone());
-            }
+    fn reaches_feedback_for_every_outcome(
+        run: &RunView,
+        from: &str,
+        outcome_override: Option<StepOutcome>,
+        decision_attempt: i32,
+        injection_node_id: &str,
+        active_path: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        if from == injection_node_id {
+            return true;
         }
+        if !active_path.insert(from.to_owned()) {
+            return false;
+        }
+
+        // A prior-attempt result may be reset when this decision schedules the route.
+        let recorded_outcome = run
+            .step(from)
+            .filter(|step| step.attempt >= decision_attempt)
+            .and_then(|step| step.outcome);
+        let outcomes = outcome_override
+            .or(recorded_outcome)
+            .map(|outcome| vec![outcome])
+            .or_else(|| {
+                run.graph
+                    .node(from)
+                    .map(|node| operator_feedback_possible_outcomes(&node.kind).to_vec())
+            })
+            .unwrap_or_default();
+        let reaches_feedback = !outcomes.is_empty()
+            && outcomes.into_iter().all(|outcome| {
+                let successors: Vec<_> = run
+                    .graph
+                    .edges
+                    .iter()
+                    .filter(|edge| {
+                        edge.from == from
+                            && (edge.condition == EdgeCondition::Always
+                                || edge.condition == EdgeCondition::OnOutcome(outcome))
+                    })
+                    .map(|edge| edge.to.as_str())
+                    .collect();
+                !successors.is_empty()
+                    && successors.into_iter().any(|to| {
+                        reaches_feedback_for_every_outcome(
+                            run,
+                            to,
+                            None,
+                            decision_attempt,
+                            injection_node_id,
+                            active_path,
+                        )
+                    })
+            });
+
+        active_path.remove(from);
+        reaches_feedback
     }
-    false
+
+    reaches_feedback_for_every_outcome(
+        run,
+        review_node_id,
+        Some(StepOutcome::Working),
+        decision_attempt,
+        injection_node_id,
+        &mut std::collections::HashSet::new(),
+    )
+}
+
+/// Outcomes an unrun node can report through the stepper's current event
+/// handlers. Keep deterministic actions narrow so a single-route Notify can
+/// still prove delivery, while gates account for every result they may emit.
+fn operator_feedback_possible_outcomes(kind: &CircuitNodeKind) -> &'static [StepOutcome] {
+    use CircuitNodeKind as Kind;
+
+    const COMPLETED: &[StepOutcome] = &[StepOutcome::Completed];
+    const COMPLETED_OR_FAILED: &[StepOutcome] = &[StepOutcome::Completed, StepOutcome::Failed];
+    const CLASSIFICATION: &[StepOutcome] = &[
+        StepOutcome::Completed,
+        StepOutcome::Blocked,
+        StepOutcome::Working,
+        StepOutcome::Failed,
+    ];
+    const VERIFICATION: &[StepOutcome] =
+        &[StepOutcome::Green, StepOutcome::Red, StepOutcome::Failed];
+    const COLLABORATOR_CHECK: &[StepOutcome] = &[
+        StepOutcome::Completed,
+        StepOutcome::Blocked,
+        StepOutcome::Failed,
+    ];
+
+    match kind {
+        Kind::Notify { .. }
+        | Kind::Manual
+        | Kind::Interval { .. }
+        | Kind::GithubIssueLabel { .. }
+        | Kind::GithubPullRequestLabel { .. }
+        | Kind::AllCompleted
+        | Kind::AnyCompleted => COMPLETED,
+        Kind::SpawnAgentNode { .. }
+        | Kind::InjectPty { .. }
+        | Kind::GithubAction { .. }
+        | Kind::SetNodeStatus { .. }
+        | Kind::CloseAgentNode { .. }
+        | Kind::RetryLimit { .. } => COMPLETED_OR_FAILED,
+        Kind::LlmTurnClassifier { .. }
+        | Kind::AwaitAgentTurn { .. }
+        | Kind::ReviewVerdict { .. } => CLASSIFICATION,
+        Kind::DeterministicVerification { .. } => VERIFICATION,
+        Kind::CollaboratorCheck { .. } => COLLABORATOR_CHECK,
+    }
 }
 
 fn fail_step(run: &mut RunView, t: &mut Transition, node_id: &str, error: String) {
