@@ -1335,10 +1335,11 @@ mod tests {
 
         /// A write-denying ACE on a directory, removed again on drop.
         ///
-        /// `Drop` order is the point: declared after the `TempDir`, it runs
-        /// first, so a panicking assertion can never leave the fixture
-        /// undeletable — a directory that outlives its test holding a deny ACE
-        /// is exactly the straggler the fixture guidance warns about.
+        /// `Drop` order is the point: declared after the `TempDir`, it runs first, so
+        /// a panicking assertion still unwinds through the ACE removal before
+        /// `TempDir` cleanup meets an undeletable directory — a fixture that
+        /// outlives its test holding a deny ACE is the straggler the fixture
+        /// guidance warns about.
         struct WriteDeny {
             admin: PathBuf,
         }
