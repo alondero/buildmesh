@@ -329,6 +329,12 @@ directory forwarded through `WSLENV`, and a fail-closed guard, because a batch
 expands an unset variable to nothing and `pushd ""` succeeds. The last one is
 what turns a forwarding regression from a failure into a silent wrong-directory
 spawn.
+
+The same split governs the batch file's own path: written through the host
+spelling of a Windows directory (`/mnt/c/...`), because that is how Linux opens
+it, but handed to `cmd.exe` in the Windows spelling (`C:\...`), because that is
+how Windows resolves it. `windows_cli_home` returns the host spelling — correct
+for opening a file, wrong for telling Windows where it is.
 - **Only a mapped spawn drops its working directory.** Handing cmd.exe the UNC
   anyway prints *Defaulting to Windows directory* and makes a correct spawn look
   broken. But `Direct` never establishes a location, and PowerShell running a

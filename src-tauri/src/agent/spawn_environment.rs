@@ -218,19 +218,58 @@ fn mapped_launch_batch(encoded: &str) -> String {
 /// Handing that to `cmd.exe` fails with *is not recognized as an internal or
 /// external command*. The Windows-side temp directory is the only place the
 /// file can live.
-fn mapped_launch_directory(env_type: EnvType) -> Result<std::path::PathBuf, String> {
-    // `is_wsl_host` is the discriminator, not just the env type. On a Windows
-    // host an interop spawn is not a real configuration, so falling back to the
-    // local temp directory is harmless and keeps this path testable there; on a
-    // WSL host `/tmp` is the guest's and must never be handed to cmd.exe.
-    if env_type == EnvType::WindowsInterop && crate::env::is_wsl_host() {
-        return crate::env::windows_cli_home("AppData/Local/Temp").ok_or_else(|| {
-            "a mapped WindowsInterop spawn needs a Windows-visible batch file, but the \
-             Windows temp directory could not be resolved from the WSL host"
-                .to_string()
-        });
+/// Where the one-shot batch file is written, and the name `cmd.exe` is given.
+///
+/// The two differ on `WindowsInterop`. Buildmesh runs on the Linux host and
+/// writes through `/mnt/c/...`, which is the same directory as
+/// `C:\Users\...` — but `cmd.exe` is a Windows process and cannot resolve a
+/// `/mnt/c/...` path. Passing the host path is how this route hung with a
+/// Windows-format argument that Windows could not open: `cmd.exe` reported an
+/// unrecognised path and then blocked on a PTY the spawner was not reading.
+struct MappedLaunchTarget {
+    /// The filesystem Buildmesh writes the file through.
+    write_path: std::path::PathBuf,
+    /// The path handed to `cmd.exe /c`, in Windows form.
+    windows_path: String,
+}
+
+impl MappedLaunchTarget {
+    fn native() -> Self {
+        let directory = std::env::temp_dir();
+        Self {
+            windows_path: directory.to_string_lossy().into_owned(),
+            write_path: directory,
+        }
     }
-    Ok(std::env::temp_dir())
+}
+
+fn mapped_launch_directory(env_type: EnvType) -> Result<MappedLaunchTarget, String> {
+    // `is_wsl_host` is the discriminator, not just the env type. On a Windows
+    // host an interop spawn is not a real configuration, so the native shape is
+    // harmless and keeps this path testable there; on a WSL host `/tmp` is the
+    // guest's and must never be handed to cmd.exe.
+    if env_type != EnvType::WindowsInterop || !crate::env::is_wsl_host() {
+        return Ok(MappedLaunchTarget::native());
+    }
+    let home = crate::env::windows_home().ok_or_else(|| {
+        "a mapped WindowsInterop spawn needs a Windows-visible batch file, but the Windows \
+         user profile could not be resolved from the WSL host"
+            .to_string()
+    })?;
+    // Built as a Windows path, and deliberately *not* run through
+    // `windows_cli_home`: that returns the host-side spelling of a Windows
+    // path, which is correct for opening a file from Linux and wrong for
+    // telling Windows where it is.
+    let windows_dir = format!(
+        "{}\\{}",
+        home.trim_end_matches('\\'),
+        "AppData\\Local\\Temp"
+    );
+    let write_path = std::path::PathBuf::from(crate::env::to_host_path(&windows_dir));
+    Ok(MappedLaunchTarget {
+        windows_path: windows_dir,
+        write_path,
+    })
 }
 
 /// Characters cmd.exe treats as something other than path text when they appear
@@ -290,45 +329,47 @@ const MAPPED_BATCH_PREFIX: &str = "buildmesh-mapped-spawn-";
 /// restarts its counter after a process restart, so the same pid could
 /// overwrite a file a still-running `cmd.exe` holds open.
 fn write_mapped_launch_batch(
-    directory: &std::path::Path,
+    target: &MappedLaunchTarget,
     contents: &str,
-) -> Result<std::path::PathBuf, String> {
-    sweep_stale_mapped_batches(directory);
+) -> Result<(std::path::PathBuf, String), String> {
+    sweep_stale_mapped_batches(&target.write_path);
     let mut file = tempfile::Builder::new()
         .prefix(MAPPED_BATCH_PREFIX)
         .suffix(".cmd")
-        .tempfile_in(directory)
+        .tempfile_in(&target.write_path)
         .map_err(|error| {
             format!(
                 "creating the mapped spawn script in {}: {error}",
-                directory.display()
+                target.write_path.display()
             )
         })?;
     std::io::Write::write_all(&mut file, contents.as_bytes()).map_err(|error| {
         format!(
             "writing the mapped spawn script in {}: {error}",
-            directory.display()
+            target.write_path.display()
         )
     })?;
     let (_handle, path) = file.keep().map_err(|error| {
         format!(
             "releasing the mapped spawn script in {}: {error}",
-            directory.display()
+            target.write_path.display()
         )
     })?;
-    if has_cmd_metacharacter(&path.to_string_lossy()) {
+    let name = path
+        .file_name()
+        .ok_or_else(|| "the mapped spawn script has no file name".to_string())?;
+    let windows_path = format!("{}\\{}", target.windows_path, name.to_string_lossy());
+    if has_cmd_metacharacter(&windows_path) {
         // Unlike the node directory, this path cannot travel in an environment
         // variable: it is what tells cmd.exe which script to run. A Windows
         // account name containing `&` would otherwise split the command line
         // and execute the tail, so refuse rather than mis-spawn.
         return Err(format!(
             "the temp directory for a mapped spawn contains a character cmd.exe treats as a \
-             command operator ({}): {}",
-            &path.to_string_lossy(),
-            path.display()
+             command operator: {windows_path}"
         ));
     }
-    Ok(path)
+    Ok((path, windows_path))
 }
 
 /// Build the Windows-native invocation for a PowerShell-wrapped spawn.
@@ -364,10 +405,10 @@ fn powershell_spawn(
         return Ok(c);
     };
     tracing::info!("spawn_environment: mapping the UNC spawn directory through a cmd pushd script");
-    let launch_directory = mapped_launch_directory(env_type)?;
-    let batch = write_mapped_launch_batch(&launch_directory, &mapped_launch_batch(&encoded))?;
+    let launch = mapped_launch_directory(env_type)?;
+    let (_written, batch) = write_mapped_launch_batch(&launch, &mapped_launch_batch(&encoded))?;
     let mut c = CommandBuilder::new("cmd.exe");
-    c.args(["/d", "/c", &batch.to_string_lossy()]);
+    c.args(["/d", "/c", &batch]);
     // Only reaches Windows if `apply_wsl_env` lists it in WSLENV, which it does
     // whenever this variable is set on the command.
     c.env("BUILDMESH_SPAWN_DIR", directory);
@@ -1494,7 +1535,19 @@ mod tests {
     #[ignore = "requires WSL with Windows interop enabled"]
     fn live_wsl_mapped_interop_spawn_runs_in_the_node_directory() {
         assert!(crate::env::is_wsl_host());
-        let windows_temp = crate::env::windows_cli_home("AppData/Local/Temp").unwrap();
+        // The Windows user profile is what makes this test possible at all: the
+        // batch file has to land somewhere Windows can open. A bare `unwrap`
+        // here would report only "called Option::unwrap() on a None value", so
+        // name the real cause — `windows_home` runs PowerShell through interop
+        // under a 10s timeout, and a cold WSL start can miss it.
+        let windows_temp =
+            crate::env::windows_cli_home("AppData/Local/Temp").unwrap_or_else(|| {
+                panic!(
+                    "the Windows user profile did not resolve from WSL, so no Windows-visible \
+                 batch file can be written. PowerShell interop either failed or missed its \
+                 10s timeout; a warm start usually resolves this."
+                )
+            });
         let npm_dir = tempfile::tempdir_in(&windows_temp).unwrap();
         let shim = npm_dir.path().join("probe.cmd");
         std::fs::write(&shim, "@echo off\r\necho shim-ran> probe.txt\r\n").unwrap();
@@ -1542,13 +1595,44 @@ mod tests {
         );
         let pair = crate::agent::spawn::open_pty_pair(24, 80).unwrap();
         let mut child = crate::agent::spawn::spawn_child(&pair, command).unwrap();
-        assert!(child.wait().unwrap().success());
+        let status = wait_bounded(&mut child, "the mapped WindowsInterop spawn");
+        assert!(status.success());
         let probe = directory.path().join("probe.txt");
         assert!(
             probe.is_file(),
             "the mapped interop spawn did not run the shim in the node directory at {}",
             directory.path().display()
         );
+    }
+
+    /// Wait for a child with a deadline, killing it if it overruns.
+    ///
+    /// A plain `wait()` on this route hangs indefinitely when the spawn does
+    /// not complete: `cmd.exe` holds the console open and nothing drains the
+    /// PTY, so the child never exits and `wait()` never returns. A test that
+    /// hangs is worse than one that fails — it stalls CI for the full job
+    /// timeout and reports nothing.
+    #[cfg(target_os = "linux")]
+    fn wait_bounded(
+        child: &mut Box<dyn portable_pty::Child + Send + Sync>,
+        what: &str,
+    ) -> portable_pty::ExitStatus {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return status,
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
+                _ => {
+                    let _ = child.kill();
+                    panic!(
+                        "{what} did not finish within 120s. cmd.exe usually holds the console \
+                         open when the mapping failed, and nothing drains the PTY here."
+                    );
+                }
+            }
+        }
     }
 
     /// The batch path is passed as `cmd.exe /c` command text, which cmd expands
