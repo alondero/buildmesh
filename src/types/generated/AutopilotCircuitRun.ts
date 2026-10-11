@@ -24,4 +24,12 @@ state: string,
 /**
  * The run's resolved template context (`circuit.*`, `node.*`), JSON.
  */
-context_json: string, created_at: string, updated_at: string, };
+context_json: string, created_at: string, updated_at: string, 
+/**
+ * Unix seconds at which the user acknowledged this run's attention, or
+ * `None` when it is still outstanding. Attention is derived from state,
+ * verdict and step status; this records only that the user has seen the
+ * remainder and needs nothing further. It changes no run state, and
+ * clearing it back to `None` restores the attention.
+ */
+attention_dismissed_at: number | null, };

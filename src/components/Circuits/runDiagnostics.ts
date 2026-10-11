@@ -164,7 +164,13 @@ export function canContinueReview(
     && (detail.run.source_agent_node_id !== null || detail.steps.some((s) => s.node_id === 'implementer' && s.agent_node_id !== null)));
 }
 
-/** A run needs a user's attention before the circuit can make progress. */
+/**
+ * Does this run *need* attention — the derived truth from run state, review
+ * verdict and step status. It ignores acknowledgement on purpose: the card uses
+ * it to keep explaining why the run wants attention, while the bulk action's
+ * count uses [`runNeedsOutstandingAttention`] so an acknowledged run is no
+ * longer outstanding.
+ */
 export function runNeedsAttention(
   detail: CircuitRunDetail,
   reviewCircuit: ReviewCircuitMetadata | null = null,
@@ -172,6 +178,22 @@ export function runNeedsAttention(
 ): boolean {
   return detail.run.state === 'failed' || detail.run.state === 'paused' || reviewResult(detail, reviewCircuit, context)?.needsAttention === true ||
     detail.steps.some((step) => step.status === 'blocked' || step.status === 'unverified');
+}
+
+/**
+ * Is this attention still *outstanding* — i.e. the user has not already
+ * acknowledged it via "Dismiss all"?
+ *
+ * A dismissed run keeps every derived reason it had, so nothing about the run
+ * is rewritten; it simply stops sorting to the top, counting towards "N need
+ * attention", and matching the Needs-attention filter.
+ */
+export function runNeedsOutstandingAttention(
+  detail: CircuitRunDetail,
+  reviewCircuit: ReviewCircuitMetadata | null = null,
+  context = parseRunContext(detail.run.context_json),
+): boolean {
+  return detail.run.attention_dismissed_at === null && runNeedsAttention(detail, reviewCircuit, context);
 }
 
 /**
@@ -286,7 +308,7 @@ export function buildCircuitProbeRows(
           : [];
       if (view === 'history') {
         if (options.attentionOnly) {
-          visibleRuns = visibleRuns.filter((run) => runNeedsAttention(run, reviewFor(run), contextFor(run)));
+visibleRuns = visibleRuns.filter((run) => runNeedsOutstandingAttention(run, reviewFor(run), contextFor(run)));
         }
         if (needle !== '') {
           visibleRuns = visibleRuns.filter((run) =>
@@ -297,9 +319,11 @@ export function buildCircuitProbeRows(
           );
         }
         // Attention-first, then newest — so the 63-failure case reads as
-        // actionable items on top, not an endless completed tail.
+        // actionable items on top, not an endless completed tail. Acknowledged
+        // runs sort with the ordinary tail: they still carry their diagnostic,
+        // but they no longer crowd the actionable items to the top.
         visibleRuns.sort((a, b) =>
-          Number(runNeedsAttention(b, reviewFor(b), contextFor(b))) - Number(runNeedsAttention(a, reviewFor(a), contextFor(a))) ||
+Number(runNeedsOutstandingAttention(b, reviewFor(b), contextFor(b))) - Number(runNeedsOutstandingAttention(a, reviewFor(a), contextFor(a))) ||
           compareRunsNewestFirst(a, b));
       } else {
         visibleRuns.sort(compareRunsNewestFirst);
@@ -307,7 +331,7 @@ export function buildCircuitProbeRows(
       return {
         ...row,
         visibleRuns,
-        hasAttention: visibleRuns.some((run) => runNeedsAttention(run, reviewFor(run), contextFor(run))),
+hasAttention: visibleRuns.some((run) => runNeedsOutstandingAttention(run, reviewFor(run), contextFor(run))),
         reviewCircuit,
         contextByRunId,
         searchContextByRunId,
@@ -362,14 +386,14 @@ export function circuitActivityStats(
       const context = contextByRunId.get(detail.run.id) ?? {};
       if (runBelongsToActivity(detail)) {
         activeCount += 1;
-        if (runNeedsAttention(detail, reviewCircuitForRun(detail, reviewCircuit, context), context)) {
+if (runNeedsOutstandingAttention(detail, reviewCircuitForRun(detail, reviewCircuit, context), context)) {
           activeAttentionCount += 1;
           attentionCount += 1;
         }
       }
       if (runBelongsToHistory(detail)) {
         historyCount += 1;
-        if (runNeedsAttention(detail, reviewCircuitForRun(detail, reviewCircuit, context), context)) {
+if (runNeedsOutstandingAttention(detail, reviewCircuitForRun(detail, reviewCircuit, context), context)) {
           historyAttentionCount += 1;
           attentionCount += 1;
         }

@@ -2619,6 +2619,18 @@ pub struct CircuitRunUpdatedPayload {
     pub state: String,
 }
 
+/// The mesh-wide "Dismiss all (N)" acknowledgement. `changed` is the number of
+/// runs actually stamped, so a client showing a confirmation can report the
+/// real count instead of the count it predicted before the call.
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export, export_to = "CircuitEvents.ts")]
+pub struct CircuitRunAttentionDismissedPayload {
+    #[ts(as = "i32")]
+    pub mesh_id: i64,
+    #[ts(as = "i32")]
+    pub changed: usize,
+}
+
 #[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
 #[ts(export, export_to = "CircuitEvents.ts")]
 pub struct CircuitNotificationPayload {

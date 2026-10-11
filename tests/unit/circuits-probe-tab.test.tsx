@@ -98,6 +98,7 @@ const RUN_DONE: CircuitRunDetail = {
     source_agent_node_id: null,
     created_at: '2026-08-22 10:05:00',
     updated_at: '2026-08-22 10:07:00',
+    attention_dismissed_at: null,
   },
   steps: [
     {
@@ -202,10 +203,13 @@ function mockBackend(overrides: {
       cmd === 'cancel_circuit_runs' ||
       cmd === 'move_circuit_run' ||
       cmd === 'reorder_circuit_queue' ||
-      cmd === 'approve_circuit_step'
+      cmd === 'approve_circuit_step' ||
+      cmd === 'dismiss_circuit_run_attention'
     ) {
       return Promise.resolve(args && cmd === 'create_circuit' ? CIRCUIT : undefined);
     }
+    // The bulk acknowledgement returns the number of runs it changed.
+    if (cmd === 'dismiss_all_circuit_run_attention') return Promise.resolve(2);
     if (cmd === 'trigger_circuit_now') return Promise.resolve(13);
     // Default-fall-through so failures surface the unexpected command.
     return Promise.resolve({ cmd });
@@ -766,6 +770,63 @@ describe('CircuitsProbeTab', () => {
     await user.type(screen.getByTestId('history-search-input'), 'manual:1724000000000');
     expect(screen.queryByTestId('run-card-9')).toBeNull();
     expect(screen.getByTestId('run-card-11')).toBeTruthy();
+  });
+
+  /**
+   * The bulk acknowledgement is one mesh-scoped IPC behind a two-step
+   * confirmation — the count in the label is the number of runs History is
+   * actually asking about, and one click must not dismiss anything.
+   */
+  it('acknowledges all outstanding attention with one confirmed mesh-scoped call', async () => {
+    mockBackend({ runs: [
+      { ...RUN_DONE, run: { ...RUN_DONE.run, id: 9, state: 'failed', trigger_identity: 'issue:9:run' } },
+      { ...RUN_DONE, run: { ...RUN_DONE.run, id: 8, state: 'failed', trigger_identity: 'issue:8:run' } },
+      RUN_DONE,
+    ] });
+    const user = userEvent.setup();
+    openProbeDestination('circuits');
+
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+
+    const dismissAll = await screen.findByTestId('history-dismiss-all');
+    expect(dismissAll.textContent).toContain('Dismiss all (2)');
+
+    // First click only arms the confirmation — nothing is dismissed yet.
+    await user.click(dismissAll);
+    await screen.findByTestId('history-dismiss-all-confirm');
+    expect(invoke).not.toHaveBeenCalledWith('dismiss_all_circuit_run_attention', expect.anything());
+
+    await user.click(screen.getByTestId('history-dismiss-all-confirm'));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('dismiss_all_circuit_run_attention', { meshId: 42 });
+    });
+    // The backend picks the rows in SQL; the UI must not send an id list that
+    // could drift from the predicate it is counting.
+    expect(invoke).not.toHaveBeenCalledWith('dismiss_circuit_run_attention', expect.anything());
+  });
+
+  it('lets a confirmed bulk dismissal be abandoned', async () => {
+    mockBackend({ runs: [
+      { ...RUN_DONE, run: { ...RUN_DONE.run, id: 9, state: 'failed', trigger_identity: 'issue:9:run' } },
+    ] });
+    const user = userEvent.setup();
+    openProbeDestination('circuits');
+
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+    await user.click(await screen.findByTestId('history-dismiss-all'));
+    await user.click(screen.getByTestId('history-dismiss-all-cancel'));
+
+    await screen.findByTestId('history-dismiss-all');
+    expect(invoke).not.toHaveBeenCalledWith('dismiss_all_circuit_run_attention', expect.anything());
+  });
+
+  it('offers no bulk dismissal when nothing is asking for attention', async () => {
+    mockBackend({ runs: [RUN_DONE] });
+    openProbeDestination('circuits');
+
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+    await screen.findByTestId('run-card-11');
+    expect(screen.queryByTestId('history-dismiss-all')).toBeNull();
   });
 
   it('reorders queue ids purely for drag-drop', async () => {

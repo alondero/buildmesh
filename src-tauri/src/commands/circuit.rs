@@ -72,6 +72,53 @@ pub fn circuit_run_attention(
     crate::db::circuit::evidence::attention(run_id)
 }
 
+/// Acknowledge (or un-acknowledge) one run's outstanding attention.
+///
+/// Purely a notification flag: no run state, step or review verdict changes, so
+/// the card still reports *why* it wants attention while the run stops being
+/// sorted/filtered/counted as outstanding. Emitted so open Probes re-read rather
+/// than showing a stale count.
+#[command]
+pub fn dismiss_circuit_run_attention(
+    app: AppHandle,
+    run_id: i64,
+    dismissed: Option<bool>,
+) -> Result<(), String> {
+    crate::db::dismiss_circuit_run_attention(run_id, dismissed.unwrap_or(true))
+        .map(|_| ())
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit(
+        "circuit-run-updated",
+        crate::services::circuit_worker::CircuitRunUpdatedPayload {
+            run_id,
+            state: "attention-dismissed".into(),
+        },
+    );
+    Ok(())
+}
+
+/// Acknowledge every outstanding attention run on a mesh — the History tab's
+/// "Dismiss all (N)". Returns how many runs changed so the UI can report the
+/// real number instead of an optimistic one.
+///
+/// Selection happens in SQL against the same predicate that decides which runs
+/// are surfaced, keeping it in step with what History called attention.
+#[command]
+pub fn dismiss_all_circuit_run_attention(app: AppHandle, mesh_id: i64) -> Result<usize, String> {
+    let changed =
+        crate::db::dismiss_all_circuit_run_attention(mesh_id).map_err(|e| e.to_string())?;
+    if changed > 0 {
+        let _ = app.emit(
+            "circuit-runs-attention-dismissed",
+            crate::services::circuit_worker::CircuitRunAttentionDismissedPayload {
+                mesh_id,
+                changed,
+            },
+        );
+    }
+    Ok(changed)
+}
+
 /// Retry a failed run's failed step, or record that the person finished it, and
 /// reopen the run. The worker is woken so it re-enters the queue promptly.
 #[command]

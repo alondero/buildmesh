@@ -34,6 +34,7 @@ const RUN: CircuitRunDetail = {
       'node.verdict.review_verdict_attempt': '2',
     }),
     created_at: '2026-08-22 10:05:00', updated_at: '2026-08-22 10:06:00',
+    attention_dismissed_at: null,
   },
   steps: [
     {

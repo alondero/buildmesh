@@ -153,7 +153,15 @@ use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
 /// attempted, nothing failed, no notification sent" via the COALESCE/NULL
 /// defaults, so a queue row left by an older build behaves exactly as it did
 /// before.
-pub(crate) const SCHEMA_VERSION: u32 = 47;
+///
+/// v48 — Acknowledged circuit-run attention: adds nullable
+/// `autopilot_circuit_runs.attention_dismissed_at` (unix seconds). Attention
+/// is *derived* from run state, review verdicts and step status, so a user who
+/// has already handled a run by hand had no way to say so. A non-NULL value is
+/// the user's acknowledgement that the remaining attention is understood; it
+/// suppresses the attention filter/count/sort while leaving run state, steps and
+/// verdicts as they were. Clearing it back to NULL restores the attention.
+pub(crate) const SCHEMA_VERSION: u32 = 48;
 
 // ---------------------------------------------------------------------------
 // ColumnSpec — one column the runner knows how to add and read back.
@@ -876,6 +884,19 @@ const SPECS: &[ColumnSpec] = &[
         column: "notified_at",
         type_with_default: "INTEGER NOT NULL DEFAULT 0",
         read_default: ReadDefault::CoalesceInt(0),
+    },
+    // ============================================================
+    // autopilot_circuit_runs
+    // ============================================================
+    // v48: the user's acknowledgement that a derived-attention run needs
+    // nothing further. Genuinely nullable — NULL *is* "still needs
+    // attention", so there is no COALESCE fallback that would invent one.
+    ColumnSpec {
+        version: 48,
+        table: "autopilot_circuit_runs",
+        column: "attention_dismissed_at",
+        type_with_default: "INTEGER",
+        read_default: ReadDefault::Nullable,
     },
     // ============================================================
     // autopilot_runs

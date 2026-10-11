@@ -66,6 +66,7 @@ import {
   cancelCircuitRuns,
   createCircuit,
   deleteCircuit,
+  dismissAllCircuitRunAttention,
   listCircuitProbe,
   moveCircuitRun,
   pauseCircuitRun,
@@ -400,6 +401,7 @@ export function CircuitsProbeTab() {
   const [confirmDeleteCircuitId, setConfirmDeleteCircuitId] = useState<number | null>(null);
   const [historySearch, setHistorySearch] = useState('');
   const [historyAttentionOnly, setHistoryAttentionOnly] = useState(false);
+  const [confirmDismissAllAttention, setConfirmDismissAllAttention] = useState(false);
   const [queueSelection, setQueueSelection] = useState<Set<number>>(new Set());
   const [queueVisibleCount, setQueueVisibleCount] = useState(QUEUE_PAGE_SIZE);
   const mountedRef = useRef(false);
@@ -687,6 +689,19 @@ export function CircuitsProbeTab() {
   const handleQueueMove = (runId: number, direction: 'up' | 'down' | 'top' | 'bottom') =>
     runAction(() => moveCircuitRun(runId, direction), { reloadOnError: true });
 
+  /**
+   * Acknowledge every outstanding attention run on this mesh. The backend picks
+   * the runs in SQL against the same predicate History uses to count them, so
+   * this cannot dismiss more (or fewer) than the number the button advertised.
+   * Dismissing changes no run state — the cards keep their diagnostics, they just
+   * stop sorting first, counting, and matching the Needs-attention filter.
+   */
+  const handleDismissAllAttention = () =>
+    runAction(async () => {
+      if (activeMeshId === null) return;
+      await dismissAllCircuitRunAttention(activeMeshId);
+    });
+
   const handleQueueDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
     if (!over || active.id === over.id || activeMeshId === null) return;
@@ -821,8 +836,45 @@ export function CircuitsProbeTab() {
               />
               Needs attention ({activityStats.historyAttentionCount})
             </label>
+            {activityStats.historyAttentionCount > 0 && (
+              confirmDismissAllAttention ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setConfirmDismissAllAttention(false);
+                      void handleDismissAllAttention();
+                    }}
+                    disabled={busy}
+                    data-testid="history-dismiss-all-confirm"
+                    className="px-1.5 py-0.5 text-2xs rounded-md bg-accent-cyan/15 text-accent-cyan disabled:opacity-40"
+                  >
+                    Dismiss {activityStats.historyAttentionCount}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDismissAllAttention(false)}
+                    disabled={busy}
+                    data-testid="history-dismiss-all-cancel"
+                    className="px-1.5 py-0.5 text-2xs rounded-md text-text-muted disabled:opacity-40"
+                  >
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmDismissAllAttention(true)}
+                  disabled={busy || activeMeshId === null}
+                  data-testid="history-dismiss-all"
+                  title="Acknowledge every run still asking for attention. The runs and their diagnostics stay; they stop sorting first and stop counting."
+                  className="px-1.5 py-0.5 text-2xs rounded-md text-accent-cyan hover:bg-accent-cyan/10 disabled:opacity-40"
+                >
+                  Dismiss all ({activityStats.historyAttentionCount})
+                </button>
+              )
+            )}
           </div>
-
         </div>
       )}
       {view === 'queue' && queue.length > 0 && (

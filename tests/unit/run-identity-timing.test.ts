@@ -22,6 +22,7 @@ function run(over: Partial<AutopilotCircuitRun> = {}): AutopilotCircuitRun {
     context_json: '{}',
     created_at: '2026-10-05 14:09:09',
     updated_at: '2026-10-05 15:08:56',
+    attention_dismissed_at: null,
     ...over,
   };
 }

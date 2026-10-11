@@ -65,7 +65,9 @@ pub struct RecoveryRequest {
     #[ts(as = "i32")]
     pub expected_revision: i64,
     pub action: RecoveryAction,
-    // Required to continue (it is an attestation); optional for a retry.
+    // Optional for both actions. It annotates the history entry with *how* the
+    // operator resolved the step; the resolution itself is recorded either way,
+    // so an empty note is not a blocked action.
     #[serde(default)]
     pub reason: String,
 }
@@ -308,9 +310,6 @@ pub(crate) fn recover_failed_run_locked(
     request: &RecoveryRequest,
 ) -> Result<(), String> {
     let reason = request.reason.trim();
-    if request.action == RecoveryAction::Continue && reason.is_empty() {
-        return Err("Say what you did to finish this step, so the history shows it.".into());
-    }
     let tx = db.transaction().map_err(|e| e.to_string())?;
     let revision: i64 = tx
         .query_row(
@@ -418,13 +417,18 @@ pub(crate) fn recover_failed_run_locked(
                 format!("node.{}.status", request.node_id),
                 "completed".into(),
             );
+            let detail = if reason.is_empty() {
+                "Operator recorded this step as completed.".to_string()
+            } else {
+                format!("Operator-recorded outcome (Completed): {reason}")
+            };
             append_history(
                 &tx,
                 run.id,
                 Some(&request.node_id),
                 Some(request.attempt),
                 "operator_attestation",
-                &format!("Operator-recorded outcome (Completed): {reason}"),
+                &detail,
                 Some(SOURCE_OPERATOR),
                 Some("completed"),
             )
@@ -739,14 +743,6 @@ mod tests {
         let mut conn = fixture();
         failed_finish_run(&conn);
 
-        let missing_reason =
-            recover(&mut conn, "finish", RecoveryAction::Continue, "  ").unwrap_err();
-        assert!(
-            missing_reason.contains("Say what you did"),
-            "{missing_reason}"
-        );
-        assert_eq!(run_state(&conn), "failed", "nothing changed");
-
         recover(
             &mut conn,
             "finish",
@@ -769,6 +765,45 @@ mod tests {
             )
             .unwrap();
         assert!(detail.contains("I pasted the finish prompt myself"));
+        let effect: String = conn
+            .query_row(
+                "SELECT state FROM circuit_effects WHERE run_id=1 AND node_id='finish' AND kind='prompt'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(effect, "attested_completed");
+    }
+
+    /// A blank note is no longer a blocked action: the operator has already said
+    /// "I've done this" by pressing the button, and forcing prose they have
+    /// nothing useful to add is pure friction. The attestation is still recorded —
+    /// it just says so in its own words rather than quoting an empty string.
+    #[test]
+    fn continue_without_a_note_completes_the_step_and_still_records_the_attestation() {
+        let mut conn = fixture();
+        failed_finish_run(&conn);
+
+        recover(&mut conn, "finish", RecoveryAction::Continue, "  ").unwrap();
+
+        let (status, _, outcome, _) = step_row(&conn, "finish");
+        assert_eq!(
+            (status.as_str(), outcome.as_deref()),
+            ("completed", Some("completed")),
+            "a blank note must not stop the operator completing the step"
+        );
+        assert_eq!(run_state(&conn), "pending");
+        let detail: String = conn
+            .query_row(
+                "SELECT detail FROM circuit_run_history WHERE run_id=1 AND kind='operator_attestation'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            detail, "Operator recorded this step as completed.",
+            "the unattributed attestation is still recorded — it is never dropped"
+        );
         let effect: String = conn
             .query_row(
                 "SELECT state FROM circuit_effects WHERE run_id=1 AND node_id='finish' AND kind='prompt'",

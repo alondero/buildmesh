@@ -1,5 +1,5 @@
-/**
- * Tests for the circuit run-diagnostics helpers (issue #1468) — the
+﻿/**
+ * Tests for the circuit run-diagnostics helpers (issue #1468) â€” the
  * plain-English reading of a run's ledger that the Probe's run cards render.
  *
  * Split from `circuit-graph-model.test.ts` alongside the module itself: the
@@ -25,6 +25,7 @@ import {
   runBelongsToActivity,
   runBelongsToHistory,
   runNeedsAttention,
+  runNeedsOutstandingAttention,
   reviewResult,
   reviewCircuitMetadata,
   reviewCircuitForRun,
@@ -37,7 +38,7 @@ import { isTerminalRunState } from '../../src/components/Circuits/circuitGraphMo
 import type { CircuitWithRuns } from '../../src/types/generated/CircuitWithRuns';
 
 /**
- * Run diagnostics (issue #1468) — the plain-English reading of a ledger.
+ * Run diagnostics (issue #1468) â€” the plain-English reading of a ledger.
  * These are the wording rules the Probe's run cards render, kept pure so
  * the copy is testable without mounting the panel.
  */
@@ -54,9 +55,14 @@ describe('run diagnostics', () => {
     })).toBe(true);
   });
   const st = (node_id: string, status: string) => ({ node_id, status, error_message: null });
-  const detail = (id: number, state: string, updated_at = '2026-08-22 10:00:00') => ({
+  const detail = (
+    id: number,
+    state: string,
+    updated_at = '2026-08-22 10:00:00',
+    attention_dismissed_at: number | null = null,
+  ) => ({
     run: { id, circuit_id: 1, mesh_id: 1, state, trigger_identity: `run:${id}`, context_json: '{}',
-      source_agent_node_id: null, created_at: updated_at, updated_at },
+      source_agent_node_id: null, created_at: updated_at, updated_at, attention_dismissed_at },
     steps: [],
   });
   const row = (...runs: ReturnType<typeof detail>[]): CircuitWithRuns => ({
@@ -139,7 +145,7 @@ describe('run diagnostics', () => {
       expect(reviewResult(exhausted, reviewCircuit)?.label).toBe('Review limit reached');
       expect(reviewResult(exhausted)).toBeNull();
       expect(runNeedsAttention(exhausted, reviewCircuit)).toBe(true);
-      // Activity is strictly live (running/paused) — exhausted reviews
+      // Activity is strictly live (running/paused) â€” exhausted reviews
       // surface in History attention-first, not in Activity.
       expect(runBelongsToActivity(exhausted)).toBe(false);
       expect(runBelongsToHistory(exhausted)).toBe(true);
@@ -298,6 +304,44 @@ describe('run diagnostics', () => {
       expect(buildCircuitProbeRows([annotated], 'history', { search: 'approved' })[0].visibleRuns).toEqual([]);
       expect(buildCircuitProbeRows([annotated], 'history', { search: 'queue' })[0].visibleRuns).toHaveLength(1);
       expect(buildCircuitProbeRows([annotated], 'history', { search: 'buildmesh' })[0].visibleRuns).toHaveLength(1);
+
+    /**
+     * Acknowledging attention is a notification flag, not a rewrite. These two
+     * predicates exist as a pair precisely because a dismissed run must keep
+     * reporting *why* it wanted attention while ceasing to be outstanding.
+     */
+    describe('dismissed attention', () => {
+      it('keeps the derived reason but stops the run being outstanding', () => {
+        const acknowledged = detail(2, 'failed', '2026-08-22 10:02:00', 1_786_000_000);
+        expect(runNeedsAttention(acknowledged)).toBe(true);
+        expect(runNeedsOutstandingAttention(acknowledged)).toBe(false);
+
+        const outstanding = detail(2, 'failed');
+        expect(runNeedsOutstandingAttention(outstanding)).toBe(true);
+      });
+
+      it('drops an acknowledged run out of the attention filter and the count', () => {
+        const failed = detail(2, 'failed', '2026-08-22 10:02:00');
+        const acknowledged = detail(4, 'failed', '2026-08-22 10:01:00', 1_786_000_000);
+        const rows = buildCircuitProbeRows(
+          [row(failed, acknowledged)],
+          'history',
+          { attentionOnly: true },
+        );
+        expect(rows[0].visibleRuns.map((r) => r.run.id)).toEqual([2]);
+        expect(circuitActivityStats([row(failed, acknowledged)], 0).historyAttentionCount).toBe(1);
+      });
+
+      it('sorts an acknowledged run into the ordinary tail, not the top', () => {
+        const olderAcknowledged = detail(2, 'failed', '2026-08-22 10:01:00', 1_786_000_000);
+        const newerAcknowledged = detail(3, 'failed', '2026-08-22 10:05:00', 1_786_000_000);
+        const outstanding = detail(4, 'failed', '2026-08-22 10:00:00');
+        const ordered = buildCircuitProbeRows(
+          [row(olderAcknowledged, newerAcknowledged, outstanding)],
+          'history',
+        )[0].visibleRuns.map((r) => r.run.id);
+        expect(ordered).toEqual([4, 3, 2]);
+      });
     });
 
     it('flags a live run stale after the quiet window, never a terminal run', () => {
@@ -329,7 +373,7 @@ describe('run diagnostics', () => {
     it('does not straddle the minute boundary', () => {
       // Regression: the tier used to be chosen on raw ms (`safe < 60_000`)
       // while the label printed `toFixed(1)`, so 59_999ms passed the test
-      // but rendered "60.0s" — the sequence read "59.8s, 60.0s, 1m 0s".
+      // but rendered "60.0s" â€” the sequence read "59.8s, 60.0s, 1m 0s".
       // The boundary is now decided in deciseconds, the unit it prints, so
       // a value that would render as 60.0s is already in the minute tier.
       expect(formatDurationMs(59_940)).toBe('59.9s');
@@ -338,7 +382,7 @@ describe('run diagnostics', () => {
     });
 
     it('never formats a non-finite input as "NaNh NaNm"', () => {
-      // `Math.max(0, NaN)` is NaN, not 0 — the clamp does not sanitise, and
+      // `Math.max(0, NaN)` is NaN, not 0 â€” the clamp does not sanitise, and
       // NaN fails every `<` comparison, so it fell through to the hours
       // branch and printed "NaNh NaNm". The duration helpers return null
       // rather than NaN, so this guards future callers.
@@ -372,7 +416,7 @@ describe('run diagnostics', () => {
       ).toBe(300_000);
     });
 
-    it('treats paused as live — a paused run is still open', () => {
+    it('treats paused as live â€” a paused run is still open', () => {
       expect(
         runDurationMs(
           { state: 'paused', created_at: '2026-08-22 10:05:00', updated_at: '2026-08-22 10:07:00' },
@@ -389,7 +433,7 @@ describe('run diagnostics', () => {
       // The trap: V8's Date.parse accepts "2026-08-22 10:05:00" and reads
       // it as LOCAL time. The skew cancels when you subtract two ledger
       // timestamps (so stepDurationMs never noticed) but NOT when you
-      // compare one against `now` — which is exactly what a running run
+      // compare one against `now` â€” which is exactly what a running run
       // does. On a UTC+1 host this test read 65 minutes instead of 5.
       expect(
         runDurationMs(
@@ -397,8 +441,8 @@ describe('run diagnostics', () => {
           new Date('2026-08-22T10:05:30Z')
         )
       ).toBe(30_000);
-      // An explicitly-zoned ISO string keeps working — appending "Z" to it
-      // would produce "…ZZ" → NaN.
+      // An explicitly-zoned ISO string keeps working â€” appending "Z" to it
+      // would produce "â€¦ZZ" â†’ NaN.
       expect(
         runDurationMs(
           { state: 'running', created_at: '2026-08-22T10:05:00Z', updated_at: '2026-08-22T10:05:00Z' },
@@ -489,7 +533,7 @@ describe('run diagnostics', () => {
       expect(noSteps.nodeId).toBeNull();
       expect(noSteps.detail).toContain('before any step was recorded');
 
-      // Failed run, steps present, but none of them is the failure — the
+      // Failed run, steps present, but none of them is the failure â€” the
       // worker failed the run itself.
       const workerFailed = runActivity(
         { state: 'failed' },
@@ -501,7 +545,7 @@ describe('run diagnostics', () => {
 
     it('does not blame the worker when an unapproved review ended the run', () => {
       // The review graph fails an exhausted (or blocked) run without ever
-      // writing a failed step — the ending is a gate *outcome*, and the
+      // writing a failed step â€” the ending is a gate *outcome*, and the
       // card's review line states it. The generic fallback must stay quiet
       // rather than claim the worker failed the run for no visible reason.
       const steps = [st('verdict', 'completed'), st('retry', 'completed')];
@@ -539,7 +583,7 @@ describe('run diagnostics', () => {
       // "Waiting to start" and nothing else. After #1467 the run is
       // parked against the mesh's circuit-run budget, so the activity
       // detail names that budget and how many concurrent runs the mesh
-      // allows — the run card user can act on that.
+      // allows â€” the run card user can act on that.
       const fullMesh = runActivity(
         { state: 'pending' },
         [],
@@ -547,7 +591,7 @@ describe('run diagnostics', () => {
       );
       expect(fullMesh).toMatchObject({ kind: 'idle', label: 'Waiting to start', nodeId: null });
       expect(fullMesh.detail).toBe(
-        'Waiting for a circuit-run slot — all 2 of this mesh\'s circuit-run slots are busy.'
+        'Waiting for a circuit-run slot â€” all 2 of this mesh\'s circuit-run slots are busy.'
       );
 
       // Singular copy when the mesh allows only one run.
@@ -557,7 +601,7 @@ describe('run diagnostics', () => {
         { meshRunCapacity: 1, meshActiveRuns: 1 }
       );
       expect(singularFull.detail).toBe(
-        'Waiting for a circuit-run slot — this mesh allows 1 concurrent run, and that slot is busy.'
+        'Waiting for a circuit-run slot â€” this mesh allows 1 concurrent run, and that slot is busy.'
       );
     });
 
@@ -579,7 +623,7 @@ describe('run diagnostics', () => {
       // has exactly one reason to park a step: no free agent slot in the
       // run's lease (or the optional app-wide pool).
       expect(queuedReason()).toBe(
-        "Waiting for a circuit agent slot — this run's agent lease, or the app-wide agent pool, has no free slot."
+        "Waiting for a circuit agent slot â€” this run's agent lease, or the app-wide agent pool, has no free slot."
       );
     });
 
@@ -619,7 +663,7 @@ describe('run diagnostics', () => {
 
   describe('countActiveRuns (issue #1467 / #1475)', () => {
     it('counts running + paused runs across the mesh', () => {
-      // Mirrors `db::count_active_circuit_runs` semantics — `running`
+      // Mirrors `db::count_active_circuit_runs` semantics â€” `running`
       // and `paused` admit, `pending` and terminal states do not.
       expect(
         countActiveRuns([
@@ -634,7 +678,7 @@ describe('run diagnostics', () => {
     });
 
     it('counts an empty ledger as zero rather than undefined', () => {
-      // A mesh with no circuits still has a zero admission count —
+      // A mesh with no circuits still has a zero admission count â€”
       // mirrors the backend's empty-aggregate behaviour.
       expect(countActiveRuns([])).toBe(0);
     });
@@ -648,7 +692,7 @@ describe('run diagnostics', () => {
           meshActiveRuns: 2,
         })
       ).toBe(
-        "Waiting for a circuit-run slot — all 2 of this mesh's circuit-run slots are busy."
+        "Waiting for a circuit-run slot â€” all 2 of this mesh's circuit-run slots are busy."
       );
     });
 
@@ -661,13 +705,13 @@ describe('run diagnostics', () => {
           meshActiveRuns: 1,
         })
       ).toBe(
-        'Waiting for a circuit-run slot — this mesh allows 1 concurrent run, and that slot is busy.'
+        'Waiting for a circuit-run slot â€” this mesh allows 1 concurrent run, and that slot is busy.'
       );
     });
 
     it('hedges a zero capacity rather than claiming a busy budget', () => {
       // A `meshRunCapacity === 0` should not happen on a healthy mesh
-      // (the column is `1..=8` per #1467), but render defensively — the
+      // (the column is `1..=8` per #1467), but render defensively â€” the
       // rather than "all 0 slots are busy".
       expect(
         pendingAdmissionDetail({
@@ -679,8 +723,8 @@ describe('run diagnostics', () => {
 
     it('says why the run is still pending when the mesh has spare capacity', () => {
       // A `pending` run with `meshActiveRuns < meshRunCapacity` is a
-      // transient mid-tick state. State what we see — admission is
-      // re-checked every 2 s — rather than fabricate a budget reason.
+      // transient mid-tick state. State what we see â€” admission is
+      // re-checked every 2 s â€” rather than fabricate a budget reason.
       expect(
         pendingAdmissionDetail({
           meshRunCapacity: 2,
@@ -692,7 +736,7 @@ describe('run diagnostics', () => {
     it('uses a visually distinct vocabulary from the queued-step copy (#1467 AC)', () => {
       // Per #1467's own AC: the capacity concepts must read unambiguously
       // as different budgets. The pending copy says "circuit-run slot(s)",
-      // the queued copy says "circuit agent slot" — no overlap.
+      // the queued copy says "circuit agent slot" â€” no overlap.
       const pendingCopy = pendingAdmissionDetail({
         meshRunCapacity: 2,
         meshActiveRuns: 2,

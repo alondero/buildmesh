@@ -67,6 +67,7 @@ const RUN_DONE: CircuitRunDetail = {
     source_agent_node_id: null,
     created_at: '2026-08-22 10:05:00',
     updated_at: '2026-08-22 10:07:00',
+    attention_dismissed_at: null,
   },
   steps: [],
 };

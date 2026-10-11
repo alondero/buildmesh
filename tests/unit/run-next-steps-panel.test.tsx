@@ -28,6 +28,7 @@ const run = (over: Partial<AutopilotCircuitRun> = {}): AutopilotCircuitRun => ({
   context_json: '{}',
   created_at: '2026-10-05 12:00:00',
   updated_at: '2026-10-05 12:30:00',
+  attention_dismissed_at: null,
   ...over,
 });
 
@@ -129,19 +130,20 @@ describe('a failed run', () => {
     await waitFor(() => expect(vi.mocked(circuitRunAttention).mock.calls.length).toBeGreaterThan(1));
   });
 
-  it('will not record that the person finished the step without a note saying what they did', async () => {
+  it('records a note when one is given, and never blocks the action on having one', async () => {
     vi.mocked(circuitRunAttention).mockResolvedValue(recoverable());
     renderPanel();
 
     fireEvent.click(await screen.findByTestId('run-recover-continue-7'));
     const confirm = screen.getByTestId('run-recover-confirm-7') as HTMLButtonElement;
-    expect(confirm.disabled).toBe(true);
+    // The person already said "I've done this" by pressing the button; making
+    // them invent prose they have nothing useful to add is pure friction.
+    expect(confirm.disabled).toBe(false);
     expect(recoverFailedCircuitRun).not.toHaveBeenCalled();
 
     fireEvent.change(screen.getByTestId('run-recover-note-7'), {
       target: { value: 'Pasted the finish prompt into the terminal myself' },
     });
-    expect(confirm.disabled).toBe(false);
     fireEvent.click(confirm);
 
     await waitFor(() =>
@@ -153,6 +155,21 @@ describe('a failed run', () => {
         action: 'continue',
         reason: 'Pasted the finish prompt into the terminal myself',
       }),
+    );
+  });
+
+  it('continues with an empty note rather than stranding the operator on a text box', async () => {
+    vi.mocked(circuitRunAttention).mockResolvedValue(recoverable());
+    renderPanel();
+
+    fireEvent.click(await screen.findByTestId('run-recover-continue-7'));
+    fireEvent.change(screen.getByTestId('run-recover-note-7'), { target: { value: '   ' } });
+    fireEvent.click(screen.getByTestId('run-recover-confirm-7'));
+
+    await waitFor(() =>
+      expect(recoverFailedCircuitRun).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'continue', reason: '   ' }),
+      ),
     );
   });
 
@@ -261,7 +278,7 @@ describe('a running run waiting on evidence', () => {
     );
   });
 
-  it('recording a result asks what you checked first, and sends the note', async () => {
+  it('recording a result offers an optional note box, and sends it when given', async () => {
     vi.mocked(circuitRunAttention).mockResolvedValue(checkpointed());
     renderPanel({ state: 'running' }, waiting);
 
@@ -269,10 +286,10 @@ describe('a running run waiting on evidence', () => {
     expect(screen.queryByTestId('run-checkpoint-note-7')).toBeNull();
     fireEvent.click(await screen.findByTestId('run-checkpoint-7-review_classifier-completed'));
     const confirm = screen.getByTestId('run-checkpoint-confirm-7') as HTMLButtonElement;
-    expect(confirm.disabled).toBe(true);
+    // A note annotates the history when given; it never gates the record.
+    expect(confirm.disabled).toBe(false);
     expect(recordCircuitOutcome).not.toHaveBeenCalled();
     fireEvent.change(screen.getByTestId('run-checkpoint-note-7'), { target: { value: 'Read the reviewer report; it is final.' } });
-    expect(confirm.disabled).toBe(false);
     fireEvent.click(confirm);
 
     await waitFor(() =>

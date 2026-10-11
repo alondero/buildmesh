@@ -58,6 +58,13 @@ pub struct AutopilotCircuitRun {
     pub context_json: String,
     pub created_at: String,
     pub updated_at: String,
+    /// Unix seconds at which the user acknowledged this run's attention, or
+    /// `None` when it is still outstanding. Attention is derived from state,
+    /// verdict and step status; this records only that the user has seen the
+    /// remainder and needs nothing further. It changes no run state, and
+    /// clearing it back to `None` restores the attention.
+    #[ts(as = "Option<i32>")]
+    pub attention_dismissed_at: Option<i64>,
 }
 
 /// One Circuit Step — a single circuit node's execution within a run.
