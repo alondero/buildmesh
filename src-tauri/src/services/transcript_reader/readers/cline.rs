@@ -71,9 +71,7 @@
 //! would truncate a document that has to be parsed whole. A native turn boundary
 //! is a non-goal here, not an oversight.
 
-use crate::services::transcript_reader::adapter::{
-    LocateCtx, TranscriptAdapter,
-};
+use crate::services::transcript_reader::adapter::{LocateCtx, TranscriptAdapter};
 use crate::services::transcript_reader::types::{
     cap_tool_calls, push_bounded, truncate, truncate_json_strings, Parsed, ToolCall, Turn,
     MAX_TOOL_STRING,
@@ -120,6 +118,29 @@ impl TranscriptAdapter for ClineAdapter {
         self.read_tail(path, session_id, 1)
     }
 
+    fn naming_dialogue(
+        &self,
+        path: &Path,
+        _session_id: &str,
+    ) -> Result<Vec<Turn>, super::super::UnavailableReason> {
+        use super::super::UnavailableReason;
+        let file = std::fs::File::open(path).map_err(|_| UnavailableReason::Unreadable)?;
+        let document: Value = serde_json::from_reader(std::io::BufReader::new(file))
+            .map_err(|_| UnavailableReason::ShapeChanged)?;
+        if document.get("version").and_then(Value::as_i64) != Some(CLINE_MESSAGES_VERSION) {
+            return Err(UnavailableReason::ShapeChanged);
+        }
+        let messages = document
+            .get("messages")
+            .and_then(Value::as_array)
+            .ok_or(UnavailableReason::ShapeChanged)?;
+        let mut turns = Vec::new();
+        let parsed =
+            parse_cline_turns(messages, messages.len(), super::super::types::MAX_TURN_TEXT);
+        super::super::types::append_naming_turns(&mut turns, parsed.turns);
+        Ok(turns)
+    }
+
     fn assistant_report(
         &self,
         _path: &Path,
@@ -137,7 +158,6 @@ impl TranscriptAdapter for ClineAdapter {
         // observation, which is the honest answer for Cline.
         false
     }
-
 }
 
 // ── Locator (issue #1776) ───────────────────────────────────────────────

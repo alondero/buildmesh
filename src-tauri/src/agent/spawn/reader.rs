@@ -296,22 +296,6 @@ pub fn pump_pty_output(mut reader: Box<dyn std::io::Read + Send>, mut on_chunk: 
     }
 }
 
-/// Buffer a PTY chunk for session auto-naming — every chunk for LLM
-/// providers, never for a plain terminal. A terminal's rename buffer is
-/// never consumed: the rename LLM only fires from `on_turn`, which only
-/// the Claude stop hook calls. Ungated, each Terminal node would retain
-/// up to `MAX_BUFFER_CHARS` and contend the global NAMING mutex on every
-/// chunk for the node's whole lifetime (issue #296).
-///
-/// Extracted from `start_reader`'s pump callback so the gate is
-/// unit-testable without standing up an AppHandle / PTY (same seam
-/// pattern as `resolve_base_ref_for_spawn`).
-pub(crate) fn maybe_buffer_for_naming(is_plain_terminal: bool, session_id: i64, text: &str) {
-    if !is_plain_terminal {
-        crate::session_naming::on_output(session_id, text);
-    }
-}
-
 /// Start the PTY reader thread. Returns the `JoinHandle` so the caller
 /// can store it on `AgentProcess` and let `kill_session` join with a
 /// bounded timeout (issue #300).
@@ -363,7 +347,7 @@ pub(super) fn start_reader(
     // `session id: <uuid>` regex can match a banner that straddles an
     // 8 KiB read boundary, and so multi-byte UTF-8 sequences split
     // across reads aren't corrupted to U+FFFD before being handed to
-    // `session_naming::on_output` and `circuit::evaluator::on_output`.
+    // `circuit::evaluator::on_output`.
     // `captured` is a plain `bool` (not `AtomicBool`) because the
     // reader thread is the only writer — the `AtomicBool` here used to
     // be load-bearing for `start_reader`'s outer scope but it's now
@@ -426,7 +410,6 @@ pub(super) fn start_reader(
                     crate::services::pool_worker::note_activity_for_mesh(mesh_id);
 
                     let (text, uuid) = chunk_capture.feed(data);
-                    maybe_buffer_for_naming(is_plain_terminal, session_id, &text);
                     // Autopilot state evaluator tail (issue #483) — one in-memory
                     // set lookup for non-piloted nodes.
                     crate::circuit::evaluator::on_output(session_id, &text);

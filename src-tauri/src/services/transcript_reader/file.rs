@@ -18,6 +18,63 @@ fn parse<R: TranscriptReader + ?Sized>(
     reader.parse(Box::new(lines), keep, MAX_TURN_TEXT)
 }
 
+/// Replay exponentially growing, bounded prefixes through the normal parser so
+/// split messages retain their harness-owned coalescing. A fifth text message
+/// closes the fourth; tool-only turns do not consume the dialogue budget.
+pub(super) fn naming_dialogue<R: TranscriptReader + ?Sized>(
+    adapter: &R,
+    path: &Path,
+) -> Result<Vec<super::Turn>, UnavailableReason> {
+    let file = fs::File::open(path).map_err(|_| UnavailableReason::Unreadable)?;
+    const MAX_BYTES: u64 = 1024 * 1024;
+    let capped = file
+        .metadata()
+        .map_err(|_| UnavailableReason::Unreadable)?
+        .len()
+        > MAX_BYTES;
+    let mut input = BufReader::new(file.take(MAX_BYTES));
+    let mut lines = Vec::new();
+    loop {
+        let mut bytes = Vec::new();
+        if input
+            .read_until(b'\n', &mut bytes)
+            .map_err(|_| UnavailableReason::Unreadable)?
+            == 0
+        {
+            break;
+        }
+        // Drop a cap-split record before decoding: the cut may bisect UTF-8.
+        if capped && !bytes.ends_with(b"\n") {
+            break;
+        }
+        lines.push(String::from_utf8(bytes).map_err(|_| UnavailableReason::Unreadable)?);
+        if lines.len().is_power_of_two() {
+            let (turns, complete) = naming_prefix(adapter, &lines);
+            if complete {
+                return Ok(turns);
+            }
+        }
+    }
+    Ok(naming_prefix(adapter, &lines).0)
+}
+
+fn naming_prefix<R: TranscriptReader + ?Sized>(
+    adapter: &R,
+    lines: &[String],
+) -> (Vec<super::Turn>, bool) {
+    let parsed = parse(adapter, lines.iter().cloned(), lines.len().max(1));
+    let text_turns: Vec<_> = parsed
+        .turns
+        .into_iter()
+        .skip_while(|turn| turn.role != "user" || turn.text.trim().is_empty())
+        .filter(|turn| !turn.text.trim().is_empty())
+        .collect();
+    let complete = text_turns.len() > 4;
+    let mut turns = Vec::new();
+    super::types::append_naming_turns(&mut turns, text_turns);
+    (turns, complete)
+}
+
 pub(super) fn read_tail<R: TranscriptReader + ?Sized>(
     adapter: &R,
     path: &Path,

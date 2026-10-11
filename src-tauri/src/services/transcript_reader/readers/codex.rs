@@ -174,7 +174,9 @@ fn subdirs_sorted_desc(dir: &Path) -> Vec<PathBuf> {
 /// turns, mirroring [`super::super::is_synthetic_message`] for Claude Code.
 fn is_codex_synthetic(text: &str) -> bool {
     let t = text.trim_start();
-    t.starts_with("<user_instructions>") || t.starts_with("<environment_context>")
+    t.starts_with("<user_instructions>")
+        || t.starts_with("<environment_context>")
+        || (t.starts_with("# AGENTS.md instructions for ") && t.contains("<INSTRUCTIONS>"))
 }
 
 /// Pull the text out of a Codex message `content` array. Codex types its

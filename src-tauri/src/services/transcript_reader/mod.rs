@@ -171,6 +171,37 @@ pub fn read_tail(
     )
 }
 
+pub(crate) fn read_naming_dialogue(
+    format: TranscriptFormat,
+    session_id: Option<&str>,
+    node_path: &str,
+) -> TranscriptTail {
+    match resolve(format, session_id, node_path)
+        .and_then(|(path, id)| reader(format).naming_dialogue(&path, id))
+    {
+        Ok(turns) => TranscriptTail::Available {
+            turns,
+            last_assistant_message: None,
+        },
+        Err(reason) => TranscriptTail::unavailable(reason),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn read_naming_from_file(
+    path: &Path,
+    session_id: &str,
+    format: TranscriptFormat,
+) -> TranscriptTail {
+    match reader(format).naming_dialogue(path, session_id) {
+        Ok(turns) => TranscriptTail::Available {
+            turns,
+            last_assistant_message: None,
+        },
+        Err(reason) => TranscriptTail::unavailable(reason),
+    }
+}
+
 /// Read an explicit transcript store through the same reader as production.
 #[cfg_attr(
     not(test),

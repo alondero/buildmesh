@@ -182,6 +182,19 @@ pub struct Turn {
     pub tool_calls: Vec<ToolCall>,
 }
 
+pub(super) fn append_naming_turns(out: &mut Vec<Turn>, turns: Vec<Turn>) {
+    for mut turn in turns {
+        if out.len() == 4 {
+            break;
+        }
+        if turn.text.trim().is_empty() || (out.is_empty() && turn.role != "user") {
+            continue;
+        }
+        turn.tool_calls.clear();
+        out.push(turn);
+    }
+}
+
 /// Why a transcript could not be read. Typed so the Coordinator can tell a
 /// genuinely-quiet node from a degraded rich layer (ADR-0008 §3) — never a
 /// panic, never a silent empty result.

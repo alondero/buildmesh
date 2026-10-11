@@ -60,7 +60,7 @@ async fn codex_background_naming_reads_the_final_file_and_preserves_saved_settin
     if cfg!(windows) {
         std::fs::write(&script, format!(
             "$promptText = [Console]::In.ReadToEnd()\n\
-             if (-not $promptText.Contains('Terminal log to summarize:')) {{ exit 9 }}\n\
+             if (-not $promptText.Contains('Conversation messages (JSON):')) {{ exit 9 }}\n\
              if (-not $promptText.Contains('fix background naming')) {{ exit 8 }}\n\
              if ($env:OPENAI_API_KEY -or $env:OPENAI_BASE_URL -or $env:BUILDMESH_SESSION_ID) {{ exit 7 }}\n\
              [IO.File]::WriteAllLines({}, [string[]]$args)\n\
@@ -71,7 +71,7 @@ async fn codex_background_naming_reads_the_final_file_and_preserves_saved_settin
         )).unwrap();
     } else {
         std::fs::write(&script, format!(
-            "#!/bin/sh\ninput=$(cat)\ncase \"$input\" in *'Terminal log to summarize:'*'fix background naming'*) ;; *) exit 9;; esac\n\
+            "#!/bin/sh\ninput=$(cat)\ncase \"$input\" in *'Conversation messages (JSON):'*'fix background naming'*) ;; *) exit 9;; esac\n\
              [ -z \"$OPENAI_API_KEY$OPENAI_BASE_URL$BUILDMESH_SESSION_ID\" ] || exit 7\n\
              printf '%s\\n' \"$@\" > {}\nwhile [ \"$#\" -gt 0 ]; do\n\
              if [ \"$1\" = '--output-last-message' ]; then shift; printf fix-background-naming > \"$1\"; break; fi\n\
@@ -113,43 +113,8 @@ async fn codex_background_naming_reads_the_final_file_and_preserves_saved_settin
     assert_eq!(args.last(), Some(&"-"));
 }
 
-/// Open the buffering gate for a node so `on_output` writes immediately.
-/// Real code opens the gate via `should_trigger_rename`; tests use this
-/// to simulate "the agent has already had at least one turn".
-fn open_gate(node_id: i64) {
-    naming().entry(node_id).or_default().buffering_ready = true;
-}
-
-/// The node's accumulated buffer, or `None` if it has no naming state.
-fn buffer_of(node_id: i64) -> Option<String> {
-    naming().get(&node_id).map(|st| st.buffer.clone())
-}
-
-/// Whether the buffering gate is open for the node.
-fn gate_open(node_id: i64) -> bool {
-    naming()
-        .get(&node_id)
-        .map(|st| st.buffering_ready)
-        .unwrap_or(false)
-}
-
-/// Whether the node has any naming state at all.
 fn has_state(node_id: i64) -> bool {
     naming().contains_key(&node_id)
-}
-
-fn set_renaming_in_progress(node_id: i64) {
-    naming().entry(node_id).or_default().renaming = true;
-}
-
-fn clear_renaming_in_progress(node_id: i64) {
-    if let Some(st) = naming().get_mut(&node_id) {
-        st.renaming = false;
-    }
-}
-
-fn set_attempts(node_id: i64, n: u8) {
-    naming().entry(node_id).or_default().attempts = n;
 }
 
 #[test]
@@ -755,198 +720,16 @@ fn slug_with_retry_does_not_flag_short_non_slug_as_conversational() {
 }
 
 #[test]
-fn buffer_caps_at_max() {
-    open_gate(999);
-    let big = "x".repeat(5000);
-    on_output(999, &big);
-    assert!(buffer_of(999).unwrap().len() <= MAX_BUFFER_CHARS);
-}
-
-#[test]
 fn slug_with_retry_extracts_hyphenated_from_prose() {
     let result = slug_with_retry("Based on the session, a good name would be: improve-auth-flow");
     assert!(result.is_ok());
-}
-
-#[test]
-fn stale_buffer_cleared_on_cleanup() {
-    open_gate(5);
-    let stale_text = "old context from a previous archived session";
-    on_output(5, stale_text);
-    assert!(buffer_of(5).is_some(), "precondition: buffer exists");
-
-    cleanup(5);
-
-    assert!(
-        buffer_of(5).is_none(),
-        "node 5's buffer should be cleared by cleanup"
-    );
-}
-
-#[test]
-fn cleanup_only_clears_target_session() {
-    open_gate(5);
-    open_gate(99);
-    on_output(5, "session 5 output");
-    on_output(99, "session 99 output");
-
-    cleanup(5);
-
-    assert!(buffer_of(5).is_none());
-    assert!(buffer_of(99).is_some(), "session 99 buffer should survive");
-    cleanup(99);
-}
-
-#[test]
-fn cleanup_is_idempotent() {
-    open_gate(8);
-    on_output(8, "some output");
-
-    cleanup(8);
-    cleanup(8); // second call must not panic
-
-    assert!(buffer_of(8).is_none());
-}
-
-#[test]
-fn buffer_truncation_splits_multibyte_utf8_correctly() {
-    let node_id = 77;
-    open_gate(node_id);
-    let base = "x".repeat(4000);
-    let with_kanji = format!("{}{}", base, "日本");
-
-    on_output(node_id, &with_kanji);
-
-    let buf = buffer_of(node_id).unwrap();
-
-    assert!(buf.len() <= MAX_BUFFER_CHARS);
-    assert!(std::str::from_utf8(buf.as_bytes()).is_ok());
-}
-
-#[test]
-fn on_output_drops_data_until_gate_opens() {
-    // Distinct id to avoid cross-test contamination with shared statics
-    let node_id = 4242;
-    cleanup(node_id);
-
-    // Before any Node Turn, all output is discarded — this is the
-    // bypass-permissions-warning fix: chrome printed at startup never
-    // reaches the renaming buffer.
-    on_output(node_id, "chrome chrome chrome");
-    on_output(node_id, "Bypass Permissions warning text...");
-
-    assert!(
-        buffer_of(node_id).is_none(),
-        "buffer must stay empty before gate opens"
-    );
-
-    // Now the gate flips (simulating first idle_prompt webhook)
-    open_gate(node_id);
-
-    on_output(node_id, "real user content");
-    assert_eq!(
-        buffer_of(node_id).as_deref(),
-        Some("real user content"),
-        "post-gate output must accumulate, no chrome contamination"
-    );
-    cleanup(node_id);
-}
-
-#[test]
-fn on_output_accumulates_after_gate_opens() {
-    open_gate(42);
-    on_output(42, "first output");
-    on_output(42, "second output");
-
-    assert_eq!(
-        buffer_of(42).as_deref(),
-        Some("first outputsecond output"),
-        "on_output should accumulate once the gate is open"
-    );
-}
-
-// --- Plain-terminal naming gate (issue #296) ---
-
-/// A plain Terminal node's PTY chunks must never reach the rename
-/// buffer: the buffer is consumed only by the rename LLM, which fires
-/// from `on_turn` — and only the Claude stop hook calls that. Ungated,
-/// every Terminal chunk would take the global NAMING mutex and retain
-/// up to MAX_BUFFER_CHARS for the node's whole lifetime.
-///
-/// The provider gate lives in the spawn reader callback
-/// (`agent::spawn::maybe_buffer_for_naming`); drive it with the node's
-/// buffering gate open — the state where `on_output` WOULD write — so
-/// this pin fails if the provider gate is ever bypassed.
-#[test]
-fn plain_terminal_output_never_reaches_rename_buffer() {
-    let node_id = 70296;
-    cleanup(node_id);
-    open_gate(node_id);
-
-    crate::agent::spawn::maybe_buffer_for_naming(true, node_id, "user typed: ls -la\n");
-
-    assert!(
-        buffer_of(node_id).as_deref().unwrap_or("").is_empty(),
-        "terminal node output must not reach the rename buffer, got: {:?}",
-        buffer_of(node_id)
-    );
-    cleanup(node_id);
-}
-
-/// Counterpart pin: the #296 gate must not swallow LLM providers'
-/// chunks — `on_output` still fires on every chunk once the node's
-/// buffering gate is open.
-#[test]
-fn llm_provider_output_still_reaches_rename_buffer() {
-    let node_id = 71296;
-    cleanup(node_id);
-    open_gate(node_id);
-
-    crate::agent::spawn::maybe_buffer_for_naming(false, node_id, "assistant reply chunk");
-
-    assert_eq!(
-        buffer_of(node_id).as_deref(),
-        Some("assistant reply chunk"),
-        "LLM provider output must keep accumulating after the #296 gate"
-    );
-    cleanup(node_id);
-}
-
-#[test]
-fn reset_buffers_removes_only_target() {
-    open_gate(5);
-    open_gate(99);
-    on_output(5, "session 5 output");
-    on_output(99, "session 99 output");
-
-    reset_buffers(5);
-
-    assert!(buffer_of(5).is_none());
-    assert!(buffer_of(99).is_some());
-    cleanup(99);
-}
-
-#[test]
-fn reset_buffers_closes_gate_so_next_session_starts_fresh() {
-    // After a kill/resume cycle, the gate must close so the next agent's
-    // startup chrome is dropped just like the first time.
-    let node_id = 5151;
-    open_gate(node_id);
-    on_output(node_id, "turn-1 content");
-    reset_buffers(node_id);
-
-    // After reset, gate is closed — output is dropped until a new turn.
-    on_output(node_id, "resumed-agent startup chrome");
-    assert!(
-        buffer_of(node_id).is_none(),
-        "reset_buffers must also close the gate so resume-startup chrome is dropped"
-    );
 }
 
 // --- SessionNamingRepository mock tests ---
 
 struct MockRepo {
     node_name: String,
+    context: Option<String>,
     should_fail: bool,
     /// When true, `update_agent_node_name` returns `Err` without
     /// recording the call in `updates`. Distinct from `should_fail`
@@ -961,6 +744,7 @@ impl MockRepo {
     fn with_name(name: &str) -> Self {
         Self {
             node_name: name.to_string(),
+            context: Some(r#"[{"role":"user","text":"Fix login"}]"#.into()),
             should_fail: false,
             update_should_fail: false,
             updates: std::sync::Mutex::new(vec![]),
@@ -972,6 +756,7 @@ impl MockRepo {
     fn with_failing_update(name: &str) -> Self {
         Self {
             node_name: name.to_string(),
+            context: Some(r#"[{"role":"user","text":"Fix login"}]"#.into()),
             should_fail: false,
             update_should_fail: true,
             updates: std::sync::Mutex::new(vec![]),
@@ -980,6 +765,10 @@ impl MockRepo {
 }
 
 impl SessionNamingRepository for MockRepo {
+    fn naming_context(&self, _node: &AgentNode) -> Option<String> {
+        self.context.clone()
+    }
+
     fn get_agent_node_by_id(&self, id: i64) -> Result<AgentNode, String> {
         if self.should_fail {
             return Err("mock db error".into());
@@ -1002,242 +791,153 @@ impl SessionNamingRepository for MockRepo {
 }
 
 #[test]
-fn failed_backend_resolution_releases_rename_ownership_and_allows_repaired_configuration() {
-    let node_id = 70100;
-    cleanup(node_id);
+fn naming_uses_short_dialogue_on_first_turn() {
+    let id = 70999;
+    cleanup(id);
     let repo = MockRepo::with_name("bold-keen-brook");
-    let prefs = crate::preferences::AppPreferences::default();
-    let valid_plan = crate::preferences::launch_configurations::capture(
-        &prefs,
-        "codex",
-        &crate::preferences::launch_configurations::LaunchOverrides::default(),
-    )
-    .unwrap();
-    let buffer = "fix background naming\n".repeat(100);
-    open_gate(node_id);
-    on_output(node_id, &buffer);
+    let trigger = should_trigger_rename(&repo, id).unwrap();
+    assert_eq!(
+        trigger.dialogue,
+        "[{\"role\":\"user\",\"text\":\"Fix login\"}]"
+    );
+    assert!(
+        should_trigger_rename(&repo, id).is_none(),
+        "one in-flight rename"
+    );
+    cleanup(id);
+}
 
-    let mut invalid_plan = valid_plan.clone();
-    invalid_plan.extra_args = Some("--json".into());
-    let error = prepare_rename_with(&repo, node_id, || {
-        naming_backend_env_from_plan(invalid_plan, &prefs)
-    })
-    .err()
-    .expect("extra arguments must fail background resolution");
-    assert!(error.contains("remove extra CLI arguments"), "{error}");
-    {
-        let states = naming();
-        let state = states.get(&node_id).unwrap();
-        assert!(
-            !state.renaming,
-            "failed preflight must release rename ownership"
-        );
-        assert_eq!(
-            state.attempts, 0,
-            "configuration failures must not consume inference attempts"
-        );
-        assert!(state.buffering_ready);
-        assert_eq!(state.buffer, buffer);
+#[test]
+fn unavailable_dialogue_retries_without_spending_attempts() {
+    let id = 71000;
+    cleanup(id);
+    let mut repo = MockRepo::with_name("bold-keen-brook");
+    repo.context = None;
+    for _ in 0..5 {
+        assert!(should_trigger_rename(&repo, id).is_none());
+        assert_eq!(naming().get(&id).unwrap().attempts, 0);
+        assert!(!naming().get(&id).unwrap().renaming);
     }
+    repo.context = Some("actual task".into());
+    assert_eq!(
+        should_trigger_rename(&repo, id).unwrap().dialogue,
+        "actual task"
+    );
+    cleanup(id);
+}
 
-    let (trigger, _) = prepare_rename_with(&repo, node_id, || {
-        naming_backend_env_from_plan(valid_plan, &prefs)
-    })
-    .unwrap()
-    .expect("repairing configuration must let the same node retry");
-    assert_eq!(trigger.buffer, buffer);
-    assert!(naming().get(&node_id).unwrap().renaming);
+#[test]
+fn named_nodes_and_failed_reads_never_start_inference() {
+    let id = 71001;
+    cleanup(id);
+    assert!(should_trigger_rename(&MockRepo::with_name("my-task-name"), id).is_none());
+    assert!(!has_state(id));
+    let mut repo = MockRepo::with_name("bold-keen-brook");
+    repo.should_fail = true;
+    assert!(should_trigger_rename(&repo, id).is_none());
+    assert!(!has_state(id));
+}
+
+#[test]
+fn inference_failures_lock_out_until_reset() {
+    let id = 71002;
+    cleanup(id);
+    let repo = MockRepo::with_name("bold-keen-brook");
+    for attempt in 1..=MAX_RENAME_ATTEMPTS {
+        let trigger = should_trigger_rename(&repo, id).unwrap();
+        assert_eq!(record_failed_attempt(&trigger.reservation), Some(attempt));
+    }
+    assert!(should_trigger_rename(&repo, id).is_none());
+    reset_buffers(id);
+    assert!(should_trigger_rename(&repo, id).is_some());
+    cleanup(id);
+}
+
+#[test]
+fn stale_reservation_cannot_release_or_charge_resumed_naming() {
+    let id = 71004;
+    cleanup(id);
+    let repo = MockRepo::with_name("bold-keen-brook");
+    let old = should_trigger_rename(&repo, id).unwrap();
+    reset_buffers(id);
+    let current = should_trigger_rename(&repo, id).unwrap();
+    assert!(!old.reservation.is_current());
+    assert_eq!(record_failed_attempt(&old.reservation), None);
+    commit_rename(&repo, &old.reservation, "stale-task-name", |_| {
+        panic!("stale completion emitted")
+    });
     assert!(repo.updates.lock().unwrap().is_empty());
-    cleanup(node_id);
+    drop(old);
+    assert!(current.reservation.is_current());
+    assert!(should_trigger_rename(&repo, id).is_none());
+    assert_eq!(naming().get(&id).unwrap().attempts, 0);
+    drop(current);
+    assert!(should_trigger_rename(&repo, id).is_some());
+    cleanup(id);
 }
 
 #[test]
-fn should_trigger_rename_skips_already_renamed_node() {
-    let node_id = 70001;
-    open_gate(node_id);
-    on_output(node_id, &"x".repeat(2000));
-
-    let repo = MockRepo::with_name("fix-auth-token-refresh");
-    let result = should_trigger_rename(&repo, node_id);
-    assert!(result.is_none(), "should skip node with custom name");
-
-    assert!(buffer_of(node_id).is_none(), "buffer should be cleared");
-    assert!(
-        !gate_open(node_id),
-        "gate should be closed for renamed node"
+fn old_completion_after_new_success_cannot_restore_stale_name() {
+    let id = 71006;
+    cleanup(id);
+    let repo = MockRepo::with_name("bold-keen-brook");
+    let old = should_trigger_rename(&repo, id).unwrap();
+    reset_buffers(id);
+    let current = should_trigger_rename(&repo, id).unwrap();
+    let mut names = Vec::new();
+    commit_rename(&repo, &current.reservation, "new-task-name", |name| {
+        names.push(name.to_owned())
+    });
+    commit_rename(&repo, &old.reservation, "old-task-name", |_| {
+        panic!("old completion emitted")
+    });
+    assert_eq!(names, ["new-task-name"]);
+    assert_eq!(
+        *repo.updates.lock().unwrap(),
+        [(id, "new-task-name".to_owned())]
     );
+    assert_eq!(record_failed_attempt(&old.reservation), None);
+    assert!(!has_state(id));
 }
 
 #[test]
-fn should_trigger_rename_opens_gate_on_first_call_for_default_named_node() {
-    // First call (no gate yet) is the "discard startup chrome" turn.
-    // It opens the gate and returns None even if the buffer would have
-    // been large enough, because the buffer at this point would be chrome.
-    let node_id = 70002;
-    cleanup(node_id);
-
-    let repo = MockRepo::with_name("bold-keen-brook");
-    let result = should_trigger_rename(&repo, node_id);
-    assert!(
-        result.is_none(),
-        "first call must defer rename to open the gate"
-    );
-    assert!(gate_open(node_id), "gate must be open after first call");
-    cleanup(node_id);
+fn reset_during_transcript_read_discards_the_prepared_rename() {
+    struct ResetDuringRead(MockRepo);
+    impl SessionNamingRepository for ResetDuringRead {
+        fn get_agent_node_by_id(&self, id: i64) -> Result<AgentNode, String> {
+            self.0.get_agent_node_by_id(id)
+        }
+        fn update_agent_node_name(&self, id: i64, name: &str) -> Result<(), String> {
+            self.0.update_agent_node_name(id, name)
+        }
+        fn naming_context(&self, node: &AgentNode) -> Option<String> {
+            reset_buffers(node.id);
+            self.0.naming_context(node)
+        }
+    }
+    let id = 71005;
+    cleanup(id);
+    let repo = ResetDuringRead(MockRepo::with_name("bold-keen-brook"));
+    assert!(prepare_rename_with(&repo, id, || panic!(
+        "stale read must not resolve an inference backend"
+    ))
+    .unwrap()
+    .is_none());
+    assert!(!has_state(id));
 }
 
 #[test]
-fn should_trigger_rename_returns_buffer_on_second_call() {
-    let node_id = 70003;
-    cleanup(node_id);
-
+fn failed_backend_resolution_releases_rename_ownership() {
+    let id = 71003;
+    cleanup(id);
     let repo = MockRepo::with_name("bold-keen-brook");
-    // First call opens the gate, returns None
-    let first = should_trigger_rename(&repo, node_id);
-    assert!(first.is_none());
-
-    // Now real PTY output accumulates (gate is open)
-    on_output(node_id, &"x".repeat(2000));
-
-    // Second call sees the buffer and returns it for renaming
-    let second = should_trigger_rename(&repo, node_id);
-    assert!(second.is_some(), "second call should trigger rename");
-    assert_eq!(second.as_ref().unwrap().buffer.len(), 2000);
-
-    clear_renaming_in_progress(node_id);
-    cleanup(node_id);
-}
-
-#[test]
-fn should_trigger_rename_skips_insufficient_buffer() {
-    let node_id = 70004;
-    cleanup(node_id);
-    open_gate(node_id); // pretend gate already opened by an earlier turn
-    on_output(node_id, "short");
-
-    let repo = MockRepo::with_name("bold-keen-brook");
-    let result = should_trigger_rename(&repo, node_id);
-    assert!(result.is_none(), "should skip when buffer too small");
-    cleanup(node_id);
-}
-
-#[test]
-fn should_trigger_rename_skips_when_already_in_progress() {
-    let node_id = 70005;
-    cleanup(node_id);
-    open_gate(node_id);
-    on_output(node_id, &"x".repeat(2000));
-    set_renaming_in_progress(node_id);
-
-    let repo = MockRepo::with_name("bold-keen-brook");
-    let result = should_trigger_rename(&repo, node_id);
-    assert!(result.is_none(), "should skip when rename in progress");
-
-    clear_renaming_in_progress(node_id);
-    cleanup(node_id);
-}
-
-#[test]
-fn should_trigger_rename_skips_when_max_attempts_reached() {
-    let node_id = 70006;
-    cleanup(node_id);
-    open_gate(node_id);
-    on_output(node_id, &"x".repeat(2000));
-    set_attempts(node_id, MAX_RENAME_ATTEMPTS);
-
-    let repo = MockRepo::with_name("bold-keen-brook");
-    let result = should_trigger_rename(&repo, node_id);
-    assert!(result.is_none(), "should skip when max attempts reached");
-
-    cleanup(node_id);
-}
-
-/// Issue #824 follow-up: the rename-trigger return value hands back
-/// the harvested PTY buffer from the second `should_trigger_rename`
-/// call onward. The LLM-call backend is now resolved from
-/// `AppPreferences.naming_provider` in `on_turn_with`, so the
-/// trigger no longer carries the node's `provider`.
-#[test]
-fn should_trigger_rename_passes_buffer_through_on_second_call() {
-    let node_id = 70007;
-    cleanup(node_id);
-
-    let repo = MockRepo::with_name("bold-keen-brook");
-    // First call opens the gate; no RenameTrigger yet.
-    assert!(should_trigger_rename(&repo, node_id).is_none());
-    on_output(node_id, &"x".repeat(2000));
-
-    // Second call should hand back the harvested buffer.
-    let trigger = should_trigger_rename(&repo, node_id).expect("second call should trigger rename");
-    assert_eq!(trigger.buffer.len(), 2000);
-
-    clear_renaming_in_progress(node_id);
-    cleanup(node_id);
-}
-
-#[test]
-fn end_to_end_bypass_permissions_chrome_excluded_from_rename_buffer() {
-    // Regression for the bypass-permissions slug bug.
-    //
-    // Simulated lifecycle of a freshly-spawned agent:
-    //   1. Claude Code prints its startup chrome (banner + Bypass
-    //      Permissions warning + plugin listing).
-    //   2. First idle_prompt arrives -> on_turn fires -> gate opens.
-    //   3. User does one real turn; PTY emits the real content.
-    //   4. Second idle_prompt arrives -> on_turn fires -> buffer is read.
-    //
-    // The buffer handed to the renaming LLM must contain only step-3 content.
-    let node_id = 70999;
-    cleanup(node_id);
-
-    let chrome = "\
-            ╭─ WARNING ────────────────────────────────────╮\n\
-            │  Claude Code running in Bypass Permissions   │\n\
-            │  mode. Only use in a sandboxed environment.  │\n\
-            ╰──────────────────────────────────────────────╯\n\
-            Plugins loaded: hookify, feature-dev, frontend-design\n\
-            ";
-    // Step 1: chrome arrives before any on_turn — must be dropped
-    on_output(node_id, chrome);
-
-    let repo = MockRepo::with_name("bold-keen-brook");
-    // Step 2: first turn opens the gate
-    assert!(should_trigger_rename(&repo, node_id).is_none());
-
-    // Step 3: real user content accumulates
-    let real = "User: refactor the authentication module to use JWT.\n\
-                    Assistant: I'll start by reading auth/login.rs.\n";
-    let bulk = real.repeat(40); // push past SUMMARIZE_BUFFER_CHARS / 2
-    on_output(node_id, &bulk);
-
-    // Step 4: second turn — buffer is harvested
-    let harvested = should_trigger_rename(&repo, node_id)
-        .expect("rename should trigger on second turn with real content");
-    let harvested_buf = &harvested.buffer;
-
-    assert!(
-        !harvested_buf.contains("Bypass Permissions"),
-        "chrome leaked into rename buffer:\n{}",
-        harvested_buf
-    );
-    assert!(
-        !harvested_buf.contains("Plugins loaded"),
-        "plugin listing leaked into rename buffer:\n{}",
-        harvested_buf
-    );
-    assert!(
-        !harvested_buf.contains("hookify"),
-        "skill name leaked from startup chrome:\n{}",
-        harvested_buf
-    );
-    assert!(
-        harvested_buf.contains("authentication module"),
-        "real user content missing from rename buffer:\n{}",
-        harvested_buf
-    );
-
-    clear_renaming_in_progress(node_id);
-    cleanup(node_id);
+    let err = prepare_rename_with(&repo, id, || Err("repair configuration".into()))
+        .err()
+        .unwrap();
+    assert_eq!(err, "repair configuration");
+    assert_eq!(naming().get(&id).unwrap().attempts, 0);
+    assert!(should_trigger_rename(&repo, id).is_some());
+    cleanup(id);
 }
 
 #[test]
@@ -1257,7 +957,7 @@ fn mock_repo_update_records_calls() {
 /// inline implementation logged a warning, then unconditionally
 /// cleared state and emitted — the frontend patched its in-memory
 /// node list to a name SQLite never persisted, and the retry
-/// buffer was wiped.
+/// dialogue was wiped.
 ///
 /// Asserts the contract on `commit_rename` directly, since the
 /// inline `Ok(slug)` arm of `on_turn_with` is otherwise hidden
@@ -1268,17 +968,16 @@ fn mock_repo_update_records_calls() {
 fn commit_rename_preserves_state_on_db_write_failure() {
     let node_id = 71100;
     cleanup(node_id);
-    // Seed a "rename-eligible" state: gate open, buffer present.
+    // Seed an in-flight rename so persistence failures must preserve state.
     // Without this, `has_state` would be false trivially and the
     // test couldn't distinguish "we preserved state" from "there
     // was no state to preserve".
-    open_gate(node_id);
-    on_output(node_id, "transient write-lock contention simulation");
 
     let repo = MockRepo::with_failing_update("bold-keen-brook");
+    let trigger = should_trigger_rename(&repo, node_id).unwrap();
     let mut emitted: Option<String> = None;
 
-    commit_rename(&repo, node_id, "fix-test-slug-bug", |name| {
+    commit_rename(&repo, &trigger.reservation, "fix-test-slug-bug", |name| {
         emitted = Some(name.to_string())
     });
 
@@ -1301,20 +1000,22 @@ fn commit_rename_preserves_state_on_db_write_failure() {
 /// pin the happy path so a future regression that over-eagerly
 /// swallows success (e.g. returning on every code path) trips here.
 /// On a successful DB write the helper MUST emit the rename and
-/// clear the buffer/gate.
+/// clear the dialogue/gate.
 #[test]
 fn commit_rename_emits_and_clears_on_db_write_success() {
     let node_id = 71101;
     cleanup(node_id);
-    open_gate(node_id);
-    on_output(node_id, "happy path buffer");
 
     let repo = MockRepo::with_name("bold-keen-brook");
+    let trigger = should_trigger_rename(&repo, node_id).unwrap();
     let mut emitted: Option<String> = None;
 
-    commit_rename(&repo, node_id, "fix-auth-token-refresh", |name| {
-        emitted = Some(name.to_string())
-    });
+    commit_rename(
+        &repo,
+        &trigger.reservation,
+        "fix-auth-token-refresh",
+        |name| emitted = Some(name.to_string()),
+    );
 
     assert_eq!(
         emitted.as_deref(),
@@ -1338,47 +1039,6 @@ fn commit_rename_emits_and_clears_on_db_write_success() {
 
     cleanup(node_id);
 }
-
-#[test]
-fn strip_claude_code_banner_removes_logo_and_cwd_lines() {
-    let input = "\u{2590}\u{259B}\u{2588}\u{2588}\u{2588}\u{259C}\u{258C}   Claude Code v2.1.145\n\
-                     \u{259D}\u{259C}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{259B}\u{2598}  Opus 4.7 with xhigh effort \u{00B7} Claude Pro\n\
-                     \u{0020}\u{0020}\u{2598}\u{2598} \u{259D}\u{259D}    X:\\src\\buildmesh\\.claude\\worktrees\\open-lucky-box\n\
-                     \n\
-                     User asked to refactor the authentication flow.\n\
-                     Assistant: I'll start by reading the auth module.";
-
-    let stripped = strip_claude_code_banner(input);
-
-    assert!(
-        !stripped.contains("Claude Code v"),
-        "version line should be gone:\n{}",
-        stripped
-    );
-    assert!(
-        !stripped.contains("Opus 4.7"),
-        "model line should be gone:\n{}",
-        stripped
-    );
-    assert!(
-        !stripped.contains("open-lucky-box"),
-        "cwd/banner line should be gone:\n{}",
-        stripped
-    );
-    assert!(
-        stripped.contains("refactor the authentication flow"),
-        "real content must survive:\n{}",
-        stripped
-    );
-}
-
-#[test]
-fn strip_claude_code_banner_is_noop_when_no_banner_present() {
-    let input = "User asked to fix a bug.\nAssistant: Looking at the code now.";
-    assert_eq!(strip_claude_code_banner(input), input);
-}
-
-// --- Manual rename race guard ---
 
 #[test]
 fn user_renamed_mid_flight_returns_true_for_user_chosen_name() {
@@ -1411,6 +1071,7 @@ fn user_renamed_mid_flight_returns_false_on_db_error() {
     // the LLM slug still gets a chance to commit.
     let repo = MockRepo {
         node_name: String::new(),
+        context: None,
         should_fail: true,
         update_should_fail: false,
         updates: std::sync::Mutex::new(vec![]),
@@ -1418,55 +1079,6 @@ fn user_renamed_mid_flight_returns_false_on_db_error() {
     assert!(!user_renamed_mid_flight(&repo, 1));
 }
 
-// --- cleanup() frees the rename-eligible state ---
-
-#[test]
-fn cleanup_removes_node_from_rename_eligible_state() {
-    // The manual-rename command relies on `cleanup` to free the buffer,
-    // gate, and attempt counter for a node that no longer needs a rename.
-    // With the consolidated state these all live in one entry, so cleanup
-    // removing the entry frees them together. Seed a fully-populated entry
-    // and assert cleanup drains it.
-    let node_id = 81000i64;
-    cleanup(node_id); // start from a clean slate
-
-    {
-        let mut map = naming();
-        let st = map.entry(node_id).or_default();
-        st.buffer = "buffered output".to_string();
-        st.buffering_ready = true;
-        st.attempts = 2;
-    }
-
-    // Sanity: the entry exists with its fields set.
-    assert!(has_state(node_id));
-    assert!(gate_open(node_id));
-    assert_eq!(buffer_of(node_id).as_deref(), Some("buffered output"));
-
-    cleanup(node_id);
-
-    // Post-cleanup: the node's entire naming state is gone.
-    assert!(!has_state(node_id), "cleanup must remove the node's entry");
-}
-
-// --- gh688: async claude spawn must set kill_on_drop ---
-
-/// Regression guard for issue #688: `summarize_and_rename_with` spawns an
-/// async `claude --print` child via `tokio::process::Command`. The rename
-/// is fire-and-forget (caller is `tauri::async_runtime::spawn`) and
-/// bounded by a 30s `tokio::time::timeout` — but tokio timeout cancels
-/// the awaiter, NOT the spawned child. Without `.kill_on_drop(true)`,
-/// cancellation, timeout, or app-shutdown leave the LLM child orphaned,
-/// and the leak accumulates (one per node rename, capped at
-/// `MAX_RENAME_ATTEMPTS = 3`).
-///
-/// `tokio::process::Command::get_kill_on_drop()` (tokio ≥ 1.47) would let
-/// us test this at runtime, but only against a separately-constructed
-/// command — not the actual line. A static check binds the assertion to
-/// the production code, so a future refactor that drops the call fails
-/// this test. The substring is unique to this site; a second async
-/// `tokio::process::Command` would warrant a body-scope (see #665 for the
-/// setter-only `creation_flags` precedent that motivated this shape).
 #[test]
 fn summarize_and_rename_with_sets_kill_on_drop_on_claude_command() {
     let source = include_str!("engine.rs");

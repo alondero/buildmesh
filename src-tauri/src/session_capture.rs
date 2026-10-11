@@ -20,8 +20,7 @@
 //!
 //! 2. **UTF-8 corruption**: per-chunk `String::from_utf8_lossy` replaces any
 //!    multi-byte UTF-8 sequence split across two reads with U+FFFD, corrupting
-//!    text fed to `session_naming::on_output` (rename buffer sent to the LLM)
-//!    and `circuit::evaluator::on_output`. Frontend display is unaffected
+//!    text fed to `circuit::evaluator::on_output`. Frontend display is unaffected
 //!    (raw bytes are base64'd separately in `agent::spawn`'s reader thread).
 //!
 //! [`ChunkCapture`] is the stateful wrapper that holds a small carry-over
@@ -112,8 +111,7 @@ fn is_utf8_continuation_byte(byte: u8) -> bool {
 /// One trade-off worth flagging: the held-back tail is the *last*
 /// `CHUNK_CAPTURE_TAIL_CAP` bytes the wrapper has seen, so downstream
 /// consumers never see those final bytes per session. Acceptable here
-/// because the rename buffer caps at 4000 chars (LLM rename fires at
-/// ~1500) and the autopilot tail is a circular buffer. Pinned by
+/// because the autopilot tail is a circular buffer. Pinned by
 /// [`tests::chunk_capture_releases_in_order_without_duplication`].
 ///
 /// Once `captured` is set, subsequent calls short-circuit: no regex work,
@@ -178,10 +176,7 @@ impl ChunkCapture {
             // would round-trip through from_utf8_lossy as U+FFFD — but
             // the latch has fired so the downstream consumers no longer
             // matter, and the captured UUID is already an owned String.
-            return (
-                String::from_utf8_lossy(&text).into_owned(),
-                Some(uuid),
-            );
+            return (String::from_utf8_lossy(&text).into_owned(), Some(uuid));
         }
 
         // 3. No match. Decide what to hold back vs. release.
@@ -309,7 +304,10 @@ mod tests {
         assert!(uuid1.is_none(), "no UUID in the first half: text={text1:?}");
         // The text returned on this chunk is "" — the carry-over still
         // holds the whole 19 bytes, since len <= TAIL_CAP.
-        assert!(text1.is_empty(), "no text released before the carry-over fills: text={text1:?}");
+        assert!(
+            text1.is_empty(),
+            "no text released before the carry-over fills: text={text1:?}"
+        );
 
         // Second chunk: the rest of the UUID.
         let (text2, uuid2) = cap.feed(b"d2-7cd6-7ea2-b907-531b0d261be7\n");
@@ -319,7 +317,7 @@ mod tests {
             "wrapper must stitch the two halves and match the full UUID"
         );
         // After latch, the wrapper returns the concatenation (which the
-        // naming buffer / evaluator consume). The exact text content can
+        // evaluator consumes). The exact text content can
         // include U+FFFD on the latch-firing chunk if the held-back tail
         // ended mid-UTF-8 (ASCII banner so it won't here, but we only
         // assert the UUID round-trip is what matters).
@@ -338,7 +336,10 @@ mod tests {
     #[test]
     fn chunk_capture_captures_conversation_id_split_across_two_chunks() {
         let mut cap = ChunkCapture::default();
-        assert!(cap.feed(b"OpenAI Codex v0.148.0\n--------\nconversation id: 01a02").1.is_none());
+        assert!(cap
+            .feed(b"OpenAI Codex v0.148.0\n--------\nconversation id: 01a02")
+            .1
+            .is_none());
         let (_, uuid) = cap.feed(b"4d2-7cd6-7ea2-b907-531b0d261be7\n--------\n");
         assert_eq!(
             uuid.as_deref(),
@@ -350,8 +351,7 @@ mod tests {
     /// Issue #1221, secondary case: a 3-byte UTF-8 character (CJK block
     /// character `█`) split as `[0xe2, 0x96]` in one chunk and `[0x88]` in
     /// the next. The per-chunk `from_utf8_lossy` path used to substitute
-    /// U+FFFD, corrupting the text handed to `session_naming::on_output`
-    /// and `circuit::evaluator::on_output`. The wrapper holds back the
+    /// U+FFFD, corrupting the text handed to `circuit::evaluator::on_output`. The wrapper holds back the
     /// trailing incomplete sequence so the downstream text contains the
     /// real character once the carry-over is pushed past it.
     #[test]
@@ -416,11 +416,7 @@ mod tests {
         // ~120 bytes total so the carry-over trims at least twice and
         // the concatenation covers multiple chunks. ASCII-only so UTF-8
         // isn't a confound.
-        let input: String = (b'a'..=b'z')
-            .cycle()
-            .take(120)
-            .map(char::from)
-            .collect();
+        let input: String = (b'a'..=b'z').cycle().take(120).map(char::from).collect();
         let mut cap = ChunkCapture::default();
         // Feed in 30-byte chunks so the carry-over (64 bytes) sees a
         // mix of "freshly appended" and "held-back" content per call.
@@ -463,9 +459,8 @@ mod tests {
         // Post-latch: even a chunk that would normally trigger a fresh
         // regex match must return `None` for the UUID — the latch is
         // sticky. The text is still returned (verbatim to downstream).
-        let (text, uuid) = cap.feed(
-            b"\nsome more output\nsession id: ffff0000-7cd6-7ea2-b907-531b0d261be7\n",
-        );
+        let (text, uuid) =
+            cap.feed(b"\nsome more output\nsession id: ffff0000-7cd6-7ea2-b907-531b0d261be7\n");
         assert!(uuid.is_none(), "latch must not re-fire on later chunks");
         assert!(text.contains("some more output"));
     }
@@ -538,7 +533,7 @@ mod tests {
 
     /// When the regex never matches across many small chunks, the wrapper
     /// must release text incrementally as `pending` grows past
-    /// `CHUNK_CAPTURE_TAIL_CAP` — otherwise the naming buffer would
+    /// `CHUNK_CAPTURE_TAIL_CAP` — otherwise the evaluator tail would
     /// starve for the first ~64 bytes of every session.
     #[test]
     fn chunk_capture_releases_text_when_carry_over_grows() {

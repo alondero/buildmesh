@@ -192,7 +192,7 @@ pub(crate) fn begin_circuit_wait_probe(node_id: i64, probe_key: &str) -> Option<
 }
 
 /// PTY reader hook — called for every output chunk (see `agent::spawn`'s
-/// reader thread, next to `session_naming::on_output`). Non-piloted nodes
+/// reader thread). Non-piloted nodes
 /// return after one set lookup.
 pub fn on_output(node_id: i64, data: &str) {
     let mut nodes = NODES.lock().unwrap();

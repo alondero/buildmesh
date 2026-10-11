@@ -12,9 +12,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::env;
 use crate::models::EnvType;
-use crate::services::transcript_reader::adapter::{
-    LocateCtx, TranscriptAdapter,
-};
+use crate::services::transcript_reader::adapter::{LocateCtx, TranscriptAdapter};
 use crate::services::transcript_reader::types::{
     cap_tool_calls, push_bounded, truncate, Parsed, ToolCall, Turn, UnavailableReason,
     MAX_TURN_TEXT,
@@ -143,6 +141,24 @@ impl TranscriptAdapter for OpenCodeAdapter {
         Ok(parse_opencode_messages(&messages, 1))
     }
 
+    fn naming_dialogue(
+        &self,
+        path: &Path,
+        session_id: &str,
+    ) -> Result<Vec<Turn>, UnavailableReason> {
+        let rows = read_opencode_rows_ordered(path, session_id, OPENCODE_DIGEST_WINDOW, true)
+            .ok_or(UnavailableReason::Unreadable)?;
+        let mut turns = Vec::new();
+        for (_, message) in rows {
+            let parsed = parse_opencode_messages(&[message], 4);
+            super::super::types::append_naming_turns(&mut turns, parsed.turns);
+            if turns.len() == 4 {
+                break;
+            }
+        }
+        Ok(turns)
+    }
+
     fn assistant_report(
         &self,
         path: &Path,
@@ -162,7 +178,6 @@ impl TranscriptAdapter for OpenCodeAdapter {
                 })
             })
     }
-
 }
 
 /// Read the row tail of an OpenCode session's `message` table. Returns the
@@ -194,6 +209,15 @@ pub(crate) fn read_opencode_message_rows(
     session_id: &str,
     row_budget: usize,
 ) -> Option<Vec<(String, serde_json::Value)>> {
+    read_opencode_rows_ordered(db_path, session_id, row_budget, false)
+}
+
+fn read_opencode_rows_ordered(
+    db_path: &Path,
+    session_id: &str,
+    row_budget: usize,
+    oldest_first: bool,
+) -> Option<Vec<(String, serde_json::Value)>> {
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
     if let Err(error) = conn.busy_timeout(Duration::from_millis(OPENCODE_READER_BUSY_TIMEOUT_MS)) {
         // Busytimeout is best-effort — log but don't fail the read;
@@ -204,19 +228,20 @@ pub(crate) fn read_opencode_message_rows(
              concurrent writes may degrade to Unreadable"
         );
     }
+    let order = if oldest_first { "ASC" } else { "DESC" };
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             // LIMIT applies to messages, not joined parts. One statement keeps
             // metadata and content on the same SQLite read snapshot.
             // Unary + disqualifies the session predicate as an index lookup:
             // use the message-id index instead of rescanning the whole session
             // for every message, while still checking part session ownership.
             "WITH recent AS (SELECT id, session_id, time_created, data FROM message \
-                WHERE session_id = ?1 ORDER BY time_created DESC, id DESC LIMIT ?2) \
+                WHERE session_id = ?1 ORDER BY time_created {order}, id {order} LIMIT ?2) \
              SELECT m.id, m.data, p.data FROM recent m \
              LEFT JOIN part p ON p.message_id = m.id AND +p.session_id = m.session_id \
-             ORDER BY m.time_created DESC, m.id DESC, p.id ASC",
-        )
+             ORDER BY m.time_created {order}, m.id {order}, p.id ASC",
+        ))
         .ok()?;
     let mut latest: Vec<(String, serde_json::Value)> = Vec::new();
     let mut rows = stmt
@@ -243,7 +268,9 @@ pub(crate) fn read_opencode_message_rows(
     // The query returned DESC; the parser consumes ASC (matches the
     // natural timeline that `opencode export` orders by). Reverse once
     // here so the parser never has to know about the bound direction.
-    latest.reverse();
+    if !oldest_first {
+        latest.reverse();
+    }
     Some(latest)
 }
 

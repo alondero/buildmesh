@@ -676,6 +676,14 @@ with extra CLI arguments cannot run background inference. Unsupported choices
 show the missing requirement in the settings picker and are rejected by the
 backend. Usage remains attached to the account, not each recipe.
 
+Auto-naming describes the initial task from the agent's saved conversation, using
+user requests and assistant text rather than terminal spinners or command output.
+It can name a short request after the first turn. If no supported conversation
+is readable yet, the generated name stays and naming retries on a later turn.
+Harnesses without a transcript reader keep their generated names; you can rename
+any node manually. Existing task names are preserved, including names generated
+by earlier versions; rename those manually if they are misleading.
+
 If the selected configuration cannot be resolved, auto-naming retries on a later
 turn after you repair it. On Windows, Claude Code background work also checks
 the standard native and npm install locations when the app's PATH is stale.

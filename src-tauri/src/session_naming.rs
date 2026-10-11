@@ -5,43 +5,23 @@
 //! emitted payloads. This facade preserves the established
 //! `session_naming::*` API.
 //!
-//! State: one naming-state entry per node behind a single map. It
-//! folds together what used to be four parallel statics — a PTY-output buffer,
-//! a "buffering ready" gate, a "rename in progress" flag, and a failed-attempt
-//! counter. Keeping a node's whole naming state in one entry under one lock
-//! means it can be read at once, and removes the cross-map self-deadlock hazard
-//! that four non-reentrant mutexes invited (a lock can't deadlock against
-//! siblings that no longer exist). The fields:
-//! - `buffer` — PTY output accumulator; an entry exists = the node hasn't been
-//!   renamed yet.
-//! - `buffering_ready` — the gate. PTY output is only accumulated after the
-//!   *first* Node Turn, which discards the chrome Claude Code prints on
-//!   startup (the "Bypass Permissions" warning, plugin/skill listings, banner
-//!   repaints) so the renaming LLM never sees that text. Without this gate the
-//!   LLM kept producing names like `bypass-permissions-worktree`.
-//! - `renaming` — guards against duplicate concurrent LLM calls.
-//! - `attempts` — per-node failure counter; caps retries at MAX_RENAME_ATTEMPTS.
+//! Naming reads the initial user/assistant dialogue through harness-owned
+//! transcript readers on a blocking worker. PTY output is not a naming source.
+//! A per-node reservation prevents duplicate inference; unavailable dialogue
+//! retries on a later Node Turn without spending the inference retry budget.
+//! User-selected names and configured naming backends keep their existing rules.
 //!
-//! The LLM rename never holds the `NAMING` lock across its `.await`: the buffer
-//! is snapshotted under the lock and released before the network call.
-//!
-//! Lifecycle:
-//! - `on_spawn()` generates an initial random name
-//! - `on_output(node_id, data)` buffers PTY output once the node's gate is open
-//! - `on_turn(node_id, app)` flips the buffering gate (first call) and triggers
-//!   LLM rename when the buffer is sufficient (subsequent calls)
-//! - `cleanup(node_id)` removes all state for a node
-//!
-//! Diagnostic: set `BUILDMESH_DUMP_NAME_BUFFER=1` to dump the raw + cleaned
-//! buffer to `%TEMP%/bm-name-buffer-<node_id>-<ts>.txt` whenever a rename runs.
+//! Set `BUILDMESH_DUMP_NAME_BUFFER=1` to dump the selected dialogue and exact
+//! naming prompt to `%TEMP%/bm-name-buffer-<node_id>-<ts>.txt`.
 
+mod context;
 mod engine;
 mod repository;
 mod slug;
 mod wire;
 mod words;
 
-pub use engine::{cleanup, on_output, on_turn, reset_buffers};
+pub use engine::{cleanup, on_turn, reset_buffers};
 // Dev-only diagnostic for the `debug_crash_snapshot` command (issue #2153);
 // re-exported separately so the gate on the function carries to this list.
 #[cfg(any(debug_assertions, feature = "dev-tools"))]

@@ -368,6 +368,20 @@ fn message_text(message: &serde_json::Value) -> String {
     }
 }
 
+/// MiniMax prefixes real user input with reminder blocks in the same text
+/// item. Strip complete leading wrappers before truncation, keeping the request.
+fn user_text(text: &str) -> &str {
+    let mut text = text.trim();
+    while text.starts_with("<system-reminder>") {
+        let Some(end) = text.find("</system-reminder>") else {
+            // A partial injected wrapper is not a user request.
+            return "";
+        };
+        text = text[end + "</system-reminder>".len()..].trim_start();
+    }
+    text
+}
+
 /// Pull tool calls out of an assistant message's `{type: "toolCall"}`
 /// content items. `arguments` is natively an object but may arrive as JSON
 /// text; both are honoured under the shared `MAX_TOOL_STRING` truncation so
@@ -450,7 +464,12 @@ pub(crate) fn parse_mcode_turns_with_text_limit(
             saw_malformed = true;
             continue;
         }
-        let text = message_text(message);
+        let raw_text = message_text(message);
+        let text = if role == "user" {
+            user_text(&raw_text)
+        } else {
+            &raw_text
+        };
         let mut tool_calls = if role == "assistant" {
             extract_mcode_tool_calls(message)
         } else {
@@ -467,7 +486,7 @@ pub(crate) fn parse_mcode_turns_with_text_limit(
             cap_tool_calls(&mut tool_calls);
             let turn = Turn {
                 role: "assistant".to_string(),
-                text: truncate(&text, max_text),
+                text: truncate(text, max_text),
                 tool_calls,
             };
             if !turn.text.trim().is_empty() {
@@ -479,7 +498,7 @@ pub(crate) fn parse_mcode_turns_with_text_limit(
                 &mut turns,
                 Turn {
                     role: "user".to_string(),
-                    text: truncate(&text, max_text),
+                    text: truncate(text, max_text),
                     tool_calls: Vec::new(),
                 },
                 keep,

@@ -77,6 +77,15 @@ pub(crate) trait TranscriptReader: Send + Sync {
         super::file::read_tail(self, path, keep)
     }
 
+    /// Initial task dialogue for a stable name, independent of tool-call volume.
+    fn naming_dialogue(
+        &self,
+        path: &Path,
+        _session_id: &str,
+    ) -> Result<Vec<super::Turn>, UnavailableReason> {
+        super::file::naming_dialogue(self, path)
+    }
+
     /// Read a bounded digest window, retaining enough turns to identify availability.
     /// The dispatcher alone shapes the available/unavailable envelope.
     fn last_assistant_message(
