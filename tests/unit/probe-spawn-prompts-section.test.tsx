@@ -1,5 +1,5 @@
 /**
- * Probe spawn prompt settings (Settings → General → Probe spawn prompts).
+ * Probe spawn prompt settings (Settings → Prompts → Probe spawn prompts).
  *
  * The section edits the two custom templates for the initial prompt
  * handed to agents spawned from the Probe's GitHub Issues / Pull

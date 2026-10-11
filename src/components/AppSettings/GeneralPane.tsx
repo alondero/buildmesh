@@ -1,18 +1,17 @@
 /**
- * `GeneralPane` — appearance, behaviour and host-wide agent runtime
- * defaults (issue #1880). Owns every draft the General tab edits:
- * the theme choice, the confirm-before-quit toggle, the Circuit agent
- * pool size, the Worktree Node directory, and the probe spawn prompt
- * templates.
+ * `GeneralPane` — appearance, quit confirmation and the default worktree
+ * directory (issue #1880). Owns every draft the General tab edits: the theme
+ * choice, the confirm-before-quit toggle, and the Worktree Node directory.
+ * Circuit limits live on the Autopilot tab and the probe spawn prompts on the
+ * Prompts tab.
  *
- * All four preference-backed drafts hydrate from the shared
- * `preferences` payload and commit on blur / Enter rather than per
- * keystroke, so a half-typed "1" of "10" never briefly caps the pool at
- * 1, and a half-typed path never briefly relocates the warm pool. Each
- * draft also reports a dirty site so the modal's nav rail can mark this
- * pane and the discard banner can intercept a stray close (issue #730).
+ * The worktree directory hydrates from the shared `preferences` payload and
+ * commits on blur / Enter rather than per keystroke, so a half-typed path
+ * never briefly relocates the warm pool. It reports a dirty site so the
+ * modal's nav rail can mark this pane and the discard banner can intercept a
+ * stray close (issue #730).
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import * as api from '../../lib/tauri';
 import type { AppPreferences } from '../../types/generated/AppPreferences';
 import { formatError } from '../../lib/errorUtils';
@@ -21,7 +20,6 @@ import { useExitPromptStore } from '../../stores/exitPromptStore';
 import { optimisticToggle } from '../../lib/optimisticToggle';
 import { SettingsRow, SettingsSection } from './SettingsRow';
 import { ResourceLoadStatus } from './ResourceLoadStatus';
-import { ProbeSpawnPromptsSection, type ProbePromptDefaults, type ProbePromptKind } from './ProbeSpawnPromptsSection';
 import { UpdateAboutSection } from './UpdateAboutSection';
 import { useSettingsData } from './SettingsDataContext';
 
@@ -54,18 +52,9 @@ export function GeneralPane() {
   const confirmBeforeQuit = useExitPromptStore((s) => s.confirmBeforeQuit);
   const [confirmQuitBusy, setConfirmQuitBusy] = useState(false);
 
-  // Circuit agent pool size (app-wide cap on concurrent Circuit agents).
-  // The draft is a string so the input can hold a cleared/in-progress
-  // value; `''` means "no global cap".
-  const [poolDraft, setPoolDraft] = useState('');
-  const [poolSaving, setPoolSaving] = useState(false);
   // The preferences payload whose drafts are currently rendered. Null until
   // the first load commits.
   const [adoptedPrefs, setAdoptedPrefs] = useState<AppPreferences | null>(null);
-  // Last value confirmed saved (canonical string form), for rollback and
-  // dirty comparison. A ref for the same closure-staleness reason as the
-  // optimistically-rolled-back pickers (issue #581).
-  const poolSavedRef = useRef('');
 
   // Issue #1519: Buildmesh-wide default Worktree Node directory. Draft is
   // the raw textfield value; `''` means "no app override — each Mesh uses
@@ -74,39 +63,9 @@ export function GeneralPane() {
   const [worktreeDirSaving, setWorktreeDirSaving] = useState(false);
   const worktreeDirSavedRef = useRef('');
 
-  // Probe spawn prompt templates. `null` = no override, the built-in
-  // default is active.
-  const [probePrompts, setProbePrompts] = useState<{ issue: string | null; pr: string | null }>({
-    issue: null,
-    pr: null,
-  });
-  const [probePromptDefaults, setProbePromptDefaults] = useState<ProbePromptDefaults | null>(null);
-
-  // Built-in probe-spawn templates for the Settings display. Static per
-  // binary with no mesh context, so they load once outside the resource
-  // state machine; the section stays disabled until they resolve. A
-  // failure surfaces inline in the section (with Retry) rather than
-  // leaving the cards silently disabled.
-  const [probeDefaultsError, setProbeDefaultsError] = useState<string | null>(null);
-  const loadProbeDefaults = useCallback(() => {
-    setProbeDefaultsError(null);
-    return api
-      .getProbeSpawnPromptDefaults()
-      .then((d) => {
-        setProbePromptDefaults({ issue: d.issue_template, pr: d.pr_template, policy: d.review_policy });
-      })
-      .catch((err) => {
-        console.error('Failed to load probe prompt defaults:', err);
-        setProbeDefaultsError(formatError(err));
-      });
-  }, []);
-  useEffect(() => {
-    void loadProbeDefaults();
-  }, [loadProbeDefaults]);
-
-  // Seed every draft from the latest winning preferences read *during render*
-  // rather than from an effect. These inputs are controlled by the drafts and
-  // their `disabled` gate flips in the same render as the resource status, so
+  // Seed the draft from the latest winning preferences read *during render*
+  // rather than from an effect. The input is controlled by the draft and its
+  // `disabled` gate flips in the same render as the resource status, so
   // an effect would leave one committed frame where the input is enabled and
   // still showing the previous value. Each payload is a distinct object (the
   // hook only commits a read whose token is still current), so identity is a
@@ -114,12 +73,7 @@ export function GeneralPane() {
   // refresh is what picks up a backend normalise-on-write.
   if (preferences && preferences !== adoptedPrefs) {
     setAdoptedPrefs(preferences);
-    setPoolDraft(preferences.circuit_agent_pool_size == null ? '' : String(preferences.circuit_agent_pool_size));
     setWorktreeDirDraft(preferences.worktree_directory?.trim() ?? '');
-    setProbePrompts({
-      issue: preferences.issue_spawn_prompt ?? null,
-      pr: preferences.pr_spawn_prompt ?? null,
-    });
   }
 
   // Last value confirmed saved (canonical string form), for rollback and the
@@ -136,8 +90,6 @@ export function GeneralPane() {
   // commit reads them.
   useEffect(() => {
     if (!preferences) return;
-    poolSavedRef.current =
-      preferences.circuit_agent_pool_size == null ? '' : String(preferences.circuit_agent_pool_size);
     worktreeDirSavedRef.current = preferences.worktree_directory?.trim() ?? '';
   }, [preferences]);
 
@@ -153,20 +105,11 @@ export function GeneralPane() {
     useExitPromptStore.getState().setConfirmBeforeQuit(preferences.confirm_before_quit ?? true);
   }, [preferences]);
 
-  const poolDirtyChange = useCallback(
-    (dirty: boolean) => siteDirtyChange('circuit-agent-pool', dirty),
-    [siteDirtyChange],
-  );
-  const probePromptsDirtyChange = useCallback(
-    (dirty: boolean) => siteDirtyChange('probe-prompts', dirty),
-    [siteDirtyChange],
-  );
-
   // Commit the worktree-directory draft (blur / Enter, issue #1519). `''`
   // (or whitespace-only) clears the app default so inheriting Meshes fall
   // back to `.claude/worktrees`; anything else stores the trimmed raw input
   // verbatim (no shell/`~` expansion — resolution joins it literally).
-  // Optimistic with rollback, mirroring the pool-size write.
+  // Optimistic with rollback.
   const commitWorktreeDir = async () => {
     const trimmed = worktreeDirDraft.trim();
     const canonical = trimmed;
@@ -193,51 +136,6 @@ export function GeneralPane() {
       setError(formatError(e));
     } finally {
       setWorktreeDirSaving(false);
-    }
-  };
-
-  // Commit the Circuit pool-size draft (blur / Enter). `''` clears the
-  // global cap; anything else is clamped to a non-negative integer (0 =
-  // pause new Circuit spawns). Optimistic with rollback; the dirty site
-  // clears optimistically too so a successful save never leaves a phantom
-  // discard banner.
-  const commitPoolSize = async () => {
-    const trimmed = poolDraft.trim();
-    const numeric = Number(trimmed);
-    if (trimmed !== '' && Number.isNaN(numeric)) {
-      // Unreachable via the DOM (type=number sanitises non-numeric input to
-      // ''), but guards the IPC from ever carrying NaN if the input type
-      // changes: revert to the saved value rather than sending garbage.
-      setPoolDraft(poolSavedRef.current);
-      siteDirtyChange('circuit-agent-pool', false);
-      return;
-    }
-    const parsed = trimmed === '' ? null : Math.max(0, Math.floor(numeric));
-    const canonical = parsed === null ? '' : String(parsed);
-    setPoolDraft(canonical);
-    if (canonical === poolSavedRef.current) {
-      siteDirtyChange('circuit-agent-pool', false);
-      return;
-    }
-    const previous = poolSavedRef.current;
-    poolSavedRef.current = canonical;
-    siteDirtyChange('circuit-agent-pool', false);
-    setPoolSaving(true);
-    setError(null);
-    try {
-      await api.setAppCircuitAgentPoolSize(parsed);
-      // Issue #1534 (review round 5) — refresh via the loader so a
-      // failed `get_app_preferences` (or a backend normalisation
-      // e.g. server-side cap adjustment) surfaces in the preferences
-      // banner rather than leaving the optimistic `circuit_agent_pool_size`
-      // silently stale.
-      await loadPreferences();
-    } catch (e) {
-      poolSavedRef.current = previous;
-      setPoolDraft(previous);
-      setError(formatError(e));
-    } finally {
-      setPoolSaving(false);
     }
   };
 
@@ -283,37 +181,6 @@ export function GeneralPane() {
     setTheme(next);
   };
 
-  // Probe spawn prompt templates. One save path per side; the boolean
-  // return drives the section's optimistic commit/rollback, and the
-  // post-write `loadPreferences()` picks up the backend
-  // normalise-on-write (a blank draft clears the override) so the
-  // "Using default" badge flips without a stale snapshot.
-  const handleSetProbePrompt = async (kind: ProbePromptKind, value: string): Promise<boolean> => {
-    setError(null);
-    try {
-      if (kind === 'issue') await api.setAppIssueSpawnPrompt(value);
-      else await api.setAppPrSpawnPrompt(value);
-      await loadPreferences();
-      return true;
-    } catch (e) {
-      setError(formatError(e));
-      return false;
-    }
-  };
-
-  const handleResetProbePrompt = async (kind: ProbePromptKind): Promise<boolean> => {
-    setError(null);
-    try {
-      if (kind === 'issue') await api.setAppIssueSpawnPrompt(null);
-      else await api.setAppPrSpawnPrompt(null);
-      await loadPreferences();
-      return true;
-    } catch (e) {
-      setError(formatError(e));
-      return false;
-    }
-  };
-
   return (
     <>
       {/* Issue #1534 (review round 5) — surface a loading indicator while
@@ -333,8 +200,8 @@ export function GeneralPane() {
           Loading settings…
         </p>
       )}
-      {/* Issue #1534 — preference-backed controls in this pane (pool size,
-          worktree directory, confirm-quit) stay disabled while preferences
+      {/* Issue #1534 — preference-backed controls in this pane (worktree
+          directory, confirm-quit) stay disabled while preferences
           load or have failed; the banner makes that visible at the top of the
           pane instead of leaving the user to discover the disabled inputs by
           trial. */}
@@ -396,73 +263,27 @@ export function GeneralPane() {
 
       {/* Issue #1501: exit confirmation. On by default — closing the
           window with active sessions prompts instead of terminating. The
-          checkbox keeps its full label text because that string is the
-          control's accessible name (used by tests and screen readers). */}
+          row label is the checkbox's accessible name; the explanation lives
+          behind the info tip rather than beside the control. */}
       <SettingsSection title="Behaviour">
         <SettingsRow
-          label="Exiting"
-          summary="Warn before closing the window with active agent sessions."
-          controlClassName="w-80 shrink-0"
+          label="Confirm before quitting"
+          htmlFor="confirm-before-quit"
+          controlClassName="shrink-0"
+          details="Warn before closing the window while agent sessions are active."
         >
-          <label className="flex items-center gap-3 text-base text-text-primary cursor-pointer">
-            <input
-              type="checkbox"
-              checked={confirmBeforeQuit}
-              disabled={!prefsLoaded || confirmQuitBusy}
-              onChange={e => void handleToggleConfirmQuit(e.target.checked)}
-              className="accent-accent-cyan h-4 w-4 disabled:opacity-50"
-            />
-            <span>Confirm before quitting when agent sessions are active</span>
-          </label>
+          <input
+            id="confirm-before-quit"
+            type="checkbox"
+            checked={confirmBeforeQuit}
+            disabled={!prefsLoaded || confirmQuitBusy}
+            onChange={e => void handleToggleConfirmQuit(e.target.checked)}
+            className="accent-accent-cyan h-4 w-4 disabled:opacity-50"
+          />
         </SettingsRow>
       </SettingsSection>
 
-      {/* Agent runtime — host-wide execution caps and paths. */}
-      <SettingsSection
-        title="Agent runtime"
-        description={
-          <>
-            Host-wide execution defaults. Each mesh still respects its own
-            concurrency limit and worktree override in Project Settings.
-          </>
-        }
-      >
-        <SettingsRow
-          label="Circuit agent pool size"
-          htmlFor="circuit-agent-pool-size"
-          summary="Global cap on Circuit agents across all meshes."
-          controlClassName="w-48 shrink-0"
-          details={
-            <>
-              The most Circuit agents allowed to run at once across all meshes.
-              Each mesh's run capacity is configured in Circuits. Leave empty for
-              no global cap; 0 pauses new agent launches. Lowering the cap holds
-              new launches until slots free up; running agents are retained.
-            </>
-          }
-        >
-          <input
-            id="circuit-agent-pool-size"
-            type="number"
-            min={0}
-            step={1}
-            inputMode="numeric"
-            aria-label="Circuit agent pool size"
-            placeholder="No global cap"
-            value={poolDraft}
-            disabled={!prefsLoaded || poolSaving}
-            onChange={e => {
-              setPoolDraft(e.target.value);
-              poolDirtyChange(e.target.value.trim() !== poolSavedRef.current);
-            }}
-            onBlur={commitPoolSize}
-            onKeyDown={e => {
-              if (e.key === 'Enter') commitPoolSize();
-            }}
-            className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
-          />
-        </SettingsRow>
-
+      <SettingsSection title="Agent runtime">
         <SettingsRow
           label="Worktree directory"
           htmlFor="worktree-directory"
@@ -506,17 +327,6 @@ export function GeneralPane() {
           (UpdatePrompt) handles nag-style flow; Settings exposes
           current version + manual check + install progress for users
           who want to drive it themselves. */}
-      <ProbeSpawnPromptsSection
-        stored={probePrompts}
-        defaults={probePromptDefaults}
-        onSave={handleSetProbePrompt}
-        onReset={handleResetProbePrompt}
-        onDirtyChange={probePromptsDirtyChange}
-        defaultsError={probeDefaultsError}
-        onRetryDefaults={() => void loadProbeDefaults()}
-        disabled={!prefsLoaded}
-      />
-
       <UpdateAboutSection />
     </>
   );

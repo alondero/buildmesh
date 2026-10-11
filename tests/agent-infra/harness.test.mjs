@@ -102,6 +102,12 @@ test('product runner and shared failure parser edits select product verification
   }
 });
 
+test('editing the advisory self-review script does not select product verification', () => {
+  const ids = planGates(['scripts/self-review.mjs']).map(gate => gate.id);
+  for (const id of ['rust-tests', 'frontend-build', 'frontend-tests', 'browser-smoke']) assert.ok(!ids.includes(id), id);
+  assert.ok(ids.includes('agent-tests'), 'the agent-infra tests still run');
+});
+
 test('uncached ConPTY checks its network prerequisite before compilation; cached packages work offline', async t => {
   const fixture = repo(t);
   const unavailable = await conptyPrerequisite(fixture.cwd, async () => { throw new Error('offline'); });
@@ -576,6 +582,8 @@ test('the format gate passes baseline rustfmt debt and fails touched or unexplai
   // Bare `rustfmt <file>` also rewrites child modules, so the gate must not recommend it.
   assert.match(touched.reason, /node scripts\/rustfmt-touched\.mjs "src-tauri\/src\/new\.rs"/);
   assert.doesNotMatch(touched.reason, /rustfmt --edition 2021/);
+  // The gate checks the final tree, so formatting goes in its own commit after the behaviour change.
+  assert.match(touched.reason, /commit your behaviour change first.*`style\(rust\)/);
   // A worktree path can contain spaces; the suggested command must stay copy-pasteable.
   const spaced = await gate('Diff in /r/src-tauri/src/new module.rs:3:', ['src-tauri/src/new module.rs']);
   assert.match(spaced.reason, /node scripts\/rustfmt-touched\.mjs "src-tauri\/src\/new module\.rs"/);
@@ -592,14 +600,54 @@ test('behavior gates reject zero tests and preserve executed counts', async t =>
   assert.equal(executed.count, 1);
   assert.equal(executedTests('rust', 'test result: ok. 2 passed;\ntest result: ok. 3 passed;'), 5);
 });
-test('build gates use production while test gates retain the test environment', async t => {
+test('a gate receives the environment it declares, and the test environment otherwise', async t => {
+  // The subprocess boundary itself: what the child process actually reads.
   const fixture = repo(t);
-  for (const [id, expected] of [['frontend-build', 'production'], ['mobile-build', 'production'], ['frontend-tests', 'test']]) {
+  for (const [declared, expected] of [[{ nodeEnv: 'production' }, 'production'], [undefined, 'test']]) {
     const result = await runGate(fixture.cwd, {
-      id, minutes: 1,
+      id: 'boundary', minutes: 1, ...(declared ? declared : {}),
       command: ['node', '-e', `if (process.env.NODE_ENV !== '${expected}') throw new Error(process.env.NODE_ENV);`],
     }, fixture.base);
     assert.equal(result.outcome, 'PASS', result.log ? readFileSync(result.log, 'utf8') : result.reason);
+  }
+});
+test('each planned build gate declares the production environment', () => {
+  // Issue #2013 - the plan declares the environment, not a list of gate ids
+  // inside the executor. Both build plans are covered: a Rust-only change runs
+  // `mobile-build` and takes the `else if` branch, so the frontend plan alone
+  // would not exercise it.
+  const frontend = planGates(['src/App.tsx']);
+  const rustOnly = planGates(['src-tauri/src/db/mod.rs']);
+  const declared = gates => gates.filter(gate => gate.nodeEnv === 'production').map(gate => gate.id);
+  assert.deepEqual(declared(frontend), ['frontend-build']);
+  assert.deepEqual(declared(rustOnly), ['mobile-build']);
+  // Ties the declaration to the command, so renaming or adding a build gate
+  // fails here until it says which environment it builds in.
+  for (const gate of [...frontend, ...rustOnly]) {
+    const builds = gate.command.join(' ').includes('run build');
+    assert.equal(gate.nodeEnv === 'production', builds, `${gate.id} declares the wrong environment`);
+  }
+  // Test gates keep the harness-wide test environment React's `act` needs.
+  for (const id of ['frontend-tests', 'docs-tests', 'lint']) {
+    assert.equal(frontend.find(gate => gate.id === id).nodeEnv, undefined, `${id} must not claim a production build`);
+  }
+});
+test('the Windows wrapper builds in production and leaves the caller environment alone', () => {
+  // scripts/check.ps1 is a second entry point that runs the same build, so it
+  // has to make the same choice; the repository documents NODE_ENV=test for
+  // vitest, and inheriting that here fails the bundle budget on the React
+  // development runtime. Parsed as text: PowerShell is not a test dependency.
+  const wrapper = readFileSync(join(root, 'scripts/check.ps1'), 'utf8');
+  const helper = wrapper.slice(wrapper.indexOf('function Invoke-ProductionBuild'), wrapper.indexOf('function Ensure-MobileBuilt'));
+  assert.match(helper, /\$env:NODE_ENV = 'production'/);
+  assert.match(helper, /\$env:NODE_ENV = \$previous/, 'the caller environment must be restored');
+  // Both build entry points route through the helper, and the vitest calls
+  // must not, or they would run without `act`.
+  assert.match(wrapper, /Invoke-ProductionBuild build:mobile/);
+  assert.match(wrapper, /Invoke-ProductionBuild build(\s|')/);
+  assert.doesNotMatch(wrapper, /Invoke-ProductionBuild (?:unit|integration|test)\b/);
+  for (const call of ['npx vitest run --pool=threads tests/unit', 'npx vitest run --pool=threads tests/integration']) {
+    assert.ok(wrapper.includes(call) && !wrapper.includes(`Invoke-ProductionBuild ${call}`), `${call} must keep the test environment`);
   }
 });
 test('missing dependencies preflight BLOCKED without launching tests', async t => {
@@ -613,7 +661,7 @@ test('canonical verification rejects a source mutation even when every child che
   const fixture = repo(t);
   // Stand-in executables keep this a process/orchestration regression, without
   // coupling it to a full Tauri or frontend installation.
-  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-test-failures.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
+  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-test-failures.mjs', 'scripts/self-review.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
   for (const path of ['scripts/check-agent-diff.mjs', 'scripts/check-docs.mjs', 'scripts/check-readme-drift.mjs', 'scripts/check-process-spawn-discipline.mjs']) fixture.put(path, 'process.exit(0);\n');
   fixture.put('.gitignore', '.harness/\n.task.json\nnode_modules/\n');
   fixture.put('node_modules/eslint/package.json', '{"version":"fixture"}');
@@ -970,7 +1018,7 @@ test('wait never reports a stale or missing result as success', async t => {
 });
 test('verify queues a heavy gate behind held machine-wide slots and runs it once one frees', async t => {
   const fixture = repo(t);
-  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-test-failures.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
+  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-test-failures.mjs', 'scripts/self-review.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
   for (const path of ['scripts/check-agent-diff.mjs', 'scripts/check-docs.mjs', 'scripts/check-readme-drift.mjs', 'scripts/check-process-spawn-discipline.mjs']) fixture.put(path, 'process.exit(0);\n');
   fixture.put('.gitignore', '.harness/\n.task.json\nnode_modules/\n');
   fixture.put('node_modules/eslint/package.json', '{"version":"fixture"}');
@@ -1063,6 +1111,42 @@ test('a passed gate is reused until a file it reads changes, not until anything 
   fixture.commit();
   await run();
   assert.deepEqual(ran(), ['docs-fake']);
+});
+
+test('verify prints the self-review prompts before the gates and a trailer when they flagged something', async t => {
+  const fixture = repo(t);
+  const { gate } = fakeGates(fixture);
+  fixture.put('docs/note.md', 'Nothing here can ever go wrong.\n');
+  const plan = () => [gate('docs-fake', ['^src/'])];
+  const lines = [];
+  t.mock.method(console, 'log', (...args) => { lines.push(args.join(' ')); });
+
+  // A substituted plan is a test double: it does not pay for a git scan it did not ask for.
+  await verify(fixture.cwd, { base: fixture.base, plan });
+  assert.equal(lines.some(line => /Self-review prompts/.test(line)), false);
+
+  lines.length = 0;
+  await verify(fixture.cwd, { base: fixture.base, plan, selfReview: true });
+  const text = lines.join('\n');
+  assert.match(text, /Self-review prompts \(advisory/);
+  assert.match(text, /docs\/note\.md:1/);
+  assert.ok(text.indexOf('Self-review prompts (advisory') < text.indexOf('PASS docs-fake'), 'prompts come before the gate rows');
+  assert.match(lines.at(-1), /Self-review prompts above flagged 1 item\b/);
+
+  // An agent that ran verify in the background only reads `wait`'s summary, so the flags must reach it too.
+  const summary = (await waitForVerify(fixture.cwd, { graceMs: 0 })).lines.join('\n');
+  assert.match(summary, /^PASS: 1\/1 gates/);
+  assert.match(summary, new RegExp(`Self-review prompts flagged 1 item.*npm run self-review -- --base ${fixture.base.slice(0, 8)}`));
+});
+
+test('verify keeps going when the self-review prompts cannot be produced', async t => {
+  const fixture = repo(t);
+  const { gate } = fakeGates(fixture);
+  const lines = [];
+  t.mock.method(console, 'log', (...args) => { lines.push(args.join(' ')); });
+  const receipt = await verify(fixture.cwd, { base: fixture.base, plan: () => [gate('docs-fake')], selfReview: () => { throw new Error('boom'); } });
+  assert.equal(receipt.outcome, 'PASS');
+  assert.ok(lines.some(line => /Self-review prompts unavailable: boom/.test(line)));
 });
 
 test('a failed attempt keeps the gates it passed across attempts', async t => {

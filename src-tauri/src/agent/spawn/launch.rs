@@ -138,16 +138,17 @@ pub(super) async fn launch_process(
     // `spawn_option_id` for a Proxied Provider row is the composite id
     // `"<harness>:<provider>"` (e.g. `"claude:minimax"`, `"codex:minimax"`).
     // The application-defaults map is keyed by the harness *profile* id (the
-    // half before the first `:`), so a raw lookup would miss every Proxied
-    // spawn — failing AC #12 ("Native and Proxied Provider Spawn Options
-    // consume the same application-default layer"). Read the harness half off
-    // the typed `SpawnOptionId` (parsed once at the entry seam, issue #1659
-    // item 1) so native and Proxied rows hit the same map key.
-    let harness_id_for_default = spawn_option_id.harness_id();
+    // half before the first `:`), so `harness_default_for` reads the harness
+    // half off the typed option — native and Proxied rows hit the same map
+    // key — and drops the model/effort for a Proxied row itself, because a
+    // harness default describes the harness's native provider and would
+    // otherwise hand an OpenAI model name to the proxied endpoint (#2038).
+    // Both halves of the cascade go through that one reader, so the frozen
+    // Launch Configuration path and this live path cannot disagree.
     let frozen = crate::db::node_spawn_configuration(session_id, &spawn_option_id.to_string())?
         .is_some_and(|c| c.resolved.is_some());
     let app_default = match crate::preferences::load() {
-        Ok(prefs) => crate::preferences::harness_default_for(&prefs, harness_id_for_default),
+        Ok(prefs) => crate::preferences::harness_default_for(&prefs, &spawn_option_id),
         Err(e) => {
             tracing::warn!("launch_process: harness-default load failed, treating as absent: {e}");
             None
@@ -291,7 +292,10 @@ pub(super) async fn launch_process(
 /// every frozen artifact on purpose), so the live per-harness Settings
 /// default still applies to the next spawn. Without this carve-out a
 /// frozen node would silently keep launching unattended after the person
-/// switched the harness to prompt mode.
+/// switched the harness to prompt mode. The option scoping (a Proxied row
+/// never inherits a native model, #2038) already happened in
+/// `preferences::harness_default_for`; this only widens the carve-out to
+/// `permission_mode`.
 fn frozen_application_default(
     app_default: Option<&crate::preferences::HarnessConfigValue>,
     frozen: bool,
@@ -344,5 +348,65 @@ mod tests {
     fn absent_default_stays_absent_when_frozen() {
         assert!(frozen_application_default(None, true).is_none());
         assert!(frozen_application_default(None, false).is_none());
+    }
+
+    /// Issue #2038 end-to-end pin for this seam: a Proxied Spawn Option
+    /// whose node carries **no** frozen configuration must reach the
+    /// resolver with an empty application layer. `resolve_spawn_config`
+    /// alone cannot prove that (its input is already scoped), so this
+    /// drives the same two steps `launch_process` does — read the
+    /// default for the option, then apply the frozen carve-out — and
+    /// asserts the native Codex model never reaches a MiniMax route.
+    /// An empty model is what lets `build_spawn_command_prepared`'s
+    /// `CodexProxy` fold supply the route's own model instead.
+    #[test]
+    fn proxied_spawn_without_a_frozen_config_carries_no_native_model() {
+        let mut prefs = crate::preferences::AppPreferences::default();
+        prefs.harness_defaults.insert(
+            "codex".into(),
+            crate::preferences::HarnessConfigValue {
+                model: Some("gpt-5.1-codex".into()),
+                effort: Some("high".into()),
+                permission_mode: None,
+            },
+        );
+        let app_default =
+            crate::preferences::harness_default_for(&prefs, &SpawnOptionId::from("codex:minimax"));
+        let resolved = resolve_spawn_config(
+            Provider::Codex,
+            None,
+            None,
+            None,
+            frozen_application_default(app_default.as_ref(), false).as_ref(),
+        );
+        assert_eq!(resolved.model, None);
+        assert_eq!(resolved.effort, None);
+    }
+
+    /// The other half of the same seam: a native Spawn Option still reads
+    /// the harness application default, so the shared reader cannot fix
+    /// the leak by dropping the layer entirely.
+    #[test]
+    fn native_spawn_still_reads_the_harness_application_default() {
+        let mut prefs = crate::preferences::AppPreferences::default();
+        prefs.harness_defaults.insert(
+            "codex".into(),
+            crate::preferences::HarnessConfigValue {
+                model: Some("gpt-5.1-codex".into()),
+                effort: Some("high".into()),
+                permission_mode: None,
+            },
+        );
+        let app_default =
+            crate::preferences::harness_default_for(&prefs, &SpawnOptionId::from("codex"));
+        let resolved = resolve_spawn_config(
+            Provider::Codex,
+            None,
+            None,
+            None,
+            frozen_application_default(app_default.as_ref(), false).as_ref(),
+        );
+        assert_eq!(resolved.model.as_deref(), Some("gpt-5.1-codex"));
+        assert_eq!(resolved.effort.as_deref(), Some("high"));
     }
 }

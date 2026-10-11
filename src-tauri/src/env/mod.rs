@@ -82,23 +82,84 @@ pub(crate) mod test_helpers {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::OnceLock;
 
     static NEXT_TEST_DIR: AtomicUsize = AtomicUsize::new(0);
 
-    /// Per-test scratch directory under %TEMP%, named uniquely so parallel
-    /// cargo test invocations don't collide. Removed on drop.
+    /// How many disambiguated names `claim_dir` will try before giving up.
+    const CLAIM_ATTEMPTS: u32 = 64;
+
+    /// A wall-clock value captured once per process and reused by each
+    /// name this process hands out.
+    ///
+    /// The pid alone is not a unique fixture name on Windows: ids are
+    /// recycled within seconds, so `_<pid>_<counter>` from a run three days
+    /// ago still matched the next run's (issue #1992). Pairing the two makes
+    /// the name a function of *this* process instance, not of the pid alone.
+    fn process_token() -> u64 {
+        static TOKEN: OnceLock<u64> = OnceLock::new();
+        *TOKEN.get_or_init(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|since| since.as_nanos() as u64)
+                .unwrap_or_default()
+        })
+    }
+
+    /// Create `parent/<stem>` — or `parent/<stem>_<n>` if that name is
+    /// already taken — and return the directory actually created.
+    ///
+    /// The exclusive `create_dir` is what this relies on: the fixture used to
+    /// `remove_dir_all` and then `create_dir_all`, which *adopted* whatever
+    /// directory a recycled process id had left behind and deleted it. A
+    /// survivor is now stepped around rather than destroyed, so the returned
+    /// path is one this call created.
+    /// `claim_dir_steps_around_a_directory_an_earlier_run_left` pins that.
+    fn claim_dir(parent: &Path, stem: &str) -> std::io::Result<PathBuf> {
+        for attempt in 0..CLAIM_ATTEMPTS {
+            let mut name = stem.to_string();
+            if attempt > 0 {
+                name.push('_');
+                name.push_str(&attempt.to_string());
+            }
+            let path = parent.join(&name);
+            match fs::create_dir(&path) {
+                Ok(()) => return Ok(path),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("no free directory for `{stem}` under {}", parent.display()),
+        ))
+    }
+
+    /// Per-test scratch directory under %TEMP%, claimed through `claim_dir` so
+    /// two runs step around each other however their process ids line up.
+    /// Drop removes it along with the siblings taken from it, pinned by
+    /// `test_dir_sibling_starts_empty_and_is_removed_on_drop`.
     pub(crate) struct TestDir(PathBuf, std::sync::Mutex<Vec<PathBuf>>);
     impl TestDir {
         pub(crate) fn new(suffix: &str) -> Self {
             let id = NEXT_TEST_DIR.fetch_add(1, Ordering::SeqCst);
-            let path = std::env::temp_dir().join(format!(
-                "buildmesh_wt_test_{}_{}_{}",
-                suffix,
-                std::process::id(),
-                id
-            ));
-            let _ = fs::remove_dir_all(&path);
-            fs::create_dir_all(&path).unwrap();
+            let parent = std::env::temp_dir();
+            fs::create_dir_all(&parent).expect("the temp directory must exist");
+            let path = claim_dir(
+                &parent,
+                &format!(
+                    "buildmesh_wt_test_{suffix}_{}_{}_{}",
+                    std::process::id(),
+                    process_token(),
+                    id
+                ),
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "claiming a fresh TestDir under {} must succeed: {error}",
+                    parent.display()
+                )
+            });
             Self(path, std::sync::Mutex::new(Vec::new()))
         }
         pub(crate) fn path(&self) -> &Path {
@@ -131,6 +192,33 @@ pub(crate) mod test_helpers {
                 let _ = fs::remove_dir_all(sibling);
             }
         }
+    }
+
+    /// Create a Windows **directory junction** at `link` pointing at `target`
+    /// — the same `mklink /J` a developer uses to share `node_modules` or a
+    /// cargo cache into a fresh worktree (issue #2193).
+    ///
+    /// `mklink /J` rather than `CreateSymbolicLinkW`: a mount point is a
+    /// reparse point the kernel resolves without `SeCreateSymbolicLinkPrivilege`,
+    /// so the fixture does not need Developer Mode or an elevated runner.
+    /// Windows-only; callers gate their own tests with `#[cfg(target_os =
+    /// "windows")]` so no other platform compiles against a helper that cannot
+    /// make one.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn junction_dir(link: &Path, target: &Path) {
+        let output = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .expect("running mklink must succeed");
+        assert!(
+            output.status.success(),
+            "mklink /J {} -> {} failed: {}",
+            link.display(),
+            target.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     /// A spawned test child that is killed *and reaped* when it goes out of
@@ -211,12 +299,13 @@ pub(crate) mod test_helpers {
     /// changes. Used as a precondition assertion by the dirty-parent tests
     /// so a silent failure to dirty the repo doesn't make the test pass
     /// for the wrong reason.
+    ///
+    /// Delegates rather than re-walking `statuses()`: a second copy of this
+    /// question is how the ignore verdict drifted from production in the
+    /// first place (#2193).
     pub(crate) fn repo_is_dirty(path: &Path) -> bool {
         let repo = git2::Repository::open(path).unwrap();
-        let mut opts = git2::StatusOptions::new();
-        opts.include_untracked(true).recurse_untracked_dirs(true);
-        let statuses = repo.statuses(Some(&mut opts)).unwrap();
-        statuses.iter().any(|entry| !entry.status().is_ignored())
+        crate::git::primitives::is_dirty(&repo).unwrap()
     }
 
     /// Add a commit on top of current HEAD with the given file content,
@@ -254,6 +343,49 @@ pub(crate) mod test_helpers {
             "precondition: HEAD must differ from origin/main"
         );
         (repo, origin_oid)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Issue #1992: the fixture used to `remove_dir_all` and then
+        /// `create_dir_all`, so a directory an earlier run had left behind was
+        /// deleted and its name handed to this one. In the leaked-origin
+        /// incident that put the fixture's very first push on top of another
+        /// run's commits, and git rejected it as non-fast-forward. Claiming a
+        /// directory must step around a survivor instead, and leave it be.
+        #[test]
+        fn claim_dir_steps_around_a_directory_an_earlier_run_left() {
+            let owner = TestDir::new("claim_dir");
+            let parent = owner.path();
+
+            let survivor = parent.join("fixture");
+            fs::create_dir(&survivor).unwrap();
+            fs::write(survivor.join("earlier-run.txt"), "not mine to delete\n").unwrap();
+
+            let claimed = claim_dir(parent, "fixture").unwrap();
+            assert_ne!(
+                claimed, survivor,
+                "a survivor's name must not be handed out again"
+            );
+            assert!(
+                claimed.is_dir(),
+                "claim_dir must return a directory it created"
+            );
+            assert!(
+                survivor.join("earlier-run.txt").exists(),
+                "claiming a directory must not delete a directory it did not create"
+            );
+
+            // The same stem keeps stepping around, rather than handing out the
+            // name `claimed` already took.
+            let claimed_again = claim_dir(parent, "fixture").unwrap();
+            assert_ne!(claimed_again, survivor);
+            assert_ne!(claimed_again, claimed);
+            assert!(claimed_again.is_dir());
+            assert!(claimed.is_dir(), "the first claim must survive the second");
+        }
     }
 }
 
@@ -771,49 +903,107 @@ mod tests {
         assert_eq!(path, expected);
     }
 
-    /// Round 1 review: a Windows Buildmesh driving a WSL Cline must
-    /// convert the guest POSIX path to a `\\wsl$\—` UNC path before
-    /// opening the SQLite store. `cline_db_path_for_host` is the
-    /// single seam that does this; passing the raw POSIX path to a
-    /// host `Connection::open` fails silently. On non-WSL env types
-    /// the helper is a no-op.
+    /// Issue #2082: a Windows Buildmesh driving a WSL Cline must convert
+    /// the guest POSIX path to a `\\wsl$\…` UNC path before opening the
+    /// SQLite store. `cline_db_path_for_host` is the single seam that does
+    /// this; passing the raw POSIX path to a host `Connection::open` fails
+    /// silently. On non-WSL env types the helper is a no-op.
     ///
-    /// Windows-only: the WSL→UNC translation lives in
-    /// `host_path::to_host_path`, which only branches into the UNC
-    /// prefix on `cfg!(target_os = "windows")`. On macOS / native Linux
-    /// the helper is a no-op, so `guest == host` and the difference
-    /// assertion would fire spuriously (Linux CI is
+    /// Both live dependencies — the guest home probe and the distro
+    /// lookup — are injected here, so this test asserts the full
+    /// translation on any host: it no longer needs a running WSL
+    /// distribution, and the expected UNC string is exact rather than a
+    /// prefix check. The live-WSL counterpart is
+    /// `cline_db_path_for_host_against_a_live_wsl_distro` below.
+    ///
+    /// The expectation branches on the host because the UNC prefix is built
+    /// only on Windows: `host_path::to_host_path_with_distro` returns a
+    /// `/home/…` input unchanged on macOS / native Linux (Linux CI is
     /// `.github/workflows/build.yml:25, :158`).
-    #[cfg(target_os = "windows")]
     #[test]
     fn cline_db_path_for_host_translates_wsl_guest_path() {
-        // The test needs a running WSL distribution: the host helper builds
-        // a `\\wsl$\<distro>\` UNC path, and our Windows helper asks
-        // `wslapi` for one when the env is WSL. Skip when the host cannot
-        // start a distribution (the WSL2 hypervisor is not installed or
-        // no distribution is registered) so a host that genuinely does
-        // not have a usable WSL still passes. The skip is logged so the
-        // gate's log carries evidence the test exists rather than silently
-        // disappearing.
+        use crate::models::EnvType;
+        // Fake guest home and distro: no `wsl.exe` is spawned anywhere in this
+        // test, so it behaves identically on a WSL2-capable host and on one
+        // where the hypervisor is not installed.
+        let guest_home = || Some(std::path::PathBuf::from("/home/alond"));
+        let distro = || Some("FakeDistro".to_string());
+        let injected_env = |key: &str| match key {
+            "USERPROFILE" => Some(r"C:\Users\dev".into()),
+            "HOME" => Some("/home/dev".into()),
+            "USERNAME" => Some("dev".into()),
+            _ => None,
+        };
+
+        // On WSL the guest POSIX path must become the UNC path carrying the
+        // *injected* distro name — proving the translation is driven by the
+        // seam, not by whatever distribution the host happens to have.
+        let guest = cline_db_path_for_host_with(EnvType::Wsl, "", injected_env, guest_home, distro)
+            .expect("WSL guest home must resolve");
+        let host_str = if cfg!(target_os = "windows") {
+            r"\\wsl$\FakeDistro\home\alond\.cline\data\db\sessions.db"
+        } else {
+            // No WSL filesystem to translate into: the guest path is already
+            // host-native and must pass through untouched.
+            "/home/alond/.cline/data/db/sessions.db"
+        };
+        assert_eq!(
+            guest.to_string_lossy(),
+            host_str,
+            "WSL guest path must translate to the injected distro's UNC path"
+        );
+
+        // Windows / WindowsInterop stay on the host, so the host helper
+        // equals the raw helper.
+        let raw_windows = cline_db_path_with_seams(EnvType::Windows, "", injected_env, || {
+            None::<std::path::PathBuf>
+        })
+        .expect("windows home must resolve");
+        let host_windows = cline_db_path_for_host_with(
+            EnvType::Windows,
+            "",
+            injected_env,
+            || None::<std::path::PathBuf>,
+            || None,
+        )
+        .expect("windows host-path must resolve");
+        assert_eq!(raw_windows, host_windows, "Windows paths must be no-ops");
+    }
+
+    /// Issue #2082: the one test that exercises the *real* WSL path — a live
+    /// distribution's guest home and its actual registered distro name.
+    /// `#[ignore]` rather than a runtime skip, so `cargo test` reports it as
+    /// **not run** instead of passing silently on a host with no WSL. Opt in
+    /// with `cargo test -- --ignored cline_db_path_for_host` on a host with a
+    /// running WSL2 distribution.
+    ///
+    /// The hermetic sibling above is what keeps the gate green everywhere;
+    /// this one only catches a drift a fake distro could not reveal — e.g. the
+    /// guest home probe and the distro parser disagreeing on a real machine.
+    #[ignore = "requires a live WSL distribution; run with `cargo test -- --ignored`"]
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn cline_db_path_for_host_against_a_live_wsl_distro() {
+        use crate::models::EnvType;
+        // No runtime skip here: the caller already opted in, so a host that
+        // cannot provide a distribution is a failure to report, not a skip.
         match wsl_test_probe() {
             WslTestProbe::Ready => {}
             WslTestProbe::Unavailable(reason) => {
-                eprintln!("skipping cline_db_path_for_host_translates_wsl_guest_path: {reason}");
-                return;
+                panic!("live WSL probe failed on a host running an --ignored test: {reason}");
             }
         }
-        use crate::models::EnvType;
-        // On non-WSL hosts the host-path helper must equal the raw
+        // On non-WSL env types the host-path helper must equal the raw
         // helper (Windows / WindowsInterop stay on the host).
         let raw_windows =
             cline_db_path_for_env(EnvType::Windows, "").expect("windows home must resolve");
         let host_windows =
             cline_db_path_for_host(EnvType::Windows, "").expect("windows host-path must resolve");
         assert_eq!(raw_windows, host_windows, "Windows paths must be no-ops");
-        // On WSL the host-path helper must differ from the raw guest
-        // path — every Windows-side reader needs the UNC translation.
-        // The test only asserts the difference, not the exact UNC
-        // string (which depends on the active distro).
+        // On WSL the host-path helper must differ from the raw guest path —
+        // every Windows-side reader needs the UNC translation. The test only
+        // asserts the difference, not the exact UNC string (which depends on
+        // the active distro).
         let guest = cline_db_path_for_env(EnvType::Wsl, "/home/alond/repo")
             .expect("WSL guest home must resolve");
         let host = cline_db_path_for_host(EnvType::Wsl, "/home/alond/repo")
@@ -829,9 +1019,9 @@ mod tests {
         );
     }
 
-    /// WSL availability probe used by the WSL-dependent tests. Treats every
-    /// non-Ready answer as "skip with a reason": the gate log carries the
-    /// reason, but the test never panics on a host without a usable WSL.
+    /// WSL availability probe used by the `#[ignore]`-gated live-WSL test.
+    /// It reports why the host cannot start a distribution so that test fails
+    /// with the real cause instead of a bare `expect` panic (issue #2082).
     fn wsl_test_probe() -> WslTestProbe {
         use std::time::Duration;
         const PROBE_TIMEOUT: Duration = Duration::from_secs(10);

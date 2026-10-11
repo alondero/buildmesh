@@ -89,7 +89,10 @@ After REQUEST_CHANGES:
    migrations, security, lifecycle ownership, dependencies or platform/build
    behavior. A failed full check remains unresolved until the failing check
    and affected checks pass; a passing subset supplies diagnostic evidence.
-4. Give the reviewer the repair diff, previous findings and executed checks.
+4. Before pushing the repair, run `npm run self-review -- --base <base>`. A
+   repair that adds explanation or tests adds claims the next round audits, so
+   delete or soften a disputed claim rather than defending it at length.
+5. Give the reviewer the repair diff, previous findings and executed checks.
    Follow-up review checks every finding's resolution, new defects and the
    repair's interactions with the whole change. A reviewer without that
    history, or a change that expands scope, needs a complete pass.
@@ -137,6 +140,15 @@ behaves the same on every harness. Each gate also writes
 `.harness/logs/<timestamp>-<gate>.log` as it runs, so a log can be read while the
 run is still going. A killed run is recovered automatically (see the lock
 paragraph below).
+
+`verify` first prints the advisory [self-review prompts](self-review.md):
+formatting-only hunks inside behaviour commits, absolute claims in added
+comments and documents, and a seven-line checklist digest. They compare the
+working tree with the verification base, never fail a gate, and are not part of
+the receipt's outcome; a plan substituted by a test skips them. When they
+flagged something, the receipt records the count and `wait` adds one line with
+the command that prints them again (`npm run self-review -- --base <commit>`),
+which is also the cheap check to run before pushing a repair.
 
 ### Lanes and the machine-wide slot limit
 
@@ -280,6 +292,15 @@ and use `NO_COLOR`. The outer npm/Node process may still warn if
 its parent shell exports both color variables; clear `FORCE_COLOR` there too.
 Building under the test environment includes development React code and makes
 the production bundle budget check the wrong artifact.
+
+A gate chooses its own environment by declaring `nodeEnv: 'production'` in the
+plan (`scripts/harness-plan.mjs`); a gate without that property runs with the
+harness-wide `test` value. The declaration travels with the gate rather than
+living in a list of gate ids in the executor, so a new build gate is visibly
+undeclared instead of quietly defaulting to the test environment. `scripts/check.ps1`
+makes the same choice for its own `npm run build` and `npm run build:mobile`
+calls, scoped to those invocations so its vitest calls still get the test
+environment React's `act` requires.
 
 | Outcome | Meaning and next action | Exit |
 |---|---|---|

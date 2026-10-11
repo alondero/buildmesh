@@ -9,6 +9,7 @@ import { runGuarded } from './ci/run-guarded.mjs';
 import { availableParallelism } from 'node:os';
 import { executedTests, gateReads, planGates, touchedFormatDiffs } from './harness-plan.mjs';
 import { acquireSlot, heavyGateEnv, heavyGateLimit, runPlan } from './harness-lanes.mjs';
+import { selfReviewReport } from './self-review.mjs';
 import { conptyPrerequisite, failureLines, gatePassed, isolatedCommand, isolateTests, knownFlakes, readTestReport, validateFlakeIssues } from './harness-test-failures.mjs';
 
 const USAGE = 'harness start --spec <json> | update --spec <json> | status | metrics | verify [--base <commit>] [--full] | wait [--max-seconds <n>] | finish | evaluate [--case <id>] | checkpoint | record-rollback --ref <commit>';
@@ -276,7 +277,11 @@ export async function runGate(root, gate, base, paths = [], extraEnv = {}, { def
     const command = commandFor(root, gate, base);
     const reportPath = `${log}.json`;
     if (gate.tests === 'vitest') command.push(...(gate.command[0] === 'npm' ? ['--'] : []), '--reporter=default', '--reporter=json', `--outputFile.json=${reportPath}`);
-    const nodeEnv = gate.id === 'frontend-build' || gate.id === 'mobile-build' ? 'production' : 'test';
+    // The gate owns its environment (issue #2013): a build gate declares
+    // `nodeEnv: 'production'` in the plan so Vite builds the artifact the bundle
+    // budget is written against, and a gate without it keeps the harness-wide
+    // test environment that React's `act` and the render suites require.
+    const nodeEnv = gate.nodeEnv ?? 'test';
     const env = { ...process.env, NODE_ENV: nodeEnv, NO_COLOR: '1', ...extraEnv };
     delete env.FORCE_COLOR;
     delete env.BUILDMESH_PREFILL;
@@ -328,7 +333,7 @@ function classify(gate, code, output, paths) {
   if (gate.touchedFormat && code !== 0) {
     const { touched, total } = touchedFormatDiffs(output, paths);
     if (!total) return { outcome: 'FAIL', reason: 'rustfmt failed without reporting a formatting diff. See the gate log.' };
-    if (touched.length) return { outcome: 'FAIL', reason: `rustfmt diffs in touched files: ${touched.join(', ')}. Format them with node scripts/rustfmt-touched.mjs ${touched.map(path => `"${path}"`).join(' ')}, which restores every other Rust file; bare "rustfmt <file>" also rewrites child modules and "cargo fmt" rewrites the whole crate (#2022).`, formatDiffCount: total };
+    if (touched.length) return { outcome: 'FAIL', reason: `rustfmt diffs in touched files: ${touched.join(', ')}. Format them with node scripts/rustfmt-touched.mjs ${touched.map(path => `"${path}"`).join(' ')}, which restores every other Rust file; bare "rustfmt <file>" also rewrites child modules and "cargo fmt" rewrites the whole crate (#2022). This gate checks the final tree, so commit your behaviour change first, then format and commit the result alone as \`style(rust): format <files>\`; reformatting inside the behaviour commit buries the change reviewers must read.`, formatDiffCount: total };
     return { outcome: 'PASS', count: null, formatDiffCount: total };
   }
   if (code !== 0) return { outcome: 'FAIL', reason: 'Command failed. See the gate log; failure attribution is unverified.' };
@@ -346,8 +351,9 @@ function classify(gate, code, output, paths) {
   }
   return { outcome: 'PASS', count };
 }
-// `plan` lets tests substitute fake gates for the real npm/cargo plan.
-export async function verify(root, { base: requestedBase, full = false, plan = planGates } = {}) {
+// `plan` lets tests substitute fake gates for the real npm/cargo plan; a substituted plan also skips
+// the self-review prompts unless `selfReview` asks for them (true, or a function standing in for them).
+export async function verify(root, { base: requestedBase, full = false, plan = planGates, selfReview = plan === planGates } = {}) {
   const task = taskAt(root);
   if (!task && !requestedBase) throw new Error('BLOCKED: start a task or provide --base <commit>; HEAD alone can miss committed work.');
   const base = resolveBase(root, requestedBase ?? task.base);
@@ -358,6 +364,16 @@ export async function verify(root, { base: requestedBase, full = false, plan = p
   const snapshot = treeSnapshot(root);
   const identity = runIdentity(root, base);
   const receipt = { taskId: task?.id ?? null, root, base, head: git(root, 'rev-parse', 'HEAD').trim(), tree, full, paths, gatePlan: gates, gates: [], outcome: 'BLOCKED', startedAt: new Date().toISOString() };
+  // Advisory only, and printed first: a repair is cheapest before the slow gates have run against it.
+  let selfReviewFlags = 0;
+  if (selfReview) {
+    try {
+      const report = (typeof selfReview === 'function' ? selfReview : selfReviewReport)(root, base);
+      console.log(report.text);
+      selfReviewFlags = report.flagged;
+      receipt.selfReviewFlags = report.flagged;
+    } catch (error) { console.log(`Self-review prompts unavailable: ${error.message.split('\n')[0]}`); }
+  }
   // Passed gates survive across attempts of one task, so a failure part-way
   // through the plan does not forget the gates it never reached. A cache that
   // is missing, corrupt or another task's only costs time, never correctness.
@@ -440,6 +456,7 @@ export async function verify(root, { base: requestedBase, full = false, plan = p
   saveJson(statePath(root, 'receipt.json'), receipt);
   event(root, { type: 'verification', taskId: receipt.taskId, outcome: receipt.outcome, durationMs: receipt.durationMs, attempt: task?.verificationAttempts ?? null });
   console.log(`${receipt.outcome}: ${receipt.gates.length}/${gates.length} gates${receipt.reason ? `; ${receipt.reason}` : ''}. Receipt: .harness/receipt.json`);
+  if (selfReviewFlags) console.log(`Self-review prompts above flagged ${selfReviewFlags} item${selfReviewFlags === 1 ? '' : 's'}; apply docs/agents/self-review.md before committing.`);
   return receipt;
 }
 async function evaluate(root, selected) {
@@ -516,6 +533,7 @@ function receiptSummary(root, held) {
     named += Math.min(row.failures?.length ?? 0, 10 - named);
   }
   if (failed.length > MAX_SUMMARY_GATES) lines.push(`(+${failed.length - MAX_SUMMARY_GATES} more nonpassing gates in the receipt)`);
+  if (receipt.selfReviewFlags) lines.push(`Self-review prompts flagged ${receipt.selfReviewFlags} item${receipt.selfReviewFlags === 1 ? '' : 's'}: npm run self-review -- --base ${String(receipt.base).slice(0, 8)}`);
   return { outcome: receipt.outcome, lines };
 }
 // Block until no harness operation holds .harness/lock (a verify holds it for

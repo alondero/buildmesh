@@ -54,28 +54,24 @@ beforeEach(() => {
   tauriMocks.setAppConfirmBeforeQuit.mockReset().mockResolvedValue(undefined);
 });
 
+const CONFIRM_QUIT = 'Confirm before quitting';
+
 async function renderModal() {
   render(<AppSettingsModal onClose={() => {}} />);
-  await screen.findByRole('checkbox', {
-    name: 'Confirm before quitting when agent sessions are active',
-  });
+  await screen.findByRole('checkbox', { name: CONFIRM_QUIT });
 }
 
 describe('App Settings confirm-before-quit (issue #1501)', () => {
   it('renders checked by default from the preference', async () => {
     await renderModal();
     expect(
-      screen.getByRole('checkbox', {
-        name: 'Confirm before quitting when agent sessions are active',
-      }),
+      screen.getByRole('checkbox', { name: CONFIRM_QUIT }),
     ).toHaveProperty('checked', true);
   });
 
   it('persists an opt-out toggle to the backend', async () => {
     await renderModal();
-    const box = screen.getByRole('checkbox', {
-      name: 'Confirm before quitting when agent sessions are active',
-    });
+    const box = screen.getByRole('checkbox', { name: CONFIRM_QUIT });
     await act(async () => {
       fireEvent.click(box);
     });
@@ -87,9 +83,7 @@ describe('App Settings confirm-before-quit (issue #1501)', () => {
   it('rolls back when the save fails', async () => {
     tauriMocks.setAppConfirmBeforeQuit.mockRejectedValueOnce(new Error('disk full'));
     await renderModal();
-    const box = screen.getByRole('checkbox', {
-      name: 'Confirm before quitting when agent sessions are active',
-    }) as HTMLInputElement;
+    const box = screen.getByRole('checkbox', { name: CONFIRM_QUIT }) as HTMLInputElement;
     await act(async () => {
       fireEvent.click(box);
     });

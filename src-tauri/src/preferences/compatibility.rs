@@ -10,7 +10,8 @@
 //!   [`validate_harness_default`], [`upsert_harness_default`],
 //!   [`remove_harness_default`], [`harness_default_for`]): gates user
 //!   application-level harness overrides against each harness's capability
-//!   contract (issue #1148).
+//!   contract (issue #1148) and against the Spawn Option they are read for
+//!   (issue #2038).
 //!
 //! See the [module-level docs](super) for what concerns each submodule owns.
 
@@ -148,12 +149,33 @@ pub fn remove_harness_default(prefs: &mut AppPreferences, profile_id: &str) {
     prefs.harness_defaults.remove(profile_id);
 }
 
-/// The stored default for `profile_id`, if any. The caller passes the value
-/// straight into the resolver's `application` slot — the resolver's
+/// The application layer one Spawn Option may consume. The caller passes the
+/// value straight into the resolver's `application` slot — the resolver's
 /// capability mask is what actually gates whether the value reaches the
 /// harness process (issue #1148 acceptance criteria 6).
-pub fn harness_default_for(prefs: &AppPreferences, profile_id: &str) -> Option<HarnessConfigValue> {
-    prefs.harness_defaults.get(profile_id).cloned()
+///
+/// A harness default names a model on that harness's **native** provider, so
+/// a Proxied Provider Spawn Option (`codex:minimax`) must not inherit the
+/// `codex` half's value — the route's own model is the only valid fallback
+/// there. The exclusion lives here, on the option, so the live launch seam
+/// (`agent::spawn::launch`) and the frozen Launch Configuration resolver
+/// (`launch_configurations::resolve_plan`) cannot disagree about it (issue
+/// #2038). `permission_mode` is a property of the harness CLI rather than of
+/// the endpoint it talks to, so it keeps cascading for a proxied spawn.
+pub fn harness_default_for(
+    prefs: &AppPreferences,
+    option: &crate::agent::provider::SpawnOptionId,
+) -> Option<HarnessConfigValue> {
+    let stored = prefs.harness_defaults.get(option.harness_id())?;
+    if !option.is_proxied() {
+        return Some(stored.clone());
+    }
+    let scoped = HarnessConfigValue {
+        model: None,
+        effort: None,
+        permission_mode: stored.permission_mode.clone(),
+    };
+    (!scoped.is_empty()).then_some(scoped)
 }
 
 // ----- Spawn env translation --------------------------------------------

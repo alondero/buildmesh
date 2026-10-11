@@ -270,21 +270,22 @@ export function RemoteAccessPane() {
           </div>
         )}
 
+        {/* One label; the section's info tip carries the explanation (TLS,
+            loopback, reconnecting devices). Repeating it as a subtitle and as
+            checkbox text is what made this row read as a wall of text. */}
         <SettingsRow
-          label="Enable exposure"
-          summary="Self-signed TLS; loopback stays plain HTTP."
-          controlClassName="w-80 shrink-0"
+          label="Expose to LAN / VPN"
+          htmlFor="lan-exposure"
+          controlClassName="shrink-0"
         >
-          <label className="flex items-center gap-3 text-base text-text-primary cursor-pointer">
-            <input
-              type="checkbox"
-              checked={lanEnabled}
-              disabled={!networkLoaded || lanBusy}
-              onChange={e => handleToggleLanExposure(e.target.checked)}
-              className="accent-accent-cyan h-4 w-4 disabled:opacity-50"
-            />
-            <span>Expose to LAN / VPN over self-signed TLS</span>
-          </label>
+          <input
+            id="lan-exposure"
+            type="checkbox"
+            checked={lanEnabled}
+            disabled={!networkLoaded || lanBusy}
+            onChange={e => handleToggleLanExposure(e.target.checked)}
+            className="accent-accent-cyan h-4 w-4 disabled:opacity-50"
+          />
         </SettingsRow>
 
         {/* Realized exposure (issue #586). When the toggle is on but the
@@ -369,7 +370,7 @@ export function RemoteAccessPane() {
         <SettingsRow
           label="Enable coordinator read API"
           htmlFor="coordinator-read-api"
-          summary="Read-only HTTP view of node status for an external coordinator."
+          controlClassName="shrink-0"
         >
           <input
             id="coordinator-read-api"

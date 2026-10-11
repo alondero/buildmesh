@@ -150,8 +150,8 @@ describe('AppSettingsModal dirty-check wiring (issue #730)', () => {
 
     await screen.findByText('DeepSeek via Claude Code');
     await openSettingsPane('Providers');
-    // Open the credentials editor.
-    await user.click(screen.getByRole('button', { name: /edit credentials/i }));
+    // Expand the account row to reach the credentials editor.
+    await user.click(screen.getByRole('button', { name: 'DeepSeek via Claude Code', expanded: false }));
     // Type a half-typed API key.
     await user.type(screen.getByLabelText(/deepseek via claude code api key/i), 'sk-half-typed');
 
