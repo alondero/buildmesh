@@ -1540,6 +1540,11 @@ mod tests {
         let npm_dir = tempfile::tempdir_in(&windows_temp).unwrap();
         let shim = npm_dir.path().join("probe.cmd");
         std::fs::write(&shim, "@echo off\r\necho shim-ran> probe.txt\r\n").unwrap();
+        // PowerShell is a Windows process, so it needs the *Windows* spelling
+        // of the shim. `windows_cli_home` returns the host spelling — correct
+        // for writing the file, wrong for telling Windows where it is — which
+        // is the same trap the batch file had.
+        let shim_windows = crate::env::windows_path_from_wsl(shim.to_str().unwrap());
         // A WSL-side directory whose Windows form is UNC, with an `&` in the
         // name so a directory that reached cmd.exe on the command line would be
         // split rather than mapped.
@@ -1558,7 +1563,7 @@ mod tests {
             recipe,
             EnvType::WindowsInterop,
             None,
-            Some(shim.to_str().unwrap()),
+            Some(&shim_windows),
             &spawn_path,
             8127,
             false,
@@ -1591,6 +1596,12 @@ mod tests {
              without splitting on a metacharacter; got: {script}"
         );
         let pair = crate::agent::spawn::open_pty_pair(24, 80).unwrap();
+        // Stands in for xterm.js: the only thing that answers the child's
+        // cursor-position query. `take_writer` may be called once per master.
+        let mut console = pair
+            .master
+            .take_writer()
+            .expect("a PTY master hands out one writer");
         let mut master = pair.master.try_clone_reader().unwrap();
         let mut child = crate::agent::spawn::spawn_child(&pair, command).unwrap();
         // Drain the PTY. Without this the console output is discarded, and a
@@ -1616,21 +1627,64 @@ mod tests {
         // for a node, not a failure — so `wait()` would never return here even
         // on a completely successful spawn. What matters is whether the shim
         // ran *in the node's directory*, which is what the probe records.
+        //
+        // Answer the cursor-position query while polling. cmd.exe opens with
+        // `ESC[6n` ("Device Status Report": where is your cursor?) and blocks
+        // until a terminal replies. In the app that reply comes from xterm.js
+        // in the frontend; a bare PTY has no terminal behind it and so nobody
+        // answers, which is the whole of this test's hang. Answering it here is
+        // emulating the frontend, not patching the spawn.
+        const CURSOR_REPLY: &[u8] = b"\x1b[1;1R";
+        use std::io::Write as _;
+        // Reply once. The captured text keeps containing the query, so a sticky
+        // check spams the reply and buries the real output under repaints.
+        let mut answered_cursor_query = false;
         let probe = directory.path().join("probe.txt");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
-        while !probe.is_file() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(250));
+        loop {
+            if probe.is_file() {
+                break;
+            }
+            if !answered_cursor_query {
+                let asked = captured
+                    .lock()
+                    .map(|text| text.contains("\u{1b}[6n"))
+                    .unwrap_or(false);
+                if asked {
+                    answered_cursor_query = true;
+                    if console.write_all(CURSOR_REPLY).is_err() {
+                        break;
+                    }
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
         let ran_in_node_directory = probe.is_file();
         let _ = child.kill();
         drop(pair);
         let _ = reader.join();
+        // Tail only: the console is full of repaint escapes once PowerShell is
+        // up, and the error that matters is the last thing it printed.
+        let tail: String = captured
+            .lock()
+            .map(|text| {
+                text.chars()
+                    .rev()
+                    .take(1500)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect()
+            })
+            .unwrap_or_default();
         assert!(
             ran_in_node_directory,
             "the mapped interop spawn did not run the shim in the node directory at {}.\n\
-             Console output:\n{}",
-            directory.path().display(),
-            captured.lock().map(|text| text.clone()).unwrap_or_default()
+             Console output (tail):\n{tail}",
+            directory.path().display()
         );
     }
 
