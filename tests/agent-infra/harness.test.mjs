@@ -600,14 +600,54 @@ test('behavior gates reject zero tests and preserve executed counts', async t =>
   assert.equal(executed.count, 1);
   assert.equal(executedTests('rust', 'test result: ok. 2 passed;\ntest result: ok. 3 passed;'), 5);
 });
-test('build gates use production while test gates retain the test environment', async t => {
+test('a gate receives the environment it declares, and the test environment otherwise', async t => {
+  // The subprocess boundary itself: what the child process actually reads.
   const fixture = repo(t);
-  for (const [id, expected] of [['frontend-build', 'production'], ['mobile-build', 'production'], ['frontend-tests', 'test']]) {
+  for (const [declared, expected] of [[{ nodeEnv: 'production' }, 'production'], [undefined, 'test']]) {
     const result = await runGate(fixture.cwd, {
-      id, minutes: 1,
+      id: 'boundary', minutes: 1, ...(declared ? declared : {}),
       command: ['node', '-e', `if (process.env.NODE_ENV !== '${expected}') throw new Error(process.env.NODE_ENV);`],
     }, fixture.base);
     assert.equal(result.outcome, 'PASS', result.log ? readFileSync(result.log, 'utf8') : result.reason);
+  }
+});
+test('each planned build gate declares the production environment', () => {
+  // Issue #2013 - the plan declares the environment, not a list of gate ids
+  // inside the executor. Both build plans are covered: a Rust-only change runs
+  // `mobile-build` and takes the `else if` branch, so the frontend plan alone
+  // would not exercise it.
+  const frontend = planGates(['src/App.tsx']);
+  const rustOnly = planGates(['src-tauri/src/db/mod.rs']);
+  const declared = gates => gates.filter(gate => gate.nodeEnv === 'production').map(gate => gate.id);
+  assert.deepEqual(declared(frontend), ['frontend-build']);
+  assert.deepEqual(declared(rustOnly), ['mobile-build']);
+  // Ties the declaration to the command, so renaming or adding a build gate
+  // fails here until it says which environment it builds in.
+  for (const gate of [...frontend, ...rustOnly]) {
+    const builds = gate.command.join(' ').includes('run build');
+    assert.equal(gate.nodeEnv === 'production', builds, `${gate.id} declares the wrong environment`);
+  }
+  // Test gates keep the harness-wide test environment React's `act` needs.
+  for (const id of ['frontend-tests', 'docs-tests', 'lint']) {
+    assert.equal(frontend.find(gate => gate.id === id).nodeEnv, undefined, `${id} must not claim a production build`);
+  }
+});
+test('the Windows wrapper builds in production and leaves the caller environment alone', () => {
+  // scripts/check.ps1 is a second entry point that runs the same build, so it
+  // has to make the same choice; the repository documents NODE_ENV=test for
+  // vitest, and inheriting that here fails the bundle budget on the React
+  // development runtime. Parsed as text: PowerShell is not a test dependency.
+  const wrapper = readFileSync(join(root, 'scripts/check.ps1'), 'utf8');
+  const helper = wrapper.slice(wrapper.indexOf('function Invoke-ProductionBuild'), wrapper.indexOf('function Ensure-MobileBuilt'));
+  assert.match(helper, /\$env:NODE_ENV = 'production'/);
+  assert.match(helper, /\$env:NODE_ENV = \$previous/, 'the caller environment must be restored');
+  // Both build entry points route through the helper, and the vitest calls
+  // must not, or they would run without `act`.
+  assert.match(wrapper, /Invoke-ProductionBuild build:mobile/);
+  assert.match(wrapper, /Invoke-ProductionBuild build(\s|')/);
+  assert.doesNotMatch(wrapper, /Invoke-ProductionBuild (?:unit|integration|test)\b/);
+  for (const call of ['npx vitest run --pool=threads tests/unit', 'npx vitest run --pool=threads tests/integration']) {
+    assert.ok(wrapper.includes(call) && !wrapper.includes(`Invoke-ProductionBuild ${call}`), `${call} must keep the test environment`);
   }
 });
 test('missing dependencies preflight BLOCKED without launching tests', async t => {
