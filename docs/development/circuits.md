@@ -50,8 +50,10 @@ Run cards start collapsed. Open a card for the step timeline, reports and eviden
 Resolve reveals recovery actions for uncertain or failed steps. Review gates that
 are unverified offer explicit **Review passed** and **Request changes** decisions
 when no known work/input/evidence blocker remains. Request changes is available
-only when every possible outcome along its configured route can still reach a
-feedback injection. An inconclusive automatic review emits a circuit
+only when the feedback injection is scheduler-eligible for every possible
+outcome, with all required incoming edges satisfied in the same run. Mutually
+exclusive branches cannot combine to satisfy an all-incoming join. An
+inconclusive automatic review emits a circuit
 notification and stays unverified with its reviewer available for inspection. It
 notifies once
 when it first parks for that inconclusive verdict; repeating the same observation

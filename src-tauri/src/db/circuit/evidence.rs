@@ -5592,6 +5592,104 @@ mod tests {
     }
 
     #[test]
+    fn operator_review_is_refused_when_exclusive_branches_cannot_satisfy_feedback_join() {
+        use crate::circuit::model::{
+            CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind, EdgeCondition, StepOutcome,
+        };
+
+        let db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch(
+            "INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(9,1,'source','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(10,1,'reviewer','/repo/reviewer');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'review');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state,context_json)
+                VALUES(1,1,1,'running','{\"source.agent_id\":\"9\",\"source.name\":\"issue #42\"}');
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,agent_node_id)
+                VALUES(1,'reviewer',1,'completed',10),(1,'verdict',1,'unverified',10);",
+        )
+        .unwrap();
+
+        let mut graph = CircuitGraph::agent_review(None, None, 3);
+        graph
+            .edges
+            .retain(|edge| !(edge.from == "verdict" && edge.to == "feedback"));
+        graph.nodes.extend([
+            CircuitNode {
+                id: "await_feedback_gate".into(),
+                kind: CircuitNodeKind::AwaitAgentTurn {
+                    target_node_id: Some("$source".into()),
+                },
+            },
+            CircuitNode {
+                id: "completed_notice".into(),
+                kind: CircuitNodeKind::Notify {
+                    message: "The source turn completed.".into(),
+                },
+            },
+            CircuitNode {
+                id: "blocked_notice".into(),
+                kind: CircuitNodeKind::Notify {
+                    message: "The source turn was blocked.".into(),
+                },
+            },
+        ]);
+        graph.edges.extend([
+            CircuitEdge {
+                from: "verdict".into(),
+                to: "await_feedback_gate".into(),
+                condition: EdgeCondition::OnOutcome(StepOutcome::Working),
+            },
+            CircuitEdge {
+                from: "await_feedback_gate".into(),
+                to: "completed_notice".into(),
+                condition: EdgeCondition::OnOutcome(StepOutcome::Completed),
+            },
+            CircuitEdge {
+                from: "await_feedback_gate".into(),
+                to: "blocked_notice".into(),
+                condition: EdgeCondition::OnOutcome(StepOutcome::Blocked),
+            },
+            CircuitEdge {
+                from: "await_feedback_gate".into(),
+                to: "completed_notice".into(),
+                condition: EdgeCondition::OnOutcome(StepOutcome::Working),
+            },
+            CircuitEdge {
+                from: "await_feedback_gate".into(),
+                to: "completed_notice".into(),
+                condition: EdgeCondition::OnOutcome(StepOutcome::Failed),
+            },
+            CircuitEdge {
+                from: "completed_notice".into(),
+                to: "feedback".into(),
+                condition: EdgeCondition::Always,
+            },
+            CircuitEdge {
+                from: "blocked_notice".into(),
+                to: "feedback".into(),
+                condition: EdgeCondition::Always,
+            },
+        ]);
+        db.execute(
+            "UPDATE autopilot_circuits SET graph_json=?1",
+            [graph.to_json().unwrap()],
+        )
+        .unwrap();
+
+        let stored = super::super::ledger::get_circuit_run_inner(&db, 1)
+            .unwrap()
+            .unwrap();
+        let view = recovery_view(&db, &stored).unwrap();
+        assert!(view.step("await_feedback_gate").is_none());
+        assert!(
+            !view.can_record_review("verdict", StepOutcome::Working),
+            "exclusive outcome branches cannot jointly satisfy feedback's all-incoming-edge join"
+        );
+    }
+
+    #[test]
     fn recorded_operator_review_drives_the_next_tick_and_injected_prompt() {
         use crate::circuit::{
             model::{

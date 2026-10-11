@@ -2982,8 +2982,9 @@ fn classifier_outcome_is_routed(run: &RunView, node_id: &str, outcome: StepOutco
 }
 
 /// A request-changes verdict must deliver its note to an agent other than the
-/// reviewer for every outcome an unrun intermediate can produce. A configured
-/// branch that can bypass feedback is not enough to accept the verdict.
+/// reviewer for every outcome an unrun intermediate can produce. Simulate the
+/// scheduler's incoming-edge rules so mutually exclusive branches cannot
+/// falsely satisfy an all-incoming feedback join.
 fn operator_feedback_injection_reachable(
     run: &RunView,
     review_node_id: &str,
@@ -3003,75 +3004,190 @@ fn operator_feedback_injection_reachable(
     if feedback_agent.is_none() || feedback_agent == reviewer {
         return false;
     }
+    let mut route_nodes = std::collections::HashSet::new();
+    let mut pending = vec![review_node_id.to_owned()];
+    while let Some(node_id) = pending.pop() {
+        if !route_nodes.insert(node_id.clone()) {
+            continue;
+        }
+        pending.extend(run.graph.children(&node_id));
+    }
+    if !route_nodes.contains(injection_node_id) {
+        return false;
+    }
     let decision_attempt = run.step(review_node_id).map_or(1, |step| step.attempt);
 
-    fn reaches_feedback_for_every_outcome(
+    if run
+        .step(injection_node_id)
+        .is_some_and(|step| step.status == StepStatus::Running && step.attempt >= decision_attempt)
+    {
+        // Prompt resolution calls this after the scheduler has selected the
+        // injection step, so its route is already proven for this attempt.
+        return true;
+    }
+
+    let mut scheduled = std::collections::HashSet::new();
+    let mut outcomes = std::collections::HashMap::new();
+    for step in &run.steps {
+        if step.attempt < decision_attempt {
+            continue;
+        }
+        scheduled.insert(step.node_id.clone());
+        if step.status.is_terminal() {
+            outcomes.insert(step.node_id.clone(), step.outcome);
+        }
+    }
+    scheduled.insert(review_node_id.to_owned());
+    outcomes.insert(review_node_id.to_owned(), Some(StepOutcome::Working));
+
+    fn every_scheduled_outcome_reaches_feedback(
         run: &RunView,
-        from: &str,
-        outcome_override: Option<StepOutcome>,
-        decision_attempt: i32,
         injection_node_id: &str,
-        active_path: &mut std::collections::HashSet<String>,
+        route_nodes: &std::collections::HashSet<String>,
+        scheduled: &mut std::collections::HashSet<String>,
+        outcomes: &mut std::collections::HashMap<String, Option<StepOutcome>>,
     ) -> bool {
-        if from == injection_node_id {
+        if route_nodes.contains(injection_node_id)
+            && operator_feedback_node_is_eligible(run, injection_node_id, scheduled, outcomes)
+        {
             return true;
         }
-        if !active_path.insert(from.to_owned()) {
+
+        // A running/queued step was already selected by the scheduler. Model
+        // its eventual result before selecting another node; otherwise choose
+        // the first newly eligible node in scheduler order.
+        let next = run
+            .graph
+            .nodes
+            .iter()
+            .find(|node| {
+                route_nodes.contains(&node.id)
+                    && scheduled.contains(&node.id)
+                    && !outcomes.contains_key(&node.id)
+            })
+            .or_else(|| {
+                run.graph.nodes.iter().find(|node| {
+                    route_nodes.contains(&node.id)
+                        && !scheduled.contains(&node.id)
+                        && operator_feedback_node_is_eligible(run, &node.id, scheduled, outcomes)
+                })
+            });
+        let Some(next) = next else {
+            return false;
+        };
+        let next_id = next.id.clone();
+        let possible_outcomes = operator_feedback_possible_outcomes(&next.kind);
+        if possible_outcomes.is_empty() {
             return false;
         }
 
-        // A prior-attempt result may be reset when this decision schedules the route.
-        let recorded_outcome = run
-            .step(from)
-            .filter(|step| step.attempt >= decision_attempt)
-            .and_then(|step| step.outcome);
-        let outcomes = outcome_override
-            .or(recorded_outcome)
-            .map(|outcome| vec![outcome])
-            .or_else(|| {
-                run.graph
-                    .node(from)
-                    .map(|node| operator_feedback_possible_outcomes(&node.kind).to_vec())
-            })
-            .unwrap_or_default();
-        let reaches_feedback = !outcomes.is_empty()
-            && outcomes.into_iter().all(|outcome| {
-                let successors: Vec<_> = run
-                    .graph
-                    .edges
-                    .iter()
-                    .filter(|edge| {
-                        edge.from == from
-                            && (edge.condition == EdgeCondition::Always
-                                || edge.condition == EdgeCondition::OnOutcome(outcome))
-                    })
-                    .map(|edge| edge.to.as_str())
-                    .collect();
-                !successors.is_empty()
-                    && successors.into_iter().any(|to| {
-                        reaches_feedback_for_every_outcome(
-                            run,
-                            to,
-                            None,
-                            decision_attempt,
-                            injection_node_id,
-                            active_path,
-                        )
-                    })
-            });
-
-        active_path.remove(from);
-        reaches_feedback
+        let newly_scheduled = scheduled.insert(next_id.clone());
+        for outcome in possible_outcomes {
+            outcomes.insert(next_id.clone(), Some(*outcome));
+            if !every_scheduled_outcome_reaches_feedback(
+                run,
+                injection_node_id,
+                route_nodes,
+                scheduled,
+                outcomes,
+            ) {
+                outcomes.remove(&next_id);
+                if newly_scheduled {
+                    scheduled.remove(&next_id);
+                }
+                return false;
+            }
+        }
+        outcomes.remove(&next_id);
+        if newly_scheduled {
+            scheduled.remove(&next_id);
+        }
+        true
     }
 
-    reaches_feedback_for_every_outcome(
+    every_scheduled_outcome_reaches_feedback(
         run,
-        review_node_id,
-        Some(StepOutcome::Working),
-        decision_attempt,
         injection_node_id,
-        &mut std::collections::HashSet::new(),
+        &route_nodes,
+        &mut scheduled,
+        &mut outcomes,
     )
+}
+
+/// Mirror [`is_eligible`] for a hypothetical execution. The maps contain only
+/// terminal current-attempt outcomes; `scheduled` also includes active steps.
+fn operator_feedback_node_is_eligible(
+    run: &RunView,
+    node_id: &str,
+    scheduled: &std::collections::HashSet<String>,
+    outcomes: &std::collections::HashMap<String, Option<StepOutcome>>,
+) -> bool {
+    let incoming: Vec<_> = run
+        .graph
+        .incoming(node_id)
+        .into_iter()
+        .filter(|edge| {
+            if matches!(
+                run.graph.node(&edge.from).map(|node| &node.kind),
+                Some(CircuitNodeKind::RetryLimit { .. })
+            ) {
+                return outcomes.contains_key(&edge.from);
+            }
+            if matches!(
+                run.graph.node(&edge.from).map(|node| &node.kind),
+                Some(CircuitNodeKind::CollaboratorCheck {
+                    require_approval: true
+                })
+            ) && !scheduled.contains(&edge.from)
+            {
+                return false;
+            }
+            true
+        })
+        .collect();
+    if incoming.is_empty() {
+        return false;
+    }
+
+    if matches!(
+        run.graph.node(node_id).map(|node| &node.kind),
+        Some(CircuitNodeKind::AnyCompleted)
+    ) {
+        return incoming.iter().any(|edge| {
+            outcomes.get(&edge.from) == Some(&Some(StepOutcome::Completed))
+                && matches!(
+                    edge.condition,
+                    EdgeCondition::Always | EdgeCondition::OnOutcome(StepOutcome::Completed)
+                )
+        });
+    }
+
+    incoming
+        .iter()
+        .all(|edge| operator_feedback_edge_is_satisfied(run, edge, outcomes))
+}
+
+fn operator_feedback_edge_is_satisfied(
+    run: &RunView,
+    edge: &super::model::CircuitEdge,
+    outcomes: &std::collections::HashMap<String, Option<StepOutcome>>,
+) -> bool {
+    let Some(outcome) = outcomes.get(&edge.from) else {
+        return false;
+    };
+    let condition_matches = match edge.condition {
+        EdgeCondition::Always => true,
+        EdgeCondition::OnOutcome(expected) => *outcome == Some(expected),
+    };
+    condition_matches
+        && (*outcome != Some(StepOutcome::Completed)
+            || !matches!(
+                run.graph.node(&edge.from).map(|node| &node.kind),
+                Some(CircuitNodeKind::ReviewVerdict { .. })
+            )
+            || run
+                .step(&edge.from)
+                .is_some_and(|step| has_current_review_approval(run, step)))
 }
 
 /// Outcomes an unrun node can report through the stepper's current event
