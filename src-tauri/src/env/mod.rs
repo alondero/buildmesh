@@ -82,23 +82,84 @@ pub(crate) mod test_helpers {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::OnceLock;
 
     static NEXT_TEST_DIR: AtomicUsize = AtomicUsize::new(0);
 
-    /// Per-test scratch directory under %TEMP%, named uniquely so parallel
-    /// cargo test invocations don't collide. Removed on drop.
+    /// How many disambiguated names `claim_dir` will try before giving up.
+    const CLAIM_ATTEMPTS: u32 = 64;
+
+    /// A wall-clock value captured once per process and reused by each
+    /// name this process hands out.
+    ///
+    /// The pid alone is not a unique fixture name on Windows: ids are
+    /// recycled within seconds, so `_<pid>_<counter>` from a run three days
+    /// ago still matched the next run's (issue #1992). Pairing the two makes
+    /// the name a function of *this* process instance, not of the pid alone.
+    fn process_token() -> u64 {
+        static TOKEN: OnceLock<u64> = OnceLock::new();
+        *TOKEN.get_or_init(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|since| since.as_nanos() as u64)
+                .unwrap_or_default()
+        })
+    }
+
+    /// Create `parent/<stem>` — or `parent/<stem>_<n>` if that name is
+    /// already taken — and return the directory actually created.
+    ///
+    /// The exclusive `create_dir` is what this relies on: the fixture used to
+    /// `remove_dir_all` and then `create_dir_all`, which *adopted* whatever
+    /// directory a recycled process id had left behind and deleted it. A
+    /// survivor is now stepped around rather than destroyed, so the returned
+    /// path is one this call created.
+    /// `claim_dir_steps_around_a_directory_an_earlier_run_left` pins that.
+    fn claim_dir(parent: &Path, stem: &str) -> std::io::Result<PathBuf> {
+        for attempt in 0..CLAIM_ATTEMPTS {
+            let mut name = stem.to_string();
+            if attempt > 0 {
+                name.push('_');
+                name.push_str(&attempt.to_string());
+            }
+            let path = parent.join(&name);
+            match fs::create_dir(&path) {
+                Ok(()) => return Ok(path),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("no free directory for `{stem}` under {}", parent.display()),
+        ))
+    }
+
+    /// Per-test scratch directory under %TEMP%, claimed through `claim_dir` so
+    /// two runs step around each other however their process ids line up.
+    /// Drop removes it along with the siblings taken from it, pinned by
+    /// `test_dir_sibling_starts_empty_and_is_removed_on_drop`.
     pub(crate) struct TestDir(PathBuf, std::sync::Mutex<Vec<PathBuf>>);
     impl TestDir {
         pub(crate) fn new(suffix: &str) -> Self {
             let id = NEXT_TEST_DIR.fetch_add(1, Ordering::SeqCst);
-            let path = std::env::temp_dir().join(format!(
-                "buildmesh_wt_test_{}_{}_{}",
-                suffix,
-                std::process::id(),
-                id
-            ));
-            let _ = fs::remove_dir_all(&path);
-            fs::create_dir_all(&path).unwrap();
+            let parent = std::env::temp_dir();
+            fs::create_dir_all(&parent).expect("the temp directory must exist");
+            let path = claim_dir(
+                &parent,
+                &format!(
+                    "buildmesh_wt_test_{suffix}_{}_{}_{}",
+                    std::process::id(),
+                    process_token(),
+                    id
+                ),
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "claiming a fresh TestDir under {} must succeed: {error}",
+                    parent.display()
+                )
+            });
             Self(path, std::sync::Mutex::new(Vec::new()))
         }
         pub(crate) fn path(&self) -> &Path {
@@ -282,6 +343,49 @@ pub(crate) mod test_helpers {
             "precondition: HEAD must differ from origin/main"
         );
         (repo, origin_oid)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Issue #1992: the fixture used to `remove_dir_all` and then
+        /// `create_dir_all`, so a directory an earlier run had left behind was
+        /// deleted and its name handed to this one. In the leaked-origin
+        /// incident that put the fixture's very first push on top of another
+        /// run's commits, and git rejected it as non-fast-forward. Claiming a
+        /// directory must step around a survivor instead, and leave it be.
+        #[test]
+        fn claim_dir_steps_around_a_directory_an_earlier_run_left() {
+            let owner = TestDir::new("claim_dir");
+            let parent = owner.path();
+
+            let survivor = parent.join("fixture");
+            fs::create_dir(&survivor).unwrap();
+            fs::write(survivor.join("earlier-run.txt"), "not mine to delete\n").unwrap();
+
+            let claimed = claim_dir(parent, "fixture").unwrap();
+            assert_ne!(
+                claimed, survivor,
+                "a survivor's name must not be handed out again"
+            );
+            assert!(
+                claimed.is_dir(),
+                "claim_dir must return a directory it created"
+            );
+            assert!(
+                survivor.join("earlier-run.txt").exists(),
+                "claiming a directory must not delete a directory it did not create"
+            );
+
+            // The same stem keeps stepping around, rather than handing out the
+            // name `claimed` already took.
+            let claimed_again = claim_dir(parent, "fixture").unwrap();
+            assert_ne!(claimed_again, survivor);
+            assert_ne!(claimed_again, claimed);
+            assert!(claimed_again.is_dir());
+            assert!(claimed.is_dir(), "the first claim must survive the second");
+        }
     }
 }
 
