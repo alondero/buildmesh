@@ -326,9 +326,11 @@ mod tests {
         stage_file(&repo, _repo.path(), ".gitignore", "/cache/\n");
         commit_staged(&repo, "add gitignore");
 
-        // A second TempGitRepo is a RAII-guarded directory outside the repo to
-        // stand in for the shared cache the junction points at.
+        // A second TempGitRepo is a RAII-guarded path outside the repo to stand
+        // in for the shared cache. `TempGitRepo::new` only builds the path —
+        // nothing has created it yet — so make the directory here.
         let payload = TempGitRepo::new();
+        fs::create_dir_all(payload.path()).unwrap();
         fs::write(payload.path().join("artifact.bin"), b"x").unwrap();
         junction_dir(&_repo.path().join("cache"), payload.path());
 
