@@ -423,7 +423,7 @@ pub struct AppPreferences {
     /// user has reordered; a harness without an entry keeps its natural
     /// (insertion) order — the per-harness bucket in the Spawn Menu
     /// preserves the order the backend emits it in. The drag-to-reorder UI
-    /// lives on the harness-config page (Settings → Harnesses); cross-harness
+    /// lives on the harness-config page (Settings → Launch Configurations); cross-harness
     /// drag is disallowed (each `HarnessCard` is its own `DndContext`, so a
     /// draggable can only be dropped on a sibling in the same card). An
     /// additive field — an older `preferences.json` without it loads with an

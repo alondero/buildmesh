@@ -1,5 +1,5 @@
 /**
- * Settings → Harnesses → Agent Harness defaults: application-level model +
+ * Settings → Launch Configurations → Agent Harness defaults: application-level model +
  * effort + permission-mode defaults per Agent Harness (issue #1150 /
  * #1148, permission in #2151). Pinned contract:
  *
