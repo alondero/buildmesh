@@ -330,10 +330,10 @@ pub(crate) fn cascade_inputs_for<'a>(
 /// path through the same call shape `spawn_agent_inner` uses — without
 /// standing up a Tauri runtime, a preferences cache, or a DB.
 ///
-/// `app_default` is the ALREADY-LOOKED-UP value for the harness
-/// profile. The launch phase parses the composite harness id
-/// (`"<harness>:<provider>"` for Proxied rows) and resolves the harness
-/// default at its seam so this helper stays free of
+/// `app_default` is the ALREADY-LOOKED-UP application layer for this Spawn
+/// Option (`preferences::harness_default_for` reads the harness half off the
+/// composite id and drops the model/effort for a Proxied row). The launch
+/// phase resolves it at its seam so this helper stays free of
 /// `preferences::load()` (which would force the test to populate the
 /// in-process preferences cache).
 pub(crate) fn resolve_spawn_config(
