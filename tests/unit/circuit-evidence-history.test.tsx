@@ -170,7 +170,7 @@ it('shows ordered evidence and sends a reasoned outcome against the displayed re
   await waitFor(() => expect(recordCircuitOutcome).toHaveBeenCalledWith({
     run_id: 3, node_id: 'comment', attempt: 1, expected_revision: 7, action: 'completed', reason: 'The remote comment exists.',
   }));
-  expect(screen.getByText(/does not grant permission or review approval/)).toBeTruthy();
+  expect(screen.getByText(/Completion does not grant review approval/)).toBeTruthy();
 });
 
 it('offers read-only evidence recheck for a recorded OpenPr target', async () => {

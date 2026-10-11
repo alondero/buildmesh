@@ -10,10 +10,11 @@ preset waits for the source task to finish.
 The review preset classifies the source's completion report, starts a separate
 reviewer, returns findings to the original agent, waits for fixes, and reviews
 again. Explicit reviewer approval ends the loop. The default limit is three
-review rounds, configurable from one to ten. Reaching the limit or receiving
-an unclear reviewer verdict ends the run in a failed, recoverable checkpoint;
-it does not claim approval. Resume the saved implementation session to resolve
-the blocker or request a fresh review. When the source's completion cannot be
+review rounds, configurable from one to ten. Reaching the limit ends the run
+in a failed, recoverable checkpoint. An unclear reviewer verdict instead
+parks the review step as Unverified, notifies once, and leaves the run active
+for inspection and an operator verdict or recheck. Neither state claims
+approval. When the source's completion cannot be
 read or classified, a visible approval step lets the user confirm completion
 before review begins.
 
@@ -80,10 +81,11 @@ activity. The reviewer is spawned once per run: the round limit's loop
 re-enters at `re_review`, which prompts the same open reviewer to re-check its
 earlier findings, and a `review_round` join feeds either turn to the verdict
 gate. Both flows use explicit approval, changes-requested, and blocked verdicts.
-Only changes-requested reports start a fix round. A blocked or exhausted run
-preserves the reviewer checkpoint, including its association and worktree, for
-recovery; cleanup stops its live process and is retryable rather than deleting
-the review evidence.
+Only changes-requested reports start a fix round. An unclear verdict parks the
+step as Unverified and notifies once, leaving the reviewer available for
+inspection. An exhausted review fails recoverably and preserves the reviewer
+checkpoint, including its association, worktree and report; cleanup stops its
+live process without deleting the evidence.
 
 Approval closes the reviewer, then `merge` asks the source to squash-merge the
 pull request: it marks a draft ready, brings a behind-base branch up to date
@@ -296,10 +298,12 @@ These variables appear in the editor's template reference. Ordinary Trigger
 Now has no source context and rejects graphs requiring a source binding.
 
 `AwaitAgentTurn` classifies completion using a readable transcript even when
-the source finished before the run started. `ReviewVerdict` routes `completed`
-for explicit approval, `working` for findings requiring changes, and `blocked`
-for an unclear/incomplete review or a classifier failure. These are routing
-outcomes, not agent lifecycle statuses. Circuit reviewer prompts now ask for a
+the source finished before the run started. `ReviewVerdict` completes with
+`completed` for explicit approval and `working` for findings requiring changes.
+An unclear or incomplete review classified as `blocked` parks the step as
+Unverified and notifies once instead of following a routing edge. These are
+circuit outcomes, not agent lifecycle statuses. Circuit reviewer prompts now
+ask for a
 final `BUILDMESH_REVIEW_V1: APPROVE`, `REQUEST_CHANGES`, or `BLOCKED` line
 (the prefix is required for each value). Fix feedback in the node-review preset
 asks for `BUILDMESH_HANDOFF_V1: READY` or `BLOCKED`. Valid result lines route

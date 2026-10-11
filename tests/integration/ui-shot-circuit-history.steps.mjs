@@ -15,7 +15,8 @@ import path from 'node:path';
 //   * the waiting run is seeded `paused`, which the worker never drives, so its
 //     `pending_slot` step stays parked (a running run's queued step would be
 //     promoted now that no per-circuit step budget holds it back, ADR 0042);
-//   * the mesh `circuit_run_capacity = 1` keeps the pending run queued.
+//   * four unfinished fixtures fill the mesh's four run slots, keeping the
+//     pending run queued while the capacity meter remains internally coherent.
 const GRAPH = JSON.stringify({
   version: 2,
   nodes: [
@@ -27,18 +28,24 @@ const GRAPH = JSON.stringify({
 
 export default async function ({ page, invoke }) {
   const mesh = await invoke('create_test_mesh', { name: 'Circuit history states' });
-  const db = new DatabaseSync(path.join(process.env.APPDATA, 'com.alond.buildmesh.dev', 'buildmesh.db'));
+  const profileId = process.env.BUILDMESH_PROFILE_ID ?? 'com.alond.buildmesh.dev';
+  const db = new DatabaseSync(path.join(process.env.APPDATA, profileId, 'buildmesh.db'));
   try {
-    db.prepare('UPDATE meshes SET path=?, pre_spawn_pool_size=0, circuit_run_capacity=1 WHERE id=?')
+    db.prepare('UPDATE meshes SET path=?, pre_spawn_pool_size=0, circuit_run_capacity=4 WHERE id=?')
       .run(process.cwd(), mesh.id);
     const circuit = db.prepare("INSERT INTO autopilot_circuits (mesh_id,name,graph_json,enabled) VALUES (?,?,?,0)")
       .run(mesh.id, 'Lifecycle states', GRAPH).lastInsertRowid;
     const insertRun = db.prepare('INSERT INTO autopilot_circuit_runs (circuit_id,mesh_id,trigger_identity,state,context_json) VALUES (?,?,?,?,?)');
     const insertStep = db.prepare('INSERT INTO autopilot_circuit_run_steps (run_id,node_id,status,attempt,outcome,error_message) VALUES (?,?,?,?,?,?)');
     const insertHistory = db.prepare('INSERT INTO circuit_run_history (run_id,node_id,attempt,kind,detail,source,disposition) VALUES (?,?,?,?,?,?,?)');
+    const issueContext = (number, title) => JSON.stringify({
+      'issue.number': String(number),
+      'issue.title': title,
+      'source.name': `#${number} ${title}`,
+    });
 
     // Working: a running step, no wait.
-    const working = insertRun.run(circuit, mesh.id, 'manual:state-working', 'running', '{}').lastInsertRowid;
+    const working = insertRun.run(circuit, mesh.id, 'manual:state-working', 'running', issueContext(318, 'Show current circuit capacity')).lastInsertRowid;
     insertStep.run(working, 'work', 'running', 1, null, null);
     insertHistory.run(working, null, null, 'configuration_pinned',
       JSON.stringify({ behavior_revision: 1, graph_sha256: 'abcdef0123456789', reviewers: [] }),
@@ -64,7 +71,7 @@ export default async function ({ page, invoke }) {
       'circuit_worker.reconciliation', 'resolved');
 
     // Failed: a terminal failure with a readable reason.
-    const failed = insertRun.run(circuit, mesh.id, 'manual:state-failed', 'failed', '{}').lastInsertRowid;
+    const failed = insertRun.run(circuit, mesh.id, 'manual:state-failed', 'failed', issueContext(321, 'Handle an inconclusive review')).lastInsertRowid;
     insertStep.run(failed, 'reviewer', 'failed', 1, 'failed', 'The review command exited before producing a result.');
 
     // Recovery: a failed predecessor and the successor that continues it. The
@@ -78,7 +85,7 @@ export default async function ({ page, invoke }) {
       JSON.stringify({ from_run_id: predecessor }), 'operator', 'applied');
 
     // Waiting (admission): a pending run held by the mesh's single run slot.
-    const queued = insertRun.run(circuit, mesh.id, 'manual:state-queued', 'pending', '{}').lastInsertRowid;
+    const queued = insertRun.run(circuit, mesh.id, 'manual:state-queued', 'pending', issueContext(322, 'Pick up the next queued issue')).lastInsertRowid;
 
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.locator(`#mesh-item-name-${mesh.id}`).click();
@@ -94,30 +101,35 @@ export default async function ({ page, invoke }) {
 
     // --- Activity: working, waiting, Unverified, recovery link ---------------
     await expect(page.getByTestId(`run-card-${working}`)).toBeVisible();
-    await expect(page.getByTestId(`run-activity-${working}`)).toContainText('Running');
-    await expect(page.getByTestId(`run-activity-${waiting}`)).toContainText('Queued');
-    await expect(page.getByTestId(`run-reason-${waiting}`)).toContainText(/Waiting for a circuit agent slot/);
+    await expect(page.getByTestId(`run-state-${working}`)).toContainText('Running');
+    await expect(page.getByTestId(`run-activity-${working}`)).toContainText('Send feedback');
+    await expect(page.getByTestId(`run-state-${waiting}`)).toContainText('Paused');
+    await expect(page.getByTestId(`run-activity-${waiting}`)).toContainText('Send feedback');
     await expect(page.getByTestId(`run-activity-${unverified}`)).toContainText('Unverified Checkpoint');
-    await expect(page.getByTestId(`run-reason-${unverified}`)).toContainText(/Evidence is incomplete/);
-    await expect(page.getByText(new RegExp(`Continues run #${predecessor}`))).toBeVisible();
+    const unverifiedCard = page.getByTestId(`run-card-${unverified}`);
+    await expect(unverifiedCard).toContainText(/can't confirm yet/i);
+    await expect(unverifiedCard.getByTestId(`run-error-summary-${unverified}`)).toContainText(/Evidence is incomplete/);
     // The successor's own history records the lineage (the failed ancestor is
     // never written to).
     const successorCard = page.getByTestId(`run-card-${successor}`);
     const successorToggle = page.getByTestId(`run-toggle-${successor}`);
     if ((await successorToggle.getAttribute('aria-expanded')) !== 'true') await successorToggle.click();
+    await expect(successorCard.getByText(new RegExp(`Continues run #${predecessor}`))).toBeVisible();
     await successorCard.getByText('Circuit Run History').click();
     await expect(successorCard.getByText(new RegExp(`Continued a failed review — this run follows run #${predecessor}`))).toBeVisible();
     await successorCard.scrollIntoViewIfNeeded();
     await page.screenshot({ path: path.join(shotDir, '1909-states-continuation.png') });
 
     // The Unverified next safe action: open the card's history and its Recheck.
-    const unverifiedCard = page.getByTestId(`run-card-${unverified}`);
     const unverifiedToggle = page.getByTestId(`run-toggle-${unverified}`);
     if ((await unverifiedToggle.getAttribute('aria-expanded')) !== 'true') await unverifiedToggle.click();
     await unverifiedCard.getByText('Circuit Run History').click();
     const recheck = unverifiedCard.getByRole('button', { name: 'Recheck evidence' });
     await expect(recheck).toBeVisible();
-    // The resolved evidence wait renders as cleared, not as an active window.
+    // Evidence-window bookkeeping is intentionally tucked behind technical
+    // history; expand it before checking that the resolved wait is cleared.
+    const technicalHistory = unverifiedCard.getByTestId('history-technical-toggle');
+    if (await technicalHistory.isVisible()) await technicalHistory.click();
     await expect(unverifiedCard.getByText(/Evidence wait cleared/)).toBeVisible();
     await expect(unverifiedCard.getByText(/Evidence wait — attempt/)).toHaveCount(0);
     await recheck.scrollIntoViewIfNeeded();
@@ -126,8 +138,8 @@ export default async function ({ page, invoke }) {
     // --- History: the failed run's readable reason ---------------------------
     await page.getByTestId('circuits-view-history').click();
     await expect(page.getByTestId(`run-card-${failed}`)).toBeVisible();
-    await expect(page.getByTestId(`run-error-${failed}`)).toContainText('The review command exited');
-    await expect(page.getByTestId(`run-activity-${failed}`)).toContainText('Failed');
+    await expect(page.getByTestId(`run-state-${failed}`)).toContainText('Failed');
+    await expect(page.getByTestId(`run-error-summary-${failed}`)).toContainText('The review command exited');
     await page.screenshot({ path: path.join(shotDir, '1909-states-history.png') });
 
     // --- Queue: the pending run's admission reason ---------------------------
@@ -138,6 +150,7 @@ export default async function ({ page, invoke }) {
 
     // --- 240px acceptance ----------------------------------------------------
     await page.getByTestId('circuits-view-activity').click();
+    await expect(page.getByText(/^Slot \d+$/)).toHaveCount(0);
     const bounds = await page.getByTestId('circuits-probe-tab').evaluate((root) => ({
       width: root.getBoundingClientRect().width, scroll: root.scrollWidth, client: root.clientWidth,
     }));
@@ -155,6 +168,36 @@ export default async function ({ page, invoke }) {
       });
     });
     expect(clipped).toBe(false);
+    const screenshotWidth = Number(process.env.CIRCUITS_PROBE_SCREENSHOT_WIDTH ?? 240);
+    if (!Number.isInteger(screenshotWidth) || screenshotWidth < 240 || screenshotWidth > 520 || (screenshotWidth - 240) % 8 !== 0) {
+      throw new Error(`Unsupported Probe screenshot width: ${screenshotWidth}`);
+    }
+    const separator = page.getByRole('separator', { name: 'Resize probe panel' });
+    await separator.focus();
+    for (let width = 240; width < screenshotWidth; width += 8) {
+      await page.keyboard.press('ArrowLeft');
+    }
+    await expect(separator).toHaveAttribute('aria-valuenow', String(screenshotWidth));
+    const screenshotPath = process.env.CIRCUITS_PROBE_SCREENSHOT_PATH;
+    if (screenshotPath) {
+      const screenshotView = process.env.CIRCUITS_PROBE_SCREENSHOT_VIEW ?? 'activity';
+      if (!['activity', 'history', 'queue', 'manage'].includes(screenshotView)) {
+        throw new Error(`Unsupported Circuits Probe screenshot view: ${screenshotView}`);
+      }
+      if (screenshotView !== 'activity') {
+        await page.getByTestId(`circuits-view-${screenshotView}`).click();
+      }
+      await expect(page.getByTestId('circuits-probe-tab')).toBeVisible();
+      if (screenshotView === 'history') {
+        await expect(page.getByTestId(`run-card-${failed}`)).toBeVisible();
+      } else if (screenshotView === 'queue') {
+        await expect(page.getByTestId(`queue-run-${queued}`)).toBeVisible();
+      } else if (screenshotView === 'manage') {
+        await expect(page.getByRole('heading', { name: 'Run capacity' })).toBeVisible();
+      }
+      await mkdir(path.dirname(path.resolve(screenshotPath)), { recursive: true });
+      await page.getByTestId('circuits-probe-tab').screenshot({ path: path.resolve(screenshotPath) });
+    }
     console.log(`CIRCUIT_HISTORY_STATES_MESH=${mesh.id} WORKING=${working} WAITING=${waiting} UNVERIFIED=${unverified} FAILED=${failed} PREDECESSOR=${predecessor} SUCCESSOR=${successor} QUEUED=${queued}`);
   } finally {
     db.close();

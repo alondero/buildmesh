@@ -15,6 +15,7 @@ import { stepPassLabel } from './runStepPresentation';
 
 const KIND_TITLES: Record<string, string> = {
   continuation_effect: 'Continuation prompt',
+  operator_review: 'Human review decision',
   queue_wait: 'Waiting for admission',
   step_capacity_wait: 'Step capacity wait changed',
   configuration_pinned: 'Pinned run configuration',

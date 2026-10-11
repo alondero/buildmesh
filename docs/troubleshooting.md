@@ -184,6 +184,10 @@ the last observation time and event source.
 
 `Signal degraded` means a callback could not be interpreted reliably.
 `Signal unavailable` means setup failed or the harness has no supported observer.
+If Codex repeatedly shows `Signal degraded` during tool use on Windows, older
+Buildmesh callbacks could corrupt non-ASCII text before delivering it. Update
+Buildmesh and restart affected Codex nodes to refresh their launch-time hooks.
+A subsequent accepted lifecycle callback clears the warning.
 An old observation is not a heartbeat. Where delivery is merely not confirmed
 yet, the node's status tooltip says so instead of showing a warning badge — an
 unproven signal is the normal state between turns, not a fault. See the

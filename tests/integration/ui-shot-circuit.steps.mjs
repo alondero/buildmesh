@@ -13,11 +13,13 @@ export default async function ({ page }) {
   await page.getByRole('separator', { name: 'Resize probe panel' }).focus();
   await page.keyboard.press('End');
   await page.locator('[data-testid="circuits-probe-tab"]').waitFor({ state: 'visible' });
-  await page.locator('[data-testid="circuit-row"]').first().waitFor({ state: 'visible' });
+  await expect(page.getByText('Ready for work')).toBeVisible();
   await expect(page.getByTestId('circuits-view-activity')).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByTestId('circuit-name-input')).toHaveCount(0);
   await expect(page.getByTestId('queue-run-1002')).toHaveCount(0);
   await page.getByTestId('circuits-view-history').click();
+  await expect(page.getByTestId('run-toggle-1001')).toHaveAttribute('aria-expanded', 'false');
+  await page.getByTestId('run-toggle-1001').click();
   await expect(page.getByTestId('run-toggle-1001')).toHaveAttribute('aria-expanded', 'true');
   // A failed run says what happened in plain words right away; the raw error is
   // one disclosure away rather than the first thing on the card.
@@ -41,6 +43,7 @@ export default async function ({ page }) {
   for (const view of ['activity', 'history', 'manage', 'queue']) {
     await page.getByTestId(`circuits-view-${view}`).click();
     if (view === 'manage') {
+      await page.getByText('Create a circuit', { exact: true }).first().click();
       await page.getByTestId('circuit-blueprint-select').selectOption('issue_driven_autopilot_review');
       await expect(page.getByTestId('circuit-trigger-label-input')).toBeVisible();
     }

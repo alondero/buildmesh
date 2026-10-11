@@ -4,6 +4,8 @@ use super::model::{
 };
 
 pub(crate) const LOCAL_APPROVED_MESSAGE: &str = "Review approved for {{source.name}} (agent {{source.agent_id}}). It was asked to squash-merge its pull request and has been handed back to you.";
+pub(crate) const LOCAL_REVIEW_INCONCLUSIVE_MESSAGE: &str = "Review needs attention for {{source.name}}: the reviewer could not give a verdict. See the review report in the run context.";
+pub(crate) const PR_REVIEW_INCONCLUSIVE_MESSAGE: &str = "Review needs attention for PR #{{pr.number}}: the reviewer could not give a verdict. See the review report in the run context.";
 pub(crate) const LEGACY_LOCAL_APPROVED_MESSAGE: &str =
     "Review approved for {{source.name}} (agent {{source.agent_id}}).";
 
@@ -145,8 +147,6 @@ impl CircuitGraph {
                 target_node_id: target(),
             }),
             ("approved", K::Notify { message: LOCAL_APPROVED_MESSAGE.into() }),
-            ("close_blocked", K::CloseAgentNode { target_node_id: reviewer() }),
-            ("blocked", K::Notify { message: "Review needs attention for {{source.name}}: the reviewer could not give a verdict. See the review report in the run context.".into() }),
             ("exhausted", K::Notify { message: "Review limit reached for {{source.name}} after {{retry.max_retries}} rounds. Latest fixes have not been approved; inspect the report before continuing.".into() }),
         ];
         let edges = vec![
@@ -173,8 +173,6 @@ impl CircuitGraph {
             ("verdict", "close_approved", Some(O::Completed)),
             ("close_approved", "merge", None),
             ("merge", "approved", None),
-            ("verdict", "close_blocked", Some(O::Blocked)),
-            ("close_blocked", "blocked", None),
         ];
         Self {
             version: CIRCUIT_GRAPH_VERSION,
@@ -464,13 +462,103 @@ mod tests {
     fn agent_review_ambiguous_report_stops_for_attention() {
         let mut run = reviewing(3);
         let mut result = classified(&mut run, "verdict", Classification::Blocked);
+        let repeated = classified(&mut run, "verdict", Classification::Blocked);
+        let notifications = result
+            .effects
+            .iter()
+            .chain(&repeated.effects)
+            .filter(|effect| {
+                matches!(effect, Effect::Notify { message } if message.contains("Review needs attention"))
+            })
+            .count();
+        assert_eq!(
+            notifications, 1,
+            "parking the same inconclusive review notifies once"
+        );
         result.effects.extend(tick(&mut run).effects);
-        assert!(result.effects.iter().any(
-            |e| matches!(e, Effect::Notify { message } if message.contains("needs attention"))
-        ));
+        assert!(run.graph.node("close_blocked").is_none());
+        assert!(run.graph.node("blocked").is_none());
+        assert!(!result
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::CloseAgentNode { .. })));
         assert!(run.step("feedback").is_none());
         assert!(run.step("merge").is_none());
-        assert_eq!(run.state, RunState::Failed);
+        assert_eq!(run.state, RunState::Running);
+        assert_eq!(run.step("verdict").unwrap().status, StepStatus::Unverified);
+        assert!(run.can_record_review("verdict", O::Completed));
+    }
+
+    #[test]
+    fn human_review_findings_reach_the_next_feedback_prompt() {
+        let mut run = reviewing(3);
+        classified(&mut run, "verdict", Classification::Working);
+        let attempt = run.step("verdict").unwrap().attempt.to_string();
+        run.context
+            .set("node.verdict.review_verdict_source", "operator");
+        run.context
+            .set("node.verdict.review_verdict_attempt", attempt);
+        run.context.set(
+            "node.verdict.operator_review_note",
+            "Fix the unchecked null before merging.",
+        );
+        let (effects, _) = inject(&mut run, "feedback");
+        let prompt = injected_prompt(&effects, "feedback", "$source");
+        assert!(prompt
+            .contains("Human review findings (operator):\nFix the unchecked null before merging."));
+        assert!(prompt.contains("review report"));
+    }
+
+    #[test]
+    fn human_review_findings_reach_feedback_without_a_report_placeholder() {
+        let mut run = reviewing(3);
+        let feedback = run
+            .graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "feedback")
+            .expect("feedback node");
+        let K::InjectPty { prompt, .. } = &mut feedback.kind else {
+            panic!("feedback must inject a prompt");
+        };
+        *prompt = "Address the requested changes and summarize your work.".into();
+
+        classified(&mut run, "verdict", Classification::Working);
+        let attempt = run.step("verdict").unwrap().attempt.to_string();
+        run.context
+            .set("node.verdict.review_verdict_source", "operator");
+        run.context
+            .set("node.verdict.review_verdict_attempt", attempt);
+        run.context.set(
+            "node.verdict.operator_review_note",
+            "Fix the unchecked null before merging.",
+        );
+        let (effects, _) = inject(&mut run, "feedback");
+        let prompt = injected_prompt(&effects, "feedback", "$source");
+        assert!(prompt.contains("Address the requested changes"));
+        assert!(prompt
+            .contains("Human review findings (operator):\nFix the unchecked null before merging."));
+        assert!(!prompt.contains("review report"));
+    }
+
+    #[test]
+    fn request_changes_is_rejected_without_a_feedback_injection_route() {
+        let mut run = reviewing(3);
+        classified(&mut run, "verdict", Classification::Blocked);
+        run.graph.edges.retain(|edge| edge.from != "verdict");
+        run.graph.nodes.push(CircuitNode {
+            id: "attention_only".into(),
+            kind: K::Notify {
+                message: "Inspect this review".into(),
+            },
+        });
+        run.graph.edges.push(CircuitEdge {
+            from: "verdict".into(),
+            to: "attention_only".into(),
+            condition: EdgeCondition::OnOutcome(O::Working),
+        });
+
+        assert!(!run.can_record_review("verdict", O::Working));
     }
 
     #[test]

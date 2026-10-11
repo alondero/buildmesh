@@ -858,19 +858,24 @@ impl CircuitGraph {
                 changed = true;
             }
         }
-        for id in ["close_approved", "review_exhausted", "review_blocked"] {
+        for id in ["close_approved", "review_exhausted"] {
             if self.node(id).is_none() {
                 self.nodes
                     .push(canonical.node(id).expect("canonical review node").clone());
                 changed = true;
             }
         }
+        let before_nodes = self.nodes.len();
+        self.nodes.retain(|node| node.id != "review_blocked");
+        changed |= self.nodes.len() != before_nodes;
         let before_edges = self.edges.len();
         self.edges.retain(|edge| {
-            !(edge.from == "review_classifier" && edge.to == "review_exhausted"
-                || edge.from == "review_retry"
-                    && edge.to == "complete"
-                    && edge.condition == EdgeCondition::OnOutcome(StepOutcome::Failed))
+            let obsolete_review_route = edge.from == "review_classifier"
+                && matches!(edge.to.as_str(), "review_exhausted" | "review_blocked");
+            let obsolete_retry_route = edge.from == "review_retry"
+                && edge.to == "complete"
+                && edge.condition == EdgeCondition::OnOutcome(StepOutcome::Failed);
+            !(obsolete_review_route || obsolete_retry_route)
         });
         changed |= self.edges.len() != before_edges;
         let missing_edge =
@@ -885,11 +890,7 @@ impl CircuitGraph {
                 "review_classifier" | "review_retry" | "close_approved"
             ) && matches!(
                 edge.to.as_str(),
-                "follow_feedback"
-                    | "close_approved"
-                    | "review_exhausted"
-                    | "review_blocked"
-                    | "complete"
+                "follow_feedback" | "close_approved" | "review_exhausted" | "complete"
             )
         }) {
             if missing_edge(&edge.from, &edge.to, edge.condition, &self.edges) {
@@ -1374,9 +1375,6 @@ impl CircuitGraph {
                 node("review_exhausted", CircuitNodeKind::Notify {
                     message: "Review limit reached for PR #{{pr.number}}. Latest fixes have not been approved. Resume the saved implementation session and request a fresh review.".to_string(),
                 }),
-                node("review_blocked", CircuitNodeKind::Notify {
-                    message: "Review is blocked for PR #{{pr.number}}. Resume the saved implementation session and resolve the reviewer blocker before requesting another review.".to_string(),
-                }),
                 node(
                     "complete",
                     CircuitNodeKind::Notify {
@@ -1400,7 +1398,6 @@ impl CircuitGraph {
                 edge("review_round", "review_classifier"),
                 outcome("review_classifier", "follow_feedback", StepOutcome::Working),
                 outcome("review_classifier", "close_approved", Completed),
-                outcome("review_classifier", "review_blocked", StepOutcome::Blocked),
                 edge("close_approved", "merge"),
                 edge("merge", "merge_wait"),
                 outcome("merge_wait", "merge_verify", Completed),
@@ -1472,7 +1469,12 @@ impl CircuitGraph {
         if !rewired {
             return false;
         }
-        upgraded.nodes.retain(|node| node.id != "close_reviewer");
+        upgraded
+            .nodes
+            .retain(|node| node.id != "close_reviewer" && node.id != "review_blocked");
+        upgraded
+            .edges
+            .retain(|edge| edge.from != "review_blocked" && edge.to != "review_blocked");
         let canonical = Self::issue_driven_autopilot_review("");
         for id in ["review_round", "re_review", "merge"] {
             upgraded
@@ -3028,6 +3030,11 @@ mod tests {
             [EdgeCondition::OnOutcome(StepOutcome::Working)],
             "only a changes-requested verdict feeds the implementer"
         );
+        assert!(graph.node("review_blocked").is_none());
+        assert!(!graph
+            .edges
+            .iter()
+            .any(|edge| { edge.from == "review_classifier" && edge.to == "review_blocked" }));
         graph.validate().unwrap();
     }
 

@@ -296,7 +296,7 @@ export function RunNextSteps({ run, steps, roleLabel, busy }: RunNextStepsProps)
           {recording !== null && (
             <div className="space-y-1">
               <label className="block text-text-secondary">
-                What did you check? This is saved in the run history and does not grant approval.
+                {recording.action === 'review_pass' || recording.action === 'review_fail' ? 'Your review decision and evidence will be recorded. Autopilot will follow this verdict.' : 'What did you check? This is saved in the run history and does not grant approval.'}
                 <textarea
                   value={note}
                   onChange={(event) => setNote(event.target.value)}

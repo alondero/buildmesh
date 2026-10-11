@@ -171,7 +171,11 @@ mod tests {
             && e.condition == EdgeCondition::OnOutcome(StepOutcome::Working)));
         assert!(upgraded.node("close_approved").is_some());
         assert!(upgraded.node("review_exhausted").is_some());
-        assert!(upgraded.node("review_blocked").is_some());
+        assert!(upgraded.node("review_blocked").is_none());
+        assert!(!upgraded
+            .edges
+            .iter()
+            .any(|edge| { edge.from == "review_classifier" && edge.to == "review_blocked" }));
         assert!(
             matches!(&upgraded.node("reviewer").unwrap().kind, K::SpawnAgentNode { provider, model, prompt, .. } if provider.as_deref() == Some("codex") && model.as_deref() == Some("review-model") && prompt == &CircuitGraph::pr_review_prompt())
         );

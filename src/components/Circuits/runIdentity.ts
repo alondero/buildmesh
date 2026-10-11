@@ -2,9 +2,8 @@
  * runIdentity — who a circuit run is about, and when it really ran.
  *
  * A run id (`#335`) and a circuit node id (`review_classifier`) are scheduler
- * vocabulary: they say nothing about the work. What a person scans for is the
- * agent node doing the implementation, so the run is named after it, falling
- * back to the issue/PR it came from once that node has been closed.
+ * vocabulary: they say nothing about the work. Issue and PR titles identify the work; implementation names are a fallback
+ * when the trigger did not record a subject.
  *
  * Timing leaves out the time a run spent in the admission queue. The run row
  * is stamped when its trigger fires, but nothing happens until a slot frees, so
@@ -100,7 +99,7 @@ function reviewerNodeIds(nodeIndex: NodeIndex): Set<string> {
   return reviewers;
 }
 
-function recordedLabel(context: Record<string, string>): string | null {
+export function recordedLabel(context: Record<string, string>): string | null {
   const title = (context['issue.title'] ?? '').trim();
   if (title !== '') {
     const number = (context['issue.number'] ?? '').trim();
@@ -113,10 +112,8 @@ function recordedLabel(context: Record<string, string>): string | null {
 }
 
 /**
- * Name a run after its implementation node. A title-bar review is about the
- * borrowed source agent; an issue-driven run is about its `implementer`, never
- * the reviewer that happens to be active. When that agent node has been closed
- * the run keeps a recognisable name from what it recorded (issue, source, PR).
+ * Prefer the recorded issue/source/PR subject while retaining the implementation
+ * agent link. A reviewer changing during the run does not rename the work.
  */
 export function runSubject(
   run: Pick<AutopilotCircuitRun, 'source_agent_node_id'>,
@@ -139,7 +136,7 @@ export function runSubject(
   const candidate = run.source_agent_node_id ?? implementation?.agent_node_id ?? null;
   if (candidate !== null) {
     const name = agentName(candidate);
-    if (name !== null) return { label: name, agentNodeId: candidate };
+    if (name !== null) return { label: recordedLabel(context) ?? name, agentNodeId: candidate };
   }
   return { label: recordedLabel(context), agentNodeId: null };
 }

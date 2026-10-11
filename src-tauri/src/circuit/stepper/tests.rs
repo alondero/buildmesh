@@ -104,6 +104,176 @@ fn status_of(run: &RunView, node: &str) -> StepStatus {
 
 // -- trigger --------------------------------------------------------------
 
+fn operator_review_fanout_run(checks: usize) -> RunView {
+    let mut run = linear_run();
+    run.state = RunState::Running;
+    run.context.set("source.agent_id", "9");
+    run.graph.nodes = vec![
+        CircuitNode {
+            id: "reviewer".into(),
+            kind: spawn_kind("Review"),
+        },
+        CircuitNode {
+            id: "verdict".into(),
+            kind: CircuitNodeKind::ReviewVerdict {
+                target_node_id: Some("reviewer".into()),
+            },
+        },
+        CircuitNode {
+            id: "feedback".into(),
+            kind: CircuitNodeKind::InjectPty {
+                prompt: "Fix findings".into(),
+                target_node_id: Some("$source".into()),
+            },
+        },
+    ];
+    run.graph.edges = vec![CircuitEdge {
+        from: "reviewer".into(),
+        to: "verdict".into(),
+        condition: EdgeCondition::Always,
+    }];
+    for index in 0..checks {
+        let id = format!("merge_check_{index}");
+        run.graph.nodes.push(CircuitNode {
+            id: id.clone(),
+            kind: CircuitNodeKind::GithubAction {
+                action: GithubActionKind::ConfirmPrMerged,
+                open_pr_policy: None,
+                label: None,
+                comment: None,
+            },
+        });
+        run.graph.edges.extend([
+            CircuitEdge {
+                from: "verdict".into(),
+                to: id.clone(),
+                condition: EdgeCondition::OnOutcome(StepOutcome::Working),
+            },
+            CircuitEdge {
+                from: id,
+                to: "feedback".into(),
+                condition: EdgeCondition::Always,
+            },
+        ]);
+    }
+    let mut reviewer = StepView::new("reviewer", StepStatus::Completed);
+    reviewer.agent_node_id = Some(10);
+    reviewer.outcome = Some(StepOutcome::Completed);
+    let mut verdict = StepView::new("verdict", StepStatus::Unverified);
+    verdict.agent_node_id = Some(10);
+    run.steps = vec![reviewer, verdict];
+    run
+}
+
+#[test]
+fn operator_review_feedback_memo_does_not_grow_with_unrelated_reports() {
+    fn memo_bytes(mut run: RunView) -> usize {
+        complete_with_outcome(
+            &mut run,
+            &mut Transition::default(),
+            "verdict",
+            StepOutcome::Working,
+        );
+        let mut search = FeedbackRouteSearch::default();
+        assert!(operator_feedback_scheduled_outcomes_reach_injection(
+            run,
+            "feedback",
+            &mut search
+        ));
+        search.results.keys().map(String::len).sum()
+    }
+    let mut run = operator_review_fanout_run(1);
+    let without_reports = memo_bytes(run.clone());
+    run.context.set("source.output", "x".repeat(50_000));
+    run.context
+        .set("node.reviewer.evaluated_output", "y".repeat(25_000));
+    run.context.set("node.reviewer.output", "z".repeat(25_000));
+    assert_eq!(
+        memo_bytes(run),
+        without_reports,
+        "memo keys must exclude the 100 KB of unrelated agent reports"
+    );
+}
+
+#[test]
+fn operator_review_feedback_fanout_reuses_equivalent_scheduler_snapshots() {
+    let mut run = operator_review_fanout_run(6);
+    assert!(run.can_record_review("verdict", StepOutcome::Working));
+    complete_with_outcome(
+        &mut run,
+        &mut Transition::default(),
+        "verdict",
+        StepOutcome::Working,
+    );
+    let mut search = FeedbackRouteSearch::default();
+    assert!(operator_feedback_scheduled_outcomes_reach_injection(
+        run,
+        "feedback",
+        &mut search
+    ));
+    assert!(!search.limit_hit);
+}
+
+#[test]
+fn operator_review_refuses_feedback_analysis_that_exceeds_its_resource_budget() {
+    let mut run = operator_review_fanout_run(9);
+    assert!(run.can_offer_review("verdict", StepOutcome::Working));
+    let reason = run
+        .check_review_decision("verdict", StepOutcome::Working)
+        .unwrap_err();
+    assert!(reason.contains("resource limit"));
+    assert!(reason.contains("Simplify"));
+    complete_with_outcome(
+        &mut run,
+        &mut Transition::default(),
+        "verdict",
+        StepOutcome::Working,
+    );
+    let mut search = FeedbackRouteSearch::default();
+    assert!(!operator_feedback_scheduled_outcomes_reach_injection(
+        run,
+        "feedback",
+        &mut search
+    ));
+    assert!(search.limit_hit);
+    assert!(search.memo_bytes <= MAX_FEEDBACK_MEMO_BYTES);
+}
+
+#[test]
+fn operator_review_feedback_key_retains_scheduler_inputs() {
+    let mut run = operator_review_fanout_run(1);
+    let initial = feedback_schedule_key(&run, "feedback");
+    run.context.set("retry.max_retries", "7");
+    let retries = feedback_schedule_key(&run, "feedback");
+    assert_ne!(initial, retries);
+    run.context.set("node.verdict.review_verdict", "approved");
+    run.context.set("node.verdict.review_verdict_attempt", "1");
+    let approved = feedback_schedule_key(&run, "feedback");
+    assert_ne!(retries, approved);
+    run.context.set("node.verdict.review_verdict_attempt", "01");
+    assert_ne!(approved, feedback_schedule_key(&run, "feedback"));
+}
+
+#[test]
+fn operator_review_measures_report_heavy_fanout() {
+    for checks in [6, 9] {
+        let mut run = operator_review_fanout_run(checks);
+        run.context.set("source.output", "x".repeat(100_000));
+        let started = std::time::Instant::now();
+        let mut search = FeedbackRouteSearch::default();
+        let accepted =
+            operator_feedback_injection_reachable(&run, "verdict", "feedback", &mut search);
+        println!(
+            "100KB report, {checks} checks: accepted={accepted}, elapsed={:?}, states={}, charged_key_bytes={}, retained_key_bytes={}",
+            started.elapsed(), search.visited, search.memo_bytes,
+            search.results.keys().map(String::capacity).sum::<usize>()
+        );
+        assert_eq!(accepted, checks == 6);
+        assert_eq!(search.limit_hit, checks == 9);
+        assert!(search.memo_bytes <= MAX_FEEDBACK_MEMO_BYTES);
+    }
+}
+
 #[test]
 fn manual_trigger_starts_run_and_completes_trigger_roots() {
     let mut run = linear_run();
@@ -5851,7 +6021,7 @@ fn issue_review_explicit_approval_completes_without_requesting_more_changes() {
 }
 
 #[test]
-fn issue_review_blocked_verdict_fails_immediately_and_notifies() {
+fn issue_review_inconclusive_verdict_waits_for_human_resolution() {
     let mut run = issue_review_run();
     issue_review_to_first_verdict(&mut run, 702);
     let transition = advance_with_report_evidence(
@@ -5862,15 +6032,39 @@ fn issue_review_blocked_verdict_fails_immediately_and_notifies() {
             Some("Cannot review: provider access is unavailable."),
         ),
     );
-    let terminal = advance(&mut run, &tick(8));
-    assert_eq!(run.state, RunState::Failed);
-    assert_eq!(status_of(&run, "review_blocked"), StepStatus::Completed);
-    assert!(transition
+    let next = advance(&mut run, &tick(8));
+    let repeated = advance_with_report_evidence(
+        &mut run,
+        &classified_with_output(
+            "review_classifier",
+            Some(Classification::Blocked),
+            Some("Cannot review: provider access is unavailable."),
+        ),
+    );
+    assert_eq!(run.state, RunState::Running);
+    assert_eq!(status_of(&run, "review_classifier"), StepStatus::Unverified);
+    assert!(run.can_record_review("review_classifier", StepOutcome::Completed));
+    assert!(run.can_record_review("review_classifier", StepOutcome::Working));
+    let notifications: Vec<_> = transition
         .effects
         .iter()
-        .chain(&terminal.effects)
-        .any(|effect| matches!(effect,
-        Effect::Notify { message } if message.contains("Review is blocked"))));
+        .chain(&next.effects)
+        .chain(&repeated.effects)
+        .filter_map(|effect| match effect {
+            Effect::Notify { message } if message.contains("Review needs attention") => {
+                Some(message.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notifications.len(), 1, "parking notifies exactly once");
+    assert!(notifications[0].contains("PR #314"), "{notifications:?}");
+    assert!(!notifications[0].contains("for :"), "{notifications:?}");
+    assert!(!transition
+        .effects
+        .iter()
+        .chain(&next.effects)
+        .any(|effect| matches!(effect, Effect::CloseAgentNode { .. })));
 }
 
 #[test]

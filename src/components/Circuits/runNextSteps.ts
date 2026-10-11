@@ -98,6 +98,8 @@ export function recoveryGuidance(recovery: RunRecovery | null): RecoveryGuidance
 }
 
 const CHECKPOINT_LABELS: Record<CheckpointAction, string> = {
+  review_pass: 'Review passed',
+  review_fail: 'Request changes',
   recheck: 'Check again',
   completed: "I've done this — mark it done",
   not_performed: "It didn't happen",
