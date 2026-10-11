@@ -3047,69 +3047,77 @@ fn operator_feedback_injection_reachable(
         scheduled: &mut std::collections::HashSet<String>,
         outcomes: &mut std::collections::HashMap<String, Option<StepOutcome>>,
     ) -> bool {
-        if route_nodes.contains(injection_node_id)
-            && operator_feedback_node_is_eligible(run, injection_node_id, scheduled, outcomes)
-        {
-            return true;
-        }
+        let injection_eligible = route_nodes.contains(injection_node_id)
+            && operator_feedback_node_is_eligible(run, injection_node_id, scheduled, outcomes);
+        let injection_was_scheduled = scheduled.contains(injection_node_id);
+        let added_injection = injection_eligible && scheduled.insert(injection_node_id.to_owned());
+        let feedback_pending = injection_eligible || injection_was_scheduled;
 
-        // A running/queued step was already selected by the scheduler. Model
-        // its eventual result before selecting another node; otherwise choose
-        // the first newly eligible node in scheduler order.
+        // The scheduler selects every eligible node in a pass. Keep the
+        // feedback injection pending while modeling its siblings: a
+        // fail-fast result can cancel the injection before AgentReady.
         let next = run
             .graph
             .nodes
             .iter()
             .find(|node| {
-                route_nodes.contains(&node.id)
+                node.id != injection_node_id
                     && scheduled.contains(&node.id)
                     && !outcomes.contains_key(&node.id)
             })
             .or_else(|| {
                 run.graph.nodes.iter().find(|node| {
-                    route_nodes.contains(&node.id)
+                    node.id != injection_node_id
                         && !scheduled.contains(&node.id)
                         && operator_feedback_node_is_eligible(run, &node.id, scheduled, outcomes)
                 })
             });
-        let Some(next) = next else {
-            return false;
-        };
-        let next_id = next.id.clone();
-        let possible_outcomes = operator_feedback_possible_outcomes(&next.kind);
-        if possible_outcomes.is_empty() {
-            return false;
-        }
-
-        let newly_scheduled = scheduled.insert(next_id.clone());
-        for outcome in possible_outcomes {
-            // A Failed result can be routed to another node, but the real
-            // scheduler stops immediately unless a RetryLimit owns that
-            // failure. Do not accept a hypothetical route that would only
-            // deliver the operator note after a fail-fast run has stopped.
-            if *outcome == StepOutcome::Failed && !has_retry_path(run, &next_id) {
-                return false;
-            }
-            outcomes.insert(next_id.clone(), Some(*outcome));
-            if !every_scheduled_outcome_reaches_feedback(
-                run,
-                injection_node_id,
-                route_nodes,
-                scheduled,
-                outcomes,
-            ) {
-                outcomes.remove(&next_id);
+        let reaches_feedback = if let Some(next) = next {
+            let next_id = next.id.clone();
+            let possible_outcomes = operator_feedback_possible_outcomes(&next.kind);
+            if possible_outcomes.is_empty() {
+                false
+            } else {
+                let newly_scheduled = scheduled.insert(next_id.clone());
+                let mut all_outcomes_reach_feedback = true;
+                for outcome in possible_outcomes {
+                    // ConfirmPrMerged and an exhausted completed-parent
+                    // RetryLimit feedback cycle report routed Failed
+                    // outcomes without stopping the run. Other failures stop
+                    // the run unless a RetryLimit owns them.
+                    if *outcome == StepOutcome::Failed
+                        && !operator_feedback_failed_outcome_is_routed(run, &next_id, outcomes)
+                        && !has_retry_path(run, &next_id)
+                    {
+                        all_outcomes_reach_feedback = false;
+                        break;
+                    }
+                    outcomes.insert(next_id.clone(), Some(*outcome));
+                    if !every_scheduled_outcome_reaches_feedback(
+                        run,
+                        injection_node_id,
+                        route_nodes,
+                        scheduled,
+                        outcomes,
+                    ) {
+                        outcomes.remove(&next_id);
+                        all_outcomes_reach_feedback = false;
+                        break;
+                    }
+                    outcomes.remove(&next_id);
+                }
                 if newly_scheduled {
                     scheduled.remove(&next_id);
                 }
-                return false;
+                all_outcomes_reach_feedback
             }
+        } else {
+            feedback_pending
+        };
+        if added_injection {
+            scheduled.remove(injection_node_id);
         }
-        outcomes.remove(&next_id);
-        if newly_scheduled {
-            scheduled.remove(&next_id);
-        }
-        true
+        reaches_feedback
     }
 
     every_scheduled_outcome_reaches_feedback(
@@ -3119,6 +3127,46 @@ fn operator_feedback_injection_reachable(
         &mut scheduled,
         &mut outcomes,
     )
+}
+
+fn operator_feedback_failed_outcome_is_routed(
+    run: &RunView,
+    node_id: &str,
+    outcomes: &std::collections::HashMap<String, Option<StepOutcome>>,
+) -> bool {
+    match run.graph.node(node_id).map(|node| &node.kind) {
+        Some(CircuitNodeKind::GithubAction {
+            action: GithubActionKind::ConfirmPrMerged,
+            ..
+        }) => true,
+        Some(CircuitNodeKind::RetryLimit { .. }) => {
+            let Some(retry_target) = run.graph.children(node_id).into_iter().next() else {
+                return false;
+            };
+            if !retry_gate_reaches_itself(run, node_id, &retry_target) {
+                return false;
+            }
+
+            let incoming = run.graph.incoming(node_id);
+            let failed_parent = incoming.iter().any(|edge| {
+                matches!(
+                    outcomes.get(&edge.from).copied().flatten(),
+                    Some(StepOutcome::Failed | StepOutcome::Red)
+                )
+            });
+            if failed_parent {
+                return false;
+            }
+
+            incoming.iter().any(|edge| {
+                matches!(
+                    edge.condition,
+                    EdgeCondition::Always | EdgeCondition::OnOutcome(StepOutcome::Completed)
+                ) && outcomes.get(&edge.from).copied().flatten() == Some(StepOutcome::Completed)
+            })
+        }
+        _ => false,
+    }
 }
 
 /// Mirror [`is_eligible`] for a hypothetical execution. The maps contain only

@@ -5767,6 +5767,430 @@ mod tests {
     }
 
     #[test]
+    fn operator_review_is_refused_when_parallel_failure_can_cancel_feedback() {
+        use crate::circuit::{
+            model::{
+                CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind, EdgeCondition,
+                GithubActionKind, StepOutcome,
+            },
+            stepper::{advance, Capacity, CircuitEvent, Effect, RunState, StepStatus},
+        };
+
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch(
+            "INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(9,1,'source','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(10,1,'reviewer','/repo/reviewer');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'review');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state,context_json)
+                VALUES(1,1,1,'running','{\"source.agent_id\":\"9\",\"source.name\":\"issue #42\"}');
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,agent_node_id)
+                VALUES(1,'reviewer',1,'completed',10),(1,'verdict',1,'unverified',10);",
+        )
+        .unwrap();
+
+        let mut graph = CircuitGraph::agent_review(None, None, 3);
+        graph.nodes.push(CircuitNode {
+            id: "parallel_label".into(),
+            kind: CircuitNodeKind::GithubAction {
+                action: GithubActionKind::AddLabel,
+                open_pr_policy: None,
+                label: Some("reviewed".into()),
+                comment: None,
+            },
+        });
+        graph.edges.push(CircuitEdge {
+            from: "verdict".into(),
+            to: "parallel_label".into(),
+            condition: EdgeCondition::OnOutcome(StepOutcome::Working),
+        });
+        db.execute(
+            "UPDATE autopilot_circuits SET graph_json=?1",
+            [graph.to_json().unwrap()],
+        )
+        .unwrap();
+
+        let stored = super::super::ledger::get_circuit_run_inner(&db, 1)
+            .unwrap()
+            .unwrap();
+        let mut simulated = recovery_view(&db, &stored).unwrap();
+        let verdict = simulated.step_mut("verdict").unwrap();
+        verdict.status = StepStatus::Completed;
+        verdict.outcome = Some(StepOutcome::Working);
+        advance(
+            &mut simulated,
+            &CircuitEvent::Tick(Capacity {
+                agent_free_slots: 1,
+            }),
+        );
+        assert_eq!(
+            simulated.step("feedback").unwrap().status,
+            StepStatus::Running
+        );
+        assert_eq!(
+            simulated.step("parallel_label").unwrap().status,
+            StepStatus::Running,
+            "the scheduler starts the sibling action while feedback waits for AgentReady"
+        );
+        advance(
+            &mut simulated,
+            &CircuitEvent::GithubActionResult {
+                node_id: "parallel_label".into(),
+                success: false,
+                pr_number: None,
+                pr_url: None,
+                pr_head_ref: None,
+                pr_title: None,
+                error: Some("GitHub rejected the label change".into()),
+            },
+        );
+        assert_eq!(simulated.state, RunState::Failed);
+        let agent_ready = advance(
+            &mut simulated,
+            &CircuitEvent::AgentReady {
+                node_id: "feedback".into(),
+            },
+        );
+        assert!(
+            agent_ready
+                .effects
+                .iter()
+                .all(|effect| !matches!(effect, Effect::InjectPty { .. })),
+            "a fail-fast sibling can cancel feedback before prompt delivery"
+        );
+
+        let stored = super::super::ledger::get_circuit_run_inner(&db, 1)
+            .unwrap()
+            .unwrap();
+        let view = recovery_view(&db, &stored).unwrap();
+        assert!(
+            !view.can_record_review("verdict", StepOutcome::Working),
+            "Request changes must be refused when a parallel fail-fast step can cancel feedback"
+        );
+        let error = record_outcome_locked(
+            &mut db,
+            &CheckpointRequest {
+                run_id: 1,
+                node_id: "verdict".into(),
+                attempt: 1,
+                expected_revision: 0,
+                action: CheckpointAction::ReviewFail,
+                reason: "Fix the unchecked null.".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("every possible outcome on the Request changes route"),
+            "the refusal should explain why the parallel route is unsafe: {error}"
+        );
+    }
+
+    #[test]
+    fn operator_review_accepts_a_routed_confirm_pr_merged_failure() {
+        use crate::circuit::{
+            model::{
+                CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind, EdgeCondition,
+                GithubActionKind, StepOutcome,
+            },
+            stepper::{advance, Capacity, CircuitEvent, Effect, StepStatus},
+        };
+
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch(
+            "INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(9,1,'source','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(10,1,'reviewer','/repo/reviewer');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'review');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state,context_json)
+                VALUES(1,1,1,'running','{\"source.agent_id\":\"9\",\"source.name\":\"issue #42\"}');
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,agent_node_id)
+                VALUES(1,'reviewer',1,'completed',10),(1,'verdict',1,'unverified',10);",
+        )
+        .unwrap();
+
+        let mut graph = CircuitGraph::agent_review(None, None, 3);
+        graph
+            .edges
+            .retain(|edge| !(edge.from == "verdict" && edge.to == "feedback"));
+        graph.nodes.push(CircuitNode {
+            id: "confirm_merge".into(),
+            kind: CircuitNodeKind::GithubAction {
+                action: GithubActionKind::ConfirmPrMerged,
+                open_pr_policy: None,
+                label: None,
+                comment: None,
+            },
+        });
+        graph.edges.extend([
+            CircuitEdge {
+                from: "verdict".into(),
+                to: "confirm_merge".into(),
+                condition: EdgeCondition::OnOutcome(StepOutcome::Working),
+            },
+            CircuitEdge {
+                from: "confirm_merge".into(),
+                to: "feedback".into(),
+                condition: EdgeCondition::Always,
+            },
+        ]);
+        db.execute(
+            "UPDATE autopilot_circuits SET graph_json=?1",
+            [graph.to_json().unwrap()],
+        )
+        .unwrap();
+
+        let stored = super::super::ledger::get_circuit_run_inner(&db, 1)
+            .unwrap()
+            .unwrap();
+        let view = recovery_view(&db, &stored).unwrap();
+        assert!(
+            view.can_record_review("verdict", StepOutcome::Working),
+            "ConfirmPrMerged reports an unmerged PR as a completed, routed Failed outcome"
+        );
+        record_outcome_locked(
+            &mut db,
+            &CheckpointRequest {
+                run_id: 1,
+                node_id: "verdict".into(),
+                attempt: 1,
+                expected_revision: 0,
+                action: CheckpointAction::ReviewFail,
+                reason: "Fix the unchecked null.".into(),
+            },
+        )
+        .unwrap();
+
+        let stored = super::super::ledger::get_circuit_run_inner(&db, 1)
+            .unwrap()
+            .unwrap();
+        let mut active = recovery_view(&db, &stored).unwrap();
+        advance(
+            &mut active,
+            &CircuitEvent::Tick(Capacity {
+                agent_free_slots: 1,
+            }),
+        );
+        assert_eq!(
+            active.step("confirm_merge").unwrap().status,
+            StepStatus::Running
+        );
+        advance(
+            &mut active,
+            &CircuitEvent::GithubActionResult {
+                node_id: "confirm_merge".into(),
+                success: false,
+                pr_number: None,
+                pr_url: None,
+                pr_head_ref: None,
+                pr_title: None,
+                error: Some("The pull request is not merged.".into()),
+            },
+        );
+        assert_eq!(
+            active.step("confirm_merge").unwrap().status,
+            StepStatus::Completed
+        );
+        assert_eq!(
+            active.step("confirm_merge").unwrap().outcome,
+            Some(StepOutcome::Failed)
+        );
+        assert_eq!(active.state, crate::circuit::stepper::RunState::Running);
+        let agent_ready = advance(
+            &mut active,
+            &CircuitEvent::AgentReady {
+                node_id: "feedback".into(),
+            },
+        );
+        assert!(agent_ready.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::InjectPty { node_id, prompt, .. }
+                if node_id == "feedback" && prompt.contains("Human review findings (operator):\nFix the unchecked null.")
+        )));
+    }
+
+    #[test]
+    fn operator_review_accepts_a_routed_retry_limit_feedback_exhaustion() {
+        use crate::circuit::{
+            model::{
+                CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind, EdgeCondition, StepOutcome,
+            },
+            stepper::{advance, Capacity, CircuitEvent, Effect, StepStatus},
+        };
+
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch(
+            "INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(9,1,'source','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(10,1,'reviewer','/repo/reviewer');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'review');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state,context_json)
+                VALUES(1,1,1,'running','{\"source.agent_id\":\"9\",\"source.name\":\"issue #42\"}');
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,agent_node_id)
+                VALUES(1,'reviewer',1,'completed',10),(1,'verdict',1,'unverified',10);",
+        )
+        .unwrap();
+
+        let mut graph = CircuitGraph::agent_review(None, None, 3);
+        graph.edges.retain(|edge| {
+            edge.from != "verdict"
+                && edge.from != "retry"
+                && edge.to != "retry"
+                && edge.to != "feedback"
+        });
+        graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "retry")
+            .unwrap()
+            .kind = CircuitNodeKind::RetryLimit { max_retries: 1 };
+        graph.nodes.extend([
+            CircuitNode {
+                id: "start_notice".into(),
+                kind: CircuitNodeKind::Notify {
+                    message: "Begin feedback cycle".into(),
+                },
+            },
+            CircuitNode {
+                id: "before_retry".into(),
+                kind: CircuitNodeKind::AnyCompleted,
+            },
+            CircuitNode {
+                id: "retry_cycle".into(),
+                kind: CircuitNodeKind::Notify {
+                    message: "Bounded feedback cycle".into(),
+                },
+            },
+            CircuitNode {
+                id: "completed_notice".into(),
+                kind: CircuitNodeKind::Notify {
+                    message: "Retry remains available".into(),
+                },
+            },
+            CircuitNode {
+                id: "failed_notice".into(),
+                kind: CircuitNodeKind::Notify {
+                    message: "Retry limit reached".into(),
+                },
+            },
+            CircuitNode {
+                id: "retry_join".into(),
+                kind: CircuitNodeKind::AnyCompleted,
+            },
+        ]);
+        graph.edges.extend([
+            CircuitEdge {
+                from: "verdict".into(),
+                to: "start_notice".into(),
+                condition: EdgeCondition::OnOutcome(StepOutcome::Working),
+            },
+            CircuitEdge {
+                from: "start_notice".into(),
+                to: "before_retry".into(),
+                condition: EdgeCondition::Always,
+            },
+            CircuitEdge {
+                from: "before_retry".into(),
+                to: "retry".into(),
+                condition: EdgeCondition::Always,
+            },
+            // The first child is the bounded loop target, matching the
+            // scheduler's feedback-cycle detection. Both routed outcomes
+            // converge before the operator's feedback prompt.
+            CircuitEdge {
+                from: "retry".into(),
+                to: "retry_cycle".into(),
+                condition: EdgeCondition::OnOutcome(StepOutcome::Completed),
+            },
+            CircuitEdge {
+                from: "retry".into(),
+                to: "completed_notice".into(),
+                condition: EdgeCondition::OnOutcome(StepOutcome::Completed),
+            },
+            CircuitEdge {
+                from: "retry".into(),
+                to: "failed_notice".into(),
+                condition: EdgeCondition::OnOutcome(StepOutcome::Failed),
+            },
+            CircuitEdge {
+                from: "retry_cycle".into(),
+                to: "before_retry".into(),
+                condition: EdgeCondition::Always,
+            },
+            CircuitEdge {
+                from: "completed_notice".into(),
+                to: "retry_join".into(),
+                condition: EdgeCondition::Always,
+            },
+            CircuitEdge {
+                from: "failed_notice".into(),
+                to: "retry_join".into(),
+                condition: EdgeCondition::Always,
+            },
+            CircuitEdge {
+                from: "retry_join".into(),
+                to: "feedback".into(),
+                condition: EdgeCondition::Always,
+            },
+        ]);
+        db.execute(
+            "UPDATE autopilot_circuits SET graph_json=?1",
+            [graph.to_json().unwrap()],
+        )
+        .unwrap();
+
+        let stored = super::super::ledger::get_circuit_run_inner(&db, 1)
+            .unwrap()
+            .unwrap();
+        let view = recovery_view(&db, &stored).unwrap();
+        assert!(
+            view.can_record_review("verdict", StepOutcome::Working),
+            "a RetryLimit feedback-cycle exhaustion follows its configured Failed route"
+        );
+        record_outcome_locked(
+            &mut db,
+            &CheckpointRequest {
+                run_id: 1,
+                node_id: "verdict".into(),
+                attempt: 1,
+                expected_revision: 0,
+                action: CheckpointAction::ReviewFail,
+                reason: "Fix the unchecked null.".into(),
+            },
+        )
+        .unwrap();
+
+        let stored = super::super::ledger::get_circuit_run_inner(&db, 1)
+            .unwrap()
+            .unwrap();
+        let mut active = recovery_view(&db, &stored).unwrap();
+        advance(
+            &mut active,
+            &CircuitEvent::Tick(Capacity {
+                agent_free_slots: 1,
+            }),
+        );
+        assert_eq!(active.step("retry").unwrap().status, StepStatus::Completed);
+        assert_eq!(
+            active.step("retry").unwrap().outcome,
+            Some(StepOutcome::Failed)
+        );
+        let agent_ready = advance(
+            &mut active,
+            &CircuitEvent::AgentReady {
+                node_id: "feedback".into(),
+            },
+        );
+        assert!(agent_ready.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::InjectPty { node_id, prompt, .. }
+                if node_id == "feedback" && prompt.contains("Human review findings (operator):\nFix the unchecked null.")
+        )));
+    }
+
+    #[test]
     fn recorded_operator_review_drives_the_next_tick_and_injected_prompt() {
         use crate::circuit::{
             model::{
