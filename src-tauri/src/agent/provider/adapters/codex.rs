@@ -99,8 +99,9 @@ fn attention_hook_wsl_shell_command(url: &str) -> String {
 
 fn attention_hook_windows_fallback_command(url: &str) -> String {
     let url = crate::env::powershell_literal(url);
+    // Codex sends UTF-8 JSON; both PowerShell defaults corrupt non-ASCII tool text.
     let script = format!(
-        "$ErrorActionPreference = 'Stop'; $body = [Console]::In.ReadToEnd(); try {{ Invoke-WebRequest -UseBasicParsing -Method Post -Uri {url} -ContentType 'application/json' -Body $body -TimeoutSec 10 | Out-Null }} catch {{ }}; [Console]::Out.WriteLine('{{}}'); exit 0"
+        "[Console]::InputEncoding=[Text.Encoding]::UTF8; try {{ Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -Method Post {url} -ContentType 'application/json; charset=utf-8' -Body ([Console]::In.ReadToEnd()) -TimeoutSec 10 | Out-Null }} catch {{ }}; [Console]::Out.WriteLine('{{}}'); exit 0"
     );
     format!(
         "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
@@ -3382,6 +3383,9 @@ mod tests {
         use std::process::Stdio;
 
         let mut hook = crate::process_util::command_no_window("powershell.exe");
+        // Codex's Core hook environment excludes the live app's callback address.
+        hook.env_remove("BUILDMESH_PORT")
+            .env_remove("BUILDMESH_SESSION_ID");
         hook.args([
             "-NoLogo",
             "-NoProfile",
@@ -3855,7 +3859,7 @@ trust_level = "trusted"
     /// `command` through cmd.exe (issue #2036).
     #[cfg(windows)]
     #[test]
-    fn windows_attention_hook_posts_stdin_through_powershell_and_cmd() {
+    fn windows_attention_hook_posts_utf8_stdin_through_powershell_and_cmd() {
         use std::os::windows::process::CommandExt;
         use std::process::{Command, Stdio};
         for field in ["command", "commandWindows"] {
@@ -3910,7 +3914,7 @@ trust_level = "trusted"
                     .creation_flags(0x08000000)
                     .spawn()
                     .unwrap();
-                let payload = r#"{"hook_event_name":"Stop","session_id":"controlled-session"}"#;
+                let payload = r#"{"hook_event_name":"PostToolUse","session_id":"controlled-session","tool_name":"exec_command","tool_input":{"cmd":"echo café → 日本語"},"tool_response":"Done… 😀"}"#;
                 child
                     .stdin
                     .take()
