@@ -83,8 +83,9 @@ node and sends short replies through the acknowledged HTTP input route.
 CaptureIdea retains a browser-local draft until creation succeeds. Its prompt
 crosses the generated CreateNodeRequest boundary into SpawnIntent::Prompt,
 so the existing spawn orchestrator owns initial prompt delivery. The create
-route validates text size and prompt capability before creating a node;
-mobile never races terminal startup by injecting the idea as keystrokes.
+route validates text size. Whether the harness can take an initial prompt is
+the rule in services::agent_node, shared with the desktop commands.
+Mobile never races terminal startup by injecting the idea as keystrokes.
 
 ## Mobile terminal socket lifecycle
 

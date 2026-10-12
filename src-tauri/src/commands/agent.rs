@@ -20,11 +20,11 @@
 //! `use crate::agent::provider_menu::available_providers` import is the
 //! single direct call site; no re-export lives here.
 
-use crate::agent::spawn::{
-    spawn_with_intent, IssueContext, PullRequestContext, SpawnIntent, SpawnOutcome,
-    SpawnRequest, TerminalSize,
-};
 use crate::agent::session_lifecycle;
+use crate::agent::spawn::{
+    spawn_with_intent, IssueContext, PullRequestContext, SpawnIntent, SpawnOutcome, SpawnRequest,
+    TerminalSize,
+};
 use crate::db;
 use crate::process_util::panic_message;
 use futures_util::FutureExt;
@@ -193,12 +193,9 @@ pub async fn spawn_agent(app: AppHandle, request: SpawnAgentRequest) -> Result<(
     } else {
         spawn_request
     };
-    crate::agent::spawn::spawn_with_intent(
-        &app,
-        spawn_request,
-    )
-    .await
-    .map(|_| ())
+    crate::agent::spawn::spawn_with_intent(&app, spawn_request)
+        .await
+        .map(|_| ())
 }
 
 /// Internal implementation shared by spawn_issue_agent and spawn_handover_agent.
@@ -223,8 +220,7 @@ async fn spawn_new_agent_impl(
         crate::preferences::default_provider(),
     );
 
-    let branch = crate::commands::git::get_default_branch(mesh.path.clone())
-        .await;
+    let branch = crate::commands::git::get_default_branch(mesh.path.clone()).await;
 
     // Issue #1658 step 5 — fold the mesh-lookup + branch + create dance into
     // `services::agent_node::create_blocking`, the single shared runner used
@@ -232,28 +228,27 @@ async fn spawn_new_agent_impl(
     // awaited `branch` and resolved the provider here, so we hand both into
     // the helper as `branch_override = Some(&branch)` /
     // `provider = Some(&effective_provider)` — the helper does the mesh
-    // lookup internally (its `Status("mesh not found")` sentinel surfaces
-    // here as a `String` error like the old inline `map_err` did).
+    // lookup internally. A missing mesh is `MeshNotFound`, and this
+    // command returns that error's display text.
     let mesh_id = mesh.id;
     let branch_str = branch.clone();
     let effective_provider_str = effective_provider.clone();
-    let node = crate::commands::run_blocking(
-        "spawn_new_agent_impl_create",
-        move || {
-            crate::services::agent_node::create_blocking(
-                mesh_id,
-                Some(&effective_provider_str),
-                Some(&branch_str),
-                source_issue,
-                // Move `initial_name` into the closure so `as_deref()`
-                // borrows from an owned `'static` `Option<String>`.
-                initial_name.as_deref(),
-                None,
-                false, // pending — Idle matches the prior create(...) semantics
-            )
-            .map_err(|e| e.to_string())
-        },
-    )
+    let initial_prompt = intent.initial_prompt().map(|prompt| prompt.into_string());
+    let node = crate::commands::run_blocking("spawn_new_agent_impl_create", move || {
+        crate::services::agent_node::create_blocking(
+            mesh_id,
+            Some(&effective_provider_str),
+            Some(&branch_str),
+            source_issue,
+            // Move `initial_name` into the closure so `as_deref()`
+            // borrows from an owned `Option<String>`.
+            initial_name.as_deref(),
+            None,
+            false, // pending — Idle matches the prior create(...) semantics
+            initial_prompt.as_deref(),
+        )
+        .map_err(|e| e.to_string())
+    })
     .await?;
 
     let outcome = spawn_with_intent(
@@ -278,8 +273,9 @@ async fn spawn_new_agent_impl(
 /// LLMs can read the URL themselves and they need the link anyway to cite the
 /// issue in the closing PR.
 ///
-/// The `--prefill` arg is only passed for providers whose adapter declares
-/// `supports_prefill() = true`; others spawn without prefill and log a warning.
+/// Creating the node rejects a harness that cannot take an initial prompt.
+/// A prompt that reaches spawn for a node that already exists is still
+/// dropped, with a warning, when that harness does not support prefill.
 #[command]
 pub async fn spawn_issue_agent(
     app: AppHandle,
@@ -312,9 +308,14 @@ pub async fn spawn_issue_agent(
         provider,
         Some(issue_number),
         Some(initial_name),
-    ).await?;
+    )
+    .await?;
 
-    tracing::info!("spawn_issue_agent: spawned node {} for issue #{}", node.id, issue_number);
+    tracing::info!(
+        "spawn_issue_agent: spawned node {} for issue #{}",
+        node.id,
+        issue_number
+    );
     Ok(node)
 }
 
@@ -442,9 +443,7 @@ pub(crate) fn dispatch_spawn_outcome(
             );
         }
         SpawnDispatchAction::ReportSkipped => {
-            tracing::error!(
-                "create_*_node: node {node_id} spawn skipped before process launch"
-            );
+            tracing::error!("create_*_node: node {node_id} spawn skipped before process launch");
             // `on_error_if_pending` writes `Error` only when the row is
             // still `Pending`; a `Suspended` row (orchestrator's
             // intentional leave-alone for Resume / Regenerate affordances
@@ -474,14 +473,8 @@ pub(crate) fn dispatch_spawn_outcome(
 /// Convert a panic that escaped the spawn future into a user-visible Error
 /// so the DB row never stays stuck on `pending`. Called from the
 /// detached-task wrapper [`run_detached_spawn`].
-pub(crate) fn dispatch_spawn_panic(
-    app: &AppHandle,
-    node_id: i64,
-    panic_msg: String,
-) {
-    tracing::error!(
-        "create_*_node: node {node_id} spawn future panicked: {panic_msg}"
-    );
+pub(crate) fn dispatch_spawn_panic(app: &AppHandle, node_id: i64, panic_msg: String) {
+    tracing::error!("create_*_node: node {node_id} spawn future panicked: {panic_msg}");
     let sink = session_lifecycle::AppSessionLifecycleSink { app };
     let _ = session_lifecycle::on_error(&sink, node_id);
     let _ = app.emit(
@@ -529,6 +522,46 @@ pub fn create_issue_node(
     provider: Option<String>,
     configuration_id: Option<String>,
 ) -> Result<IssueNodeDraft, String> {
+    let (draft, intent) = create_issue_node_impl(
+        mesh_id,
+        issue_number,
+        issue_title,
+        provider,
+        configuration_id,
+    )?;
+
+    let _ = app.emit("node-created", NodeCreatedPayload { id: draft.node.id });
+    let app_for_spawn = app.clone();
+    // Detached task: the previous bare `if let Err(...)` wrapper silently
+    // dropped every `SpawnOutcome::Skipped` / `AlreadyActive` and any panic
+    // that escaped the future — leaving the row stuck on `pending` until the
+    // user restarted the app (issue #1700). `run_detached_spawn` routes all
+    // four outcomes + panic through session-lifecycle + Tauri events so the
+    // DB and the frontend `agentNodeStore` both observe a terminal state.
+    tauri::async_runtime::spawn(run_detached_spawn(
+        app_for_spawn,
+        SpawnRequest::new(draft.node.id, intent, TerminalSize::default()),
+    ));
+
+    tracing::info!(
+        "create_issue_node: accepted pending node {} for issue #{} on mesh {}",
+        draft.node.id,
+        issue_number,
+        mesh_id
+    );
+
+    Ok(draft)
+}
+
+/// DB + runner half of [`create_issue_node`]. Isolated from `AppHandle` so
+/// tests can pin the prompt-capability gate without emitting events.
+pub(crate) fn create_issue_node_impl(
+    mesh_id: i64,
+    issue_number: i64,
+    issue_title: String,
+    provider: Option<String>,
+    configuration_id: Option<String>,
+) -> Result<(IssueNodeDraft, SpawnIntent), String> {
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)
         .map_err(|e| format!("{} — cannot derive issue URL", e))?;
@@ -577,7 +610,8 @@ pub fn create_issue_node(
     let configuration = crate::preferences::spawn_configurations::resolve_saved(
         &effective_provider,
         configuration_id.as_deref().filter(|s| !s.trim().is_empty()),
-    ).map_err(|error| error.to_string())?;
+    )
+    .map_err(|error| error.to_string())?;
     let node = crate::services::agent_node::create_blocking_configured(
         mesh.id,
         Some(&effective_provider),
@@ -585,36 +619,14 @@ pub fn create_issue_node(
         Some(issue_number),
         Some(&initial_name),
         None, // use_worktree_override — falls back to mesh default
-        true,  // pending — Pending matches the prior create_pending(...) semantics
+        true, // pending — Pending matches the prior create_pending(...) semantics
         configuration.as_ref(),
+        Some(prefill.as_str()),
     )
     .map_err(|e| e.to_string())?;
 
-
-    let _ = app.emit("node-created", NodeCreatedPayload { id: node.id });
-    let app_for_spawn = app.clone();
-    // Detached task: the previous bare `if let Err(...)` wrapper silently
-    // dropped every `SpawnOutcome::Skipped` / `AlreadyActive` and any panic
-    // that escaped the future — leaving the row stuck on `pending` until the
-    // user restarted the app (issue #1700). `run_detached_spawn` routes all
-    // four outcomes + panic through session-lifecycle + Tauri events so the
-    // DB and the frontend `agentNodeStore` both observe a terminal state.
-    tauri::async_runtime::spawn(run_detached_spawn(
-        app_for_spawn,
-        SpawnRequest::new(node.id, intent, TerminalSize::default()),
-    ));
-
-    tracing::info!(
-        "create_issue_node: accepted pending node {} for issue #{} on mesh {}",
-        node.id,
-        issue_number,
-        mesh_id
-    );
-
-    Ok(IssueNodeDraft { node, prefill })
+    Ok((IssueNodeDraft { node, prefill }, intent))
 }
-
-
 
 // ---------------------------------------------------------------------------
 // Two-stage PR spawn (fast stage-1 + background stage-2) — issue #420
@@ -698,12 +710,10 @@ pub(crate) fn validate_pr_spawn_inputs(
     }
 
     if head_ref.is_empty() {
-        return Err(
-            "PR's head_ref is required (got an empty value). \
+        return Err("PR's head_ref is required (got an empty value). \
              Reload the PR list so the panel can re-fetch the head branch, \
              then retry the spawn."
-                .to_string(),
-        );
+            .to_string());
     }
 
     Ok((head_ref, head_repo_owner, head_repo_clone_url))
@@ -782,10 +792,7 @@ pub fn create_pr_node(
         configuration_id,
         reviewer.unwrap_or(false),
     )?;
-    let _ = app.emit(
-        "node-created",
-        NodeCreatedPayload { id: draft.node.id },
-    );
+    let _ = app.emit("node-created", NodeCreatedPayload { id: draft.node.id });
 
     let app_for_spawn = app.clone();
     // See `create_issue_node` for the rationale — `run_detached_spawn` handles
@@ -891,11 +898,8 @@ pub(crate) fn create_pr_node_impl_configured(
     // an upstream payload quirk) is normalised before it reaches the
     // service layer as `node.branch` — without the trim, stage-2's
     // `git fetch origin <ref>` would fail on the persisted branch.
-    let (head_ref, head_repo_owner, head_repo_clone_url) = validate_pr_spawn_inputs(
-        &head_ref,
-        head_repo_owner,
-        head_repo_clone_url,
-    )?;
+    let (head_ref, head_repo_owner, head_repo_clone_url) =
+        validate_pr_spawn_inputs(&head_ref, head_repo_owner, head_repo_clone_url)?;
 
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)
@@ -965,24 +969,30 @@ pub(crate) fn create_pr_node_impl_configured(
     // force-pushed / rebased between click-time and spawn-time. An empty
     // `head_sha` (partial GitHub response, fork payload) skips the drift
     // check — same fail-open semantics as `pr_head_unfetchable`.
-    let pinned_sha_opt: Option<&str> = if head_sha.is_empty() { None } else { Some(&head_sha) };
+    let pinned_sha_opt: Option<&str> = if head_sha.is_empty() {
+        None
+    } else {
+        Some(&head_sha)
+    };
 
     let configuration = crate::preferences::spawn_configurations::resolve_saved(
         &effective_provider,
         configuration_id.as_deref().filter(|s| !s.trim().is_empty()),
-    ).map_err(|error| error.to_string())?;
+    )
+    .map_err(|error| error.to_string())?;
     let node = crate::services::agent_node::create_pending_with_source_pr_fork_configured(
         mesh.id,
         &mesh.path,
         &head_ref,
         Some(&effective_provider),
-        None,                 // source_issue
-        Some(pr_number),      // source_pr — the key field for stage-2 worktree adoption
-        pinned_sha_opt,       // source_pr_pinned_sha — exact-pinning handle (issue #444)
+        None,            // source_issue
+        Some(pr_number), // source_pr — the key field for stage-2 worktree adoption
+        pinned_sha_opt,  // source_pr_pinned_sha — exact-pinning handle (issue #444)
         Some(&initial_name),
-        head_repo_owner.as_deref(),  // fork meta (issue #443) — None for same-repo PRs
+        head_repo_owner.as_deref(), // fork meta (issue #443) — None for same-repo PRs
         head_repo_clone_url.as_deref(),
         configuration.as_ref(),
+        Some(prefill.as_str()),
     )
     .map_err(|e| e.to_string())?;
 
@@ -1021,9 +1031,13 @@ pub async fn spawn_handover_agent(
         provider,
         None,
         None,
-    ).await?;
+    )
+    .await?;
 
-    tracing::info!("spawn_handover_agent: spawned node {} via handover", node.id);
+    tracing::info!(
+        "spawn_handover_agent: spawned node {} via handover",
+        node.id
+    );
     Ok(node)
 }
 
@@ -1047,19 +1061,30 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
     // Recovery is filesystem/SQLite work and each provider scans a different
     // store. Run those independent scans together so one slow Codex rollout
     // directory cannot hold every other node on the startup critical path.
-    let recovery_tasks = nodes.iter().cloned().map(|node| {
-        tauri::async_runtime::spawn(async move {
-            let node_id = node.id;
-            (node_id, crate::services::session_recovery::recover_suspended_node(node).await)
+    let recovery_tasks = nodes
+        .iter()
+        .cloned()
+        .map(|node| {
+            tauri::async_runtime::spawn(async move {
+                let node_id = node.id;
+                (
+                    node_id,
+                    crate::services::session_recovery::recover_suspended_node(node).await,
+                )
+            })
         })
-    }).collect::<Vec<_>>();
+        .collect::<Vec<_>>();
     for task in recovery_tasks {
         match task.await {
             Ok((node_id, Err(error))) => {
-                tracing::warn!("auto_resume_agent_nodes: identity recovery failed for {node_id}: {error}");
+                tracing::warn!(
+                    "auto_resume_agent_nodes: identity recovery failed for {node_id}: {error}"
+                );
             }
             Ok(_) => {}
-            Err(error) => tracing::warn!("auto_resume_agent_nodes: identity recovery task failed: {error}"),
+            Err(error) => {
+                tracing::warn!("auto_resume_agent_nodes: identity recovery task failed: {error}")
+            }
         }
     }
 
@@ -1072,7 +1097,8 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
                     cause: crate::agent::spawn::ResumeCause::Startup,
                 },
                 TerminalSize::default(),
-            ).with_lifecycle_lease(),
+            )
+            .with_lifecycle_lease(),
         )
         .await
         {
@@ -1112,7 +1138,6 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
 // (the inverted calls #1052 closes) now points at
 // `agent::process::kill_agent` directly.
 // ---------------------------------------------------------------------------
-
 
 #[cfg(test)]
 mod tests {
@@ -1170,8 +1195,7 @@ mod tests {
         let repo = git2::Repository::init(&path).expect("git init");
         repo.remote_set_url("origin", origin_url)
             .expect("remote_set_url");
-        let mesh = crate::db::create_mesh(name, path.to_str().unwrap())
-            .expect("create_mesh");
+        let mesh = crate::db::create_mesh(name, path.to_str().unwrap()).expect("create_mesh");
         (tmp, mesh.id)
     }
 
@@ -1189,7 +1213,7 @@ mod tests {
         let _db = ensure_pr_db();
 
         let err = create_pr_node_impl(
-            1,           // mesh_id — irrelevant; gate short-circuits before DB read
+            1, // mesh_id — irrelevant; gate short-circuits before DB read
             420,
             "any title".to_string(),
             "".to_string(),
@@ -1230,8 +1254,8 @@ mod tests {
             "feat/443-fork".to_string(),
             "".to_string(),
             None,
-            Some("alice".to_string()),     // owner present
-            None,                          // clone_url MISSING — XOR violation
+            Some("alice".to_string()), // owner present
+            None,                      // clone_url MISSING — XOR violation
         )
         .expect_err("owner without clone_url must be rejected");
 
@@ -1274,6 +1298,53 @@ mod tests {
         );
     }
 
+    /// Issue and PR spawn pass the SpawnIntent prefill into create. A
+    /// Terminal selection must refuse at create and leave the mesh empty —
+    /// the previous path created the row and dropped the prompt at spawn.
+    #[test]
+    fn create_issue_node_impl_rejects_a_prompt_the_harness_cannot_take() {
+        let _db = ensure_pr_db();
+        let (_tmp, mesh_id) =
+            create_test_mesh("issue-terminal-prompt", "https://github.com/x/y.git");
+
+        let err = create_issue_node_impl(
+            mesh_id,
+            101,
+            "fix the wobble".to_string(),
+            Some("terminal".to_string()),
+            None,
+        )
+        .expect_err("Terminal cannot take an issue-spawn prompt");
+
+        assert_eq!(err, crate::services::agent_node::INITIAL_PROMPT_UNSUPPORTED);
+        assert!(crate::db::list_agent_nodes_by_mesh(mesh_id)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn create_pr_node_impl_rejects_a_prompt_the_harness_cannot_take() {
+        let _db = ensure_pr_db();
+        let (_tmp, mesh_id) = create_test_mesh("pr-terminal-prompt", "https://github.com/x/y.git");
+
+        let err = create_pr_node_impl(
+            mesh_id,
+            7,
+            "review the race".to_string(),
+            "feat/x".to_string(),
+            "".to_string(),
+            Some("terminal".to_string()),
+            None,
+            None,
+        )
+        .expect_err("Terminal cannot take a PR-spawn prompt");
+
+        assert_eq!(err, crate::services::agent_node::INITIAL_PROMPT_UNSUPPORTED);
+        assert!(crate::db::list_agent_nodes_by_mesh(mesh_id)
+            .unwrap()
+            .is_empty());
+    }
+
     /// The seam the issue calls out most explicitly: the returned
     /// `IssueNodeDraft` must carry the prefill from `SpawnIntent::initial_prompt`
     /// AND the node name from `pr_node_name`. Both pieces are computed
@@ -1289,10 +1360,8 @@ mod tests {
     fn create_pr_node_impl_wires_name_and_prefill_seam() {
         let _db = ensure_pr_db();
 
-        let (_tmp, mesh_id) = create_test_mesh(
-            "pr-seam-test",
-            "https://github.com/alondero/buildmesh.git",
-        );
+        let (_tmp, mesh_id) =
+            create_test_mesh("pr-seam-test", "https://github.com/alondero/buildmesh.git");
 
         let pr_number: i64 = 445;
         let pr_title = "test(pr-spawn): Rust unit tests for create_pr_node + fetch_single_ref";
@@ -1470,8 +1539,7 @@ mod tests {
         // (no app-level setter for it; the column is set on insert via
         // `meshes.default_provider` and only the React UI mutates it
         // through `commands::mesh_properties`, not a `db::` helper).
-        let (_tmp2, mesh_id2) =
-            create_test_mesh("pr-provider-mesh", "https://github.com/x/y.git");
+        let (_tmp2, mesh_id2) = create_test_mesh("pr-provider-mesh", "https://github.com/x/y.git");
         let db = crate::db::write_conn();
         db.execute(
             "UPDATE meshes SET default_provider = ?1 WHERE id = ?2",
@@ -1513,8 +1581,7 @@ mod tests {
         let _db = ensure_pr_db();
 
         // Case A: non-empty head_sha persists verbatim.
-        let (_tmp_a, mesh_id_a) =
-            create_test_mesh("pr-sha-pin-a", "https://github.com/x/y.git");
+        let (_tmp_a, mesh_id_a) = create_test_mesh("pr-sha-pin-a", "https://github.com/x/y.git");
         let sha = "abcdef0123456789abcdef0123456789abcdef01";
         let draft_a = create_pr_node_impl(
             mesh_id_a,
@@ -1535,8 +1602,7 @@ mod tests {
         );
 
         // Case B: empty head_sha persists as None.
-        let (_tmp_b, mesh_id_b) =
-            create_test_mesh("pr-sha-pin-b", "https://github.com/x/y.git");
+        let (_tmp_b, mesh_id_b) = create_test_mesh("pr-sha-pin-b", "https://github.com/x/y.git");
         let draft_b = create_pr_node_impl(
             mesh_id_b,
             2,
@@ -1695,8 +1761,7 @@ mod tests {
     // `on_error_if_pending` because that helper talks to `db` directly.
 
     fn fresh_pending_node(name: &str) -> (tempfile::TempDir, i64) {
-        let (_tmp, mesh_id) =
-            create_test_mesh(name, "https://github.com/alondero/buildmesh.git");
+        let (_tmp, mesh_id) = create_test_mesh(name, "https://github.com/alondero/buildmesh.git");
         let node = crate::services::agent_node::create_blocking_configured(
             mesh_id,
             Some("claude"),
@@ -1706,6 +1771,7 @@ mod tests {
             /* use_worktree_override = */ None,
             /* pending = */ true,
             /* configuration = */ None,
+            /* initial_prompt = */ None,
         )
         .expect("create pending node");
         (_tmp, node.id)
@@ -1745,8 +1811,7 @@ mod tests {
         let (_tmp, node_id) = fresh_pending_node("err-if-pending");
 
         let sink = crate::agent::session_lifecycle::DbOnlySink;
-        let wrote =
-            session_lifecycle::on_error_if_pending(&sink, node_id).expect("helper ok");
+        let wrote = session_lifecycle::on_error_if_pending(&sink, node_id).expect("helper ok");
         assert!(wrote, "Pending row must accept the Error write");
 
         let after = crate::db::get_agent_node_by_id(node_id).expect("read after");
@@ -1763,15 +1828,11 @@ mod tests {
         // the current status and skips the write for non-`Pending` rows.
         let _db = ensure_pr_db();
         let (_tmp, node_id) = fresh_pending_node("err-preserve-suspended");
-        crate::db::update_agent_node_status(
-            node_id,
-            crate::models::SessionStatus::Suspended,
-        )
-        .expect("set suspended");
+        crate::db::update_agent_node_status(node_id, crate::models::SessionStatus::Suspended)
+            .expect("set suspended");
 
         let sink = crate::agent::session_lifecycle::DbOnlySink;
-        let wrote =
-            session_lifecycle::on_error_if_pending(&sink, node_id).expect("helper ok");
+        let wrote = session_lifecycle::on_error_if_pending(&sink, node_id).expect("helper ok");
         assert!(!wrote, "Suspended row must NOT accept the Error write");
 
         let after = crate::db::get_agent_node_by_id(node_id).expect("read after");
@@ -1783,4 +1844,3 @@ mod tests {
         );
     }
 }
-

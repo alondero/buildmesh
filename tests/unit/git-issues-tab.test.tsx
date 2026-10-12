@@ -372,6 +372,7 @@ describe('GitIssuesTab (#378)', () => {
     });
     // The dock stays open so the user can try again.
     expect(useUIStore.getState().probeOpen).toBe(true);
+    expect(addToastMock).toHaveBeenCalledWith('Spawn', 'boom', 'error');
   });
 
   it('renders the empty-state "No project selected" from ProbeTabBody, not a custom one', () => {

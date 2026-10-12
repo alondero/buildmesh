@@ -82,6 +82,10 @@ pub enum AgentNodeError {
     /// This remains typed so HTTP callers can return a client error without
     /// scraping the validation text.
     InvalidConfiguration(String),
+    /// The caller included an initial prompt, and the harness that will
+    /// launch does not accept one. Both surfaces return
+    /// [`INITIAL_PROMPT_UNSUPPORTED`]; no row is inserted.
+    InitialPromptUnsupported,
     /// A backend orchestrator call (`spawn_agent_inner` today, but
     /// the variant is intentionally generic so future downstream
     /// calls share the path) failed. The wrapped string is the
@@ -97,6 +101,7 @@ impl std::fmt::Display for AgentNodeError {
             AgentNodeError::Status(e) => write!(f, "{}", e),
             AgentNodeError::MeshNotFound(mesh_id) => write!(f, "mesh {mesh_id} not found"),
             AgentNodeError::InvalidConfiguration(e) => write!(f, "{}", e),
+            AgentNodeError::InitialPromptUnsupported => write!(f, "{INITIAL_PROMPT_UNSUPPORTED}"),
             AgentNodeError::Backend(e) => write!(f, "{}", e),
         }
     }
@@ -105,6 +110,51 @@ impl std::fmt::Display for AgentNodeError {
 impl From<rusqlite::Error> for AgentNodeError {
     fn from(e: rusqlite::Error) -> Self {
         AgentNodeError::Db(e)
+    }
+}
+
+/// Sentence returned when a create request includes an initial prompt and
+/// the harness that will launch cannot accept one. HTTP and the desktop
+/// commands share this exact text.
+pub const INITIAL_PROMPT_UNSUPPORTED: &str = "Choose an agent that supports an initial prompt";
+
+/// Worktree path and environment for one node. `None` or a blank segment is
+/// a Root Node: no stored path, and the environment comes from the mesh root.
+/// A non-empty segment stores `<effective dir>/<name>`.
+fn place_worktree(
+    mesh_path: &str,
+    mesh_worktree_directory: Option<&str>,
+    worktree_segment: Option<&str>,
+) -> (Option<String>, crate::models::EnvType) {
+    let app_dir = crate::preferences::worktree_directory();
+    let effective_dir =
+        env::effective_worktree_dir_raw(mesh_path, mesh_worktree_directory, app_dir.as_deref());
+    let path = worktree_segment
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| env::resolve_worktree_node_raw(&effective_dir, name));
+    let resolved = env::resolve_agent_path_in_dir(mesh_path, &effective_dir, worktree_segment);
+    (path, resolved.env_type)
+}
+
+/// Capability only. Install detection stays on spawn preflight: a missing
+/// binary is a different error, and `available_providers()` is a process-global
+/// probe that must not decide whether a prompt may be stored.
+fn reject_unsupported_initial_prompt(
+    harness_id: &str,
+    initial_prompt: Option<&str>,
+) -> Result<(), AgentNodeError> {
+    let Some(text) = initial_prompt else {
+        return Ok(());
+    };
+    if text.trim().is_empty() {
+        return Ok(());
+    }
+    let adapter = crate::models::Provider::from_db_str(harness_id).adapter();
+    if adapter.supports_prefill() {
+        Ok(())
+    } else {
+        Err(AgentNodeError::InitialPromptUnsupported)
     }
 }
 
@@ -203,6 +253,7 @@ pub fn create_with_source_pr_fork(
         head_repo_owner,
         head_repo_clone_url,
         None,
+        None,
     )
 }
 
@@ -220,6 +271,7 @@ pub fn create_with_source_pr_fork_configured(
     head_repo_owner: Option<&str>,
     head_repo_clone_url: Option<&str>,
     configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
+    initial_prompt: Option<&str>,
 ) -> Result<AgentNode, AgentNodeError> {
     let mesh = db::get_mesh_by_id(mesh_id)?;
     let mut prefs = crate::preferences::load().map_err(AgentNodeError::Backend)?;
@@ -246,6 +298,10 @@ pub fn create_with_source_pr_fork_configured(
     };
     let runtime = plan.harness.runtime;
     let provider_id = plan.spawn_option_id.clone();
+    // After the plan is known, so a bad configuration stays the more specific
+    // error, and on the harness that will launch rather than the raw request
+    // string or a saved-configuration id.
+    reject_unsupported_initial_prompt(&plan.harness.harness, initial_prompt)?;
     let configuration = Some(crate::preferences::launch_configurations::snapshot(plan));
     let use_worktree = use_worktree_override.unwrap_or(mesh.use_worktree);
 
@@ -273,16 +329,9 @@ pub fn create_with_source_pr_fork_configured(
     // Nodes. Existing rows without it retain the legacy fallback via
     // `env::node_working_path`, so changing a setting affects future nodes
     // without moving live worktrees.
-    let app_dir = crate::preferences::worktree_directory();
-    let effective_dir = env::effective_worktree_dir_raw(
-        path,
-        mesh.worktree_directory.as_deref(),
-        app_dir.as_deref(),
-    );
-    let worktree_path_owned: Option<String> =
-        worktree_db_name.map(|n| env::resolve_worktree_node_raw(&effective_dir, n));
-    let resolved = env::resolve_agent_path_in_dir(path, &effective_dir, worktree_db_name);
-    let env_type = runtime.unwrap_or(resolved.env_type);
+    let (worktree_path_owned, placed_env) =
+        place_worktree(path, mesh.worktree_directory.as_deref(), worktree_db_name);
+    let env_type = runtime.unwrap_or(placed_env);
     // Store the harness/profile id verbatim (issue #535) — no premature parse
     // to the legacy `Provider` enum, which would flatten an unknown profile id
     // to Anthropic. Resolution happens at the spawn seam. An absent provider
@@ -326,8 +375,8 @@ pub fn create_with_source_pr_fork_configured(
 /// # Arguments
 ///
 /// * `mesh_id` — the mesh to scope the new node under. A missing
-///   mesh id surfaces as `AgentNodeError::Status("mesh not found")`
-///   — the route maps that exact sentinel to its 400 response.
+///   mesh id surfaces as [`AgentNodeError::MeshNotFound`]. HTTP create
+///   maps that variant to 400; HTTP import maps it to 404.
 /// * `provider` — the harness id to persist verbatim. The legacy
 ///   `provider.unwrap_or("anthropic")` fallback lives in
 ///   [`create_with_source_pr_fork`] (issue #538 default), so a `None`
@@ -367,6 +416,7 @@ pub fn create_blocking(
     name_override: Option<&str>,
     use_worktree_override: Option<bool>,
     pending: bool,
+    initial_prompt: Option<&str>,
 ) -> Result<AgentNode, AgentNodeError> {
     create_blocking_configured(
         mesh_id,
@@ -377,6 +427,7 @@ pub fn create_blocking(
         use_worktree_override,
         pending,
         None,
+        initial_prompt,
     )
 }
 
@@ -390,6 +441,7 @@ pub fn create_blocking_configured(
     use_worktree_override: Option<bool>,
     pending: bool,
     configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
+    initial_prompt: Option<&str>,
 ) -> Result<AgentNode, AgentNodeError> {
     // 1. Mesh lookup. Map the missing-row case to the typed
     //    `AgentNodeError::MeshNotFound(mesh_id)` variant so the route
@@ -444,6 +496,7 @@ pub fn create_blocking_configured(
             None, // head_repo_clone_url
             use_worktree_override,
             configuration,
+            initial_prompt,
         )
     } else {
         create_with_source_pr_fork_configured(
@@ -459,6 +512,7 @@ pub fn create_blocking_configured(
             None, // head_repo_owner
             None, // head_repo_clone_url
             configuration,
+            initial_prompt,
         )
     }
 }
@@ -543,6 +597,7 @@ pub fn create_pending_with_worktree_override_configured(
         None,
         use_worktree_override,
         configuration,
+        None,
     )
 }
 
@@ -576,6 +631,7 @@ pub fn create_pending_with_source_pr_fork(
         head_repo_owner,
         head_repo_clone_url,
         None,
+        None,
     )
 }
 
@@ -592,6 +648,7 @@ pub fn create_pending_with_source_pr_fork_configured(
     head_repo_owner: Option<&str>,
     head_repo_clone_url: Option<&str>,
     configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
+    initial_prompt: Option<&str>,
 ) -> Result<AgentNode, AgentNodeError> {
     create_pending_with_source_pr_fork_and_worktree(
         mesh_id,
@@ -606,6 +663,7 @@ pub fn create_pending_with_source_pr_fork_configured(
         head_repo_clone_url,
         None,
         configuration,
+        initial_prompt,
     )
 }
 
@@ -623,6 +681,7 @@ fn create_pending_with_source_pr_fork_and_worktree(
     head_repo_clone_url: Option<&str>,
     use_worktree_override: Option<bool>,
     configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
+    initial_prompt: Option<&str>,
 ) -> Result<AgentNode, AgentNodeError> {
     let mut node = create_with_source_pr_fork_configured(
         mesh_id,
@@ -637,6 +696,7 @@ fn create_pending_with_source_pr_fork_and_worktree(
         head_repo_owner,
         head_repo_clone_url,
         configuration,
+        initial_prompt,
     )?;
     // Two writes (insert + status update) is one extra ~1ms SQLite round
     // trip. Acceptable: this function is on the fast path, and the second
@@ -652,6 +712,55 @@ fn create_pending_with_source_pr_fork_and_worktree(
     .map_err(AgentNodeError::Backend)?;
     node.status = SessionStatus::Pending;
     Ok(node)
+}
+
+/// Import a discovered CLI session as a node and store its session id.
+///
+/// The provider is kept verbatim (`anthropic` when absent). This path does
+/// not resolve a launch configuration: an import is a resume of an existing
+/// conversation, not a new launch. The mesh path comes from the mesh row.
+/// `use_worktree` follows whether a name was supplied, including an empty
+/// one; the stored path is set only when that name trims to something.
+pub fn import_discovered_session(
+    mesh_id: i64,
+    cli_session_id: &str,
+    branch: &str,
+    worktree_name: Option<&str>,
+    provider: Option<&str>,
+) -> Result<AgentNode, AgentNodeError> {
+    let mesh = match db::get_mesh_by_id(mesh_id) {
+        Ok(mesh) => mesh,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            return Err(AgentNodeError::MeshNotFound(mesh_id));
+        }
+        Err(error) => return Err(AgentNodeError::Db(error)),
+    };
+    let session_name = crate::session_naming::on_spawn();
+    let use_worktree = worktree_name.is_some();
+    let (worktree_path, env_type) = place_worktree(
+        &mesh.path,
+        mesh.worktree_directory.as_deref(),
+        worktree_name,
+    );
+    let provider_id = provider.unwrap_or("anthropic");
+    let node = db::create_agent_node(
+        mesh_id,
+        &session_name,
+        &mesh.path,
+        branch,
+        env_type,
+        provider_id,
+        worktree_name,
+        None,
+        None,
+        None,
+        use_worktree,
+        None,
+        None,
+        worktree_path.as_deref(),
+    )?;
+    db::update_cli_session_id(node.id, cli_session_id)?;
+    db::get_agent_node_by_id(node.id).map_err(AgentNodeError::from)
 }
 
 /// Load a node row for the close path, treating an already-removed row as
@@ -2356,6 +2465,7 @@ mod tests {
                 Some(false),
                 pending,
                 Some(&configuration),
+                None,
             )
             .unwrap();
             assert_eq!(node.provider, "codex");
@@ -2383,6 +2493,7 @@ mod tests {
             Some(false),
             false,
             Some(&configuration),
+            None,
         )
         .unwrap();
         configuration.model = Some("edited-later".into());
@@ -2410,6 +2521,7 @@ mod tests {
             None,
             Some(false),
             false,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -2633,6 +2745,7 @@ mod tests {
             None,
             None,
             false, /* pending */
+            None,
         )
         .expect("create_blocking with explicit branch must succeed");
 
@@ -2687,6 +2800,7 @@ mod tests {
             Some("gh123-test-slug"),
             None,
             true, /* pending */
+            None,
         )
         .expect("create_blocking with pending=true must succeed");
 
@@ -2729,6 +2843,7 @@ mod tests {
             None,
             None,
             false, /* pending */
+            None,
         )
         .expect_err("create_blocking on unknown mesh_id must return Err");
 
@@ -2766,6 +2881,7 @@ mod tests {
             None,
             None,
             false, /* pending */
+            None,
         )
         .expect("create_blocking with branch_override=None must succeed");
 
@@ -2797,6 +2913,7 @@ mod tests {
             None,
             /* use_worktree_override = */ Some(false),
             false, /* pending */
+            None,
         )
         .expect("create_blocking on idle path must succeed");
 
@@ -2835,6 +2952,7 @@ mod tests {
             None,
             /* use_worktree_override = */ Some(false),
             true, /* pending */
+            None,
         )
         .expect("create_blocking on pending path must succeed");
 
@@ -2852,6 +2970,188 @@ mod tests {
             node.worktree_name, None,
             "use_worktree=false on a fresh mesh must produce a Root Node even on Pending rows"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #2237 — one runner owns create and import, including the
+    // initial-prompt capability rule. Terminal cannot take a prompt.
+    // Codex can, and that success must not depend on the install menu.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prompted_terminal_create_rejects_and_inserts_nothing() {
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
+        let err = create_blocking(
+            mesh_id,
+            Some("terminal"),
+            Some("main"),
+            None,
+            None,
+            Some(false),
+            false,
+            Some("ship this"),
+        )
+        .expect_err("a prompt for Terminal must be rejected");
+        assert!(matches!(err, AgentNodeError::InitialPromptUnsupported));
+        assert_eq!(err.to_string(), INITIAL_PROMPT_UNSUPPORTED);
+        assert!(db::list_agent_nodes_by_mesh(mesh_id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn unprompted_terminal_create_still_inserts() {
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
+        let node = create_blocking(
+            mesh_id,
+            Some("terminal"),
+            Some("main"),
+            None,
+            None,
+            Some(false),
+            false,
+            None,
+        )
+        .expect("Terminal without a prompt is a normal create");
+        assert_eq!(node.provider, "terminal");
+        let blank = create_blocking(
+            mesh_id,
+            Some("terminal"),
+            Some("main"),
+            None,
+            None,
+            Some(false),
+            false,
+            Some("   "),
+        )
+        .expect("whitespace is not an initial prompt");
+        assert_eq!(blank.provider, "terminal");
+    }
+
+    #[test]
+    fn prompted_codex_create_succeeds_without_the_install_menu() {
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
+        let node = create_blocking(
+            mesh_id,
+            Some("codex"),
+            Some("main"),
+            None,
+            None,
+            Some(false),
+            false,
+            Some("review the diff"),
+        )
+        .expect("codex accepts an initial prompt even when the CLI is absent");
+        assert_eq!(node.provider, "codex");
+    }
+
+    #[test]
+    fn prompted_create_of_an_unknown_mesh_is_mesh_not_found() {
+        let _db = crate::db::test_support::isolated();
+        let err = create_blocking(
+            -1,
+            Some("terminal"),
+            Some("main"),
+            None,
+            None,
+            None,
+            false,
+            Some("hello"),
+        )
+        .expect_err("unknown mesh wins over the prompt rule");
+        assert!(matches!(err, AgentNodeError::MeshNotFound(-1)));
+    }
+
+    #[test]
+    fn import_with_worktree_persists_the_mesh_path() {
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
+        db::set_mesh_worktree_directory(mesh_id, Some("wt")).unwrap();
+        let mesh = db::get_mesh_by_id(mesh_id).unwrap();
+        let session_id = "11111111-1111-1111-1111-111111111111";
+        let node = import_discovered_session(
+            mesh_id,
+            session_id,
+            "feature",
+            Some("feature"),
+            Some("codex"),
+        )
+        .expect("import with a worktree name");
+        assert!(node.use_worktree);
+        assert_eq!(node.worktree_name.as_deref(), Some("feature"));
+        let expected_path = format!("{}/wt/feature", mesh.path);
+        assert_eq!(node.worktree_path.as_deref(), Some(expected_path.as_str()));
+        assert_eq!(node.path, mesh.path);
+        assert_eq!(node.cli_session_id.as_deref(), Some(session_id));
+        assert_eq!(node.provider, "codex");
+    }
+
+    #[test]
+    fn import_without_worktree_is_a_root_node_on_the_mesh_path() {
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
+        let mesh = db::get_mesh_by_id(mesh_id).unwrap();
+        let session_id = "22222222-2222-2222-2222-222222222222";
+        let node = import_discovered_session(mesh_id, session_id, "main", None, None)
+            .expect("import without a worktree");
+        assert!(!node.use_worktree);
+        assert_eq!(node.worktree_name, None);
+        assert_eq!(node.worktree_path, None);
+        assert_eq!(node.path, mesh.path);
+        assert_eq!(node.provider, "anthropic");
+        assert_eq!(node.cli_session_id.as_deref(), Some(session_id));
+    }
+
+    #[test]
+    fn blank_worktree_name_on_create_stores_no_path() {
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
+        let node = create_blocking(
+            mesh_id,
+            Some("anthropic"),
+            Some("main"),
+            None,
+            Some("   "),
+            Some(true),
+            false,
+            None,
+        )
+        .expect("a whitespace name still creates");
+        assert_eq!(node.worktree_name.as_deref(), Some("   "));
+        assert_eq!(node.worktree_path, None);
+        assert!(node.use_worktree);
+    }
+
+    #[test]
+    fn import_of_an_empty_worktree_name_keeps_the_flag_and_no_path() {
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
+        let node = import_discovered_session(
+            mesh_id,
+            "33333333-3333-3333-3333-333333333333",
+            "main",
+            Some(""),
+            None,
+        )
+        .expect("an empty discovered name is still a worktree flag");
+        assert!(node.use_worktree);
+        assert_eq!(node.worktree_name.as_deref(), Some(""));
+        assert_eq!(node.worktree_path, None);
+    }
+
+    #[test]
+    fn import_of_an_unknown_mesh_is_mesh_not_found() {
+        let _db = crate::db::test_support::isolated();
+        let err = import_discovered_session(
+            -1,
+            "11111111-1111-1111-1111-111111111111",
+            "main",
+            None,
+            None,
+        )
+        .expect_err("unknown mesh");
+        assert!(matches!(err, AgentNodeError::MeshNotFound(-1)));
     }
 
     // -----------------------------------------------------------------------

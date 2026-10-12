@@ -45,7 +45,12 @@ pub struct WorktreeCleanupFailedPayload {
     pub retry_not_before: i64,
 }
 
-/// Create a new agent node
+/// Create a new agent node.
+///
+/// `path` stays on the IPC surface and is unused: the runner reads the
+/// mesh path from the mesh row. `initial_prompt` is optional. When it
+/// trims to text, the runner rejects a harness that cannot take one
+/// before inserting a row.
 #[command]
 pub async fn create_agent_node(
     mesh_id: i64,
@@ -55,46 +60,51 @@ pub async fn create_agent_node(
     provider: Option<String>,
     use_worktree: Option<bool>,
     configuration_id: Option<String>,
+    initial_prompt: Option<String>,
 ) -> Result<AgentNode, String> {
-    // Tauri command surface has no PR-spawn plumbing; PR flows go via
-    // `commands::pr::create_pr_node`. If we ever expose PR spawn here,
-    // this is the call site to grow.
-    //
     // Offload: create locks SQLite, touches the filesystem, and may run
     // git worktree operations (issue #1380).
-    //
-    // Issue #1658 step 5 — the mesh-lookup + branch + create dance now
-    // flows through `services::agent_node::create_blocking`, the single
-    // shared runner used by both this command and `http::routes::nodes::create`.
-    // `path` is accepted on the IPC surface (deserialization contract)
-    // but unused — the helper derives `mesh.path` itself from the mesh
-    // row it loads. `branch_override = Some(&branch)` short-circuits the
-    // helper's `get_default_branch_blocking` since the IPC caller
-    // already supplied the branch. The legacy
-    // `provider.unwrap_or("anthropic")` fallback (issue #538 default)
-    // is preserved inside `create_with_source_pr_fork`.
     crate::commands::run_blocking("create_agent_node", move || {
-        let configuration = crate::preferences::spawn_configurations::resolve_saved(
-            provider.as_deref().unwrap_or("anthropic"),
-            configuration_id.as_deref().filter(|s| !s.trim().is_empty()),
-        )
-        .map_err(|error| error.to_string())?;
-        services::agent_node::create_blocking_configured(
+        create_agent_node_blocking(
             mesh_id,
+            &branch,
             provider.as_deref(),
-            Some(&branch),
-            None, // source_issue
-            None, // name_override — Tauri surface doesn't accept one
             use_worktree,
-            false, // pending — Idle matches the prior create(...) semantics
-            configuration.as_ref(),
+            configuration_id.as_deref(),
+            initial_prompt.as_deref(),
         )
-        .map_err(|e| {
-            tracing::error!("create_agent_node failed: {}", e);
-            e.to_string()
-        })
     })
     .await
+}
+
+pub(crate) fn create_agent_node_blocking(
+    mesh_id: i64,
+    branch: &str,
+    provider: Option<&str>,
+    use_worktree: Option<bool>,
+    configuration_id: Option<&str>,
+    initial_prompt: Option<&str>,
+) -> Result<AgentNode, String> {
+    let configuration = crate::preferences::spawn_configurations::resolve_saved(
+        provider.unwrap_or("anthropic"),
+        configuration_id.filter(|id| !id.trim().is_empty()),
+    )
+    .map_err(|error| error.to_string())?;
+    services::agent_node::create_blocking_configured(
+        mesh_id,
+        provider,
+        Some(branch),
+        None,
+        None,
+        use_worktree,
+        false,
+        configuration.as_ref(),
+        initial_prompt,
+    )
+    .map_err(|error| {
+        tracing::error!("create_agent_node failed: {}", error);
+        error.to_string()
+    })
 }
 
 /// List all agent nodes
