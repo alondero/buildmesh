@@ -443,9 +443,10 @@ from the context menu:
 
 - **Handover to new Node** creates another agent on the Mesh only when that
   harness can take an initial prompt, and pre-fills it with the selection as
-  its first turn. If the harness cannot take one, the action refuses and
-  leaves the source terminal as it is. Choose a harness that accepts a
-  first-turn prompt.
+  its first turn. If the Mesh default cannot take one, the action refuses,
+  shows an error toast, and leaves the source terminal as it is. Change the
+  Mesh default to a harness that accepts a first-turn prompt, or hand the
+  selection to an existing node instead.
 - **Handover to node** sends the selection to an agent you already have. The text
   is staged as a single paste and then submitted, exactly as if you had pasted it
   and pressed Enter — so a multi-line review report arrives as one prompt instead
@@ -800,6 +801,8 @@ answer there too.
 **Probe spawn prompts** (Settings → Prompts) customise the initial prompt
 for agents spawned from the Probe's GitHub Issues and Pull Requests tabs.
 The node is created only when that harness can take an initial prompt.
+If the Mesh default cannot, the Issues tab shows an error toast; pick
+another harness from the spawn menu.
 The built-in templates appear as editable text, so you can adjust their wording
 directly. Changes save when you leave the editor. Click a placeholder button to
 insert it at the cursor or replace selected text; each button explains its value

@@ -116,8 +116,7 @@ impl From<rusqlite::Error> for AgentNodeError {
 /// Sentence returned when a create request includes an initial prompt and
 /// the harness that will launch cannot accept one. HTTP and the desktop
 /// commands share this exact text.
-pub const INITIAL_PROMPT_UNSUPPORTED: &str =
-    "Choose an available agent that supports an initial prompt";
+pub const INITIAL_PROMPT_UNSUPPORTED: &str = "Choose an agent that supports an initial prompt";
 
 /// Worktree path and environment for one node. `None` or a blank segment is
 /// a Root Node: no stored path, and the environment comes from the mesh root.
@@ -3102,6 +3101,26 @@ mod tests {
         assert_eq!(node.path, mesh.path);
         assert_eq!(node.provider, "anthropic");
         assert_eq!(node.cli_session_id.as_deref(), Some(session_id));
+    }
+
+    #[test]
+    fn blank_worktree_name_on_create_stores_no_path() {
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
+        let node = create_blocking(
+            mesh_id,
+            Some("anthropic"),
+            Some("main"),
+            None,
+            Some("   "),
+            Some(true),
+            false,
+            None,
+        )
+        .expect("a whitespace name still creates");
+        assert_eq!(node.worktree_name.as_deref(), Some("   "));
+        assert_eq!(node.worktree_path, None);
+        assert!(node.use_worktree);
     }
 
     #[test]

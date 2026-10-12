@@ -522,6 +522,46 @@ pub fn create_issue_node(
     provider: Option<String>,
     configuration_id: Option<String>,
 ) -> Result<IssueNodeDraft, String> {
+    let (draft, intent) = create_issue_node_impl(
+        mesh_id,
+        issue_number,
+        issue_title,
+        provider,
+        configuration_id,
+    )?;
+
+    let _ = app.emit("node-created", NodeCreatedPayload { id: draft.node.id });
+    let app_for_spawn = app.clone();
+    // Detached task: the previous bare `if let Err(...)` wrapper silently
+    // dropped every `SpawnOutcome::Skipped` / `AlreadyActive` and any panic
+    // that escaped the future — leaving the row stuck on `pending` until the
+    // user restarted the app (issue #1700). `run_detached_spawn` routes all
+    // four outcomes + panic through session-lifecycle + Tauri events so the
+    // DB and the frontend `agentNodeStore` both observe a terminal state.
+    tauri::async_runtime::spawn(run_detached_spawn(
+        app_for_spawn,
+        SpawnRequest::new(draft.node.id, intent, TerminalSize::default()),
+    ));
+
+    tracing::info!(
+        "create_issue_node: accepted pending node {} for issue #{} on mesh {}",
+        draft.node.id,
+        issue_number,
+        mesh_id
+    );
+
+    Ok(draft)
+}
+
+/// DB + runner half of [`create_issue_node`]. Isolated from `AppHandle` so
+/// tests can pin the prompt-capability gate without emitting events.
+pub(crate) fn create_issue_node_impl(
+    mesh_id: i64,
+    issue_number: i64,
+    issue_title: String,
+    provider: Option<String>,
+    configuration_id: Option<String>,
+) -> Result<(IssueNodeDraft, SpawnIntent), String> {
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)
         .map_err(|e| format!("{} — cannot derive issue URL", e))?;
@@ -585,27 +625,7 @@ pub fn create_issue_node(
     )
     .map_err(|e| e.to_string())?;
 
-    let _ = app.emit("node-created", NodeCreatedPayload { id: node.id });
-    let app_for_spawn = app.clone();
-    // Detached task: the previous bare `if let Err(...)` wrapper silently
-    // dropped every `SpawnOutcome::Skipped` / `AlreadyActive` and any panic
-    // that escaped the future — leaving the row stuck on `pending` until the
-    // user restarted the app (issue #1700). `run_detached_spawn` routes all
-    // four outcomes + panic through session-lifecycle + Tauri events so the
-    // DB and the frontend `agentNodeStore` both observe a terminal state.
-    tauri::async_runtime::spawn(run_detached_spawn(
-        app_for_spawn,
-        SpawnRequest::new(node.id, intent, TerminalSize::default()),
-    ));
-
-    tracing::info!(
-        "create_issue_node: accepted pending node {} for issue #{} on mesh {}",
-        node.id,
-        issue_number,
-        mesh_id
-    );
-
-    Ok(IssueNodeDraft { node, prefill })
+    Ok((IssueNodeDraft { node, prefill }, intent))
 }
 
 // ---------------------------------------------------------------------------
@@ -1276,6 +1296,53 @@ mod tests {
             !err.is_empty(),
             "mesh-not-found must produce a non-empty error, got empty string"
         );
+    }
+
+    /// Issue and PR spawn pass the SpawnIntent prefill into create. A
+    /// Terminal selection must refuse at create and leave the mesh empty —
+    /// the previous path created the row and dropped the prompt at spawn.
+    #[test]
+    fn create_issue_node_impl_rejects_a_prompt_the_harness_cannot_take() {
+        let _db = ensure_pr_db();
+        let (_tmp, mesh_id) =
+            create_test_mesh("issue-terminal-prompt", "https://github.com/x/y.git");
+
+        let err = create_issue_node_impl(
+            mesh_id,
+            101,
+            "fix the wobble".to_string(),
+            Some("terminal".to_string()),
+            None,
+        )
+        .expect_err("Terminal cannot take an issue-spawn prompt");
+
+        assert_eq!(err, crate::services::agent_node::INITIAL_PROMPT_UNSUPPORTED);
+        assert!(crate::db::list_agent_nodes_by_mesh(mesh_id)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn create_pr_node_impl_rejects_a_prompt_the_harness_cannot_take() {
+        let _db = ensure_pr_db();
+        let (_tmp, mesh_id) = create_test_mesh("pr-terminal-prompt", "https://github.com/x/y.git");
+
+        let err = create_pr_node_impl(
+            mesh_id,
+            7,
+            "review the race".to_string(),
+            "feat/x".to_string(),
+            "".to_string(),
+            Some("terminal".to_string()),
+            None,
+            None,
+        )
+        .expect_err("Terminal cannot take a PR-spawn prompt");
+
+        assert_eq!(err, crate::services::agent_node::INITIAL_PROMPT_UNSUPPORTED);
+        assert!(crate::db::list_agent_nodes_by_mesh(mesh_id)
+            .unwrap()
+            .is_empty());
     }
 
     /// The seam the issue calls out most explicitly: the returned

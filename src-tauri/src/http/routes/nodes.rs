@@ -51,7 +51,7 @@ enum CreateNodeError {
     Agent(crate::services::agent_node::AgentNodeError),
 }
 
-pub(crate) fn create_node_blocking(
+fn create_node_blocking(
     mesh_id: i64,
     provider: &str,
     configuration_id: Option<&str>,
@@ -76,7 +76,7 @@ pub(crate) fn create_node_blocking(
     .map_err(CreateNodeError::Agent)
 }
 
-pub(crate) fn map_create_error(error: CreateNodeError) -> Response {
+fn map_create_error(error: CreateNodeError) -> Response {
     match error {
         CreateNodeError::Configuration(
             crate::preferences::spawn_configurations::SpawnConfigurationError::Invalid(message),

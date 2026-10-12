@@ -1384,7 +1384,10 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       await get().fetchAgentNodes();
       return node;
     } catch (e) {
-      set({ error: formatError(e) });
+      // Toast here rather than `state.error`: App.tsx already turns that
+      // field into a generic "System" toast, and the terminal catch would
+      // otherwise stack a second copy of the same sentence.
+      addToast('Handover', formatError(e), 'error');
       throw e;
     }
   },

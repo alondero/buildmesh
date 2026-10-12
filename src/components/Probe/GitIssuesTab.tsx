@@ -388,6 +388,7 @@ export function GitIssuesTab() {
       setSpawning(null);
     } catch (e) {
       console.error('Failed to spawn issue agent:', e);
+      addToast('Spawn', formatError(e), 'error');
       setSpawning(null);
     }
   };
@@ -411,6 +412,7 @@ export function GitIssuesTab() {
       setSpawning(null);
     } catch (e) {
       console.error('Failed to spawn issue agent:', e);
+      addToast('Spawn', formatError(e), 'error');
       setSpawning(null);
     }
   };
