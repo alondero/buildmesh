@@ -1,4 +1,3 @@
 {
-  "tests/unit/omnibar-fuzzy-search.test.ts > performance budget (issue #1410 §3) searches 500+ items in under 5ms per query": 1833,
-  "tests/integration/ui-shot.test.ts > ui-shot mock mode groups, reloads, swaps and ungroups nodes through pointer and keyboard interactions": 2204
+  "tests/unit/omnibar-fuzzy-search.test.ts > performance budget (issue #1410 §3) searches 500+ items in under 5ms per query": 1833
 }
