@@ -43,9 +43,41 @@ export async function conptyPrerequisite(root, probe = fetch) {
   }
 }
 
+/**
+ * Whether Vitest's own output reports a runtime error that no test owns.
+ *
+ * The markers are the structures Vitest prints a runtime error *in*, rather than
+ * the bare phrase. Scanning the whole formatted output for "Unhandled Error" or
+ * "Unhandled Rejection" matched test TITLES instead: the default reporter prints
+ * a test's name verbatim in the slow-test table (`✓ … 430ms`) and in the
+ * `stderr | file > suite > title` prefix, so a passing test called "does NOT leak
+ * an unhandled rejection on a failing blur save" made a completely clean run
+ * report `Additional suite/runtime failures remain` (issue #2204). A title is
+ * data the repo controls and is not reliably told apart from a diagnostic by
+ * wording, so attribution reads Vitest's structure instead. That the three real
+ * forms stay blocking is asserted in tests/agent-infra/harness.test.mjs.
+ *
+ * `[ \t]` rather than `\s` keeps each pattern on one line, so a word at the end
+ * of a title is not joined to a number on the line below.
+ */
+const RUNTIME_ERROR_PATTERNS = [
+  // The summary row Vitest prints once an error section exists: "  Errors  1 error".
+  /^[ \t]*Errors[ \t]+[1-9]\d*[ \t]+errors?[ \t]*$/m,
+  // The box header of the offending error: "⎯ Unhandled Rejection ⎯",
+  // "⎯ Unhandled Error ⎯", "⎯ Uncaught Exception ⎯".
+  /⎯+[ \t]*(?:Unhandled (?:Error|Rejection)|Uncaught Exception)[ \t]*⎯+/,
+  // The section's own sentence, which carries the count: "Vitest caught 1 unhandled error…".
+  /Vitest caught [1-9]\d* unhandled errors?\b/i,
+];
+
+export function reportsRuntimeError(output) {
+  const text = stripVTControlCharacters(output);
+  return RUNTIME_ERROR_PATTERNS.some(pattern => pattern.test(text));
+}
+
 export function vitestReport(root, report, output = '') {
   const failures = [];
-  let unattributed = /Unhandled (?:Error|Rejection)|Uncaught Exception|Errors\s+[1-9]/i.test(stripVTControlCharacters(output));
+  let unattributed = reportsRuntimeError(output);
   for (const suite of report.testResults ?? []) {
     const file = (isAbsolute(suite.name) ? relative(root, suite.name) : suite.name).replaceAll('\\', '/');
     const failed = (suite.assertionResults ?? []).filter(test => test.status === 'failed');

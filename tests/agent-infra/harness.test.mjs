@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { changedPaths, completion, fingerprint, runGate, scopePaths, verify, waitForVerify } from '../../scripts/harness.mjs';
 import { executedTests, gateReads, planGates, touchedFormatDiffs } from '../../scripts/harness-plan.mjs';
 import { acquireSlot, heavyGateEnv, heavyGateLimit, runPlan, slotHolders } from '../../scripts/harness-lanes.mjs';
-import { conptyPrerequisite, gatePassed, isolatedCommand, isolateTests, knownFlakes, rustFailures, validateFlakeIssues, vitestReport } from '../../scripts/harness-test-failures.mjs';
+import { conptyPrerequisite, gatePassed, isolatedCommand, isolateTests, knownFlakes, reportsRuntimeError, rustFailures, validateFlakeIssues, vitestReport } from '../../scripts/harness-test-failures.mjs';
 import { VERSION as CONPTY_VERSION } from '../../scripts/prepare-conpty.mjs';
 
 const script = fileURLToPath(new URL('../../scripts/harness.mjs', import.meta.url));
@@ -24,6 +24,64 @@ test('Vitest JSON and cargo failure blocks name exact tests without panic prose'
   assert.equal(rustFailures(cargo, { kind: 'test', name: 'integration' })[0].id, 'test:integration > db::broken');
   assert.deepEqual(isolatedCommand(report.failures[0], 'vitest', 'report.json'), ['node', 'scripts/harness-vitest-isolate.mjs', 'tests/unit/example.test.ts', '^suite a \\+ \\(b\\)$', 'report.json']);
   assert.deepEqual(isolatedCommand(rustFailures(cargo)[0], 'rust'), ['cargo', 'test', '--locked', '--lib', 'db::broken', '--', '--exact', '--test-threads=1']);
+});
+
+test('runtime-error attribution reads Vitest\'s own structures, not test titles (#2204)', () => {
+  // The strings below are copied from real `vitest run --reporter=default
+  // --reporter=json` output captured on this repo, because the whole defect was
+  // that the phrase "unhandled rejection" is legitimate *test data* as well as a
+  // runtime diagnostic, and the surrounding structure is what tells them apart.
+  //
+  // The first two are a CLEAN run of tests/unit/project-settings-tab.test.tsx:
+  // 49 passed, 0 failed, exit 0. The slow-test listing and the stderr prefix
+  // between them put "unhandled rejection" in the output twice, purely because
+  // a passing test is named "does NOT leak an unhandled rejection …". Reading
+  // the phrase alone called this run FAIL with "Additional suite/runtime
+  // failures remain" while its only real failure was an unrelated ui-shot flake.
+  const cleanRun = [
+    '',
+    ' RUN  v4.1.11 F:/src/buildmesh',
+    '',
+    ' ✓ tests/unit/project-settings-tab.test.tsx (49 tests) 8962ms',
+    '     ✓ does NOT leak an unhandled rejection on a failing blur save  430ms',
+    'stderr | tests/unit/project-settings-tab.test.tsx > ProjectSettingsTab — save feedback (issue #729) > does NOT leak an unhandled rejection on a failing blur save',
+    'Project setting save failed: Error: mock: update_mesh_name rejected',
+    '',
+    ' Test Files  1 passed (1)',
+    '      Tests  49 passed (49)',
+  ].join('\n');
+  assert.equal(reportsRuntimeError(cleanRun), false);
+  assert.equal(vitestReport(root, { numPassedTests: 49, numFailedTests: 0, testResults: [] }, cleanRun).unattributed, false);
+
+  // Each of these is a real runtime error, captured from a real failing run.
+  // Vitest renders one unhandled rejection three ways — the summary row, the box
+  // header and the section sentence — and each has to stay blocking on its own,
+  // so tightening the matcher is not satisfied by dropping a form.
+  const unhandledRejection = [
+    '     Errors  1 error',
+    '⎯⎯⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯⎯⎯',
+    'Vitest caught 1 unhandled error during the test run.',
+    'This might cause false positive tests. Resolve unhandled errors to make sure your tests are not affected.',
+    '⎯⎯⎯⎯ Unhandled Rejection ⎯⎯⎯⎯',
+    'Error: boom',
+    ' ❯ tests/real.test.js:2:51',
+  ].join('\n');
+  assert.equal(reportsRuntimeError(unhandledRejection), true);
+
+  const uncaughtException = [
+    '     Errors  1 error',
+    '⎯⎯⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯⎯⎯',
+    'Vitest caught 1 unhandled error during the test run.',
+    '⎯⎯⎯⎯ Uncaught Exception ⎯⎯⎯⎯',
+    'Error: kaboom',
+    ' ❯ Timeout._onTimeout tests/real.test.js:2:54',
+  ].join('\n');
+  assert.equal(reportsRuntimeError(uncaughtException), true);
+
+  // "Errors  0 errors" is the clean summary; it must not read as a runtime error.
+  assert.equal(reportsRuntimeError('     Errors  0 errors\n Test Files  1 passed (1)'), false);
+  // ANSI is stripped first, so a colourised real error is still seen.
+  assert.equal(reportsRuntimeError('[31m⎯⎯ Unhandled Rejection ⎯⎯[0m'), true);
 });
 
 test('isolated passes distinguish listed flakes, unlisted flakes and persistent failures', async t => {
@@ -154,6 +212,38 @@ test('one + (exact) sibling', () => { throw new Error('persistent sibling'); });
   assert.equal(skipped.failures[0].rerun.count, 0);
   assert.match(readFileSync(skipped.failures[0].rerun.log, 'utf8'), /1 skipped/);
   assert.doesNotMatch(readFileSync(skipped.failures[0].rerun.log, 'utf8'), /isolation.test.jsx/);
+});
+
+test('a green Vitest gate is not failed by a passing test named after a runtime error (#2204)', async t => {
+  // The end-to-end half of #2204: a real `vitest run` in which the only test
+  // passes and is *called* "does NOT leak an unhandled rejection …". The default
+  // reporter prefixes any stderr a test writes with the test's own path and
+  // title, so the run's output carries the phrase while the run is green. The
+  // gate has to read that as a pass, because the alternative reading is what
+  // reported "Additional suite/runtime failures remain" on an otherwise healthy
+  // suite and masked the one real, already-isolated ui-shot flake.
+  const fixture = repo(t);
+  symlinkSync(join(root, 'node_modules'), join(fixture.cwd, 'node_modules'), 'junction');
+  fixture.put('scripts/harness-vitest-isolate.mjs', readFileSync(join(root, 'scripts/harness-vitest-isolate.mjs')));
+  fixture.put('package.json', '{"type":"module"}');
+  fixture.put('vitest.config.mjs', 'export default { test: { include: ["tests/*.test.js"], environment: "node" } };');
+  fixture.put('tests/title.test.js', `import { test, expect } from 'vitest';
+test('does NOT leak an unhandled rejection on a failing blur save', () => {
+  console.error('Project setting save failed: Error: mock: update_mesh_column rejected');
+  expect(true).toBe(true);
+});
+`);
+
+  const row = await runGate(fixture.cwd, { id: 'frontend-tests', command: ['node', 'node_modules/vitest/vitest.mjs', 'run'], tests: 'vitest', minutes: 1 }, fixture.base);
+
+  // Asserted first, so the assertions below are meaningful only when the phrase
+  // is really in the log. A gate only parses its report once it has already
+  // failed, so attribution is asserted on the log itself and the outcome on the
+  // row.
+  assert.match(readFileSync(row.log, 'utf8'), /does NOT leak an unhandled rejection/);
+  assert.equal(reportsRuntimeError(readFileSync(row.log, 'utf8')), false, 'a passing test title is not a runtime error');
+  assert.equal(row.count, 1);
+  assert.equal(row.outcome, 'PASS', JSON.stringify(row));
 });
 
 test('real Cargo gate names a suite failure and reruns just that library test', async t => {

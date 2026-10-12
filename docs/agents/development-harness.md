@@ -344,9 +344,22 @@ A repeat failure stays FAIL. An isolated pass is FLAKY. Missing executables and
 deadlines stay BLOCKED and TIMEOUT; zero executed tests, unreadable reports,
 ambiguous duplicate names, file setup failures and unhandled runtime errors
 cannot produce an accepted flake. Collection/setup failures still name the
-failed file. Git is checked
-before product test gates. On Windows, Rust compilation checks network access
-to the pinned ConPTY package when its archive is absent from the worktree cache;
+failed file.
+
+Runtime errors are attributed from Vitest's own reporting structures — the
+`Errors  N error(s)` summary row, an `Unhandled Error`/`Unhandled
+Rejection`/`Uncaught Exception` box header, and its `Vitest caught N unhandled
+error` sentence — rather than from the bare phrase appearing anywhere in the
+output. The default reporter prints a test's title verbatim in the slow-test
+listing and in the `stderr | file > suite > title` prefix, so a *passing* test
+named after a runtime error would otherwise fail an otherwise healthy gate with
+"Additional suite/runtime failures remain" (#2204). A test title is repository
+data and is not reliably told apart from a diagnostic by wording; naming a test
+after the failure it prevents is safe.
+
+Git is checked before product test gates. On Windows, Rust compilation checks
+network access to the pinned ConPTY package when its archive is absent from the
+worktree cache;
 an unavailable download is BLOCKED before Cargo builds. Cached archives do not
 require network access. The Windows Rust runner checks
 the staged ConPTY runtime after compilation, before starting test processes.
