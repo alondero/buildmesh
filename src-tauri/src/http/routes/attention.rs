@@ -106,6 +106,13 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
         req.query(),
         crate::agent::runtime_hook_token().as_deref(),
     ) {
+        // The hook's `curl` swallows the status, so this line is the trace of a
+        // harness whose callbacks never land (run 453, Grok).
+        tracing::warn!(
+            session_id = ?node.as_ref().map(|node| node.id),
+            provider,
+            "attention webhook rejected: hook token missing or not this runtime's"
+        );
         return Response::empty("403 Forbidden");
     }
     let Some(app) = state::app_handle() else {

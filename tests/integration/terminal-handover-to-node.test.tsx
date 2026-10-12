@@ -60,6 +60,14 @@ vi.mock('@tauri-apps/plugin-opener', () => ({
   openUrl: vi.fn().mockResolvedValue(undefined),
 }));
 
+const { addToastMock } = vi.hoisted(() => ({
+  addToastMock: vi.fn(),
+}));
+vi.mock('../../src/stores/toastStore', () => ({
+  addToast: addToastMock,
+  dismissToast: vi.fn(),
+}));
+
 vi.mock('@xterm/xterm', () => {
   class MockTerminal {
 // Honours xterm's parse-completion callback (see `terminal-container.test.tsx`).
@@ -185,9 +193,11 @@ function targetRows(open: HTMLElement): string[] {
 describe('terminal handover to an existing node', () => {
   beforeEach(() => {
     mockListeners.clear();
+    addToastMock.mockReset();
     vi.clearAllMocks();
     localStorage.removeItem('buildmesh.node-groups');
     seedAgentNodes([IMPLEMENTER, REVIEWER, UNRELATED, OTHER_MESH], IMPLEMENTER.id);
+    useAgentNodeStore.setState({ error: null });
     useAgentNodeStore.setState({ circuitOwnerships: OWNERSHIPS });
     useNodeActivityStore.setState({ selections: {}, utilities: {}, groups: [] });
     useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
@@ -252,5 +262,31 @@ describe('terminal handover to an existing node', () => {
         text: 'hand me over',
       }),
     );
+  });
+
+  it('toasts when handover to a new node is refused', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'list_agent_nodes') return Promise.resolve([]);
+      if (cmd === 'list_providers') return Promise.resolve([{ id: 'anthropic', label: 'Claude' }]);
+      if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
+      if (cmd === 'spawn_handover_agent') {
+        return Promise.reject(new Error('Choose an agent that supports an initial prompt'));
+      }
+      return Promise.resolve({});
+    });
+
+    const { open } = await mountAndOpen('hand this over');
+    const button = await waitFor(() => within(open).getByText(/Handover to new Node/));
+    fireEvent.click(button);
+
+    await waitFor(() => {
+      expect(addToastMock).toHaveBeenCalledWith(
+        'Handover',
+        'Choose an agent that supports an initial prompt',
+        'error',
+      );
+    });
+    expect(addToastMock).toHaveBeenCalledTimes(1);
+    expect(useAgentNodeStore.getState().error).toBeNull();
   });
 });

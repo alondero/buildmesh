@@ -1372,6 +1372,48 @@ fn stop_with_no_pending_tasks_is_ready() {
 }
 
 #[test]
+fn claude_stopped_background_task_releases_stop_and_idle_callbacks() {
+    use crate::services::transcript_reader::adapters::claude_code::count_pending_background_tasks;
+
+    // Sanitized launch/TaskStop/CI records from run 457, agent 5354.
+    let records: Vec<_> = include_str!(
+        "../../../../tests/fixtures/transcripts/claude_code/stopped_background_task.jsonl"
+    )
+    .lines()
+    .collect();
+    let transcript = tempfile::NamedTempFile::new().unwrap();
+    for (length, expected) in [
+        (2, Decision::SuppressPendingBackground),
+        (3, Decision::Ready),
+        (4, Decision::SuppressPendingBackground),
+        (5, Decision::Ready),
+    ] {
+        std::fs::write(transcript.path(), records[..length].join("\n")).unwrap();
+        for event in ["Stop", "Notification"] {
+            let body = serde_json::json!({
+                "hook_event_name": event,
+                "notification_type": "idle_prompt",
+                "transcript_path": transcript.path(),
+            });
+            let result =
+                normalizers::normalize(Some(&body), "anthropic", count_pending_background_tasks);
+            assert_eq!(
+                result.classified.decision, expected,
+                "{event} after {length} records"
+            );
+            assert_eq!(
+                result.classified.detail.kind,
+                Some(if expected == Decision::Ready {
+                    crate::agent::session_lifecycle::LifecycleKind::TurnCompleted
+                } else {
+                    crate::agent::session_lifecycle::LifecycleKind::BackgroundRunning
+                })
+            );
+        }
+    }
+}
+
+#[test]
 fn unreadable_transcript_is_degraded_not_a_confirmed_completion() {
     let body = stop_body("/tmp/session.jsonl");
     let result = classify(&body, "anthropic", |_| None);

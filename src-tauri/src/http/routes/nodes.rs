@@ -1,8 +1,8 @@
 //! `GET /api/nodes` and `POST /api/nodes/create`, plus `POST /api/nodes/{id}/input`
 //! (issue #1377) for the triage deck's one-tap Approve/Reject chips.
 
-use tauri::Emitter;
 use crate::agent::process::{ProcessRegistryApi, PROCESS_REGISTRY};
+use tauri::Emitter;
 
 use crate::db;
 use crate::http::response::Response;
@@ -51,6 +51,59 @@ enum CreateNodeError {
     Agent(crate::services::agent_node::AgentNodeError),
 }
 
+fn create_node_blocking(
+    mesh_id: i64,
+    provider: &str,
+    configuration_id: Option<&str>,
+    initial_prompt: Option<&str>,
+) -> Result<crate::models::AgentNode, CreateNodeError> {
+    let configuration = crate::preferences::spawn_configurations::resolve_saved(
+        provider,
+        configuration_id.filter(|id| !id.trim().is_empty()),
+    )
+    .map_err(CreateNodeError::Configuration)?;
+    crate::services::agent_node::create_blocking_configured(
+        mesh_id,
+        Some(provider),
+        Some("main"),
+        None,
+        None,
+        None,
+        false,
+        configuration.as_ref(),
+        initial_prompt,
+    )
+    .map_err(CreateNodeError::Agent)
+}
+
+fn map_create_error(error: CreateNodeError) -> Response {
+    match error {
+        CreateNodeError::Configuration(
+            crate::preferences::spawn_configurations::SpawnConfigurationError::Invalid(message),
+        ) => Response::json_error("400 Bad Request", &message),
+        CreateNodeError::Configuration(error) => Response::json_error(
+            "500 Internal Server Error",
+            &format!("Failed to resolve spawn configuration: {error}"),
+        ),
+        CreateNodeError::Agent(crate::services::agent_node::AgentNodeError::MeshNotFound(_)) => {
+            Response::json_error("400 Bad Request", "Mesh not found")
+        }
+        CreateNodeError::Agent(
+            crate::services::agent_node::AgentNodeError::InvalidConfiguration(message),
+        ) => Response::json_error("400 Bad Request", &message),
+        CreateNodeError::Agent(
+            crate::services::agent_node::AgentNodeError::InitialPromptUnsupported,
+        ) => Response::json_error(
+            "400 Bad Request",
+            crate::services::agent_node::INITIAL_PROMPT_UNSUPPORTED,
+        ),
+        CreateNodeError::Agent(error) => Response::json_error(
+            "500 Internal Server Error",
+            &format!("Failed to create node: {error}"),
+        ),
+    }
+}
+
 pub async fn create(req: &ParsedRequest) -> Response {
     let parsed: CreateNodeRequest = match serde_json::from_slice(&req.body) {
         Ok(r) => r,
@@ -62,84 +115,44 @@ pub async fn create(req: &ParsedRequest) -> Response {
     let mesh_id = parsed.mesh_id;
     let intent = match parsed.prompt {
         Some(text) if text.trim().is_empty() || text.len() > 16_000 => {
-            return Response::json_error("400 Bad Request", "Idea must contain 1 to 16000 bytes of text");
+            return Response::json_error(
+                "400 Bad Request",
+                "Idea must contain 1 to 16000 bytes of text",
+            );
         }
         Some(text) => crate::agent::spawn::SpawnIntent::Prompt { text },
         None => crate::agent::spawn::SpawnIntent::Fresh,
     };
-    let provider = if parsed.provider.as_deref().is_none_or(|p| p.trim().is_empty()) {
+    let provider = if parsed
+        .provider
+        .as_deref()
+        .is_none_or(|p| p.trim().is_empty())
+    {
         parsed.configuration_id.clone().unwrap_or_default()
-    } else { parsed.provider.unwrap() };
+    } else {
+        parsed.provider.unwrap()
+    };
     let configuration_id = parsed.configuration_id.clone();
-    let has_prompt = matches!(intent, crate::agent::spawn::SpawnIntent::Prompt { .. });
+    let prompt_for_create = match &intent {
+        crate::agent::spawn::SpawnIntent::Prompt { text } => Some(text.clone()),
+        _ => None,
+    };
     let node = match crate::commands::run_blocking("http_create_node", move || {
-        let result: Result<_, CreateNodeError> = (|| {
-            let configuration = crate::preferences::spawn_configurations::resolve_saved(
-                &provider,
-                configuration_id.as_deref().filter(|s| !s.trim().is_empty()),
-            )
-            .map_err(CreateNodeError::Configuration)?;
-        if has_prompt {
-            let selection = configuration.as_ref().map(|c| c.id.as_str()).unwrap_or(&provider);
-            let supports_prompt = crate::agent::provider_menu::available_providers().iter().any(|p| {
-                p.id == selection && p.capabilities.supports_prefill && p.unavailable_reason.is_none()
-            });
-            if !supports_prompt {
-                return Err(CreateNodeError::Agent(crate::services::agent_node::AgentNodeError::InvalidConfiguration(
-                    "Choose an available agent that supports an initial prompt".into(),
-                )));
-            }
-        }
-        // Issue #1658 step 5 — the mesh-lookup + branch-resolution +
-        // node-create trio is now a single shared runner; the helper
-        // resolves `mesh.path` and the `"main"` branch internally, and
-        // surfaces the typed `AgentNodeError::MeshNotFound(mesh_id)`
-        // variant on an unknown mesh id (mapped to a 400 below). The
-        // post-spawn `run_blocking` reload survives untouched so the
-        // response body still carries the post-spawn row state.
-        //
-        // Review-round-2 fix: the prior string sentinel `"mesh not
-        // found"` was stringly-typed brittle control flow;
-        // `map_err` here tags the typed variant with its mesh id so
-        // the outer match arm compares the discriminator rather than
-        // the string body.
-        crate::services::agent_node::create_blocking_configured(mesh_id, Some(provider.as_str()), Some("main"),
-            None, // source_issue
-            None, // name_override — none on this route
-            None, // use_worktree_override — falls back to mesh default
-            false,
-            configuration.as_ref(),
-        )
-            .map_err(CreateNodeError::Agent)
-        })();
+        // The mesh lookup, branch, launch plan, and initial-prompt rule live
+        // in the shared runner. This closure only resolves a saved
+        // configuration and maps the typed error.
+        let result = create_node_blocking(
+            mesh_id,
+            &provider,
+            configuration_id.as_deref(),
+            prompt_for_create.as_deref(),
+        );
         Ok::<_, String>(result)
     })
     .await
     {
         Ok(Ok(n)) => n,
-        Ok(Err(CreateNodeError::Configuration(
-            crate::preferences::spawn_configurations::SpawnConfigurationError::Invalid(message),
-        ))) => {
-            return Response::json_error("400 Bad Request", &message);
-        }
-        Ok(Err(CreateNodeError::Configuration(error))) => {
-            return Response::json_error(
-                "500 Internal Server Error",
-                &format!("Failed to resolve spawn configuration: {error}"),
-            );
-        }
-        Ok(Err(CreateNodeError::Agent(crate::services::agent_node::AgentNodeError::MeshNotFound(_)))) => {
-            return Response::json_error("400 Bad Request", "Mesh not found");
-        }
-        Ok(Err(CreateNodeError::Agent(crate::services::agent_node::AgentNodeError::InvalidConfiguration(message)))) => {
-            return Response::json_error("400 Bad Request", &message);
-        }
-        Ok(Err(CreateNodeError::Agent(e))) => {
-            return Response::json_error(
-                "500 Internal Server Error",
-                &format!("Failed to create node: {}", e),
-            );
-        }
+        Ok(Err(error)) => return map_create_error(error),
         Err(e) => {
             return Response::json_error(
                 "500 Internal Server Error",
@@ -250,7 +263,9 @@ pub async fn post_input(req: &ParsedRequest) -> Response {
     // and the user would have to guess whether the agent died or the request
     // was malformed. Pin the failure shape.
     let node_exists = crate::commands::run_blocking("http_input_node_lookup", move || {
-        db::get_agent_node_by_id(node_id).map(|_| ()).map_err(|e| e.to_string())
+        db::get_agent_node_by_id(node_id)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     })
     .await
     .is_ok();
@@ -349,8 +364,13 @@ mod tests {
     use super::*;
     use crate::http::router::ParsedRequest;
 
-    fn outcome(disposition: crate::agent::process::InputDisposition) -> crate::agent::process::InputOutcome {
-        crate::agent::process::InputOutcome { disposition, activity: Default::default() }
+    fn outcome(
+        disposition: crate::agent::process::InputDisposition,
+    ) -> crate::agent::process::InputOutcome {
+        crate::agent::process::InputOutcome {
+            disposition,
+            activity: Default::default(),
+        }
     }
 
     /// The encoded wire bytes, so a header assertion proves the value actually
@@ -367,7 +387,10 @@ mod tests {
         assert_eq!(resp.status_code(), 200);
         let text = String::from_utf8_lossy(resp.body());
         assert!(text.contains("\"disposition\":\"accepted\""), "got: {text}");
-        assert!(!wire(&resp).contains("Retry-After"), "a delivered tap needs no retry hint");
+        assert!(
+            !wire(&resp).contains("Retry-After"),
+            "a delivered tap needs no retry hint"
+        );
     }
 
     /// Issue #1530's mobile half: a full PTY input queue must not answer
@@ -381,8 +404,14 @@ mod tests {
         )));
         assert_eq!(resp.status_code(), 503, "a refused write must not be a 200");
         let text = String::from_utf8_lossy(resp.body());
-        assert!(text.contains("input_backpressured"), "the client needs to know why: {text}");
-        assert!(!text.contains("\"ok\":true"), "a refusal must never claim delivery: {text}");
+        assert!(
+            text.contains("input_backpressured"),
+            "the client needs to know why: {text}"
+        );
+        assert!(
+            !text.contains("\"ok\":true"),
+            "a refusal must never claim delivery: {text}"
+        );
         assert!(
             wire(&resp).contains("Retry-After: 1"),
             "the bytes were never queued, so repeating the same seq is safe: {}",
@@ -394,7 +423,8 @@ mod tests {
     /// must not invite a retry the agent cannot honour.
     #[test]
     fn a_closed_input_write_is_a_503_without_a_retry_hint() {
-        let resp = input_write_response(Ok(outcome(crate::agent::process::InputDisposition::Closed)));
+        let resp =
+            input_write_response(Ok(outcome(crate::agent::process::InputDisposition::Closed)));
         assert_eq!(resp.status_code(), 503);
         let text = String::from_utf8_lossy(resp.body());
         assert!(text.contains("input_closed"), "got: {text}");
@@ -421,18 +451,59 @@ mod tests {
         let storage = crate::preferences::spawn_configurations::SpawnConfigurationError::Storage(
             "failed to read preferences".into(),
         );
-        assert!(matches!(invalid, crate::preferences::spawn_configurations::SpawnConfigurationError::Invalid(_)));
-        assert!(matches!(storage, crate::preferences::spawn_configurations::SpawnConfigurationError::Storage(_)));
+        assert!(matches!(
+            invalid,
+            crate::preferences::spawn_configurations::SpawnConfigurationError::Invalid(_)
+        ));
+        assert!(matches!(
+            storage,
+            crate::preferences::spawn_configurations::SpawnConfigurationError::Storage(_)
+        ));
     }
 
     fn req(body: &[u8], node_id: i64) -> ParsedRequest {
         ParsedRequest::test_post("/api/nodes/0/input", body).with_ids(Some(node_id), None)
     }
 
+    #[test]
+    fn http_and_desktop_reject_a_prompt_the_harness_cannot_take() {
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = crate::db::create_mesh(
+            "prompt-gate",
+            &format!("/tmp/buildmesh_prompt_gate_{}", std::process::id()),
+        )
+        .unwrap()
+        .id;
+        let http = super::create_node_blocking(mesh_id, "terminal", None, Some("ship the prompt"))
+            .expect_err("HTTP create must reject Terminal");
+        let response = super::map_create_error(http);
+        assert_eq!(response.status_code(), 400);
+        let body = String::from_utf8(response.body().to_vec()).unwrap();
+        assert!(body.contains(crate::services::agent_node::INITIAL_PROMPT_UNSUPPORTED));
+
+        let desktop = crate::commands::agent_node::create_agent_node_blocking(
+            mesh_id,
+            "main",
+            Some("terminal"),
+            None,
+            None,
+            Some("ship the prompt"),
+        )
+        .expect_err("desktop create must reject Terminal");
+        assert_eq!(
+            desktop,
+            crate::services::agent_node::INITIAL_PROMPT_UNSUPPORTED
+        );
+        assert!(crate::db::list_agent_nodes_by_mesh(mesh_id)
+            .unwrap()
+            .is_empty());
+    }
+
     #[tokio::test]
     async fn create_rejects_blank_and_oversized_ideas_before_creating_nodes() {
         for prompt in [" \n ".to_string(), "a".repeat(16_001)] {
-            let body = serde_json::to_vec(&serde_json::json!({"mesh_id": 0, "prompt": prompt})).unwrap();
+            let body =
+                serde_json::to_vec(&serde_json::json!({"mesh_id": 0, "prompt": prompt})).unwrap();
             let response = create(&ParsedRequest::test_post("/api/nodes/create", &body)).await;
             assert_eq!(response.status_code(), 400);
             assert!(String::from_utf8_lossy(response.body()).contains("Idea must contain"));

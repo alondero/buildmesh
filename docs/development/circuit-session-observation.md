@@ -183,6 +183,17 @@ rollout pull, Command Code and Muse declare a passive watcher, and every other
 harness (including MiniMax Code, OpenCode, Grok and Cline) is unwired, so its
 missing evidence stays explicit and Circuit execution stays Unverified.
 
+Unwired is about lifecycle and ownership authority, not about whether a finished
+report can be read. Grok's `chat_history.jsonl` records carry no timestamp, so
+the report reader takes both the publication time and the native turn boundary
+from the sibling `events.jsonl`: the latest lifecycle event must be a
+`turn_ended` with outcome `completed`. A `turn_started` after it (Grok starts a
+new turn about 100 ms later when a Stop hook blocks) or an unterminated final
+line means the turn is not finished, and a change to `events.jsonl` after the
+read invalidates the report before it is committed. Without that file the
+report is unavailable (`NoNativeCompletion`) rather than read with a guessed
+time.
+
 The strategy is chosen from the node's own harness. A node with a launch
 snapshot is read as the executor frozen in that snapshot, so remapping a profile
 afterwards cannot make the pull read another harness's transcript; otherwise a

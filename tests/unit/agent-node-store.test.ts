@@ -903,6 +903,9 @@ describe('useAgentNodeStore', () => {
         7, 'm', '/p', 'anthropic', undefined, '  fix the flaky test  ',
       );
 
+      expect(mockInvoke).toHaveBeenCalledWith('create_agent_node', expect.objectContaining({
+        initialPrompt: 'fix the flaky test',
+      }));
       expect(mockInvoke).toHaveBeenCalledWith('spawn_agent', {
         request: expect.objectContaining({
           sessionId: 42,
@@ -925,6 +928,8 @@ describe('useAgentNodeStore', () => {
         7, 'm', '/p', 'anthropic', undefined, '   ',
       );
 
+      const createCall = mockInvoke.mock.calls.find(([cmd]) => cmd === 'create_agent_node');
+      expect(createCall?.[1]).not.toHaveProperty('initialPrompt');
       expect(mockInvoke).not.toHaveBeenCalledWith('spawn_agent', expect.anything());
     });
   });

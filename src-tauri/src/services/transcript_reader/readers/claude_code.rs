@@ -22,9 +22,7 @@ use std::path::{Path, PathBuf};
 
 use crate::env;
 use crate::services::transcript_paths::{concat_text_blocks, encode_path, is_synthetic_message};
-use crate::services::transcript_reader::adapter::{
-    LocateCtx, TranscriptAdapter,
-};
+use crate::services::transcript_reader::adapter::{LocateCtx, TranscriptAdapter};
 use crate::services::transcript_reader::types::{
     cap_tool_calls, merge_into_with_text_limit, push_bounded, truncate, truncate_json_strings,
     Parsed, ToolCall, Turn, MAX_TOOL_STRING,
@@ -73,7 +71,6 @@ impl TranscriptAdapter for ClaudeCodeAdapter {
             .trim()
             .is_empty()
     }
-
 }
 
 /// Build the expected on-disk path of a Claude Code session transcript:
@@ -251,7 +248,7 @@ pub(crate) fn parse_turns_with_text_limit(
 //             that re-invokes the agent) carrying
 //             `<task-id>xyz</task-id>`.
 //
-// Pending = launched minus notified.
+// Pending = launched minus terminal notifications and successful stops.
 
 /// Matches the task id in either launch phrasing:
 /// `Command running in background with ID: xyz.` and
@@ -272,8 +269,8 @@ static NOTIFIED_ID: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy:
 /// changes.
 const LAUNCH_MARKER: &str = "You will be notified when it completes";
 
-/// Count background tasks launched but not yet notified in a Claude Code
-/// transcript. `None` = the file could not be read — the caller must
+/// Count Claude Code background tasks without a terminal notification or successful
+/// TaskStop result. `None` = the file could not be read — the caller must
 /// treat that as "unknown" and fall back to its pre-#878 behaviour,
 /// never as "no pending work".
 pub fn count_pending_background_tasks(path: &Path) -> Option<usize> {
@@ -283,11 +280,12 @@ pub fn count_pending_background_tasks(path: &Path) -> Option<usize> {
 }
 
 /// Pure scan over JSONL lines: launched-task ids with no matching
-/// `<task-id>` notification, in launch order. Split from the I/O
-/// wrapper so tests drive it with inline fixtures.
+/// terminal notification or successful TaskStop result, in launch order. Split from
+/// the I/O wrapper so tests drive it with inline fixtures.
 pub(crate) fn pending_background_task_ids(lines: impl Iterator<Item = String>) -> Vec<String> {
     let mut launched: Vec<String> = Vec::new();
-    let mut notified: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut terminated: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut stop_calls = std::collections::HashMap::new();
     for line in lines {
         // The notification marker is matched on the raw line: it
         // appears in `queue-operation` lines and in the queued_command
@@ -296,7 +294,7 @@ pub(crate) fn pending_background_task_ids(lines: impl Iterator<Item = String>) -
         // need.
         for cap in NOTIFIED_ID.captures_iter(&line) {
             if &cap[2] != "running" {
-                notified.insert(cap[1].to_string());
+                terminated.insert(cap[1].to_string());
             }
         }
         // Launches only count inside a tool_result block — free text
@@ -311,6 +309,20 @@ pub(crate) fn pending_background_task_ids(lines: impl Iterator<Item = String>) -
             continue;
         };
         for block in blocks {
+            if val.get("type").and_then(|t| t.as_str()) == Some("assistant")
+                && block.get("type").and_then(|t| t.as_str()) == Some("tool_use")
+                && block.get("name").and_then(|t| t.as_str()) == Some("TaskStop")
+            {
+                if let (Some(call_id), Some(task_id)) = (
+                    block.get("id").and_then(|v| v.as_str()),
+                    block
+                        .get("input")
+                        .and_then(|v| v.get("task_id"))
+                        .and_then(|v| v.as_str()),
+                ) {
+                    stop_calls.insert(call_id.to_owned(), task_id.to_owned());
+                }
+            }
             if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
                 continue;
             }
@@ -318,6 +330,29 @@ pub(crate) fn pending_background_task_ids(lines: impl Iterator<Item = String>) -
                 Some(serde_json::Value::String(s)) => s.clone(),
                 other => concat_text_blocks(other),
             };
+            // TaskStop can finish without a queued task notification. Require its actual
+            // successful result, correlated to the tool call, before ending work.
+            if val.get("type").and_then(|t| t.as_str()) == Some("user")
+                && block.get("is_error").and_then(|v| v.as_bool()) != Some(true)
+            {
+                if let Some(task_id) = block
+                    .get("tool_use_id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|id| stop_calls.remove(id))
+                {
+                    if let Ok(result) = serde_json::from_str::<serde_json::Value>(&text) {
+                        let prefix = format!("Successfully stopped task: {task_id} (");
+                        if result.get("task_id").and_then(|v| v.as_str()) == Some(task_id.as_str())
+                            && result
+                                .get("message")
+                                .and_then(|v| v.as_str())
+                                .is_some_and(|message| message.starts_with(&prefix))
+                        {
+                            terminated.insert(task_id);
+                        }
+                    }
+                }
+            }
             if !text.contains(LAUNCH_MARKER) {
                 continue;
             }
@@ -326,7 +361,7 @@ pub(crate) fn pending_background_task_ids(lines: impl Iterator<Item = String>) -
             }
         }
     }
-    launched.retain(|id| !notified.contains(id));
+    launched.retain(|id| !terminated.contains(id));
     launched
 }
 
@@ -857,6 +892,55 @@ mod contract_tests {
             count_pending_background_tasks(Path::new("X:\\nope\\missing.jsonl")),
             None
         );
+    }
+
+    #[test]
+    fn stopped_task_requires_a_successful_matching_task_stop_result() {
+        let records: Vec<serde_json::Value> =
+            std::fs::read_to_string(fixture("claude_code", "stopped_background_task.jsonl"))
+                .unwrap()
+                .lines()
+                .take(3)
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+        for case in [
+            "success",
+            "failed",
+            "wrong_call",
+            "wrong_task",
+            "different_tool",
+            "missing_call",
+            "quoted_success",
+        ] {
+            let mut replay = records.clone();
+            match case {
+                "failed" => replay[2]["message"]["content"][0]["is_error"] = true.into(),
+                "wrong_call" => {
+                    replay[2]["message"]["content"][0]["tool_use_id"] = "unrelated".into()
+                }
+                "wrong_task" => {
+                    let result = serde_json::json!({"task_id":"other", "message":"Successfully stopped task: other (vite)"});
+                    replay[2]["message"]["content"][0]["content"] = result.to_string().into();
+                }
+                "different_tool" => replay[1]["message"]["content"][0]["name"] = "Read".into(),
+                "missing_call" => {
+                    replay.remove(1);
+                }
+                "quoted_success" => {
+                    replay[2]["message"]["content"][0]["content"] =
+                        "The tool says: Successfully stopped task: bziuux8nz (vite)".into()
+                }
+                _ => {}
+            }
+            let pending =
+                pending_background_task_ids(replay.iter().map(|record| record.to_string()));
+            let expected = if case == "success" {
+                vec![]
+            } else {
+                vec!["bziuux8nz".to_owned()]
+            };
+            assert_eq!(pending, expected, "{case}");
+        }
     }
 
     #[test]
