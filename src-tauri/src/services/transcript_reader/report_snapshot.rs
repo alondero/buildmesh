@@ -40,11 +40,28 @@ pub(crate) mod result_read_test_support {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+struct Companion {
+    path: PathBuf,
+    length: u64,
+    modified: std::time::SystemTime,
+}
+
+impl Companion {
+    fn is_current(&self) -> bool {
+        fs::metadata(&self.path).is_ok_and(|metadata| {
+            metadata.len() == self.length && metadata.modified().ok() == Some(self.modified)
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 enum ReportSource {
     File {
         path: PathBuf,
         length: u64,
         modified: std::time::SystemTime,
+        /// A sibling file the report's clock or turn boundary was read from.
+        companion: Option<Companion>,
     },
     OpenCode {
         path: PathBuf,
@@ -127,9 +144,12 @@ impl ReportSnapshot {
                 path,
                 length,
                 modified,
-            } => fs::metadata(path).is_ok_and(|metadata| {
-                metadata.len() == *length && metadata.modified().ok() == Some(*modified)
-            }),
+                companion,
+            } => {
+                fs::metadata(path).is_ok_and(|metadata| {
+                    metadata.len() == *length && metadata.modified().ok() == Some(*modified)
+                }) && companion.as_ref().is_none_or(Companion::is_current)
+            }
             ReportSource::OpenCode {
                 path,
                 session_id,
@@ -335,7 +355,24 @@ fn read_file(path: &Path, format: TranscriptFormat) -> Result<ReportSnapshot, Re
     if last.role != "assistant" || !last.tool_calls.is_empty() {
         return Err(E::WorkInProgress);
     }
+    let mut companion = None;
     let turn_finished = match format {
+        TranscriptFormat::Grok => {
+            // Grok's transcript records carry no clock: the sibling events file
+            // supplies both the publication time and the native turn boundary.
+            use super::readers::grok::{completed_turn, TurnEndUnavailable};
+            let turn = completed_turn(path).map_err(|reason| match reason {
+                TurnEndUnavailable::Partial => E::PartialPublication,
+                TurnEndUnavailable::Unfinished => E::NoNativeCompletion,
+            })?;
+            published_at_ms = Some(turn.completed_at_ms);
+            companion = Some(Companion {
+                path: turn.events,
+                length: turn.length,
+                modified: turn.modified,
+            });
+            true
+        }
         TranscriptFormat::Codex => {
             let completion = adapter::dispatch("codex")
                 .and_then(|adapter| adapter.completed_turn(&lines.join("\n")))
@@ -367,6 +404,7 @@ fn read_file(path: &Path, format: TranscriptFormat) -> Result<ReportSnapshot, Re
             path: path.into(),
             length: metadata.len(),
             modified: metadata.modified().map_err(|_| E::Unreadable)?,
+            companion,
         },
     };
     if snapshot.is_current() {
@@ -2047,11 +2085,13 @@ mod tests {
             },
             FileReportCase {
                 harness: "grok", format: TranscriptFormat::Grok,
-                shape: "grok ~/.grok/sessions/<urlencoded-cwd>/<session>/chat_history.jsonl",
-                valid: vec![r#"{"role":"assistant","timestamp":"2026-09-25T12:00:00Z","content":"Done."}"#.into()],
-                text: "Done.", published_at_ms: 1_790_337_600_000, turn_finished: false,
-                shape_changed: r#"{"role":"assistant"}"#,
-                unfinished: r#"{"role":"user","timestamp":"2026-09-25T12:00:00Z","content":"keep going"}"#,
+                // Real records have no timestamp; the clock and turn boundary
+                // come from the sibling events.jsonl (see `write_companions`).
+                shape: "grok ~/.grok/sessions/<urlencoded-cwd>/<session>/chat_history.jsonl + events.jsonl",
+                valid: vec![r#"{"type":"assistant","content":"Done.","model_id":"grok-4.6-build"}"#.into()],
+                text: "Done.", published_at_ms: 1_790_337_601_000, turn_finished: true,
+                shape_changed: r#"{"type":"assistant"}"#,
+                unfinished: r#"{"type":"user","content":"keep going"}"#,
             },
             FileReportCase {
                 harness: "mcode", format: TranscriptFormat::Mcode,
@@ -2073,6 +2113,20 @@ mod tests {
                 unfinished: r#"{"payload_type":"runtime.session","recorded_at":1790337602000000,"payload":{"kind":"run","run_id":"run","event":{"kind":"user_prompt_display","prompt":"keep going"}}}"#,
             },
         ]
+    }
+
+    /// Files a harness keeps beside its transcript that the report read needs.
+    fn write_companions(harness: &str, dir: &std::path::Path) {
+        if harness == "grok" {
+            fs::write(
+                dir.join("events.jsonl"),
+                concat!(
+                    "{\"ts\":\"2026-09-25T12:00:00Z\",\"type\":\"turn_started\",\"turn_number\":0}\n",
+                    "{\"ts\":\"2026-09-25T12:00:01Z\",\"type\":\"turn_ended\",\"outcome\":\"completed\"}\n",
+                ),
+            )
+            .unwrap();
+        }
     }
 
     fn valid_lines(lines: &[String]) -> String {
@@ -2300,6 +2354,7 @@ mod tests {
         let mut snapshots = Vec::new();
         for case in file_report_cases() {
             let dir = tempfile::tempdir().unwrap();
+            write_companions(case.harness, dir.path());
             let path = dir.path().join("session.jsonl");
             fs::write(&path, valid_lines(&case.valid)).unwrap();
             let snapshot = read_file(&path, case.format).unwrap_or_else(|error| {
@@ -2329,6 +2384,7 @@ mod tests {
     fn every_wired_report_adapter_reads_its_own_valid_shape_into_the_envelope() {
         for case in file_report_cases() {
             let dir = tempfile::tempdir().unwrap();
+            write_companions(case.harness, dir.path());
             let path = dir.path().join("session.jsonl");
             fs::write(&path, valid_lines(&case.valid)).unwrap();
             let report = read_file(&path, case.format).unwrap_or_else(|error| {
@@ -2386,6 +2442,7 @@ mod tests {
         );
         for case in file_report_cases() {
             let dir = tempfile::tempdir().unwrap();
+            write_companions(case.harness, dir.path());
             let path = dir.path().join("session.jsonl");
             let lines = valid_lines(&case.valid).replace(
                 &serde_json::to_string(case.text).unwrap(),
@@ -2430,6 +2487,7 @@ mod tests {
     fn every_wired_report_adapter_rejects_its_own_malformed_partial_and_unavailable_shapes() {
         for case in file_report_cases() {
             let dir = tempfile::tempdir().unwrap();
+            write_companions(case.harness, dir.path());
             let path = dir.path().join("session.jsonl");
             let valid = valid_lines(&case.valid);
             fs::write(&path, format!("{valid}not json\n")).unwrap();
@@ -2474,6 +2532,168 @@ mod tests {
                 case.harness
             );
         }
+    }
+
+    /// A copy of a sanitized real Grok session: `chat_history.jsonl` records
+    /// carry no timestamp, so the sibling `events.jsonl` is the only clock and
+    /// the only native turn boundary (run 453 stalled on exactly this).
+    fn grok_session() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["chat_history.jsonl", "events.jsonl"] {
+            fs::copy(
+                crate::services::transcript_reader::test_support::fixture(
+                    "grok",
+                    &format!("session/{name}"),
+                ),
+                dir.path().join(name),
+            )
+            .unwrap();
+        }
+        let chat = dir.path().join("chat_history.jsonl");
+        let events = dir.path().join("events.jsonl");
+        (dir, chat, events)
+    }
+
+    fn append(path: &Path, text: &str) {
+        use std::io::Write;
+        fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .write_all(text.as_bytes())
+            .unwrap();
+    }
+
+    #[test]
+    fn grok_real_session_report_is_stamped_by_the_native_turn_end() {
+        let (_dir, chat, _) = grok_session();
+        let report = read_file(&chat, TranscriptFormat::Grok)
+            .expect("a finished real Grok session must be a readable report");
+        assert_eq!(
+            report.text,
+            "Fixed the redirect and opened PR #1.\nBUILDMESH_HANDOFF_V1: READY"
+        );
+        assert_eq!(
+            report.published_at_ms, 1_791_819_453_823,
+            "the clock is the turn_ended event, not a (missing) record timestamp"
+        );
+        assert!(
+            report.turn_finished,
+            "turn_ended(completed) is Grok's native completion boundary"
+        );
+        assert!(report.is_current());
+    }
+
+    #[test]
+    fn grok_report_waits_for_a_completed_native_turn_end() {
+        let turn_started =
+            r#"{"ts":"2026-10-12T15:38:00.000Z","type":"turn_started","turn_number":1}"#;
+        type Change<'a> = Box<dyn Fn(&Path) + 'a>;
+        let cases: [(&str, Change, ReportReadError); 5] = [
+            (
+                "a newer turn already started (Stop-hook forced continuation)",
+                Box::new(|events| append(events, &format!("{turn_started}\n"))),
+                ReportReadError::NoNativeCompletion,
+            ),
+            (
+                "the turn was cancelled, so its last message is not a report",
+                Box::new(|events| {
+                    let body = fs::read_to_string(events).unwrap();
+                    fs::write(
+                        events,
+                        body.replace(r#""outcome":"completed"}"#, r#""outcome":"cancelled"}"#),
+                    )
+                    .unwrap();
+                }),
+                ReportReadError::NoNativeCompletion,
+            ),
+            (
+                "no events file means no native boundary or clock",
+                Box::new(|events| fs::remove_file(events).unwrap()),
+                ReportReadError::NoNativeCompletion,
+            ),
+            (
+                "an unterminated event may be a turn start still being written",
+                Box::new(|events| {
+                    append(
+                        events,
+                        r#"{"ts":"2026-10-12T15:38:00.000Z","type":"turn_st"#,
+                    )
+                }),
+                ReportReadError::PartialPublication,
+            ),
+            (
+                "a long turn buries its start beyond the read window",
+                Box::new(|events| {
+                    append(events, &format!("{turn_started}\n"));
+                    let phase = "{\"ts\":\"2026-10-12T15:38:01.000Z\",\"type\":\"phase_changed\",\"phase\":\"streaming_text\"}\n";
+                    // Well over the 256 KiB tail window.
+                    append(events, &phase.repeat(5_000));
+                }),
+                ReportReadError::NoNativeCompletion,
+            ),
+        ];
+        for (name, change, expected) in cases {
+            let (_dir, chat, events) = grok_session();
+            change(&events);
+            assert_eq!(
+                read_file(&chat, TranscriptFormat::Grok).unwrap_err(),
+                expected,
+                "{name}"
+            );
+        }
+        // Telemetry the circuit does not interpret must not hide a finished turn.
+        let (_dir, chat, events) = grok_session();
+        let body = fs::read_to_string(&events).unwrap();
+        fs::write(
+            &events,
+            format!("not json\n{body}{{\"type\":\"mcp_server_connected\"}}\n"),
+        )
+        .unwrap();
+        assert!(read_file(&chat, TranscriptFormat::Grok).is_ok());
+    }
+
+    #[test]
+    fn grok_report_is_invalidated_when_the_forced_continuation_starts_after_the_read() {
+        let (_dir, chat, events) = grok_session();
+        let snapshot = read_file(&chat, TranscriptFormat::Grok).unwrap();
+        assert!(snapshot.is_current());
+        // Run 453 showed turn_ended followed 115 ms later by turn_started when
+        // a Stop hook blocked: the commit guard must see the events file move,
+        // although chat_history.jsonl has not changed yet.
+        append(
+            &events,
+            "{\"ts\":\"2026-10-12T15:37:33.938Z\",\"type\":\"turn_started\",\"turn_number\":1}\n",
+        );
+        assert!(!snapshot.is_current());
+    }
+
+    #[test]
+    fn grok_finished_real_session_is_admitted_by_circuit_readiness() {
+        use crate::models::{AgentNode, SessionStatus};
+        use crate::services::circuit_worker::readiness;
+        let (_dir, chat, _) = grok_session();
+        let snapshot = read_file(&chat, TranscriptFormat::Grok).unwrap();
+        let (run, _) = classified_run(snapshot.clone());
+        let agent = AgentNode {
+            id: 900,
+            provider: "grok".into(),
+            cli_session_id: Some("session".into()),
+            status: SessionStatus::Running,
+            ..Default::default()
+        };
+        let candidate = readiness::prepare(
+            &run,
+            "await_source",
+            &agent,
+            Some("100:projection"),
+            Ok("1:0".into()),
+            Ok(snapshot.clone()),
+        )
+        .unwrap()
+        .expect("a natively finished Grok report must not wait for hooks or a yielded status");
+        assert_eq!(candidate.output, snapshot.text);
+        assert_eq!(candidate.status, SessionStatus::Ready);
     }
 
     #[test]
