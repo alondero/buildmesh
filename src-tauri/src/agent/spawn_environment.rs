@@ -1117,6 +1117,7 @@ mod tests {
     /// The guard's other half: an oversized launch fails here, naming the
     /// budget it crossed, instead of handing a shell a line it will refuse and
     /// leaving the node to report a cryptic message.
+    #[cfg(windows)]
     #[test]
     fn a_launch_over_the_cmd_exe_budget_is_refused_with_that_budget() {
         let mut base_args = vec!["--sandbox".into(), "danger-full-access".into()];
@@ -1168,6 +1169,7 @@ mod tests {
         assert!(error.contains("32767"), "{error}");
     }
 
+    #[cfg(windows)]
     #[test]
     fn cmd_budget_accounts_for_windows_quote_and_backslash_escaping() {
         let recipe = SpawnRecipe {
