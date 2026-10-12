@@ -270,15 +270,18 @@ pub(crate) fn stuck_issue_review() -> CircuitGraph {
 /// [`stuck_issue_review`] after the repair and the upgrades it unblocks.
 pub(crate) fn repaired_stuck_issue_review() -> CircuitGraph {
     let mut graph = stuck_issue_review();
-    assert!(graph.repair_issue_review_feedback_route());
-    assert!(graph.upgrade_issue_review_publication_flow());
+    assert!(super::stored_graph::upgrade(
+        &mut graph,
+        super::stored_graph::UpgradeTarget::Blueprint
+    ));
     graph
 }
 
 /// The title-bar review shape shipped before the publication flow: a fresh
 /// reviewer every round, closed after feedback, and no publish or merge.
 pub(crate) fn pre_publication_local_review(rounds: i32) -> CircuitGraph {
-    use super::model_node_review::{LEGACY_LOCAL_APPROVED_MESSAGE, LOCAL_APPROVED_MESSAGE};
+    use super::model_node_review::LOCAL_APPROVED_MESSAGE;
+    use super::stored_graph::LEGACY_LOCAL_APPROVED_MESSAGE;
     let mut graph = CircuitGraph::agent_review(None, None, rounds);
     let added = [
         "publish",

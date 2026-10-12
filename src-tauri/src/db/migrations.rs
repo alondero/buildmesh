@@ -1775,7 +1775,7 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                     continue;
                 };
                 let graph_json = graph_json.expect("legacy circuit candidate has graph_json");
-                let _is_preset = is_preset.expect("legacy circuit candidate has is_preset") != 0;
+                let is_preset = is_preset.expect("legacy circuit candidate has is_preset") != 0;
                 let mut graph = match crate::circuit::model::CircuitGraph::from_json(&graph_json) {
                     Ok(graph) => graph,
                     Err(error) => {
@@ -1788,23 +1788,7 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                         continue;
                     }
                 };
-                // Route by blueprint, not by preset flag: independent copies
-                // of the review blueprint are stored non-preset with no
-                // blueprint marker, and only the local-review upgrade can
-                // rewrite their stock merge text. Both upgrades replace
-                // exact stock texts only, so custom prompts are preserved
-                // on every path.
-                // Route by blueprint, not by preset flag: independent copies
-                // of the review blueprint are stored non-preset with no
-                // blueprint marker, and only the local-review upgrade can
-                // rewrite their stock merge text. Both upgrades replace
-                // exact stock texts only, so custom prompts are preserved
-                // on every path.
-                let changed = if graph.is_issue_driven_autopilot_review() {
-                    graph.upgrade_legacy_issue_review_contract()
-                } else {
-                    graph.upgrade_legacy_agent_review_prompts()
-                };
+                let changed = upgrade_stored_circuit_graph(conn, id, &mut graph, is_preset, false)?;
                 if changed {
                     let upgraded_json = graph.to_json().map_err(|error| {
                         rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
@@ -1849,13 +1833,18 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                 return Ok(());
             }
 
-            let circuits: Vec<(i64, String)> = {
-                let mut stmt =
-                    conn.prepare("SELECT id, graph_json FROM autopilot_circuits ORDER BY id")?;
-                let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            let circuits: Vec<(i64, String, bool, bool)> = {
+                let mut stmt = conn.prepare(
+                    "SELECT c.id, c.graph_json, c.is_preset != 0,
+                            EXISTS(SELECT 1 FROM autopilot_circuit_runs r WHERE r.circuit_id = c.id AND r.state IN ('pending', 'running', 'paused'))
+                     FROM autopilot_circuits c ORDER BY c.id",
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?;
                 rows.collect::<SqlResult<Vec<_>>>()?
             };
-            for (id, graph_json) in circuits {
+            for (id, graph_json, is_preset, active) in circuits {
                 let mut graph = match crate::circuit::model::CircuitGraph::from_json(&graph_json) {
                     Ok(graph) => graph,
                     Err(error) => {
@@ -1868,10 +1857,8 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                     }
                 };
                 let legacy_shape = graph.has_legacy_issue_review_shape();
-                let changed = match step {
-                    AlwaysStep::UpgradeIssueReviewVerdicts => graph.upgrade_issue_review_verdict(),
-                    _ => graph.upgrade_legacy_issue_review_first_turns(),
-                };
+                let changed =
+                    upgrade_stored_circuit_graph(conn, id, &mut graph, is_preset, active)?;
                 let retained_legacy_prompt = graph.node("implementation_prompt").is_some()
                     || graph.node("review_prompt").is_some();
                 if legacy_shape && retained_legacy_prompt {
@@ -1913,14 +1900,18 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
             if already_done {
                 return Ok(());
             }
-            let circuits: Vec<(i64, String, bool)> = {
+            let circuits: Vec<(i64, String, bool, bool)> = {
                 let mut stmt = conn.prepare(
-                    "SELECT id, graph_json, is_preset != 0 FROM autopilot_circuits ORDER BY id",
+                    "SELECT c.id, c.graph_json, c.is_preset != 0,
+                            EXISTS(SELECT 1 FROM autopilot_circuit_runs r WHERE r.circuit_id = c.id AND r.state IN ('pending', 'running', 'paused'))
+                     FROM autopilot_circuits c ORDER BY c.id",
                 )?;
-                let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?;
                 rows.collect::<SqlResult<Vec<_>>>()?
             };
-            for (id, graph_json, is_preset) in circuits {
+            for (id, graph_json, is_preset, active) in circuits {
                 let mut graph = match crate::circuit::model::CircuitGraph::from_json(&graph_json) {
                     Ok(graph) => graph,
                     Err(error) => {
@@ -1928,13 +1919,8 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                         continue;
                     }
                 };
-                // Review-derived copies are user-owned; only the read-only
-                // preset and issue-review blueprints are server-owned.
-                let changed = if is_preset {
-                    graph.upgrade_local_review_publication_flow()
-                } else {
-                    graph.upgrade_issue_review_publication_flow()
-                };
+                let changed =
+                    upgrade_stored_circuit_graph(conn, id, &mut graph, is_preset, active)?;
                 if !changed {
                     continue;
                 }
@@ -1944,14 +1930,6 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                         error,
                     )))
                 })?;
-                // Runs without a snapshot read the circuit row; pin them so
-                // active work and failed-run recovery keep their own graph.
-                conn.execute(
-                    "INSERT OR IGNORE INTO circuit_run_snapshots (run_id, graph_json, behavior_revision)
-                     SELECT r.id, c.graph_json, 1 FROM autopilot_circuit_runs r
-                     JOIN autopilot_circuits c ON c.id = r.circuit_id WHERE c.id = ?1",
-                    params![id],
-                )?;
                 conn.execute(
                     "UPDATE autopilot_circuits SET graph_json = ?2, updated_at = datetime('now') WHERE id = ?1",
                     params![id, upgraded_json],
@@ -1977,14 +1955,18 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
             if already_done {
                 return Ok(());
             }
-            let circuits: Vec<(i64, String, bool)> = {
+            let circuits: Vec<(i64, String, bool, bool)> = {
                 let mut stmt = conn.prepare(
-                    "SELECT id, graph_json, is_preset != 0 FROM autopilot_circuits ORDER BY id",
+                    "SELECT c.id, c.graph_json, c.is_preset != 0,
+                            EXISTS(SELECT 1 FROM autopilot_circuit_runs r WHERE r.circuit_id = c.id AND r.state IN ('pending', 'running', 'paused'))
+                     FROM autopilot_circuits c ORDER BY c.id",
                 )?;
-                let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?;
                 rows.collect::<SqlResult<Vec<_>>>()?
             };
-            for (id, graph_json, is_preset) in circuits {
+            for (id, graph_json, is_preset, active) in circuits {
                 let mut graph = match crate::circuit::model::CircuitGraph::from_json(&graph_json) {
                     Ok(graph) => graph,
                     Err(error) => {
@@ -1996,17 +1978,8 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                         continue;
                     }
                 };
-                // Review-derived copies are user-owned; only the read-only
-                // preset and issue-review blueprints are server-owned.
-                let changed = if is_preset {
-                    graph.upgrade_merge_prompt()
-                } else if graph.is_issue_driven_autopilot_review() {
-                    let prompt = graph.upgrade_merge_prompt();
-                    let verification = graph.upgrade_issue_review_merge_verification();
-                    prompt || verification
-                } else {
-                    false
-                };
+                let changed =
+                    upgrade_stored_circuit_graph(conn, id, &mut graph, is_preset, active)?;
                 if !changed {
                     continue;
                 }
@@ -2016,14 +1989,6 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                         error,
                     )))
                 })?;
-                // Runs without a snapshot read the circuit row; pin them so
-                // active work and failed-run recovery keep their own graph.
-                conn.execute(
-                    "INSERT OR IGNORE INTO circuit_run_snapshots (run_id, graph_json, behavior_revision)
-                     SELECT r.id, c.graph_json, 1 FROM autopilot_circuit_runs r
-                     JOIN autopilot_circuits c ON c.id = r.circuit_id WHERE c.id = ?1",
-                    params![id],
-                )?;
                 conn.execute(
                     "UPDATE autopilot_circuits SET graph_json = ?2, updated_at = datetime('now') WHERE id = ?1",
                     params![id, upgraded_json],
@@ -2055,13 +2020,18 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                     error,
                 )))
             };
-            let circuits: Vec<(i64, String)> = {
-                let mut stmt =
-                    conn.prepare("SELECT id, graph_json FROM autopilot_circuits ORDER BY id")?;
-                let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            let circuits: Vec<(i64, String, bool, bool)> = {
+                let mut stmt = conn.prepare(
+                    "SELECT c.id, c.graph_json, c.is_preset != 0,
+                            EXISTS(SELECT 1 FROM autopilot_circuit_runs r WHERE r.circuit_id = c.id AND r.state IN ('pending', 'running', 'paused'))
+                     FROM autopilot_circuits c ORDER BY c.id",
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?;
                 rows.collect::<SqlResult<Vec<_>>>()?
             };
-            for (id, graph_json) in circuits {
+            for (id, graph_json, is_preset, active) in circuits {
                 let mut graph = match crate::circuit::model::CircuitGraph::from_json(&graph_json) {
                     Ok(graph) => graph,
                     Err(error) => {
@@ -2073,23 +2043,10 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                         continue;
                     }
                 };
-                if !graph.repair_issue_review_feedback_route() {
+                if !upgrade_stored_circuit_graph(conn, id, &mut graph, is_preset, active)? {
                     continue;
                 }
-                // The stale route is what made the stock topology unrecognisable
-                // to these two upgrades, so they can apply now.
-                graph.upgrade_issue_review_publication_flow();
-                graph.upgrade_merge_prompt();
-                graph.upgrade_issue_review_merge_verification();
                 let repaired_json = graph.to_json().map_err(to_sql_error)?;
-                // Runs without a snapshot read the circuit row; pin them so
-                // active work and failed-run recovery keep their own graph.
-                conn.execute(
-                    "INSERT OR IGNORE INTO circuit_run_snapshots (run_id, graph_json, behavior_revision)
-                     SELECT r.id, c.graph_json, 1 FROM autopilot_circuit_runs r
-                     JOIN autopilot_circuits c ON c.id = r.circuit_id WHERE c.id = ?1",
-                    params![id],
-                )?;
                 conn.execute(
                     "UPDATE autopilot_circuits SET graph_json = ?2, updated_at = datetime('now') WHERE id = ?1",
                     params![id, repaired_json],
@@ -2119,7 +2076,10 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                         continue;
                     }
                 };
-                if !graph.repair_issue_review_feedback_route() {
+                if !crate::circuit::stored_graph::upgrade(
+                    &mut graph,
+                    crate::circuit::stored_graph::UpgradeTarget::RunSnapshot,
+                ) {
                     continue;
                 }
                 conn.execute(
@@ -2134,6 +2094,43 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
         }
     }
     Ok(())
+}
+
+/// Resolve storage ownership once; graph upgrade ordering stays in the domain.
+fn upgrade_stored_circuit_graph(
+    conn: &Connection,
+    id: i64,
+    graph: &mut crate::circuit::model::CircuitGraph,
+    is_preset: bool,
+    active: bool,
+) -> SqlResult<bool> {
+    use crate::circuit::stored_graph::{upgrade, UpgradeTarget};
+    let target = if active {
+        UpgradeTarget::ActiveBlueprint { is_preset }
+    } else if is_preset {
+        UpgradeTarget::Preset
+    } else {
+        UpgradeTarget::Blueprint
+    };
+    let mut run_graph = graph.clone();
+    let changed = upgrade(graph, target);
+    if changed && table_present(conn, "circuit_run_snapshots")? {
+        // Earlier migrations normalized unpinned runs before the publication
+        // upgrade captured them. Keep that boundary without adopting new topology.
+        upgrade(&mut run_graph, UpgradeTarget::UnpinnedRun { active });
+        let run_json = run_graph.to_json().map_err(|error| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                error,
+            )))
+        })?;
+        conn.execute(
+            "INSERT OR IGNORE INTO circuit_run_snapshots (run_id, graph_json, behavior_revision)
+             SELECT id, ?2, 1 FROM autopilot_circuit_runs WHERE circuit_id = ?1",
+            params![id, run_json],
+        )?;
+    }
+    Ok(changed)
 }
 
 fn column_present(conn: &Connection, table: &str, column: &str) -> SqlResult<bool> {

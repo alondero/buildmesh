@@ -213,6 +213,104 @@ mod tests {
     }
 
     #[test]
+    fn an_early_upgrade_flag_pins_normalized_runs_before_publication_changes() {
+        use crate::circuit::model::{
+            CircuitGraph, CircuitNodeKind, EdgeCondition, OpenPrPolicy, StepOutcome,
+        };
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id, name, path) VALUES (1, 'early upgrade', 'C:/early-upgrade')",
+            [],
+        )
+        .unwrap();
+        let mut legacy = crate::circuit::test_support::pre_publication_issue_review();
+        legacy
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "review_classifier")
+            .unwrap()
+            .kind = CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: Some("reviewer".into()),
+        };
+        legacy
+            .edges
+            .iter_mut()
+            .find(|edge| edge.from == "review_classifier" && edge.to == "follow_feedback")
+            .unwrap()
+            .condition = EdgeCondition::OnOutcome(StepOutcome::Completed);
+        assert!(legacy.retarget_edge("review_retry", "review_exhausted", "complete"));
+        if let CircuitNodeKind::GithubAction { open_pr_policy, .. } = &mut legacy
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "open_pr")
+            .unwrap()
+            .kind
+        {
+            *open_pr_policy = None;
+        }
+        let original = legacy.to_json().unwrap();
+        conn.execute(
+            "INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json) VALUES (1, 1, 'legacy', ?1)",
+            [&original],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, state) VALUES (10, 1, 1, 'running');
+             DELETE FROM app_settings WHERE key IN ('issue_review_first_turn_upgrade_v2', 'issue_review_verdict_upgrade_v1');",
+        )
+        .unwrap();
+
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        let saved: String = conn
+            .query_row(
+                "SELECT graph_json FROM autopilot_circuits WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let upgraded = CircuitGraph::from_json(&saved).unwrap();
+        upgraded.validate().unwrap();
+        assert!(
+            upgraded.has_review_topology_of(&CircuitGraph::issue_driven_autopilot_review(
+                "buildmesh:run"
+            ))
+        );
+        assert!(upgraded.node("merge_verify").is_some());
+        let snapshot: String = conn
+            .query_row(
+                "SELECT graph_json FROM circuit_run_snapshots WHERE run_id = 10",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let snapshot = CircuitGraph::from_json(&snapshot).unwrap();
+        assert!(matches!(
+            &snapshot.node("open_pr").unwrap().kind,
+            CircuitNodeKind::GithubAction {
+                open_pr_policy: Some(OpenPrPolicy::RequireExisting),
+                ..
+            }
+        ));
+        assert!(matches!(
+            &snapshot.node("review_classifier").unwrap().kind,
+            CircuitNodeKind::ReviewVerdict { .. }
+        ));
+        assert!(snapshot.node("close_reviewer").is_some());
+        assert!(snapshot.node("merge_verify").is_none());
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT graph_json FROM autopilot_circuits WHERE id = 1",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            saved
+        );
+    }
+
+    #[test]
     fn review_publication_flow_upgrade_pins_runs_and_rewrites_only_stock_server_owned_graphs() {
         use crate::circuit::model::{CircuitGraph, CircuitNode, CircuitNodeKind};
         use crate::circuit::test_support::{
