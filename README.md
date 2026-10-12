@@ -5,6 +5,16 @@
   <img alt="Buildmesh" src="./docs/brand/wordmark-on-light.png" width="420" />
 </picture>
 
+Run AI coding agents side by side in persistent terminals, with Git worktrees keeping their changes apart.
+
+Buildmesh is Windows early access: you bring the agent CLIs; updates are minisign-signed; installers are not OS-code-signed, so SmartScreen warnings are expected.
+
+| Agent grid | Spawn menu | Changed files |
+|---|---|---|
+| [![Coding sessions side by side in the Buildmesh grid](docs/launch/media/v1.4.0/grid.png)](docs/launch/media/v1.4.0/grid.png) | [![Choose an installed agent CLI from the Buildmesh spawn menu](docs/launch/media/v1.4.0/spawn-menu.png)](docs/launch/media/v1.4.0/spawn-menu.png) | [![Inspect changed files and a Git diff in Buildmesh](docs/launch/media/v1.4.0/changed-files.png)](docs/launch/media/v1.4.0/changed-files.png) |
+
+[Watch the 45-second walkthrough](docs/launch/media/v1.4.0/buildmesh-demo.mp4) · [Start here / how to report](https://github.com/alondero/buildmesh/discussions/2251)
+
 Buildmesh is a Tauri desktop app for orchestrating multiple AI coding agents — **Claude Code, Codex, Antigravity, OpenCode, Cursor, Grok Code, Kimi Code, MiniMax Code, DeepSeek Harness, Command Code, Freebuff, Cline, Meta Muse**, and a plain **Terminal** harness — across multiple meshes at the same time. It runs each agent as a durable process in a persistent xterm.js terminal, isolates work via Git worktrees, and exposes a tiled grid view so you can watch all of them at once.
 
 If you use Claude Code / Antigravity / OpenCode from your shell and find yourself `tmux`-ing, copy-pasting between tabs, or losing context when a long-running agent restarts — Buildmesh is what that should look like.
@@ -38,8 +48,8 @@ Each installer ships with its matching `.sig` (the **auto-updater** signature �
 
 | Platform | Status | How to get it |
 |---|---|---|
-| **Windows 10/11** (x64) | **Stable** — installer shipped on every tag. | Download from the Releases page above. |
-| **WSL2** (hybrid Windows/WSL mode) | **Stable** on Windows 10/11 hosts — Linux agents run inside WSL2, the Windows-side backend drives the UI. | Install Windows first, then enable WSL2 from Mesh settings. |
+| **Windows 10/11** (x64) | **Early access** — installer shipped on every tag. | Download from the Releases page above. |
+| **WSL2** (hybrid Windows/WSL mode) | **Early access** on Windows 10/11 hosts — Linux agents run inside WSL2, the Windows-side backend drives the UI. | Install Windows first, then enable WSL2 from Mesh settings. |
 | macOS (Apple Silicon + Intel) | **Preview** — the macOS bundles compile on every weekly CI smoke run, but no signed `.dmg` is published yet. | [Build from source](#build-from-source). |
 | Linux (Ubuntu) | **Preview** — same caveat as macOS. | [Build from source](#build-from-source). |
 

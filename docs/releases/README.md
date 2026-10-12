@@ -9,6 +9,9 @@ release's versioned source of truth.
 The next release is [v1.4.0](v1.4.0.md); later notes are drafted at release time
 (see [Drafting a release](#drafting-a-release)).
 
+The [v1.4.0 launch kit](../launch/v1.4.0.md) contains the shared launch sentence,
+X and Reddit drafts, and screenshots plus a short demo clip.
+
 ## Drafting a release
 
 Release notes are drafted at release time, not per pull request. A single file
