@@ -4,6 +4,44 @@ This guide covers the normal desktop workflow. Buildmesh runs the agent
 programs you install; it does not install, authenticate, or upgrade those
 programs for you.
 
+## Table of contents
+
+- [The mental model](#the-mental-model)
+- [Install and authenticate a harness](#install-and-authenticate-a-harness)
+- [Your first session](#your-first-session)
+- [Open tools from the title bar](#open-tools-from-the-title-bar)
+- [See which scope you are looking at](#see-which-scope-you-are-looking-at)
+- [Find agents that need attention](#find-agents-that-need-attention)
+- [Configure Autopilot Circuits](#configure-autopilot-circuits)
+- [Read a node's status mark](#read-a-nodes-status-mark)
+- [Understand a circuit checkpoint](#understand-a-circuit-checkpoint)
+- [Group nodes into tabs](#group-nodes-into-tabs)
+  - [Groups in the sidebar](#groups-in-the-sidebar)
+- [Find open work in the sidebar](#find-open-work-in-the-sidebar)
+- [Paste into a terminal](#paste-into-a-terminal)
+- [Hand work over to another node](#hand-work-over-to-another-node)
+- [Harnesses and capabilities](#harnesses-and-capabilities)
+- [Attention hooks Buildmesh installs on disk](#attention-hooks-buildmesh-installs-on-disk)
+  - [What the hook does](#what-the-hook-does)
+  - [What happens to your existing configuration](#what-happens-to-your-existing-configuration)
+  - [Before you commit](#before-you-commit)
+  - [Removing a hook](#removing-a-hook)
+- [Worktrees, branches, and review](#worktrees-branches-and-review)
+- [Project Settings and Repository](#project-settings-and-repository)
+- [Launch Configurations](#launch-configurations)
+- [Settings that matter](#settings-that-matter)
+- [When Buildmesh cannot read your settings](#when-buildmesh-cannot-read-your-settings)
+- [Harness permission modes](#harness-permission-modes)
+- [Build and Run](#build-and-run)
+- [Remote access](#remote-access)
+  - [Using Buildmesh on your phone](#using-buildmesh-on-your-phone)
+- [AI context portability](#ai-context-portability)
+- [Data, backup, and restore](#data-backup-and-restore)
+  - [Check your stored state](#check-your-stored-state)
+  - [Back up](#back-up)
+  - [Restore](#restore)
+  - [Uninstall](#uninstall)
+
 ## The mental model
 
 - A **Mesh** is a repository workspace and its shared configuration.

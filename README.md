@@ -1,9 +1,9 @@
-# Buildmesh
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./docs/brand/wordmark-on-dark.png" />
-  <img alt="Buildmesh" src="./docs/brand/wordmark-on-light.png" width="420" />
-</picture>
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./docs/brand/wordmark-on-dark.png" />
+    <img alt="Buildmesh" src="./docs/brand/wordmark-on-light.png" width="420" />
+  </picture>
+</h1>
 
 Run AI coding agents side by side in persistent terminals, with Git worktrees keeping their changes apart.
 
@@ -13,9 +13,11 @@ Buildmesh is Windows early access: you bring the agent CLIs; updates are minisig
 |---|---|---|
 | [![Coding sessions side by side in the Buildmesh grid](docs/media/v1.4.0/grid.png)](docs/media/v1.4.0/grid.png) | [![Choose an installed agent CLI from the Buildmesh spawn menu](docs/media/v1.4.0/spawn-menu.png)](docs/media/v1.4.0/spawn-menu.png) | [![Inspect changed files and a Git diff in Buildmesh](docs/media/v1.4.0/changed-files.png)](docs/media/v1.4.0/changed-files.png) |
 
-[Watch the 45-second walkthrough](docs/media/v1.4.0/buildmesh-demo.mp4) · [Start here / how to report](https://github.com/alondero/buildmesh/discussions/2251)
+![45-second walkthrough of Buildmesh](docs/media/v1.4.0/buildmesh-demo.gif)
 
-Buildmesh is a Tauri desktop app for orchestrating multiple AI coding agents — **Claude Code, Codex, Antigravity, OpenCode, Cursor, Grok Code, Kimi Code, MiniMax Code, DeepSeek Harness, Command Code, Freebuff, Cline, Meta Muse**, and a plain **Terminal** harness — across multiple meshes at the same time. It runs each agent as a durable process in a persistent xterm.js terminal, isolates work via Git worktrees, and exposes a tiled grid view so you can watch all of them at once.
+[Watch the full-resolution video](docs/media/v1.4.0/buildmesh-demo.mp4) · [Start here / how to report](https://github.com/alondero/buildmesh/discussions/2251)
+
+Buildmesh is a Tauri desktop app for orchestrating multiple AI coding agents — **Claude Code, Codex, Antigravity, OpenCode, Cursor, Grok Code, Kimi Code, MiniMax Code, DeepSeek Harness, Command Code, Freebuff, Cline, Meta Muse**, and a plain **Terminal** harness — across multiple meshes at the same time. It runs each agent as a durable process in a persistent xterm.js terminal, isolates work via Git worktrees, and exposes a tiled grid view so you can orchestrate them all at once.
 
 If you use Claude Code / Antigravity / OpenCode from your shell and find yourself `tmux`-ing, copy-pasting between tabs, or losing context when a long-running agent restarts — Buildmesh is what that should look like.
 
