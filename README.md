@@ -11,9 +11,9 @@ Buildmesh is Windows early access: you bring the agent CLIs; updates are minisig
 
 | Agent grid | Spawn menu | Changed files |
 |---|---|---|
-| [![Coding sessions side by side in the Buildmesh grid](docs/launch/media/v1.4.0/grid.png)](docs/launch/media/v1.4.0/grid.png) | [![Choose an installed agent CLI from the Buildmesh spawn menu](docs/launch/media/v1.4.0/spawn-menu.png)](docs/launch/media/v1.4.0/spawn-menu.png) | [![Inspect changed files and a Git diff in Buildmesh](docs/launch/media/v1.4.0/changed-files.png)](docs/launch/media/v1.4.0/changed-files.png) |
+| [![Coding sessions side by side in the Buildmesh grid](docs/media/v1.4.0/grid.png)](docs/media/v1.4.0/grid.png) | [![Choose an installed agent CLI from the Buildmesh spawn menu](docs/media/v1.4.0/spawn-menu.png)](docs/media/v1.4.0/spawn-menu.png) | [![Inspect changed files and a Git diff in Buildmesh](docs/media/v1.4.0/changed-files.png)](docs/media/v1.4.0/changed-files.png) |
 
-[Watch the 45-second walkthrough](docs/launch/media/v1.4.0/buildmesh-demo.mp4) · [Start here / how to report](https://github.com/alondero/buildmesh/discussions/2251)
+[Watch the 45-second walkthrough](docs/media/v1.4.0/buildmesh-demo.mp4) · [Start here / how to report](https://github.com/alondero/buildmesh/discussions/2251)
 
 Buildmesh is a Tauri desktop app for orchestrating multiple AI coding agents — **Claude Code, Codex, Antigravity, OpenCode, Cursor, Grok Code, Kimi Code, MiniMax Code, DeepSeek Harness, Command Code, Freebuff, Cline, Meta Muse**, and a plain **Terminal** harness — across multiple meshes at the same time. It runs each agent as a durable process in a persistent xterm.js terminal, isolates work via Git worktrees, and exposes a tiled grid view so you can watch all of them at once.
 
