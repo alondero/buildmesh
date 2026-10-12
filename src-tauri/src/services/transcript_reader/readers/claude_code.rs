@@ -22,9 +22,7 @@ use std::path::{Path, PathBuf};
 
 use crate::env;
 use crate::services::transcript_paths::{concat_text_blocks, encode_path, is_synthetic_message};
-use crate::services::transcript_reader::adapter::{
-    LocateCtx, TranscriptAdapter,
-};
+use crate::services::transcript_reader::adapter::{LocateCtx, TranscriptAdapter};
 use crate::services::transcript_reader::types::{
     cap_tool_calls, merge_into_with_text_limit, push_bounded, truncate, truncate_json_strings,
     Parsed, ToolCall, Turn, MAX_TOOL_STRING,
@@ -73,7 +71,6 @@ impl TranscriptAdapter for ClaudeCodeAdapter {
             .trim()
             .is_empty()
     }
-
 }
 
 /// Build the expected on-disk path of a Claude Code session transcript:
