@@ -63,14 +63,16 @@ export async function conptyPrerequisite(root, probe = fetch) {
 const RUNTIME_ERROR_PATTERNS = [
   // The summary row Vitest prints once an error section exists: "  Errors  1 error".
   /^[ \t]*Errors[ \t]+[1-9]\d*[ \t]+errors?[ \t]*$/m,
-  // The box header of the offending error: "⎯ Unhandled Rejection ⎯",
-  // "⎯ Unhandled Error ⎯", "⎯ Uncaught Exception ⎯".
-  /⎯+[ \t]*(?:Unhandled (?:Error|Rejection)|Uncaught Exception)[ \t]*⎯+/,
+  // The banner of the error section and of each offending error:
+  // "⎯⎯⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯⎯⎯" (the plural banner, which opens
+  // the section), "⎯⎯ Unhandled Rejection ⎯⎯", "⎯⎯ Unhandled Error ⎯⎯",
+  // "⎯⎯ Uncaught Exception ⎯⎯".
+  /⎯+[ \t]*(?:Unhandled (?:Errors?|Rejection)|Uncaught Exception)[ \t]*⎯+/,
   // The section's own sentence, which carries the count: "Vitest caught 1 unhandled error…".
   /Vitest caught [1-9]\d* unhandled errors?\b/i,
 ];
 
-export function reportsRuntimeError(output) {
+export function reportsRuntimeError(output = '') {
   const text = stripVTControlCharacters(output);
   return RUNTIME_ERROR_PATTERNS.some(pattern => pattern.test(text));
 }

@@ -53,10 +53,22 @@ test('runtime-error attribution reads Vitest\'s own structures, not test titles 
   assert.equal(reportsRuntimeError(cleanRun), false);
   assert.equal(vitestReport(root, { numPassedTests: 49, numFailedTests: 0, testResults: [] }, cleanRun).unattributed, false);
 
-  // Each of these is a real runtime error, captured from a real failing run.
-  // Vitest renders one unhandled rejection three ways — the summary row, the box
-  // header and the section sentence — and each has to stay blocking on its own,
-  // so tightening the matcher is not satisfied by dropping a form.
+  // Each pattern has to be load-bearing on its own. A fixture that concatenates
+  // all three forms proves only that SOME pattern fires: dropping the summary
+  // row or the section sentence left this suite green (review finding on #2233).
+  // Each form is therefore asserted alone first, and the two full runs below are
+  // kept as the end-to-end shape a real failing run produces.
+  const loneForms = {
+    'summary row': '     Errors  1 error',
+    'section sentence': 'Vitest caught 1 unhandled error during the test run.',
+    'box header': '⎯⎯⎯⎯ Unhandled Rejection ⎯⎯⎯⎯',
+    'plural section banner': '⎯⎯⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯⎯⎯',
+    'exception box header': '⎯⎯⎯⎯ Uncaught Exception ⎯⎯⎯⎯',
+  };
+  for (const [name, lone] of Object.entries(loneForms)) {
+    assert.equal(reportsRuntimeError(lone), true, `${name} alone must be detected`);
+  }
+
   const unhandledRejection = [
     '     Errors  1 error',
     '⎯⎯⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯⎯⎯',
@@ -80,6 +92,9 @@ test('runtime-error attribution reads Vitest\'s own structures, not test titles 
 
   // "Errors  0 errors" is the clean summary; it must not read as a runtime error.
   assert.equal(reportsRuntimeError('     Errors  0 errors\n Test Files  1 passed (1)'), false);
+  // Called with no output at all — `stripVTControlCharacters(undefined)` throws,
+  // so the default is what keeps a report-less caller off a TypeError.
+  assert.equal(reportsRuntimeError(), false);
   // ANSI is stripped first, so a colourised real error is still seen.
   assert.equal(reportsRuntimeError('[31m⎯⎯ Unhandled Rejection ⎯⎯[0m'), true);
 });
@@ -236,10 +251,9 @@ test('does NOT leak an unhandled rejection on a failing blur save', () => {
 
   const row = await runGate(fixture.cwd, { id: 'frontend-tests', command: ['node', 'node_modules/vitest/vitest.mjs', 'run'], tests: 'vitest', minutes: 1 }, fixture.base);
 
-  // Asserted first, so the assertions below are meaningful only when the phrase
-  // is really in the log. A gate only parses its report once it has already
-  // failed, so attribution is asserted on the log itself and the outcome on the
-  // row.
+  // Asserted first, so the assertions below mean something only when the phrase
+  // is really in the log. A gate parses its report once it has already failed, so
+  // attribution is asserted on the log itself and the outcome on the row.
   assert.match(readFileSync(row.log, 'utf8'), /does NOT leak an unhandled rejection/);
   assert.equal(reportsRuntimeError(readFileSync(row.log, 'utf8')), false, 'a passing test title is not a runtime error');
   assert.equal(row.count, 1);
@@ -249,10 +263,11 @@ test('does NOT leak an unhandled rejection on a failing blur save', () => {
 test('a listed flake named after a runtime error can still be accepted (#2204)', async t => {
   // The same root cause reached isolation. `scripts/harness.mjs` computes an
   // isolated rerun's `matched` as `... && !report.unattributed`, so under the old
-  // phrase scan a test whose NAME mentioned an unhandled rejection always reported
-  // unattributed and could never be accepted as a listed flake — it failed again
-  // in isolation, however clean that rerun was. Driven through the real
-  // `readTestReport` and `isolateTests` rather than a hand-copied `matched`.
+  // phrase scan a test whose NAME mentioned an unhandled rejection reported
+  // unattributed and stayed FAIL in isolation, however clean that rerun was
+  // (measured: `matched` was false over a real report and log before the fix).
+  // Driven through the real `readTestReport` and `isolateTests` rather than a
+  // hand-copied `matched`.
   const fixture = repo(t);
   const name = 'ProjectSettingsTab does NOT leak an unhandled rejection on a failing blur save';
   const id = `tests/unit/example.test.ts > ${name}`;
