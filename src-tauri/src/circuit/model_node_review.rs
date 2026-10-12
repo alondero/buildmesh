@@ -1,13 +1,10 @@
-use super::model::{
-    CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind as K, EdgeCondition, StepOutcome as O,
-    CIRCUIT_GRAPH_VERSION,
-};
+use super::model::{CircuitGraph, CircuitNodeKind as K};
+#[cfg(test)]
+use super::model::{CircuitNode, EdgeCondition};
 
 pub(crate) const LOCAL_APPROVED_MESSAGE: &str = "Review approved for {{source.name}} (agent {{source.agent_id}}). It was asked to squash-merge its pull request and has been handed back to you.";
 pub(crate) const LOCAL_REVIEW_INCONCLUSIVE_MESSAGE: &str = "Review needs attention for {{source.name}}: the reviewer could not give a verdict. See the review report in the run context.";
 pub(crate) const PR_REVIEW_INCONCLUSIVE_MESSAGE: &str = "Review needs attention for PR #{{pr.number}}: the reviewer could not give a verdict. See the review report in the run context.";
-pub(crate) const LEGACY_LOCAL_APPROVED_MESSAGE: &str =
-    "Review approved for {{source.name}} (agent {{source.agent_id}}).";
 
 impl CircuitGraph {
     /// Continuation accepts the review shape with editable prompts and launch settings.
@@ -26,175 +23,8 @@ impl CircuitGraph {
             return true;
         }
         let mut upgraded = self.clone();
-        upgraded.upgrade_local_review_publication_flow()
+        super::stored_graph::upgrade(&mut upgraded, super::stored_graph::UpgradeTarget::Preset)
             && upgraded.has_review_topology_of(&expected)
-    }
-
-    /// Move a stored local review graph from the per-round reviewer to the
-    /// publication flow. Only the exact pre-publication topology is rewritten;
-    /// the reviewer definition and customized texts are kept.
-    pub(crate) fn upgrade_local_review_publication_flow(&mut self) -> bool {
-        if self.node("close_reviewer").is_none() || self.node("publish").is_some() {
-            return false;
-        }
-        let Some(K::RetryLimit { max_retries }) = self.node("retry").map(|node| &node.kind) else {
-            return false;
-        };
-        let canonical = Self::agent_review(None, None, *max_retries);
-        let mut upgraded = self.clone();
-        let rewired = upgraded.retarget_edge("source_ready", "reviewer", "publish")
-            && upgraded.retarget_edge("reviewer", "verdict", "review_round")
-            && upgraded.retarget_edge("feedback", "close_reviewer", "await_fixes")
-            && upgraded.remove_edge("close_reviewer", "await_fixes")
-            && upgraded.retarget_edge("retry", "reviewer", "re_review")
-            && upgraded.retarget_edge("close_approved", "approved", "merge");
-        if !rewired {
-            return false;
-        }
-        upgraded.nodes.retain(|node| node.id != "close_reviewer");
-        for id in [
-            "publish",
-            "await_publish",
-            "confirm_publish",
-            "publish_ready",
-            "review_round",
-            "re_review",
-            "merge",
-        ] {
-            upgraded
-                .nodes
-                .push(canonical.node(id).expect("canonical review node").clone());
-        }
-        let added = canonical.edges.iter().filter(|edge| {
-            matches!(
-                edge.from.as_str(),
-                "publish"
-                    | "await_publish"
-                    | "confirm_publish"
-                    | "publish_ready"
-                    | "review_round"
-                    | "re_review"
-                    | "merge"
-            )
-        });
-        upgraded.edges.extend(added.cloned());
-        upgraded.replace_stock_text(
-            "feedback",
-            &Self::review_feedback_prompt(crate::review_contract::LEGACY_LOCAL_FEEDBACK_SCOPE),
-            &Self::review_feedback_prompt(crate::review_contract::LOCAL_FEEDBACK_SCOPE),
-        );
-        upgraded.replace_stock_text(
-            "approved",
-            LEGACY_LOCAL_APPROVED_MESSAGE,
-            LOCAL_APPROVED_MESSAGE,
-        );
-        if !upgraded.has_review_topology_of(&canonical) {
-            return false;
-        }
-        *self = upgraded;
-        true
-    }
-
-    /// A borrowed source stays outside the owned-agent ledger. The reviewer
-    /// reads its working directory, including uncommitted changes, from its
-    /// own workspace and never writes to the source tree.
-    pub fn agent_review(model: Option<String>, effort: Option<String>, max_rounds: i32) -> Self {
-        Self::agent_review_with_provider(None, model, effort, max_rounds)
-    }
-
-    /// Build a review graph with an explicit reviewer provider. The built-in
-    /// title-bar preset uses [`Self::agent_review`] so its shared graph does
-    /// not retain the provider of whichever source agent created it first.
-    pub fn agent_review_with_provider(
-        provider: Option<&str>,
-        model: Option<String>,
-        effort: Option<String>,
-        max_rounds: i32,
-    ) -> Self {
-        let target = || Some("$source".to_string());
-        let reviewer = || Some("reviewer".to_string());
-        let nodes = vec![
-            ("trigger", K::Manual),
-            ("await_source", K::AwaitAgentTurn { target_node_id: target() }),
-            ("confirm_source", K::CollaboratorCheck { require_approval: true }),
-            ("source_ready", K::AnyCompleted),
-            // The source publishes a PR before review so approval can end
-            // with a merge of exactly what was reviewed.
-            ("publish", K::InjectPty {
-                prompt: crate::review_contract::PUBLISH_FOR_REVIEW.into(),
-                target_node_id: target(),
-            }),
-            ("await_publish", K::AwaitAgentTurn { target_node_id: target() }),
-            ("confirm_publish", K::CollaboratorCheck { require_approval: true }),
-            ("publish_ready", K::AnyCompleted),
-            ("reviewer", K::SpawnAgentNode {
-                prompt: CircuitGraph::local_review_prompt(),
-                name: Some("Code reviewer".into()), provider: provider.map(str::to_owned),
-                model, effort, extra_args: None, timeout_seconds: None,
-            }),
-            ("review_round", K::AnyCompleted),
-            ("verdict", K::ReviewVerdict { target_node_id: reviewer() }),
-            ("feedback", K::InjectPty {
-                prompt: CircuitGraph::review_feedback_prompt(crate::review_contract::LOCAL_FEEDBACK_SCOPE),
-                target_node_id: target(),
-            }),
-            ("await_fixes", K::AwaitAgentTurn { target_node_id: target() }),
-            ("retry", K::RetryLimit { max_retries: max_rounds }),
-            ("re_review", K::InjectPty { prompt: CircuitGraph::re_review_prompt(), target_node_id: reviewer() }),
-            ("close_approved", K::CloseAgentNode { target_node_id: reviewer() }),
-            ("merge", K::InjectPty {
-                prompt: crate::review_contract::merge_approved_pr("your pull request for this work", ""),
-                target_node_id: target(),
-            }),
-            ("approved", K::Notify { message: LOCAL_APPROVED_MESSAGE.into() }),
-            ("exhausted", K::Notify { message: "Review limit reached for {{source.name}} after {{retry.max_retries}} rounds. Latest fixes have not been approved; inspect the report before continuing.".into() }),
-        ];
-        let edges = vec![
-            ("trigger", "await_source", None),
-            ("await_source", "source_ready", Some(O::Completed)),
-            ("await_source", "confirm_source", Some(O::Blocked)),
-            ("confirm_source", "source_ready", None),
-            ("source_ready", "publish", None),
-            ("publish", "await_publish", None),
-            ("await_publish", "publish_ready", Some(O::Completed)),
-            ("await_publish", "confirm_publish", Some(O::Blocked)),
-            ("confirm_publish", "publish_ready", None),
-            ("publish_ready", "reviewer", None),
-            ("reviewer", "review_round", None),
-            ("review_round", "verdict", None),
-            ("verdict", "feedback", Some(O::Working)),
-            ("feedback", "await_fixes", None),
-            ("await_fixes", "retry", Some(O::Completed)),
-            // RetryLimit uses its first child as its loop re-entry: later
-            // rounds re-prompt the open reviewer instead of respawning it.
-            ("retry", "re_review", Some(O::Completed)),
-            ("retry", "exhausted", Some(O::Failed)),
-            ("re_review", "review_round", None),
-            ("verdict", "close_approved", Some(O::Completed)),
-            ("close_approved", "merge", None),
-            ("merge", "approved", None),
-        ];
-        Self {
-            version: CIRCUIT_GRAPH_VERSION,
-            blueprint: None,
-            nodes: nodes
-                .into_iter()
-                .map(|(id, kind)| CircuitNode {
-                    id: id.into(),
-                    kind,
-                })
-                .collect(),
-            edges: edges
-                .into_iter()
-                .map(|(from, to, outcome)| CircuitEdge {
-                    from: from.into(),
-                    to: to.into(),
-                    condition: outcome
-                        .map(EdgeCondition::OnOutcome)
-                        .unwrap_or(EdgeCondition::Always),
-                })
-                .collect(),
-        }
     }
 }
 
@@ -202,6 +32,7 @@ impl CircuitGraph {
 mod tests {
     use super::*;
     use crate::circuit::evaluator::Classification;
+    use crate::circuit::model::{CircuitEdge, StepOutcome as O};
     use crate::circuit::test_support::advance_with_report_evidence;
     use crate::circuit::{context::CircuitContext, stepper::*};
 
@@ -689,41 +520,6 @@ mod continuation_contract_tests {
         assert!(
             !bypassed.has_local_review_contract(),
             "approval cannot be bypassed in the older shape either"
-        );
-    }
-
-    #[test]
-    fn stored_preset_upgrades_to_the_publication_flow_keeping_its_reviewer() {
-        let mut stored = crate::circuit::test_support::pre_publication_local_review(4);
-        if let K::SpawnAgentNode { prompt, .. } = &mut stored
-            .nodes
-            .iter_mut()
-            .find(|n| n.id == "reviewer")
-            .unwrap()
-            .kind
-        {
-            *prompt = "Review the security boundaries".into();
-        }
-        assert!(stored.upgrade_local_review_publication_flow());
-        stored.validate().unwrap();
-        let canonical = CircuitGraph::agent_review(None, None, 4);
-        assert!(stored.has_review_topology_of(&canonical));
-        assert_eq!(
-            stored.children("retry").first().map(String::as_str),
-            Some("re_review")
-        );
-        for id in ["feedback", "publish", "re_review", "merge", "approved"] {
-            assert_eq!(
-                stored.node(id),
-                canonical.node(id),
-                "{id} uses the current stock text"
-            );
-        }
-        assert!(matches!(&stored.node("reviewer").unwrap().kind,
-            K::SpawnAgentNode { prompt, .. } if prompt == "Review the security boundaries"));
-        assert!(
-            !stored.upgrade_local_review_publication_flow(),
-            "the upgrade is idempotent"
         );
     }
 }

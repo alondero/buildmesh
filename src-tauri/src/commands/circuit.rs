@@ -369,7 +369,10 @@ pub fn set_circuit_enabled(circuit_id: i64, enabled: bool) -> Result<(), String>
 #[command]
 pub fn update_circuit_graph(circuit_id: i64, graph_json: String) -> Result<(), String> {
     let mut graph = CircuitGraph::from_json(&graph_json)?;
-    graph.upgrade_legacy_issue_review_first_turns();
+    crate::circuit::stored_graph::upgrade(
+        &mut graph,
+        crate::circuit::stored_graph::UpgradeTarget::Blueprint,
+    );
     graph.validate()?;
     // Persist the parsed/canonical form so an explicit legacy graph upgrade
     // is durable after an editor save.
@@ -939,6 +942,58 @@ pub fn approve_circuit_step(run_id: i64, node_id: String) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::retire_cancelled_agents_with;
+
+    #[test]
+    fn saving_a_legacy_graph_applies_the_full_upgrade_sequence_and_preserves_authored_text() {
+        use crate::circuit::model::{CircuitGraph, CircuitNodeKind};
+        let _db = crate::db::test_support::isolated();
+        let mesh = crate::db::create_mesh("legacy save", "C:/legacy-save").unwrap();
+        let mut graph = crate::circuit::test_support::stuck_issue_review();
+        if let CircuitNodeKind::InjectPty { prompt, .. } = &mut graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "follow_feedback")
+            .unwrap()
+            .kind
+        {
+            *prompt = "Apply our team's review checklist.".into();
+        }
+        let circuit_id = {
+            let conn = crate::db::write_conn();
+            conn.execute(
+                "INSERT INTO autopilot_circuits (mesh_id, name, graph_json) VALUES (?1, 'legacy', ?2)",
+                rusqlite::params![mesh.id, graph.to_json().unwrap()],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        super::update_circuit_graph(circuit_id, graph.to_json().unwrap()).unwrap();
+        let saved = crate::db::get_autopilot_circuit(circuit_id)
+            .unwrap()
+            .unwrap()
+            .graph_json;
+        let upgraded = CircuitGraph::from_json(&saved).unwrap();
+        upgraded.validate().unwrap();
+        assert!(
+            upgraded.has_review_topology_of(&CircuitGraph::issue_driven_autopilot_review(
+                "buildmesh:run"
+            ))
+        );
+        assert!(upgraded.node("merge_verify").is_some());
+        assert!(matches!(
+            &upgraded.node("follow_feedback").unwrap().kind,
+            CircuitNodeKind::InjectPty { prompt, .. }
+                if prompt == "Apply our team's review checklist."
+        ));
+        super::update_circuit_graph(circuit_id, saved.clone()).unwrap();
+        assert_eq!(
+            crate::db::get_autopilot_circuit(circuit_id)
+                .unwrap()
+                .unwrap()
+                .graph_json,
+            saved
+        );
+    }
 
     #[test]
     fn cancellation_retirement_attempts_every_agent_and_reports_partial_failure() {
