@@ -8,11 +8,18 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { changedPaths, completion, fingerprint, runGate, scopePaths, verify, waitForVerify } from '../../scripts/harness.mjs';
 import { executedTests, gateReads, planGates, touchedFormatDiffs } from '../../scripts/harness-plan.mjs';
 import { acquireSlot, heavyGateEnv, heavyGateLimit, runPlan, slotHolders } from '../../scripts/harness-lanes.mjs';
+import { RUST_PATH_INCLUDES, fastGates, frontendInScope, lintablePaths, pathIncludeDrift, planChecks, rustModule, rustScope } from '../../scripts/harness-check.mjs';
 import { conptyPrerequisite, gatePassed, isolatedCommand, isolateTests, knownFlakes, readTestReport, reportsRuntimeError, rustFailures, validateFlakeIssues, vitestReport } from '../../scripts/harness-test-failures.mjs';
 import { VERSION as CONPTY_VERSION } from '../../scripts/prepare-conpty.mjs';
 
 const script = fileURLToPath(new URL('../../scripts/harness.mjs', import.meta.url));
 const root = fileURLToPath(new URL('../../', import.meta.url));
+
+// The plan `completion()` recomputes for a task. It narrows through `scopePaths`
+// exactly as `verify` does, so a hand-written receipt has to be built from the
+// same path list: the plan is now sensitive to its inputs, because a scoped
+// contract-test gate joins it only when a changed path is one it reads (#2221).
+const taskPlan = (fixture, task) => planGates(scopePaths(fixture.cwd, task.base, changedPaths(fixture.cwd, task.base)));
 
 test('Vitest JSON and cargo failure blocks name exact tests without panic prose', () => {
   const report = vitestReport(root, { numPassedTests: 8, numFailedTests: 1, testResults: [{ name: join(root, 'tests/unit/example.test.ts'), status: 'failed', assertionResults: [{ fullName: 'suite a + (b)', status: 'failed' }] }] });
@@ -468,7 +475,7 @@ function repo(t) {
   return { cwd, git, put, commit, base, cli, hook, start };
 }
 function passingReceipt(fixture, task) {
-  const gatePlan = planGates(changedPaths(fixture.cwd, task.base));
+  const gatePlan = taskPlan(fixture, task);
   fixture.put('.harness/receipt.json', JSON.stringify({ root: fixture.cwd, taskId: task.id, base: task.base, tree: fingerprint(fixture.cwd, task.base), full: false, gatePlan, gates: gatePlan.map(gate => ({ id: gate.id, outcome: 'PASS' })), outcome: 'PASS' }));
   const tree = fingerprint(fixture.cwd, task.base);
   fixture.put('.harness/active-task.json', JSON.stringify({ ...task, evidence: ['Observed state after owner switch'], evidenceTree: tree, reviewTree: tree, review: { reviewer: 'independent fixture', verdict: 'APPROVE', findings: [], summary: 'Approved current change' } }));
@@ -594,7 +601,7 @@ test('review repairs require final-tree verification, acceptance and renewed ind
   };
   // Simulate all planned gates passing; leave acceptance and reviewer state intact.
   const recordVerification = () => {
-    const gatePlan = planGates(changedPaths(fixture.cwd, task.base));
+    const gatePlan = taskPlan(fixture, task);
     fixture.put('.harness/receipt.json', JSON.stringify({ root: fixture.cwd, taskId: task.id, base: task.base, tree: fingerprint(fixture.cwd, task.base), full: false, gatePlan, gates: gatePlan.map(gate => ({ id: gate.id, outcome: 'PASS' })), outcome: 'PASS' }));
   };
   update({ review: { reviewer: 'independent fixture', verdict: 'REQUEST_CHANGES', findings: ['Update the owner state'], summary: 'Repair required' } });
@@ -806,7 +813,7 @@ test('canonical verification rejects a source mutation even when every child che
   const fixture = repo(t);
   // Stand-in executables keep this a process/orchestration regression, without
   // coupling it to a full Tauri or frontend installation.
-  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-test-failures.mjs', 'scripts/self-review.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
+  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-check.mjs', 'scripts/harness-test-failures.mjs', 'scripts/self-review.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
   for (const path of ['scripts/check-agent-diff.mjs', 'scripts/check-docs.mjs', 'scripts/check-readme-drift.mjs', 'scripts/check-process-spawn-discipline.mjs']) fixture.put(path, 'process.exit(0);\n');
   fixture.put('.gitignore', '.harness/\n.task.json\nnode_modules/\n');
   fixture.put('node_modules/eslint/package.json', '{"version":"fixture"}');
@@ -842,7 +849,7 @@ test('hook stdin restores context, guards state writes and rejects stale complet
 test('a failed gate keeps blocking Stop, names the way out, and releases once update records a blocked handoff', t => {
   const fixture = repo(t);
   const task = fixture.start();
-  const gatePlan = planGates(changedPaths(fixture.cwd, task.base));
+  const gatePlan = taskPlan(fixture, task);
   fixture.put('.harness/receipt.json', JSON.stringify({ root: fixture.cwd, taskId: task.id, base: task.base, tree: fingerprint(fixture.cwd, task.base), full: false, gatePlan, gates: [], outcome: 'FAIL', reason: 'Command failed. See the gate log; failure attribution is unverified.' }));
   // A written report alone must not release a FAIL; only recorded blockers do.
   for (const payload of [{ hook_event_name: 'Stop' }, { hook_event_name: 'Stop', stop_hook_active: true }]) {
@@ -1163,7 +1170,7 @@ test('wait never reports a stale or missing result as success', async t => {
 });
 test('verify queues a heavy gate behind held machine-wide slots and runs it once one frees', async t => {
   const fixture = repo(t);
-  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-test-failures.mjs', 'scripts/self-review.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
+  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-check.mjs', 'scripts/harness-test-failures.mjs', 'scripts/self-review.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
   for (const path of ['scripts/check-agent-diff.mjs', 'scripts/check-docs.mjs', 'scripts/check-readme-drift.mjs', 'scripts/check-process-spawn-discipline.mjs']) fixture.put(path, 'process.exit(0);\n');
   fixture.put('.gitignore', '.harness/\n.task.json\nnode_modules/\n');
   fixture.put('node_modules/eslint/package.json', '{"version":"fixture"}');
@@ -1402,17 +1409,25 @@ test('the real plan reuses frontend gates after a Rust-only edit and docs-only e
   const rustOnly = rerun('src-tauri/src/secret_scrubber.rs');
   for (const id of rust) assert.ok(rustOnly.includes(id), id);
   for (const id of [...frontend, 'lint', 'lint-fixtures', 'lint-tests']) assert.ok(!rustOnly.includes(id), `${id} must be reused after a Rust-only edit`);
-  // Whole-tree gates and repo-wide agent tests still look at it.
-  for (const id of ['whitespace', 'staged-content', 'agent-rules', 'docs', 'docs-tests', 'agent-tests']) assert.ok(rustOnly.includes(id), id);
+  // A Rust source file is an input of docs-tests (git2-ownership walks every
+  // src-tauri/src/**/*.rs) and of the repo-wide infrastructure gates, but not of
+  // the scoped contract tests: no agent-infra, README or lint-fixture test reads
+  // it, so a Rust-only edit now skips all four (#2221).
+  for (const id of ['whitespace', 'staged-content', 'agent-rules', 'docs', 'readme', 'process-spawns', 'known-flakes', 'docs-tests']) assert.ok(rustOnly.includes(id), id);
+  for (const id of ['agent-tests', 'readme-tests']) assert.ok(!rustOnly.includes(id), `${id} must be skipped after a Rust-only edit`);
 
   const docsOnly = rerun('docs/agents/development-harness.md');
-  assert.deepEqual(docsOnly, ['whitespace', 'staged-content', 'agent-rules', 'docs', 'readme', 'process-spawns', 'known-flakes', 'docs-tests', 'readme-tests']);
+  assert.deepEqual(docsOnly, ['whitespace', 'staged-content', 'agent-rules', 'docs', 'readme', 'process-spawns', 'known-flakes', 'docs-tests']);
 
   // Frontend edits re-run the Rust gates: Rust tests read src/ and embed the built mobile bundle.
   const frontendEdit = rerun('src/App.tsx');
   for (const id of [...frontend, ...rust]) assert.ok(frontendEdit.includes(id), id);
-  // Unknown and tooling paths invalidate everything that does not provably ignore them.
-  assert.deepEqual(rerun('some-new-top-level-dir/file'), plan.map(row => row.id));
+  // An unknown path is still read by every gate that has not proved otherwise,
+  // so nothing that depends on the diff is skipped. The plan is itself scoped,
+  // so this diff needs a path agent-tests reads for that gate to be in it.
+  const withHarness = planGates(['scripts/harness.mjs', 'some-new-top-level-dir/file']);
+  const unknown = withHarness.filter(row => gateReads(row, 'some-new-top-level-dir/file')).map(row => row.id);
+  for (const id of ['whitespace', 'staged-content', 'agent-rules', 'docs', 'readme', 'process-spawns', 'known-flakes', 'docs-tests', 'agent-tests']) assert.ok(unknown.includes(id), id);
 });
 
 test('Vitest keeps re-running for the src-tauri files it reads, and every Rust gate shares one input list', () => {
@@ -1431,8 +1446,189 @@ test('Vitest keeps re-running for the src-tauri files it reads, and every Rust g
   const rustInputs = ['rust-format', 'rust-clippy', 'rust-tests', 'binding-drift'].map(id => JSON.stringify(byId[id].ignores));
   assert.equal(new Set(rustInputs).size, 1, 'binding-drift must never be reused while rust-tests re-runs');
   assert.ok(rustInputs[0] !== undefined);
-  // Gates the audit did not cover keep reading the whole tree.
-  for (const id of ['whitespace', 'staged-content', 'agent-rules', 'docs', 'readme', 'process-spawns', 'known-flakes', 'docs-tests', 'readme-tests']) assert.equal(byId[id].ignores, undefined, id);
+  // Gates the audit did not cover keep reading the whole tree. readme-tests,
+  // lint-tests and lint-fixtures were audited and now declare their real inputs
+  // so a change they cannot be affected by skips them (#2221); docs-tests reads
+  // all of docs/** plus every src-tauri/src/**/*.rs, so it stays whole-tree.
+  for (const id of ['whitespace', 'staged-content', 'agent-rules', 'docs', 'readme', 'process-spawns', 'known-flakes', 'docs-tests']) assert.equal(byId[id].ignores, undefined, id);
+  // This diff reads none of their inputs, so they are absent from the plan; check
+  // the declarations themselves on a plan that does contain them.
+  for (const id of ['agent-tests', 'readme-tests', 'lint-tests', 'lint-fixtures']) assert.equal(byId[id], undefined, id);
+  const fullPlan = Object.fromEntries(planGates(['src/owner.ts'], { full: true }).map(row => [row.id, row]));
+  for (const id of ['agent-tests', 'readme-tests', 'lint-tests', 'lint-fixtures']) assert.ok(Array.isArray(fullPlan[id]?.ignores) && fullPlan[id].ignores.length, `${id} must declare its inputs`);
+});
+
+test('a scoped contract-test gate joins the plan exactly when a changed path is one of its inputs', () => {
+  // The mapping is the issue's acceptance criterion: each contract-test gate is
+  // selected by the paths it reads, so an unaffected change never pays for it.
+  const selected = paths => planGates(paths).map(gate => gate.id);
+  const scoped = ['agent-tests', 'readme-tests', 'lint-tests', 'lint-fixtures'];
+
+  // agent-tests reads the whole tests/ tree: harness.test.mjs pins a snapshot of
+  // every tests/unit, tests/integration, tests/e2e and tests/setup line that
+  // mentions src-tauri, so any of those files re-runs it.
+  for (const path of ['scripts/harness.mjs', 'tests/agent-infra/harness.test.mjs', 'tests/unit/example.test.ts', 'tests/setup/vitest.setup.ts', '.github/workflows/verify.yml', 'package.json', 'docs/agents/self-review.md']) {
+    const ids = selected([path]);
+    assert.ok(ids.includes('agent-tests'), `agent-tests must run for ${path}`);
+  }
+  for (const path of ['README.md', 'src/types/generated/Provider.ts', 'src/types/generated/HarnessCapabilitiesTable.json']) {
+    assert.ok(selected([path]).includes('readme-tests'), `readme-tests must run for ${path}`);
+  }
+  for (const path of ['eslint.config.js', 'tests/lint-fixtures/conditional-hook.tsx', 'tests/lint-fixtures/missing-deps.tsx']) {
+    const ids = selected([path]);
+    for (const id of ['lint-tests', 'lint-fixtures']) assert.ok(ids.includes(id), `${id} must run for ${path}`);
+  }
+
+  // Paths none of them read, so all four are skipped.
+  for (const path of ['src/App.tsx', 'src-tauri/src/db/mod.rs', 'docs/agents/engineering.md']) {
+    const ids = selected([path]);
+    for (const id of scoped) assert.ok(!ids.includes(id), `${id} must be skipped for ${path}`);
+  }
+
+  // docs-tests reads all of docs/** and every src-tauri/src/**/*.rs (git2-ownership),
+  // so it survives every one of those changes while the others do not.
+  for (const path of ['docs/page.md', 'src-tauri/src/db/mod.rs', 'src/App.tsx']) {
+    assert.ok(selected([path]).includes('docs-tests'), `docs-tests must run for ${path}`);
+  }
+
+  // A contract-test gate always reads its own implementation and its own test
+  // file — those two files ARE the gate. Auditing only the repo files a suite
+  // opens at runtime drops them, and then a change to either skips the suite
+  // that would have caught it (review of PR #2232).
+  const selfOwned = [
+    ['scripts/check-readme-drift.mjs', 'readme-tests'],
+    ['tests/agent-infra/check-readme-drift.test.mjs', 'readme-tests'],
+    ['scripts/check-eslint-fixtures.mjs', 'lint-tests'],
+    ['tests/agent-infra/check-eslint-fixtures.test.mjs', 'lint-tests'],
+    ['scripts/check-eslint-fixtures.mjs', 'lint-fixtures'],
+    ['tests/agent-infra/check-eslint-fixtures.test.mjs', 'lint-fixtures'],
+  ];
+  for (const [path, id] of selfOwned) {
+    assert.ok(selected([path]).includes(id), `${id} must run when its own source or test file changes (${path})`);
+  }
+
+  // --full and an empty diff run the whole plan rather than a narrowed list.
+  const full = planGates(['src/App.tsx'], { full: true }).map(gate => gate.id);
+  for (const id of scoped) assert.ok(full.includes(id), `--full must include ${id}`);
+  for (const id of scoped) assert.ok(planGates([]).map(gate => gate.id).includes(id), `an empty diff must include ${id}`);
+});
+
+test('the scoped check maps each changed-file category to its own command', () => {
+  const commands = (paths) => planChecks(paths).checks.map(gate => [gate.id, gate.command.join(' ')]);
+  // Agent rules run for every diff; lint and tsc follow the hook's own rules.
+  for (const [id, command] of commands(['src/App.tsx'])) {
+    if (id === 'fast-agent-rules') assert.equal(command, 'node scripts/check-agent-diff.mjs --base $BASE');
+  }
+  assert.deepEqual(fastGates(['README.md']).map(gate => gate.id), ['fast-agent-rules'], 'a docs-only diff has no lintable source and no tsc input');
+
+  // Frontend source selects Vitest against the diff, not the whole suite.
+  assert.ok(frontendInScope(['src/App.tsx', 'tests/unit/x.test.ts']));
+  const frontend = commands(['src/App.tsx']).find(([id]) => id === 'check-frontend-tests');
+  assert.equal(frontend[1], 'node node_modules/vitest/vitest.mjs run --changed $BASE --passWithNoTests');
+  // An unknown path is 'both' to the plan but selects nothing here: starting
+  // Vitest for a diff no frontend test imports would only fail on passWithNoTests.
+  assert.equal(frontendInScope(['scripts/whatever.mjs', '.github/workflows/ci.yml']), false);
+  // `categorisePath` calls every tests/ path 'frontend', so using it here made
+  // agent-infra, e2e and lint-fixture edits start Vitest and select nothing
+  // (review of PR #2232). Only the trees Vitest runs over select it.
+  for (const path of ['tests/agent-infra/harness.test.mjs', 'tests/e2e/app-launch.spec.ts', 'tests/lint-fixtures/missing-deps.tsx', 'android/app/build.gradle.kts']) {
+    assert.equal(frontendInScope([path]), false, `${path} must not start Vitest`);
+    assert.equal(planChecks([path]).checks.some(gate => gate.id === 'check-frontend-tests'), false, path);
+  }
+  for (const path of ['src/App.tsx', 'src/types/generated/Provider.ts', 'tests/unit/example.test.ts', 'tests/integration/x.test.ts', 'tests/setup/vitest.setup.ts', 'public/icon.svg', 'vitest.config.ts', 'docs/brand/mark.svg']) {
+    assert.equal(frontendInScope([path]), true, `${path} must select Vitest`);
+  }
+
+  // Each changed Rust module gets its own filtered --lib run.
+  assert.deepEqual(rustScope(['src-tauri/src/db/mod.rs', 'src-tauri/src/env/host_path.rs', 'src-tauri/src/services/mod.rs']), {
+    modules: ['db', 'env::host_path', 'services'], whole: false, unscoped: [],
+  });
+  const rust = commands(['src-tauri/src/db/mod.rs']);
+  assert.deepEqual(rust.find(([id]) => id === 'check-rust-1'), ['check-rust-1', 'cargo test --lib db::']);
+
+  // The crate root, a manifest and an integration test cannot narrow, so the
+  // whole lib suite runs and the unscoped paths are reported.
+  for (const path of ['src-tauri/src/lib.rs', 'src-tauri/src/main.rs', 'src-tauri/Cargo.toml', 'src-tauri/build.rs', 'Cargo.lock', 'src-tauri/tests/command.rs']) {
+    const scope = rustScope([path]);
+    assert.equal(scope.whole, true, `${path} must not narrow`);
+    assert.deepEqual(scope.modules, [], path);
+  }
+  assert.deepEqual(commands(['src-tauri/Cargo.toml']).find(([id]) => id === 'check-rust-tests'), ['check-rust-tests', 'cargo test --lib']);
+
+  // A docs-only diff selects neither suite.
+  assert.deepEqual(commands(['docs/agents/engineering.md']).map(([id]) => id), ['fast-agent-rules']);
+});
+
+test('only the scoped Vitest check tolerates an empty selection', () => {
+  // `vitest --changed` matching nothing is a normal answer, but a required gate
+  // that executed nothing is a failure — so the exemption is declared per gate
+  // and never reaches npm run verify.
+  const vitest = planChecks(['src/App.tsx']).checks.find(gate => gate.id === 'check-frontend-tests');
+  assert.equal(vitest.emptyOk, true);
+  assert.equal(planChecks(['docs/page.md']).checks.some(gate => gate.emptyOk), false);
+  for (const gate of planGates(['src/App.tsx'], { full: true })) assert.equal(gate.emptyOk, undefined, gate.id);
+
+  // The Rust module checks keep the strict rule: a filter that matches no test
+  // usually means the module mapping is wrong, so it must not pass quietly.
+  const rust = planChecks(['src-tauri/src/db/mod.rs']).checks.find(gate => gate.id === 'check-rust-1');
+  assert.equal(rust.tests, 'rust');
+  assert.equal(rust.emptyOk, undefined);
+});
+
+test('the scoped check rejects --full rather than reporting a narrow run as the whole plan', t => {
+  const fixture = repo(t);
+  const blocked = fixture.cli('check', '--base', fixture.base, '--full');
+  assert.equal(blocked.status, 2);
+  assert.match(blocked.stderr, /--full expands npm run verify/);
+});
+
+test('a Rust file attached with #[path] selects the module that owns it', () => {
+  // A plain path walk would map src/git/mesh_health_tests.rs to
+  // `git::mesh_health_tests`, which matches no test: the module is declared
+  // inside git/health.rs, so its tests run under `git::health::mesh_health_tests`.
+  assert.equal(rustModule('src-tauri/src/git/mesh_health_tests.rs'), 'git::health::mesh_health_tests');
+  assert.equal(rustModule('src-tauri/src/git/fetch_origin_tests.rs'), 'git::sync::fetch_origin_tests');
+  assert.equal(rustModule('src-tauri/src/commands/prune_tests.rs'), 'commands::prune::prune_tests');
+  assert.equal(rustModule('src-tauri/src/services/legacy_retirement/retirement_crash_tests.rs'), 'services::legacy_retirement::retirement_crash_tests');
+  assert.equal(rustModule('src-tauri/src/agent/terminal_input.rs'), 'agent::process::terminal_input');
+  // A module file maps to its own module; a directory mod.rs to its directory.
+  assert.equal(rustModule('src-tauri/src/db/mod.rs'), 'db');
+  assert.equal(rustModule('src-tauri/src/env/host_path.rs'), 'env::host_path');
+  assert.equal(rustModule('src-tauri/src/session_naming.rs'), 'session_naming');
+  for (const path of ['src-tauri/src/lib.rs', 'src-tauri/src/mod.rs', 'src-tauri/src/adapters/plugin.js', 'src-tauri/build.rs']) {
+    assert.equal(rustModule(path), null, path);
+  }
+
+  // Drift guard: every `#[path = "..."]` module in the crate must be in the
+  // table, or a new one silently maps to a filter that runs zero tests. This is
+  // the same function the `rust-paths` gate runs on a Rust-only diff, so the two
+  // cannot disagree.
+  assert.deepEqual(pathIncludeDrift(root), { missing: [], stale: [] });
+});
+
+test('the #[path] drift check runs on the Rust diff that can introduce one', () => {
+  // agent-tests owns the guard but is skipped for a Rust-only diff, so the
+  // scoped check carries it too (review of PR #2232).
+  const ids = paths => planChecks(paths).checks.map(gate => gate.id);
+  for (const path of ['src-tauri/src/agent/process.rs', 'src-tauri/src/db/mod.rs']) assert.ok(ids([path]).includes('check-rust-paths'), path);
+  for (const path of ['src/App.tsx', 'docs/page.md', 'scripts/harness.mjs']) assert.ok(!ids([path]).includes('check-rust-paths'), path);
+  const gate = planChecks(['src-tauri/src/agent/process.rs']).checks.find(row => row.id === 'check-rust-paths');
+  assert.deepEqual(gate.command, ['node', 'scripts/harness.mjs', 'gate', 'rust-paths']);
+});
+
+test('the scoped check and the hook share one fast-gate table', () => {
+  // If these drifted, `harness -- check` would stop predicting what Claude's
+  // PostToolUse hook actually runs.
+  const paths = ['src/App.tsx', 'src/types/generated/Provider.ts', 'tests/lint-fixtures/missing-deps.tsx', 'scripts/harness.mjs'];
+  assert.deepEqual(fastGates(paths).map(gate => gate.id), ['fast-agent-rules', 'fast-lint', 'fast-types']);
+  assert.deepEqual(
+    lintablePaths(paths),
+    ['src/App.tsx', 'scripts/harness.mjs'],
+    'generated bindings and the deliberate lint fixtures are excluded',
+  );
+  // A deleted file has nothing left to lint, so the hook drops it from the run.
+  assert.deepEqual(lintablePaths(['src/gone.ts'], path => path !== 'src/gone.ts'), []);
+  assert.deepEqual(planChecks(paths).checks.slice(0, 3).map(gate => gate.id), ['fast-agent-rules', 'fast-lint', 'fast-types']);
 });
 
 test('new Vitest references to src-tauri are audited against the frontend-tests input list', () => {

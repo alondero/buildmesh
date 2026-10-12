@@ -83,8 +83,12 @@ After REQUEST_CHANGES:
 2. Run fast checks and the regression tests that exercise each affected
    production boundary. Claude's advisory `.harness/fast.json` covers agent
    rules, changed-file lint and TypeScript checking; it runs no behavioral or
-   Rust tests. Other harnesses use the focused commands in the
-   [engineering contract](engineering.md#choose-checks-by-scope).
+   Rust tests. Every other harness — Codex included — runs
+   `npm run harness -- check`, which maps the diff onto that same fast set plus
+   `vitest run --changed <base>` and `cargo test --lib <module>::` for the
+   changed files. It is advisory and writes no receipt: a scoped check that
+   passes (or that executes zero tests) is not completion evidence, and
+   `npm run verify` still decides completion.
 3. Broaden checks during repair when changes affect shared contracts,
    migrations, security, lifecycle ownership, dependencies or platform/build
    behavior. A failed full check remains unresolved until the failing check
@@ -109,6 +113,39 @@ Continue the repair loop within the active task; use progress updates for
 intermediate status. `finish` and the Stop hook still reject incomplete or
 stale evidence. CI and release checks remain independent safeguards; mock
 browser checks do not replace required real-runtime acceptance evidence.
+
+## Scoped check
+
+`npm run harness -- check [--base <commit>]` is the fast check every harness can
+run, so a session without Claude's PostToolUse hook still gets real coverage from
+the diff instead of running focused commands by hand. It maps the changed paths to
+the agent rules, changed-file ESLint and `tsc` gates the hook already runs, adds
+`vitest run --changed <base>` when a frontend file changed, adds
+`cargo test --lib <module>::` for each changed Rust module, and re-runs the
+`#[path]` module-table guard when a Rust source file changed. The mapping is
+table-driven in `scripts/harness-check.mjs` and tested per category.
+
+It is deliberately weaker than `verify`, which stays the completion gate:
+
+- It writes no receipt, takes no `.harness/lock`, and cannot finish a task, so it
+  can run beside a verify.
+- A check that executes zero tests is not behavioural evidence. Report the
+  executed count; `npm run verify` supplies the required coverage.
+- A change with no module filter — the crate root, a manifest, the build script,
+  an integration test — runs the whole `cargo test --lib` suite, and a path under
+  `src-tauri/tests/` is not covered by `--lib` at all, so it needs `verify`.
+- A frontend selection is narrower than `planGates`, and deliberately so. The plan
+  treats an unknown path as both product layers, and `categorisePath` calls every
+  `tests/` path 'frontend'; this check selects Vitest only for the trees Vitest
+  actually runs over — `src/`, `mobile/`, `public/`, `tests/unit/`,
+  `tests/integration/`, `tests/setup/`, `docs/brand/` and the vite/vitest configs.
+  An edit to `tests/agent-infra/**`, `tests/e2e/**` or `tests/lint-fixtures/**`
+  does not start Vitest, because those tests are not in the Vitest run and
+  `vitest --changed` would select nothing.
+- It runs the `#[path]` guard because a Rust-only diff is exactly the one that
+  skips `agent-tests`, where the guard otherwise lives. `agent-tests` and the
+  `rust-paths` gate call the same `pathIncludeDrift` function, so they cannot
+  disagree about the table.
 
 ## Verify and finish
 
@@ -202,9 +239,27 @@ both. Executable hooks and harness tests still run infrastructure gates.
 Adding only harness package scripts, or the exact `.harness` ESLint ignore,
 keeps infrastructure scope; dependency/build/rule changes retain product gates.
 
+The contract-test gates are scoped by their own inputs rather than run on every
+change. Each declares the paths it provably does not read, so `agent-tests`,
+`readme-tests`, `lint-tests` and `lint-fixtures` join the plan only when a changed
+path is one they read, and a Rust- or frontend-only edit skips all four (issue
+#2221). `docs-tests` reads all of `docs/**` plus every `src-tauri/src/**/*.rs`, so
+it stays unconditional. A gate with no declared inputs reads the whole tree and is
+never skipped; `--full` and an empty diff run the whole plan.
+`tests/agent-infra/harness.test.mjs` pins each mapping, so a gate that starts
+reading a path it does not declare fails the suite instead of silently reusing a
+stale PASS.
+
+One rule cuts across all of them: a contract-test gate always reads its own
+implementation script and its own test file, because those two files *are* the
+gate. Auditing only the repo files a suite opens at runtime misses them, and then
+a change to either skips the suite that would have caught it — the gate reports
+PASS having never run.
+
 | Scope | Required gates |
 |---|---|
-| Every change | Whitespace, staged/working consistency, shared agent rules, docs impact against base, README drift, process-spawn discipline, agent/docs/README/lint contract tests, ESLint, lint violation fixtures |
+| Every change | Whitespace, staged/working consistency, shared agent rules, docs impact against base, README drift, process-spawn discipline, docs contract tests, ESLint |
+| Contract-test inputs only | agent-infra contract tests, README drift tests, lint violation tests and fixtures — when a changed path is one those gates read |
 | Frontend | TypeScript + desktop/mobile builds, bundle budget, all Vitest unit/integration tests, Playwright verify-smoke |
 | Android | APK and instrumentation compilation, executed JVM tests, strict Android lint through `scripts/check-android.mjs`; device instrumentation runs separately |
 | Rust | Fresh mobile build (or frontend build), Rust formatting, all-targets Clippy, locked Rust tests (the CI shards as concurrent multi-threaded processes, `scripts/rust-test-shards.mjs`), generated-binding drift |
@@ -347,8 +402,8 @@ cannot produce an accepted flake. Collection/setup failures still name the
 failed file.
 
 Runtime errors are attributed from Vitest's own reporting structures — the
-`Errors  N error(s)` summary row, an `Unhandled Error`/`Unhandled
-Rejection`/`Uncaught Exception` box header, and its `Vitest caught N unhandled
+`Errors  N error(s)` summary row, an `Unhandled Error(s)`/`Unhandled
+Rejection`/`Uncaught Exception` banner, and its `Vitest caught N unhandled
 error` sentence — rather than from the bare phrase appearing anywhere in the
 output. The default reporter prints a test's title verbatim in the slow-test
 listing and in the `stderr | file > suite > title` prefix, so a *passing* test

@@ -8,6 +8,7 @@ Buildmesh is a Tauri 2 desktop app (React 19, Rust) for orchestrating AI coding 
 
 ## Commands
 - **Development harness:** `npm run harness -- start --spec .tmp/task.json`, then `npm run verify` and `npm run harness -- finish`. Resume with `npm run harness -- status`. Receipts, evidence and blocked handoffs: `docs/agents/development-harness.md`. `.harness/` is ignored worktree-local state; never hand-edit receipts.
+- **Scoped check (any harness):** `npm run harness -- check [--base <commit>]` maps the diff to agent rules, changed-file lint, `tsc`, `vitest run --changed <base>` and `cargo test --lib <module>::`. Fast and advisory — it writes no receipt, and `npm run verify` is still the completion gate (issue #2221).
 - **Windows/worktree:** `scripts\check.ps1 [unit|integration|rust|docs|all-ts|all]`. `docs` runs the documentation contract without a build; `all-ts` builds and tests the frontend; `all` also runs Rust.
 - **Agent infrastructure:** `npm run test:agent`; `npm run check:agent -- --base <base-commit>` checks changed source (committed work included) against the shared hook rules.
 - **Documentation:** `npm run test:docs` (doc tests + commit guard); `npm run check:docs` (required pages, headings, links/anchors, source-of-truth drift).
