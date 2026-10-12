@@ -980,6 +980,290 @@ fn circuit_review_verdict_upgrade_preserves_saved_overrides_and_is_repeatable() 
     assert_eq!(graph, custom, "custom wiring requires explicit editing");
 }
 
+/// Dismissal is an acknowledgement, not a rewrite: the run keeps its failure and
+/// its ledger row, and only stops being *outstanding*.
+#[test]
+fn dismissing_attention_leaves_the_failed_run_intact_and_is_idempotent() {
+    let mut conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "dismiss", "/tmp/dismiss").unwrap();
+    let circuit =
+        create_autopilot_circuit_inner(&conn, mesh.id, "attn", "", &sample_graph_json()).unwrap();
+    let run =
+        create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:one", "{}").unwrap();
+    commit_circuit_advance_locked(&mut conn, run, Some("failed"), Some("{}"), &[]).unwrap();
+
+    let stored = |conn: &Connection| get_circuit_run_inner(conn, run).unwrap().unwrap();
+    assert_eq!(
+        stored(&conn).attention_dismissed_at,
+        None,
+        "a fresh run has never been acknowledged"
+    );
+
+    assert_eq!(
+        dismiss_all_circuit_run_attention_inner(&conn, mesh.id).unwrap(),
+        1
+    );
+    let dismissed = stored(&conn);
+    assert!(
+        dismissed.attention_dismissed_at.is_some(),
+        "the acknowledgement is persisted, not just held in the UI"
+    );
+    assert_eq!(
+        (
+            dismissed.state.as_str(),
+            dismissed.trigger_identity.as_str()
+        ),
+        ("failed", "manual:one"),
+        "dismissing attention must not touch the run's state or identity"
+    );
+
+    // Idempotent: a second pass must not move the original "first seen" stamp,
+    // so the recorded acknowledgement stays meaningful.
+    let first = dismissed.attention_dismissed_at;
+    assert_eq!(
+        dismiss_all_circuit_run_attention_inner(&conn, mesh.id).unwrap(),
+        0,
+        "an already-acknowledged run matches no branch"
+    );
+    assert_eq!(stored(&conn).attention_dismissed_at, first);
+    assert_eq!(
+        stored(&conn).state,
+        "failed",
+        "the run is still failed after the round trip"
+    );
+}
+
+/// The bulk action picks its own rows from the same SQL predicate History counts
+/// with, so "Dismiss all (N)" covers the set the label promised.
+#[test]
+fn bulk_dismissal_covers_exactly_the_attention_runs_on_the_mesh() {
+    let mut conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "bulk", "/tmp/bulk").unwrap();
+    let circuit =
+        create_autopilot_circuit_inner(&conn, mesh.id, "attn", "", &sample_graph_json()).unwrap();
+    let other = create_mesh_inner(&conn, "bulk-other", "/tmp/bulk-other").unwrap();
+    let foreign =
+        create_autopilot_circuit_inner(&conn, other.id, "attn", "", &sample_graph_json()).unwrap();
+
+    let failed =
+        create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:failed", "{}").unwrap();
+    commit_circuit_advance_locked(&mut conn, failed, Some("failed"), Some("{}"), &[]).unwrap();
+    let clean =
+        create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:clean", "{}").unwrap();
+    commit_circuit_advance_locked(&mut conn, clean, Some("completed"), Some("{}"), &[]).unwrap();
+    let elsewhere =
+        create_circuit_run_locked(&mut conn, foreign.id, other.id, "manual:elsewhere", "{}")
+            .unwrap();
+    commit_circuit_advance_locked(&mut conn, elsewhere, Some("failed"), Some("{}"), &[]).unwrap();
+
+    let dismissed_at = |conn: &Connection, id: i64| {
+        get_circuit_run_inner(conn, id)
+            .unwrap()
+            .unwrap()
+            .attention_dismissed_at
+    };
+
+    assert_eq!(
+        dismiss_all_circuit_run_attention_inner(&conn, mesh.id).unwrap(),
+        1
+    );
+    assert!(
+        dismissed_at(&conn, failed).is_some(),
+        "the failed run is acknowledged"
+    );
+    assert_eq!(
+        dismissed_at(&conn, clean),
+        None,
+        "a completed run with no attention must not be stamped with an acknowledgement the user never gave"
+    );
+    assert_eq!(
+        dismissed_at(&conn, elsewhere),
+        None,
+        "bulk dismissal is scoped to the mesh it was asked about"
+    );
+
+    assert_eq!(
+        dismiss_all_circuit_run_attention_inner(&conn, mesh.id).unwrap(),
+        0,
+        "re-running the bulk action changes nothing (idempotent)"
+    );
+}
+
+/// The outstanding predicate joins steps one-to-many, so counting joined rows
+/// instead of distinct runs would inflate the confirmation: a run with three
+/// steps would be counted three times and the label would promise more runs than
+/// exist. The count must be a count of runs.
+#[test]
+fn the_attention_count_counts_runs_not_joined_step_rows() {
+    let mut conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "multi-step", "/tmp/multi-step").unwrap();
+    let circuit =
+        create_autopilot_circuit_inner(&conn, mesh.id, "attn", "", &sample_graph_json()).unwrap();
+
+    // One failed run carrying several step rows — each one joins in.
+    let run = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "issue:1", "{}").unwrap();
+    let step = |node_id: &str| CircuitStepOp {
+        node_id: node_id.into(),
+        status: "completed".into(),
+        outcome: Some(Some("completed".into())),
+        error: None,
+        agent_node_id: None,
+        attempt: 1,
+        fresh_attempt: false,
+    };
+    commit_circuit_advance_locked(
+        &mut conn,
+        run,
+        Some("running"),
+        None,
+        &[
+            step("implementer"),
+            step("review_classifier"),
+            step("verdict"),
+        ],
+    )
+    .unwrap();
+    commit_circuit_advance_locked(
+        &mut conn,
+        run,
+        Some("failed"),
+        None,
+        &[
+            step("implementer"),
+            step("review_classifier"),
+            step("verdict"),
+        ],
+    )
+    .unwrap();
+
+    let steps: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM autopilot_circuit_run_steps WHERE run_id = ?1",
+            params![run],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(steps > 1, "this test needs a multi-step run (got {steps})");
+
+    assert_eq!(
+        count_outstanding_circuit_run_attention_inner(&conn, mesh.id).unwrap(),
+        1,
+        "one run needing attention is one run, however many steps it has"
+    );
+    assert_eq!(
+        dismiss_all_circuit_run_attention_inner(&conn, mesh.id).unwrap(),
+        1,
+        "the mutation agrees with the count"
+    );
+}
+
+/// The toolbar's confirmation count must equal what "Dismiss all" actually
+/// acknowledges.
+///
+/// The Probe's ledger deliberately surfaces at most `RECOVERY_RUNS_PER_CIRCUIT`
+/// (50) attention runs per circuit, while the bulk update reaches every
+/// outstanding run on the mesh. Counting the ledger payload therefore
+/// understates the confirmation exactly when it matters most: 75 failed runs in
+/// one circuit would read "Dismiss 50" and then clear 75 — including 25 the
+/// user never saw. This pins the count to the mutation's own predicate.
+#[test]
+fn the_attention_count_names_every_run_dismiss_all_will_touch_past_the_ledger_window() {
+    let mut conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "over-cap", "/tmp/over-cap").unwrap();
+    let circuit =
+        create_autopilot_circuit_inner(&conn, mesh.id, "attn", "", &sample_graph_json()).unwrap();
+
+    // 75 failed runs in ONE circuit: past the 50-per-circuit recovery window.
+    let outstanding = 75;
+    for index in 0..outstanding {
+        let run = create_circuit_run_locked(
+            &mut conn,
+            circuit.id,
+            mesh.id,
+            &format!("manual:fail{index}"),
+            "{}",
+        )
+        .unwrap();
+        commit_circuit_advance_locked(&mut conn, run, Some("failed"), Some("{}"), &[]).unwrap();
+    }
+
+    // The ledger really is capped — this is what made the old label wrong.
+    let surfaced = list_circuits_with_recent_runs_inner(&conn, mesh.id, 10)
+        .unwrap()
+        .into_iter()
+        .flat_map(|(_, runs)| runs.into_iter().map(|detail| detail.run.id))
+        .filter(|id| (1..=(outstanding as i64)).contains(id))
+        .count();
+    assert!(
+        surfaced < outstanding as usize,
+        "this test is only meaningful while the ledger window is narrower than the real backlog (surfaced {surfaced} of {outstanding})"
+    );
+
+    // The number the confirmation shows, and the number the command changes.
+    let counted = count_outstanding_circuit_run_attention_inner(&conn, mesh.id).unwrap();
+    assert_eq!(
+        counted, outstanding as i64,
+        "the count is unbounded by the ledger window, so the label cannot understate"
+    );
+    let changed = dismiss_all_circuit_run_attention_inner(&conn, mesh.id).unwrap();
+    assert_eq!(
+        changed as i64, counted,
+        "the confirmation names exactly the runs that are acknowledged"
+    );
+    assert_eq!(
+        count_outstanding_circuit_run_attention_inner(&conn, mesh.id).unwrap(),
+        0,
+        "everything the confirmation promised is now acknowledged"
+    );
+}
+
+/// A dismissed run must stop being force-surfaced by the 50-per-circuit recovery
+/// window, or the UI would drop it from the count while the ledger kept pulling
+/// it back over the ordinary history cap.
+#[test]
+fn dismissed_attention_stops_outranking_the_ordinary_history_window() {
+    let mut conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "window", "/tmp/window").unwrap();
+    let circuit =
+        create_autopilot_circuit_inner(&conn, mesh.id, "attn", "", &sample_graph_json()).unwrap();
+    let old =
+        create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:old", "{}").unwrap();
+    commit_circuit_advance_locked(&mut conn, old, Some("failed"), Some("{}"), &[]).unwrap();
+    // Push it far past a one-run history window with newer, clean runs.
+    for index in 0..3 {
+        let fresh = create_circuit_run_locked(
+            &mut conn,
+            circuit.id,
+            mesh.id,
+            &format!("manual:fresh{index}"),
+            "{}",
+        )
+        .unwrap();
+        commit_circuit_advance_locked(&mut conn, fresh, Some("completed"), Some("{}"), &[])
+            .unwrap();
+    }
+
+    let visible_ids = |conn: &Connection| -> Vec<i64> {
+        list_circuits_with_recent_runs_inner(conn, mesh.id, 1)
+            .unwrap()
+            .into_iter()
+            .flat_map(|(_, runs)| runs.into_iter().map(|detail| detail.run.id))
+            .collect()
+    };
+
+    assert!(
+        visible_ids(&conn).contains(&old),
+        "an undismissed failed run is force-surfaced beyond the ordinary window"
+    );
+
+    dismiss_all_circuit_run_attention_inner(&conn, mesh.id).unwrap();
+
+    assert!(
+        !visible_ids(&conn).contains(&old),
+        "an acknowledged run yields the recovery window slot back to newer runs"
+    );
+}
+
 #[test]
 fn circuit_failure_atomically_records_cleanup_and_releases_admission_lease() {
     let mut conn = isolated_test_conn();

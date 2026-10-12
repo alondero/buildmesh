@@ -13,7 +13,8 @@
  *
  * What is offered comes from the backend's own eligibility decision, so a button
  * is shown only when the command will accept it; when an action is unavailable the
- * reason says how to unblock it. Continuing is an attestation and needs a note.
+ * reason says how to unblock it. The optional note annotates the history entry
+ * with how the operator resolved the step; it never gates the action.
  */
 
 import { useEffect, useState } from 'react';
@@ -27,7 +28,7 @@ import type { AutopilotCircuitRun } from '../../types/generated/AutopilotCircuit
 import type { AutopilotCircuitRunStep } from '../../types/generated/AutopilotCircuitRunStep';
 import type { CheckpointAction } from '../../types/generated/CheckpointAction';
 import type { CircuitRunAttention } from '../../types/generated/CircuitRunAttention';
-import { checkpointActionLabel, describeProblem, recoveryGuidance } from './runNextSteps';
+import { checkpointActionLabel, checkpointActionNeedsEvidence, describeProblem, recoveryGuidance } from './runNextSteps';
 import { runFailureStep } from './runStepPresentation';
 
 /** A backend answer we can rely on, or `null` (a mock or a skewed build). */
@@ -234,7 +235,7 @@ export function RunNextSteps({ run, steps, roleLabel, busy }: RunNextStepsProps)
           {noting === 'continue' && (
             <div className="mt-1.5 space-y-1">
               <label className="block text-text-secondary">
-                What did you do? This is recorded in the run history.
+                What did you do? <span className="text-text-muted">Optional — saved in the run history when given.</span>
                 <textarea
                   value={note}
                   onChange={(event) => setNote(event.target.value)}
@@ -246,7 +247,7 @@ export function RunNextSteps({ run, steps, roleLabel, busy }: RunNextStepsProps)
               </label>
               <button
                 type="button"
-                disabled={disabled || note.trim() === ''}
+                disabled={disabled}
                 onClick={() => void proceed()}
                 data-testid={`run-recover-confirm-${run.id}`}
                 className="px-1.5 py-1 rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40"
@@ -296,7 +297,7 @@ export function RunNextSteps({ run, steps, roleLabel, busy }: RunNextStepsProps)
           {recording !== null && (
             <div className="space-y-1">
               <label className="block text-text-secondary">
-                {recording.action === 'review_pass' || recording.action === 'review_fail' ? 'Your review decision and evidence will be recorded. Autopilot will follow this verdict.' : 'What did you check? This is saved in the run history and does not grant approval.'}
+{recording.action === 'review_pass' || recording.action === 'review_fail' ? 'Your review decision and evidence will be recorded. Autopilot will follow this verdict.' : 'What did you check? Optional — saved in the run history when given; it does not grant approval.'}
                 <textarea
                   value={note}
                   onChange={(event) => setNote(event.target.value)}
@@ -308,7 +309,7 @@ export function RunNextSteps({ run, steps, roleLabel, busy }: RunNextStepsProps)
               </label>
               <button
                 type="button"
-                disabled={disabled || note.trim() === ''}
+                disabled={disabled || (checkpointActionNeedsEvidence(recording.action) && note.trim() === '')}
                 onClick={() => void record(recording.nodeId, recording.attempt, recording.action)}
                 data-testid={`run-checkpoint-confirm-${run.id}`}
                 className="px-1.5 py-1 rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40"

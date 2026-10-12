@@ -205,7 +205,8 @@ it('offers agent handoff recovery before history and retains a rejected reason f
   const { container } = render(<CircuitEvidenceHistory runId={3} updatedAt="one" />);
   fireEvent.click(container.querySelector('summary')!);
   const button = await screen.findByRole('button', { name: 'Record completed' });
-  expect(button.matches(':disabled')).toBe(true);
+  // A note annotates the history when given; it no longer gates the record.
+  expect(button.matches(':disabled')).toBe(false);
   const reason = screen.getByLabelText('Reason and supporting evidence');
   expect(reason.compareDocumentPosition(screen.getByTestId('history-entry-7')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   fireEvent.change(reason, { target: { value: 'Inspected the finished fixes; continue to the independent review.' } });

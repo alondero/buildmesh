@@ -25,6 +25,7 @@ import {
   runBelongsToActivity,
   runBelongsToHistory,
   runNeedsAttention,
+  runNeedsOutstandingAttention,
   reviewResult,
   reviewCircuitMetadata,
   reviewCircuitForRun,
@@ -54,9 +55,14 @@ describe('run diagnostics', () => {
     })).toBe(true);
   });
   const st = (node_id: string, status: string) => ({ node_id, status, error_message: null });
-  const detail = (id: number, state: string, updated_at = '2026-08-22 10:00:00') => ({
+  const detail = (
+    id: number,
+    state: string,
+    updated_at = '2026-08-22 10:00:00',
+    attention_dismissed_at: number | null = null,
+  ) => ({
     run: { id, circuit_id: 1, mesh_id: 1, state, trigger_identity: `run:${id}`, context_json: '{}',
-      source_agent_node_id: null, created_at: updated_at, updated_at },
+      source_agent_node_id: null, created_at: updated_at, updated_at, attention_dismissed_at },
     steps: [],
   });
   const row = (...runs: ReturnType<typeof detail>[]): CircuitWithRuns => ({
@@ -298,6 +304,43 @@ describe('run diagnostics', () => {
       expect(buildCircuitProbeRows([annotated], 'history', { search: 'approved' })[0].visibleRuns).toEqual([]);
       expect(buildCircuitProbeRows([annotated], 'history', { search: 'queue' })[0].visibleRuns).toHaveLength(1);
       expect(buildCircuitProbeRows([annotated], 'history', { search: 'buildmesh' })[0].visibleRuns).toHaveLength(1);
+    });
+
+    /**
+     * Acknowledging attention is a notification flag, not a rewrite. These two
+     * predicates exist as a pair precisely because an acknowledged run must keep
+     * reporting *why* it wanted attention while ceasing to be outstanding.
+     */
+    describe('dismissed attention', () => {
+      it('keeps the derived reason but stops the run being outstanding', () => {
+        const acknowledged = detail(2, 'failed', '2026-08-22 10:02:00', 1_786_000_000);
+        expect(runNeedsAttention(acknowledged)).toBe(true);
+        expect(runNeedsOutstandingAttention(acknowledged)).toBe(false);
+
+        const outstanding = detail(2, 'failed');
+        expect(runNeedsOutstandingAttention(outstanding)).toBe(true);
+      });
+
+      it('drops an acknowledged run out of the attention filter and the count', () => {
+        const failed = detail(2, 'failed', '2026-08-22 10:02:00');
+        const acknowledged = detail(4, 'failed', '2026-08-22 10:01:00', 1_786_000_000);
+        const rows = buildCircuitProbeRows([row(failed, acknowledged)], 'history', {
+          attentionOnly: true,
+        });
+        expect(rows[0].visibleRuns.map((r) => r.run.id)).toEqual([2]);
+        expect(circuitActivityStats([row(failed, acknowledged)], 0).historyAttentionCount).toBe(1);
+      });
+
+      it('sorts an acknowledged run into the ordinary tail, not the top', () => {
+        const olderAcknowledged = detail(2, 'failed', '2026-08-22 10:01:00', 1_786_000_000);
+        const newerAcknowledged = detail(3, 'failed', '2026-08-22 10:05:00', 1_786_000_000);
+        const outstanding = detail(4, 'failed', '2026-08-22 10:00:00');
+        const ordered = buildCircuitProbeRows(
+          [row(olderAcknowledged, newerAcknowledged, outstanding)],
+          'history',
+        )[0].visibleRuns.map((r) => r.run.id);
+        expect(ordered).toEqual([4, 3, 2]);
+      });
     });
 
     it('flags a live run stale after the quiet window, never a terminal run', () => {

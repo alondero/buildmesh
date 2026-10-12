@@ -277,10 +277,20 @@ A run that needs you says so on its card: a **What to do next** box explains
 what happened in plain words (the raw error is under *Technical detail*) and offers
 the actions that apply. On a failed run, **Retry this step** runs the failed step
 again, and **I've done this — continue** records that you did the step yourself
-(you write a short note, which is kept in the history) and lets the run carry on.
+and lets the run carry on. Both accept a short optional note saying what you did;
+it is kept in the run history when you write one, and the action works without it.
 An action that cannot work is not offered; the box says why instead, for example
 that a closed agent has to be resumed from Archive before a retry. A review
 approval can never be recorded on the reviewer's behalf; use **Review again**.
+
+Some runs ask for attention only because Buildmesh recorded no outcome, not
+because there is anything left to do — you may have fixed it by hand and moved on.
+**Dismiss all** in the History toolbar clears these in one go, after a
+confirmation showing how many runs it covers. That number is every run still
+asking on this Mesh, which can be more than the list is showing — old runs past
+the history window are included. It only clears the request: the run stays in
+History and its card still says exactly why it wanted attention, but it stops
+sorting to the top and stops being counted under **Needs attention**.
 
 Each run is named after its implementation agent, with when it started and
 finished and how long it ran. Time spent waiting in the queue is not counted.

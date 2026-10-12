@@ -98,6 +98,7 @@ const RUN_DONE: CircuitRunDetail = {
     source_agent_node_id: null,
     created_at: '2026-08-22 10:05:00',
     updated_at: '2026-08-22 10:07:00',
+    attention_dismissed_at: null,
   },
   steps: [
     {
@@ -162,7 +163,11 @@ function mockBackend(overrides: {
   circuits?: AutopilotCircuit[];
   runs?: CircuitRunDetail[];
   queue?: CircuitQueueEntry[];
-  queueWaits?: Record<string, string>;
+queueWaits?: Record<string, string>;
+  /** Backend-reported outstanding attention, independent of the ledger window. */
+  outstandingAttention?: number;
+  /** Make the unbounded count fail, as a transient backend failure would. */
+  countAttentionFails?: boolean;
 } = {}) {
   const circuits = overrides.circuits ?? [CIRCUIT];
   const runs = overrides.runs ?? [RUN_DONE, RUN_RUNNING];
@@ -205,6 +210,14 @@ function mockBackend(overrides: {
       cmd === 'approve_circuit_step'
     ) {
       return Promise.resolve(args && cmd === 'create_circuit' ? CIRCUIT : undefined);
+    }
+    // The bulk acknowledgement returns the number of runs it changed.
+    if (cmd === 'dismiss_all_circuit_run_attention') return Promise.resolve(2);
+    // The outstanding count is backend-computed and deliberately independent of
+    // the windowed ledger payload (which caps attention at 50/circuit).
+    if (cmd === 'count_circuit_run_attention') {
+      if (overrides.countAttentionFails) return Promise.reject(new Error('count unavailable'));
+      return Promise.resolve(overrides.outstandingAttention ?? runs.filter((r) => r.run.state === 'failed').length);
     }
     if (cmd === 'trigger_circuit_now') return Promise.resolve(13);
     // Default-fall-through so failures surface the unexpected command.
@@ -766,6 +779,310 @@ describe('CircuitsProbeTab', () => {
     await user.type(screen.getByTestId('history-search-input'), 'manual:1724000000000');
     expect(screen.queryByTestId('run-card-9')).toBeNull();
     expect(screen.getByTestId('run-card-11')).toBeTruthy();
+  });
+
+  /**
+   * The bulk acknowledgement is one mesh-scoped IPC behind a two-step
+   * confirmation — the count in the label is the number of runs History is
+   * actually asking about, and one click must not dismiss anything.
+   */
+  it('acknowledges all outstanding attention with one confirmed mesh-scoped call', async () => {
+    mockBackend({ runs: [
+      { ...RUN_DONE, run: { ...RUN_DONE.run, id: 9, state: 'failed', trigger_identity: 'issue:9:run' } },
+      { ...RUN_DONE, run: { ...RUN_DONE.run, id: 8, state: 'failed', trigger_identity: 'issue:8:run' } },
+      RUN_DONE,
+    ] });
+    const user = userEvent.setup();
+    openProbeDestination('circuits');
+
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+
+    const dismissAll = await screen.findByTestId('history-dismiss-all');
+    expect(dismissAll.textContent).toContain('Dismiss all (2)');
+
+    // First click only arms the confirmation — nothing is dismissed yet.
+    await user.click(dismissAll);
+    await screen.findByTestId('history-dismiss-all-confirm');
+    expect(invoke).not.toHaveBeenCalledWith('dismiss_all_circuit_run_attention', expect.anything());
+
+    await user.click(screen.getByTestId('history-dismiss-all-confirm'));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('dismiss_all_circuit_run_attention', { meshId: 42 });
+    });
+    // The backend picks the rows in SQL; the UI must not send an id list that
+    // could drift from the predicate it is counting.
+    expect(invoke).not.toHaveBeenCalledWith('dismiss_circuit_run_attention', expect.anything());
+  });
+
+  it('lets a confirmed bulk dismissal be abandoned', async () => {
+    mockBackend({ runs: [
+      { ...RUN_DONE, run: { ...RUN_DONE.run, id: 9, state: 'failed', trigger_identity: 'issue:9:run' } },
+    ] });
+    const user = userEvent.setup();
+    openProbeDestination('circuits');
+
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+    await user.click(await screen.findByTestId('history-dismiss-all'));
+    await user.click(screen.getByTestId('history-dismiss-all-cancel'));
+
+    await screen.findByTestId('history-dismiss-all');
+    expect(invoke).not.toHaveBeenCalledWith('dismiss_all_circuit_run_attention', expect.anything());
+  });
+
+  it('withholds the bulk action when the unbounded count is unavailable', async () => {
+    // A windowed count is exactly the understatement the backend count exists to
+    // prevent, so a failed count must hide the control rather than label it with a
+    // number that does not describe what the command will do.
+    mockBackend({
+      runs: [{ ...RUN_DONE, run: { ...RUN_DONE.run, id: 9, state: 'failed' } }],
+      countAttentionFails: true,
+    });
+    openProbeDestination('circuits');
+
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+    // The ledger still renders — a failed count must not blank the tab.
+    await screen.findByTestId('run-card-9');
+    expect(screen.queryByTestId('history-dismiss-all')).toBeNull();
+  });
+
+  /**
+   * Scoping the count to its mesh id is not sufficient on its own: on an
+   * A→B→A round trip the original mesh's id matches again, so a count fetched
+   * before A's runs could have changed would pass the guard and sit above a
+   * confirmation that dismisses those changed runs. The count must be dropped
+   * on every switch, not merely re-scoped.
+   */
+  it('does not resurrect a mesh’s old count after an A→B→A round trip', async () => {
+    mockBackend({
+      runs: [{ ...RUN_DONE, run: { ...RUN_DONE.run, id: 9, state: 'failed' } }],
+      outstandingAttention: 7,
+    });
+    openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+    expect(await screen.findByTestId('history-dismiss-all')).toHaveProperty(
+      'textContent',
+      expect.stringContaining('7'),
+    );
+
+    const fallback = vi.mocked(invoke).getMockImplementation();
+    // Mesh 42 (A) is asked twice through this override: the initial count of 7
+    // came from mockBackend before it was installed, so the first call this
+    // override sees is the return trip. That one is slow, and when it finally
+    // answers the backlog is 2 — not the 7 fetched on the first visit.
+    let aCountCalls = 0;
+    let releaseReturn!: () => void;
+    const returnPending = new Promise<void>((resolve) => { releaseReturn = resolve; });
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      const meshId = (args as { meshId?: number })?.meshId;
+      if (cmd === 'count_circuit_run_attention' && meshId === 42) {
+        aCountCalls += 1;
+        if (aCountCalls === 1) return returnPending.then(() => 2);
+        return Promise.resolve(7);
+      }
+      if (meshId === 43) return Promise.reject(new Error('mesh B is unreachable'));
+      return fallback?.(cmd, args) ?? Promise.resolve({ cmd });
+    });
+
+    const otherMesh = { ...MESH, id: 43, name: 'other mesh' };
+    const select = (id: number) => act(() => useMeshStore.setState({
+      meshes: [MESH, otherMesh],
+      meshesById: new Map([[MESH.id, MESH], [otherMesh.id, otherMesh]]),
+      selectedMeshId: id,
+    }));
+
+    select(43);
+    await waitFor(() => {
+      expect(vi.mocked(invoke).mock.calls.some(([, args]) =>
+        (args as { meshId?: number })?.meshId === 43)).toBe(true);
+    });
+    select(42);
+
+    // Back on A, whose refresh is still in flight: the old 7 must not return.
+    expect(screen.queryByTestId('history-dismiss-all')).toBeNull();
+
+    await act(async () => {
+      releaseReturn();
+      await returnPending;
+    });
+
+    // A's own fresh count is what may now be shown — 2, not the stale 7.
+    await waitFor(() => {
+      expect(screen.getByTestId('history-dismiss-all')).toHaveProperty(
+        'textContent',
+        expect.stringContaining('2'),
+      );
+    });
+  });
+
+  /**
+   * A count belongs to the mesh that produced it. Between a mesh switch and the
+   * new fetch landing, mesh A's count is still in state — rendering it above
+   * mesh B's runs would have the user confirm a number that describes neither
+   * the list nor the action the handler would take.
+   */
+  it('never shows one mesh’s bulk count over another mesh’s runs', async () => {
+    mockBackend({
+      runs: [{ ...RUN_DONE, run: { ...RUN_DONE.run, id: 9, state: 'failed' } }],
+      outstandingAttention: 7,
+    });
+    openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+    expect(await screen.findByTestId('history-dismiss-all')).toHaveProperty(
+      'textContent',
+      expect.stringContaining('7'),
+    );
+
+    // Hold mesh B's fetch open so the switch is observed mid-flight.
+    const fallback = vi.mocked(invoke).getMockImplementation();
+    let releaseMeshB!: () => void;
+    const meshBPending = new Promise<void>((resolve) => { releaseMeshB = resolve; });
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      const meshId = (args as { meshId?: number })?.meshId;
+      if (meshId !== 43) return fallback?.(cmd, args) ?? Promise.resolve({ cmd });
+      // Mesh B's fetch is held open, then reports a backlog of its own.
+      if (cmd === 'list_circuit_probe') return meshBPending.then(() => ({ circuits: [], queue: [] }));
+      if (cmd === 'count_circuit_run_attention') {
+        return meshBPending.then(() => 0);
+      }
+      return fallback?.(cmd, args) ?? Promise.resolve({ cmd });
+    });
+
+    const otherMesh = { ...MESH, id: 43, name: 'other mesh' };
+    act(() => useMeshStore.setState({
+      meshes: [MESH, otherMesh],
+      meshesById: new Map([[MESH.id, MESH], [otherMesh.id, otherMesh]]),
+      selectedMeshId: otherMesh.id,
+    }));
+
+    // Mesh A's 7 must not survive into mesh B's view, pending or not.
+    await waitFor(() => {
+      expect(vi.mocked(invoke).mock.calls.filter(([cmd, args]) =>
+        cmd === 'list_circuit_probe' && (args as { meshId?: number })?.meshId === 43)).toHaveLength(1);
+    });
+    expect(screen.queryByTestId('history-dismiss-all')).toBeNull();
+
+    await act(async () => {
+      releaseMeshB();
+      await meshBPending;
+    });
+    expect(screen.queryByTestId('history-dismiss-all')).toBeNull();
+  });
+
+  it('does not fall back to the previous mesh’s count when the new one fails to load', async () => {
+    mockBackend({
+      runs: [{ ...RUN_DONE, run: { ...RUN_DONE.run, id: 9, state: 'failed' } }],
+      outstandingAttention: 7,
+    });
+    openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+    expect(await screen.findByTestId('history-dismiss-all')).toBeTruthy();
+
+    const fallback = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if ((args as { meshId?: number })?.meshId === 43) {
+        return Promise.reject(new Error('mesh B is unreachable'));
+      }
+      return fallback?.(cmd, args) ?? Promise.resolve({ cmd });
+    });
+
+    const otherMesh = { ...MESH, id: 43, name: 'other mesh' };
+    act(() => useMeshStore.setState({
+      meshes: [MESH, otherMesh],
+      meshesById: new Map([[MESH.id, MESH], [otherMesh.id, otherMesh]]),
+      selectedMeshId: otherMesh.id,
+    }));
+
+    // Mesh A's 7 must not linger over mesh B, which failed to report anything.
+    await waitFor(() => {
+      expect(screen.queryByTestId('history-dismiss-all')).toBeNull();
+    });
+  });
+
+  it('discards an armed confirmation when the mesh changes', async () => {
+    mockBackend({
+      runs: [{ ...RUN_DONE, run: { ...RUN_DONE.run, id: 9, state: 'failed' } }],
+      outstandingAttention: 3,
+    });
+    const user = userEvent.setup();
+    openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+
+    await user.click(await screen.findByTestId('history-dismiss-all'));
+    await screen.findByTestId('history-dismiss-all-confirm');
+
+    const otherMesh = { ...MESH, id: 43, name: 'other mesh' };
+    act(() => useMeshStore.setState({
+      meshes: [MESH, otherMesh],
+      meshesById: new Map([[MESH.id, MESH], [otherMesh.id, otherMesh]]),
+      selectedMeshId: otherMesh.id,
+    }));
+
+    // The confirmation was armed against mesh 42; it must not still be showing
+    // a number whose action would now target mesh 43.
+    await waitFor(() => {
+      expect(screen.queryByTestId('history-dismiss-all-confirm')).toBeNull();
+    });
+  });
+
+  /**
+   * A bulk acknowledgement changes no run state, so no `circuit-run-updated`
+   * event accompanies it. Without this subscription a second window — or any
+   * view that did not perform the clearing — would keep showing the old count
+   * and the now-acknowledged runs.
+   */
+  it('refreshes when attention is acknowledged elsewhere', async () => {
+    mockBackend({ runs: [RUN_DONE] });
+    openProbeDestination('circuits');
+    await waitFor(() => expect(vi.mocked(listen)).toHaveBeenCalledWith(
+      'circuit-runs-attention-dismissed',
+      expect.any(Function),
+    ));
+
+    const before = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'list_circuit_probe').length;
+    await act(async () => {
+      await emit('circuit-runs-attention-dismissed', { mesh_id: MESH.id, changed: 3 });
+    });
+    await waitFor(() => {
+      expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'list_circuit_probe').length)
+        .toBeGreaterThan(before);
+    });
+  });
+
+  it('offers no bulk dismissal when nothing is asking for attention', async () => {
+    mockBackend({ runs: [RUN_DONE] });
+    openProbeDestination('circuits');
+
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+    await screen.findByTestId('run-card-11');
+    expect(screen.queryByTestId('history-dismiss-all')).toBeNull();
+  });
+
+  /**
+   * The ledger payload is capped at 50 attention runs per circuit, so counting
+   * it would read "Dismiss 50" while the command acknowledged every outstanding
+   * run on the mesh — including runs the user never saw in the list. The label
+   * must come from the backend's unbounded count.
+   */
+  it('labels the bulk dismissal with the backend count, not the windowed list', async () => {
+    mockBackend({
+      runs: [{ ...RUN_DONE, run: { ...RUN_DONE.run, id: 9, state: 'failed' } }],
+      outstandingAttention: 137,
+    });
+    const user = userEvent.setup();
+    openProbeDestination('circuits');
+
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+
+    // One failed run is loaded, but the mesh genuinely has 137 outstanding.
+    expect(await screen.findByTestId('history-dismiss-all')).toHaveProperty(
+      'textContent',
+      expect.stringContaining('137'),
+    );
+    await user.click(screen.getByTestId('history-dismiss-all'));
+    expect(await screen.findByTestId('history-dismiss-all-confirm')).toHaveProperty(
+      'textContent',
+      expect.stringContaining('137'),
+    );
   });
 
   it('reorders queue ids purely for drag-drop', async () => {

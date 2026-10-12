@@ -830,13 +830,15 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
         "WITH terminal AS ( \
              SELECT r.id, r.circuit_id, r.mesh_id, r.trigger_identity, r.state, \
                     r.context_json, r.source_agent_node_id, r.created_at, r.updated_at, \
+                    r.attention_dismissed_at, \
                     c.is_preset, c.graph_json, ROW_NUMBER() OVER (PARTITION BY r.circuit_id ORDER BY r.id DESC) AS history_rank \
              FROM autopilot_circuit_runs r JOIN autopilot_circuits c ON c.id=r.circuit_id \
              WHERE r.circuit_id IN ({}) \
                AND r.state IN ({}) \
          ), attention_candidates AS ( \
              SELECT DISTINCT terminal.id, terminal.circuit_id, terminal.mesh_id, terminal.trigger_identity, terminal.state, \
-                    terminal.context_json, terminal.source_agent_node_id, terminal.created_at, terminal.updated_at \
+                    terminal.context_json, terminal.source_agent_node_id, terminal.created_at, terminal.updated_at, \
+                    terminal.attention_dismissed_at \
              FROM terminal \
              LEFT JOIN autopilot_circuit_run_steps s ON s.run_id = terminal.id \
              LEFT JOIN agent_node_lifecycle_leases l ON l.node_id = s.agent_node_id \
@@ -848,22 +850,27 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
          ), attention AS ( \
              SELECT attention_candidates.*, ROW_NUMBER() OVER (PARTITION BY circuit_id ORDER BY id DESC) AS attention_rank \
              FROM attention_candidates \
+             WHERE attention_dismissed_at IS NULL \
          ), visible AS ( \
              SELECT id, circuit_id, mesh_id, trigger_identity, state, \
-                    context_json, source_agent_node_id, created_at, updated_at \
+                    context_json, source_agent_node_id, created_at, updated_at, \
+                    attention_dismissed_at \
              FROM autopilot_circuit_runs \
              WHERE circuit_id IN ({}) AND state IN ({}) \
              UNION ALL \
              SELECT id, circuit_id, mesh_id, trigger_identity, state, \
-                    context_json, source_agent_node_id, created_at, updated_at \
+                    context_json, source_agent_node_id, created_at, updated_at, \
+                    attention_dismissed_at \
              FROM terminal WHERE history_rank <= ?1 \
              UNION \
              SELECT id, circuit_id, mesh_id, trigger_identity, state, \
-                    context_json, source_agent_node_id, created_at, updated_at \
+                    context_json, source_agent_node_id, created_at, updated_at, \
+                    attention_dismissed_at \
              FROM attention WHERE attention_rank <= ?2 \
          ) \
          SELECT id, circuit_id, mesh_id, trigger_identity, state, \
-                context_json, source_agent_node_id, created_at, updated_at \
+                context_json, source_agent_node_id, created_at, updated_at, \
+                attention_dismissed_at \
          FROM visible ORDER BY circuit_id, id DESC",
         ids.join(","),
         RunState::SQL_IN_TERMINAL,
@@ -884,6 +891,7 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
                     source_agent_node_id: row.get(6)?,
                     created_at: row.get(7)?,
                     updated_at: row.get(8)?,
+                    attention_dismissed_at: row.get(9)?,
                 })
             },
         )?
@@ -1406,7 +1414,8 @@ pub(crate) fn list_active_circuit_runs_inner(db: &Connection) -> SqlResult<Vec<A
     let mut stmt = db.prepare(
         "SELECT r.id, r.circuit_id, r.mesh_id, r.trigger_identity, r.state, \
                 r.context_json, r.source_agent_node_id, r.created_at, r.updated_at, \
-                c.enabled, COALESCE(snapshot.graph_json, c.graph_json), c.name \
+                c.enabled, COALESCE(snapshot.graph_json, c.graph_json), c.name, \
+                r.attention_dismissed_at \
          FROM autopilot_circuit_runs r \
          JOIN autopilot_circuits c ON c.id = r.circuit_id \
          LEFT JOIN circuit_run_snapshots snapshot ON snapshot.run_id = r.id \
@@ -1425,6 +1434,7 @@ pub(crate) fn list_active_circuit_runs_inner(db: &Connection) -> SqlResult<Vec<A
                 source_agent_node_id: row.get(6)?,
                 created_at: row.get(7)?,
                 updated_at: row.get(8)?,
+                attention_dismissed_at: row.get(12)?,
             },
             circuit_enabled: row.get::<_, i64>(9)? != 0,
             circuit_graph_json: row.get(10)?,
@@ -1447,7 +1457,8 @@ pub(crate) fn list_circuit_runs_inner(
 ) -> SqlResult<Vec<AutopilotCircuitRun>> {
     let mut stmt = db.prepare(
         "SELECT id, circuit_id, mesh_id, trigger_identity, state, \
-                context_json, source_agent_node_id, created_at, updated_at \
+                context_json, source_agent_node_id, created_at, updated_at, \
+                attention_dismissed_at \
          FROM autopilot_circuit_runs WHERE circuit_id = ?1 \
          ORDER BY id DESC LIMIT ?2",
     )?;
@@ -1462,6 +1473,7 @@ pub(crate) fn list_circuit_runs_inner(
             source_agent_node_id: row.get(6)?,
             created_at: row.get(7)?,
             updated_at: row.get(8)?,
+            attention_dismissed_at: row.get(9)?,
         })
     })?;
     rows.collect()
@@ -1526,6 +1538,92 @@ pub fn is_terminal_run_state(state: &str) -> bool {
     crate::circuit::stepper::RunState::from_db_str(state).is_terminal()
 }
 
+/// The outstanding-attention predicate, shared by
+/// [`count_outstanding_circuit_run_attention`] and
+/// [`dismiss_all_circuit_run_attention_inner`].
+///
+/// Both derive their rows from this one string: a count that did not match the
+/// mutation would have the toolbar promising a different number than the command
+/// then acknowledges.
+///
+/// It selects `DISTINCT` run ids. The joins below are one-to-many (a run has
+/// many steps, and the review step is joined across every node in the graph), so
+/// a plain `SELECT r.id` yields one row per matching join combination and
+/// `COUNT(*)` over it would count a three-step run three times. `DISTINCT` keeps
+/// this a set of runs, which is what both callers mean.
+const OUTSTANDING_ATTENTION_RUNS: &str = "\
+             SELECT DISTINCT r.id \
+             FROM autopilot_circuit_runs r \
+             LEFT JOIN autopilot_circuits c ON c.id = r.circuit_id \
+             LEFT JOIN autopilot_circuit_run_steps s ON s.run_id = r.id \
+             LEFT JOIN agent_node_lifecycle_leases l ON l.node_id = s.agent_node_id \
+             LEFT JOIN json_each(CASE WHEN json_valid(c.graph_json) THEN c.graph_json ELSE '{}' END, '$.nodes') \
+                 review_node ON json_extract(review_node.value, '$.type.type') = 'review_verdict' \
+             LEFT JOIN autopilot_circuit_run_steps review_step \
+                 ON review_step.run_id = r.id \
+                AND review_step.node_id = json_extract(review_node.value, '$.id') \
+             WHERE r.mesh_id = ?1 \
+               AND r.attention_dismissed_at IS NULL \
+               AND r.state IN ('completed', 'failed', 'cancelled') \
+               AND (r.state = 'failed' OR l.cleanup_requested = 1 \
+                    OR (review_step.id IS NOT NULL AND COALESCE(review_step.outcome, '') <> 'completed'))";
+
+/// How many runs on this mesh are still asking for attention, unbounded by the
+/// per-circuit history window.
+///
+/// This exists because the Probe's ledger deliberately truncates (50 attention
+/// runs per circuit, so a long-dead circuit cannot stream its whole lifetime),
+/// while "Dismiss all" acknowledges every outstanding run on the mesh. Counting
+/// the ledger payload would understate the confirmation whenever the cap bites.
+pub fn count_outstanding_circuit_run_attention(mesh_id: i64) -> SqlResult<i64> {
+    let db = crate::db::read_conn();
+    count_outstanding_circuit_run_attention_inner(&db, mesh_id)
+}
+
+/// Per-test isolated variant of [`count_outstanding_circuit_run_attention`].
+pub(crate) fn count_outstanding_circuit_run_attention_inner(
+    db: &Connection,
+    mesh_id: i64,
+) -> SqlResult<i64> {
+    db.query_row(
+        &format!("SELECT COUNT(*) FROM ({OUTSTANDING_ATTENTION_RUNS})"),
+        params![mesh_id],
+        |row| row.get(0),
+    )
+}
+
+/// Dismiss attention on every run on one mesh that the backend considers
+/// attention-bearing, returning how many rows changed.
+///
+/// The mesh-wide "Dismiss all" action. It selects rows in SQL against
+/// [`OUTSTANDING_ATTENTION_RUNS`] rather than trusting a caller-supplied id list:
+/// a bulk action over ids the UI derived in TypeScript would silently drift from
+/// the SQL that decides which runs are surfaced. Runs the predicate no longer
+/// matches are left alone, so a run that recovers on its own does not get
+/// stamped with an acknowledgement the user never gave.
+///
+/// Idempotent: already-dismissed runs match no branch and are not re-stamped.
+pub fn dismiss_all_circuit_run_attention(mesh_id: i64) -> SqlResult<usize> {
+    let db = crate::db::write_conn();
+    dismiss_all_circuit_run_attention_inner(&db, mesh_id)
+}
+
+/// Per-test isolated variant of [`dismiss_all_circuit_run_attention`].
+pub(crate) fn dismiss_all_circuit_run_attention_inner(
+    db: &Connection,
+    mesh_id: i64,
+) -> SqlResult<usize> {
+    let now = chrono::Utc::now().timestamp();
+    db.execute(
+        &format!(
+            "UPDATE autopilot_circuit_runs \
+             SET attention_dismissed_at = ?2 \
+             WHERE id IN ({OUTSTANDING_ATTENTION_RUNS})"
+        ),
+        params![mesh_id, now],
+    )
+}
+
 /// One run row by id, or `None` when the id is unknown.
 pub fn get_circuit_run(run_id: i64) -> SqlResult<Option<AutopilotCircuitRun>> {
     let db = crate::db::read_conn();
@@ -1539,7 +1637,8 @@ pub(crate) fn get_circuit_run_inner(
 ) -> SqlResult<Option<AutopilotCircuitRun>> {
     let mut stmt = db.prepare(
         "SELECT id, circuit_id, mesh_id, trigger_identity, state, \
-                context_json, source_agent_node_id, created_at, updated_at \
+                context_json, source_agent_node_id, created_at, updated_at, \
+                attention_dismissed_at \
          FROM autopilot_circuit_runs WHERE id = ?1",
     )?;
     let mut rows = stmt.query_map(params![run_id], |row| {
@@ -1553,6 +1652,7 @@ pub(crate) fn get_circuit_run_inner(
             source_agent_node_id: row.get(6)?,
             created_at: row.get(7)?,
             updated_at: row.get(8)?,
+            attention_dismissed_at: row.get(9)?,
         })
     })?;
     rows.next().transpose()

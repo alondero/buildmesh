@@ -109,3 +109,17 @@ const CHECKPOINT_LABELS: Record<CheckpointAction, string> = {
 export function checkpointActionLabel(action: CheckpointAction): string {
   return CHECKPOINT_LABELS[action];
 }
+
+/**
+ * Does recording this action require evidence?
+ *
+ * A review verdict is a person's judgement about someone else's work, so the
+ * evidence is part of the verdict. Every other recording action is an
+ * acknowledgement of something the operator did themselves — pressing the
+ * button already says it — so the note only annotates the history when they
+ * happen to write one. The backend stores an unattributed action in its own
+ * words rather than refusing it.
+ */
+export function checkpointActionNeedsEvidence(action: CheckpointAction): boolean {
+  return action === 'review_pass' || action === 'review_fail';
+}

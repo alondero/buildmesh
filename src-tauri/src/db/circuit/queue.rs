@@ -20,7 +20,8 @@ pub(crate) fn list_queued_circuit_runs_inner(
 ) -> SqlResult<Vec<(AutopilotCircuitRun, String)>> {
     let mut stmt = db.prepare(
         "SELECT r.id, r.circuit_id, r.mesh_id, r.trigger_identity, r.state, \
-                r.context_json, r.source_agent_node_id, r.created_at, r.updated_at, c.name \
+                r.context_json, r.source_agent_node_id, r.created_at, r.updated_at, c.name, \
+                r.attention_dismissed_at \
          FROM autopilot_circuit_runs r \
          JOIN autopilot_circuits c ON c.id = r.circuit_id \
          WHERE r.mesh_id = ?1 AND r.state = 'pending' \
@@ -38,6 +39,7 @@ pub(crate) fn list_queued_circuit_runs_inner(
                 source_agent_node_id: row.get(6)?,
                 created_at: row.get(7)?,
                 updated_at: row.get(8)?,
+                attention_dismissed_at: row.get(10)?,
             },
             row.get(9)?,
         ))

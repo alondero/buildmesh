@@ -83,6 +83,10 @@ import { recordedLabel } from '../Circuits/runIdentity';
 import { parseRunContext } from '../Circuits/runStepPresentation';
 import { isTerminalRunState } from '../Circuits/circuitVocabulary';
 import {
+  countCircuitRunAttention,
+  dismissAllCircuitRunAttention,
+} from '../../lib/tauri/circuitEvidence';
+import {
   buildCircuitProbeRows,
   annotateCircuitRows,
   circuitActivityStats,
@@ -400,6 +404,16 @@ export function CircuitsProbeTab() {
   const [confirmDeleteCircuitId, setConfirmDeleteCircuitId] = useState<number | null>(null);
   const [historySearch, setHistorySearch] = useState('');
   const [historyAttentionOnly, setHistoryAttentionOnly] = useState(false);
+  const [confirmDismissAllAttention, setConfirmDismissAllAttention] = useState(false);
+  // Backend-computed, unbounded by the ledger's per-circuit window: this is the
+  // number "Dismiss all" will actually acknowledge.
+  //
+  // The mesh id travels with the number because a count only describes the mesh
+  // that produced it. Until the new mesh's fetch lands, the outgoing mesh's count
+  // is still in state, and showing it above the incoming mesh's runs would have
+  // the user confirm a number that is about neither the list nor the action.
+  // `count: null` means the count is not known and the action stays hidden.
+  const [attentionCount, setAttentionCount] = useState<{ meshId: number; count: number | null } | null>(null);
   const [queueSelection, setQueueSelection] = useState<Set<number>>(new Set());
   const [queueVisibleCount, setQueueVisibleCount] = useState(QUEUE_PAGE_SIZE);
   const mountedRef = useRef(false);
@@ -554,7 +568,8 @@ export function CircuitsProbeTab() {
     if (activeMeshId === null) {
       setRows([]);
       setQueue([]);
-      setQueueWaits({});
+setQueueWaits({});
+      setAttentionCount(null);
       setLoadedMeshId(null);
       return;
     }
@@ -563,7 +578,26 @@ export function CircuitsProbeTab() {
       // `limit` bounds ordinary terminal history per circuit; attention
       // (failed / needs-review, up to 50/circuit) and all live runs ride
       // alongside so Activity stays exact while History stays windowed.
-      const snapshot = await listCircuitProbe(activeMeshId, 10);
+      //
+      // The unbounded attention count is fetched alongside it rather than after
+      // it. It cannot come from this payload (attention is windowed at 50 per
+      // circuit), and awaiting it sequentially would render the runs one frame
+      // before their count — a toolbar whose runs are listed but whose bulk
+      // action is missing, then appears.
+      //
+      // If the count fails we deliberately show NO bulk action rather than
+      // falling back to the windowed number: a windowed count here is the exact
+      // understatement this command exists to prevent — the user would confirm
+      // "Dismiss 50" and watch more runs than that get acknowledged. The ledger
+      // still renders; only the action that cannot describe itself honestly is
+      // withheld.
+      const [snapshot, outstanding] = await Promise.all([
+        listCircuitProbe(activeMeshId, 10),
+        countCircuitRunAttention(activeMeshId).catch((err) => {
+          console.error('Failed to count circuit attention:', err);
+          return null;
+        }),
+      ]);
       if (requestId !== loadRequestRef.current) return;
       setRows(snapshot.circuits);
       setQueue(snapshot.queue);
@@ -574,6 +608,7 @@ export function CircuitsProbeTab() {
         for (const id of prev) if (live.has(id)) next.add(id);
         return next;
       });
+      setAttentionCount({ meshId: activeMeshId, count: outstanding });
       setLoadError(null);
       setLoadedMeshId(activeMeshId);
     } catch (err) {
@@ -591,6 +626,18 @@ export function CircuitsProbeTab() {
     // to the outgoing mesh until the new fetch lands, and a focus request must
     // wait for that rather than resolve against stale data.
     setLoadedMeshId(null);
+    // A confirmation armed against the outgoing mesh must not survive the
+    // switch: its number describes runs the user was looking at, while the
+    // handler would act on the incoming mesh.
+    setConfirmDismissAllAttention(false);
+    // Drop the count too. Scoping it to its mesh id stops it rendering over the
+    // wrong mesh, but it does not survive a round trip: if the new mesh's fetch
+    // fails, the count stays in state, and returning to the original mesh makes
+    // its id match again — re-showing a number fetched before that mesh's runs
+    // could have changed, next to a confirmation that would dismiss them.
+    // Invalidating here keeps the control hidden until the current load
+    // supplies a count of its own.
+    setAttentionCount(null);
     void load();
     return () => {
       // Invalidate an in-flight snapshot before a mesh switch or unmount.
@@ -598,10 +645,7 @@ export function CircuitsProbeTab() {
     };
   }, [load]);
 
-  // The worker emits `circuit-run-updated` whenever a run changes state;
-  // reload so a finishing run flips to Completed in place. Debounced so a
-  // batch cancel (single event) or a worker burst (many events) triggers
-  // one snapshot reload, not an N+1 IPC storm.
+  // Live circuit events refresh the snapshot.
   useEffect(() => {
     if (activeMeshId === null) return;
     let disposed = false;
@@ -614,11 +658,24 @@ export function CircuitsProbeTab() {
         if (!disposed) void load();
       }, 200);
     };
-    const unlisten = listen('circuit-run-updated', scheduleLoad);
+    // The worker emits `circuit-run-updated` whenever a run changes state;
+    // reload so a finishing run flips to Completed in place. Debounced so a
+    // batch cancel (single event) or a worker burst (many events) triggers
+    // one snapshot reload, not an N+1 IPC storm.
+    //
+    // `circuit-runs-attention-dismissed` rides the same debounce. A bulk
+    // acknowledgement changes no run state, so no run-updated event accompanies
+    // it and this is the only signal that the count and the acknowledged runs
+    // moved. The acting tab reloads through its own runAction, but a second
+    // window — or any view that did not perform the action — would otherwise
+    // keep showing the old count until something else forced a reload.
+    const unlistenRunUpdated = listen('circuit-run-updated', scheduleLoad);
+    const unlistenAttentionDismissed = listen('circuit-runs-attention-dismissed', scheduleLoad);
     return () => {
       disposed = true;
       if (timer !== null) clearTimeout(timer);
-      void unlisten.then((fn) => fn());
+      void unlistenRunUpdated.then((fn) => fn());
+      void unlistenAttentionDismissed.then((fn) => fn());
     };
   }, [activeMeshId, load]);
 
@@ -686,6 +743,19 @@ export function CircuitsProbeTab() {
 
   const handleQueueMove = (runId: number, direction: 'up' | 'down' | 'top' | 'bottom') =>
     runAction(() => moveCircuitRun(runId, direction), { reloadOnError: true });
+
+  /**
+   * Acknowledge every outstanding attention run on this mesh. The backend picks
+   * the runs in SQL against the same predicate History uses to count them, so
+   * this cannot dismiss more (or fewer) than the number the button advertised.
+   * Dismissing changes no run state — the cards keep their diagnostics, they just
+   * stop sorting first, counting, and matching the Needs-attention filter.
+   */
+  const handleDismissAllAttention = () =>
+    runAction(async () => {
+      if (activeMeshId === null) return;
+      await dismissAllCircuitRunAttention(activeMeshId);
+    });
 
   const handleQueueDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
@@ -821,8 +891,45 @@ export function CircuitsProbeTab() {
               />
               Needs attention ({activityStats.historyAttentionCount})
             </label>
+            {attentionCount?.meshId === activeMeshId && attentionCount.count !== null && attentionCount.count > 0 && (
+              confirmDismissAllAttention ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setConfirmDismissAllAttention(false);
+                      void handleDismissAllAttention();
+                    }}
+                    disabled={busy}
+                    data-testid="history-dismiss-all-confirm"
+                    className="px-1.5 py-0.5 text-2xs rounded-md bg-accent-cyan/15 text-accent-cyan disabled:opacity-40"
+                  >
+                    Dismiss {attentionCount.count}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDismissAllAttention(false)}
+                    disabled={busy}
+                    data-testid="history-dismiss-all-cancel"
+                    className="px-1.5 py-0.5 text-2xs rounded-md text-text-muted disabled:opacity-40"
+                  >
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmDismissAllAttention(true)}
+                  disabled={busy || activeMeshId === null}
+                  data-testid="history-dismiss-all"
+                  title={`Acknowledge all ${attentionCount.count} runs still asking for attention on this mesh. The runs and their diagnostics stay; they stop sorting first and stop counting.`}
+                  className="px-1.5 py-0.5 text-2xs rounded-md text-accent-cyan hover:bg-accent-cyan/10 disabled:opacity-40"
+                >
+                  Dismiss all ({attentionCount.count})
+                </button>
+              )
+            )}
           </div>
-
         </div>
       )}
       {view === 'queue' && queue.length > 0 && (

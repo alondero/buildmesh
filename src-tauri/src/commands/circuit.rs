@@ -72,6 +72,38 @@ pub fn circuit_run_attention(
     crate::db::circuit::evidence::attention(run_id)
 }
 
+/// How many runs on this mesh are still asking for attention.
+///
+/// Counted against the same unbounded predicate `dismiss_all_circuit_run_attention`
+/// updates, not against the Probe's per-circuit ledger window, so the toolbar's
+/// confirmation names every run the command will touch.
+#[command]
+pub fn count_circuit_run_attention(mesh_id: i64) -> Result<i64, String> {
+    crate::db::count_outstanding_circuit_run_attention(mesh_id).map_err(|e| e.to_string())
+}
+
+/// Acknowledge every outstanding attention run on a mesh — the History tab's
+/// "Dismiss all (N)". Returns how many runs changed so the UI can report the
+/// real number instead of an optimistic one.
+///
+/// Selection happens in SQL against the same predicate that decides which runs
+/// are surfaced, keeping it in step with what History called attention.
+#[command]
+pub fn dismiss_all_circuit_run_attention(app: AppHandle, mesh_id: i64) -> Result<usize, String> {
+    let changed =
+        crate::db::dismiss_all_circuit_run_attention(mesh_id).map_err(|e| e.to_string())?;
+    if changed > 0 {
+        let _ = app.emit(
+            "circuit-runs-attention-dismissed",
+            crate::services::circuit_worker::CircuitRunAttentionDismissedPayload {
+                mesh_id,
+                changed,
+            },
+        );
+    }
+    Ok(changed)
+}
+
 /// Retry a failed run's failed step, or record that the person finished it, and
 /// reopen the run. The worker is woken so it re-enters the queue promptly.
 #[command]

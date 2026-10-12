@@ -16,8 +16,7 @@ use std::path::Path;
 pub(crate) fn create_review_activity_fixture(name: &str) -> Result<Value, String> {
     let mesh = crate::services::mesh::create_test(name).map_err(|error| error.to_string())?;
     let mesh_path = mesh.path.clone();
-    let result = create_review_activity_rows(mesh.id, &mesh);
-    match result {
+    match create_review_activity_rows(mesh.id, &mesh) {
         Ok(data) => Ok(data),
         Err(error) => match teardown_fixture(mesh.id, &mesh_path) {
             Ok(()) => Err(error),
@@ -27,6 +26,61 @@ pub(crate) fn create_review_activity_fixture(name: &str) -> Result<Value, String
             )),
         },
     }
+}
+
+/// Create a backlog of terminal runs that still ask for attention, for the
+/// real-runtime History-toolbar screenshot.
+///
+/// `create_review_activity_fixture` only ever produces **completed** runs, so the
+/// derived attention predicate is false for all of them and the History toolbar
+/// renders with nothing to acknowledge. This one terminalises runs as `failed`
+/// through the same production seams (`create_circuit_run` +
+/// `commit_circuit_advance`), so the Probe shows a genuine backlog and the
+/// "Dismiss all (N)" control appears with a real count.
+///
+/// No agent process or worktree is created, and no run is ever admitted by the
+/// worker: the run is terminal in its first commit.
+pub(crate) fn create_attention_backlog_fixture(name: &str, count: i64) -> Result<Value, String> {
+    let count = count.clamp(1, 200);
+    let mesh = crate::services::mesh::create_test(name).map_err(|error| error.to_string())?;
+    let mesh_path = mesh.path.clone();
+    match create_attention_backlog_rows(mesh.id, count) {
+        Ok(data) => Ok(data),
+        Err(error) => match teardown_fixture(mesh.id, &mesh_path) {
+            Ok(()) => Err(error),
+            Err(cleanup_error) => Err(format!(
+                "{}; fixture cleanup failed: {}",
+                error, cleanup_error
+            )),
+        },
+    }
+}
+
+fn create_attention_backlog_rows(mesh_id: i64, count: i64) -> Result<Value, String> {
+    let circuit = crate::db::create_autopilot_circuit(
+        mesh_id,
+        &format!("Attention backlog {count}"),
+        "Real-runtime History toolbar fixture",
+        &crate::circuit::model::CircuitGraph::walking_skeleton("examine the failing step")
+            .to_json()
+            .map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+
+    for index in 0..count {
+        let run_id = crate::db::create_circuit_run(
+            circuit.id,
+            mesh_id,
+            &format!("issue:{index}:ready-for-agent"),
+            "{}",
+        )
+        .map_err(|error| error.to_string())?;
+        // A failed terminal state is what the derived attention predicate reads.
+        crate::db::commit_circuit_advance(run_id, Some("failed"), None, &[])
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(serde_json::json!({ "mesh_id": mesh_id, "circuit": circuit.id, "runs": count }))
 }
 
 fn create_review_activity_rows(mesh_id: i64, mesh: &crate::models::Mesh) -> Result<Value, String> {

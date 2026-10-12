@@ -10,6 +10,7 @@ import type { RecordedClassification } from '../../types/generated/RecordedClass
 import type { ObservedWorkFact } from '../../types/generated/ObservedWorkFact';
 import { ledgerTimestampMs } from './circuitGraphModel';
 import { historyTitle, splitHistory, stepReference } from './historyPresentation';
+import { checkpointActionNeedsEvidence } from './runNextSteps';
 import { formatWallClock } from './runIdentity';
 
 /** Wall-clock time of one entry; the raw stamp stays on the element's `title`. */
@@ -235,7 +236,7 @@ export function CircuitEvidenceHistory({ runId, updatedAt, nodeLabel }: {
   }, [runId, updatedAt, open, refresh]);
 
   async function record(step: CircuitCheckpoint, action: CheckpointAction) {
-    if (rows === null || pending || reason.trim() === '') return;
+    if (rows === null || pending) return;
     setPending(true);
     setError(null);
     try {
@@ -259,14 +260,14 @@ export function CircuitEvidenceHistory({ runId, updatedAt, nodeLabel }: {
       {checkpoints.length > 0 && <div className="space-y-2">
         <p>Inspect the agent or external result, then choose how to continue. Record completed advances this step without replaying its action.</p>
         <p>For a staged prompt, submit it in the agent terminal first. Record completed only after confirming it was accepted.</p>
-        <p>Completion does not grant review approval. Explicit review decisions are recorded as human verdicts.</p>
-        <label className="block">Reason and supporting evidence
-          <textarea value={reason} onChange={(event) => setReason(event.target.value)} disabled={pending}
-            className="block w-full min-w-0 rounded-sm border border-border-subtle bg-bg-card p-1" />
-        </label>
-        {checkpoints.map((step) => <fieldset key={step.node_id} disabled={pending || rows === null || reason.trim() === ''} className="flex flex-wrap gap-2">
+<p>Completion does not grant review approval. Explicit review decisions are recorded as human verdicts.</p>
+        <label htmlFor="evidence-reason" className="block">Reason and supporting evidence</label>
+        <p className="text-text-muted">Optional, and recorded in the run history when given — except for a review verdict, which needs evidence. The backend stores an unattributed action in its own words rather than refusing it.</p>
+        <textarea id="evidence-reason" value={reason} onChange={(event) => setReason(event.target.value)} disabled={pending}
+          className="block w-full min-w-0 rounded-sm border border-border-subtle bg-bg-card p-1" />
+        {checkpoints.map((step) => <fieldset key={step.node_id} disabled={pending || rows === null} className="flex flex-wrap gap-2">
           <legend>{step.node_id}</legend>
-          {step.actions.map((action) => <button key={action} type="button" disabled={pending || reason.trim() === ''} className="text-accent-cyan disabled:opacity-50" onClick={() => void record(step, action)}>
+          {step.actions.map((action) => <button key={action} type="button" disabled={pending || (checkpointActionNeedsEvidence(action) && reason.trim() === '')} className="text-accent-cyan disabled:opacity-50" onClick={() => void record(step, action)}>
             {{ completed: 'Record completed', not_performed: 'Record not performed', retry: 'Retry as new attempt', recheck: 'Recheck evidence', review_pass: 'Review passed', review_fail: 'Request changes' }[action]}
           </button>)}
         </fieldset>)}
