@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { changedPaths, completion, fingerprint, runGate, scopePaths, verify, waitForVerify } from '../../scripts/harness.mjs';
 import { executedTests, gateReads, planGates, touchedFormatDiffs } from '../../scripts/harness-plan.mjs';
 import { acquireSlot, heavyGateEnv, heavyGateLimit, runPlan, slotHolders } from '../../scripts/harness-lanes.mjs';
-import { conptyPrerequisite, gatePassed, isolatedCommand, isolateTests, knownFlakes, reportsRuntimeError, rustFailures, validateFlakeIssues, vitestReport } from '../../scripts/harness-test-failures.mjs';
+import { conptyPrerequisite, gatePassed, isolatedCommand, isolateTests, knownFlakes, readTestReport, reportsRuntimeError, rustFailures, validateFlakeIssues, vitestReport } from '../../scripts/harness-test-failures.mjs';
 import { VERSION as CONPTY_VERSION } from '../../scripts/prepare-conpty.mjs';
 
 const script = fileURLToPath(new URL('../../scripts/harness.mjs', import.meta.url));
@@ -244,6 +244,46 @@ test('does NOT leak an unhandled rejection on a failing blur save', () => {
   assert.equal(reportsRuntimeError(readFileSync(row.log, 'utf8')), false, 'a passing test title is not a runtime error');
   assert.equal(row.count, 1);
   assert.equal(row.outcome, 'PASS', JSON.stringify(row));
+});
+
+test('a listed flake named after a runtime error can still be accepted (#2204)', async t => {
+  // The same root cause reached isolation. `scripts/harness.mjs` computes an
+  // isolated rerun's `matched` as `... && !report.unattributed`, so under the old
+  // phrase scan a test whose NAME mentioned an unhandled rejection always reported
+  // unattributed and could never be accepted as a listed flake — it failed again
+  // in isolation, however clean that rerun was. Driven through the real
+  // `readTestReport` and `isolateTests` rather than a hand-copied `matched`.
+  const fixture = repo(t);
+  const name = 'ProjectSettingsTab does NOT leak an unhandled rejection on a failing blur save';
+  const id = `tests/unit/example.test.ts > ${name}`;
+  const reportPath = join(fixture.cwd, 'report.json');
+  // What the default reporter emits for a one-test run of that name: the title,
+  // and nothing that is actually an error section.
+  const output = [
+    '',
+    ' RUN  v4.1.11',
+    '',
+    ` ✓ tests/unit/example.test.ts (1 test) 3ms`,
+    `     ✓ ${name}  3ms`,
+    '',
+    ' Test Files  1 passed (1)',
+    '      Tests  1 passed (1)',
+  ].join('\n');
+  fixture.put('report.json', JSON.stringify({
+    numPassedTests: 1,
+    numFailedTests: 0,
+    testResults: [{ name: join(fixture.cwd, 'tests/unit/example.test.ts'), status: 'passed', assertionResults: [{ fullName: name, status: 'passed' }] }],
+  }));
+
+  const parsed = readTestReport(fixture.cwd, 'vitest', reportPath, output);
+  assert.equal(parsed.unattributed, false, `a passing test title is not a runtime error:\n${output}`);
+  const rerun = { exitCode: 0, count: parsed.count, matched: !parsed.unattributed };
+  const row = await isolateTests(fixture.cwd, { failures: [{ id, file: 'tests/unit/example.test.ts', name }] }, async () => rerun, { [id]: 2204 });
+
+  assert.equal(row.outcome, 'FLAKY');
+  assert.equal(row.failures[0].outcome, 'FLAKY');
+  assert.equal(row.failures[0].issue, 2204);
+  assert.equal(gatePassed(row), true);
 });
 
 test('real Cargo gate names a suite failure and reruns just that library test', async t => {
