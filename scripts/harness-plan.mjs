@@ -22,7 +22,40 @@ const FRONTEND_BUILD_IGNORES = [DOCS, '^src-tauri/'];
 export const VITEST_READS_FROM_SRC_TAURI = ['capabilities/', 'Cargo\\.', 'tauri[^/]*\\.json$', 'src/(?:commands/|http/routes/|lib\\.rs$|agent/provider/adapters/opencode_attention_plugin\\.js$)'];
 const FRONTEND_TEST_IGNORES = ['^docs/(?!brand/)', `^src-tauri/(?!(?:${VITEST_READS_FROM_SRC_TAURI.join('|')}))`];
 const RUST_IGNORES = [DOCS, '^android/', '^tests/'];
-const NODE_CHECK_IGNORES = [DOCS];
+
+// The contract-test gates read far less of the tree than they used to claim, so
+// they can be skipped when nothing they read has changed (issue #2221). Each
+// list below was audited from the tests and the scripts they import; a gate that
+// reads a path it does not list here is re-run too often, and a gate that lists
+// a path it does read can reuse a stale PASS. Both are bugs, so the lists are
+// conservative and `tests/agent-infra/harness.test.mjs` pins the mapping.
+//
+// - agent-tests reads the harness itself: `scripts/**`, `.claude/**`,
+//   `.agents/**`, `.github/**` (workflows, actions, the pin allowlist, the
+//   rustsec exceptions), the manifests, `tests/**` (harness.test.mjs reads every
+//   `.ts/.tsx/.mjs` under tests/unit, tests/integration, tests/e2e and
+//   tests/setup), and `docs/agents/self-review.md`, which self-review.test.mjs
+//   digests. That last file is why `docs/` cannot be ignored wholesale.
+// - docs-tests reads all of `docs/**` plus every `src-tauri/src/**/*.rs`
+//   (git2-ownership), `package.json`, the generated bindings, and the existence
+//   of every path a skill or Markdown link names — so it keeps reading the whole
+//   tree and stays unconditional.
+// - readme-tests reads exactly three files, so it skips on almost everything.
+// - lint-tests and lint-fixtures share one list: the ESLint config, the two
+//   deliberate hook-rule violation fixtures, and the checker itself.
+const AGENT_TEST_IGNORES = [
+  '^docs/(?!agents/self-review\\.md$)',
+  '^src/',
+  '^android/',
+  '^src-tauri/(?!Cargo\\.(?:toml|lock)$|tauri\\.conf\\.json$)',
+  '^(?:README|CONTEXT|CLAUDE|CONTRIBUTING|SECURITY|CODE_OF_CONDUCT)\\.md$',
+  '^eslint\\.config\\.js$',
+  '^tsconfig[^/]*\\.json$',
+  '^(?:vite|vitest|playwright)[^/]*\\.config\\.ts$',
+  '^index\\.html$',
+];
+const README_TEST_IGNORES = ['^(?!README\\.md$|src/types/generated/(?:Provider\\.ts|HarnessCapabilitiesTable\\.json)$)'];
+const LINT_FIXTURE_IGNORES = ['^(?!tests/lint-fixtures/|eslint\\.config\\.js$|scripts/check-eslint-fixtures\\.mjs$)'];
 
 // Whether `path` is an input of `gate`. Paths use forward slashes.
 export function gateReads(gate, path) {
@@ -51,6 +84,14 @@ export function planGates(paths, { full = false } = {}) {
   const gates = [];
   const node = (id, args, options = {}) => gates.push({ id, command: ['node', ...args], minutes: 5, ...options });
   const npm = (id, script, options = {}) => gates.push({ id, command: ['npm', 'run', script], minutes: 5, ...options });
+  // A contract-test gate joins the plan only when a changed path is one of its
+  // inputs. A gate with no `ignores` reads the whole tree, so `gateReads` is
+  // true for every path and it stays unconditional (issue #2221). `--full` and
+  // an empty diff run the whole plan rather than trusting a narrowed list.
+  const scoped = (id, script, options = {}) => {
+    const gate = { id, command: ['npm', 'run', script], minutes: 5, ...options };
+    if (full || !paths.length || paths.some(path => gateReads(gate, path))) gates.push(gate);
+  };
   node('whitespace', ['scripts/harness.mjs', 'gate', 'whitespace']);
   node('staged-content', ['scripts/harness.mjs', 'gate', 'staging']);
   node('agent-rules', ['scripts/check-agent-diff.mjs', '--base', '$BASE']);
@@ -58,13 +99,13 @@ export function planGates(paths, { full = false } = {}) {
   node('readme', ['scripts/check-readme-drift.mjs']);
   node('process-spawns', ['scripts/check-process-spawn-discipline.mjs']);
   node('known-flakes', ['scripts/harness.mjs', 'gate', 'flakes']);
-  npm('agent-tests', 'test:agent', { tests: 'node', ignores: NODE_CHECK_IGNORES });
-  npm('docs-tests', 'test:docs', { tests: 'node' });
-  npm('readme-tests', 'test:readme', { tests: 'node' });
-  npm('lint-tests', 'test:lint', { tests: 'node', ignores: [DOCS, '^src-tauri/'] });
+  scoped('agent-tests', 'test:agent', { tests: 'node', ignores: AGENT_TEST_IGNORES });
+  scoped('docs-tests', 'test:docs', { tests: 'node' });
+  scoped('readme-tests', 'test:readme', { tests: 'node', ignores: README_TEST_IGNORES });
+  scoped('lint-tests', 'test:lint', { tests: 'node', ignores: LINT_FIXTURE_IGNORES });
   // ESLint already ignores docs/** and src-tauri/**; the Rust sources are not linted.
   npm('lint', 'lint', { ignores: [DOCS, '^src-tauri/'] });
-  npm('lint-fixtures', 'lint:fixtures', { ignores: [DOCS, '^src-tauri/'] });
+  scoped('lint-fixtures', 'lint:fixtures', { ignores: LINT_FIXTURE_IGNORES });
   if (paths.some(path => path.startsWith('android/') || /^scripts\/check-android(?:-live)?\.mjs$/.test(path) || path === '.github/workflows/android.yml')) {
     node('android', ['scripts/check-android.mjs'], { minutes: 25, tests: 'android' });
   }
@@ -114,7 +155,7 @@ export function touchedFormatDiffs(output, paths) {
 }
 
 export function isHarnessPath(path) {
-  return /^(?:scripts\/harness(?:-plan|-lanes|-vitest-isolate)?\.mjs|scripts\/self-review\.mjs|scripts\/known-flakes\.json|scripts\/harness-corpus\.json|scripts\/ci\/run-guarded\.mjs|tests\/agent-infra\/|\.claude\/|\.agents\/|\.github\/PULL_REQUEST_TEMPLATE\.md$)/.test(path);
+  return /^(?:scripts\/harness(?:-plan|-lanes|-check|-vitest-isolate)?\.mjs|scripts\/self-review\.mjs|scripts\/known-flakes\.json|scripts\/harness-corpus\.json|scripts\/ci\/run-guarded\.mjs|tests\/agent-infra\/|\.claude\/|\.agents\/|\.github\/PULL_REQUEST_TEMPLATE\.md$)/.test(path);
 }
 
 export function executedTests(kind, output) {

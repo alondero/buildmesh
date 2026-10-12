@@ -11,8 +11,9 @@ import { executedTests, gateReads, planGates, touchedFormatDiffs } from './harne
 import { acquireSlot, heavyGateEnv, heavyGateLimit, runPlan } from './harness-lanes.mjs';
 import { selfReviewReport } from './self-review.mjs';
 import { conptyPrerequisite, failureLines, gatePassed, isolatedCommand, isolateTests, knownFlakes, readTestReport, validateFlakeIssues } from './harness-test-failures.mjs';
+import { fastGates, planChecks } from './harness-check.mjs';
 
-const USAGE = 'harness start --spec <json> | update --spec <json> | status | metrics | verify [--base <commit>] [--full] | wait [--max-seconds <n>] | finish | evaluate [--case <id>] | checkpoint | record-rollback --ref <commit>';
+const USAGE = 'harness start --spec <json> | update --spec <json> | status | metrics | check [--base <commit>] | verify [--base <commit>] [--full] | wait [--max-seconds <n>] | finish | evaluate [--case <id>] | checkpoint | record-rollback --ref <commit>';
 const EXIT = { PASS: 0, FAIL: 1, FLAKY: 1, BLOCKED: 2, TIMEOUT: 124 };
 const statePath = (root, name) => join(root, '.harness', name);
 const git = (root, ...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -338,7 +339,14 @@ function classify(gate, code, output, paths) {
   }
   if (code !== 0) return { outcome: 'FAIL', reason: 'Command failed. See the gate log; failure attribution is unverified.' };
   const count = gate.tests ? executedTests(gate.tests, output) : null;
-  if (gate.tests && !count) return { outcome: 'FAIL', count: 0, reason: 'No passing tests were executed (or the reporter format is unrecognised).' };
+  // A required gate that executed nothing is a failure, because the suite that
+  // had to run did not. `vitest --changed` is different: it selects tests by
+  // what the diff touches, so "nothing related" is a normal answer rather than a
+  // missing run, and a scoped check says so instead of crying wolf (issue #2221).
+  // Only the advisory scoped check sets `emptyOk`; npm run verify never does.
+  if (gate.tests && !count) return gate.emptyOk
+    ? { outcome: 'PASS', count: 0, reason: 'No test is related to this diff; npm run verify still runs the full suite.' }
+    : { outcome: 'FAIL', count: 0, reason: 'No passing tests were executed (or the reporter format is unrecognised).' };
   if (gate.warnings) {
     const diagnostics = output.split('\n').flatMap(line => {
       try { const message = JSON.parse(line); return message.reason === 'compiler-message' && message.message.level === 'warning' ? [message.message] : []; } catch { return []; }
@@ -607,10 +615,7 @@ async function hook(root, payload) {
       const tree = fingerprint(root, task.base);
       if (readJson(statePath(root, 'fast.json'))?.tree === tree) return;
       const paths = changedPaths(root, task.base);
-      const gates = [{ id: 'fast-agent-rules', command: ['node', 'scripts/check-agent-diff.mjs', '--base', '$BASE'], minutes: 1 }];
-      const lintable = paths.filter(path => /^(?:src|tests|scripts)\/.+\.(?:tsx?|m?js)$/.test(path) && !path.startsWith('src/types/generated/') && !path.startsWith('tests/lint-fixtures/') && existsSync(join(root, path)));
-      if (lintable.length) gates.push({ id: 'fast-lint', command: ['node', 'node_modules/eslint/bin/eslint.js', '--max-warnings', '0', ...lintable], minutes: 2 });
-      if (paths.some(path => /^src\/.+\.tsx?$/.test(path))) gates.push({ id: 'fast-types', command: ['node', 'node_modules/typescript/bin/tsc', '--noEmit'], minutes: 2 });
+      const gates = fastGates(paths, { exists: path => existsSync(join(root, path)) });
       const results = [];
       for (const gate of gates) {
         const result = await runGate(root, gate, task.base, paths);
@@ -643,6 +648,28 @@ async function hook(root, payload) {
       console.log(JSON.stringify({ decision: 'block', reason: `${result.outcome}: ${result.reason} Complete verification and evidence, or report an incomplete handoff with this diagnostic.${escape} Do not claim success.` }));
     }
   }
+}
+async function check(root, requestedBase) {
+  // The scoped check is advisory: it writes no receipt and takes no `lock`, so
+  // it can run beside a verify. Completion evidence is still `npm run verify`.
+  const ref = requestedBase ?? taskAt(root)?.base;
+  if (!ref) throw new Error('BLOCKED: start a task or provide --base <commit>.');
+  const base = resolveBase(root, ref);
+  const paths = changedPaths(root, base);
+  const { checks, rust } = planChecks(paths, { exists: path => existsSync(join(root, path)) });
+  console.log(`Scoped check against ${base.slice(0, 12)}: ${paths.length} changed path(s), ${checks.length} check(s).`);
+  if (rust.unscoped.length) console.log(`No module filter covers ${rust.unscoped.join(', ')}; running the whole lib suite.`);
+  if (rust.modules.length) console.log(`Rust modules: ${rust.modules.join(', ')}`);
+  const rows = [];
+  for (const gate of checks) {
+    const row = await runGate(root, gate, base, paths);
+    rows.push({ ...row, module: gate.module });
+    console.log(`${row.outcome} ${row.id}${row.module ? ` [${row.module}]` : ''}${row.count != null ? ` (${row.count} tests)` : ''}${row.reason ? `: ${row.reason}` : ''}${row.outcome !== 'PASS' && row.log ? `\n  ${row.log}` : ''}`);
+  }
+  const outcome = rows.find(row => !gatePassed(row))?.outcome ?? 'PASS';
+  const executed = rows.reduce((sum, row) => sum + (row.count ?? 0), 0);
+  console.log(`${outcome}: ${rows.filter(row => row.outcome === 'PASS').length}/${rows.length} scoped checks passed, ${executed} test(s) executed. A scoped check is not completion evidence; run npm run verify before finishing.`);
+  return { outcome, rows };
 }
 async function internalGate(root, name) {
   if (name === 'flakes') {
@@ -700,7 +727,6 @@ async function main() {
       process.exitCode = EXIT[result.outcome];
       return;
     }
-    release = lock(root, 'lock', options.action);
     process.env.NODE_ENV = 'test';
     process.env.NO_COLOR = '1';
     delete process.env.FORCE_COLOR;
@@ -708,6 +734,18 @@ async function main() {
     // Match the existing Windows wrapper's native tool selection.
     if (process.platform === 'win32' && existsSync('C:/Program Files/Git/cmd/git.exe')) process.env.PATH = `C:/Program Files/Git/cmd;C:/Program Files/Git/usr/bin;${process.env.PATH}`;
     let result;
+    // The scoped check is advisory, so it deliberately runs without the task
+    // lock and writes no receipt: a developer can invoke it while a verify of
+    // the same worktree holds `.harness/lock`.
+    if (options.action === 'check') {
+      // Expanding scope is `verify --full`; silently ignoring the flag here would
+      // report a narrow run as if it were the whole plan.
+      if (options.full) throw new Error('BLOCKED: --full expands npm run verify, not the scoped check. Run npm run verify -- --full.');
+      result = await check(root, options.base);
+      process.exitCode = EXIT[result.outcome];
+      return;
+    }
+    release = lock(root, 'lock', options.action);
     if (options.action === 'start' || options.action === 'update') {
       if (!options.spec) throw new Error(USAGE);
       result = (options.action === 'start' ? start : update)(root, readJson(resolve(options.spec)));
