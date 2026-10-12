@@ -441,8 +441,11 @@ clipboard text through the terminal connection.
 Select text in an agent's terminal and right-click it to hand that selection on
 from the context menu:
 
-- **Handover to new Node** spawns another agent on the Mesh, pre-filled with the
-  selection as its first turn.
+- **Handover to new Node** creates another agent on the Mesh only when that
+  harness can take an initial prompt, and pre-fills it with the selection as
+  its first turn. If the harness cannot take one, the action refuses and
+  leaves the source terminal as it is. Choose a harness that accepts a
+  first-turn prompt.
 - **Handover to node** sends the selection to an agent you already have. The text
   is staged as a single paste and then submitted, exactly as if you had pasted it
   and pressed Enter — so a multi-line review report arrives as one prompt instead
@@ -796,6 +799,7 @@ answer there too.
 
 **Probe spawn prompts** (Settings → Prompts) customise the initial prompt
 for agents spawned from the Probe's GitHub Issues and Pull Requests tabs.
+The node is created only when that harness can take an initial prompt.
 The built-in templates appear as editable text, so you can adjust their wording
 directly. Changes save when you leave the editor. Click a placeholder button to
 insert it at the cursor or replace selected text; each button explains its value
@@ -939,7 +943,8 @@ to GitHub Issues and its Archive, plus a button to start an empty agent.
 **Capture** saves an idea draft on this phone as you type. Choose a mesh and
 an available agent (your choices are remembered on this phone), then select **Start working on this**. The idea becomes
 the new agent's initial prompt. Saved launch configurations are available;
-only agents supporting initial prompts are offered. A failed launch retains
+only agents supporting initial prompts are offered. Desktop uses the same rule
+for a prompted new node, a handover, and an issue or pull-request spawn. A failed launch retains
 the draft. If the connection drops during launch, check Work before retrying:
 the desktop may have accepted the request. Drafts are local to the browser,
 are not a desktop backlog, and disappear when site data is cleared.

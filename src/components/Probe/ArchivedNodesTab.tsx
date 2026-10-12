@@ -37,10 +37,10 @@
  * `activePath` resolves to the focused node's working directory (a
  * worktree subdir) when a node is active, but `discover_agent_nodes`
  * walks `.claude/projects/<project>/sessions-index.json` from the
- * *mesh root* — the same place `import_discovered_agent_node` needs
- * to attach the imported node to. The probe context hook exposes
- * `activeMeshPath` for exactly this case; we don't reach into
- * `meshesById` directly.
+ * mesh root. Import attaches the node to the path stored on the mesh
+ * row, so the path passed with the import is not that directory.
+ * The probe context hook exposes `activeMeshPath` for the discovery
+ * walk; we don't reach into `meshesById` directly.
  */
 
 import { formatError } from '../../lib/errorUtils';
