@@ -6,20 +6,17 @@
 </h1>
 
 Run AI coding agents side by side in persistent terminals, with Git worktrees keeping their changes apart.
-
-Buildmesh is Windows early access: you bring the agent CLIs; updates are minisign-signed; installers are not OS-code-signed, so SmartScreen warnings are expected.
+If you use Claude Code / Antigravity / OpenCode from your shell and find yourself `tmux`-ing, copy-pasting between tabs, or losing context when a long-running agent restarts — Buildmesh is what that should look like.
 
 | Agent grid | Spawn menu | Changed files |
 |---|---|---|
 | [![Coding sessions side by side in the Buildmesh grid](docs/media/v1.4.0/grid.png)](docs/media/v1.4.0/grid.png) | [![Choose an installed agent CLI from the Buildmesh spawn menu](docs/media/v1.4.0/spawn-menu.png)](docs/media/v1.4.0/spawn-menu.png) | [![Inspect changed files and a Git diff in Buildmesh](docs/media/v1.4.0/changed-files.png)](docs/media/v1.4.0/changed-files.png) |
 
+Buildmesh is a Tauri desktop app for orchestrating multiple AI coding agents — **Claude Code, Codex, Antigravity, OpenCode, Cursor, Grok Code, Kimi Code, MiniMax Code, DeepSeek Harness, Command Code, Freebuff, Cline, Meta Muse**, and a plain **Terminal** harness — across multiple meshes at the same time. It runs each agent as a durable process in a persistent xterm.js terminal, isolates work via Git worktrees, and exposes a tiled grid view so you can orchestrate them all at once.
+
 ![45-second walkthrough of Buildmesh](docs/media/v1.4.0/buildmesh-demo.gif)
 
 [Watch the full-resolution video](docs/media/v1.4.0/buildmesh-demo.mp4) · [Start here / how to report](https://github.com/alondero/buildmesh/discussions/2251)
-
-Buildmesh is a Tauri desktop app for orchestrating multiple AI coding agents — **Claude Code, Codex, Antigravity, OpenCode, Cursor, Grok Code, Kimi Code, MiniMax Code, DeepSeek Harness, Command Code, Freebuff, Cline, Meta Muse**, and a plain **Terminal** harness — across multiple meshes at the same time. It runs each agent as a durable process in a persistent xterm.js terminal, isolates work via Git worktrees, and exposes a tiled grid view so you can orchestrate them all at once.
-
-If you use Claude Code / Antigravity / OpenCode from your shell and find yourself `tmux`-ing, copy-pasting between tabs, or losing context when a long-running agent restarts — Buildmesh is what that should look like.
 
 [![Build](https://github.com/alondero/buildmesh/actions/workflows/build.yml/badge.svg)](https://github.com/alondero/buildmesh/actions/workflows/build.yml)
 [![Latest release](https://img.shields.io/github/v/release/alondero/buildmesh?display_name=tag)](https://github.com/alondero/buildmesh/releases/latest)
@@ -31,10 +28,6 @@ If you use Claude Code / Antigravity / OpenCode from your shell and find yoursel
 - **Contributors:** read the [developer guide](docs/development/README.md) and [contribution contract](CONTRIBUTING.md).
 - **Maintainers:** use the [release guide](docs/development/releasing.md), [release notes](docs/releases/README.md), and [documentation standards](docs/documentation-standards.md).
 
-## Install Buildmesh
-
-Buildmesh ships as a Windows installer through GitHub Releases and is upgraded in place by the in-app updater. Each release publishes an updater feed, and every update is verified with the app's own minisign signature before it installs. OS code-signing is **not** in place yet, so first launch shows a SmartScreen / Gatekeeper warning — see [SmartScreen & Gatekeeper warnings](#smartscreen--gatekeeper-warnings-unsigned-installers).
-
 ### Download
 
 Grab the latest installer from the [GitHub Releases page](https://github.com/alondero/buildmesh/releases/latest). Each Windows release publishes **two** installers (pick whichever you prefer):
@@ -45,6 +38,10 @@ Grab the latest installer from the [GitHub Releases page](https://github.com/alo
 | `Buildmesh_<version>_x64_en-US.msi` | Windows Installer `.msi` | MSI deployment; per-machine install. |
 
 Each installer ships with its matching `.sig` (the **auto-updater** signature — see [Upgrade](#upgrade)) and a `latest.json` updater feed; existing installs read that feed to detect new releases.
+
+## Install Buildmesh
+
+Buildmesh ships as a Windows installer through GitHub Releases and is upgraded in place by the in-app updater. Each release publishes an updater feed, and every update is verified with the app's own minisign signature before it installs. OS code-signing is **not** in place yet, so first launch shows a SmartScreen / Gatekeeper warning — see [SmartScreen & Gatekeeper warnings](#smartscreen--gatekeeper-warnings-unsigned-installers).
 
 ### Supported platforms
 
