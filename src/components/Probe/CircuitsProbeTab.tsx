@@ -578,7 +578,26 @@ setQueueWaits({});
       // `limit` bounds ordinary terminal history per circuit; attention
       // (failed / needs-review, up to 50/circuit) and all live runs ride
       // alongside so Activity stays exact while History stays windowed.
-      const snapshot = await listCircuitProbe(activeMeshId, 10);
+      //
+      // The unbounded attention count is fetched alongside it rather than after
+      // it. It cannot come from this payload (attention is windowed at 50 per
+      // circuit), and awaiting it sequentially would render the runs one frame
+      // before their count — a toolbar whose runs are listed but whose bulk
+      // action is missing, then appears.
+      //
+      // If the count fails we deliberately show NO bulk action rather than
+      // falling back to the windowed number: a windowed count here is the exact
+      // understatement this command exists to prevent — the user would confirm
+      // "Dismiss 50" and watch more runs than that get acknowledged. The ledger
+      // still renders; only the action that cannot describe itself honestly is
+      // withheld.
+      const [snapshot, outstanding] = await Promise.all([
+        listCircuitProbe(activeMeshId, 10),
+        countCircuitRunAttention(activeMeshId).catch((err) => {
+          console.error('Failed to count circuit attention:', err);
+          return null;
+        }),
+      ]);
       if (requestId !== loadRequestRef.current) return;
       setRows(snapshot.circuits);
       setQueue(snapshot.queue);
@@ -589,23 +608,6 @@ setQueueWaits({});
         for (const id of prev) if (live.has(id)) next.add(id);
         return next;
       });
-      // The ledger payload is windowed (attention rides up to 50/circuit), so it
-      // cannot count what "Dismiss all" will touch. Ask the backend for the
-      // unbounded number instead.
-      //
-      // If that fails we deliberately show NO bulk action rather than falling
-      // back to the windowed count: a windowed number here is the exact
-      // understatement this count exists to prevent — the user would confirm
-      // "Dismiss 50" and watch more runs than that get acknowledged. The ledger
-      // we already read still renders; only the action that cannot describe
-      // itself honestly is withheld.
-      let outstanding: number | null = null;
-      try {
-        outstanding = await countCircuitRunAttention(activeMeshId);
-      } catch (err) {
-        console.error('Failed to count circuit attention:', err);
-      }
-      if (requestId !== loadRequestRef.current) return;
       setAttentionCount({ meshId: activeMeshId, count: outstanding });
       setLoadError(null);
       setLoadedMeshId(activeMeshId);
@@ -643,10 +645,7 @@ setQueueWaits({});
     };
   }, [load]);
 
-  // The worker emits `circuit-run-updated` whenever a run changes state;
-  // reload so a finishing run flips to Completed in place. Debounced so a
-  // batch cancel (single event) or a worker burst (many events) triggers
-  // one snapshot reload, not an N+1 IPC storm.
+  // Live circuit events refresh the snapshot.
   useEffect(() => {
     if (activeMeshId === null) return;
     let disposed = false;
@@ -659,11 +658,24 @@ setQueueWaits({});
         if (!disposed) void load();
       }, 200);
     };
-    const unlisten = listen('circuit-run-updated', scheduleLoad);
+    // The worker emits `circuit-run-updated` whenever a run changes state;
+    // reload so a finishing run flips to Completed in place. Debounced so a
+    // batch cancel (single event) or a worker burst (many events) triggers
+    // one snapshot reload, not an N+1 IPC storm.
+    //
+    // `circuit-runs-attention-dismissed` rides the same debounce. A bulk
+    // acknowledgement changes no run state, so no run-updated event accompanies
+    // it and this is the only signal that the count and the acknowledged runs
+    // moved. The acting tab reloads through its own runAction, but a second
+    // window — or any view that did not perform the action — would otherwise
+    // keep showing the old count until something else forced a reload.
+    const unlistenRunUpdated = listen('circuit-run-updated', scheduleLoad);
+    const unlistenAttentionDismissed = listen('circuit-runs-attention-dismissed', scheduleLoad);
     return () => {
       disposed = true;
       if (timer !== null) clearTimeout(timer);
-      void unlisten.then((fn) => fn());
+      void unlistenRunUpdated.then((fn) => fn());
+      void unlistenAttentionDismissed.then((fn) => fn());
     };
   }, [activeMeshId, load]);
 

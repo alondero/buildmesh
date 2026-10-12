@@ -983,7 +983,7 @@ fn circuit_review_verdict_upgrade_preserves_saved_overrides_and_is_repeatable() 
 /// Dismissal is an acknowledgement, not a rewrite: the run keeps its failure and
 /// its ledger row, and only stops being *outstanding*.
 #[test]
-fn dismissing_attention_leaves_the_failed_run_intact_and_is_reversible() {
+fn dismissing_attention_leaves_the_failed_run_intact_and_is_idempotent() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "dismiss", "/tmp/dismiss").unwrap();
     let circuit =
@@ -1000,7 +1000,7 @@ fn dismissing_attention_leaves_the_failed_run_intact_and_is_reversible() {
     );
 
     assert_eq!(
-        dismiss_circuit_run_attention_inner(&conn, run, true).unwrap(),
+        dismiss_all_circuit_run_attention_inner(&conn, mesh.id).unwrap(),
         1
     );
     let dismissed = stored(&conn);
@@ -1017,24 +1017,15 @@ fn dismissing_attention_leaves_the_failed_run_intact_and_is_reversible() {
         "dismissing attention must not touch the run's state or identity"
     );
 
-    // Idempotent: a second click keeps the original "first seen" stamp rather
-    // than moving it, so the recorded acknowledgement stays meaningful.
+    // Idempotent: a second pass must not move the original "first seen" stamp,
+    // so the recorded acknowledgement stays meaningful.
     let first = dismissed.attention_dismissed_at;
     assert_eq!(
-        dismiss_circuit_run_attention_inner(&conn, run, true).unwrap(),
-        1
+        dismiss_all_circuit_run_attention_inner(&conn, mesh.id).unwrap(),
+        0,
+        "an already-acknowledged run matches no branch"
     );
     assert_eq!(stored(&conn).attention_dismissed_at, first);
-
-    assert_eq!(
-        dismiss_circuit_run_attention_inner(&conn, run, false).unwrap(),
-        1
-    );
-    assert_eq!(
-        stored(&conn).attention_dismissed_at,
-        None,
-        "clearing the acknowledgement restores the attention"
-    );
     assert_eq!(
         stored(&conn).state,
         "failed",
@@ -1265,7 +1256,7 @@ fn dismissed_attention_stops_outranking_the_ordinary_history_window() {
         "an undismissed failed run is force-surfaced beyond the ordinary window"
     );
 
-    dismiss_circuit_run_attention_inner(&conn, old, true).unwrap();
+    dismiss_all_circuit_run_attention_inner(&conn, mesh.id).unwrap();
 
     assert!(
         !visible_ids(&conn).contains(&old),

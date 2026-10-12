@@ -59,10 +59,12 @@ pub struct AutopilotCircuitRun {
     pub created_at: String,
     pub updated_at: String,
     /// Unix seconds at which the user acknowledged this run's attention, or
-    /// `None` when it is still outstanding. Attention is derived from state,
-    /// verdict and step status; this records only that the user has seen the
-    /// remainder and needs nothing further. It changes no run state, and
-    /// clearing it back to `None` restores the attention.
+    /// `None` when it is still outstanding — `None` is the default for a new
+    /// run, so "never acknowledged" and "still needs attention" are the same
+    /// state. Attention is derived from state, verdict and step status; this
+    /// records only that the user has seen the remainder and needs nothing
+    /// further. It changes no run state. There is no command that writes it
+    /// back to `None`: the acknowledgement is one-way.
     #[ts(as = "Option<i32>")]
     pub attention_dismissed_at: Option<i64>,
 }

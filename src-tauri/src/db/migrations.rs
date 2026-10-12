@@ -160,7 +160,8 @@ use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
 /// has already handled a run by hand had no way to say so. A non-NULL value is
 /// the user's acknowledgement that the remaining attention is understood; it
 /// suppresses the attention filter/count/sort while leaving run state, steps and
-/// verdicts as they were. Clearing it back to NULL restores the attention.
+/// verdicts as they were. NULL is the default and means "still outstanding";
+/// nothing writes it back.
 pub(crate) const SCHEMA_VERSION: u32 = 48;
 
 // ---------------------------------------------------------------------------

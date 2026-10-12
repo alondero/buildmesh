@@ -207,8 +207,7 @@ queueWaits?: Record<string, string>;
       cmd === 'cancel_circuit_runs' ||
       cmd === 'move_circuit_run' ||
       cmd === 'reorder_circuit_queue' ||
-      cmd === 'approve_circuit_step' ||
-      cmd === 'dismiss_circuit_run_attention'
+      cmd === 'approve_circuit_step'
     ) {
       return Promise.resolve(args && cmd === 'create_circuit' ? CIRCUIT : undefined);
     }
@@ -997,7 +996,6 @@ describe('CircuitsProbeTab', () => {
     await waitFor(() => {
       expect(screen.queryByTestId('history-dismiss-all')).toBeNull();
     });
-    expect(invoke).not.toHaveBeenCalledWith('dismiss_all_circuit_run_attention', { meshId: 42 });
   });
 
   it('discards an armed confirmation when the mesh changes', async () => {
@@ -1023,6 +1021,30 @@ describe('CircuitsProbeTab', () => {
     // a number whose action would now target mesh 43.
     await waitFor(() => {
       expect(screen.queryByTestId('history-dismiss-all-confirm')).toBeNull();
+    });
+  });
+
+  /**
+   * A bulk acknowledgement changes no run state, so no `circuit-run-updated`
+   * event accompanies it. Without this subscription a second window — or any
+   * view that did not perform the clearing — would keep showing the old count
+   * and the now-acknowledged runs.
+   */
+  it('refreshes when attention is acknowledged elsewhere', async () => {
+    mockBackend({ runs: [RUN_DONE] });
+    openProbeDestination('circuits');
+    await waitFor(() => expect(vi.mocked(listen)).toHaveBeenCalledWith(
+      'circuit-runs-attention-dismissed',
+      expect.any(Function),
+    ));
+
+    const before = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'list_circuit_probe').length;
+    await act(async () => {
+      await emit('circuit-runs-attention-dismissed', { mesh_id: MESH.id, changed: 3 });
+    });
+    await waitFor(() => {
+      expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'list_circuit_probe').length)
+        .toBeGreaterThan(before);
     });
   });
 

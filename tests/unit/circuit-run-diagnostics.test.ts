@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Tests for the circuit run-diagnostics helpers (issue #1468) â€” the
  * plain-English reading of a run's ledger that the Probe's run cards render.
  *

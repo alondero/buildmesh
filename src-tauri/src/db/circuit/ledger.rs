@@ -1538,39 +1538,6 @@ pub fn is_terminal_run_state(state: &str) -> bool {
     crate::circuit::stepper::RunState::from_db_str(state).is_terminal()
 }
 
-/// Dismiss (or un-dismiss) one run's attention. This is a pure
-/// acknowledgement: it writes only `attention_dismissed_at` and leaves state,
-/// steps and review verdicts untouched, so the card keeps reporting the real
-/// reason it needs attention while the run stops being *outstanding*.
-///
-/// Idempotent by construction — re-dismissing keeps the original timestamp, so
-/// the recorded acknowledgement reads as "when the user first saw it", not "when
-/// they last clicked". Returns the number of rows changed (0 when the id is
-/// unknown or already in the requested state).
-pub fn dismiss_circuit_run_attention(run_id: i64, dismissed: bool) -> SqlResult<usize> {
-    let db = crate::db::write_conn();
-    dismiss_circuit_run_attention_inner(&db, run_id, dismissed)
-}
-
-/// Per-test isolated variant of [`dismiss_circuit_run_attention`].
-pub(crate) fn dismiss_circuit_run_attention_inner(
-    db: &Connection,
-    run_id: i64,
-    dismissed: bool,
-) -> SqlResult<usize> {
-    // One statement carries both directions so the flip cannot half-apply: a
-    // true flag stamps "now" (and keeps an existing stamp, so the recorded
-    // acknowledgement stays "when the user first saw it"), while a false one
-    // collapses to NULL to restore attention.
-    Ok(db.execute(
-        "UPDATE autopilot_circuit_runs \
-         SET attention_dismissed_at = CASE WHEN ?3 = 1 THEN COALESCE(attention_dismissed_at, ?2) \
-                                        ELSE NULL END \
-         WHERE id = ?1",
-        params![run_id, chrono::Utc::now().timestamp(), dismissed as i64],
-    )?)
-}
-
 /// The outstanding-attention predicate, shared by
 /// [`count_outstanding_circuit_run_attention`] and
 /// [`dismiss_all_circuit_run_attention_inner`].
@@ -1618,11 +1585,11 @@ pub(crate) fn count_outstanding_circuit_run_attention_inner(
     db: &Connection,
     mesh_id: i64,
 ) -> SqlResult<i64> {
-    Ok(db.query_row(
+    db.query_row(
         &format!("SELECT COUNT(*) FROM ({OUTSTANDING_ATTENTION_RUNS})"),
         params![mesh_id],
         |row| row.get(0),
-    )?)
+    )
 }
 
 /// Dismiss attention on every run on one mesh that the backend considers
@@ -1647,14 +1614,14 @@ pub(crate) fn dismiss_all_circuit_run_attention_inner(
     mesh_id: i64,
 ) -> SqlResult<usize> {
     let now = chrono::Utc::now().timestamp();
-    Ok(db.execute(
+    db.execute(
         &format!(
             "UPDATE autopilot_circuit_runs \
              SET attention_dismissed_at = ?2 \
              WHERE id IN ({OUTSTANDING_ATTENTION_RUNS})"
         ),
         params![mesh_id, now],
-    )?)
+    )
 }
 
 /// One run row by id, or `None` when the id is unknown.
