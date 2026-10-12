@@ -2610,35 +2610,8 @@ mod tests {
         let _ = watcher.join();
     }
 
-    // -----------------------------------------------------------------------
-    // provider_is_plain_terminal attention-signal tests (issue #535 / #550)
-    //
-    // These pin the per-provider attention-cleared gating without driving
-    // `write_to_agent`'s full PTY path. A plain terminal's Enter is just
-    // shell input — flipping status to `Running` would render a spurious
-    // cyan badge for a shell sitting at a prompt, so we skip the
-    // `attention-cleared` emit (and the `Running` status flip) for
-    // Terminal-typed nodes.
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn plain_terminal_provider_skips_attention_signals() {
-        // The "terminal" harness id resolves to the plain-shell executor.
-        assert!(provider_is_plain_terminal("terminal"));
-    }
-
-    #[test]
-    fn llm_providers_do_emit_attention_signals() {
-        // Every non-terminal harness id resolves to an LLM executor, so none skip
-        // attention signals. "minimax"/"kimi" are legacy ids that now resolve to
-        // the Anthropic executor (still an LLM, still not plain-terminal).
-        for id in ["anthropic", "minimax", "kimi", "agy", "opencode", "codex"] {
-            assert!(
-                !provider_is_plain_terminal(id),
-                "LLM provider {id:?} should not skip attention signals"
-            );
-        }
-    }
+    // The shell rule (issue #535 / #550) is pinned where it lives, in
+    // `session_lifecycle::on_user_submitted`'s tests.
 
     /// Submitting a prompt must publish the stored `work_resumed` envelope.
     /// The legacy attention-clear event has no status, so a desktop that
@@ -2646,7 +2619,7 @@ mod tests {
     #[test]
     fn submitted_input_publishes_the_running_lifecycle() {
         let blocking = crate::agent::session_lifecycle::testing::RecordingSink::new();
-        let payload = crate::agent::session_lifecycle::commit_user_resumed(&blocking, 7)
+        let payload = crate::agent::session_lifecycle::on_user_submitted(&blocking, 7)
             .unwrap()
             .expect("a live row accepts the resume");
         let desktop = crate::agent::session_lifecycle::testing::RecordingSink::new();
@@ -2666,14 +2639,13 @@ mod tests {
         assert_eq!(*desktop.attention_cleared(), vec![7]);
     }
 
-    /// Regression test for the sync core: an unregistered session must short-
-    /// circuit on the PTY write before the DB read. Without the `?` ordering
-    /// the unit-test DB-not-initialised panic surfaces as a test failure.
-    /// The full PTY-write + DB-update path needs a registered agent
-    /// (real `portable_pty` handles) and is covered by integration tests.
+    /// An unregistered session must fail on the PTY write, before any DB read
+    /// could run (`write_to_agent` writes first and only then asks the
+    /// lifecycle). The full PTY-write + DB-update path needs a registered
+    /// agent (real `portable_pty` handles) and is covered by integration tests.
     #[test]
-    fn write_to_agent_blocking_unknown_session_short_circuits_before_db() {
-        let result = write_to_agent_blocking(999_999_999, "x".to_string());
+    fn writing_to_an_unknown_session_fails_on_the_pty_write() {
+        let result = PROCESS_REGISTRY.write_input(999_999_999, b"x");
         let err = result.expect_err("unknown session must surface an error");
         assert!(
             err.contains("Agent not running"),
@@ -2799,20 +2771,16 @@ pub(crate) fn publish_submitted_input(
 
 /// Commit a submitted keystroke's resume on the blocking pool.
 ///
-/// Plain-shell providers have no LLM attention state to clear — a shell's
-/// Enter is just shell input, and flipping status to `Running` would render
-/// a spurious "Running" badge for a shell sitting at a prompt (issue #535).
-/// Returns the stored envelope so the async caller can publish it. `None`
-/// means the keystroke was shell input, or the row rejected the transition.
-/// A commit error is logged and treated as "nothing to publish": the PTY
-/// bytes were already accepted.
+/// `session_lifecycle::on_user_submitted` decides whether the submission
+/// resumes anything (a plain shell's Enter does not — issue #535). Returns the
+/// stored envelope so the async caller can publish it. `None` means the
+/// keystroke was shell input, or the row rejected the transition. A commit
+/// error is logged and treated as "nothing to publish": the PTY bytes were
+/// already accepted.
 pub(crate) fn write_to_agent_signal_blocking(
     session_id: i64,
 ) -> Result<Option<crate::agent::session_lifecycle::LifecycleChangedPayload>, String> {
-    if should_skip_attention_signals(session_id) {
-        return Ok(None);
-    }
-    match crate::agent::session_lifecycle::commit_user_resumed(
+    match crate::agent::session_lifecycle::on_user_submitted(
         &crate::agent::session_lifecycle::DbOnlySink,
         session_id,
     ) {
@@ -2822,52 +2790,6 @@ pub(crate) fn write_to_agent_signal_blocking(
             Ok(None)
         }
     }
-}
-
-/// Sync core for [`write_to_agent`] — **legacy combined entry point**
-/// retained for the existing test suite and for any future mobile HTTP
-/// route that wants to mirror the identical behaviour in one call. New
-/// IPC callers should use [`write_to_agent`] directly (which splits the
-/// fast PTY write from the slow DB work) — issue #1122.
-///
-/// PTY write happens first; a failed write must NOT claim "user input
-/// accepted" — the reader thread's exit-detector would see no signal for
-/// the dead child, and the status flip would land on a session that
-/// never received the byte.
-#[cfg(test)]
-pub(crate) fn write_to_agent_blocking(session_id: i64, data: String) -> Result<bool, String> {
-    let outcome = PROCESS_REGISTRY.write_input(session_id, data.as_bytes())?;
-    if outcome.activity.user_input {
-        crate::attention_autoclear::disarm(session_id);
-    }
-    let should_signal = outcome.is_accepted()
-        && outcome.activity.submitted
-        && !should_skip_attention_signals(session_id);
-    if should_signal {
-        session_lifecycle::on_attention_cleared(&session_lifecycle::DbOnlySink, session_id).ok();
-    }
-    Ok(should_signal)
-}
-
-/// Returns true if a newline in `write_to_agent` should NOT flip the
-/// node to `Running` and should NOT emit `attention-cleared`. A plain
-/// terminal's "Enter" is just shell input — the node has no LLM
-/// attention state to clear, and flipping status would render a
-/// spurious cyan "Running" badge for a shell sitting at a prompt.
-pub(super) fn should_skip_attention_signals(session_id: i64) -> bool {
-    db::get_agent_node_by_id(session_id)
-        .ok()
-        .map(|n| provider_is_plain_terminal(&n.provider))
-        .unwrap_or(false)
-}
-
-/// Whether the stored harness id resolves to a plain shell. Resolving through
-/// the harness profile (not just the legacy enum) ensures a node spawned via
-/// the **Terminal profile** still skips LLM attention signals (issue #535).
-pub(super) fn provider_is_plain_terminal(provider: &str) -> bool {
-    crate::preferences::resolve_harness_provider(provider)
-        .adapter()
-        .is_plain_terminal()
 }
 
 #[command]

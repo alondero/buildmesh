@@ -220,8 +220,8 @@ impl<T: DriveTarget> AgentDriver for PtyDriver<T> {
         }
         // A plain terminal has no LLM attention state to clear; flipping it to
         // Running would paint a spurious "Running" badge on a shell sitting at a
-        // prompt. This mirrors the desktop write path's
-        // `agent::process::should_skip_attention_signals` guard.
+        // prompt. This is the same rule `session_lifecycle::on_user_submitted`
+        // applies to the desktop and mobile input paths.
         if !self.target.is_plain_terminal(node_id) {
             self.target.clear_attention(node_id);
         }
@@ -248,13 +248,7 @@ impl DriveTarget for RegistryTarget {
     }
 
     fn is_plain_terminal(&self, node_id: i64) -> bool {
-        crate::db::get_agent_node_by_id(node_id)
-            .map(|n| {
-                crate::preferences::resolve_harness_provider(&n.provider)
-                    .adapter()
-                    .is_plain_terminal()
-            })
-            .unwrap_or(false)
+        crate::agent::session_lifecycle::node_is_plain_terminal(node_id)
     }
 
     fn clear_attention(&self, node_id: i64) {

@@ -1104,10 +1104,9 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
 // The deep module owns `kill_agent` / `kill_agent_blocking` /
 // `kill_all_sessions` (renamed from `kill_all_agents` for naming consistency
 // with `kill_session`) / `resize_agent` / `write_to_agent` /
-// `write_to_agent_signal_blocking` / `write_to_agent_blocking` (cfg(test)) /
+// `write_to_agent_signal_blocking` /
 // `send_to_agent` / `is_agent_running` / `AgentDebugState` /
-// `debug_list_agents` / `CrashSnapshot` / `debug_crash_snapshot` plus the
-// `should_skip_attention_signals` / `provider_is_plain_terminal` helpers.
+// `debug_list_agents` / `CrashSnapshot` / `debug_crash_snapshot`.
 // The dependency arrow from `services::agent_node.rs` and `agent::spawn.rs`
 // (the inverted calls #1052 closes) now points at
 // `agent::process::kill_agent` directly.
