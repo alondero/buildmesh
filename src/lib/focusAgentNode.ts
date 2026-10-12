@@ -1,7 +1,4 @@
-import { useAgentNodeStore } from '../stores/agentNodeStore';
-import { useMeshStore } from '../stores/meshStore';
-import { useNodeActivityStore } from '../stores/nodeActivityStore';
-import { useUIStore } from '../stores/uiStore';
+import { focusNode } from './navigation';
 
 /**
  * Canonical "take me to this agent node" transition. Selects the owning mesh,
@@ -14,10 +11,5 @@ import { useUIStore } from '../stores/uiStore';
  * silently doing nothing.
  */
 export function focusAgentNode(nodeId: number): boolean {
-  const node = useAgentNodeStore.getState().nodesById[nodeId];
-  if (node === undefined) return false;
-  useMeshStore.getState().selectMesh(node.mesh_id);
-  useNodeActivityStore.getState().activateNode(nodeId);
-  useUIStore.getState().setViewMode('single');
-  return true;
+  return focusNode(nodeId, { view: 'single' });
 }

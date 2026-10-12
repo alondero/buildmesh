@@ -2,6 +2,7 @@ import { useState, useRef, useMemo, useCallback } from 'react';
 import { useMeshStore } from '../../stores/meshStore';
 import { useAgentNodeStore, useAllAgentNodes, type AgentNode } from '../../stores/agentNodeStore';
 import { useNodeActivityStore } from '../../stores/nodeActivityStore';
+import { enterMesh, focusNode } from '../../lib/navigation';
 import { useUIStore } from '../../stores/uiStore';
 import type { Mesh } from '../../stores/meshStore';
 import { useProviderList } from '../../hooks/useProviderList';
@@ -61,7 +62,6 @@ export function Sidebar() {
 
   const meshes = useMeshStore(state => state.meshes);
   const selectedMeshId = useMeshStore(state => state.selectedMeshId);
-  const selectMesh = useMeshStore(state => state.selectMesh);
   const reorderMeshes = useMeshStore(state => state.reorderMeshes);
   const getDefaultProvider = useMeshStore(state => state.getDefaultProvider);
   // Issue #1384 — `useAllAgentNodes` is the canonical derived selector.
@@ -123,7 +123,7 @@ export function Sidebar() {
   // Issue #1748 — `Sidebar` no longer subscribes to `activeNodeId`: each
   // `NodeItem` owns its own active bit, so activating a node re-renders
   // only the rows whose bit flips instead of the whole sidebar.
-  const activateNode = useNodeActivityStore(state => state.activateNode);
+  const activateNode = useCallback((nodeId: number) => { focusNode(nodeId, { view: 'mesh' }); }, []);
   const selectProviderForMesh = useAgentNodeStore(state => state.selectProviderForMesh);
   const deleteAgentNode = useAgentNodeStore(state => state.deleteAgentNode);
   // Issue #376 / #378: open the unified Probe Panel on a specific tab.
@@ -131,11 +131,6 @@ export function Sidebar() {
   // The action reference is stable across renders (zustand), so we bind
   // the tab at the prop site without an extra closure layer.
   const openProbeTab = useUIStore(s => s.openProbeTab);
-  // The one Mesh-scope entrypoint every Mesh click shares (see
-  // `handleSelectMesh`). Read as an action so the stable zustand reference
-  // keeps the memoized `MeshItem` rows skipping (#1748).
-  const enterMeshScope = useUIStore(s => s.enterMeshScope);
-
   // Issue #1264 — the open-id is a pre-prefixed string (built via
   // `dropdownId('mesh', mesh.id)`) so the sidebar spawn picker's
   // `data-dropdown-for` can't collide with a node- or terminal-keyed
@@ -170,28 +165,12 @@ export function Sidebar() {
   useClickOutside<string>(openDropdownFor, () => setOpenDropdownFor(null));
 
   // Issue #1748 — row callbacks are `useCallback`-stable so the memoized
-  // `MeshItem` rows actually skip: `selectMesh`/`openProbeTab`/`activateNode`
-  // are stable zustand actions, and the two pieces of render state read here
+  // `MeshItem` rows actually skip: navigation intents and `openProbeTab`
+  // have stable references, and the two pieces of render state read here
   // (`selectedMeshId`, `openDropdownFor`) go through `getState`/functional
   // updates instead of the dependency array.
   //
-  // Issue #2072 — a Mesh click means "show me this Mesh", never "leave this
-  // Mesh". Re-clicking the highlighted Mesh keeps both halves of the scope:
-  // in Mesh Grid it is a plain no-op, and from a cross-Mesh View Mode it
-  // returns the canvas to that Mesh's grid. All Nodes is the only way out
-  // (it clears the selection inside `setViewMode`). The mesh→mode
-  // subscription below short-circuits on an unchanged selection, so the
-  // restore has to go through the View Mode setter.
-  //
-  // #2070 review — both halves of that ruling now live in one store
-  // operation (`uiStore.enterMeshScope`), because the sidebar, the title-bar
-  // picker and the omnibar each spelled it out and drifted: the picker's copy
-  // called bare `selectMesh`, so re-picking the Mesh in scope there only
-  // closed the panel. A wrapper like the one this handler used to be is the
-  // drift source, not the cure (issue #1002).
-  const handleSelectMesh = useCallback((meshId: number) => {
-    enterMeshScope(meshId);
-  }, [enterMeshScope]);
+  const handleSelectMesh = enterMesh;
   const handleToggleDropdown = useCallback((mesh: Mesh) => {
     const key = dropdownId('mesh', mesh.id);
     setOpenDropdownFor(prev => (prev === key ? null : key));
@@ -207,23 +186,9 @@ export function Sidebar() {
     openProbeTab('files');
   }, [openProbeTab]);
 
-  // #2081 review — the four Mesh-lens destinations below used to call bare
-  // `selectMesh`. A previous pass left them that way on the argument that
-  // they "open a destination rather than entering Mesh scope" — but that
-  // argument is exactly what produced the divergence: opening a Mesh's
-  // properties from Pinned returned the canvas to that Mesh's grid when done
-  // from the command palette (which routes through `enterMeshScope`) and
-  // stayed on Pinned when done from here. Same intent, two outcomes, so all
-  // four now run the same store operation as every other Mesh entrypoint.
-  //
-  // The select-then-open ORDER is load-bearing and unchanged: a Mesh-lens
-  // destination resolves its subject from `selectedMeshId`, so the selection
-  // must land before `openProbeTab` mounts the tab.
-
   const handleOpenPropertiesProbe = useCallback((meshId: number) => {
-    enterMeshScope(meshId);
-    openProbeTab('properties');
-  }, [enterMeshScope, openProbeTab]);
+    enterMesh(meshId, { probeTab: 'properties' });
+  }, []);
 
   // Issue #767 — the drift `!` badge in the sidebar opens the Probe
   // Panel on the 🌳 Worktree Manager tab, where the HealthBlock's
@@ -231,22 +196,19 @@ export function Sidebar() {
   // drifted and needs recovery"; the Properties tab has no such
   // controls, so routing there (the pre-#767 behaviour) was a dead-end.
   const handleOpenWorktreesProbe = useCallback((meshId: number) => {
-    enterMeshScope(meshId);
-    openProbeTab('worktrees');
-  }, [enterMeshScope, openProbeTab]);
+    enterMesh(meshId, { probeTab: 'worktrees' });
+  }, []);
 
   // Issue #378 — the right-click "GitHub Issues" and "Archive" entries
   // open the Probe Panel on the 🐙 / 🕒 tabs respectively. The mesh is
   // scoped first (same dance as the Properties entry point) so
   // `useProbeContext` resolves to the right row before the tab mounts.
   const handleOpenIssuesProbe = useCallback((meshId: number) => {
-    enterMeshScope(meshId);
-    openProbeTab('issues');
-  }, [enterMeshScope, openProbeTab]);
+    enterMesh(meshId, { probeTab: 'issues' });
+  }, []);
   const handleOpenSessionHistoryProbe = useCallback((meshId: number) => {
-    enterMeshScope(meshId);
-    openProbeTab('sessions');
-  }, [enterMeshScope, openProbeTab]);
+    enterMesh(meshId, { probeTab: 'sessions' });
+  }, []);
 
   const handleSelectProvider = useCallback(async (mesh: Mesh, providerId: string, useWorktree?: boolean, configurationId?: string) => {
     setOpenDropdownFor(null);
@@ -259,15 +221,14 @@ export function Sidebar() {
     // The create→activate→select-mesh dance + its rollback contract live in
     // selectProviderForMesh (issue #283); this handler stays a thin UI shim.
     try {
-      const node = await selectProviderForMesh(mesh.id, mesh.name, mesh.path, providerId, useWorktree, undefined, configurationId);
-      activateNode(node.id);
+      await selectProviderForMesh(mesh.id, mesh.name, mesh.path, providerId, useWorktree, undefined, configurationId);
     } catch (e) {
       console.error('Failed to create node:', e);
     } finally {
       spawningMeshRef.current.delete(mesh.id);
       setSpawningMeshIds(new Set(spawningMeshRef.current));
     }
-  }, [selectProviderForMesh, activateNode]);
+  }, [selectProviderForMesh]);
 
   const handleDeleteNode = useCallback(async (e: React.MouseEvent, nodeId: number) => {
     e.stopPropagation();
@@ -351,7 +312,6 @@ export function Sidebar() {
       onOpenSessionHistoryProbe={handleOpenSessionHistoryProbe}
       nodeClusters={clustersByMesh.get(mesh.id) ?? EMPTY_CLUSTERS}
       onActivateNode={activateNode}
-      selectMesh={selectMesh}
       onDeleteNode={handleDeleteNode}
       getDefaultProvider={getDefaultProvider}
     />

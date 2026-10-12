@@ -2,9 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
-import { useNodeActivityStore } from '../../stores/nodeActivityStore';
-import { useMeshStore } from '../../stores/meshStore';
-import { useUIStore } from '../../stores/uiStore';
+import { enterMesh, revealRun } from '../../lib/navigation';
 import { cancelCircuitRun, isAgentRunning, listCircuits, triggerCircuitFromNode } from '../../lib/tauri';
 import type { SpawnOption } from '../../lib/groups';
 import { blocksReviewCircuit } from '../Circuits/harnessCapabilities';
@@ -90,9 +88,7 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
   }, [open, node.mesh_id]);
 
   function showRun() {
-    useMeshStore.getState().selectMesh(node.mesh_id);
-    useNodeActivityStore.getState().activateNode(node.id);
-    useUIStore.getState().openProbeTab('circuits');
+    enterMesh(node.mesh_id, { nodeId: node.id, probeTab: 'circuits' });
   }
 
   // The backend treats whatever reaches it as a launch *selection*: a Launch
@@ -161,8 +157,7 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
               setOpen(false);
               // The Probe follows mesh selection; scope it to this node's mesh
               // so the circuit run is in the loaded snapshot.
-              useMeshStore.getState().selectMesh(node.mesh_id);
-              useUIStore.getState().focusCircuitRun(activeOwnership.run_id);
+              revealRun(node.mesh_id, activeOwnership.run_id);
             }}>
             View circuit run #{activeOwnership.run_id}
           </button>

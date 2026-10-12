@@ -5,6 +5,7 @@ import { AgentReviewButton } from '../../src/components/AgentNodeView/AgentRevie
 import type { SpawnOption } from '../../src/lib/groups';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import { useMeshStore } from '../../src/stores/meshStore';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
 import { useUIStore } from '../../src/stores/uiStore';
 
 const { trigger, list, isRunning } = vi.hoisted(() => ({ trigger: vi.fn(), list: vi.fn(), isRunning: vi.fn() }));
@@ -79,6 +80,7 @@ describe('agent workflow title-bar control', () => {
     // only consulted for transient statuses (pending/spawning).
     isRunning.mockReset().mockResolvedValue(false);
     listConfigurations.mockReset().mockResolvedValue([]);
+    seedAgentNodes([node]);
     useAgentNodeStore.setState({ circuitOwnerships: {} });
     useUIStore.setState({ probeOpen: false, pendingCircuitRunFocus: null });
   });

@@ -13,6 +13,17 @@ The canvas exposes five **View Modes** (wayfinder #982; state model #983; render
 
 The five-segment control is the bespoke `ViewModeSwitcher` in the title bar; the adjacent scope indicator names that scope (the Mesh, or an honest cross-Mesh label carrying an Agent Node count) and doubles as the Mesh picker, so choosing a Mesh is one write that moves the canvas and the Mesh-owned Probe destinations together (#2074, #2077). A search that escapes Mesh scope, and deleting the Mesh the canvas was showing, announce the move instead of changing the view silently (#2076).
 
+`src/lib/navigation.ts` owns desktop navigation across the mesh, agent activity,
+View Mode and Probe stores. `focusNode` can keep the current grid, follow the
+node into its mesh, or solo it; following a node from Single preserves the
+selected grid and its return mode. `enterMesh` restores the chosen mesh grid,
+optionally focusing a node and opening a Probe destination. `revealRun` selects
+the owning mesh before requesting the run in Circuits. Store setters retain
+local invariants, including All Nodes clearing mesh selection; mesh selection
+no longer drives View Mode through a cross-store subscription. Lifecycle
+operations load navigation lazily rather than making the mesh store import
+the UI store during initialization. Mobile navigation is separate.
+
 ## Probe Context Lenses (issue #1456)
 Probe destinations have explicit ownership in `src/lib/probeContext.ts`; the
 complete `PROBE_TAB_DEFINITIONS` record is the source of truth for ownership

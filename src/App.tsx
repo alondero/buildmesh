@@ -22,6 +22,7 @@ import { formatError } from './lib/errorUtils';
 import { runBoot } from './lib/bootSequence';
 import { useMeshStore } from './stores/meshStore';
 import { useAgentNodeStore } from './stores/agentNodeStore';
+import { focusNode } from './lib/navigation';
 import { useNodeActivityStore } from './stores/nodeActivityStore';
 import { useExitPromptStore } from './stores/exitPromptStore';
 import { useUIStore } from './stores/uiStore';
@@ -396,9 +397,7 @@ function App() {
       // one `deriveScope` definition the grid render reads, instead of
       // re-deriving scope here — and with the Mesh fallback chain gone, a Mesh
       // Grid with no selection walks an empty set (there is nothing on screen
-      // to walk). `setActiveNode` only writes `activeNodeId` (not
-      // `selectedMeshId`), so a cross-mesh hop in Pinned/All won't trip the
-      // sidebar-sync subscription back into Mesh mode.
+      // to walk). Focusing within the current grid preserves its mesh scope.
       const activeNode = useAgentNodeStore.getState().getActiveNode();
       if (!activeNode) return;
       // Issue #1384 — `getAgentNodes()` is the store's derived getter; it
@@ -417,7 +416,7 @@ function App() {
       const visibleNodes = groupActivityNodes(scope.visibleNodes, nodeIndex, ownerships, groups);
       const targetId = traversalTargetId(visibleNodes, activityRootId(activeNode.id, nodeIndex, ownerships, groups), direction);
       if (targetId !== null) {
-        useNodeActivityStore.getState().activateNode(targetId);
+        focusNode(targetId);
       }
     };
 

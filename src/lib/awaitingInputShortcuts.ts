@@ -1,5 +1,5 @@
 import { useAgentNodeStore, type AgentNode } from '../stores/agentNodeStore';
-import { useNodeActivityStore } from '../stores/nodeActivityStore';
+import { focusNode } from './navigation';
 
 /**
  * Cycle through agent nodes with `status === 'awaiting_input'` (issue #64).
@@ -89,7 +89,7 @@ export function nextAwaitingNodeId(): number | null {
 export function jumpToNextAwaitingNode(): number | null {
   const nextId = nextAwaitingNodeId();
   if (nextId !== null) {
-    useNodeActivityStore.getState().activateNode(nextId);
+    focusNode(nextId);
   }
   return nextId;
 }

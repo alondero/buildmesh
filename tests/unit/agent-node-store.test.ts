@@ -12,6 +12,7 @@ import {
 import * as api from '../../src/lib/tauri';
 import { attachAgentNodeListeners } from '../../src/stores/agentNodeListeners';
 import { useMeshStore } from '../../src/stores/meshStore';
+import { useUIStore } from '../../src/stores/uiStore';
 import { useWorktreeClosePromptStore } from '../../src/stores/worktreeClosePromptStore';
 import type { WorktreeCloseSafety } from '../../src/lib/worktreeClose';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
@@ -813,6 +814,21 @@ describe('useAgentNodeStore', () => {
     // (issue #283): the create-then-activate-then-select-mesh sequence enforces ONE
     // invariant — "only switch active mesh/node if creation succeeded" — and the
     // invariant lives next to the orchestration, not in each click handler.
+
+    it.each([7, 99])('creation from Single follows the new node with selected mesh %s', async selectedMeshId => {
+      useMeshStore.setState({ selectedMeshId });
+      useUIStore.setState({ viewMode: 'single', lastNonSingleMode: 'mesh', probeOpen: false });
+      mockInvoke.mockResolvedValueOnce({
+        id: 42, mesh_id: 7, name: 'mesh-7', path: '/p', branch: 'main',
+        env: 'windows', provider: 'anthropic', status: 'idle', created_at: '',
+        use_worktree: true, position: 0,
+      });
+      await useAgentNodeStore.getState().selectProviderForMesh(7, 'mesh-7', '/p', 'anthropic');
+      expect(useMeshStore.getState().selectedMeshId).toBe(7);
+      expect(useAgentNodeStore.getState().activeNodeId).toBe(42);
+      expect(useUIStore.getState().viewMode).toBe(selectedMeshId === 7 ? 'single' : 'mesh');
+      expect(useUIStore.getState().probeOpen).toBe(false);
+    });
 
     it('creates the node, then sets it active, then selects the mesh', async () => {
       const newNode = {

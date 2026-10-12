@@ -171,7 +171,6 @@ function stableMeshCallbacks() {
     onOpenIssuesProbe: vi.fn(),
     onOpenSessionHistoryProbe: vi.fn(),
     onActivateNode: vi.fn(),
-    selectMesh: vi.fn(),
     onDeleteNode: vi.fn(),
     getDefaultProvider: vi.fn().mockResolvedValue('anthropic'),
   };

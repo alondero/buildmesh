@@ -498,7 +498,8 @@ describe('CommandOmnibar — command execution routing', () => {
       setViewMode: useUIStore.getState().setViewMode,
       openProbeTab: vi.fn(),
     });
-    expect(useMeshStore.getState().selectedMeshId).toBe(mesh.id);
+    expect(useMeshStore.getState().selectedMeshId).toBeNull();
+    expect(useAgentNodeStore.getState().activeNodeId).toBe(node.id);
     expect(useUIStore.getState().viewMode).toBe('single');
   });
 
@@ -625,7 +626,8 @@ describe('CommandOmnibar — command execution routing', () => {
       openProbeTab,
     });
     expect(useMeshStore.getState().selectedMeshId).toBe(2);
-    expect(openProbeTab).toHaveBeenCalledWith('issues');
+    expect(useUIStore.getState().probeTab).toBe('issues');
+    expect(useUIStore.getState().probeOpen).toBe(true);
   });
 
   it('routes a pull item to its mesh and the Pull Requests tab', () => {
@@ -638,7 +640,8 @@ describe('CommandOmnibar — command execution routing', () => {
       openProbeTab,
     });
     expect(useMeshStore.getState().selectedMeshId).toBe(3);
-    expect(openProbeTab).toHaveBeenCalledWith('pulls');
+    expect(useUIStore.getState().probeTab).toBe('pulls');
+    expect(useUIStore.getState().probeOpen).toBe(true);
     expect(useUIStore.getState().activeDiffFile).toEqual({
       filePath: '',
       rootPath: mesh.path,
@@ -664,7 +667,8 @@ describe('CommandOmnibar — command execution routing', () => {
       openProbeTab,
     });
     expect(useMeshStore.getState().selectedMeshId).toBe(2);
-    expect(openProbeTab).toHaveBeenCalledWith('issues');
+    expect(useUIStore.getState().probeTab).toBe('issues');
+    expect(useUIStore.getState().probeOpen).toBe(true);
   });
 
   it('aligns the canvas with Mesh Grid when the mesh-scoped probe targets the current mesh', () => {
@@ -680,7 +684,8 @@ describe('CommandOmnibar — command execution routing', () => {
       openProbeTab,
     });
     expect(useUIStore.getState().viewMode).toBe('mesh');
-    expect(openProbeTab).toHaveBeenCalledWith('issues');
+    expect(useUIStore.getState().probeTab).toBe('issues');
+    expect(useUIStore.getState().probeOpen).toBe(true);
   });
 
   it('ignores mesh-scoped probe ids with an unknown mesh, tab, or shape', () => {
@@ -822,9 +827,12 @@ describe('CommandOmnibar — go to Mesh entry (issue #2077)', () => {
     // from `selectedMeshId`, so the selection must already be in place when
     // the destination opens.
     const selectedWhenOpened: Array<number | null> = [];
-    const openProbeTab = vi.fn(() => {
-      selectedWhenOpened.push(useMeshStore.getState().selectedMeshId);
+    const unsub = useUIStore.subscribe((state, prev) => {
+      if (state.probeOpen && !prev.probeOpen) {
+        selectedWhenOpened.push(useMeshStore.getState().selectedMeshId);
+      }
     });
+    const openProbeTab = vi.fn();
 
     executeOmnibarItem('probe-in-mesh:issues:2', {
       meshes: [mesh, projectY],
@@ -832,6 +840,7 @@ describe('CommandOmnibar — go to Mesh entry (issue #2077)', () => {
       setViewMode: useUIStore.getState().setViewMode,
       openProbeTab,
     });
+    unsub();
     expect(selectedWhenOpened).toEqual([2]);
 
     const scope = currentScope();
@@ -851,7 +860,7 @@ describe('CommandOmnibar — go to Mesh entry (issue #2077)', () => {
   });
 
   // #2070 review — "enter Mesh scope for Mesh X" is ONE store operation
-  // (`uiStore.enterMeshScope`). These two cases are the omnibar half of that
+  // (`navigation.enterMesh`). These two cases are the omnibar half of that
   // contract: the entry that names a Mesh and the `view-mesh` command must
   // agree with the sidebar and the title-bar picker about what the same
   // selection means.

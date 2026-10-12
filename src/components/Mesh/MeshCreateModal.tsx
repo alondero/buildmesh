@@ -2,6 +2,7 @@ import { formatError } from '../../lib/errorUtils';
 import { useEffect, useRef, useState } from 'react';
 import { Modal, ModalCloseButton } from '../shared/Modal';
 import { MeshColorPicker } from './MeshColorPicker';
+import { enterMesh } from '../../lib/navigation';
 import { useMeshStore } from '../../stores/meshStore';
 import { addToast } from '../../stores/toastStore';
 import { pickMeshFolder } from '../../lib/tauri';
@@ -46,7 +47,6 @@ const PATH_PREVIEW =
 export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps) {
   const createMesh = useMeshStore((s) => s.createMesh);
   const cloneMesh = useMeshStore((s) => s.cloneMesh);
-  const selectMesh = useMeshStore((s) => s.selectMesh);
   // The modal owns its own default-colour derivation (rather than the
   // parent reaching into `useMeshStore.getState().meshes.length`
   // inside the JSX render) so the abstraction boundary is correct —
@@ -121,7 +121,7 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
     if (!stillMounted.current) return;
     setBusy(false);
     if (mesh) {
-      selectMesh(mesh.id);
+      enterMesh(mesh.id);
       onClose();
     } else {
       setError('Failed to create mesh. See logs for details.');
@@ -151,7 +151,7 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
     }
     setBusy(false);
     if ('mesh' in result) {
-      selectMesh(result.mesh.id);
+      enterMesh(result.mesh.id);
       onClose();
     } else {
       setError(result.error);

@@ -403,8 +403,8 @@ interface UIState extends GridControls {
   setDragTargetNodeId: (nodeId: number | null) => void;
 
   // The active canvas View Mode (wayfinder #982 / ticket #983). Persisted
-  // in localStorage (`buildmesh.view-mode`); sidebar mesh selection syncs
-  // it via the subscription at the bottom of this module. What each mode
+  // in localStorage (`buildmesh.view-mode`); navigation intents coordinate
+  // it with mesh and node selection. What each mode
   // renders is decided in `src/lib/viewModes.ts` and `AgentNodeView` (#986).
   viewMode: ViewMode;
   // The grid mode 'single' was most recently entered from — the Escape /
@@ -412,8 +412,7 @@ interface UIState extends GridControls {
   // `setViewMode` whenever a non-single mode is set.
   lastNonSingleMode: NonSingleViewMode;
   // Switch the canvas View Mode. Idempotent: a same-mode call is a no-op
-  // (no subscriber notification, no storage write) so the meshStore
-  // sync subscription can fire freely.
+  // (no subscriber notification, no storage write).
   //
   // When `mode === 'all'`, this action also enforces the All Nodes
   // invariant — `viewMode === 'all' ⟹ selectedMeshId === null` — by
@@ -425,28 +424,6 @@ interface UIState extends GridControls {
   // Leave 'single' for the grid mode it was entered from. No-op when the
   // current mode isn't 'single'.
   exitSingleMode: () => void;
-
-  // ---- Entering Mesh scope (#2070) ----
-  // "Enter Mesh scope for Mesh X", as ONE transition. It lives here, next to
-  // the View Mode setter it drives, because the two halves of the scope -
-  // `selectedMeshId` in meshStore and `viewMode` here - cannot both be owned
-  // by meshStore without a circular import (meshStore already imports this
-  // module; see its header).
-  //
-  // Every entrypoint routes here: the sidebar Mesh row and its Mesh-lens
-  // Probe destinations, the title-bar picker's Mesh rows, the omnibar's
-  // Mesh-scoped routes, and the `view-mesh` command. When the Mesh is
-  // already selected there is no selection change, so the
-  // mesh?mode subscription at the bottom of this file cannot fire - the View
-  // Mode setter is what honours the sticky re-click (#2072). Already in that
-  // Mesh's grid, it is a no-op. All Nodes clears the selection inside
-  // `setViewMode`, so it is never a re-click.
-  //
-  // The parameter is a Mesh id and cannot be null: no code path selects a Mesh
-  // the user did not choose (#2071), and "what to do with nothing selected"
-  // stays an entrypoint decision - the `view-mesh` command asks instead of
-  // guessing.
-  enterMeshScope: (meshId: number) => void;
 
   // ---- Grid Controls (wayfinder #988 / ticket #995) ----
   // The five control fields themselves come from `GridControls`. Every setter
@@ -671,44 +648,19 @@ export const useUIStore = create<UIState>((set, get) => {
     lastNonSingleMode: initialViewMode === 'single' ? 'all' : initialViewMode,
 
     setViewMode: (mode) => {
+      if (mode === 'all' && useMeshStore.getState().selectedMeshId !== null) {
+        useMeshStore.getState().selectMesh(null);
+      }
       if (get().viewMode === mode) return;
       set({
         viewMode: mode,
         lastNonSingleMode: mode === 'single' ? get().lastNonSingleMode : mode,
       });
       persistViewMode(mode);
-      // All Nodes invariant: `viewMode === 'all' ⟹ selectedMeshId === null`.
-      // The reverse is NOT true — a null selection is also valid in
-      // pinned/filtered/single modes. The mesh→mode subscription at the
-      // bottom of this file guards against re-entrancy when this
-      // selectMesh fires it.
-      if (mode === 'all') {
-        const { selectedMeshId, selectMesh } = useMeshStore.getState();
-        if (selectedMeshId !== null) {
-          selectMesh(null);
-        }
-      }
     },
 
     exitSingleMode: () => {
       get().setViewMode(get().lastNonSingleMode);
-    },
-
-    enterMeshScope: (meshId) => {
-      const { selectedMeshId, selectMesh } = useMeshStore.getState();
-      // A different Mesh is a selection change, and the mesh?mode
-      // subscription below turns that into Mesh Grid on its own.
-      if (selectedMeshId !== meshId) {
-        selectMesh(meshId);
-        return;
-      }
-      // The same Mesh again: the subscription short-circuits on an unchanged
-      // selection, so from a cross-Mesh View Mode the canvas would stay
-      // cross-Mesh. Re-picking the Mesh in scope means "take me back to its
-      // grid" (#2072); already there, this is a no-op.
-      if (get().viewMode !== 'mesh') {
-        get().setViewMode('mesh');
-      }
     },
 
     ...initialGridControls,
@@ -792,24 +744,4 @@ export const useUIStore = create<UIState>((set, get) => {
       }
     },
   };
-});
-
-// Sidebar sync — "one filter, two controls" (wayfinder #982 / ticket #983,
-// re-click-deselect → 'all' per ticket #986, removed by #2072). Selecting a
-// mesh in the sidebar switches the canvas to Mesh Grid for that mesh;
-// clearing the selection switches to All Nodes. Pinned mode never writes
-// selectedMeshId, but a sidebar mesh click always means "show me this mesh",
-// so the sync applies in whatever mode the canvas is in.
-//
-// The viewMode-equality guard kills the re-entrant cycle: when
-// `setViewMode('all')` itself calls `selectMesh(null)` (issue #1002), the
-// subscription fires with `state.selectedMeshId === null` and would
-// re-enter `setViewMode('all')`. Checking `viewMode === targetMode`
-// before dispatching short-circuits the re-entry — the mode is already
-// what the sidebar-sync would set it to.
-useMeshStore.subscribe((state, prevState) => {
-  if (state.selectedMeshId === prevState.selectedMeshId) return;
-  const targetMode = state.selectedMeshId === null ? 'all' : 'mesh';
-  if (useUIStore.getState().viewMode === targetMode) return;
-  useUIStore.getState().setViewMode(targetMode);
 });

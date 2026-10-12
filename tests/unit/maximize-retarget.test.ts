@@ -3,15 +3,13 @@
  * retarget the solo view to the clicked node (not exit the solo view, not
  * stick on the previous node). Migrated to View Modes in wayfinder #982
  * (#983): Single mode renders the active node, so the retarget is now
- * just `setActiveNode` — and the handler must NOT call `selectMesh` while
- * in Single, or the uiStore mesh-sync would break the user out of the
- * solo view. This file pins the store-level contract that the click
- * handler in `src/components/Sidebar/MeshItem.tsx` must produce.
+ * handled by the desktop navigation intent.
  *
  * Patterned on `tests/unit/grid-shortcuts.test.ts` — real Zustand stores,
  * imperative calls, no React render.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
+import { focusNode } from '../../src/lib/navigation';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import { useMeshStore } from '../../src/stores/meshStore';
@@ -81,24 +79,12 @@ const mesh10: Mesh = {
 };
 const mesh20: Mesh = { ...mesh10, id: 20, name: 'mesh-20', path: '/repo/c', position: 1 };
 
-/**
- * Simulates exactly what the `onSelect` callback in `MeshItem.tsx` does
- * for a sidebar click. Stays in sync with the production handler — if the
- * call order / set list changes there, this must change too. Keep them
- * visually identical so a reviewer can diff them.
- */
 function clickSidebarNode(node: AgentNode): void {
-  useAgentNodeStore.getState().setActiveNode(node.id);
-  if (useUIStore.getState().viewMode !== 'single') {
-    useMeshStore.getState().selectMesh(node.mesh_id);
-  }
+  focusNode(node.id, { view: 'mesh' });
 }
 
 describe('sidebar click and View Modes (wayfinder #982)', () => {
   beforeEach(() => {
-    // Reset all three stores to a known baseline. meshStore goes FIRST:
-    // the uiStore mesh-subscription fires synchronously on a
-    // selectedMeshId change and would clobber a viewMode set before it.
     useMeshStore.setState({
       meshes: [mesh10, mesh20],
       meshesById: new Map([[10, mesh10], [20, mesh20]]),
@@ -128,12 +114,7 @@ describe('sidebar click and View Modes (wayfinder #982)', () => {
   });
 
   it('cross-mesh retarget: clicking C (different mesh) keeps Single AND keeps the selection', () => {
-    // The View Modes contract (#983): Single shows the active node
-    // regardless of mesh scope — a cross-mesh sidebar click retargets the
-    // solo view without breaking out of it. The handler must skip
-    // selectMesh in Single, or the uiStore mesh-sync would flip the canvas
-    // to Mesh Grid (and move the sidebar selection away from the mesh the
-    // user was browsing).
+    // A cross-mesh click preserves Single and its return scope.
     useMeshStore.setState({ selectedMeshId: mesh10.id });
     useUIStore.setState({ viewMode: 'single', lastNonSingleMode: 'mesh' });
     useAgentNodeStore.setState({ activeNodeId: nodeA.id });
@@ -160,9 +141,6 @@ describe('sidebar click and View Modes (wayfinder #982)', () => {
   });
 
   it('click from a grid mode selects the mesh and flips the canvas to Mesh Grid', () => {
-    // The non-Single path preserves today's behaviour: the click selects
-    // the node's mesh, and the uiStore mesh-sync subscription (one filter,
-    // two controls) flips the canvas to Mesh Grid.
     useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all' });
     useMeshStore.setState({ selectedMeshId: null });
     useAgentNodeStore.setState({ activeNodeId: null });

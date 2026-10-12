@@ -52,6 +52,7 @@ vi.mock('../../src/components/RemoteAccess/RemoteAccessModal', () => ({
 
 import { TitleBar } from '../../src/components/TitleBar/TitleBar';
 import { useUIStore, type ViewMode } from '../../src/stores/uiStore';
+import { enterMesh } from '../../src/lib/navigation';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { type AgentNode } from '../../src/stores/agentNodeStore';
 import { useProbeContext } from '../../src/hooks/useProbeContext';
@@ -611,7 +612,7 @@ describe('TitleBar (bespoke window chrome)', () => {
 
     it('names the derived Mesh when the scope is Mesh-scoped, with a glyph beside the text', async () => {
       act(() => {
-        useMeshStore.getState().selectMesh(1);
+        enterMesh(1);
       });
       await renderTitleBar();
       const trigger = screen.getByTestId('scope-indicator');
@@ -631,7 +632,7 @@ describe('TitleBar (bespoke window chrome)', () => {
       // rather than inventing a label.
       act(() => {
         useMeshStore.setState({ meshes: [MESH_B], meshesById: new Map([[2, MESH_B]]) });
-        useMeshStore.getState().selectMesh(1);
+        enterMesh(1);
       });
       await renderTitleBar();
       expect(screen.getByTestId('scope-indicator').getAttribute('aria-label')).toBe('Mesh #1');
@@ -680,7 +681,7 @@ describe('TitleBar (bespoke window chrome)', () => {
 
     it('keeps the accessible name after the visible label collapses, truncating the name first', async () => {
       act(() => {
-        useMeshStore.getState().selectMesh(1);
+        enterMesh(1);
       });
       await renderTitleBar();
       const label = screen.getByTestId('scope-indicator').querySelector('span');
@@ -715,7 +716,7 @@ describe('TitleBar (bespoke window chrome)', () => {
       // A Mesh-scoped indicator takes the active accent — the same class pair
       // the switcher segment uses for its selected mode.
       act(() => {
-        useMeshStore.getState().selectMesh(1);
+        enterMesh(1);
       });
       const meshScoped = screen.getByTestId('scope-indicator');
       expect(meshScoped.className).toContain('bg-bg-card');
@@ -797,7 +798,7 @@ describe('TitleBar (bespoke window chrome)', () => {
 
       it('marks the selected Mesh as the current scope in the picker', async () => {
         act(() => {
-          useMeshStore.getState().selectMesh(1);
+          enterMesh(1);
         });
         await renderTitleBar();
         fireEvent.click(screen.getByTestId('scope-indicator'));
@@ -810,7 +811,7 @@ describe('TitleBar (bespoke window chrome)', () => {
         const raf = mockRaf();
         try {
           act(() => {
-            useMeshStore.getState().selectMesh(1);
+            enterMesh(1);
           });
           await renderTitleBar();
           const trigger = screen.getByTestId('scope-indicator');
@@ -867,7 +868,7 @@ describe('TitleBar (bespoke window chrome)', () => {
       // #2070 review — the picker used to call bare `selectMesh`, so choosing
       // the Mesh already in scope just closed the panel and left the canvas
       // cross-Mesh, while the sidebar and the omnibar returned it to that
-      // Mesh's grid. All three now run `uiStore.enterMeshScope`, so the same
+      // Mesh's grid. All three now run `navigation.enterMesh`, so the same
       // pick means the same scope everywhere.
       it('returns the canvas to that Mesh Grid when the picker re-picks the Mesh already in scope', async () => {
         const raf = mockRaf();

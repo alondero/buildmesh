@@ -29,7 +29,7 @@ export const useNodeActivityStore = create<{
   groups: NodeGroups;
   groupNodes: (sourceId: number, targetId: number) => void;
   ungroupNode: (nodeId: number) => void;
-  /** Canonical UI navigation transition: focus an agent and its activity. */
+  /** Low-level node/activity selection; desktop navigation lives in lib/navigation. */
   activateNode: (nodeId: number, utility?: boolean, utilityMode?: UtilityMode) => void;
   select: (rootId: number, nodeId: number, utility?: boolean) => void;
   openUtility: (rootId: number, nodeId: number, mode: UtilityMode) => void;
