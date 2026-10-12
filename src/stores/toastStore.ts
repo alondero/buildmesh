@@ -1,97 +1,102 @@
-// Issue #1001 — lift `addToast` from a local App.tsx `useCallback` into a
-// shared Zustand store so any component (not just App.tsx) can surface a
-// user-visible error toast. Before this extraction the only error-toast
-// surface in the app was local to App.tsx, which forced:
-//   - the Issues Probe's trigger-label toggle (#980) to invent inline
-//     error state below the badge as a workaround, and
-//   - `agentNodeStore.deleteAgentNode` (#645) to silently swallow the
-//     rejection into a `state.error` Zustand field no UI watches.
-//
-// The pure helpers (`dedupToasts`, `applyToastCap`, `TOAST_*` constants)
-// stay in `src/lib/toastUtils.ts` so the 17 unit tests covering them
-// continue to assert against the same surface, and so the auto-dismiss /
-// dedup semantics remain trivially correct under React 19 StrictMode
-// (no shared mutable state, `now` is passed in by the caller).
-//
-// The imperative `addToast` / `dismissToast` wrappers below exist for
-// non-React callers — event listeners, store actions, naming-backend
-// callback. They reach the store via `.getState()` under the hood,
-// mirroring the `requestWorktreeCloseAction` pattern at
-// `src/stores/worktreeClosePromptStore.ts:37-42`. React components can
-// either subscribe with `useToastStore((s) => s.toasts)` (for rendering)
-// or call the wrappers directly (for fire-and-forget).
-
 import { create } from 'zustand';
+import { createJSONStorage, persist } from 'zustand/middleware';
 import {
-  applyToastCap,
-  dedupToasts,
-  TOAST_DEDUP_TTL_MS,
-  TOAST_MAX,
-  TOAST_TTL_MS,
-  type Toast,
-  type ToastSeverity,
+  applyToastCap, createToastKey, dedupToasts, TOAST_DEDUP_TTL_MS, TOAST_MAX, TOAST_TTL_MS,
+  type Toast, type ToastSeverity,
 } from '../lib/toastUtils';
+import {
+  limitNotifications, needsAttention, restoreNotifications,
+  type Notification, type WorktreeNotificationAction, type WorktreeNotice,
+} from '../lib/notifications';
 
 interface ToastState {
   toasts: Toast[];
-  addToast: (provider: string, message: string, severity?: ToastSeverity) => void;
+  notifications: Notification[];
+  cleanupLoading: boolean;
+  cleanupError: string | null;
+  worktreeRevision: number;
+  addToast: (provider: string, message: string, severity?: ToastSeverity, action?: WorktreeNotificationAction) => void;
   dismissToast: (id: number) => void;
-  // Drop every toast whose `createdAt` is older than `TOAST_TTL_MS` relative
-  // to `now`. The interval in App.tsx calls this on a 1s tick; the
-  // functional update ensures a dedup-refresh of `createdAt` during the
-  // tick is respected (closing over `toasts` would expire a toast whose
-  // TTL was just reset). The action lives in the store so App.tsx stays
-  // out of the store's data — same convention as every other cross-store
-  // call in the codebase (`.getState().action(...)`).
   dismissExpired: (now: number) => void;
+  markNotificationRead: (id: number) => void;
+  markAllNotificationsRead: () => void;
+  clearReadNotifications: () => void;
+  resolveWorktreeNotification: (path: string, resolution: string) => void;
+  reconcileWorktrees: (entries: WorktreeNotice[], expectedRevision: number) => void;
 }
 
 let nextToastId = 0;
 
-export const useToastStore = create<ToastState>((set) => ({
-  toasts: [],
-  addToast: (provider, message, severity = 'error') => {
-    const now = Date.now();
-    // Functional `set((state) => ...)` is atomic against the current store
-    // snapshot — important under React 19 StrictMode's double-invocation
-    // and for any future caller that calls `addToast` twice in the same
-    // tick (the second call would otherwise race against the first). `now`
-    // is computed once above so createdAt and the dedup comparison reference
-    // the same timestamp. Identity uses a monotonic counter because multiple
-    // calls can share the same millisecond.
-    set((state) => ({
-      toasts: applyToastCap(
-        dedupToasts(
-          state.toasts,
-          { id: ++nextToastId, provider, message, createdAt: now, severity },
-          now,
-          TOAST_DEDUP_TTL_MS,
-        ),
-        TOAST_MAX,
-      ),
-    }));
+// Storage failure must not prevent the toast or recovery state transition.
+let savedHistory: string | null = null;
+const storage = createJSONStorage(() => ({
+  getItem: (name: string) => { try { savedHistory = localStorage.getItem(name); return savedHistory; } catch { return null; } },
+  setItem: (name: string, value: string) => {
+    if (value === savedHistory) return;
+    try { localStorage.setItem(name, value); savedHistory = value; } catch { /* Keep in-memory history. */ }
   },
-  dismissToast: (id) =>
-    set((state) => ({
-      toasts: state.toasts.filter((t) => t.id !== id),
-    })),
-  dismissExpired: (now) =>
-    set((state) => ({
-      toasts: state.toasts.filter((t) => now - t.createdAt < TOAST_TTL_MS),
-    })),
+  removeItem: (name: string) => { try { localStorage.removeItem(name); savedHistory = null; } catch { /* Storage may be unavailable. */ } },
 }));
 
-// Imperative wrappers — non-React callers (event listeners, store
-// actions, naming-backend callback) reach the store via `.getState()`.
-// The default severity is applied in the store action so it lives in
-// exactly one place; the wrapper just forwards `severity` unchanged
-// (undefined falls through to the store's `= 'error'`).
-export function addToast(
-  provider: string,
-  message: string,
-  severity?: ToastSeverity,
-): void {
-  useToastStore.getState().addToast(provider, message, severity);
+export const useToastStore = create<ToastState>()(persist((set) => ({
+  toasts: [], notifications: [], cleanupLoading: false, cleanupError: null, worktreeRevision: 0,
+  addToast: (provider, message, severity = 'error', action) => {
+    const now = Date.now();
+    set(state => {
+      const incoming = { id: ++nextToastId, provider, message, createdAt: now, severity };
+      const merged = dedupToasts(state.toasts, incoming, now, TOAST_DEDUP_TTL_MS);
+      const toast = merged.find(t => t.createdAt === now && createToastKey(t) === createToastKey(incoming))!;
+      const previous = action
+        ? state.notifications.find(n => needsAttention(n) && n.action?.path === action.path)
+        : state.notifications.find(n => !n.action && n.id === toast.id);
+      const id = previous?.id ?? (state.notifications.some(n => n.id === toast.id) ? ++nextToastId : toast.id);
+      const notice: Notification = { ...toast, id, message, read: false, action };
+      return {
+        toasts: applyToastCap(merged, TOAST_MAX),
+        notifications: limitNotifications([notice, ...state.notifications.filter(n => n.id !== id)]),
+        worktreeRevision: state.worktreeRevision + (action ? 1 : 0),
+      };
+    });
+  },
+  dismissToast: id => set(state => ({ toasts: state.toasts.filter(t => t.id !== id) })),
+  dismissExpired: now => set(state => ({ toasts: state.toasts.filter(t => now - t.createdAt < TOAST_TTL_MS) })),
+  markNotificationRead: id => set(state => ({ notifications: state.notifications.map(n => n.id === id ? { ...n, read: true } : n) })),
+  markAllNotificationsRead: () => set(state => ({ notifications: state.notifications.map(n => ({ ...n, read: true })) })),
+  clearReadNotifications: () => set(state => ({ notifications: state.notifications.filter(n => !n.read || needsAttention(n)) })),
+  resolveWorktreeNotification: (path, resolution) => set(state => ({
+    worktreeRevision: state.worktreeRevision + 1,
+    notifications: limitNotifications(state.notifications.map(n => needsAttention(n) && n.action?.path === path
+      ? { ...n, action: { ...n.action, resolution } } : n)),
+  })),
+  reconcileWorktrees: (entries, expectedRevision) => set(state => {
+    // A failure event or manual recovery after this read began owns the newer state.
+    if (state.worktreeRevision !== expectedRevision) return state;
+    let notifications = state.notifications.map(n => needsAttention(n) && !entries.some(e => e.path === n.action?.path)
+      ? { ...n, action: { ...n.action!, resolution: 'No longer awaiting cleanup.' } } : n);
+    for (const entry of entries) {
+      const previous = notifications.find(n => needsAttention(n) && n.action?.path === entry.path);
+      const action: WorktreeNotificationAction = { kind: 'worktree-cleanup', path: entry.path, nodeName: entry.nodeName, detail: entry.detail };
+      const notice: Notification = {
+        id: previous?.id ?? ++nextToastId, provider: 'Worktree', severity: 'warning', message: entry.message,
+        createdAt: entry.createdAt, action,
+        read: previous?.message === entry.message ? previous.read : false,
+      };
+      notifications = [notice, ...notifications.filter(n => n.id !== notice.id)];
+    }
+    return { notifications: limitNotifications(notifications), worktreeRevision: state.worktreeRevision + 1 };
+  }),
+}), {
+  name: 'buildmesh-notifications', version: 1, storage,
+  partialize: state => ({ notifications: state.notifications }),
+  merge: (persisted, current) => {
+    const notifications = restoreNotifications((persisted as { notifications?: unknown } | undefined)?.notifications);
+    nextToastId = Math.max(nextToastId, ...notifications.map(n => n.id));
+    return { ...current, notifications };
+  },
+}));
+
+export function addToast(provider: string, message: string, severity?: ToastSeverity, action?: WorktreeNotificationAction): void {
+  useToastStore.getState().addToast(provider, message, severity, action);
 }
 
 export function dismissToast(id: number): void {

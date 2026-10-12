@@ -20,8 +20,8 @@ import { dropdownId } from '../../lib/dropdownId';
 
 const OVERFLOW_ID = dropdownId('titlebar', 'tools-overflow');
 
-// Usage already has a dedicated title-bar button.
-const ENTRIES = TOOL_DISCOVERY_TILES.filter((entry) => entry.tab !== 'usage');
+// Usage and Notifications already have dedicated title-bar buttons.
+const ENTRIES = TOOL_DISCOVERY_TILES.filter(entry => entry.tab !== 'usage' && entry.tab !== 'notifications');
 
 /** Lucide `ellipsis` — the conventional overflow affordance. */
 function MoreIcon({ className }: { className?: string }) {

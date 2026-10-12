@@ -52,7 +52,7 @@ const mocked = api as unknown as {
 describe('blocked cleanup store (#2139)', () => {
   beforeEach(() => {
     useBlockedCleanupStore.setState({ entries: [], isOpen: false, loading: false, blockers: {}, actionStatus: {} });
-    useToastStore.setState({ toasts: [] });
+    useToastStore.setState({ toasts: [], notifications: [], cleanupError: null, worktreeRevision: 0 });
     mocked.listPendingWorktreeRemovals.mockReset();
     mocked.retryWorktreeCleanup.mockReset();
     mocked.dismissWorktreeCleanup.mockReset();
@@ -122,7 +122,7 @@ describe('blocked cleanup store (#2139)', () => {
     ).toBe(true);
   });
 
-  it('drops the entry without claiming a removal when the backend says it is already gone', async () => {
+  it('drops an unqueued entry without claiming the folder was removed', async () => {
     mocked.retryWorktreeCleanup.mockResolvedValue({ status: 'gone', record: null });
     useBlockedCleanupStore.setState({ entries: [BLOCKED], isOpen: true });
 
@@ -132,7 +132,8 @@ describe('blocked cleanup store (#2139)', () => {
     expect(state.entries).toEqual([]);
     expect(state.isOpen).toBe(false);
     const toasts = useToastStore.getState().toasts;
-    expect(toasts.some((toast) => /already cleaned/i.test(toast.message))).toBe(true);
+    expect(toasts.some((toast) => /cleanup is no longer queued/i.test(toast.message))).toBe(true);
+    expect(toasts.some((toast) => /already cleaned/i.test(toast.message))).toBe(false);
     expect(toasts.some((toast) => /Worktree removed/.test(toast.message))).toBe(
       false,
       'a gone entry is not a removal',

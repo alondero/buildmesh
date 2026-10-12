@@ -175,6 +175,13 @@ export const PROBE_DESTINATION_COMMANDS: Record<`probe-${ProbeTab}`, AppCommand>
     icon: 'usage',
     keywords: ['meters', 'limits', 'quota', 'balance'],
   },
+  'probe-notifications': {
+    id: 'probe-notifications',
+    label: 'Open Notifications',
+    subtitle: 'Review app activity and resolve worktree problems',
+    icon: 'notifications',
+    keywords: ['bell', 'toast', 'history', 'errors', 'cleanup', 'attention'],
+  },
   'probe-worktrees': {
     id: 'probe-worktrees',
     label: 'Open Repository',

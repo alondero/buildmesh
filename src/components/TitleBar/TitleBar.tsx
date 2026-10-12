@@ -9,6 +9,7 @@ import { HeaderPillButton } from './HeaderPillButton';
 import { ScopeIndicator } from './ScopeIndicator';
 import { Wordmark } from './Wordmark';
 import { ZoomControl } from './ZoomControl';
+import { NotificationButton } from './NotificationButton';
 import { TitleBarOverflow } from './TitleBarOverflow';
 import { AppSettingsModal } from '../AppSettings/AppSettingsModal';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
@@ -508,6 +509,7 @@ export function TitleBar() {
             (inputs/pills/buttons) keep their clicks; empty space drags. */}
         <div data-tauri-drag-region className="flex items-center justify-end">
           <div className="flex items-center gap-2 pr-1">
+            <NotificationButton />
             <ZoomControl />
             <UsageButton />
             <HeaderPillButton

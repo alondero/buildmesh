@@ -52,6 +52,7 @@ vi.mock('../../src/components/RemoteAccess/RemoteAccessModal', () => ({
 
 import { TitleBar } from '../../src/components/TitleBar/TitleBar';
 import { useUIStore, type ViewMode } from '../../src/stores/uiStore';
+import { useToastStore } from '../../src/stores/toastStore';
 import { enterMesh } from '../../src/lib/navigation';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { type AgentNode } from '../../src/stores/agentNodeStore';
@@ -80,6 +81,7 @@ function captionGlyphClass(name: string): string {
 }
 
 beforeEach(() => {
+  useToastStore.setState({ toasts: [], notifications: [] });
   resizeHandler = null;
   focusHandler = null;
   windowApi.isMaximized.mockResolvedValue(false);
@@ -111,6 +113,15 @@ beforeEach(() => {
 });
 
 describe('TitleBar (bespoke window chrome)', () => {
+  it('places the notifications bell directly before Zoom and toggles its Probe destination', async () => {
+    await renderTitleBar();
+    const bell = screen.getByRole('button', { name: 'Open Notifications' });
+    expect(bell.nextElementSibling?.querySelector('button')?.getAttribute('aria-label')).toBe('Zoom terminal text size');
+    fireEvent.click(bell);
+    expect(useUIStore.getState()).toMatchObject({ probeOpen: true, probeTab: 'notifications' });
+    fireEvent.click(bell);
+    expect(useUIStore.getState().probeOpen).toBe(false);
+  });
   describe('spec shape', () => {
     it('renders wordmark, view-mode toolbar, navigation cluster, settings/remote icons and the three window controls', async () => {
       await renderTitleBar();
@@ -380,7 +391,7 @@ describe('TitleBar (bespoke window chrome)', () => {
         expect(screen.getByRole('button', { name: 'More tools' }).getAttribute('aria-expanded')).toBe('false');
       });
 
-      it('lists every inspector tool except Usage, which has its own title-bar button', async () => {
+      it('lists tools without a dedicated title-bar button', async () => {
         await renderTitleBar();
         fireEvent.click(screen.getByRole('button', { name: 'More tools' }));
 
@@ -396,6 +407,7 @@ describe('TitleBar (bespoke window chrome)', () => {
         expect(panel.textContent).toContain('Review what the focused agent changed');
         expect(panel.textContent).toContain('Check health, recover, and clean up branches');
         expect(within(panel).queryByText('Usage')).toBeNull();
+        expect(within(panel).queryByText('Notifications')).toBeNull();
         expect(screen.getByRole('button', { name: 'Open Usage' })).toBeTruthy();
       });
 

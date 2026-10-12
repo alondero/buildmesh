@@ -201,10 +201,18 @@ export function LayoutGridIcon({ className }: IconProps) {
  * discovery start screen — can render the same destination glyphs without
  * importing the full inspector body and its tab implementations.
  */
+export function BellIcon({ className }: IconProps) {
+  return <Svg className={className}>
+    <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" />
+    <path d="M10 21h4" />
+  </Svg>;
+}
+
 export const PROBE_TAB_ICONS: Record<ProbeTab, ProbeIcon> = {
   files: FilesIcon,
   review: ReviewIcon,
   usage: UsageIcon,
+  notifications: BellIcon,
   worktrees: WorktreesIcon,
   properties: PropertiesIcon,
   circuits: CircuitsIcon,

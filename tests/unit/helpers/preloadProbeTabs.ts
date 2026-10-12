@@ -26,5 +26,6 @@ export async function preloadProbeTabs(): Promise<void> {
     import('../../../src/components/Probe/AgentHistoryTab'),
     import('../../../src/components/Probe/ScratchpadTab'),
     import('../../../src/components/Probe/UsageTab'),
+    import('../../../src/components/Probe/NotificationsTab'),
   ]);
 }

@@ -84,6 +84,7 @@ const GitPullRequestsTab = lazy(() => import('./GitPullRequestsTab').then((m) =>
 const AgentHistoryTab = lazy(() => import('./AgentHistoryTab').then((m) => ({ default: m.AgentHistoryTab })));
 const ScratchpadTab = lazy(() => import('./ScratchpadTab').then((m) => ({ default: m.ScratchpadTab })));
 const UsageTab = lazy(() => import('./UsageTab').then((m) => ({ default: m.UsageTab })));
+const NotificationsTab = lazy(() => import('./NotificationsTab').then(m => ({ default: m.NotificationsTab })));
 
 type ProbeTabDef = ProbeTabDefinition & { tab: ProbeTab; icon: ProbeIcon };
 
@@ -390,6 +391,7 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
   // a new host-lens tab means a new branch here.
   if (definition.lens === 'host') {
     if (tab === 'usage') return <UsageTab />;
+    if (tab === 'notifications') return <NotificationsTab />;
     if (tab === 'sessions') return <AgentHistoryTab />;
     return <ProbeTabPlaceholder tab={tab} />;
   }

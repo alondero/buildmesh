@@ -1031,6 +1031,7 @@ describe('CommandOmnibar — tool discovery start screen (Option A)', () => {
     'files',
     'review',
     'usage',
+    'notifications',
     'worktrees',
     'properties',
     'circuits',

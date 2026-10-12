@@ -134,6 +134,7 @@ To upgrade manually, install the new `.msi` or `-setup.exe` over the existing in
 - **Terminal zoom slider**: a *Zoom* button in the title bar opens a text-size slider for every terminal pane (agent and build/run alike). It stays in step with the `Ctrl/Cmd +` / `Ctrl/Cmd -` / `Ctrl/Cmd 0` shortcuts and the `Ctrl`/`Cmd` + mouse-wheel gesture, and your chosen size is remembered across launches.
 
 ### Visibility & review
+- **Notifications**: the bell immediately left of Zoom opens a resizable side panel with worktree problems first and recent toast history below. Toasts stay reviewable after dismissal. Choose Resolve to inspect or retry a blocked worktree cleanup; failures no longer interrupt you with a modal. Mark all read and Clear read keep unresolved problems visible.
 - **File explorer with inline diff**: per-mesh and per-node file trees with line-addition/deletion counts and a side-by-side diff viewer.
 - **Changed Files panel**: aggregated view of modified files across the whole mesh.
 - **Mesh-level PR creation**: uncommitted-changes indicator + `gh pr create` from Mesh Properties.
