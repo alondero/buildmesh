@@ -890,9 +890,14 @@ pub fn record_outcome(request: &CheckpointRequest) -> Result<(), String> {
 }
 
 fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Result<(), String> {
-    // The note annotates the history entry when given; it is not a gate. Every
-    // branch below therefore has to render a sensible sentence without one.
+    // For an acknowledgement the note annotates the history entry when given;
+    // every branch below therefore renders a sensible sentence without one. A
+    // review verdict is different: it is a person's judgement about someone
+    // else's work, so the evidence is part of the verdict and is required.
     let note = request.reason.trim();
+    if note.is_empty() && matches!(request.action, CheckpointAction::ReviewPass | CheckpointAction::ReviewFail) {
+        return Err("Give the evidence behind your review decision.".into());
+    }
     let tx = db.transaction().map_err(|e| e.to_string())?;
     let revision: i64 = tx
         .query_row(

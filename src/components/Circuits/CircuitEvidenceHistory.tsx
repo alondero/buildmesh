@@ -10,6 +10,7 @@ import type { RecordedClassification } from '../../types/generated/RecordedClass
 import type { ObservedWorkFact } from '../../types/generated/ObservedWorkFact';
 import { ledgerTimestampMs } from './circuitGraphModel';
 import { historyTitle, splitHistory, stepReference } from './historyPresentation';
+import { checkpointActionNeedsEvidence } from './runNextSteps';
 import { formatWallClock } from './runIdentity';
 
 /** Wall-clock time of one entry; the raw stamp stays on the element's `title`. */
@@ -17,14 +18,6 @@ function entryTime(observedAt: string, now: Date): string {
   const ms = ledgerTimestampMs(observedAt);
   return Number.isFinite(ms) ? formatWallClock(ms, now) : observedAt;
 }
-
-/**
- * Actions that record a human judgement about someone else's work, so evidence
- * is part of the verdict rather than an optional annotation. Every other action
- * is an acknowledgement of what the operator did — pressing the button already
- * says it — and must not demand prose the person may have nothing to add.
- */
-const REVIEW_ACTIONS: ReadonlySet<string> = new Set(['review_pass', 'review_fail']);
 
 /** The worker saying it applied something: true of almost every key event. */
 function isRoutineProvenance(entry: CircuitHistoryEntry): boolean {
@@ -274,7 +267,7 @@ export function CircuitEvidenceHistory({ runId, updatedAt, nodeLabel }: {
           className="block w-full min-w-0 rounded-sm border border-border-subtle bg-bg-card p-1" />
         {checkpoints.map((step) => <fieldset key={step.node_id} disabled={pending || rows === null} className="flex flex-wrap gap-2">
           <legend>{step.node_id}</legend>
-          {step.actions.map((action) => <button key={action} type="button" disabled={pending || (REVIEW_ACTIONS.has(action) && reason.trim() === '')} className="text-accent-cyan disabled:opacity-50" onClick={() => void record(step, action)}>
+          {step.actions.map((action) => <button key={action} type="button" disabled={pending || (checkpointActionNeedsEvidence(action) && reason.trim() === '')} className="text-accent-cyan disabled:opacity-50" onClick={() => void record(step, action)}>
             {{ completed: 'Record completed', not_performed: 'Record not performed', retry: 'Retry as new attempt', recheck: 'Recheck evidence', review_pass: 'Review passed', review_fail: 'Request changes' }[action]}
           </button>)}
         </fieldset>)}

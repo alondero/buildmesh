@@ -28,7 +28,7 @@ import type { AutopilotCircuitRun } from '../../types/generated/AutopilotCircuit
 import type { AutopilotCircuitRunStep } from '../../types/generated/AutopilotCircuitRunStep';
 import type { CheckpointAction } from '../../types/generated/CheckpointAction';
 import type { CircuitRunAttention } from '../../types/generated/CircuitRunAttention';
-import { checkpointActionLabel, describeProblem, recoveryGuidance } from './runNextSteps';
+import { checkpointActionLabel, checkpointActionNeedsEvidence, describeProblem, recoveryGuidance } from './runNextSteps';
 import { runFailureStep } from './runStepPresentation';
 
 /** A backend answer we can rely on, or `null` (a mock or a skewed build). */
@@ -309,7 +309,7 @@ export function RunNextSteps({ run, steps, roleLabel, busy }: RunNextStepsProps)
               </label>
               <button
                 type="button"
-                disabled={disabled}
+                disabled={disabled || (checkpointActionNeedsEvidence(recording.action) && note.trim() === '')}
                 onClick={() => void record(recording.nodeId, recording.attempt, recording.action)}
                 data-testid={`run-checkpoint-confirm-${run.id}`}
                 className="px-1.5 py-1 rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40"
