@@ -120,8 +120,9 @@ browser checks do not replace required real-runtime acceptance evidence.
 run, so a session without Claude's PostToolUse hook still gets real coverage from
 the diff instead of running focused commands by hand. It maps the changed paths to
 the agent rules, changed-file ESLint and `tsc` gates the hook already runs, adds
-`vitest run --changed <base>` when a frontend file changed, and adds
-`cargo test --lib <module>::` for each changed Rust module. The mapping is
+`vitest run --changed <base>` when a frontend file changed, adds
+`cargo test --lib <module>::` for each changed Rust module, and re-runs the
+`#[path]` module-table guard when a Rust source file changed. The mapping is
 table-driven in `scripts/harness-check.mjs` and tested per category.
 
 It is deliberately weaker than `verify`, which stays the completion gate:
@@ -133,9 +134,18 @@ It is deliberately weaker than `verify`, which stays the completion gate:
 - A change with no module filter — the crate root, a manifest, the build script,
   an integration test — runs the whole `cargo test --lib` suite, and a path under
   `src-tauri/tests/` is not covered by `--lib` at all, so it needs `verify`.
-- A frontend selection is narrower than `planGates`: an unknown path is treated
-  as both layers by the plan, but is out of scope here rather than starting
-  Vitest for a diff no frontend test imports.
+- A frontend selection is narrower than `planGates`, and deliberately so. The plan
+  treats an unknown path as both product layers, and `categorisePath` calls every
+  `tests/` path 'frontend'; this check selects Vitest only for the trees Vitest
+  actually runs over — `src/`, `mobile/`, `public/`, `tests/unit/`,
+  `tests/integration/`, `tests/setup/`, `docs/brand/` and the vite/vitest configs.
+  An edit to `tests/agent-infra/**`, `tests/e2e/**` or `tests/lint-fixtures/**`
+  does not start Vitest, because those tests are not in the Vitest run and
+  `vitest --changed` would select nothing.
+- It runs the `#[path]` guard because a Rust-only diff is exactly the one that
+  skips `agent-tests`, where the guard otherwise lives. `agent-tests` and the
+  `rust-paths` gate call the same `pathIncludeDrift` function, so they cannot
+  disagree about the table.
 
 ## Verify and finish
 
@@ -239,6 +249,12 @@ never skipped; `--full` and an empty diff run the whole plan.
 `tests/agent-infra/harness.test.mjs` pins each mapping, so a gate that starts
 reading a path it does not declare fails the suite instead of silently reusing a
 stale PASS.
+
+One rule cuts across all of them: a contract-test gate always reads its own
+implementation script and its own test file, because those two files *are* the
+gate. Auditing only the repo files a suite opens at runtime misses them, and then
+a change to either skips the suite that would have caught it — the gate reports
+PASS having never run.
 
 | Scope | Required gates |
 |---|---|

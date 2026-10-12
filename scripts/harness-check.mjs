@@ -9,6 +9,9 @@
 // It is deliberately advisory. A scoped check that passes is not completion
 // evidence; `npm run verify` still runs the full plan (issue #2221).
 
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { categorisePath } from './ci/changed-scope.mjs';
 
 const RUST_SRC = 'src-tauri/src/';
@@ -34,17 +37,32 @@ export function fastGates(paths, { exists = () => true } = {}) {
   return gates;
 }
 
+// The trees Vitest actually runs over: the sources under test, the suites
+// themselves, the shared setup file, the brand assets a test reads, and the
+// build config. `categorisePath` calls every `tests/` path 'frontend', so using
+// it here started Vitest for `tests/agent-infra/**`, `tests/e2e/**` and
+// `tests/lint-fixtures/**` and then selected nothing — the scoped check burned a
+// dependency-graph walk to execute zero tests (review of PR #2232). Generated
+// wire types live under `src/types/generated/`, so `src/` already covers them.
+const FRONTEND_TEST_ROOTS = [
+  'src/',
+  'mobile/',
+  'public/',
+  'tests/unit/',
+  'tests/integration/',
+  'tests/setup/',
+  'docs/brand/',
+  'vitest.config.ts',
+  'vite.config.ts',
+];
+
 // Whether a frontend test could plausibly be affected. Deliberately narrower
-// than `categorisePath`, which sends an unknown path to both product layers:
-// this check is for a fast loop, and starting Vitest for a diff that no
+// than `categorisePath`, which also sends an unknown path to both product
+// layers: this check is a fast loop, and starting Vitest for a diff that no
 // frontend test imports only costs a dependency-graph walk. Such a change stays
-// the full plan's business. Generated wire types are spelled out because
-// `categorisePath` calls them 'both' (ts-rs writes them during `cargo test`).
+// the full plan's business.
 export function frontendInScope(paths) {
-  return paths.some(path => {
-    const category = categorisePath(path);
-    return category === 'frontend' || path.startsWith('src/types/generated/');
-  });
+  return paths.some(path => FRONTEND_TEST_ROOTS.some(root => path.startsWith(root)));
 }
 
 // Rust test modules attached to another file with `#[path = "..."]` (issue
@@ -52,9 +70,11 @@ export function frontendInScope(paths) {
 // `git::mesh_health_tests`, but the module is declared inside `git/health.rs`,
 // so its tests run under `git::health::mesh_health_tests` and the naive filter
 // would match nothing. Each entry maps the included file to the module path
-// that actually owns it. `tests/agent-infra/harness.test.mjs` pins this table
-// against every `#[path]` declaration in the crate, so a new one fails loudly
-// instead of silently selecting zero tests.
+// that actually owns it.
+//
+// Both the agent-infra test and the `rust-paths` gate call
+// `pathIncludeDrift` below, so a new `#[path]` fails the gate that runs on the
+// Rust diff itself, not only the one CI happens to run (review of PR #2232).
 export const RUST_PATH_INCLUDES = {
   'src-tauri/src/agent/terminal_input.rs': 'agent::process::terminal_input',
   'src-tauri/src/git/fetch_origin_tests.rs': 'git::sync::fetch_origin_tests',
@@ -62,6 +82,23 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/commands/prune_tests.rs': 'commands::prune::prune_tests',
   'src-tauri/src/services/legacy_retirement/retirement_crash_tests.rs': 'services::legacy_retirement::retirement_crash_tests',
 };
+
+// Every `#[path = "..."]` module in the crate, as repo-relative paths. Entries
+// in RUST_PATH_INCLUDES that no declaration backs are drift too: they would mask
+// a file that stops being included.
+export function pathIncludeDrift(root) {
+  const declared = new Set();
+  for (const file of execFileSync('git', ['ls-files', RUST_SRC], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).split('\n')) {
+    if (!file.endsWith('.rs')) continue;
+    const source = readFileSync(join(root, file), 'utf8');
+    for (const match of source.matchAll(/#\[path\s*=\s*"([^"]+)"\]/g)) {
+      declared.add(join(file.replace(/\/[^/]+$/, ''), match[1]).replaceAll('\\', '/'));
+    }
+  }
+  const missing = [...declared].filter(file => !RUST_PATH_INCLUDES[file]).sort();
+  const stale = Object.keys(RUST_PATH_INCLUDES).filter(file => !declared.has(file)).sort();
+  return { missing, stale };
+}
 
 // The `cargo test --lib` module prefix a changed Rust path belongs to, or null
 // when no module filter can scope it (crate root, manifests, build script,
@@ -115,6 +152,12 @@ export function planChecks(paths, { exists = () => true } = {}) {
   const checks = fastGates(paths, { exists });
   if (frontendInScope(paths)) {
     checks.push({ id: 'check-frontend-tests', command: ['node', 'node_modules/vitest/vitest.mjs', 'run', '--changed', '$BASE', '--passWithNoTests'], tests: 'vitest', minutes: 10, emptyOk: true });
+  }
+  // agent-tests owns the #[path] drift guard but is skipped for a Rust-only
+  // diff, which is exactly when a new #[path] is added. This runs the same
+  // check on the Rust source the diff actually touches.
+  if (paths.some(path => path.startsWith(RUST_SRC) && path.endsWith('.rs'))) {
+    checks.push({ id: 'check-rust-paths', command: ['node', 'scripts/harness.mjs', 'gate', 'rust-paths'], minutes: 2 });
   }
   const rust = rustScope(paths);
   if (rust.whole) {

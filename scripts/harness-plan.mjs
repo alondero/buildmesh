@@ -43,6 +43,12 @@ const RUST_IGNORES = [DOCS, '^android/', '^tests/'];
 // - readme-tests reads exactly three files, so it skips on almost everything.
 // - lint-tests and lint-fixtures share one list: the ESLint config, the two
 //   deliberate hook-rule violation fixtures, and the checker itself.
+//
+// One rule cuts across all of them: a contract-test gate always reads its own
+// implementation script and its own test file, because those two files *are*
+// the gate. Auditing only the repo files a suite opens at runtime misses them —
+// then a change to either skips the suite that would have caught it, and the
+// gate reports PASS having never run (review of PR #2232).
 const AGENT_TEST_IGNORES = [
   '^docs/(?!agents/self-review\\.md$)',
   '^src/',
@@ -54,8 +60,8 @@ const AGENT_TEST_IGNORES = [
   '^(?:vite|vitest|playwright)[^/]*\\.config\\.ts$',
   '^index\\.html$',
 ];
-const README_TEST_IGNORES = ['^(?!README\\.md$|src/types/generated/(?:Provider\\.ts|HarnessCapabilitiesTable\\.json)$)'];
-const LINT_FIXTURE_IGNORES = ['^(?!tests/lint-fixtures/|eslint\\.config\\.js$|scripts/check-eslint-fixtures\\.mjs$)'];
+const README_TEST_IGNORES = ['^(?!README\\.md$|src/types/generated/(?:Provider\\.ts|HarnessCapabilitiesTable\\.json)$|scripts/check-readme-drift\\.mjs$|tests/agent-infra/check-readme-drift\\.test\\.mjs$)'];
+const LINT_FIXTURE_IGNORES = ['^(?!tests/lint-fixtures/|eslint\\.config\\.js$|scripts/check-eslint-fixtures\\.mjs$|tests/agent-infra/check-eslint-fixtures\\.test\\.mjs$)'];
 
 // Whether `path` is an input of `gate`. Paths use forward slashes.
 export function gateReads(gate, path) {

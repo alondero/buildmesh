@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { changedPaths, completion, fingerprint, runGate, scopePaths, verify, waitForVerify } from '../../scripts/harness.mjs';
 import { executedTests, gateReads, planGates, touchedFormatDiffs } from '../../scripts/harness-plan.mjs';
 import { acquireSlot, heavyGateEnv, heavyGateLimit, runPlan, slotHolders } from '../../scripts/harness-lanes.mjs';
-import { RUST_PATH_INCLUDES, fastGates, frontendInScope, lintablePaths, planChecks, rustModule, rustScope } from '../../scripts/harness-check.mjs';
+import { RUST_PATH_INCLUDES, fastGates, frontendInScope, lintablePaths, pathIncludeDrift, planChecks, rustModule, rustScope } from '../../scripts/harness-check.mjs';
 import { conptyPrerequisite, gatePassed, isolatedCommand, isolateTests, knownFlakes, rustFailures, validateFlakeIssues, vitestReport } from '../../scripts/harness-test-failures.mjs';
 import { VERSION as CONPTY_VERSION } from '../../scripts/prepare-conpty.mjs';
 
@@ -1346,6 +1346,22 @@ test('a scoped contract-test gate joins the plan exactly when a changed path is 
     assert.ok(selected([path]).includes('docs-tests'), `docs-tests must run for ${path}`);
   }
 
+  // A contract-test gate always reads its own implementation and its own test
+  // file — those two files ARE the gate. Auditing only the repo files a suite
+  // opens at runtime drops them, and then a change to either skips the suite
+  // that would have caught it (review of PR #2232).
+  const selfOwned = [
+    ['scripts/check-readme-drift.mjs', 'readme-tests'],
+    ['tests/agent-infra/check-readme-drift.test.mjs', 'readme-tests'],
+    ['scripts/check-eslint-fixtures.mjs', 'lint-tests'],
+    ['tests/agent-infra/check-eslint-fixtures.test.mjs', 'lint-tests'],
+    ['scripts/check-eslint-fixtures.mjs', 'lint-fixtures'],
+    ['tests/agent-infra/check-eslint-fixtures.test.mjs', 'lint-fixtures'],
+  ];
+  for (const [path, id] of selfOwned) {
+    assert.ok(selected([path]).includes(id), `${id} must run when its own source or test file changes (${path})`);
+  }
+
   // --full and an empty diff run the whole plan rather than a narrowed list.
   const full = planGates(['src/App.tsx'], { full: true }).map(gate => gate.id);
   for (const id of scoped) assert.ok(full.includes(id), `--full must include ${id}`);
@@ -1367,6 +1383,16 @@ test('the scoped check maps each changed-file category to its own command', () =
   // An unknown path is 'both' to the plan but selects nothing here: starting
   // Vitest for a diff no frontend test imports would only fail on passWithNoTests.
   assert.equal(frontendInScope(['scripts/whatever.mjs', '.github/workflows/ci.yml']), false);
+  // `categorisePath` calls every tests/ path 'frontend', so using it here made
+  // agent-infra, e2e and lint-fixture edits start Vitest and select nothing
+  // (review of PR #2232). Only the trees Vitest runs over select it.
+  for (const path of ['tests/agent-infra/harness.test.mjs', 'tests/e2e/app-launch.spec.ts', 'tests/lint-fixtures/missing-deps.tsx', 'android/app/build.gradle.kts']) {
+    assert.equal(frontendInScope([path]), false, `${path} must not start Vitest`);
+    assert.equal(planChecks([path]).checks.some(gate => gate.id === 'check-frontend-tests'), false, path);
+  }
+  for (const path of ['src/App.tsx', 'src/types/generated/Provider.ts', 'tests/unit/example.test.ts', 'tests/integration/x.test.ts', 'tests/setup/vitest.setup.ts', 'public/icon.svg', 'vitest.config.ts', 'docs/brand/mark.svg']) {
+    assert.equal(frontendInScope([path]), true, `${path} must select Vitest`);
+  }
 
   // Each changed Rust module gets its own filtered --lib run.
   assert.deepEqual(rustScope(['src-tauri/src/db/mod.rs', 'src-tauri/src/env/host_path.rs', 'src-tauri/src/services/mod.rs']), {
@@ -1429,19 +1455,20 @@ test('a Rust file attached with #[path] selects the module that owns it', () => 
   }
 
   // Drift guard: every `#[path = "..."]` module in the crate must be in the
-  // table, or a new one silently maps to a filter that runs zero tests.
-  const declared = execFileSync('git', ['ls-files', 'src-tauri/src'], { cwd: root, encoding: 'utf8' })
-    .split('\n').filter(file => file.endsWith('.rs'));
-  const found = new Set();
-  for (const file of declared) {
-    const source = readFileSync(join(root, file), 'utf8');
-    for (const match of source.matchAll(/#\[path\s*=\s*"([^"]+)"\]/g)) {
-      const target = join(file.replace(/\/[^/]+$/, ''), match[1]).replaceAll('\\', '/');
-      assert.ok(RUST_PATH_INCLUDES[target], `${file} attaches ${match[1]}; add ${target} to RUST_PATH_INCLUDES`);
-      found.add(target);
-    }
-  }
-  assert.deepEqual([...found].sort(), Object.keys(RUST_PATH_INCLUDES).sort(), 'RUST_PATH_INCLUDES must not keep entries with no #[path] declaration');
+  // table, or a new one silently maps to a filter that runs zero tests. This is
+  // the same function the `rust-paths` gate runs on a Rust-only diff, so the two
+  // cannot disagree.
+  assert.deepEqual(pathIncludeDrift(root), { missing: [], stale: [] });
+});
+
+test('the #[path] drift check runs on the Rust diff that can introduce one', () => {
+  // agent-tests owns the guard but is skipped for a Rust-only diff, so the
+  // scoped check carries it too (review of PR #2232).
+  const ids = paths => planChecks(paths).checks.map(gate => gate.id);
+  for (const path of ['src-tauri/src/agent/process.rs', 'src-tauri/src/db/mod.rs']) assert.ok(ids([path]).includes('check-rust-paths'), path);
+  for (const path of ['src/App.tsx', 'docs/page.md', 'scripts/harness.mjs']) assert.ok(!ids([path]).includes('check-rust-paths'), path);
+  const gate = planChecks(['src-tauri/src/agent/process.rs']).checks.find(row => row.id === 'check-rust-paths');
+  assert.deepEqual(gate.command, ['node', 'scripts/harness.mjs', 'gate', 'rust-paths']);
 });
 
 test('the scoped check and the hook share one fast-gate table', () => {

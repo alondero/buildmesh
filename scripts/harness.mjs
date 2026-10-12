@@ -11,7 +11,7 @@ import { executedTests, gateReads, planGates, touchedFormatDiffs } from './harne
 import { acquireSlot, heavyGateEnv, heavyGateLimit, runPlan } from './harness-lanes.mjs';
 import { selfReviewReport } from './self-review.mjs';
 import { conptyPrerequisite, failureLines, gatePassed, isolatedCommand, isolateTests, knownFlakes, readTestReport, validateFlakeIssues } from './harness-test-failures.mjs';
-import { fastGates, planChecks } from './harness-check.mjs';
+import { fastGates, pathIncludeDrift, planChecks } from './harness-check.mjs';
 
 const USAGE = 'harness start --spec <json> | update --spec <json> | status | metrics | check [--base <commit>] | verify [--base <commit>] [--full] | wait [--max-seconds <n>] | finish | evaluate [--case <id>] | checkpoint | record-rollback --ref <commit>';
 const EXIT = { PASS: 0, FAIL: 1, FLAKY: 1, BLOCKED: 2, TIMEOUT: 124 };
@@ -665,6 +665,9 @@ async function check(root, requestedBase) {
     const row = await runGate(root, gate, base, paths);
     rows.push({ ...row, module: gate.module });
     console.log(`${row.outcome} ${row.id}${row.module ? ` [${row.module}]` : ''}${row.count != null ? ` (${row.count} tests)` : ''}${row.reason ? `: ${row.reason}` : ''}${row.outcome !== 'PASS' && row.log ? `\n  ${row.log}` : ''}`);
+    // Name the failing tests, as verify's reportRow does; a bare log path sends
+    // the reader to a raw file to find out what broke.
+    for (const line of failureLines(row)) console.log(line);
   }
   const outcome = rows.find(row => !gatePassed(row))?.outcome ?? 'PASS';
   const executed = rows.reduce((sum, row) => sum + (row.count ?? 0), 0);
@@ -687,6 +690,13 @@ async function internalGate(root, name) {
     const working = [...git(root, 'diff', '--no-renames', '--name-only', '-z', '--').split('\0'), ...git(root, 'ls-files', '--others', '--exclude-standard', '-z').split('\0')];
     const mismatches = working.filter(path => staged.has(path));
     if (mismatches.length) throw new Error(`Staged content differs from the tested working tree: ${mismatches.join(', ')}. Stage the intended final content before verification.`);
+  }
+  else if (name === 'rust-paths') {
+    // A Rust-only diff skips agent-tests, which is where the #[path] guard
+    // otherwise lives, so the scoped check runs it here too.
+    const { missing, stale } = pathIncludeDrift(root);
+    if (missing.length) throw new Error(`Add ${missing.join(', ')} to RUST_PATH_INCLUDES in scripts/harness-check.mjs: every \`#[path = "..."]\` module needs the module path that owns it, or a scoped \`cargo test --lib\` filter selects zero tests.`);
+    if (stale.length) throw new Error(`Remove ${stale.join(', ')} from RUST_PATH_INCLUDES in scripts/harness-check.mjs: no \`#[path]\` declaration includes them.`);
   }
   else if (name === 'bindings') {
     const expected = process.env.BUILDMESH_BINDINGS_FINGERPRINT;
