@@ -713,7 +713,20 @@ mod tests {
     fn freebuff_credential_paths_includes_xdg_default() {
         // The XDG-style path is always present regardless of platform
         // — it's the primary candidate the upstream CLI writes to.
-        let paths = freebuff_credential_paths();
+        //
+        // `freebuff_credential_paths` reads the ambient environment, and the
+        // process environment is shared state: the sibling override test
+        // below exports `XDG_CONFIG_HOME` while holding `ENV_LOCK`. A reader
+        // that skipped the lock therefore saw that test's tempdir as candidate
+        // #0, and failed only under parallel libtest (issue #2285). Hold the
+        // crate-wide lock and pin the variable to "unset" for the read, so the
+        // assertion sees the default rather than whichever writer happened to
+        // run alongside it.
+        let _env = crate::env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let paths =
+            crate::env::with_env_vars(&[("XDG_CONFIG_HOME", None)], freebuff_credential_paths);
         assert!(!paths.is_empty(), "must have at least the XDG candidate");
         let first = paths[0].to_string_lossy();
         assert!(
@@ -734,22 +747,17 @@ mod tests {
         // The process environment is shared state: this mutation has to
         // exclude every other test that mutates it *and* every test that
         // snapshots it, so it takes the one crate-wide lock (issue #2048).
-        let _env = crate::env::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // `with_env_vars` restores the previous value through
+        // `catch_unwind`, so a failing assertion cannot leave this tempdir
+        // exported to the rest of the suite.
+        let _env = crate::env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
-        let previous = env::var_os("XDG_CONFIG_HOME");
-        // SAFETY: `ENV_LOCK` above excludes every other test that touches the
-        // process environment, so no other thread reads or writes it here.
-        // Setting before read and restoring after keeps the cross-test
-        // contract.
-        unsafe { env::set_var("XDG_CONFIG_HOME", dir.path()) };
-        let paths = freebuff_credential_paths();
-        // SAFETY: pair with the `set_var` above.
-        unsafe {
-            match previous.as_deref() {
-                Some(v) => env::set_var("XDG_CONFIG_HOME", v),
-                None => env::remove_var("XDG_CONFIG_HOME"),
-            }
-        }
+        let paths = crate::env::with_env_vars(
+            &[("XDG_CONFIG_HOME", Some(dir.path().as_os_str()))],
+            freebuff_credential_paths,
+        );
         let first = paths[0].to_string_lossy();
         assert!(
             first.starts_with(dir.path().to_string_lossy().as_ref()),
