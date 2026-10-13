@@ -31,6 +31,12 @@ pub(crate) fn for_agent(agent: &crate::models::AgentNode) -> CircuitObserverCapa
 /// Diagnostics for a stored provider string: a harness id, a custom harness
 /// profile, or a proxied `harness:account` option. Unknown harnesses render as
 /// unwired.
+///
+/// Test-only: a production caller holds an agent row or a stored selector and
+/// goes through [`for_agent`] or [`for_selector`], so the launch snapshot keeps
+/// deciding which harness the diagnostics describe. Rendering the contracts
+/// against a bare id needs no row, which is what these tests assert.
+#[cfg(test)]
 pub(crate) fn for_provider(provider: &str) -> CircuitObserverCapabilities {
     for_selector(&HarnessSelector::Stored(provider.to_owned()))
 }
