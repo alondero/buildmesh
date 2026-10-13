@@ -59,6 +59,84 @@ function openTerminalLink(_event: MouseEvent, uri: string): void {
   openUrl(uri).catch(console.error);
 }
 
+/**
+ * Bookkeeping for one in-flight `doCreate` (issue #2016).
+ *
+ * Creation spans several awaits — the lazy xterm chunk import, two
+ * `listen()` registrations and the binary PTY Channel — and a node can be
+ * deleted at any point inside that window. `dispose(nodeId)` used to clean
+ * up only an instance already in `instances`, so a late `doCreate` went on
+ * to register a terminal, writer sink, font-size / theme entries and Tauri
+ * listeners for a node that no longer existed, and a failure after those
+ * registrations kept them all.
+ *
+ * The record owns each resource as the creation acquires it, so a deletion
+ * releases what is already held and refuses everything after it. It is
+ * created by `getOrCreate` and dropped as soon as the creation settles, so
+ * it is deliberately NOT a deleted-id tombstone map — that would only trade
+ * one lifetime leak for another.
+ */
+class PendingCreation {
+  private owned: Array<() => void> = [];
+  /** True once ownership has moved on (committed or released). */
+  private closed = false;
+
+  /** The guarded creation. Assigned by `getOrCreate` right after it is
+   *  constructed, so callers that coalesce onto an in-flight record can
+   *  await it. */
+  promise!: Promise<TerminalInstance | null>;
+
+  /** Flipped by `dispose` and `destroy`. */
+  cancelRequested = false;
+
+  /**
+   * Take ownership of one just-acquired resource. If the creation was
+   * already closed — a deletion raced this line — the resource is released
+   * on the spot, so callers never have to re-check `cancelRequested`.
+   */
+  own(release: () => void): void {
+    if (this.closed) {
+      release();
+      return;
+    }
+    this.owned.push(release);
+  }
+
+  /**
+   * Hand the acquired resources over to the `instances` map, which
+   * `dispose(nodeId)` already tears down. Only the published success path
+   * calls this; after it, any later `own()` releases immediately rather
+   * than parking a resource nothing will ever free.
+   */
+  commit(): void {
+    this.owned.length = 0;
+    this.closed = true;
+  }
+
+  /**
+   * Release everything acquired so far, newest first so the xterm outlives
+   * the bookkeeping that points at it. Idempotent and safe to call from
+   * `dispose`, `destroy`, the cancellation checkpoints and the failure path.
+   *
+   * Every disposer runs even if an earlier one throws: these are all
+   * best-effort teardown steps (the unsubscribe is already a `.catch(() =>
+   * {})`), and letting one failure skip the rest would leak exactly the
+   * resources this record exists to release.
+   */
+  release(): void {
+    if (this.closed) return;
+    this.closed = true;
+    const releases = this.owned.splice(0).reverse();
+    for (const release of releases) {
+      try {
+        release();
+      } catch (error) {
+        console.error('[TerminalRegistry] Failed to release a cancelled terminal resource:', error);
+      }
+    }
+  }
+}
+
 function measureAndFit(inst: TerminalInstance): void {
   // xterm.js exposes `_core._charSizeService` as an internal API for
   // re-measuring glyph widths — needed for Unicode 11+ alignment so
@@ -74,7 +152,7 @@ function measureAndFit(inst: TerminalInstance): void {
 
 export class TerminalRegistry {
   private instances = new Map<number, TerminalInstance>();
-  private pending = new Map<number, Promise<TerminalInstance | null>>();
+  private pending = new Map<number, PendingCreation>();
   private listeners = new Set<() => void>();
   private writer = new TerminalWriter();
   private fontSizeManager = new FontSizeManager();
@@ -93,6 +171,10 @@ export class TerminalRegistry {
   // `spawn_start` `Instant`). Cleared by `dispose` to avoid a slow leak
   // across many spawn/delete cycles.
   private nodeStartTimes = new Map<number, number>();
+  // Set by `destroy()`. A module-level `listen()` that resolves after
+  // teardown releases its handle instead of parking it in `unlistenFns`
+  // for the rest of the process (issue #2016).
+  private destroyed = false;
 
   constructor() {
     // Post-spawn PTY-size reconcile (issue #332). The backend emits
@@ -119,6 +201,16 @@ export class TerminalRegistry {
     // will be available by the time destroy() runs because the promise
     // resolves on the same microtask queue as the listener registration.
     unlistenPromise.then((unlisten) => {
+      // `destroy()` can land before this resolves (issue #2016). Parking
+      // the handle in `unlistenFns` afterwards would leave a live
+      // module-level listener nobody can ever reach again, so release it
+      // here instead. The `destroyed` flag is the whole record — a
+      // destroyed registry registers no further module-level listeners,
+      // because its constructor has already run.
+      if (this.destroyed) {
+        unlisten();
+        return;
+      }
       this.unlistenFns.push(unlisten);
     }).catch(console.error);
   }
@@ -132,11 +224,19 @@ export class TerminalRegistry {
   }
 
   async getOrCreate(nodeId: number): Promise<TerminalInstance | null> {
-    if (this.instances.has(nodeId)) {
-      return this.instances.get(nodeId)!;
-    }
-    if (this.pending.has(nodeId)) {
-      return this.pending.get(nodeId)!;
+    const existing = this.instances.get(nodeId);
+    if (existing) return existing;
+    const inFlight = this.pending.get(nodeId);
+    if (inFlight) {
+      // A deletion raced this creation (issue #2016). Let that creation
+      // finish its own cleanup instead of handing a doomed terminal to a
+      // fresh caller, and do not coalesce onto a request that is already
+      // being torn down.
+      if (inFlight.cancelRequested) {
+        await inFlight.promise;
+        return null;
+      }
+      return inFlight.promise;
     }
     // Stamp the per-node spawn-timing reference NOW (issue #602). This is
     // the moment the frontend first sees a fresh nodeId — the "frontend
@@ -146,12 +246,20 @@ export class TerminalRegistry {
     // same nodeId all share the original stamp: `pending` already
     // deduplicates them, and only the first path reaches this line.
     this.nodeStartTimes.set(nodeId, performance.now());
-    const promise = this.doCreate(nodeId);
-    this.pending.set(nodeId, promise);
+    const request = new PendingCreation();
+    request.promise = this.doCreate(nodeId, request);
+    this.pending.set(nodeId, request);
     try {
-      return await promise;
+      const inst = await request.promise;
+      // A deletion that landed while the creation was in flight has
+      // already torn down whatever it produced — the caller must not adopt
+      // a terminal that is no longer in `instances`.
+      return request.cancelRequested ? null : inst;
     } finally {
-      this.pending.delete(nodeId);
+      // Identity-checked: a later creation for the same node may already
+      // own the slot (dispose releases the record, the next getOrCreate
+      // installs a fresh one).
+      if (this.pending.get(nodeId) === request) this.pending.delete(nodeId);
     }
   }
 
@@ -291,6 +399,24 @@ export class TerminalRegistry {
   }
 
   dispose(nodeId: number): void {
+    // A deletion can land while `doCreate` is between awaits (issue
+    // #2016). Mark the in-flight creation cancelled and release whatever
+    // it already owns, so the lazy import / listener registrations that
+    // settle afterwards cannot publish a terminal, keep a writer sink, a
+    // font-size or theme entry, or a binary PTY Channel for a node that no
+    // longer exists. The record itself is dropped by `getOrCreate` when
+    // the creation settles, so this is not a deleted-id tombstone.
+    const inFlight = this.pending.get(nodeId);
+    if (inFlight) {
+      inFlight.cancelRequested = true;
+      inFlight.release();
+    }
+    // Drop the per-node spawn-timing stamp (issue #602). Without this
+    // every spawn/delete cycle adds an entry to `nodeStartTimes` and
+    // the map grows unbounded for long-running sessions that cycle
+    // through many nodes. Cleared on the cancelled-creation path too —
+    // that creation never reaches `dispose`'s instance branch.
+    this.nodeStartTimes.delete(nodeId);
     const instance = this.instances.get(nodeId);
     if (instance) {
       instance.resizeScheduler.dispose();
@@ -302,11 +428,6 @@ export class TerminalRegistry {
       this.writer.unregister(nodeId);
       this.fontSizeManager.unregister(nodeId);
       this.themeManager.unregister(nodeId);
-      // Drop the per-node spawn-timing stamp (issue #602). Without this
-      // every spawn/delete cycle adds an entry to `nodeStartTimes` and
-      // the map grows unbounded for long-running sessions that cycle
-      // through many nodes.
-      this.nodeStartTimes.delete(nodeId);
       this.notify();
     }
   }
@@ -338,7 +459,15 @@ export class TerminalRegistry {
     this.listeners.forEach(cb => cb());
   }
 
-  private async doCreate(nodeId: number): Promise<TerminalInstance | null> {
+  private async doCreate(nodeId: number, pending: PendingCreation): Promise<TerminalInstance | null> {
+    // Deletion can land between any two awaits below, so the checkpoint
+    // runs after each one: it releases what this creation already owns and
+    // refuses to acquire anything further (issue #2016).
+    const aborted = (): boolean => {
+      if (!pending.cancelRequested) return false;
+      pending.release();
+      return true;
+    };
     try {
       // Issue #1568 - lazy-load xterm + its addons + the unicode-width shim
       // behind a single dynamic import. Vite emits a separate chunk for each
@@ -360,12 +489,22 @@ export class TerminalRegistry {
         import('@xterm/addon-web-links'),
         import('./loadUnicode11Widths'),
       ]);
+      // Nothing has been acquired yet — bail before allocating an xterm
+      // for a node that was deleted while the chunk was in flight.
+      if (aborted()) return null;
 
       const term = new Terminal({
         ...createTerminalOptions(),
         // xterm accepts HTTP(S) OSC 8 links by default. Do not opt in to
         // non-HTTP protocols here; terminal output is untrusted agent text.
         linkHandler: { activate: openTerminalLink },
+      });
+      // Owned immediately, before the first thing that can throw, so a
+      // failure or a deletion anywhere in the rest of creation still tears
+      // the xterm down (issue #2016). `release()` unwinds newest first, so
+      // the terminal goes last — after the bookkeeping that points at it.
+      pending.own(() => {
+        term.dispose(); // allow-dispose — the node was deleted (or creation failed) before this terminal was ever published
       });
 
       const fitAddon = new FitAddon();
@@ -407,10 +546,24 @@ export class TerminalRegistry {
         useNativeClipboardPaste: false,
       };
 
+      // The scheduler is owned as soon as the instance exists, so a deletion
+      // that lands on the next line cannot leave it running (issue #2016).
+      pending.own(() => instance.resizeScheduler.dispose()); // allow-dispose — resize scheduler owned by this cancelled creation, not a live terminal
+
       // `term.write`'s callback fires when xterm has parsed the payload, so
       // the writer can cap how much unparsed work xterm holds at once
       // (issue #2018). Both arguments are required here: the writer only
       // counts in-flight payloads for a sink declared completion-aware.
+      //
+      // The unwind is owned BEFORE the three registrations, so a throw in
+      // any of them still drops the entries the earlier ones created
+      // (issue #2016). All three `unregister` calls are no-ops for a key
+      // that was never registered.
+      pending.own(() => {
+        this.writer.unregister(nodeId);
+        this.fontSizeManager.unregister(nodeId);
+        this.themeManager.unregister(nodeId);
+      });
       this.writer.register(
         nodeId,
         (data, done) => term.write(data, done),
@@ -430,15 +583,28 @@ export class TerminalRegistry {
           }
         }
       });
+      pending.own(() => unlisten());
+      if (aborted()) return null;
 
       // Binary PTY path (issue #1385). Production bytes arrive here as a
       // `Uint8Array` with no Base64/JSON. The `agent-output` listener
       // above stays for test injection (`line`). Pre-subscribe bytes are
       // buffered on the backend OutputSink, not this JSON event.
       // `TerminalWriter` still rAF-batches the display write.
-      api.subscribeAgentOutput(nodeId, (bytes) => {
+      const outputSubscribe = api.subscribeAgentOutput(nodeId, (bytes) => {
         this.writer.append(nodeId, bytes);
       }).catch(console.error);
+      // The unsubscribe is chained AFTER the subscribe so a deletion that
+      // lands mid-registration still drops the Channel the backend is in
+      // the middle of creating (issue #2016) — unsubscribing first would
+      // race the registration and leave the Channel alive. The Rust
+      // `unsubscribe_agent_output` is idempotent, so the ordering is the
+      // only thing that matters here.
+      pending.own(() => {
+        void outputSubscribe
+          .then(() => api.unsubscribeAgentOutput(nodeId))
+          .catch(() => {});
+      });
 
       const unlistenSerialize = await listen<SerializeTerminalRequestPayload>('serialize-terminal-request', (event) => {
         if (event.payload.node_id === nodeId) {
@@ -446,6 +612,8 @@ export class TerminalRegistry {
           api.submitTerminalSnapshot(event.payload.request_id, snapshot).catch(console.error);
         }
       });
+      pending.own(() => unlistenSerialize());
+      if (aborted()) return null;
 
       term.onData((data) => {
         api.writeToAgent(nodeId, data).catch(console.error);
@@ -500,11 +668,23 @@ export class TerminalRegistry {
       const combinedUnlisten: UnlistenFn = () => { unlisten(); unlistenSerialize(); };
       instance.unlisten = combinedUnlisten;
 
+      if (aborted()) return null;
       this.instances.set(nodeId, instance);
+      // Ownership of everything acquired above moves to `instances`, which
+      // `dispose(nodeId)` tears down. Closing the record here also means a
+      // later `own()` would release rather than park — the creation is done.
+      pending.commit();
       this.notify();
       return instance;
     } catch (e) {
       console.error(`[TerminalRegistry] Failed to create terminal for ${nodeId}`, e);
+      // A failure after the terminal / writer / theme / listener
+      // registrations leaves nothing behind: the record unwinds every
+      // resource it owns (issue #2016). Before that, the catch cleared only
+      // the spawn-timing stamp, so a failed create kept a half-built xterm,
+      // a writer sink, font-size and theme entries and — once the binary
+      // subscribe had started — a live PTY Channel.
+      pending.release();
       // Drop the spawn-timing stamp set by `getOrCreate` (issue #602). The
       // success path's `dispose(nodeId)` is the normal cleanup, but it
       // walks `this.instances` and never runs when creation failed before
@@ -518,7 +698,17 @@ export class TerminalRegistry {
   }
 
   destroy(): void {
-    for (const nodeId of this.instances.keys()) {
+    // Set first: a module-level `listen()` that resolves after this point
+    // releases its handle instead of appending to `unlistenFns`
+    // (issue #2016).
+    this.destroyed = true;
+    // Creations still in flight keep no instance for `dispose` to find, so
+    // they are cancelled and unwound through the same path first.
+    for (const pending of [...this.pending.values()]) {
+      pending.cancelRequested = true;
+      pending.release();
+    }
+    for (const nodeId of [...this.instances.keys()]) {
       this.dispose(nodeId); // allow-dispose — destroy() only runs at app-exit / test teardown
     }
     this.fontSizeManager.destroy();
