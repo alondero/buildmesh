@@ -38,6 +38,7 @@ fn mcode_spawn_validates_final_model_for_fresh_and_resumed_sessions() {
                 &config,
                 Some("prompt"),
                 false,
+                crate::agent::spawn::ResumeCause::Explicit,
             )
             .unwrap();
             let argv: Vec<_> = command
@@ -99,6 +100,7 @@ fn mcode_spawn_validates_final_model_for_fresh_and_resumed_sessions() {
                     &config,
                     None,
                     false,
+                    crate::agent::spawn::ResumeCause::Explicit,
                 )
                 .expect_err("invalid model must fail before building a command");
                 assert!(
@@ -142,6 +144,7 @@ fn codex_spawn_carries_attention_hooks_for_the_launched_node() {
                 &ResolvedAgentConfig::default(),
                 None,
                 false,
+                crate::agent::spawn::ResumeCause::Explicit,
             )
             .unwrap();
             let argv: Vec<String> = command
@@ -489,7 +492,10 @@ fn codex_resume_recipe_uses_subcommand_shape() {
     let config = ResolvedAgentConfig::default();
     let input = make_input(
         Platform::Macos,
-        SessionIdModeRef::Resume("sess-xyz"),
+        SessionIdModeRef::Resume {
+            id: "sess-xyz",
+            cause: crate::agent::spawn::ResumeCause::Explicit,
+        },
         &config,
         None,
     );

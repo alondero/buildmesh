@@ -56,10 +56,22 @@ pub(crate) struct PullRequestContext {
     pub(crate) template: Option<String>,
 }
 
+/// Why this spawn is resuming a captured session id rather than starting
+/// fresh. Reaches argv composition as the cause recorded on the resume, so a
+/// harness that can branch off a transcript instead of continuing it in place
+/// gets the chance to (issue #1550).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ResumeCause {
+pub enum ResumeCause {
     Startup,
     Explicit,
+    /// Regenerate-on-the-same-harness: the user swapped Model Provider
+    /// without changing the harness, so the captured id is still valid but
+    /// the run must NOT mutate the transcript it branches from — otherwise
+    /// the regenerate overwrites the very history the user is regenerating
+    /// against. Harnesses that can branch declare it via
+    /// [`crate::agent::provider::AgentProvider::resume_args_fork`]; the rest
+    /// resume in place, which is the pre-#1550 behaviour.
+    Regenerate,
 }
 
 /// Worktree policy supplied by a caller that knows the spawn's purpose.
@@ -576,6 +588,16 @@ https://github.com/alondero/buildmesh/issues/247"
         assert_eq!(
             SpawnIntent::Resume {
                 cause: ResumeCause::Explicit
+            }
+            .initial_prompt(),
+            None
+        );
+        // Issue #1550 — a Regenerate resume branches off the captured
+        // transcript; the user (or the harness) supplies the first turn,
+        // so it stays prompt-free like every other resume.
+        assert_eq!(
+            SpawnIntent::Resume {
+                cause: ResumeCause::Regenerate
             }
             .initial_prompt(),
             None

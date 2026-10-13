@@ -466,7 +466,10 @@ mod tests {
         let input = HarnessLaunchInput {
             platform: Platform::Windows,
             runtime: EnvType::Windows,
-            session: SessionIdModeRef::Resume("3fadada6-e0a3-44a2-ab68-ce1ecf7207a9"),
+            session: SessionIdModeRef::Resume {
+                id: "3fadada6-e0a3-44a2-ab68-ce1ecf7207a9",
+                cause: crate::agent::spawn::ResumeCause::Explicit,
+            },
             config: &config,
             prefill: None,
             sandbox: false,

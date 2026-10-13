@@ -1,3 +1,4 @@
+use super::intent::ResumeCause;
 use super::launch::LaunchParams;
 use super::reader::SessionIdMode;
 use crate::agent::provider::SpawnOptionId;
@@ -24,6 +25,11 @@ fn launch_params_carry_pty_size_and_cascade_overrides() {
         spawn_option_id: SpawnOptionId::from("anthropic"),
         registry_mesh_id: 1,
         session_id_mode: SessionIdMode::None,
+        // Issue #1550: the cause decides the resume flag shape at argv
+        // composition. Pinned here so a refactor that drops the field
+        // (silently degrading every Regenerate back to an in-place
+        // resume) fails compilation.
+        resume_cause: ResumeCause::Explicit,
         sandbox: false,
     };
     assert_eq!(launch.rows, 24);

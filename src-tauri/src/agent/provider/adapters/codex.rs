@@ -4072,7 +4072,10 @@ trust_level = "trusted"
             let input = HarnessLaunchInput {
                 platform: Platform::Windows,
                 runtime: EnvType::Windows,
-                session: SessionIdModeRef::Resume("sid-123"),
+                session: SessionIdModeRef::Resume {
+                    id: "sid-123",
+                    cause: crate::agent::spawn::ResumeCause::Explicit,
+                },
                 config: &config,
                 prefill: None,
                 sandbox: false,

@@ -200,6 +200,15 @@ pub(crate) async fn spawn_with_intent(
     let adapter = provider.adapter();
     let is_resume_intent = matches!(intent, SpawnIntent::Resume { .. });
 
+    // Issue #1550 — the cause travels from the intent to argv composition
+    // so a regenerate-on-the-same-harness can branch off the captured
+    // transcript (`AgentProvider::resume_args_fork`) instead of appending to
+    // it. Read before `resume` is computed below, which borrows `intent`.
+    let resume_cause = match &intent {
+        SpawnIntent::Resume { cause } => *cause,
+        _ => ResumeCause::Explicit,
+    };
+
     let resume = match &intent {
         SpawnIntent::Resume { cause } => {
             let decision = decide_startup_resume(
@@ -226,9 +235,10 @@ pub(crate) async fn spawn_with_intent(
                 // the cli_session_id-missing branch above): the node
                 // stays Suspended so the user's new Resume button can
                 // retry later, or the node can be regenerated to a
-                // different provider. The Explicit branch
-                // (ResumeCause::Explicit from user-driven Resume /
-                // Regenerate) is not affected -- the explicit user's
+                // different provider. The user-driven causes
+                // (`ResumeCause::Explicit` from Retry Resume / Resume and
+                // `ResumeCause::Regenerate` from a same-harness provider
+                // swap) are not affected -- the explicit user's
                 // expectation is that we try the captured session id
                 // via `supports_resume()`, not that we silently skip.
                 | ResumeSkipDecision::SkipAdapterDeclines => {
@@ -334,6 +344,12 @@ pub(crate) async fn spawn_with_intent(
             session_id: node_id,
             provider,
             resume,
+            // Issue #1550 — the intent's cause decides the resume flag
+            // shape. Only `Resume` intents carry a meaningful cause; a
+            // fresh spawn records `Explicit` so an accidental
+            // `resume: Some(..)` on a non-resume intent still composes the
+            // in-place resume args rather than a fork.
+            resume_cause,
             rows: terminal_size.rows,
             cols: terminal_size.cols,
             prefill,

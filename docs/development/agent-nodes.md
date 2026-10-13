@@ -105,6 +105,20 @@ Two supporting decisions, both deliberate:
 
 Do not move this guard into the frontend or into `resolveSpawnAgentIntent`: it depends on observing a process death next to the launch mode, which only the backend has. Equally, do not "fix" the loop by making `on_idle` respect `FORBIDDEN_TERMINAL` — that write is what clears the recovery `Error` so an explicit Retry Resume / Start Fresh can spawn at all.
 
+### Resume causes, and why regenerate branches instead of continuing (issue #1550)
+`SpawnIntent::Resume` carries a `ResumeCause` so argv composition can tell three resumes apart — they look identical until the flags don't:
+
+- `Startup` — crash-recovery auto-resume (`auto_resume_agent_nodes`). Honours `auto_resume_on_startup()`.
+- `Explicit` — the user pressed **Retry Resume** / **Resume**.
+- `Regenerate` — the user swapped Model Provider on the **same** harness. `decide_resume` accepted the captured `cli_session_id`, so the conversation is still reachable — but the run must not *keep writing to* the transcript it starts from, or a regenerate overwrites the very history it is regenerating against.
+
+`AgentProvider::resume_args_fork(id)` is the per-adapter opt-in for the last case and **defaults to `resume_args`**, so harnesses with no fork concept keep their existing in-place resume and no CLI sees a flag it does not know. OpenCode is the only override so far (`--session <id> --fork`). Two constraints hold the seam:
+
+- The cause rides on `SessionIdModeRef::Resume { id, cause }` rather than as a separate launch flag, so "fork without a resume" is unrepresentable at the only place that builds argv.
+- Fork is a per-call-site decision keyed on the resume cause, **not** a `HarnessCapabilities` control, so `capability_recipe_coherence` (which asserts recipe flags agree with the advertised descriptor) is unchanged. Do not promote it to a capability without that test changing too.
+
+Cross-harness regenerate still starts fresh — the captured id is bound to the old harness's session format.
+
 ### `AgentNode.branch` is overloaded (base ref vs PR head ref)
 The `branch` field on `AgentNode` (see Rust doc comment at `src-tauri/src/models/mod.rs`) means two different things depending on spawn source:
 
