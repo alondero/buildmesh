@@ -242,6 +242,28 @@ pub(crate) fn unix_attention_curl() -> &'static str {
 #[cfg(test)]
 mod command_tests {
     #[test]
+    fn powershell_literal_doubles_ascii_and_smart_apostrophes() {
+        for (input, expected) in [
+            ("'", "''''"),
+            ("\u{2018}", "'\u{2018}\u{2018}'"),
+            ("\u{2019}", "'\u{2019}\u{2019}'"),
+            ("\u{201a}", "'\u{201a}\u{201a}'"),
+            ("\u{201b}", "'\u{201b}\u{201b}'"),
+            ("don't", "'don''t'"),
+            ("don\u{2018}t", "'don\u{2018}\u{2018}t'"),
+            ("don\u{2019}t", "'don\u{2019}\u{2019}t'"),
+            ("don\u{201a}t", "'don\u{201a}\u{201a}t'"),
+            ("don\u{201b}t", "'don\u{201b}\u{201b}t'"),
+            (
+                "'\u{2018}\u{2019}\u{201a}\u{201b}",
+                "'''\u{2018}\u{2018}\u{2019}\u{2019}\u{201a}\u{201a}\u{201b}\u{201b}'",
+            ),
+        ] {
+            assert_eq!(super::powershell_literal(input), expected, "input: {input}");
+        }
+    }
+
+    #[test]
     fn hook_callback_is_quote_and_newline_free_in_every_runtime() {
         for command in [
             super::windows_hook_callback_command_for_runtime(

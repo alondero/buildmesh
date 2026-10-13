@@ -1126,6 +1126,8 @@ mod tests {
 
     #[test]
     fn mapped_codex_launch_accepts_a_prompt_that_fits_the_child_budget() {
+        // Windows means host-native on other hosts; WindowsInterop explicitly
+        // selects the Windows wrapper without assuming the host uses it.
         let env_types = if cfg!(windows) {
             &[EnvType::Windows, EnvType::WindowsInterop][..]
         } else {
@@ -1159,6 +1161,29 @@ mod tests {
             assert_maps_through_pushd(&command, UNC_SPAWN_PATH, &encoded_script(&command));
             remove_mapped_batch(&command);
         }
+    }
+
+    #[test]
+    fn windows_interop_mapped_percent_directory_is_batch_escaped() {
+        let spawn_path = r"\\server\share\50%off\%USERNAME%\repo";
+        let recipe = SpawnRecipe {
+            binary: "codex",
+            base_args: vec![],
+            trailing_args: vec![],
+            windows_shell: WindowsShell::PowerShell,
+        };
+        let command = super::wrap(
+            recipe,
+            EnvType::WindowsInterop,
+            None,
+            Some(r"C:\tools\codex.cmd"),
+            spawn_path,
+            5408,
+            false,
+        )
+        .expect("a mapped percent-containing directory should assemble");
+        assert_maps_through_pushd(&command, spawn_path, &encoded_script(&command));
+        remove_mapped_batch(&command);
     }
 
     #[test]
