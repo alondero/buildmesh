@@ -1418,23 +1418,24 @@ fn empty_or_garbage_body_marks_input_with_degraded_health() {
 
 #[test]
 fn review_handoff_stop_after_reading_launch_examples_is_ready() {
-    // The fixture transcript intentionally contains a tool_result whose
-    // body *mentions* a background-task launch pattern in prose. The
-    // shared `count_pending_background_tasks` parser correctly extracts
-    // the launch id from the pattern (the same parser that handles
-    // real launches); a Stop hook firing with that transcript must
-    // therefore surface as `SuppressPendingBackground`, not `Ready`.
-    // The test name preserves the original intent (the parser should
-    // not be tricked by prose mentions of the launch pattern); the
-    // expectation was wrong, not the parser.
+    // The transcript is a Read of the reader's own source, so its
+    // `tool_result` *quotes* both launch phrasings as prose. No launch was
+    // issued and no notification can ever arrive for `xyz`, so the yield is
+    // not a background wait: Stop is `Ready`. Only a result correlated to the
+    // `Bash` call that launched a task counts (issue #2264).
     let transcript = tempfile::NamedTempFile::new().unwrap();
-    let record = serde_json::json!({"type":"user", "message":{"content":[{
-        "type":"tool_result", "content":"659\t// Command running in background with ID: xyz.\n681\tconst LAUNCH_MARKER: &str = \"You will be notified when it completes\";"
+    let call = serde_json::json!({"type":"assistant", "message":{"role":"assistant","content":[{
+        "type":"tool_use", "id":"t-read", "name":"Read",
+        "input":{"file_path":"F:\\src\\buildmesh\\src-tauri\\src\\services\\transcript_reader\\readers\\claude_code.rs","offset":659,"limit":24}
     }]}});
-    std::fs::write(transcript.path(), format!("{record}\n")).unwrap();
+    let result = serde_json::json!({"type":"user", "message":{"role":"user","content":[{
+        "type":"tool_result", "tool_use_id":"t-read",
+        "content":"659 // Command running in background with ID: xyz.\n681 const LAUNCH_MARKER: &str = \"You will be notified when it completes\";"
+    }]}});
+    std::fs::write(transcript.path(), format!("{call}\n{result}\n")).unwrap();
     let body = serde_json::json!({"hook_event_name":"Stop", "transcript_path":transcript.path()})
         .to_string();
-    assert_eq!(classify_decision(body.as_bytes(), "claude", crate::services::transcript_reader::adapters::claude_code::count_pending_background_tasks), Decision::SuppressPendingBackground);
+    assert_eq!(classify_decision(body.as_bytes(), "claude", crate::services::transcript_reader::adapters::claude_code::count_pending_background_tasks), Decision::Ready);
 }
 
 #[test]
@@ -1505,9 +1506,9 @@ fn claude_stopped_background_task_releases_stop_and_idle_callbacks() {
     let transcript = tempfile::NamedTempFile::new().unwrap();
     for (length, expected) in [
         (2, Decision::SuppressPendingBackground),
-        (3, Decision::Ready),
-        (4, Decision::SuppressPendingBackground),
-        (5, Decision::Ready),
+        (4, Decision::Ready),
+        (6, Decision::SuppressPendingBackground),
+        (7, Decision::Ready),
     ] {
         std::fs::write(transcript.path(), records[..length].join("\n")).unwrap();
         for event in ["Stop", "Notification"] {
