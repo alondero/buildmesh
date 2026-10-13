@@ -16,12 +16,12 @@ import type { AgentSpawnedPayload } from '../../types/generated/AgentSpawnedPayl
 import type { SerializeTerminalRequestPayload } from '../../types/generated/SerializeTerminalRequestPayload';
 
 export type { AgentOutputPayload };
-import { openUrl } from '@tauri-apps/plugin-opener';
 import * as api from '../../lib/tauri';
 import { createTerminalOptions } from './terminalConfig';
 import { resolveKeyAction } from './terminalKeyAction';
 import { isMac } from '../../lib/platform';
 import { TerminalWriter, type TerminalWriteData } from './TerminalWriter';
+import type { TerminalLinkRouter } from './TerminalLinkRouter';
 import { FontSizeManager } from './FontSizeManager';
 import { ThemeManager } from './ThemeManager';
 import { terminalWebglPool } from './WebglRendererPool';
@@ -34,6 +34,7 @@ export interface TerminalInstance {
   fitAddon: FitAddon;
   serializeAddon: SerializeAddon;
   searchAddon: SearchAddon;
+  links: TerminalLinkRouter;
   unlisten: UnlistenFn;
   opened: boolean;
   resizeScheduler: TerminalResizeScheduler;
@@ -51,13 +52,8 @@ function terminalDataFromPayload(payload: AgentOutputPayload): TerminalWriteData
   return null;
 }
 
-// Claude Code prints plain URLs, which WebLinksAddon recognises. Codex uses
-// OSC 8 terminal hyperlinks; xterm routes those through `linkHandler`
-// instead. Keep both paths on the opener plugin so the Tauri WebView never
-// tries to navigate away from Buildmesh.
-function openTerminalLink(_event: MouseEvent, uri: string): void {
-  openUrl(uri).catch(console.error);
-}
+// Link clicks — OSC 8 hyperlinks and plain printed URLs alike — are routed by
+// `TerminalLinkRouter`, which owns the click arbitration. See its header.
 
 /**
  * Bookkeeping for one in-flight `doCreate` (issue #2016).
@@ -272,6 +268,10 @@ export class TerminalRegistry {
     if (!inst.opened) {
       inst.opened = true;
       inst.term.open(container);
+      // Bind the link-click guard to the element `open()` just created. It
+      // lives on the persistent terminal element, so a later re-attach
+      // re-parents it without re-binding.
+      inst.links.attach(inst.term);
       // Capture Shift+Insert/browser paste before xterm converts it to PTY text.
       // This listener belongs to the persistent terminal element, not its pane.
       inst.term.element?.addEventListener('paste', (event) => {
@@ -418,6 +418,7 @@ export class TerminalRegistry {
     const instance = this.instances.get(nodeId);
     if (instance) {
       instance.resizeScheduler.dispose();
+      instance.links.dispose(); // allow-dispose — the only path that tears a terminal down is the deleted node's
       instance.unlisten();
       api.unsubscribeAgentOutput(nodeId).catch(() => {});
       terminalWebglPool.release(`agent:${nodeId}`);
@@ -472,6 +473,9 @@ export class TerminalRegistry {
       // of these modules, and they're only fetched on first terminal attach.
       // Without this, every byte of @xterm/xterm + 5 addons lands in the
       // desktop initial bundle even for users who never open a canvas.
+      // `TerminalLinkRouter` rides here too: it is only reachable from
+      // `doCreate`, and a static import of it costs the entry bundle enough
+      // to break `check:bundle` (issue #2284 round 2).
       const [
         { Terminal },
         { FitAddon },
@@ -479,6 +483,7 @@ export class TerminalRegistry {
         { SearchAddon },
         { WebLinksAddon },
         { loadUnicode11Widths },
+        { TerminalLinkRouter },
       ] = await Promise.all([
         import('@xterm/xterm'),
         import('@xterm/addon-fit'),
@@ -486,16 +491,21 @@ export class TerminalRegistry {
         import('@xterm/addon-search'),
         import('@xterm/addon-web-links'),
         import('./loadUnicode11Widths'),
+        import('./TerminalLinkRouter'),
       ]);
       // Nothing has been acquired yet — bail before allocating an xterm
       // for a node that was deleted while the chunk was in flight.
       if (aborted()) return null;
 
+      // Both link providers point at one router: it owns the click, so the
+      // URL opens once no matter which provider xterm picks (or whether the
+      // agent's TUI is also handling the press — see TerminalLinkRouter).
+      const links = new TerminalLinkRouter();
+      pending.own(() => links.dispose()); // allow-dispose — link router owned by this cancelled creation, not a live terminal
+
       const term = new Terminal({
         ...createTerminalOptions(),
-        // xterm accepts HTTP(S) OSC 8 links by default. Do not opt in to
-        // non-HTTP protocols here; terminal output is untrusted agent text.
-        linkHandler: { activate: openTerminalLink },
+        linkHandler: links.linkHandler,
       });
       // Owned immediately, before the first thing that can throw, so a
       // failure or a deletion anywhere in the rest of creation still tears
@@ -511,7 +521,7 @@ export class TerminalRegistry {
       term.loadAddon(serializeAddon);
       const searchAddon = new SearchAddon();
       term.loadAddon(searchAddon);
-      const webLinksAddon = new WebLinksAddon(openTerminalLink);
+      const webLinksAddon = new WebLinksAddon(links.openWebLink, links.webLinksOptions);
       term.loadAddon(webLinksAddon);
       // Align glyph widths with the Unicode 11+ tables that modern agent CLIs
       // (string-width) use to lay out tables/box-drawing. Without this, xterm
@@ -536,6 +546,7 @@ export class TerminalRegistry {
         fitAddon,
         serializeAddon,
         searchAddon,
+        links,
         unlisten: () => {},
         opened: false,
         resizeScheduler: new TerminalResizeScheduler(() => measureAndFit(instance)),

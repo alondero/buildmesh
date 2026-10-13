@@ -114,6 +114,50 @@ intermediate status. `finish` and the Stop hook still reject incomplete or
 stale evidence. CI and release checks remain independent safeguards; mock
 browser checks do not replace required real-runtime acceptance evidence.
 
+## Detached dev processes
+
+Use a background server for repeated browser checks:
+
+```powershell
+npm run dev:bg -- --port 3999 --timeout-seconds 60
+node scripts/ui-shot.mjs --mock --mock-url http://127.0.0.1:3999 --out .tmp/ui-after.png --steps .tmp/steps.mjs
+npm run dev:stop
+```
+
+Start binds loopback with a strict port, waits for HTTP readiness, and returns
+the PID, URL and `.harness/logs/dev-server.log` path. Ownership lives in
+`.harness/dev-server.json`, including the PID and a private control token.
+Repeated starts reuse this worktree's server; a different requested port
+requires stopping it first. Occupied ports fail rather than adopting another
+server. Stop confirms ownership through the private loopback endpoint and
+closes only that Vite instance. Stale dead-PID records are removed; a live PID
+whose ownership cannot be confirmed is left alone with a diagnostic. Stop
+retains that record on failure; a new start discards the unconfirmed record
+and tries a fresh strict-port launch without stopping the old PID. An occupied
+port still fails. CLI operations serialize with `.harness/dev-server.lock`
+and reclaim dead owners.
+Startup failure or timeout ends the newly launched child. Its handles are
+redirected, so the invoking shell can exit while the ready server keeps running.
+
+Native app launchers support `scripts\run-dev.ps1 -Detach -CdpPort 9223`
+and `scripts/run-dev.sh --detach`. They still build synchronously, then wait up
+to 30 seconds for a new `started|ready` log entry while the launched PID is
+alive. Configure that readiness budget with `-ReadinessTimeoutSeconds <n>` or
+`--readiness-timeout-seconds <n>` (1–300 seconds). A panic, early exit or timeout
+fails the launch and cleans up its PID. Success prints the PID and app log path
+and leaves the app running. Windows uses an independent ShellExecute launch
+with normal GUI visibility; macOS/Linux redirect console output to
+`.harness/logs/dev-app.*.log` with nohup.
+Stop the printed dev PID when finished. Existing dev instances are replaced
+as before; the stable hub is unaffected. Without detach, the existing launch
+check retains its process-alive fallback.
+
+UI-only checks use `ui-shot --mock` first on every host, with functional
+assertions, inspected screenshots and elapsed time recorded in the PR. This
+needs Vite and Chromium but no native build. Use the native dev profile when
+the backend is part of the change or required acceptance needs real runtime
+evidence; see the [UI verification skill](../../.claude/skills/verify-ui/SKILL.md).
+
 ## Scoped check
 
 `npm run harness -- check [--base <commit>]` is the fast check every harness can
