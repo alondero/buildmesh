@@ -822,6 +822,19 @@ pub(crate) fn ensure_baseline_tables(conn: &Connection) -> SqlResult<()> {
             observed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         );
         CREATE INDEX IF NOT EXISTS idx_circuit_history_run ON circuit_run_history(run_id, id);
+        -- Submission-ordinal lookups (issue #1932). `newest_submission_seq`
+        -- (db/circuit/evidence.rs) filters on kind plus an agent-node id that
+        -- only exists inside the JSON `detail`, so the run index covers
+        -- neither predicate and the query full-scanned this append-only table.
+        -- The partial `WHERE` keeps the index to the submission rows instead
+        -- of indexing the JSON of every history kind, and indexing the
+        -- expression rather than `kind` follows from the agent-node filter
+        -- being the selective half. No SCHEMA_VERSION bump: this batch runs
+        -- unconditionally on every launch, so an existing database adopts
+        -- the index at next start.
+        CREATE INDEX IF NOT EXISTS idx_circuit_history_submission
+            ON circuit_run_history(json_extract(detail,'$.agent_node_id'))
+            WHERE kind='prompt_submitted';
         "
     )?;
 
