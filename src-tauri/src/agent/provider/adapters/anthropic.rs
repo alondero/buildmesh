@@ -164,6 +164,16 @@ impl AgentProvider for AnthropicAdapter {
         true
     }
 
+    fn prefill_args(&self, text: &str) -> Vec<String> {
+        // --prefill stages a draft; a positional prompt starts the first turn.
+        // End option parsing so a handover beginning with '-' remains prompt text.
+        vec!["--".into(), text.into()]
+    }
+
+    fn prefill_auto_submits(&self) -> bool {
+        true
+    }
+
     fn available_on(&self) -> &'static [Platform] {
         &[Platform::Windows, Platform::Macos, Platform::Linux]
     }
@@ -223,6 +233,53 @@ mod tests {
     };
     use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
     use crate::models::EnvType;
+
+    #[test]
+    fn prompted_launch_keeps_settings_before_the_positional_prompt() {
+        let config = ResolvedAgentConfig {
+            model: Some("sonnet".into()),
+            effort: Some("high".into()),
+            extra_args: Some("--verbose".into()),
+            permission_mode: Some(PERMISSION_MODE_PROMPT.into()),
+        };
+        for platform in [Platform::Windows, Platform::Macos, Platform::Linux] {
+            for session in [
+                SessionIdModeRef::None,
+                SessionIdModeRef::Assign("123e4567-e89b-12d3-a456-426614174000"),
+                SessionIdModeRef::Resume {
+                    id: "123e4567-e89b-12d3-a456-426614174000",
+                    cause: crate::agent::spawn::ResumeCause::Explicit,
+                },
+            ] {
+                let prepared = default_prepare(
+                    &ANTHROPIC,
+                    HarnessLaunchInput {
+                        platform,
+                        runtime: EnvType::Windows,
+                        session,
+                        config: &config,
+                        prefill: Some("- review this diff\r\n+ added line"),
+                        sandbox: false,
+                    },
+                );
+                let mut expected = Vec::new();
+                match session {
+                    SessionIdModeRef::Assign(id) => expected.extend(["--session-id", id]),
+                    SessionIdModeRef::Resume { id, .. } => expected.extend(["--resume", id]),
+                    SessionIdModeRef::None => {}
+                }
+                expected.extend(["--model", "sonnet", "--effort", "high", "--verbose"]);
+                expected.extend([
+                    "--",
+                    match platform {
+                        Platform::Windows => "- review this diff + added line",
+                        Platform::Macos | Platform::Linux => "- review this diff\n+ added line",
+                    },
+                ]);
+                assert_eq!(prepared.recipe.base_args, expected);
+            }
+        }
+    }
 
     /// Issue #2151: the Claude-backed base recipe is bare — no adapter
     /// keeps a hidden unattended argv.

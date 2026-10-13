@@ -586,11 +586,17 @@ pub trait AgentProvider: Send + Sync {
     /// `supports_model_override` already uses.
     fn supports_extra_args(&self) -> bool;
 
-    /// Whether `--prefill <text>` is accepted. Used by both spawn flows:
+    /// Whether an initial prompt is accepted. Used by both spawn flows:
     /// `spawn_issue_agent` (URL + title hint, ~150 bytes; never the full body —
     /// see memory: buildmesh-issue-spawn-url-only) and `spawn_handover_agent`
     /// (free-form selected text from a parent terminal, often multi-line).
     fn supports_prefill(&self) -> bool;
+
+    /// Whether the CLI submits the prompt from `prefill_args` on launch.
+    /// Circuit launches must not send another Enter for an already submitted turn.
+    fn prefill_auto_submits(&self) -> bool {
+        false
+    }
 
     /// Whether this prompt should be delivered through the live PTY instead
     /// of being placed on the automated launch command line. Harnesses may

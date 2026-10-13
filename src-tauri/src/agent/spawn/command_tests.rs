@@ -10,6 +10,59 @@ use crate::models::{EnvType, Provider};
 use crate::preferences::HarnessConfigValue;
 
 #[test]
+fn claude_prompted_spawn_submits_instead_of_staging_for_enter() {
+    use super::command::build_spawn_command;
+    use super::reader::SessionIdMode;
+
+    let resolved = crate::env::ResolvedPath {
+        host_path: ".".into(),
+        spawn_path: ".".into(),
+        raw_path: ".".into(),
+        env_type: EnvType::Windows,
+    };
+    let config = ResolvedAgentConfig::default();
+    for session in [
+        SessionIdMode::Assign("123e4567-e89b-12d3-a456-426614174000".into()),
+        SessionIdMode::Resume("123e4567-e89b-12d3-a456-426614174000".into()),
+    ] {
+        for prompt in [
+            "Review PR #123 https://github.com/example/project/pull/123",
+            "Please work on GitHub issue #123",
+            "Handover: finish the implementation\nthen run tests",
+            "- review this diff\n+ added line",
+        ] {
+            let cmd = build_spawn_command(
+                &resolved,
+                Provider::Anthropic,
+                &[],
+                &session,
+                1,
+                &config,
+                Some(prompt),
+                false,
+                super::ResumeCause::Explicit,
+            )
+            .unwrap();
+            let argv: Vec<_> = cmd
+                .get_argv()
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            assert!(
+                !argv.iter().any(|arg| arg == "--prefill"),
+                "--prefill leaves the task waiting for Enter: {argv:?}"
+            );
+            let expected = if cfg!(windows) {
+                prompt.replace('\n', " ")
+            } else {
+                prompt.to_string()
+            };
+            assert_eq!(&argv[argv.len() - 2..], &["--".to_string(), expected]);
+        }
+    }
+}
+
+#[test]
 fn mcode_spawn_validates_final_model_for_fresh_and_resumed_sessions() {
     use super::command::build_spawn_command;
     use super::reader::SessionIdMode;

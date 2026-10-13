@@ -364,6 +364,20 @@ The Claude-backed family does not declare its own value at all:
 `src-tauri/src/agent/provider/mod.rs`, which pins `Direct`, so a new
 Claude-backed adapter inherits the right shell instead of restating it.
 
+Claude-backed launches pass initial prompts as `-- <prompt>`, which starts the
+first interactive turn. `--prefill` only stages a draft awaiting Enter. The
+shared adapter applies this to PR reviewers, PR and issue probe launches,
+handovers to new nodes, and prompted creates, including saved provider routes.
+The option terminator keeps a selection starting with `-` out of CLI option
+parsing. Launches without an initial prompt still open an idle composer.
+
+The adapter's `prefill_auto_submits` declares this submission behavior to
+`initial_prompt_delivery`. Circuit launches use `AutoSubmit` to carry the
+prompt in `SpawnIntent::Loop` without scheduling the staged-prefill Enter
+watcher or injecting it again through the PTY. Harnesses that stage a draft
+retain `Prefill` and its readiness watcher; prompts requiring live PTY delivery
+retain `InjectAfterSpawn`.
+
 ### Launch permission modes are adapter-owned, not a Buildmesh policy
 
 `spawn_recipe` is bare of approval flags (issue #2151): no adapter keeps a

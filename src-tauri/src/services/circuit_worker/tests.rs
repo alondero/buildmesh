@@ -6270,15 +6270,25 @@ fn spawn_kind(
 }
 
 #[test]
-fn circuit_first_turn_prefills_when_the_harness_supports_it() {
+fn circuit_first_turn_uses_the_harness_submission_policy() {
     use crate::agent::launch::{initial_prompt_delivery, InitialPromptDelivery};
     assert_eq!(
         initial_prompt_delivery("claude", "implement the issue"),
-        InitialPromptDelivery::Prefill
+        InitialPromptDelivery::AutoSubmit
     );
     assert_eq!(
         initial_prompt_delivery("codex:custom-provider", "review the PR"),
         InitialPromptDelivery::Prefill
+    );
+    let intent = super::spawn::circuit_spawn_intent(
+        initial_prompt_delivery("claude", "implement the issue"),
+        "implement the issue",
+    );
+    assert_eq!(
+        intent,
+        crate::agent::spawn::SpawnIntent::Loop {
+            initial_prompt: "implement the issue".into(),
+        }
     );
 }
 

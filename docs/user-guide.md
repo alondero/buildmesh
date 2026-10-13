@@ -362,6 +362,11 @@ agent on that pull request's head commit — the same spawn the Pull Requests
 probe's **+** performs — in its own worktree (on Meshes that use worktrees) and
 groups it as another tab on the node you clicked.
 
+With Claude Code, the review starts automatically when the agent opens; no
+extra Enter is needed. Claude Code also starts the first turn automatically
+for issue and Pull Requests probe launches, handovers to new nodes, and new
+nodes created with an initial prompt.
+
 This is a plain agent on the pull request, not the review loop: it reads the PR
 and writes its report in its own tab without sending findings back. Use the
 title bar's **Start review or circuit** control for the automated

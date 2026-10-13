@@ -176,6 +176,8 @@ fn normalize_prefill_for_platform(platform: Platform, text: &str) -> String {
 pub(crate) enum InitialPromptDelivery {
     Fresh,
     Prefill,
+    /// The CLI starts the first turn from its launch argument, without a PTY Enter.
+    AutoSubmit,
     InjectAfterSpawn,
 }
 
@@ -190,7 +192,11 @@ pub(crate) fn initial_prompt_delivery(spawn_option: &str, prompt: &str) -> Initi
 
     let adapter = crate::preferences::resolve_harness_provider(spawn_option).adapter();
     if adapter.supports_prefill() && !adapter.prefill_requires_pty(prompt) {
-        InitialPromptDelivery::Prefill
+        if adapter.prefill_auto_submits() {
+            InitialPromptDelivery::AutoSubmit
+        } else {
+            InitialPromptDelivery::Prefill
+        }
     } else {
         InitialPromptDelivery::InjectAfterSpawn
     }
@@ -1036,6 +1042,22 @@ mod tests {
             initial_prompt_delivery("codex", "Review the PR"),
             InitialPromptDelivery::Prefill
         );
+    }
+
+    #[test]
+    fn claude_initial_prompts_submit_on_launch_without_an_enter_watcher() {
+        for harness in ["anthropic", "claude", "anthropic:custom-provider"] {
+            for prompt in ["Review the PR", "Review the diff\n+ added line"] {
+                assert_eq!(
+                    initial_prompt_delivery(harness, prompt),
+                    InitialPromptDelivery::AutoSubmit
+                );
+            }
+            assert_eq!(
+                initial_prompt_delivery(harness, "  \n\t"),
+                InitialPromptDelivery::Fresh
+            );
+        }
     }
 
     #[test]

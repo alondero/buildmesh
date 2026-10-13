@@ -779,7 +779,7 @@ mod tests {
         );
     }
 
-    /// Prefill text is appended as `--prefill <text>` for a supporting provider.
+    /// Claude submits the initial prompt from its trailing positional argument.
     #[test]
     fn prefill_appended_for_supporting_provider() {
         let cmd = cmd_for(
@@ -797,7 +797,7 @@ mod tests {
             argv(&cmd),
             expected_wsl(
                 "claude",
-                &["--dangerously-skip-permissions", "--prefill", "hello world"]
+                &["--dangerously-skip-permissions", "--", "hello world"]
             )
         );
     }
@@ -822,7 +822,7 @@ mod tests {
                 "claude",
                 &[
                     "--dangerously-skip-permissions",
-                    "--prefill",
+                    "--",
                     "Title\n\nLine 1\nLine 2\nLine 3"
                 ]
             )
@@ -897,8 +897,8 @@ mod tests {
         let args = argv(&cmd);
         let pos = args
             .iter()
-            .position(|a| a == "--prefill")
-            .expect("--prefill present in argv");
+            .position(|a| a == "--")
+            .expect("prompt option terminator present in argv");
         // Issue #1773 review — `cmd.exe /c` requires newlines in the
         // prefill to be flattened to single spaces (the bare-newline
         // end-of-command trap). The empty middle segment from the
@@ -1036,7 +1036,7 @@ mod tests {
         );
     }
 
-    /// WSL keeps the `--prefill` CLI arg: `wsl.exe` passes a multi-line argv
+    /// WSL keeps the positional prompt: `wsl.exe` passes a multi-line argv
     /// through intact (no cmd.exe in the chain), and a Windows env var does not
     /// cross into the WSL environment without `WSLENV`. So the env transport must
     /// NOT engage for WSL spawns. With no per-profile backend env, WSLENV stays
@@ -1066,7 +1066,7 @@ mod tests {
             argv(&cmd),
             expected_wsl(
                 "claude",
-                &["--dangerously-skip-permissions", "--prefill", "hello world"]
+                &["--dangerously-skip-permissions", "--", "hello world"]
             )
         );
         assert!(

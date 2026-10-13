@@ -325,7 +325,7 @@ pub(super) fn circuit_spawn_intent(
     use crate::agent::spawn::SpawnIntent;
 
     match delivery {
-        InitialPromptDelivery::Prefill => SpawnIntent::Loop {
+        InitialPromptDelivery::Prefill | InitialPromptDelivery::AutoSubmit => SpawnIntent::Loop {
             initial_prompt: prompt.to_string(),
         },
         InitialPromptDelivery::Fresh | InitialPromptDelivery::InjectAfterSpawn => {
@@ -344,7 +344,7 @@ pub(super) fn deliver_circuit_initial_prompt(
     use crate::agent::launch::InitialPromptDelivery;
 
     let result = match delivery {
-        InitialPromptDelivery::Prefill => Ok(()),
+        InitialPromptDelivery::Prefill | InitialPromptDelivery::AutoSubmit => Ok(()),
         InitialPromptDelivery::InjectAfterSpawn => {
             crate::circuit::delivery::PreparedPrompt::prepare(node_id, prompt)
                 .map_err(|e| format!("Could not prepare initial prompt: {e}"))
