@@ -40,7 +40,6 @@ pub(crate) struct IssueContext {
     pub(crate) template: Option<String>,
 }
 
-
 /// Context required to spawn an agent on a GitHub pull request.
 /// Does not carry `title` because the PR prefill is persona-driven and
 /// intentionally independent of the PR title. The PR title is used
@@ -195,11 +194,9 @@ impl SpawnIntent {
                         &context.repo,
                         context.number,
                     ),
-                    None => format_pull_request_prefill(
-                        &context.owner,
-                        &context.repo,
-                        context.number,
-                    ),
+                    None => {
+                        format_pull_request_prefill(&context.owner, &context.repo, context.number)
+                    }
                 };
                 Some(InitialPrompt(prompt))
             }
@@ -355,11 +352,7 @@ pub(crate) fn format_issue_prefill_with_url(number: i64, title: &str, url: &str)
 
 /// Format the GitHub-PR prefill. Single source of truth (issue #1180, #1561);
 /// see [`format_issue_prefill`] for the parallel doc.
-pub(crate) fn format_pull_request_prefill(
-    owner: &str,
-    repo: &str,
-    number: i64,
-) -> String {
+pub(crate) fn format_pull_request_prefill(owner: &str, repo: &str, number: i64) -> String {
     let url = format!("https://github.com/{owner}/{repo}/pull/{number}");
     format!(
         "Review PR #{number}\n{}\n{url}",
@@ -606,8 +599,13 @@ https://github.com/alondero/buildmesh/issues/247"
 
     #[test]
     fn mobile_idea_is_the_initial_prompt_verbatim() {
-        let intent = SpawnIntent::Prompt { text: "Fix the mobile view\nKeep terminal access.".into() };
-        assert_eq!(intent.initial_prompt().unwrap().as_str(), "Fix the mobile view\nKeep terminal access.");
+        let intent = SpawnIntent::Prompt {
+            text: "Fix the mobile view\nKeep terminal access.".into(),
+        };
+        assert_eq!(
+            intent.initial_prompt().unwrap().as_str(),
+            "Fix the mobile view\nKeep terminal access."
+        );
     }
 
     /// `Handover` passes the user's selection through verbatim — it's
@@ -773,31 +771,50 @@ https://github.com/alondero/buildmesh/issues/7"
         let issue_render = |template: &str| {
             render_issue_spawn_prompt(template, "octocat", "hello-world", 42, "Fix login timeout")
         };
-        let pr_render = |template: &str| {
-            render_pr_spawn_prompt(template, "octocat", "hello-world", 42)
-        };
+        let pr_render =
+            |template: &str| render_pr_spawn_prompt(template, "octocat", "hello-world", 42);
         let issue_examples: serde_json::Map<String, serde_json::Value> = issue_names
             .iter()
-            .map(|name| (name.to_string(), serde_json::json!(issue_render(&format!("{{{{{name}}}}}")))))
+            .map(|name| {
+                (
+                    name.to_string(),
+                    serde_json::json!(issue_render(&format!("{{{{{name}}}}}"))),
+                )
+            })
             .collect();
         let pr_examples: serde_json::Map<String, serde_json::Value> = pr_names
             .iter()
-            .map(|name| (name.to_string(), serde_json::json!(pr_render(&format!("{{{{{name}}}}}")))))
+            .map(|name| {
+                (
+                    name.to_string(),
+                    serde_json::json!(pr_render(&format!("{{{{{name}}}}}"))),
+                )
+            })
             .collect();
         let issue_cases: Vec<_> = [
             DEFAULT_ISSUE_SPAWN_TEMPLATE,
             "{{number}}|{{title}}|{{title_suffix}}|{{url}}|{{owner}}|{{repo}}|{{policy}}",
             "{{unknown}}|{{toString}}|{{constructor}}|{{ number }}|{{\nnumber}}|{{{number}}|{{url",
-        ].into_iter().map(|template| serde_json::json!({
-            "template": template, "rendered": issue_render(template),
-        })).collect();
+        ]
+        .into_iter()
+        .map(|template| {
+            serde_json::json!({
+                "template": template, "rendered": issue_render(template),
+            })
+        })
+        .collect();
         let pr_cases: Vec<_> = [
             DEFAULT_PR_SPAWN_TEMPLATE,
             "{{number}}|{{url}}|{{owner}}|{{repo}}|{{policy}}|{{title}}|{{title_suffix}}",
             "{{unknown}}|{{toString}}|{{constructor}}|{{ number }}|{{\nnumber}}|{{{number}}|{{url",
-        ].into_iter().map(|template| serde_json::json!({
-            "template": template, "rendered": pr_render(template),
-        })).collect();
+        ]
+        .into_iter()
+        .map(|template| {
+            serde_json::json!({
+                "template": template, "rendered": pr_render(template),
+            })
+        })
+        .collect();
         let fixture = serde_json::json!({
             "defaults": {
                 "issue": DEFAULT_ISSUE_SPAWN_TEMPLATE,
@@ -808,11 +825,11 @@ https://github.com/alondero/buildmesh/issues/7"
             "cases": { "issue": issue_cases, "pr": pr_cases },
         });
         let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
-            std::env::var_os("TS_RS_EXPORT_DIR")
-                .unwrap_or_else(|| "../src/types/generated".into()),
+            std::env::var_os("TS_RS_EXPORT_DIR").unwrap_or_else(|| "../src/types/generated".into()),
         );
         std::fs::create_dir_all(&dir).expect("create generated bindings directory");
-        let contents = serde_json::to_string_pretty(&fixture).expect("serialize preview contract") + "\n";
+        let contents =
+            serde_json::to_string_pretty(&fixture).expect("serialize preview contract") + "\n";
         std::fs::write(dir.join("ProbeSpawnPromptExamples.json"), contents)
             .expect("export production prompt examples");
     }
@@ -875,13 +892,8 @@ https://github.com/alondero/buildmesh/issues/7"
     /// than silently deleted, so a typo stays visible in the prompt.
     #[test]
     fn unknown_placeholders_are_left_in_place() {
-        let out = render_issue_spawn_prompt(
-            "#{{number}} {{bogus}}",
-            "alondero",
-            "buildmesh",
-            1,
-            "t",
-        );
+        let out =
+            render_issue_spawn_prompt("#{{number}} {{bogus}}", "alondero", "buildmesh", 1, "t");
         assert_eq!(out, "#1 {{bogus}}");
     }
 
@@ -910,13 +922,7 @@ https://github.com/alondero/buildmesh/issues/7"
     /// swallowing the rest of the template.
     #[test]
     fn unterminated_placeholder_passes_through() {
-        let out = render_issue_spawn_prompt(
-            "#{{number}} {{oops",
-            "alondero",
-            "buildmesh",
-            1,
-            "t",
-        );
+        let out = render_issue_spawn_prompt("#{{number}} {{oops", "alondero", "buildmesh", 1, "t");
         assert_eq!(out, "#1 {{oops");
     }
 
@@ -995,7 +1001,12 @@ https://github.com/alondero/buildmesh/issues/7"
     /// failing the render - the number, title, and URL still land.
     #[test]
     fn with_url_renderer_tolerates_unparseable_url() {
-        let out = render_issue_spawn_prompt_with_url("[{{owner}}/{{repo}}] #{{number}} {{url}}", 1, "t", "u");
+        let out = render_issue_spawn_prompt_with_url(
+            "[{{owner}}/{{repo}}] #{{number}} {{url}}",
+            1,
+            "t",
+            "u",
+        );
         assert_eq!(out, "[/] #1 u");
     }
 
