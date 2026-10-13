@@ -7,7 +7,7 @@ metadata:
   muse_version: 1.3.0 (1.3.0-R3401.1), native Windows + WSL (macOS unverified)
   date: 2026-09-22
   workspace_trust: implemented 2026-09-22 — pre-provisioned in Muse's config root (issue #1706); verified live with `muse skills list`
-  launch_flags: verdicts recorded 2026-10-06 against 1.3.0 (issue #1710); no flag modeled
+  launch_flags: verdicts recorded 2026-10-06 against 1.3.0 (issue #1710); `--reasoning-effort` modeled 2026-10-13 (issue #1704), no new `HarnessConfigValue` field
 ---
 
 # Meta Muse harness capabilities vs Buildmesh
@@ -19,7 +19,9 @@ installed 1.3.0 on **native Windows** and **WSL**. macOS is derived from the
 same `canonicalize` / XDG rules but is **not yet verified** — see
 [Verification scope](#verification-scope). Attention is still served by the
 passive session-log watcher (issue #1709) — see
-[Attention](#attention-still-watched-not-hooked).
+[Attention](#attention-still-watched-not-hooked). Reasoning effort is modeled
+from configuration as `--reasoning-effort` with an eight-level closed vocabulary
+(issue #1704) — see [Modeled](#modeled).
 
 ## Sources (primary only)
 
@@ -41,7 +43,7 @@ passive session-log watcher (issue #1709) — see
 | `captures_session_id_from_pty` | `false` | No verified banner |
 | `supports_prefill` | `true` | Trailing positional prompt; `prefill_requires_pty` is `true` (resume documents no positional prompt) |
 | `supports_model_override` | `true` | `--model <id>` |
-| `effort_control` | `None` | No effort flag is baked |
+| `effort_control` | `Closed { none, minimal, low, medium, high, xhigh, max, ultra }` | `--reasoning-effort <level>`; wired in #1704. No `--effort` alias, so the recipe shape is adapter-owned too |
 | `supports_extra_args` | `true` | |
 | `requires_attention_hook` | `false` | No native hook wired yet (#1709) |
 | `attention_capability` | `None` | Same |
@@ -73,6 +75,29 @@ than it missed (`--agents`, `--no-session-log`, and the
 `--sandbox-network` / `--disable-write` / `--disable-shell` /
 `--enable-shell-tool` safety group), so the re-check was not a formality.
 
+### Modeled
+
+| Flag | Why Buildmesh emits it |
+|---|---|
+| `--reasoning-effort <EFFORT>` | The one reasoning-effort knob `muse --help` documents, on both the interactive root command and `muse exec`, so the PTY path Buildmesh spawns accepts it. "Meta reasoning effort: none\|minimal\|low\|medium\|high\|xhigh\|max\|ultra (default: high)" — an eight-level **closed** vocabulary, verified on the installed 1.3.0 and unchanged from the 1.1.1 help. Landed in #1704: `effort_control` advertises the vocabulary so the resolver stops dropping mesh overrides, application defaults, and explicit spawn arguments, and the Spawn Menu and Inspector offer the knob. |
+
+The flag name is the sharp part, and it is why `effort_args` is overridden
+alongside `effort_control`. Grok accepts `--effort` as an alias of
+`--reasoning-effort` (see [its deep dive](grok-harness-capabilities.md)), so
+that adapter inherits the trait default; Muse documents **no** such alias, so
+the trait default's `["--effort", level]` would make the CLI reject the launch.
+Enabling the vocabulary without the flag override would convert a silently
+ignored setting into a node that never starts — the pair is pinned together in
+`muse_recipe_appends_reasoning_effort_arg_when_resolved`.
+
+Two limits stay deliberate. Muse's help does not say a given model honours all
+eight levels — the same gap Grok has, where Buildmesh advertises a vocabulary
+that is a superset of every model's own set (#1280) — so Buildmesh forwards
+whatever level the configuration resolved to and leaves the model to interpret
+it. And a per-model effort subset is a **follow-up**, not part of #1704: it
+would need a way to ask Muse which levels a model advertises, which no
+documented flag provides.
+
 ### Never-pass
 
 | Flag | Why Buildmesh must not emit it |
@@ -103,7 +128,7 @@ than it missed (`--agents`, `--no-session-log`, and the
 
 | Flag | Owner |
 |---|---|
-| `--reasoning-effort` (8-level closed vocabulary) | #1704 |
+| `--reasoning-effort` (8-level closed vocabulary) | #1704 — landed; see [Modeled](#modeled) |
 | `--approval-mode`, `--yolo`, `--permission-profile`, `--approval-judge`, `--disable-approval` | #1705 — `--permission-profile` and `--approval-judge` are recorded here only to note where they went |
 | `--trust-workspace` | #1706 |
 | `--disable-sandbox`, `--sandbox-network`, `--disable-write`, `--disable-shell`, `--enable-shell-tool` | #1707, #1788 |
@@ -135,17 +160,21 @@ harness option uses.
 Conversely `--agents` and `--echo-delay-ms` are interactive-only (`--echo-delay-ms`
 carries the never-pass verdict above).
 
-### Nothing graduates to modeled in this pass
+### No new `HarnessConfigValue` field graduates in this pass
 
-No Muse flag earned a `HarnessConfigValue` field, so `ResolvedAgentConfig` and
-the capability table are unchanged. The slot is deliberately left open for a
-future promotion: OpenCode's `--agent <name>` is the template — a value added to
-`HarnessConfigValue` + `ResolvedAgentConfig`, behind a capability gate, rendered
-by an adapter `*_args` helper, never a provider-name check at a call site. Of the
-verdicts above, only two could eventually qualify: `--agents` (once Muse
-publishes a stable, name-addressable overlay vocabulary to send instead of a
-blob) and `--parallel-tool-calls` (once the harness-wide tri-state question is
-answered for every adapter at once, not just Muse).
+No Muse flag earned a new `HarnessConfigValue` field, so `ResolvedAgentConfig`
+keeps exactly the slots it had: `model`, `effort`, `extra_args`, and
+`permission_mode`. `--reasoning-effort` (#1704) is *modeled* in the sense above
+but rides the pre-existing `effort` slot rather than adding one — the gap it
+closes was the vocabulary and the flag name, not a missing config field. The
+slot stays deliberately open for a future promotion: OpenCode's `--agent <name>`
+is the template — a value added to `HarnessConfigValue` + `ResolvedAgentConfig`,
+behind a capability gate, rendered by an adapter `*_args` helper, never a
+provider-name check at a call site. Of the verdicts above, only two could
+eventually qualify: `--agents` (once Muse publishes a stable, name-addressable
+overlay vocabulary to send instead of a blob) and `--parallel-tool-calls` (once
+the harness-wide tri-state question is answered for every adapter at once, not
+just Muse).
 
 ## Workspace trust (#1706)
 
