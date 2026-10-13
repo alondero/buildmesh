@@ -49,7 +49,9 @@ and native `background-tasks` store, resolved through its own session ID and
 spawn environment. It does not apply Claude's task scanner to MiniMax's
 temporary compatible hook transcript. Explicit and timeout-promoted launches
 remain pending until a native terminal tool receipt or terminal summary settles
-them. Missing or partial canonical history remains unavailable evidence. The
+them. Missing or partial canonical history remains unavailable evidence. An
+unanswered foreground tool call also leaves Stop completion evidence unavailable;
+its matching native result must arrive before Stop can report Ready. The
 native lookup runs even when the compatible transcript path is missing or empty.
 If the first Stop precedes identity capture, it uses the validated callback
 session of the already resolved workspace owner; application still requires the

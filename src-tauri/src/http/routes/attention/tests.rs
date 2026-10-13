@@ -44,6 +44,52 @@ fn minimax_stop_uses_canonical_background_receipts() {
 }
 
 #[test]
+fn minimax_stop_waits_for_pending_foreground_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("messages.jsonl");
+    let stop = serde_json::json!({"hook_event_name":"Stop",
+        "session_id":"mvs_0123456789abcdef0123456789abcdef", "cwd":"repo"});
+    let normalize = || {
+        normalizers::normalize(Some(&stop), "mcode", |_| {
+            crate::services::transcript_reader::adapters::mcode::count_pending_background_tasks_in(
+                &transcript,
+                &dir.path().join("tasks"),
+            )
+        })
+        .classified
+    };
+    let background = concat!(
+        "{\"message\":{\"role\":\"toolResult\",\"timestamp\":100,\"details\":{\"status\":\"auto_promoted\",\"task_id\":\"bg_settled\"},\"content\":[]}}\n",
+        "{\"message\":{\"role\":\"toolResult\",\"timestamp\":200,\"details\":{\"status\":\"succeeded\",\"task_id\":\"bg_settled\"},\"content\":[]}}\n"
+    );
+    let call = serde_json::json!({"message":{"role":"assistant","timestamp":300,
+        "content":[{"type":"toolCall","id":"foreground","name":"bash","arguments":{}}]}});
+    let unrelated = serde_json::json!({"message":{"role":"toolResult","timestamp":400,
+        "toolCallId":"unrelated","content":[]}});
+    let matched = serde_json::json!({"message":{"role":"toolResult","timestamp":500,
+        "toolCallId":"foreground","content":[]}});
+    for prefix in [background, ""] {
+        let pending = format!("{prefix}{call}\n");
+        std::fs::write(&transcript, &pending).unwrap();
+        let classified = normalize();
+        assert_eq!(classified.decision, Decision::MarkInput);
+        assert_eq!(
+            classified.detail.kind,
+            Some(LifecycleKind::SignalUnavailable)
+        );
+        assert!(
+            classified.validated,
+            "an unavailable read retains the Stop's identity and turn fence"
+        );
+
+        std::fs::write(&transcript, format!("{pending}{unrelated}\n")).unwrap();
+        assert_eq!(normalize().decision, Decision::MarkInput);
+        std::fs::write(&transcript, format!("{pending}{unrelated}\n{matched}\n")).unwrap();
+        assert_eq!(normalize().decision, Decision::Ready);
+    }
+}
+
+#[test]
 fn minimax_first_stop_reads_the_ownership_resolved_session() {
     let id = "mvs_0123456789abcdef0123456789abcdef";
     let stop = serde_json::json!({"hook_event_name":"Stop", "session_id":id,

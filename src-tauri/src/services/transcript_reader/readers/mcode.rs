@@ -321,6 +321,10 @@ pub(crate) fn count_pending_background_tasks_in(
     if lines.trim().is_empty() {
         return None;
     }
+    // A settled background task cannot establish that the foreground is done.
+    if has_pending_tool_call(&lines)? {
+        return None;
+    }
     let launched = launched_background_tasks(&lines);
     let facts = background_facts(&lines, tasks_dir, &launched)?;
     Some(
