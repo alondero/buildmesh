@@ -5,6 +5,7 @@
 //! claim, and the host/spawn paths. The orchestrator acquires the in-flight
 //! claim *before* calling this function and holds it across every phase.
 
+use super::intent::ResumeCause;
 use super::launch::LaunchParams;
 use super::process::is_agent_already_running;
 use super::provision::WorkspaceToProvision;
@@ -73,6 +74,12 @@ pub(crate) struct SpawnOptions {
     pub session_id: i64,
     pub provider: Provider,
     pub resume: Option<String>,
+    /// Why the orchestrator asked to resume (issue #1550). Carried
+    /// verbatim to argv composition: `Regenerate` composes
+    /// [`crate::agent::provider::AgentProvider::resume_args_fork`] so the
+    /// same-harness provider swap branches off the captured transcript
+    /// instead of appending to it. Ignored when `resume` is `None`.
+    pub resume_cause: ResumeCause,
     pub rows: u16,
     pub cols: u16,
     pub prefill: Option<String>,
@@ -196,6 +203,7 @@ pub(super) async fn prepare_context(
         session_id,
         provider,
         resume,
+        resume_cause,
         rows,
         cols,
         prefill,
@@ -424,9 +432,7 @@ pub(super) async fn prepare_context(
     let mut node = node;
     if let (false, Some(ref entry)) = (is_rename_spawn, &warm_claimed) {
         node.worktree_name = Some(entry.preassigned_name.clone());
-        node.worktree_path = Some(
-            crate::env::normalize_unc_to_wsl(&entry.path).into_owned(),
-        );
+        node.worktree_path = Some(crate::env::normalize_unc_to_wsl(&entry.path).into_owned());
     }
 
     // Issue #1519: the node row is now authoritative for every spawn kind —
@@ -484,6 +490,7 @@ pub(super) async fn prepare_context(
             spawn_option_id,
             registry_mesh_id: mesh_id,
             session_id_mode,
+            resume_cause,
             sandbox,
         },
     })))

@@ -1252,7 +1252,10 @@ mod tests {
         let input = HarnessLaunchInput {
             platform: Platform::Linux,
             runtime: EnvType::Wsl,
-            session: SessionIdModeRef::Resume("12345678-1234-4234-8234-123456789abc"),
+            session: SessionIdModeRef::Resume {
+                id: "12345678-1234-4234-8234-123456789abc",
+                cause: crate::agent::spawn::ResumeCause::Explicit,
+            },
             config: &config,
             prefill: None,
             sandbox: false,
@@ -1375,7 +1378,14 @@ mod tests {
         let session_id = "12345678-1234-4234-8234-123456789abc";
         let modes = [
             ("fresh", SessionIdModeRef::None, Some("fix the auth bug")),
-            ("resume", SessionIdModeRef::Resume(session_id), None),
+            (
+                "resume",
+                SessionIdModeRef::Resume {
+                    id: session_id,
+                    cause: crate::agent::spawn::ResumeCause::Explicit,
+                },
+                None,
+            ),
             ("assign", SessionIdModeRef::Assign(session_id), None),
         ];
 

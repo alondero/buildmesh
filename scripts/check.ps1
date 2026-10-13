@@ -84,6 +84,24 @@ if ($gitWrong -or $opensslWrong) {
   $env:PATH = "$($pin -join ';');$env:PATH"
 }
 
+function Resolve-NpmCommand {
+  # Issue #2255 - npm ships two Windows shims that do not accept arguments the
+  # same way. npm.cmd takes a real argument vector. In its `-Command` branch
+  # npm.ps1 instead rebuilds its own argument list by re-parsing the *text* of
+  # the command that called it, and in that branch the wrapper's `@args` splat
+  # is lost: npm gets no script name, prints the lifecycle script list and exits
+  # 0. That is how `npm run build` became a script listing, leaving the bundle
+  # gate to fail later on a missing dist or stale output.
+  #
+  # Only the forwarding helper needs this. The bare `& npm run <script>` calls
+  # below pass literal arguments, which that re-parse reconstructs correctly, so
+  # they are deliberately left alone rather than churned for consistency.
+  $cmd = Get-Command 'npm.cmd' -CommandType Application -ErrorAction SilentlyContinue
+  if ($cmd) { return $cmd.Source }
+  # No .cmd shim to reach: pwsh on POSIX, or a PATH carrying only npm.ps1.
+  return 'npm'
+}
+
 function Invoke-ProductionBuild {
   # Issue #2013 - run a build command under Vite's production environment and
   # restore the caller's NODE_ENV afterwards, instead of inheriting whatever
@@ -95,7 +113,7 @@ function Invoke-ProductionBuild {
   # only when NODE_ENV is not production.
   $previous = $env:NODE_ENV
   $env:NODE_ENV = 'production'
-  try { & npm run @args } finally { $env:NODE_ENV = $previous }
+  try { & (Resolve-NpmCommand) run @args } finally { $env:NODE_ENV = $previous }
 }
 
 function Ensure-MobileBuilt {

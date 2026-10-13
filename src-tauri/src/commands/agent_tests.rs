@@ -250,6 +250,7 @@ mod tests {
             &config,
             prefill,
             sandbox,
+            crate::agent::spawn::ResumeCause::Explicit,
         )
         .expect("command assembly")
     }
@@ -354,6 +355,7 @@ mod tests {
             &crate::agent::capabilities::ResolvedAgentConfig::default(),
             None,
             false,
+            crate::agent::spawn::ResumeCause::Explicit,
         )
         .expect("command assembly");
 
@@ -396,6 +398,7 @@ mod tests {
             &crate::agent::capabilities::ResolvedAgentConfig::default(),
             None,
             false,
+            crate::agent::spawn::ResumeCause::Explicit,
         )
         .expect("command assembly");
         assert!(env_of(&cmd, "ANTHROPIC_BASE_URL").is_none());
@@ -421,6 +424,7 @@ mod tests {
                 &crate::agent::capabilities::ResolvedAgentConfig::default(),
                 None,
                 false,
+                crate::agent::spawn::ResumeCause::Explicit,
             )
             .expect("command assembly");
             let args = argv(&cmd);
@@ -488,6 +492,7 @@ mod tests {
                     &config,
                     None,
                     false,
+                    crate::agent::spawn::ResumeCause::Explicit,
                 )
                 .expect("command assembly");
                 let args = argv(&cmd);
@@ -529,6 +534,7 @@ mod tests {
             &crate::agent::capabilities::ResolvedAgentConfig::default(),
             None,
             false,
+            crate::agent::spawn::ResumeCause::Explicit,
         )
         .expect("command assembly");
         let args = argv(&cmd);
@@ -559,6 +565,7 @@ mod tests {
                     },
                     None,
                     false,
+                    crate::agent::spawn::ResumeCause::Explicit,
                 )
                 .expect("command assembly");
                 let args = argv(&cmd);
@@ -599,6 +606,7 @@ mod tests {
             &crate::agent::capabilities::ResolvedAgentConfig::default(),
             None,
             false,
+            crate::agent::spawn::ResumeCause::Explicit,
         )
         .expect("command assembly");
         let args = argv(&cmd);
@@ -651,6 +659,7 @@ mod tests {
                 &crate::agent::capabilities::ResolvedAgentConfig::default(),
                 None,
                 false,
+                crate::agent::spawn::ResumeCause::Explicit,
             )
             .expect("command assembly")
         };
@@ -698,6 +707,7 @@ mod tests {
                 &crate::agent::capabilities::ResolvedAgentConfig::default(),
                 None,
                 false,
+                crate::agent::spawn::ResumeCause::Explicit,
             )
             .expect("command assembly");
             let log = temp.path().join(format!("invocation-{index}.log"));
@@ -935,6 +945,7 @@ mod tests {
             &crate::agent::capabilities::ResolvedAgentConfig::default(),
             None,
             false,
+            crate::agent::spawn::ResumeCause::Explicit,
         )
         .expect("command assembly");
 

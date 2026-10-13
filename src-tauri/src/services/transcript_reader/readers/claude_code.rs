@@ -279,6 +279,61 @@ pub fn count_pending_background_tasks(path: &Path) -> Option<usize> {
     Some(pending_background_task_ids(reader.lines().map_while(Result::ok)).len())
 }
 
+// --- Native session continuation (issue #2263) ---
+//
+// A running Claude Code process can carry on inside a *new* native session and
+// leave the transition in the transcript of the session it came from:
+//
+//   {"type":"continued-in","sessionId":"<old>",
+//    "continuedInSessionId":"<new>"}
+//
+// Every callback after that point carries `<new>`, so this record is the only
+// evidence that distinguishes "the same process continued" from "a callback
+// from a process that has been replaced" — an unrelated id is never lineage.
+
+/// The session this transcript records itself continuing into. `None` covers
+/// both "no continuation" and "unreadable": neither is proof, and the caller
+/// must not tell them apart.
+pub fn continued_session_id(session_id: &str, path: &Path) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    declared_continuation(session_id, reader.lines().map_while(Result::ok))
+}
+
+/// Pure scan: the last `continued-in` record whose own `sessionId` is this
+/// transcript. A record naming a different predecessor proves nothing about
+/// *this* session, and the newest record wins if a transcript carries more
+/// than one.
+pub(crate) fn declared_continuation(
+    session_id: &str,
+    lines: impl Iterator<Item = String>,
+) -> Option<String> {
+    let mut continued = None;
+    for line in lines {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if value.get("type").and_then(|kind| kind.as_str()) != Some("continued-in") {
+            continue;
+        }
+        let declares_own_lineage = value
+            .get("sessionId")
+            .and_then(|id| id.as_str())
+            .is_some_and(|declared| declared == session_id);
+        let Some(successor) = value
+            .get("continuedInSessionId")
+            .and_then(|id| id.as_str())
+            .filter(|successor| !successor.is_empty() && *successor != session_id)
+        else {
+            continue;
+        };
+        if declares_own_lineage {
+            continued = Some(successor.to_string());
+        }
+    }
+    continued
+}
+
 /// Pure scan over JSONL lines: launched-task ids with no matching
 /// terminal notification or successful TaskStop result, in launch order. Split from
 /// the I/O wrapper so tests drive it with inline fixtures.
@@ -958,6 +1013,103 @@ mod contract_tests {
         let count = count_pending_background_tasks(&path);
         std::fs::remove_file(&path).ok();
         assert_eq!(count, Some(1), "one launched-but-unnotified task");
+    }
+
+    // Issue #2263 — the recorded transition between two native sessions.
+    const PREVIOUS: &str = "d1b48df8-eb97-4867-b365-a34cdbdc5900";
+    const CONTINUED: &str = "a5acfe57-a409-4aaa-a644-4f7621934663";
+
+    fn continued_record(session_id: &str, successor: serde_json::Value) -> String {
+        serde_json::json!({
+            "type": "continued-in",
+            "sessionId": session_id,
+            "continuedInSessionId": successor,
+            "timestamp": "2026-10-12T18:57:48.345Z",
+        })
+        .to_string()
+    }
+
+    fn scan(lines: &[String], session_id: &str) -> Option<String> {
+        declared_continuation(session_id, lines.iter().cloned())
+    }
+
+    #[test]
+    fn a_recorded_transition_is_read_back_verbatim() {
+        // The run-455 shape, as Claude Code wrote it.
+        assert_eq!(
+            scan(
+                &[continued_record(PREVIOUS, serde_json::json!(CONTINUED))],
+                PREVIOUS
+            )
+            .as_deref(),
+            Some(CONTINUED)
+        );
+    }
+
+    #[test]
+    fn only_own_well_formed_records_count() {
+        // A record naming another predecessor proves nothing about this file.
+        assert_eq!(
+            scan(
+                &[continued_record(CONTINUED, serde_json::json!(PREVIOUS))],
+                PREVIOUS
+            ),
+            None
+        );
+        // No successor, empty successor, or a self-continuation.
+        for successor in [
+            serde_json::json!(null),
+            serde_json::json!(""),
+            serde_json::json!(PREVIOUS),
+        ] {
+            assert_eq!(
+                scan(&[continued_record(PREVIOUS, successor.clone())], PREVIOUS),
+                None,
+                "{successor}"
+            );
+        }
+        // Right fields, wrong record type; and unparseable lines.
+        assert_eq!(
+            scan(
+                &[serde_json::json!({
+                    "type": "summary",
+                    "sessionId": PREVIOUS,
+                    "continuedInSessionId": CONTINUED,
+                })
+                .to_string()],
+                PREVIOUS
+            ),
+            None
+        );
+        assert_eq!(
+            scan(&["{\"type\":\"continued-in\",".to_string()], PREVIOUS),
+            None
+        );
+    }
+
+    #[test]
+    fn the_newest_own_record_wins() {
+        let later = "0c9e6d55-2f18-4a7b-b6c2-51f0a3d97c48";
+        assert_eq!(
+            scan(
+                &[
+                    continued_record(PREVIOUS, serde_json::json!(CONTINUED)),
+                    continued_record(PREVIOUS, serde_json::json!(later)),
+                ],
+                PREVIOUS
+            )
+            .as_deref(),
+            Some(later)
+        );
+    }
+
+    #[test]
+    fn an_unreadable_transcript_proves_no_continuation() {
+        let missing = std::env::temp_dir().join(format!(
+            "buildmesh_test_no_such_session_{}.jsonl",
+            std::process::id()
+        ));
+        assert_eq!(continued_session_id(PREVIOUS, &missing), None);
     }
 }
 

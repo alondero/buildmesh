@@ -41,6 +41,7 @@ The `AgentProvider` trait / `HarnessCapabilities` descriptor is the contract. Sp
 | `self_assigns_session_id` | Fresh spawn uses `SessionIdMode::None`; capture later | Codex, Agy, Cursor, Kimi, Grok, mcode, **OpenCode** |
 | `session_assign_args` | Fresh spawn flags when Buildmesh mints the ID (`--session-id <uuid>`) | Claude, dsh |
 | `resume_args` / `spawn_recipe_for_resume` | Re-spawn flags | Per adapter; OpenCode `--session <id>` |
+| `resume_args_fork` | Re-spawn flags when the run must **branch** off the transcript (issue #1550) | Defaults to `resume_args`; OpenCode appends `--fork` |
 | `supports_model_override` + `model_args` | Mesh / app default `--model` | Claude, Codex, Cursor, Agy, Kimi, Grok, dsh, **OpenCode** |
 | `effort_control` / `supports_effort_override` | `--effort` or Codex `-c model_reasoning_effort=` | Claude (closed), Codex (inline) |
 | `supports_prefill` + `prefill_args` | Issue spawn, handover, Autopilot prompt delivery | Claude `--prefill`, Codex positional, Agy `--prompt-interactive`, **OpenCode `--prompt`** |
@@ -203,6 +204,7 @@ captures_session_id_from_pty: false
 after_fresh_spawn: OpenCode SQLite poller (fallback only — primary capture is the plugin's `session.created`)
 session_assign_args: []
 resume_args(id): ["--session", id]
+resume_args_fork(id): ["--session", id, "--fork"]   // issue #1550 — regenerate branches
 supports_model_override: true
 model_args: ["--model", model]          // provider/model
 supports_prefill: true
@@ -282,9 +284,48 @@ can read these reports.
 - Attention plugin (`session.idle` / `permission.asked`) so Autopilot can run. — **DONE issue #1295 (PR #1559).**
 - Transcript reader (`opencode export` JSON) so the archive picker and coordinator rich layer work. — **DONE issue #1296.**
 - Harden capture further: plugin `session.created` or `--port` + HTTP. SQLite polling still cannot distinguish two Root Nodes in the same directory. — **DONE issue #1294. Plugin path is primary, SQLite poller is fallback.**
-- `--fork` regenerate-same-harness wire-up: add a `ResumeCause::Regenerate` variant and route `default_prepare` to append `--fork` after `--session <id>` when that cause is set. The CLI shape is settled; the call site is the next slice.
+- `--fork` regenerate-same-harness wire-up. — **DONE issue #1550.** See *Regenerate branches, it does not continue* below.
 - `--agent <name>` Mesh / app-default slot: add `agent` to `HarnessConfigValue` + `ResolvedAgentConfig`, plus a capability gate. The CLI shape is settled; the slot is the next slice.
 - `run --variant` does not exist on the TUI recipe; the TUI is `EffortControlKind::None` and the capability-coherence test (`agent::spawn::command_tests::capability_recipe_coherence`) confirms Buildmesh never forwards a synthetic `--effort` to OpenCode.
+
+---
+
+## Regenerate branches, it does not continue (issue #1550)
+
+Regenerating a node on the **same** harness reuses the captured
+`ses_<…>` id — the id is bound to OpenCode's session format, not to the
+Model Provider, so a same-harness provider swap can continue the
+conversation. "Continue" was the wrong verb: the pre-#1550 resume appended
+the regenerated run to the transcript it started from, so the history the
+user was regenerating against grew a second branch's worth of messages
+underneath itself.
+
+OpenCode's `--fork` (paired with `--session <id>`, per the 1.18.3 CLI
+table above) makes the resumed session a **sibling**: the parent
+transcript is read but never mutated. `--fork` lands immediately after
+`--session <id>`.
+
+The wiring is a per-adapter opt-in, not an OpenCode branch in the
+orchestrator:
+
+- `ResumeCause::Regenerate` distinguishes the regenerate resume from
+  startup auto-resume and an explicit user Resume. It rides on
+  `SpawnIntent::Resume { cause }`, which `regenerate_agent_node` sets when
+  `decide_resume` accepted the same-harness swap.
+- `AgentProvider::resume_args_fork(id)` defaults to `resume_args(id)`, so
+  every other harness keeps its in-place resume unchanged. OpenCode is the
+  only override so far: `resume_args(id)` plus `--fork`.
+- `default_prepare` picks `resume_args_fork` only for
+  `ResumeCause::Regenerate`; the cause rides on
+  `SessionIdModeRef::Resume { id, cause }` so "fork without a resume" is
+  unrepresentable at the only place that builds argv.
+
+This is **not** a capability change: fork is a per-call-site decision
+keyed on the resume cause, not a launch-mode control the Spawn Menu
+advertises, so `capability_recipe_coherence` is untouched.
+
+Cross-harness regenerate still starts fresh (unchanged, and out of scope):
+the captured id belongs to the old harness's session format.
 
 ---
 
