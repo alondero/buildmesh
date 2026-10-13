@@ -145,7 +145,10 @@ it cannot see a *lost* newline — only a wrong count. A payload whose newlines
 ConPTY dropped still carries the right character count, which is precisely how
 the LF defect reached a composer with every line glued together and a gate that
 reported readiness. Counting cannot detect this class of loss; staging the right
-bytes is the only defense. `docs/learning/grok-terminal-paste.md` holds the
-per-ending ConPTY probe table for Codex 0.162.1, Grok 1.0.50 and the runtime
-used, and `paste_line_endings_survive_a_bracketed_paste_on_conpty` in
-`src-tauri/src/pty/conpty_tests.rs` re-runs it (ignored; needs an installed CLI).
+bytes is the only defense.
+
+`docs/learning/grok-terminal-paste.md` holds the per-ending ConPTY probe table for
+Codex 0.162.1, Grok 1.0.50 and the runtime used. That probe was a scratch harness
+and is not checked in; building a runnable replacement is tracked in
+[#2290](https://github.com/alondero/buildmesh/issues/2290). The regressions here
+cover the byte stream and the count, which is what the fix depends on.
