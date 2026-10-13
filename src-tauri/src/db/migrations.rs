@@ -803,13 +803,6 @@ const SPECS: &[ColumnSpec] = &[
         type_with_default: "TEXT",
         read_default: ReadDefault::Nullable,
     },
-    ColumnSpec {
-        version: 49,
-        table: "agent_nodes",
-        column: "project_scope",
-        type_with_default: "TEXT",
-        read_default: ReadDefault::Nullable,
-    },
     // v39 — Fresh-spawn generation anchor used by historic session recovery.
     // NULL means the node predates this field or has never been deliberately
     // reset to a fresh conversation.
@@ -832,6 +825,13 @@ const SPECS: &[ColumnSpec] = &[
         version: 46,
         table: "agent_nodes",
         column: "lifecycle_snapshot",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 49,
+        table: "agent_nodes",
+        column: "project_scope",
         type_with_default: "TEXT",
         read_default: ReadDefault::Nullable,
     },

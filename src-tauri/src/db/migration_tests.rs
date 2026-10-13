@@ -1806,6 +1806,7 @@ mod tests {
                 worktree_path TEXT,
                 spawn_configuration TEXT,
                 lifecycle_snapshot TEXT,
+                project_scope TEXT,
                 pr_url TEXT
             );
             INSERT INTO meshes (id, name, path) VALUES (1, 'm', '/m');
@@ -2005,7 +2006,8 @@ mod tests {
                 worktree_path TEXT,
                 spawn_configuration TEXT,
                 lifecycle_snapshot TEXT,
-                status_changed_at TEXT
+                status_changed_at TEXT,
+                project_scope TEXT
             );
             INSERT INTO agent_nodes (mesh_id, name, path, created_at)
                 VALUES (1, 'n', '/n', '2020-01-01T00:00:00Z');
@@ -2076,7 +2078,8 @@ mod tests {
                 worktree_path TEXT,
                 spawn_configuration TEXT,
                 lifecycle_snapshot TEXT,
-                status_changed_at TEXT
+                status_changed_at TEXT,
+                project_scope TEXT
             );
             INSERT INTO agent_nodes (mesh_id, name, path, created_at)
                 VALUES (1, 'n', '/n', '2020-01-01T00:00:00Z');

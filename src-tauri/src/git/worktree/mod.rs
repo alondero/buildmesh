@@ -629,10 +629,10 @@ pub(crate) fn ensure_container_excluded(project_root: &str, container_host_path:
 /// before an Issue/PR spawn adopts the entry, so re-applying on adoption keeps
 /// an adopted worktree byte-for-byte equivalent to a cold-spawned one.
 pub(crate) fn apply_worktree_include(project_root: &str, host_path: &std::path::Path) {
-    let Ok(project) = super::project::resolve(project_root) else {
-        return;
-    };
-    let project_root = project.working_root.as_str();
+    let include_root = super::project::resolve(project_root)
+        .map(|project| project.working_root)
+        .unwrap_or_else(|_| to_host_path(project_root));
+    let project_root = include_root.as_str();
     let include_file_path = std::path::Path::new(project_root).join(".worktreeinclude");
     if !include_file_path.exists() {
         return;
@@ -2770,6 +2770,26 @@ mod tests {
         assert_eq!(
             fs::read_to_string(wt.join("config/nested/.keep")).unwrap(),
             "keep\n"
+        );
+    }
+
+    #[test]
+    fn apply_worktree_include_discovers_repository_root_from_scope() {
+        let td = TestDir::new("wti_scoped");
+        crate::env::test_helpers::init_repo_with_commit(
+            td.path(),
+            &[("family/parents/AGENTS.md", "instructions")],
+        );
+        fs::write(td.path().join("local.config"), "root configuration").unwrap();
+        fs::write(td.path().join(".worktreeinclude"), "local.config\n").unwrap();
+        let wt = td.path().join("owned");
+        fs::create_dir_all(&wt).unwrap();
+
+        apply_worktree_include(td.path().join("family/parents").to_str().unwrap(), &wt);
+
+        assert_eq!(
+            fs::read_to_string(wt.join("local.config")).unwrap(),
+            "root configuration"
         );
     }
 
