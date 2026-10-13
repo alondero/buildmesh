@@ -86,12 +86,21 @@ output.)
    Release containing the installer, its `.sig`, and `latest.json`. If
    verification fails on the tag, nothing is built and no release exists —
    see [What blocks a release](#what-blocks-a-release).
-6. Review the draft release on GitHub and **publish** it. Once published,
+6. An `Android signed APK` job then builds `assembleRelease` and uploads
+   `Buildmesh_<version>_android.apk` plus a `.sha256` sidecar to that draft.
+   It runs *after* the Windows job, because `tauri-action` is what creates the
+   draft to upload to. When `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEY_ALIAS` and
+   `ANDROID_KEY_PASSWORD` are absent it warns and exits 0 instead of failing,
+   because the Windows release is already published by that point and failing
+   would strand it as a draft. The APK is **not** added to `latest.json`; that
+   feed is the Tauri updater and stays Windows-only. See
+   [Android release signing](android.md#release-signing-and-distribution).
+7. Review the draft release on GitHub and **publish** it. Once published,
    `…/releases/latest/download/latest.json` serves the feed, and running installs
    will show the "Update available" prompt on next launch.
-7. Point the [release-notes guide](../releases/README.md) at the next draft
+8. Point the [release-notes guide](../releases/README.md) at the next draft
    when one is ready. Do not rewrite the published note to describe later work.
-8. **Immediately bump back to the next `-0` version**:
+9. **Immediately bump back to the next `-0` version**:
    ```
    npm run version:set -- 1.3.0-0
    ```

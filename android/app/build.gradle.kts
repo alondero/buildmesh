@@ -4,6 +4,29 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// The shipped APK takes its version from the application manifests instead of a
+// literal here, so an APK on a release can never disagree with the installer
+// beside it. `npm run version:set` stays the single writer of that version.
+val appVersion: String = File(rootProject.projectDir.parentFile, "package.json")
+    .readText()
+    .let { Regex("\"version\"\\s*:\\s*\"([^\"]+)\"").find(it)?.groupValues?.get(1) }
+    ?: error("Could not read the app version from package.json")
+
+// Android requires a strictly increasing integer. major*10000 + minor*100 +
+// patch leaves room for 100 patch releases per minor and still orders 1.4.0
+// after 1.3.9. Any `-0` suffix is dropped first, so a between-release build and
+// the release it precedes share one code rather than bumping on every commit.
+val appVersionParts = Regex("\\d+").findAll(appVersion.substringBefore('-')).map { it.value.toInt() }.toList()
+val appVersionCode = appVersionParts.getOrElse(0) { 0 } * 10_000 +
+    appVersionParts.getOrElse(1) { 0 } * 100 +
+    appVersionParts.getOrElse(2) { 0 }
+
+// Release signing arrives from the environment and never from the repository.
+// The workflow base64-decodes ANDROID_KEYSTORE_BASE64 into a temporary file and
+// points ANDROID_KEYSTORE_PATH at it; when that is absent the release type
+// still builds, it is simply unsigned.
+val signingStoreFile: String? = providers.environmentVariable("ANDROID_KEYSTORE_PATH").orNull
+
 android {
     namespace = "dev.buildmesh.remote"
     compileSdk = 36
@@ -11,11 +34,31 @@ android {
         applicationId = "dev.buildmesh.remote"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = appVersionCode
+        versionName = appVersion
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
+    signingConfigs {
+        if (signingStoreFile != null) {
+            create("release") {
+                storeFile = file(signingStoreFile)
+                storePassword = providers.environmentVariable("ANDROID_KEY_PASSWORD").orNull
+                keyAlias = providers.environmentVariable("ANDROID_KEY_ALIAS").orNull
+                keyPassword = providers.environmentVariable("ANDROID_KEY_PASSWORD").orNull
+            }
+        }
+    }
     buildTypes {
+        getByName("release") {
+            // Mirrors the debug type deliberately: no R8 minification or resource
+            // shrinking until keep rules are written and verified against the
+            // live device suite, which would otherwise silently strip the
+            // WebSocket and Compose paths this app depends on.
+            isMinifyEnabled = false
+            if (signingStoreFile != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
         create("live") {
             initWith(getByName("debug"))
             applicationIdSuffix = ".live"

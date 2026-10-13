@@ -178,3 +178,74 @@ jobs:
           }
           $lines | Set-Content SHA256SUMS.txt -Encoding ascii
           gh release upload "${{ github.ref_name }}" SHA256SUMS.txt --clobber
+
+  # The native Android client ships beside the Windows installers, signed with a
+  # developer-owned key that is never stored in this repository. `needs: release`
+  # rather than `needs: verify` because tauri-action is what creates the draft
+  # release this job uploads to; verify is waited on transitively.
+  android-release:
+    name: Android signed APK
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      # Uploading the APK to the release the previous job created.
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Setup Java
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Install Android platform
+        run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0'
+
+      - name: Build, sign and upload the APK
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Missing signing material is a configuration gap, not a broken build:
+          # the Windows release above is already published by this point, so
+          # failing here would strand it as a draft. Say so loudly and stop.
+          if [[ -z "${ANDROID_KEYSTORE_BASE64:-}" || -z "${ANDROID_KEY_ALIAS:-}" || -z "${ANDROID_KEY_PASSWORD:-}" ]]; then
+            echo "::warning title=Android APK not published::ANDROID_KEYSTORE_BASE64 / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD are not configured, so this release ships Windows-only. See docs/development/android.md."
+            exit 0
+          fi
+          KEYSTORE="$RUNNER_TEMP/buildmesh-release.jks"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
+          export ANDROID_KEYSTORE_PATH="$KEYSTORE"
+          bash android/gradlew -p android assembleRelease --console=plain
+          APK="$(ls android/app/build/outputs/apk/release/*.apk)"
+          if [[ -z "$APK" ]]; then
+            echo "::error::assembleRelease produced no APK."
+            exit 1
+          fi
+          # The file name carries the same version the APK reports internally,
+          # because build.gradle.kts reads it from package.json rather than a
+          # literal — see the version wiring there.
+          NAME="Buildmesh_${TAG#v}_android.apk"
+          cp "$APK" "$RUNNER_TEMP/$NAME"
+          ( cd "$RUNNER_TEMP" && sha256sum "$NAME" > "${NAME}.sha256" )
+          gh release upload "$TAG" "$RUNNER_TEMP/$NAME" "$RUNNER_TEMP/${NAME}.sha256" --clobber

@@ -23,10 +23,56 @@ The pre-build task bundles the terminal with the repository's existing xterm
 dependencies; it requires npm dependencies to be installed. Generated assets,
 Gradle caches, APKs and machine-specific SDK paths are ignored.
 
-The debug APK is suitable for local installation. For distribution, build
-`assembleRelease` and sign the APK with a developer-owned Android signing key;
-keys are never stored in this repository. The Android workflow produces a
+The debug APK is suitable for local installation. The Android workflow produces a
 debug APK, executed JVM test report and strict lint report on relevant changes.
+
+## Release signing and distribution
+
+Signed APKs are published on the GitHub Release beside the Windows installers,
+as `Buildmesh_<version>_android.apk`. The `Release` workflow builds and signs
+it with a developer-owned key held in repository secrets; **no key or keystore
+is stored in this repository**, and the `release` build type is unsigned
+whenever those secrets are absent.
+
+Three repository secrets are required (Settings -> Secrets and variables ->
+Actions):
+
+| Secret | Contents |
+|---|---|
+| `ANDROID_KEYSTORE_BASE64` | the `.jks`, base64-encoded (`base64 -w0 < release.jks`) |
+| `ANDROID_KEY_ALIAS` | the key alias inside that keystore |
+| `ANDROID_KEY_PASSWORD` | the keystore and key password |
+
+Generate the keystore once and keep the file outside the repository:
+
+```powershell
+keytool -genkeypair -v -keystore buildmesh-release.jks -alias buildmesh \
+  -keyalg RSA -keysize 2048 -validity 10000
+```
+
+Until those secrets exist the Android job emits a visible warning and the
+release ships Windows-only; it does not fail the release, because by that
+point the Windows build has already been published and failing would strand
+it as a draft.
+
+The APK takes its `versionName` and `versionCode` from `package.json` rather
+than a literal in `build.gradle.kts`, so it cannot disagree with the installer
+next to it: `versionCode` is `major * 10000 + minor * 100 + patch`, which
+leaves room for 100 patch releases per minor. At a release tag the manifest
+holds the bare `X.Y.Z`, so the APK reports exactly that.
+
+Two deliberate choices in the `release` build type:
+
+- **No R8 minification or resource shrinking.** `lintVitalRelease` runs, but
+  minification stays off until keep rules are written and verified against the
+  live device suite, which would otherwise silently strip the WebSocket and
+  Compose paths this app depends on.
+- **Not added to `latest.json`.** That feed is the Tauri updater and is
+  Windows-only; the Android client updates by sideloading a newer APK.
+
+The APK is published with a sidecar `<name>.sha256`. `SHA256SUMS.txt` still
+covers the Windows installers only, because that file is written before this
+job runs.
 
 ## Pairing and transport
 

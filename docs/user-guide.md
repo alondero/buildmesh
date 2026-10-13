@@ -934,13 +934,18 @@ Do not share QR codes, pairing invitations, cookies, certificates, or logs.
 
 ### Using Buildmesh on your phone
 
-The native Android app supports Android 8.0 and later. Install the APK built
-from this repository, open **Buildmesh**, choose **Scan pairing QR**, and scan
+The native Android app supports Android 8.0 and later. Download
+`Buildmesh_<version>_android.apk` from the
+[GitHub release](https://github.com/alondero/buildmesh/releases) beside the
+Windows installers and sideload it (you will need to allow installs from your
+browser), or [build the APK yourself](development/android.md#build-and-install).
+Open **Buildmesh**, choose **Scan pairing QR**, and scan
 the desktop's Remote Access Connect QR. Then select **Pair with desktop**.
 The app verifies and stores the desktop certificate privately; it does not
 require the browser's system certificate installation. On older desktops,
 paste the full pairing URL and the **Root CA SHA-256** fingerprint shown in
-the desktop's Certificate section. See [Android build and installation](development/android.md).
+the desktop's Certificate section. See
+[Android build and installation](development/android.md).
 
 Android provides native Overview/Work, agent replies, task capture, issues,
 archive resume, changes and diffs. Its terminal includes keyboard input,
