@@ -63,6 +63,35 @@ function mockBackend() {
 const noop = () => {};
 
 describe('FileTree git status reconciliation', () => {
+  it.each([false, true])('browses a scoped folder and keeps repository actions and watcher identity (owned=%s)', async owned => {
+    const tree: FileNode = { name: 'parents', path: '/scoped/family/parents', is_dir: true, children: [
+      { name: 'AGENTS.md', path: '/scoped/family/parents/AGENTS.md', is_dir: false, children: [] },
+    ] };
+    const queryPath = owned ? '/scoped' : tree.path;
+    const changed = { path: 'family/parents/AGENTS.md', project_path: owned ? 'family/parents/AGENTS.md' : 'AGENTS.md', status: 'modified', additions: 1, deletions: 0 };
+    let statuses: GitStatus[] = [changed];
+    vi.mocked(invoke).mockImplementation(cmd => {
+      if (cmd === 'list_directory') return Promise.resolve(tree);
+      if (cmd === 'get_git_status') return Promise.resolve(statuses);
+      if (cmd === 'diff_file_against_head') return Promise.resolve(DIFF);
+      return Promise.resolve(null);
+    });
+    const selected = vi.fn();
+    render(<FileTree rootPath={tree.path} gitRootPath={queryPath} showGitStatus
+      selectedFile={null} onFileSelect={noop} onChangedFileSelect={selected} />);
+    const row = await screen.findByRole('treeitem', { name: /AGENTS.md/ });
+    expect(row.textContent).toContain('M');
+    fireEvent.click(row);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('diff_file_against_head', {
+      sessionPath: queryPath, filePath: changed.path,
+    }));
+    await waitFor(() => expect(selected).toHaveBeenCalledWith(tree.children[0].path, DIFF, changed.path));
+    statuses = [{ ...changed, status: 'added' }];
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10_000);
+    await act(async () => { await emit('git-changed', { path: queryPath }); });
+    await waitFor(() => expect(row.textContent).toContain('A'));
+    expect(invoke).toHaveBeenCalledWith('list_directory', { path: tree.path, maxDepth: 4 });
+  });
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
     mockBackend();

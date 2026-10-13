@@ -384,7 +384,8 @@ fn diff_file_against_head_blocking(
     session_path: String,
     file_path: String,
 ) -> Result<DiffResult, String> {
-    let repo = git2::Repository::open(&session_path).map_err(|e| e.to_string())?;
+    let repo = crate::git::primitives::open_from_host_path(&session_path).map_err(|e| e.to_string())?;
+    let root = repo.workdir().ok_or_else(|| "Git repository has no working directory".to_string())?;
 
     let head = repo.head().ok();
     let head_content = if let Some(reference) = &head {
@@ -405,7 +406,7 @@ fn diff_file_against_head_blocking(
     };
 
     let current_content =
-        fs::read_to_string(format!("{}/{}", session_path, file_path)).unwrap_or_default();
+        fs::read_to_string(root.join(&file_path)).unwrap_or_default();
 
     let old_content = head_content.as_deref().unwrap_or("");
     let lines = compute_file_diff(old_content, &current_content);
@@ -555,7 +556,7 @@ fn diff_against_base(
     cancel: Option<&AtomicBool>,
 ) -> Result<DiffResult, String> {
     let host = to_host_path(repo_path);
-    let repo = git2::Repository::open(&host).map_err(|e| e.to_string())?;
+    let repo = crate::git::primitives::open_from_host_path(&host).map_err(|e| e.to_string())?;
     let base_tree = resolve_base_tree(&repo, base_ref);
 
     let mut opts = git2::DiffOptions::new();
@@ -593,7 +594,7 @@ fn diff_against_base(
     find.renames(true);
     let _ = diff.find_similar(Some(&mut find));
 
-    let root = std::path::Path::new(&host);
+    let root = repo.workdir().ok_or_else(|| "Git repository has no working directory".to_string())?;
     let mut files = Vec::new();
 
     for delta in diff.deltas() {
@@ -741,6 +742,7 @@ fn changed_files_against_base(
         };
 
         files.push(GitStatus {
+            project_path: None,
             path: rel,
             status,
             additions,
@@ -810,7 +812,7 @@ pub async fn diff_node_against_base(node_id: i64) -> Result<DiffResult, String> 
         let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
         let base_ref = node_base_ref(&node);
         diff_against_base(
-            &crate::env::node_working_path(&node).host_path,
+            &crate::env::node_git_path(&node).host_path,
             &base_ref,
             None,
             Some(&token),
@@ -844,7 +846,7 @@ pub async fn diff_node_file_against_base(
         let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
         let base_ref = node_base_ref(&node);
         diff_against_base(
-            &crate::env::node_working_path(&node).host_path,
+            &crate::env::node_git_path(&node).host_path,
             &base_ref,
             Some(&file_path),
             Some(&token),
@@ -869,7 +871,7 @@ pub async fn node_changed_files(node_id: i64) -> Result<Vec<GitStatus>, String> 
 pub(crate) fn node_changed_files_blocking(node_id: i64) -> Result<Vec<GitStatus>, String> {
     let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
     let base_ref = node_base_ref(&node);
-    let repo = primitives::open_from_host_path(&crate::env::node_working_path(&node).host_path)
+    let repo = primitives::open_from_host_path(&crate::env::node_git_path(&node).host_path)
         .map_err(|e| e.to_string())?;
     changed_files_against_base(&repo, &base_ref)
 }
@@ -894,6 +896,19 @@ pub(crate) fn node_changed_summary_blocking(node_id: i64) -> Result<GitSummary, 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scoped_project_diffs_remain_repository_relative() {
+        let td = crate::env::test_helpers::TestDir::new("scoped-diff");
+        crate::env::test_helpers::init_repo_with_commit(td.path(), &[("family/parents/file.txt", "before\n"), ("sibling.txt", "before\n")]);
+        std::fs::write(td.path().join("family/parents/file.txt"), "after\n").unwrap();
+        std::fs::write(td.path().join("sibling.txt"), "outside\n").unwrap();
+        let selected = td.path().join("family/parents").to_string_lossy().to_string();
+        let diff = super::diff_file_against_head_blocking(selected.clone(), "family/parents/file.txt".into()).unwrap();
+        assert_eq!(diff.files[0].path, "family/parents/file.txt");
+        assert!(!diff.files[0].hunks.is_empty());
+        let diff = super::diff_against_base(&selected, "HEAD", None, None).unwrap();
+        assert!(diff.files.iter().any(|file| file.path == "sibling.txt"));
+    }
     use super::*;
     use crate::env::test_helpers::{commit_file, init_repo_with_commit, repo_is_dirty, TestDir};
 
@@ -996,24 +1011,28 @@ mod tests {
     fn summary_folds_the_changed_files_list() {
         let files = vec![
             GitStatus {
+            project_path: None,
                 path: "a.rs".into(),
                 status: "added".into(),
                 additions: 3,
                 deletions: 0,
             },
             GitStatus {
+            project_path: None,
                 path: "b.rs".into(),
                 status: "modified".into(),
                 additions: 1,
                 deletions: 1,
             },
             GitStatus {
+            project_path: None,
                 path: "c.rs".into(),
                 status: "deleted".into(),
                 additions: 0,
                 deletions: 5,
             },
             GitStatus {
+            project_path: None,
                 path: "d.rs".into(),
                 status: "untracked".into(),
                 additions: 2,
@@ -1848,7 +1867,7 @@ mod tests {
         worktree_name: Option<&str>,
     ) -> crate::models::AgentNode {
         // Only `path` / `use_worktree` / `worktree_name` drive the diff
-        // resolution under test (via `env::node_working_path`); the rest
+        // resolution under test (via `env::node_git_path`); the rest
         // spread through `..Default::default()` so future optional columns
         // don't reopen this fixture (issue #457).
         use crate::models::AgentNode;
@@ -1876,7 +1895,7 @@ mod tests {
         init_repo_with_base(&root);
 
         let node = make_node(root.to_str().unwrap(), true, Some("wt"));
-        let wt_path = crate::env::node_working_path(&node).host_path;
+        let wt_path = crate::env::node_git_path(&node).host_path;
         assert!(
             wt_path
                 .replace('\\', "/")

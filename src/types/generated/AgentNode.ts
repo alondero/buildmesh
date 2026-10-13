@@ -128,4 +128,9 @@ lifecycle?: LifecycleChangedPayload, position: number, created_at: string,
  * setting affects future nodes without moving live worktrees.
  * Persisted as `agent_nodes.worktree_path TEXT` (schema v37).
  */
-worktree_path: string | null, };
+worktree_path: string | null, 
+/**
+ * Saved folder relative to the owned checkout. None retains legacy cwd;
+ * Some("") explicitly records a repository-root project.
+ */
+project_scope?: string | null, };

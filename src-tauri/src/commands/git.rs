@@ -12,7 +12,7 @@ use ts_rs::TS;
 use crate::services::gh_auth_cache::GhAuthCache;
 
 use crate::db;
-use crate::env::{active_node_paths, to_host_path};
+use crate::env::{to_host_path};
 use crate::git::{health, primitives};
 use crate::models::MeshHealth;
 
@@ -39,6 +39,11 @@ pub struct GitSummary {
 #[ts(export, export_to = "GitStatus.ts")]
 pub struct GitStatus {
     pub path: String,
+    /// Path relative to the queried project folder; None for changes outside
+    /// it. Git actions always use the repository-relative `path` instead.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub project_path: Option<String>,
     pub status: String, // "modified" | "added" | "deleted" | "renamed" | "untracked"
     #[ts(as = "i32")]
     pub additions: usize,
@@ -197,6 +202,7 @@ pub async fn get_git_status(path: String) -> Result<Vec<GitStatus>, String> {
 /// Sync core for [`get_git_status`].
 pub(crate) fn get_git_status_blocking(path: String) -> Result<Vec<GitStatus>, String> {
     let repo = primitives::open_from_host_path(&path).map_err(|e| e.to_string())?;
+    let project = crate::git::project::resolve(&path)?;
 
     let mut opts = StatusOptions::new();
     opts.include_untracked(true).recurse_untracked_dirs(true);
@@ -234,6 +240,8 @@ pub(crate) fn get_git_status_blocking(path: String) -> Result<Vec<GitStatus>, St
         let (additions, deletions) = line_stats.get(&path).copied().unwrap_or((0, 0));
 
         changed_files.push(GitStatus {
+            project_path: std::path::Path::new(&path).strip_prefix(&project.relative_folder)
+                .ok().map(|path| path.to_string_lossy().replace('\\', "/")),
             path,
             status: status_str.to_string(),
             additions,
@@ -333,7 +341,7 @@ pub async fn get_default_branch(path: String) -> String {
 /// failure so the async wrapper can preserve its infallible contract; the
 /// `Err` variant is reserved for genuine worker-pool join errors.
 pub(crate) fn get_default_branch_blocking(path: String) -> Result<String, String> {
-    let repo = match Repository::open(&path) {
+    let repo = match primitives::open_from_host_path(&path) {
         Ok(r) => r,
         Err(_) => return Ok("main".to_string()),
     };
@@ -410,7 +418,7 @@ fn git_sync_blocking(path: String) -> Result<GitSyncResult, String> {
     // config; `do_sync` re-opens (microsecond cost) to keep its
     // signature self-contained and the call shape uniform with
     // `fetch_origin`.
-    let repo = Repository::open(&host_path)
+    let repo = primitives::open_from_host_path(&host_path)
         .map_err(|e| format!("failed to open repo at {}: {}", host_path, e))?;
     let remote = crate::git::sync::current_branch_upstream_remote(&repo)
         .unwrap_or_else(|| "origin".to_string());
@@ -636,7 +644,7 @@ pub(crate) fn get_mesh_health_blocking(mesh_id: i64) -> Result<MeshHealth, Strin
     let mesh =
         db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
     let host_path = to_host_path(&mesh.path);
-    let repo = Repository::open(&host_path)
+    let repo = primitives::open_from_host_path(&host_path)
         .map_err(|e| format!("failed to open repo at {}: {}", host_path, e))?;
 
     let mut health = health::compute_mesh_health(&repo, &mesh.base_ref)?;
@@ -646,9 +654,9 @@ pub(crate) fn get_mesh_health_blocking(mesh_id: i64) -> Result<MeshHealth, Strin
     // Scoped to `mesh_id` — the holder can only live inside this repo, so
     // nodes from other meshes are dead weight here.
     if let Some(local_base) = health.local_base_branch.clone() {
-        let nodes = db::list_agent_nodes_by_mesh(mesh_id)
-            .map_err(|e| format!("failed to list agent nodes: {}", e))?;
-        let active_paths = active_node_paths(&nodes);
+        let nodes = crate::git::project::repository_nodes(&mesh.path,
+            db::list_agent_nodes().map_err(|e| format!("failed to list agent nodes: {e}"))?)?;
+        let active_paths = crate::git::project::active_paths(&nodes);
         health.base_branch_holder =
             health::find_base_branch_holder(&repo, &local_base, &active_paths);
     }
@@ -714,7 +722,7 @@ pub(crate) fn restore_mesh_to_base_blocking(
     host_path: String,
     local_base: String,
 ) -> Result<RestoreResult, String> {
-    let repo = Repository::open(&host_path)
+    let repo = primitives::open_from_host_path(&host_path)
         .map_err(|e| format!("failed to open repo at {}: {}", host_path, e))?;
 
     let moved = health::restore_to_base_impl(&repo, &local_base)?;
@@ -912,11 +920,12 @@ pub async fn stage_file(repo_path: String, file_path: String) -> Result<(), Stri
 pub(crate) fn stage_file_blocking(repo_path: &str, file_path: &str) -> Result<(), String> {
     reject_traversal(file_path)?;
     let host = to_host_path(repo_path);
-    let repo = git2::Repository::open(&host)
+    let repo = primitives::open_from_host_path(&host)
         .map_err(|e| format!("failed to open repo at {}: {}", host, e))?;
     let rel = std::path::Path::new(file_path);
-    let abs = std::path::Path::new(&host).join(rel);
-    assert_inside_repo(std::path::Path::new(&host), rel)?;
+    let root = repo.workdir().ok_or_else(|| "Git repository has no working directory".to_string())?;
+    let abs = root.join(rel);
+    assert_inside_repo(root, rel)?;
 
     let mut index = repo.index().map_err(|e| e.to_string())?;
     if abs.exists() {
@@ -967,11 +976,12 @@ pub async fn revert_file(repo_path: String, file_path: String) -> Result<(), Str
 pub(crate) fn revert_file_blocking(repo_path: &str, file_path: &str) -> Result<(), String> {
     reject_traversal(file_path)?;
     let host = to_host_path(repo_path);
-    let repo = git2::Repository::open(&host)
+    let repo = primitives::open_from_host_path(&host)
         .map_err(|e| format!("failed to open repo at {}: {}", host, e))?;
     let rel = std::path::Path::new(file_path);
-    let abs = std::path::Path::new(&host).join(rel);
-    assert_inside_repo(std::path::Path::new(&host), rel)?;
+    let root = repo.workdir().ok_or_else(|| "Git repository has no working directory".to_string())?;
+    let abs = root.join(rel);
+    assert_inside_repo(root, rel)?;
 
     // Is the path tracked in HEAD? (Unborn HEAD → nothing is tracked.)
     let in_head = repo

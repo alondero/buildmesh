@@ -288,7 +288,7 @@ pub(crate) fn do_sync(
     // paid it once in `do_fetch_only` and would pay it again here, but
     // threading the open repo through the `Err` channel would couple
     // the helper to its two consumers' needs.
-    let repo = match git2::Repository::open(host_path) {
+    let repo = match super::project::open(host_path) {
         Ok(r) => r,
         Err(e) => {
             return SyncOutcome::RepoUnusable {
@@ -453,7 +453,7 @@ pub(crate) fn do_fetch_only(
     // Step 1: open the repo. If the path isn't a git repo, the helper
     // bails with the same `RepoUnusable` variant `do_sync` would have
     // returned inline.
-    let repo = match git2::Repository::open(host_path) {
+    let repo = match super::project::open(host_path) {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(
@@ -796,7 +796,7 @@ pub fn fetch_origin(project_root: &str, base_ref: &str) -> Result<FetchOutcome, 
     // `do_sync` would produce internally if we let it open the path,
     // but doing it here keeps the remote-resolution bookkeeping on
     // the caller's side.
-    let repo = match git2::Repository::open(&host_root) {
+    let repo = match super::project::open(&host_root) {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(

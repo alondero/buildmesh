@@ -76,6 +76,8 @@ type ChangedFileSelect = (path: string, diff: DiffResult, relativePath: string) 
 
 interface FileTreeSelectionProps {
   rootPath: string;
+  /** Git query and watcher identity, independent of the browsed folder. */
+  gitRootPath?: string;
   /** Called when an unchanged file is selected (to open in editor) */
   onUnchangedFileSelect?: (path: string) => void;
   /** Currently selected file path (to show diff inline) */
@@ -104,6 +106,7 @@ interface VisibleRow {
 
 export function FileTree({
   rootPath,
+  gitRootPath = rootPath,
   showGitStatus,
   onChangedFileSelect,
   onUnchangedFileSelect,
@@ -155,7 +158,7 @@ export function FileTree({
   // old combined fetch did neither). Gate the loading view on both so a file's
   // changed/unchanged state is settled before the user can click it.
   const { files: gitFiles, loading: gitLoading } = useChangedFiles(
-    showGitStatus ? rootPath || null : null,
+    showGitStatus ? gitRootPath || null : null,
   );
 
   // list_directory returns absolute node paths; get_git_status returns paths
@@ -169,8 +172,11 @@ export function FileTree({
   // would warn and any consumer re-running on identity churn would defeat
   // `gitFiles` deduplication in `pathInvalidatedCache.ts`).
   const gitStatusMap = useMemo(
-    () => new Map(gitFiles.map((s) => [normalizePath(s.path), s.status])),
-    [gitFiles],
+    () => new Map(gitFiles.flatMap(s => {
+      const path = gitRootPath === rootPath ? (s.project_path === undefined ? s.path : s.project_path) : s.path;
+      return path === null ? [] : [[normalizePath(path), s] as const];
+    })),
+    [gitFiles, gitRootPath, rootPath],
   );
 
   const handleFileClick = useCallback(
@@ -188,7 +194,7 @@ export function FileTree({
         try {
           // diff_file_against_head joins session_path + file_path, so the
           // file_path must be relative to the repo root.
-          const diff = await diffFileAgainstHead(rootPath, relPath);
+          const diff = await diffFileAgainstHead(gitRootPath, relPath);
           if (version !== selectionVersion.current || selectionSignal?.aborted) return;
           onChangedFileSelect(path, diff, relPath);
         } catch (e) {
@@ -211,7 +217,7 @@ export function FileTree({
         onUnchangedFileSelect(path);
       }
     },
-    [rootPath, onChangedFileSelect, onUnchangedFileSelect, onFileSelect, onFileSelectionStart, selectedFile]
+    [gitRootPath, onChangedFileSelect, onUnchangedFileSelect, onFileSelect, onFileSelectionStart, selectedFile]
   );
 
   // Flatten the tree to the rows the user can see right now. The keyboard
@@ -355,10 +361,10 @@ export function FileTree({
         if (current.node.is_dir) {
           toggleExpanded(current.node.path);
         } else {
-          const relPath = relativeToRoot(rootPath, current.node.path);
+          const relPath = relativeToRoot(gitRootPath, current.node.path);
           const status = relPath != null ? gitStatusMap.get(relPath) : undefined;
           const isChanged = status !== undefined;
-          handleFileClick(current.node.path, relPath ?? current.node.path, isChanged);
+          handleFileClick(current.node.path, status?.path ?? relPath ?? current.node.path, isChanged);
         }
       }
       if (nextIndex !== null && nextIndex !== currentIndex) {
@@ -366,7 +372,7 @@ export function FileTree({
         items[nextIndex]?.focus();
       }
     },
-    [visible, activeIndex, expandedPaths, toggleExpanded, rootPath, gitStatusMap, handleFileClick]
+    [visible, activeIndex, expandedPaths, toggleExpanded, gitRootPath, gitStatusMap, handleFileClick]
   );
 
   // Block on the initial file-listing fetch, and on the initial git-status
@@ -415,7 +421,7 @@ export function FileTree({
     >
       {visible.map((row, index) => {
         const expanded = expandedPaths.has(row.node.path);
-        const relPath = relativeToRoot(rootPath, row.node.path);
+        const relPath = relativeToRoot(gitRootPath, row.node.path);
         const status = relPath != null ? gitStatusMap.get(relPath) : undefined;
         const isChanged = status !== undefined;
         const isSelected = selectedFile === row.node.path;
@@ -430,10 +436,10 @@ export function FileTree({
             isChanged={isChanged}
             isSelected={isSelected}
             showGitStatus={showGitStatus}
-            status={status}
+            status={status?.status}
             onToggleExpanded={toggleExpanded}
             onFileClick={handleFileClick}
-            relPath={relPath}
+            relPath={status?.path ?? relPath}
           />
         );
       })}

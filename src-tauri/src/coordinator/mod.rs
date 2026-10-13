@@ -78,7 +78,8 @@ mod tests {
                 signal_health TEXT,
                 worktree_path TEXT,
                 spawn_configuration TEXT,
-                lifecycle_snapshot TEXT
+                lifecycle_snapshot TEXT,
+                project_scope TEXT
             );
             INSERT INTO meshes (id, name, path) VALUES (1, 'core', '/tmp/core');
             INSERT INTO agent_nodes (mesh_id, name, path, provider, status, position)
@@ -301,6 +302,7 @@ mod tests {
             ALTER TABLE agent_nodes ADD COLUMN worktree_path TEXT;
             ALTER TABLE agent_nodes ADD COLUMN spawn_configuration TEXT;
             ALTER TABLE agent_nodes ADD COLUMN lifecycle_snapshot TEXT;
+            ALTER TABLE agent_nodes ADD COLUMN project_scope TEXT;
             INSERT INTO meshes (id, name, path) VALUES (1, 'core', '/tmp/core');
             -- Inserted omitting status_changed_at → stored NULL.
             INSERT INTO agent_nodes (mesh_id, name, path, status, position)

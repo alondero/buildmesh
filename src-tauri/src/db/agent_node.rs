@@ -160,7 +160,7 @@ mod launch_migration_tests {
 }
 
 const AGENT_NODE_COLUMNS: &str =
-    "id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at, source_issue, use_worktree, is_pinned, position, source_pr, head_repo_owner, head_repo_clone_url, source_pr_pinned_sha, signal_health, worktree_path, spawn_configuration, lifecycle_snapshot, status_changed_at";
+    "id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at, source_issue, use_worktree, is_pinned, position, source_pr, head_repo_owner, head_repo_clone_url, source_pr_pinned_sha, signal_health, worktree_path, spawn_configuration, lifecycle_snapshot, status_changed_at, project_scope";
 
 #[cfg(test)]
 mod lifecycle_snapshot_tests {
@@ -572,6 +572,12 @@ mod lifecycle_snapshot_tests {
 }
 
 fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
+    let project_scope: Option<String> = row.get(24)?;
+    if let Some(scope) = project_scope.as_deref() {
+        crate::env::validate_project_scope(scope).map_err(|error| rusqlite::Error::FromSqlConversionFailure(
+            24, rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error))))?;
+    }
     Ok(AgentNode {
         id: row.get(0)?,
         mesh_id: row.get(1)?,
@@ -611,6 +617,7 @@ fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
             }),
         cli_session_id: row.get(8)?,
         worktree_name: row.get(9)?,
+        project_scope,
         use_worktree: row.get::<_, i32>(12)? != 0,
         // is_pinned is at index 13 (wayfinder #982 / ticket #984). Same
         // NOT NULL + DEFAULT 0 storage as `use_worktree` — a pre-v29 row
@@ -708,7 +715,7 @@ pub fn list_coordinator_node_rows_inner(
         // the shared column list so schema additions cannot duplicate or
         // shift the coordinator-only fields.
         let node = map_agent_node_row(row)?;
-        let mesh_name: String = row.get(24)?;
+        let mesh_name: String = row.get(25)?;
         // Read as Option: a DB migrated from a pre-v14 schema added the column
         // nullable, so any row inserted before `create_agent_node` started
         // stamping it (or via some other path) can be NULL. A non-Option read
@@ -729,6 +736,14 @@ pub(crate) fn get_agent_node_by_id_inner(conn: &Connection, id: i64) -> SqlResul
         AGENT_NODE_COLUMNS
     ))?;
     stmt.query_row(params![id], map_agent_node_row)
+}
+
+pub fn save_project_scope(id: i64, scope: &str) -> SqlResult<()> {
+    crate::env::validate_project_scope(scope).map_err(|error| rusqlite::Error::ToSqlConversionFailure(
+        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, error))))?;
+    let conn = write_conn();
+    conn.execute("UPDATE agent_nodes SET project_scope = ?1 WHERE id = ?2 AND project_scope IS NULL", params![scope, id])?;
+    Ok(())
 }
 
 /// Read lifecycle evidence used as a Circuit veto independently from the
@@ -965,6 +980,20 @@ pub(crate) fn create_agent_node_configured_inner(
     worktree_path: Option<&str>,
     spawn_configuration: Option<&str>,
 ) -> SqlResult<AgentNode> {
+    // Deterministic Issue/PR identities must be reserved under the writer
+    // transaction. Imports deliberately keep their discovered identity.
+    let unique_name = if use_worktree && (source_issue.is_some() || source_pr.is_some()) {
+        let mut stmt = db.prepare("SELECT worktree_name FROM agent_nodes WHERE use_worktree = 1 AND worktree_name IS NOT NULL")?;
+        let names = stmt.query_map([], |r| r.get::<_, String>(0))?
+            .collect::<SqlResult<std::collections::HashSet<_>>>()?;
+        crate::session_naming::disambiguate_node_name(name, &names)
+    } else { name.to_string() };
+    let relocated = if unique_name != name {
+        worktree_path.and_then(|p| p.rfind(['/', '\\']).map(|i| format!("{}{unique_name}", &p[..=i])))
+    } else { None };
+    let worktree_path = relocated.as_deref().or(worktree_path);
+    let worktree_name = if unique_name != name { worktree_name.map(|_| unique_name.as_str()) } else { worktree_name };
+    let name = unique_name.as_str();
     // Append at the end of this mesh's grid order. New nodes land last so an
     // existing arrangement isn't disturbed by a fresh spawn.
     let next_position: i64 = db.query_row(

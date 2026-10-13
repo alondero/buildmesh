@@ -72,10 +72,10 @@ pub(crate) fn correction_prompt(reasons: &[String], recent_output: &str) -> Stri
 }
 
 pub(crate) fn observe_wrapup_git_state(node: &crate::models::AgentNode) -> WrapupState {
-    // `node_working_path` resolves Worktree and Root Nodes alike (host path +
+    // `node_git_path` resolves Worktree and Root Nodes alike (host path +
     // env), so the self-heal below covers both; on a Root Node the sanitize
     // is a no-op (`.git` is a directory, not a gitlink).
-    let resolved = crate::env::node_working_path(node);
+    let resolved = crate::env::node_git_path(node);
     let host_path = resolved.host_path.clone();
 
     // Self-heal before giving up: an MSYS-flavoured git leaves Git-Bash-style
@@ -180,6 +180,7 @@ mod tests {
             position: 0,
             created_at: chrono::Utc::now(),
             worktree_path: None,
+            project_scope: None,
         }
     }
 

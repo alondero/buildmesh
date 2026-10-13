@@ -20,9 +20,9 @@
 //!     `last_success`, so the spawn path stays conservative while the
 //!     worker backs off).
 //!
-//! Keyed by the mesh's DB-stored path — the same key
-//! `services::sync_lock::with_mesh_sync_lock` uses — so the freshness map
-//! and the fetch serialization agree on what "one Mesh" means.
+//! Git discovery keys recency by the canonical common Git directory, sharing
+//! successful fetches between root, folder and linked-worktree Meshes. Discovery
+//! runs before taking the registry lock; call from a blocking thread.
 //!
 //! In-memory only, on purpose: fetch recency is meaningless across an app
 //! restart (the remote may have moved arbitrarily while the app was off),
@@ -69,9 +69,10 @@ fn with_map<R>(f: impl FnOnce(&mut HashMap<String, FetchStamp>) -> R) -> R {
 /// outcome). The background worker gates on this so a mesh that is offline
 /// or has a broken remote is retried once per interval, not once per tick.
 pub fn note_attempt(mesh_path: &str) {
+    let repository_key = crate::git::project::coordination_key(mesh_path);
     let now = Instant::now();
     with_map(|map| {
-        map.entry(mesh_path.to_string())
+        map.entry(repository_key)
             .and_modify(|s| s.last_attempt = now)
             .or_insert(FetchStamp {
                 last_attempt: now,
@@ -85,10 +86,11 @@ pub fn note_attempt(mesh_path: &str) {
 /// arrived, and whether or not the parent's checkout could fast-forward).
 /// This is the stamp the spawn-time skip trusts.
 pub fn note_success(mesh_path: &str) {
+    let repository_key = crate::git::project::coordination_key(mesh_path);
     let now = Instant::now();
     with_map(|map| {
         map.insert(
-            mesh_path.to_string(),
+            repository_key,
             FetchStamp {
                 last_attempt: now,
                 last_success: Some(now),
@@ -100,8 +102,9 @@ pub fn note_success(mesh_path: &str) {
 /// Time since the last *attempted* fetch for `mesh_path`.
 /// `Duration::MAX` when never attempted this session.
 pub fn time_since_attempt(mesh_path: &str) -> Duration {
+    let repository_key = crate::git::project::coordination_key(mesh_path);
     let now = Instant::now();
-    with_map(|map| map.get(mesh_path).map(|s| s.last_attempt))
+    with_map(|map| map.get(&repository_key).map(|s| s.last_attempt))
         .map(|t| now.saturating_duration_since(t))
         .unwrap_or(Duration::MAX)
 }
@@ -109,8 +112,9 @@ pub fn time_since_attempt(mesh_path: &str) -> Duration {
 /// Time since the last *successful* fetch for `mesh_path`.
 /// `Duration::MAX` when no fetch has succeeded this session.
 pub fn time_since_success(mesh_path: &str) -> Duration {
+    let repository_key = crate::git::project::coordination_key(mesh_path);
     let now = Instant::now();
-    with_map(|map| map.get(mesh_path).and_then(|s| s.last_success))
+    with_map(|map| map.get(&repository_key).and_then(|s| s.last_success))
         .map(|t| now.saturating_duration_since(t))
         .unwrap_or(Duration::MAX)
 }

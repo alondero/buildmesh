@@ -248,6 +248,7 @@ pub(super) async fn prepare_context(
 
     // Session-id mode: Assign writes the UUID before launch; Resume
     // reuses the captured id; None leaves capture to the adapter.
+    let can_infer_scope = resume.is_none() && resume_cause != ResumeCause::Startup;
     let session_id_mode = if adapter.supports_resume() {
         match resume {
             Some(ref id) if !id.is_empty() => SessionIdMode::Resume(id.clone()),
@@ -271,7 +272,7 @@ pub(super) async fn prepare_context(
     // configuration — the v33 migration copied any non-empty legacy
     // values into the new map; see issue #1151 acceptance criteria 6).
     let row = env::mesh_row(&std::path::PathBuf::from(&node.path));
-    let use_worktree = row.as_ref().map(|r| r.use_worktree).unwrap_or(true);
+    let use_worktree = node.use_worktree;
     // OS-level sandbox toggle (macOS Seatbelt #497, Windows restricted token #498 / ADR-0014).
     // Off by default; the per-OS spawn policy is decided in `spawn_environment::wrap`
     // and `crate::sandbox::spawn::spawn_sandboxed`.
@@ -297,6 +298,22 @@ pub(super) async fn prepare_context(
         resolve_base_ref_for_spawn(&node.path, row.as_ref().and_then(|r| r.base_ref.as_deref()));
 
     timer.checkpoint("after_mesh_row_read");
+
+    let mut node = crate::blocking::run_blocking("project_scope", move || {
+        let mut node = node;
+        if let Some(scope) = node.project_scope.as_deref() {
+            env::validate_project_scope(scope)?;
+        }
+        if use_worktree && can_infer_scope && node.project_scope.is_none() {
+            let root = env::node_worktree_path(&node)
+                .ok_or_else(|| "Worktree node has no checkout path".to_string())?;
+            if let Some(scope) = crate::git::project::scope_for_checkout(&node.path, &root.host_path, None, can_infer_scope)? {
+                db::save_project_scope(node.id, &scope).map_err(|e| e.to_string())?;
+                node.project_scope = Some(scope);
+            }
+        }
+        Ok(node)
+    }).await?;
 
     // Spawn path. The pool claim (issue #609/#612) decides whether
     //    the spawn adopts a pre-warmed worktree (Manual: pool slug IS the
@@ -330,7 +347,7 @@ pub(super) async fn prepare_context(
         // Issue #1519: respects the persisted `worktree_path` (immutable) so
         // legacy rows keep their original legacy location and new rows keep
         // their creation-time effective dir.
-        let existing = env::node_working_path(&node);
+        let existing = env::node_git_path(&node);
         let existing_present = std::path::Path::new(&existing.host_path).exists();
         if mesh_id > 0 && crate::services::warm_pool::should_claim_for_spawn(existing_present) {
             match crate::services::warm_pool::try_claim(app, mesh_id) {
@@ -420,7 +437,7 @@ pub(super) async fn prepare_context(
     // For a Manual warm claim, the pool's preassigned slug IS the node's
     // `worktree_name` once the spawn completes — the provisioner persists
     // that, but `provision_for_spawn` needs the right branch name in the
-    // Spawn Context NOW so the manual `Upgraded` branch's `git checkout -B
+    // Spawn Context NOW so the manual `Upgraded` branch's `git checkout -b
     // <branch>` targets the pool's slug rather than the node's stage-1
     // throwaway. Mutate `node.worktree_name` in place here; the node
     // travels into WorkspaceToProvision.
@@ -429,7 +446,6 @@ pub(super) async fn prepare_context(
     // HOST path (UNC on WSL) while `worktree_path` stores the RAW form, so
     // normalize UNC back to POSIX here — the DB adoption then persists the
     // same raw value `node_working_path` resolves.
-    let mut node = node;
     if let (false, Some(ref entry)) = (is_rename_spawn, &warm_claimed) {
         node.worktree_name = Some(entry.preassigned_name.clone());
         node.worktree_path = Some(crate::env::normalize_unc_to_wsl(&entry.path).into_owned());
@@ -443,7 +459,7 @@ pub(super) async fn prepare_context(
     // resolver, no per-source branches: a second path here once fed the raw
     // host UNC form into `resolve_raw_path` and produced a UNC `spawn_path`
     // that `wsl.exe --cd` rejects on Windows.
-    let resolved = env::node_working_path(&node);
+    let resolved = env::node_git_path(&node);
     tracing::info!(
         "prepare_context: resolved spawn_path={}, host_path={}, env={:?}",
         resolved.spawn_path,

@@ -71,6 +71,19 @@ function mockBackend() {
 }
 
 describe('ProjectFilesTab (#376)', () => {
+  it('browses saved scope but opens changed-file overlays on the checkout watcher identity', async () => {
+    const scoped: AgentNode = { ...NODE, path: '/source/family/parents', worktree_name: 'scoped',
+      worktree_path: '/owned/scoped', project_scope: 'family/parents' };
+    seedAgentNodes([scoped], scoped.id);
+    render(<ProjectFilesTab />);
+    await screen.findByText('src/app.ts');
+    expect(invoke).toHaveBeenCalledWith('list_directory', { path: '/owned/scoped/family/parents', maxDepth: 4 });
+    expect(invoke).toHaveBeenCalledWith('get_git_status', { path: '/owned/scoped' });
+    fireEvent.click(screen.getByText('src/app.ts'));
+    await waitFor(() => expect(useUIStore.getState().activeDiffFile).toEqual({
+      filePath: 'src/app.ts', rootPath: '/owned/scoped', nodeId: scoped.id, meshId: MESH.id, source: 'head',
+    }));
+  });
   beforeEach(() => {
     useToastStore.setState({toasts:[]});
     vi.mocked(invoke).mockReset();

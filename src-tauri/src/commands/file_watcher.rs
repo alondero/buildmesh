@@ -96,7 +96,7 @@ pub fn watch_agent_node(node_id: i64, app_handle: tauri::AppHandle) -> Result<()
     // (host form), which gates on `use_worktree` and trims the name. Using the
     // canonical resolver means a Root Node with a stale `worktree_name` watches
     // the Mesh root, not a non-existent worktree subdir.
-    let resolved = env::node_working_path(&node);
+    let resolved = env::node_git_path(&node);
     let watch_path = resolved.host_path;
     let internal_path = resolved.raw_path;
 
@@ -180,7 +180,7 @@ pub fn unwatch_agent_node(node_id: i64) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::env::{node_working_path, resolve_agent_path};
+    use crate::env::{node_git_path, resolve_agent_path};
     use crate::models::AgentNode;
 
     #[test]
@@ -198,7 +198,7 @@ mod tests {
     }
 
     /// Minimal Agent Node fixture; only `use_worktree`/`worktree_name`/`path`
-    /// drive `node_working_path`. Mirrors the `env` module's fixture.
+    /// drive `node_git_path`. Mirrors the `env` module's fixture.
     /// `..Default::default()` covers the rest so future optional columns
     /// don't reopen this fixture (issue #457).
     fn node(use_worktree: bool, worktree_name: Option<&str>) -> AgentNode {
@@ -212,11 +212,11 @@ mod tests {
 
     /// A Worktree Node's GIT_CHANGED `internal_path` is its worktree subdir —
     /// matching `getNodeGitPath()`. The path is now sourced from the canonical
-    /// `env::node_working_path(...).raw_path` (issue #409).
+    /// `env::node_git_path(...).raw_path` (issue #409).
     #[test]
     fn internal_path_for_worktree_node_is_worktree_subdir() {
         assert_eq!(
-            node_working_path(&node(true, Some("gentle-fox"))).raw_path,
+            node_git_path(&node(true, Some("gentle-fox"))).raw_path,
             "/home/user/my-repo/.claude/worktrees/gentle-fox"
         );
     }
@@ -229,7 +229,7 @@ mod tests {
     #[test]
     fn internal_path_for_root_node_ignores_stale_worktree_name() {
         assert_eq!(
-            node_working_path(&node(false, Some("gentle-fox"))).raw_path,
+            node_git_path(&node(false, Some("gentle-fox"))).raw_path,
             "/home/user/my-repo"
         );
     }
@@ -238,7 +238,7 @@ mod tests {
     #[test]
     fn internal_path_without_worktree_name_is_mesh_root() {
         assert_eq!(
-            node_working_path(&node(true, None)).raw_path,
+            node_git_path(&node(true, None)).raw_path,
             "/home/user/my-repo"
         );
     }
@@ -252,7 +252,7 @@ mod tests {
     #[test]
     fn internal_path_for_padded_worktree_name_is_trimmed() {
         assert_eq!(
-            node_working_path(&node(true, Some("  gentle-fox  "))).raw_path,
+            node_git_path(&node(true, Some("  gentle-fox  "))).raw_path,
             "/home/user/my-repo/.claude/worktrees/gentle-fox"
         );
     }
@@ -262,7 +262,7 @@ mod tests {
     #[test]
     fn internal_path_for_whitespace_only_worktree_name_is_mesh_root() {
         assert_eq!(
-            node_working_path(&node(true, Some("   "))).raw_path,
+            node_git_path(&node(true, Some("   "))).raw_path,
             "/home/user/my-repo"
         );
     }

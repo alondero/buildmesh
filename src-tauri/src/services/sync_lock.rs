@@ -1,86 +1,16 @@
-//! Per-Mesh **synchronous** mutex for `git fetch` + `git pull --ff-only` runs.
+//! Synchronous coordination for fetch, sync and worktree creation.
 //!
-//! Why this exists (issues #652, #680)
-//! -----------------------------------
-//! The spawn-time auto-sync (`git::sync::fetch_origin`) and the manual
-//! `git_sync` Tauri command (`commands::git::git_sync`) both shell out
-//! to `git fetch <remote> <branch>` then `git pull --ff-only --no-rebase`
-//! on the parent Mesh. Without serialization, N concurrent callers
-//! against the same mesh race on `.git/FETCH_HEAD`, `.git/index.lock`,
-//! and `.git/refs/heads/<branch>.lock` — one process's `git fetch`
-//! succeeds while another's fails with
-//! `FetchFailed("... another git process ...")`, leaving the losers
-//! parked on a stale ref. A local bare-remote repro at N=2/5/10
-//! produced zero failures (git's per-process fetch lock serializes
-//! and the fetch is too fast to overlap meaningfully); real GitHub
-//! remotes have wide enough timing windows to expose the collision.
-//!
-//! #652 wired the spawn-time auto-sync into this lock; #680 added the
-//! manual `git_sync` command so a Sync click can't race against an
-//! in-flight spawn; #698 wrapped the PR-spawn head fetch (the
-//! `locked_fetch_pr_head` helper at `git::worktree::provision`,
-//! covering both the same-repo `fetch_single_ref` and the fork
-//! `fetch_fork_head` calls) so two concurrent PR-spawns (or a PR-spawn
-//! racing a manual `git_sync`) can't collide on `.git/FETCH_HEAD`,
-//! `.git/refs/remotes/<remote>/<ref>.lock`, or — for the fork branch —
-//! the config files `git remote add/set-url` write.
-//!
-//! #709 added the worktree prune's `git fetch --prune` as the fourth and
-//! final per-Mesh shell-out to route through this lock (the
-//! `locked_prune_remote_tracking` helper at `commands::prune`), AND
-//! consolidated the four sites into a uniform `locked_*` helper shape:
-//! each underlying shell-out function (`do_sync`, `fetch_origin`,
-//! `fetch_single_ref` / `fetch_fork_head`, the prune shell-out) has a
-//! matching `locked_*` wrapper whose entire body is one
-//! `with_mesh_sync_lock(key, || work())` call. The wrap is auditable in
-//! one place per site rather than scattered across the call sites — and
-//! the next per-Mesh shell-out site added (the issue's "copy-paste
-//! trivial, not a new helper" AC) is a five-line `locked_*` function.
-//!
-//! The existing `services::pool_worker::FILL_LOCK` is `try_lock`-or-skip and
-//! is the wrong shape here — a *skipped* fetch would leave the spawn without
-//! a fresh ref, so the agent lands on stale commits. This module uses a
-//! **blocking** mutex: the second concurrent caller waits for the first to
-//! finish its `fetch` + `pull --ff-only`, then proceeds against the
-//! freshly-populated refs. The second caller's natural outcome is then
-//! `UpToDate` (the worktree is still cut from the right SHA, just via the
-//! first caller's work rather than its own), which is the correct outcome.
-//!
-//! Shape
-//! -----
-//! `MESH_LOCKS: Lazy<Mutex<HashMap<String, Arc<Mutex<()>>>>>` — process-global
-//! map from a Mesh's path string to a per-Mesh `Arc<Mutex<()>>`. The outer
-//! `Mutex` only protects the map itself (microsecond lookup); the inner
-//! `Mutex` is the actual contention point for that Mesh's sync. Two spawns
-//! against *different* Meshes never block each other; two spawns against
-//! the same Mesh serialize.
-//!
-//! `Arc` on the inner mutex lets the address survive any future map
-//! compaction. Today the map is append-only (Meshes are a small fixed set
-//! per app session — typically a handful), so memory growth is bounded.
-//!
-//! Key shape
-//! ---------
-//! Callers MUST pass the Mesh's DB-stored path (the same string stored on
-//! `agent_nodes.path`). Buildmesh's `meshes.path` is the host-native form
-//! the user typed — Windows for a Windows repo, Linux for a WSL repo (then
-//! `env::to_host_path` re-maps it to the host-side UNC for the actual git
-//! call). That means all spawns for one Mesh row share one key, including
-//! WSL spawns (whose `node.path` is the WSL form and whose `fetch_origin`
-//! internally remaps via `to_host_path`).
-//!
-//! Lock-poison recovery
-//! ---------------------
-//! A `Poisoned` inner lock (a prior holder panicked mid-fetch) is recovered
-//! rather than propagated. The guarded unit `()` has no state to corrupt,
-//! so the right thing is to let the next caller proceed. This matches
-//! `services::pool_worker::try_with_fill_lock`'s policy.
+//! Git discovery resolves a canonical common-directory key before the map lock,
+//! so root, subfolder and linked-worktree Meshes share repository coordination.
+//! Non-Git paths retain their supplied key. Pool inventory remains per Mesh.
+//! Call on blocking threads outside DB connections. Spawn paths use the bounded
+//! variant to avoid waiting indefinitely behind manual synchronization.
 
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// Process-global map from a Mesh's path string to its per-Mesh sync mutex.
+/// Process-global map from repository identity to its sync mutex.
 /// Outer `Mutex` only guards map mutation; the inner `Arc<Mutex<()>>` is
 /// the actual contention point.
 static MESH_LOCKS: Lazy<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
@@ -106,6 +36,7 @@ where
     // Get-or-insert the per-Mesh Arc<Mutex<()>>. The outer lock is held
     // for microseconds (one HashMap lookup or insert); the heavy lifting
     // happens on the inner lock, which is what callers actually contend on.
+    let repository_key = crate::git::project::coordination_key(mesh_path);
     let arc_mutex = {
         let mut map = match MESH_LOCKS.lock() {
             Ok(g) => g,
@@ -114,7 +45,7 @@ where
         // `entry().or_insert_with` keeps the lookup-or-insert atomic so two
         // concurrent first-time callers for the same Mesh don't race to
         // allocate two distinct mutexes.
-        map.entry(mesh_path.to_string())
+        map.entry(repository_key.clone())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     };
@@ -156,12 +87,13 @@ pub fn try_with_mesh_sync_lock_timeout<F, R>(
 where
     F: FnOnce() -> R,
 {
+    let repository_key = crate::git::project::coordination_key(mesh_path);
     let arc_mutex = {
         let mut map = match MESH_LOCKS.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        map.entry(mesh_path.to_string())
+        map.entry(repository_key.clone())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     };

@@ -313,6 +313,12 @@ pub fn create_with_source_pr_fork_configured(
         Some(name) if !name.is_empty() => name.to_string(),
         _ => crate::session_naming::on_spawn(),
     };
+    // Scoped Meshes share one branch namespace, even when their checkout
+    // containers differ. Qualify new identities without moving legacy nodes.
+    let project = use_worktree.then(|| crate::git::project::resolve(path)).and_then(Result::ok);
+    let session_name = if project.as_ref().is_some_and(|p| !p.relative_folder.is_empty()) {
+        format!("{}-m{mesh_id}", session_name.chars().take(85).collect::<String>())
+    } else { session_name };
     tracing::debug!(
         "agent_node::create: mesh_id={}, name={}, path={}, branch={}, provider={:?}, use_worktree={}, source_pr={:?}, source_pr_pinned_sha={:?}, head_repo_owner={:?}",
         mesh_id, session_name, path, branch, provider, use_worktree, source_pr, source_pr_pinned_sha, head_repo_owner
@@ -354,6 +360,11 @@ pub fn create_with_source_pr_fork_configured(
         worktree_path_owned.as_deref(),
         configuration.as_ref(),
     )?;
+
+    if let Some(project) = project {
+        db::save_project_scope(node.id, &project.relative_folder)?;
+        return Ok(db::get_agent_node_by_id(node.id)?);
+    }
 
     Ok(node)
 }

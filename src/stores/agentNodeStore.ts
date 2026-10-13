@@ -103,6 +103,7 @@ const AGENT_NODE_RECONCILE_SCHEMA: Record<ReconciledKey, true> = {
   signal_health: true,
   lifecycle: true,
   worktree_path: true,
+  project_scope: true,
   launch_configuration: true,
 };
 const AGENT_NODE_RECONCILE_FIELDS = Object.keys(
@@ -614,6 +615,8 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   // response cannot overwrite newer event state").
   let circuitOwnershipsRevision = 0;
   let nodeRevision = 0;
+  const spawnRequests = new Map<number, symbol>();
+  const failedAutoSpawns = new Set<number>();
   // Wall-clock ms of the last successful `fetchAgentNodes` snapshot.
   // `refreshIfStale` reads it; only a success stamps it (a rejection
   // keeps the previous stamp so the next event retries). `0` until the
@@ -681,8 +684,17 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       const newIds: number[] = [];
       for (const n of agentNodes) {
         const old = oldById[n.id];
-        newById[n.id] = old && shallowEqualAgentNode(old, n) ? old : n;
+        // A missing failure event can leave the backend snapshot idle. Only
+        // an explicit spawn or a live lifecycle transition clears this fence.
+        const incoming = n.status === 'idle' && old && spawnRequests.has(n.id)
+          ? { ...n, status: old.status }
+          : old?.status === 'error' && failedAutoSpawns.has(n.id) && n.status === 'idle'
+            ? { ...n, status: 'error' as const } : n;
+        newById[n.id] = old && shallowEqualAgentNode(old, incoming) ? old : incoming;
         newIds.push(n.id);
+      }
+      for (const id of failedAutoSpawns) {
+        if (!newById[id] || newById[id].status === 'archived') failedAutoSpawns.delete(id);
       }
       // Issue #1252 — a schedule that outlives its target node would
       // fire `send_to_agent` (or `write_to_agent` for the empty-message
@@ -822,7 +834,13 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   // now updates the single entry in `nodesById` (preserving identity for
   // every other node), rather than remapping the whole array.
   patchAgentNode: (id, patch) => {
+    if (patch.status === 'idle' && failedAutoSpawns.has(id)) return;
+    if (patch.status === 'error' && get().nodesById[id]) failedAutoSpawns.add(id);
     nodeRevision += 1;
+    if (patch.status && !['idle', 'spawning', 'error'].includes(patch.status)) {
+      spawnRequests.delete(id);
+      failedAutoSpawns.delete(id);
+    }
     set((state) => {
       const current = state.nodesById[id];
       if (!current) return state;
@@ -959,13 +977,15 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   },
 
   adoptAgentNode: (node) => {
+    if (get().nodesById[node.id]) return;
+    nodeRevision += 1;
     // Insert-if-absent (never clobber): the `node-created` listener's fetch may
     // already have delivered a fresher row, and this is only a bridge so a
     // caller can act on the id before that fetch lands.
-    set((state) => state.nodesById[node.id] ? state : {
+    set((state) => ({
       nodesById: { ...state.nodesById, [node.id]: node },
       nodeIds: [...state.nodeIds, node.id],
-    });
+    }));
   },
 
   selectProviderForMesh: async (meshId, meshName, meshPath, providerId, useWorktree?: boolean, initialPrompt?: string, configurationId?: string): Promise<AgentNode> => {
@@ -1159,6 +1179,8 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   },
 
   removeAgentNode: (id) => {
+    spawnRequests.delete(id);
+    failedAutoSpawns.delete(id);
     // A user-initiated close already dropped the row optimistically and owns
     // its terminal disposal; only act when the store still holds the row.
     if (!(id in get().nodesById)) return;
@@ -1295,14 +1317,18 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
             cols: maybeCols,
           };
     const node = get().nodesById[nodeId];
-    const previousStatus = node?.status;
+    if (!node || node.status === 'archived') return;
+    const request = Symbol('spawn');
+    spawnRequests.set(nodeId, request);
+    failedAutoSpawns.delete(nodeId);
+    nodeRevision += 1;
     const intent = resolveSpawnAgentIntent(options, node);
     // Flip idle → spawning *before* the first await so Terminal's
     // auto-spawn effect (keyed on `status === 'idle'`) cannot start a
     // second spawn_agent while this one is in flight. Issue #1384 —
     // optimistic patch goes through `nodesById` so other entries keep
     // their identity.
-    if (node?.status === 'idle') {
+    if (['idle', 'error', 'suspended'].includes(node.status)) {
       set((state) => ({
         nodesById: {
           ...state.nodesById,
@@ -1318,7 +1344,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
         rows: options.rows ?? null,
         cols: options.cols ?? null,
       });
-      await get().fetchAgentNodes();
+      if (spawnRequests.get(nodeId) !== request) return;
     } catch (e) {
       // The central IPC wrapper (src/lib/tauri.ts → _invoke) already logs
       // every rejection to buildmesh.log as `[IPC:spawn_agent] args=… — <err>`,
@@ -1326,20 +1352,27 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       // store-side catch keeps doing two things the wrapper does not: it
       // surfaces the error on `state.error` for the UI to render, and it
       // re-throws so the caller's catch can react. Issue #1384 —
-      // rollback through `nodesById` so other entries keep their identity.
-      if (previousStatus !== undefined) {
+      // patch through `nodesById` so other entries keep their identity.
+      const current = get().nodesById[nodeId];
+      if (spawnRequests.get(nodeId) === request && current &&
+          ['idle', 'spawning', 'error'].includes(current.status)) {
+        failedAutoSpawns.add(nodeId);
+        nodeRevision += 1;
         set((state) => ({
           nodesById: {
             ...state.nodesById,
-            [nodeId]: { ...state.nodesById[nodeId]!, status: previousStatus },
+            [nodeId]: { ...state.nodesById[nodeId]!, status: 'error' },
           },
           error: formatError(e),
         }));
-      } else {
-        set({ error: formatError(e) });
       }
       throw e;
+    } finally {
+      if (spawnRequests.get(nodeId) === request) spawnRequests.delete(nodeId);
     }
+    // List refresh is independent of launch success. A failed refresh must
+    // never reclassify a provider that the backend has already launched.
+    await get().fetchAgentNodes();
   },
 
   regenerateAgentNode: async (nodeId, newProviderId) => {

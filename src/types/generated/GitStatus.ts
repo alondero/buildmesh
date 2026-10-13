@@ -6,4 +6,9 @@
  * desktop `get_git_status` Tauri command and the mobile `/git/status` HTTP
  * route. `usize` counts carry `#[ts(as = "i32")]` so they emit `number`.
  */
-export type GitStatus = { path: string, status: string, additions: number, deletions: number, };
+export type GitStatus = { path: string, 
+/**
+ * Path relative to the queried project folder; None for changes outside
+ * it. Git actions always use the repository-relative `path` instead.
+ */
+project_path?: string | null, status: string, additions: number, deletions: number, };

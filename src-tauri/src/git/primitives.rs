@@ -12,16 +12,14 @@
 use std::collections::{BTreeSet, HashMap};
 
 use git2::{Oid, Repository, StatusOptions};
-
 use crate::env::to_host_path;
 
-/// Open the repository at a session/internal path, converting it to a
-/// host-readable path first (WSL → UNC, etc.). Callers that also need the
-/// host-path string for a later subprocess `current_dir` should call
-/// [`to_host_path`] themselves and `Repository::open` directly; this helper is
-/// for the common open-and-use-the-repo case.
+
+/// Discover the nearest repository using the host-readable spelling. Source
+/// folder callers that need the Git root use `project::resolve`; owned checkout
+/// validation uses exact `Repository::open` to avoid discovering an ancestor.
 pub fn open_from_host_path(path: &str) -> Result<Repository, git2::Error> {
-    Repository::open(to_host_path(path))
+    super::project::open(path)
 }
 
 /// Whether the working tree has any non-ignored change (modified, staged,
