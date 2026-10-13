@@ -5,6 +5,7 @@
 //! Registry insert and the reader thread belong to `streams`.
 
 use super::command::{build_spawn_command_prepared, resolve_spawn_config};
+use super::intent::ResumeCause;
 use super::preflight::{ensure_spawn_binary, Preflight};
 use super::process::{sandbox_spawn, spawn_child};
 use super::provision::ProvisionedWorkspace;
@@ -44,6 +45,11 @@ pub(super) struct LaunchParams {
     /// registry for per-mesh activity tracking.
     pub registry_mesh_id: i64,
     pub session_id_mode: SessionIdMode,
+    /// Why this spawn resumes (issue #1550). Only read when
+    /// `session_id_mode` is [`SessionIdMode::Resume`]; `Regenerate` makes
+    /// argv composition branch off the transcript via
+    /// [`AgentProvider::resume_args_fork`] instead of extending it.
+    pub resume_cause: ResumeCause,
     pub sandbox: bool,
 }
 
@@ -88,6 +94,7 @@ pub(super) async fn launch_process(
         spawn_option_id,
         registry_mesh_id,
         session_id_mode,
+        resume_cause,
         sandbox,
     } = launch;
 
@@ -179,6 +186,7 @@ pub(super) async fn launch_process(
         &resolved_config,
         prefill.as_deref(),
         sandbox,
+        resume_cause,
     )
     .inspect_err(|error| {
         adapter.on_process_terminated(session_id);

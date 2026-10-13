@@ -36,6 +36,11 @@ CREATE INDEX idx_autopilot_runs_state ON autopilot_runs(state)
 index:idx_circuit_history_run
 CREATE INDEX idx_circuit_history_run ON circuit_run_history(run_id, id)
 
+index:idx_circuit_history_submission
+CREATE INDEX idx_circuit_history_submission
+            ON circuit_run_history(json_extract(detail,'$.agent_node_id'))
+            WHERE kind='prompt_submitted'
+
 index:idx_circuit_runs_mesh_queue
 CREATE INDEX idx_circuit_runs_mesh_queue
             ON autopilot_circuit_runs(mesh_id, state, queue_position)

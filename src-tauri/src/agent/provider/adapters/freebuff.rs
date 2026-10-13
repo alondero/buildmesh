@@ -260,7 +260,10 @@ mod tests {
         let input = HarnessLaunchInput {
             platform: Platform::Linux,
             runtime: EnvType::Windows,
-            session: SessionIdModeRef::Resume("existing-uuid-100"),
+            session: SessionIdModeRef::Resume {
+                id: "existing-uuid-100",
+                cause: crate::agent::spawn::ResumeCause::Explicit,
+            },
             config: &config,
             prefill: None,
             sandbox: false,

@@ -542,8 +542,14 @@ pub async fn regenerate_agent_node(
     .await?;
 
     let intent = if resume {
+        // Issue #1550 — a same-harness regenerate reuses the captured
+        // `cli_session_id`, but it must branch off that transcript rather
+        // than continue it: continuing would append the regenerated run to
+        // the very history the user is regenerating from. Harnesses that
+        // cannot fork ignore this (their `resume_args_fork` defaults to
+        // `resume_args`, i.e. the pre-#1550 in-place resume).
         SpawnIntent::Resume {
-            cause: ResumeCause::Explicit,
+            cause: ResumeCause::Regenerate,
         }
     } else {
         SpawnIntent::Fresh
@@ -567,6 +573,39 @@ pub async fn regenerate_agent_node(
 #[cfg(test)]
 mod tests {
     use super::validate_rename_name;
+
+    /// Issue #1550 — the fork argv is only reachable if this call site
+    /// actually asks for `ResumeCause::Regenerate`. `regenerate_agent_node`
+    /// needs a live `tauri::AppHandle` to spawn, so the intent mapping is
+    /// pinned at the source instead: `regenerate_apply_blocking` already
+    /// has behavioural tests for the `resume` decision itself, and
+    /// `agent::launch` / the adapter own the argv.
+    #[test]
+    fn regenerate_resumes_with_the_regenerate_cause() {
+        let src = include_str!("agent_node.rs");
+        let start = src
+            .find("let intent = if resume {")
+            .expect("regenerate_agent_node must build its SpawnIntent here");
+        let rest = &src[start..];
+        let end = rest
+            .find("} else {")
+            .expect("the resume branch must be followed by the fresh branch");
+        let arm = &rest[..end];
+        assert!(
+            arm.contains("SpawnIntent::Resume"),
+            "a same-harness regenerate resumes the captured session; got: {arm}"
+        );
+        assert!(
+            arm.contains("cause: ResumeCause::Regenerate"),
+            "the fork argv is only reachable through ResumeCause::Regenerate \
+             (issue #1550); got: {arm}"
+        );
+        assert!(
+            !arm.contains("cause: ResumeCause::Explicit"),
+            "ResumeCause::Explicit would continue the parent transcript in \
+             place instead of branching off it; got: {arm}"
+        );
+    }
 
     #[test]
     fn validate_accepts_trimmed_name() {

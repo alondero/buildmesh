@@ -357,6 +357,16 @@ makes the same choice for its own `npm run build` and `npm run build:mobile`
 calls, scoped to those invocations so its vitest calls still get the test
 environment React's `act` requires.
 
+On Windows that wrapper has to name npm's `.cmd` shim rather than bare `npm`,
+because the two npm shims do not accept arguments the same way. `npm.cmd` takes
+a real argument vector; `npm.ps1` rebuilds its own argument list by re-parsing
+the *text* of the command that called it, so a forwarded `@args` splat is lost
+and `npm run build` quietly becomes a script listing that exits 0. The wrapper
+falls back to a bare `npm` only where no `.cmd` exists (pwsh on POSIX). A build
+gate that prints a script list and reports success has built nothing: treat a
+missing `dist` or a stale-bundle budget failure as this symptom first, not as a
+build failure.
+
 | Outcome | Meaning and next action | Exit |
 |---|---|---|
 | PASS | Every required gate passed, including executed tests | 0 |

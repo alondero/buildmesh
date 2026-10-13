@@ -1918,6 +1918,44 @@ pub(crate) fn recover_live_cli_session_id_inner(
     Ok(changed > 0)
 }
 
+/// Adopt a proven native session continuation (issue #2263).
+///
+/// The transcript proved `previous` continued into `successor`; this writes
+/// that transition under the exact identity and process generation the proof
+/// was made against. A node that has since been respawned, restarted, or had
+/// its identity captured by another source keeps the newer identity, so a
+/// retired process's successor callback is dropped instead of resurrecting a
+/// conversation Buildmesh has already moved past.
+pub(crate) fn adopt_continued_cli_session_id(
+    id: i64,
+    previous: &str,
+    successor: &str,
+    generation: Option<i64>,
+) -> SqlResult<bool> {
+    adopt_continued_cli_session_id_inner(&write_conn(), id, previous, successor, generation)
+}
+
+pub(crate) fn adopt_continued_cli_session_id_inner(
+    conn: &Connection,
+    id: i64,
+    previous: &str,
+    successor: &str,
+    generation: Option<i64>,
+) -> SqlResult<bool> {
+    // Same live statuses and single-owner rule as the other identity captures:
+    // a suspended or archived node's process is gone, and one live owner per
+    // session id is what keeps report binding unambiguous.
+    let changed = conn.execute(
+        "UPDATE agent_nodes SET cli_session_id = ?3
+         WHERE id = ?1 AND cli_session_id = ?2
+         AND session_started_at IS ?4
+         AND status IN ('running', 'ready', 'awaiting_input', 'completed', 'spawning')
+         AND NOT EXISTS (SELECT 1 FROM agent_nodes WHERE id != ?1 AND status != 'archived' AND cli_session_id = ?3)",
+        params![id, previous, successor, generation],
+    )?;
+    Ok(changed > 0)
+}
+
 /// Lean existence check for a node's CLI session id (issue #1499). The
 /// capture pollers run this on every retry; selecting the full
 /// `AGENT_NODE_COLUMNS` projection plus an `AgentNode` allocation (as

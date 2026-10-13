@@ -591,7 +591,17 @@ export const HARNESS_CATALOG = {
       "background_inference": null,
       "default_permission_mode": "unattended",
       "effort_control": {
-        "kind": "none"
+        "allowed": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max",
+          "ultra"
+        ],
+        "kind": "closed"
       },
       "harness_id": "muse",
       "is_plain_terminal": false,
@@ -609,7 +619,7 @@ export const HARNESS_CATALOG = {
       ],
       "produces_readable_transcript": true,
       "requires_attention_hook": false,
-      "supports_effort_override": false,
+      "supports_effort_override": true,
       "supports_extra_args": true,
       "supports_model_override": true,
       "supports_passive_turn_watcher": true,

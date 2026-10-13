@@ -1,3 +1,4 @@
+use super::intent::ResumeCause;
 use super::prepare::{
     resolve_base_ref_for_spawn, SpawnInFlightClaim, SpawnOptions, DEFAULT_WORKTREE_MODE,
 };
@@ -23,6 +24,12 @@ fn spawn_options_carries_explicit_slots() {
         session_id: -1,
         provider: Provider::Anthropic,
         resume: None,
+        // Issue #1550: `regenerate_agent_node` sets
+        // `ResumeCause::Regenerate` so argv composition branches off the
+        // captured transcript. Pinned so dropping the field (which would
+        // silently revert every regenerate to an in-place resume) fails
+        // compilation.
+        resume_cause: ResumeCause::Explicit,
         rows: 24,
         cols: 80,
         prefill: None,
@@ -504,6 +511,7 @@ fn prepare_does_not_acquire_the_in_flight_claim() {
 /// way the launch phase consumes it.
 #[test]
 fn prepare_threads_typed_spawn_option_id_into_launch_params() {
+    use super::intent::ResumeCause;
     use super::launch::LaunchParams;
     use super::reader::SessionIdMode;
 
@@ -530,6 +538,7 @@ fn prepare_threads_typed_spawn_option_id_into_launch_params() {
         spawn_option_id: id.clone(),
         registry_mesh_id: 0,
         session_id_mode: SessionIdMode::None,
+        resume_cause: ResumeCause::Explicit,
         sandbox: false,
     };
 
