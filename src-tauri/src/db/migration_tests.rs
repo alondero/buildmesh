@@ -2561,6 +2561,54 @@ mod tests {
             "legacy and fresh databases must converge on the canonical indexes"
         );
     }
+
+    /// Issue #1932 — the submission-ordinal index is index-only DDL with no
+    /// `SCHEMA_VERSION` bump, so it has to reach a database that is already at
+    /// the current version but predates it. The faithful simulation is that
+    /// shape: a current-schema database whose index is absent, holding the
+    /// submissions an upgrade must keep answering for.
+    #[test]
+    fn init_schema_adds_the_submission_index_to_a_current_schema_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::super::init_schema(&conn).unwrap();
+        conn.execute_batch(
+            "
+            DROP INDEX idx_circuit_history_submission;
+            INSERT INTO meshes (id, name, path) VALUES (1, 'legacy', '/repo');
+            INSERT INTO autopilot_circuits (id, mesh_id, name) VALUES (1, 1, 'legacy');
+            INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, state)
+                VALUES (1, 1, 1, 'running');
+            INSERT INTO circuit_run_history (run_id, node_id, attempt, kind, detail)
+                VALUES (1, 'spawn', 1, 'prompt_submitted',
+                        '{\"agent_node_id\":9,\"submission_seq\":4}');
+            ",
+        )
+        .unwrap();
+        assert!(
+            !index_present(&conn, "idx_circuit_history_submission"),
+            "the scenario only means something if the index really is absent"
+        );
+
+        super::super::init_schema(&conn).unwrap();
+
+        assert!(
+            index_present(&conn, "idx_circuit_history_submission"),
+            "the baseline DDL runs on every launch, so the index must be restored"
+        );
+        // Additive DDL: the submissions recorded before the index existed stay
+        // queryable, which is the ordinal fence #1898 depends on.
+        assert_eq!(
+            conn.query_row(
+                "SELECT COALESCE(MAX(json_extract(detail,'$.submission_seq')),0)
+                 FROM circuit_run_history
+                 WHERE kind='prompt_submitted' AND json_extract(detail,'$.agent_node_id')=9",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            4
+        );
+    }
 }
 #[test]
 fn historic_continued_review_circuits_collapse_into_the_original_circuit() {
