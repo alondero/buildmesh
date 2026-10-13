@@ -420,6 +420,31 @@ describe('TerminalRegistry creation/teardown races (issue #2016)', () => {
       expect(ipcFor('subscribe_agent_output')).toHaveLength(0);
     });
 
+    it('gives every concurrent caller null when the deletion lands at the commit/notify window', async () => {
+      registry = await loadRegistry();
+
+      // `notify()` runs synchronously inside `doCreate`, immediately after
+      // the instance is published — the window where the creator and a
+      // caller that coalesced onto the same pending record used to disagree:
+      // the creator saw `cancelRequested` and returned `null`, the coalesced
+      // caller adopted the instance `dispose` had just torn down.
+      let deleted = false;
+      registry.subscribe(() => {
+        if (deleted) return;
+        deleted = true;
+        registry.dispose(1);
+      });
+
+      const first = registry.getOrCreate(1);
+      const second = registry.getOrCreate(1);
+
+      expect(await Promise.all([first, second])).toEqual([null, null]);
+      expect(registry.getInstance(1)).toBeUndefined();
+      expect(control.terminals).toHaveLength(1);
+      expect(control.terminals[0].dispose).toHaveBeenCalledTimes(1);
+      await waitFor(() => ipcFor('unsubscribe_agent_output').length === 1, 'the output unsubscribe');
+    });
+
     it('leaves the node reusable after a cancelled creation', async () => {
       registry = await loadRegistry();
 

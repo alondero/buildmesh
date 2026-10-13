@@ -227,17 +227,12 @@ export class TerminalRegistry {
     const existing = this.instances.get(nodeId);
     if (existing) return existing;
     const inFlight = this.pending.get(nodeId);
-    if (inFlight) {
-      // A deletion raced this creation (issue #2016). Let that creation
-      // finish its own cleanup instead of handing a doomed terminal to a
-      // fresh caller, and do not coalesce onto a request that is already
-      // being torn down.
-      if (inFlight.cancelRequested) {
-        await inFlight.promise;
-        return null;
-      }
-      return inFlight.promise;
-    }
+    // Coalesce onto the creation in flight. `PendingCreation.promise` already
+    // folds cancellation into its result, so this caller and the creator both
+    // see `null` for a deleted node — handing a coalesced caller the raw
+    // `doCreate` result would let it adopt an instance `dispose` already tore
+    // down (issue #2016).
+    if (inFlight) return inFlight.promise;
     // Stamp the per-node spawn-timing reference NOW (issue #602). This is
     // the moment the frontend first sees a fresh nodeId — the "frontend
     // realized it needs an xterm" anchor that the `xterm_mount` checkpoint
@@ -247,14 +242,17 @@ export class TerminalRegistry {
     // deduplicates them, and only the first path reaches this line.
     this.nodeStartTimes.set(nodeId, performance.now());
     const request = new PendingCreation();
-    request.promise = this.doCreate(nodeId, request);
+    // Map cancellation into the shared promise rather than at each call site,
+    // so the creator and every coalesced caller resolve identically. A
+    // deletion that lands after `doCreate` published the instance but before
+    // this promise settles — a `notify()` subscriber deleting the node, for
+    // one — must still yield `null` to all of them.
+    request.promise = this.doCreate(nodeId, request).then((inst) =>
+      request.cancelRequested ? null : inst,
+    );
     this.pending.set(nodeId, request);
     try {
-      const inst = await request.promise;
-      // A deletion that landed while the creation was in flight has
-      // already torn down whatever it produced — the caller must not adopt
-      // a terminal that is no longer in `instances`.
-      return request.cancelRequested ? null : inst;
+      return await request.promise;
     } finally {
       // Identity-checked: a later creation for the same node may already
       // own the slot (dispose releases the record, the next getOrCreate
@@ -665,7 +663,15 @@ export class TerminalRegistry {
         });
       });
 
-      const combinedUnlisten: UnlistenFn = () => { unlisten(); unlistenSerialize(); };
+      // `finally`, not a plain sequence: a throw from one unlisten must not skip
+      // the other, or `dispose(nodeId)` would leave a live listener behind.
+      const combinedUnlisten: UnlistenFn = () => {
+        try {
+          unlisten();
+        } finally {
+          unlistenSerialize();
+        }
+      };
       instance.unlisten = combinedUnlisten;
 
       if (aborted()) return null;
