@@ -50,14 +50,20 @@ coordinator's `AgentDriver::send_prompt` is single-line by contract and bypasses
 staged delivery. ConPTY turns every pasted byte into a key event: an LF is dropped
 and a CRLF is an Enter. A terminal selection is CRLF-joined on Windows, so an
 unmodified Grok handover submitted line 1 and queued the rest as separate messages.
-A harness whose adapter returns true from `paste_requires_cr_newlines` (Grok) gets
-CR line endings inside the bracketed paste, which is what xterm.js sends for a
-manual paste. Other harnesses keep their line endings as given (with the exception
-of circuit-piloted Codex nodes, where `codex_composer_text` converts CRLF/CR to LF,
-tracked in [#2199](https://github.com/alondero/buildmesh/issues/2199)), but any prompt
+A harness whose adapter returns true from `paste_requires_cr_newlines` (Grok and
+Codex) gets CR line endings inside the bracketed paste, which is what xterm.js sends
+for a manual paste. Other harnesses keep their line endings as given, but any prompt
 containing CR or LF is treated as multiline: bracketed by `injection_payload` and
 subject to non-generic rendered-paste gates (such as Codex and Muse). See the
 [Grok paste investigation](../learning/grok-terminal-paste.md) for runtime evidence.
+
+A harness with its own paste gate may need two texts rather than one. Codex's
+split-marker gate keeps `codex_sanitized_text` (the payload: control-stripped, line
+endings as `prepare` resolved them) separate from `codex_composer_text` (the proof:
+the same text with CRLF and bare CR collapsed to LF, which is what Codex's
+`apply_paste` holds and counts). Codex normalizes line endings *before* counting, so
+`[Pasted Content N chars]` is identical for LF, CRLF and CR payloads — the CR the
+wire needs costs the gate nothing, and no custom burst-boundary handling is needed.
 
 ## PTY output streaming (issue #1385 / #1393)
 

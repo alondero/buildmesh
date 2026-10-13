@@ -130,3 +130,22 @@ Rendered confirmation cannot verify the contents hidden behind a marker or
 provide byte-exact delivery. The standalone native smoke retained the complete
 normalized prompt and accepted separate Enter. No packaged Buildmesh runtime
 smoke or live multi-burst capture is claimed.
+
+## Line endings do not move the count (#2199)
+
+`apply_paste` collapses CRLF and bare CR to LF *before* it counts, so the
+`[Pasted Content N chars]` marker is the same number whether the PTY delivered
+LF, CRLF or CR. That is what lets Buildmesh stage the CR endings Windows ConPTY
+requires without weakening this gate: the payload (`codex_sanitized_text`) and
+the proof (`codex_composer_text`) are deliberately two texts, and only the
+payload's line endings differ.
+
+This matters because the gate ignores whitespace when matching inline text, so
+it cannot see a *lost* newline — only a wrong count. A payload whose newlines
+ConPTY dropped still carries the right character count, which is precisely how
+the LF defect reached a composer with every line glued together and a gate that
+reported readiness. Counting cannot detect this class of loss; staging the right
+bytes is the only defense. `docs/learning/grok-terminal-paste.md` holds the
+per-ending ConPTY probe table for Codex 0.162.1, Grok 1.0.50 and the runtime
+used, and `paste_line_endings_survive_a_bracketed_paste_on_conpty` in
+`src-tauri/src/pty/conpty_tests.rs` re-runs it (ignored; needs an installed CLI).

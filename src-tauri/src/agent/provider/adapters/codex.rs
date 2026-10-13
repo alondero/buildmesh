@@ -1686,6 +1686,23 @@ impl AgentProvider for CodexAdapter {
         crate::agent::provider::PasteGatePolicy::RenderedWithSplitMarker
     }
 
+    /// Codex's composer needs CR line endings inside a bracketed paste.
+    ///
+    /// A ConPTY probe against Codex 0.162.1 (140x35, flags `0x2 | 0x4`,
+    /// bundled 1.24.260710001 runtime) staged a 12-line synthetic paste inside
+    /// `ESC[200~ … ESC[201~` and read the rendered composer: LF dropped every
+    /// newline and glued the lines together, while both CRLF and CR kept the
+    /// multiline layout. Nothing was submitted in any run.
+    ///
+    /// This is safe for the split-marker gate because Codex's `apply_paste`
+    /// normalizes CRLF and bare CR to LF *before* counting, so the
+    /// `[Pasted Content N chars]` proof is identical for all three endings.
+    /// Runtime evidence: `docs/learning/codex-paste-confirmation.md` and
+    /// `docs/learning/grok-terminal-paste.md`; the defect is issue #2199.
+    fn paste_requires_cr_newlines(&self) -> bool {
+        true
+    }
+
     fn background_recipe(
         &self,
         platform: Platform,
