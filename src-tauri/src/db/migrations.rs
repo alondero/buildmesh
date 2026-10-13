@@ -320,11 +320,16 @@ pub(crate) enum AlwaysStep {
     RepairReviewFeedbackRoute,
 }
 
-const REVIEW_PUBLICATION_FLOW_UPGRADE_FLAG: &str = "review_publication_flow_upgrade_v1";
-const MERGE_VERIFICATION_UPGRADE_FLAG: &str = "merge_verification_upgrade_v1";
-const REVIEW_FEEDBACK_ROUTE_REPAIR_FLAG: &str = "review_feedback_route_repair_v1";
+// `pub(crate)` so the migration tests reset the exact flag a migration reads: a
+// renamed flag would otherwise leave a test asserting against a row nothing
+// writes or clears.
+pub(crate) const REVIEW_PUBLICATION_FLOW_UPGRADE_FLAG: &str = "review_publication_flow_upgrade_v1";
+pub(crate) const MERGE_VERIFICATION_UPGRADE_FLAG: &str = "merge_verification_upgrade_v1";
+pub(crate) const REVIEW_FEEDBACK_ROUTE_REPAIR_FLAG: &str = "review_feedback_route_repair_v1";
+pub(crate) const ISSUE_REVIEW_FIRST_TURN_UPGRADE_FLAG: &str = "issue_review_first_turn_upgrade_v2";
+pub(crate) const ISSUE_REVIEW_VERDICT_UPGRADE_FLAG: &str = "issue_review_verdict_upgrade_v1";
 
-const REVIEW_CONTRACT_PROMPT_UPGRADE_FLAG: &str = "review_contract_prompt_upgrade_v1";
+pub(crate) const REVIEW_CONTRACT_PROMPT_UPGRADE_FLAG: &str = "review_contract_prompt_upgrade_v1";
 const REVIEW_CONTRACT_PROMPT_UPGRADE_COMPLETE: &str = "complete";
 const REVIEW_CONTRACT_PROMPT_UPGRADE_DEFERRED: &str = "deferred";
 const LEGACY_REVIEW_GRAPH_PREDICATE: &str = "c.graph_json LIKE '%Review the work of agent {{source.agent_id}}%' OR c.graph_json LIKE '%An independent reviewer requested changes to your work.%' OR c.graph_json LIKE '%review PR {{pr.number}} as%' OR c.graph_json LIKE '%Follow the feedback comments on PR #{{pr.number}}%' OR c.graph_json LIKE '%Do not make further changes. If a required check fails%'";
@@ -1790,12 +1795,7 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                 };
                 let changed = upgrade_stored_circuit_graph(conn, id, &mut graph, is_preset, false)?;
                 if changed {
-                    let upgraded_json = graph.to_json().map_err(|error| {
-                        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            error,
-                        )))
-                    })?;
+                    let upgraded_json = graph.to_json().map_err(graph_json_error)?;
                     conn.execute(
                         "UPDATE autopilot_circuits SET graph_json = ?2, updated_at = datetime('now') WHERE id = ?1",
                         params![id, upgraded_json],
@@ -1819,8 +1819,8 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
             // review graphs, so the migration must run once after v1 has
             // already been recorded.
             let flag = match step {
-                AlwaysStep::UpgradeIssueReviewVerdicts => "issue_review_verdict_upgrade_v1",
-                _ => "issue_review_first_turn_upgrade_v2",
+                AlwaysStep::UpgradeIssueReviewVerdicts => ISSUE_REVIEW_VERDICT_UPGRADE_FLAG,
+                _ => ISSUE_REVIEW_FIRST_TURN_UPGRADE_FLAG,
             };
             let already_done: bool = conn
                 .query_row(
@@ -1868,12 +1868,7 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                     );
                 }
                 if changed {
-                    let upgraded_json = graph.to_json().map_err(|error| {
-                        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            error,
-                        )))
-                    })?;
+                    let upgraded_json = graph.to_json().map_err(graph_json_error)?;
                     conn.execute(
                         "UPDATE autopilot_circuits SET graph_json = ?2, updated_at = datetime('now') WHERE id = ?1",
                         params![id, upgraded_json],
@@ -1886,214 +1881,144 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
             )?;
         }
         AlwaysStep::UpgradeReviewPublicationFlow => {
-            if !table_present(conn, "autopilot_circuits")?
-                || !table_present(conn, "autopilot_circuit_runs")?
-                || !table_present(conn, "circuit_run_snapshots")?
-            {
-                return Ok(());
-            }
-            let already_done: bool = conn.query_row(
-                "SELECT COUNT(*) > 0 FROM app_settings WHERE key = ?1",
-                params![REVIEW_PUBLICATION_FLOW_UPGRADE_FLAG],
-                |row| row.get(0),
-            )?;
-            if already_done {
-                return Ok(());
-            }
-            let circuits: Vec<(i64, String, bool, bool)> = {
-                let mut stmt = conn.prepare(
-                    "SELECT c.id, c.graph_json, c.is_preset != 0,
-                            EXISTS(SELECT 1 FROM autopilot_circuit_runs r WHERE r.circuit_id = c.id AND r.state IN ('pending', 'running', 'paused'))
-                     FROM autopilot_circuits c ORDER BY c.id",
-                )?;
-                let rows = stmt.query_map([], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                })?;
-                rows.collect::<SqlResult<Vec<_>>>()?
-            };
-            for (id, graph_json, is_preset, active) in circuits {
-                let mut graph = match crate::circuit::model::CircuitGraph::from_json(&graph_json) {
-                    Ok(graph) => graph,
-                    Err(error) => {
-                        tracing::warn!("evolve_to: cannot inspect circuit {} for the review publication flow: {}", id, error);
-                        continue;
-                    }
-                };
-                let changed =
-                    upgrade_stored_circuit_graph(conn, id, &mut graph, is_preset, active)?;
-                if !changed {
-                    continue;
-                }
-                let upgraded_json = graph.to_json().map_err(|error| {
-                    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        error,
-                    )))
-                })?;
-                conn.execute(
-                    "UPDATE autopilot_circuits SET graph_json = ?2, updated_at = datetime('now') WHERE id = ?1",
-                    params![id, upgraded_json],
-                )?;
-            }
-            conn.execute(
-                "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, '1')",
-                params![REVIEW_PUBLICATION_FLOW_UPGRADE_FLAG],
+            upgrade_stored_review_graphs(
+                conn,
+                REVIEW_PUBLICATION_FLOW_UPGRADE_FLAG,
+                "the review publication flow",
+                |_| Ok(()),
             )?;
         }
         AlwaysStep::UpgradeMergeVerification => {
-            if !table_present(conn, "autopilot_circuits")?
-                || !table_present(conn, "autopilot_circuit_runs")?
-                || !table_present(conn, "circuit_run_snapshots")?
-            {
-                return Ok(());
-            }
-            let already_done: bool = conn.query_row(
-                "SELECT COUNT(*) > 0 FROM app_settings WHERE key = ?1",
-                params![MERGE_VERIFICATION_UPGRADE_FLAG],
-                |row| row.get(0),
-            )?;
-            if already_done {
-                return Ok(());
-            }
-            let circuits: Vec<(i64, String, bool, bool)> = {
-                let mut stmt = conn.prepare(
-                    "SELECT c.id, c.graph_json, c.is_preset != 0,
-                            EXISTS(SELECT 1 FROM autopilot_circuit_runs r WHERE r.circuit_id = c.id AND r.state IN ('pending', 'running', 'paused'))
-                     FROM autopilot_circuits c ORDER BY c.id",
-                )?;
-                let rows = stmt.query_map([], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                })?;
-                rows.collect::<SqlResult<Vec<_>>>()?
-            };
-            for (id, graph_json, is_preset, active) in circuits {
-                let mut graph = match crate::circuit::model::CircuitGraph::from_json(&graph_json) {
-                    Ok(graph) => graph,
-                    Err(error) => {
-                        tracing::warn!(
-                            "evolve_to: cannot inspect circuit {} for merge verification: {}",
-                            id,
-                            error
-                        );
-                        continue;
-                    }
-                };
-                let changed =
-                    upgrade_stored_circuit_graph(conn, id, &mut graph, is_preset, active)?;
-                if !changed {
-                    continue;
-                }
-                let upgraded_json = graph.to_json().map_err(|error| {
-                    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        error,
-                    )))
-                })?;
-                conn.execute(
-                    "UPDATE autopilot_circuits SET graph_json = ?2, updated_at = datetime('now') WHERE id = ?1",
-                    params![id, upgraded_json],
-                )?;
-            }
-            conn.execute(
-                "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, '1')",
-                params![MERGE_VERIFICATION_UPGRADE_FLAG],
+            upgrade_stored_review_graphs(
+                conn,
+                MERGE_VERIFICATION_UPGRADE_FLAG,
+                "merge verification",
+                |_| Ok(()),
             )?;
         }
         AlwaysStep::RepairReviewFeedbackRoute => {
-            if !table_present(conn, "autopilot_circuits")?
-                || !table_present(conn, "autopilot_circuit_runs")?
-                || !table_present(conn, "circuit_run_snapshots")?
-            {
-                return Ok(());
-            }
-            let already_done: bool = conn.query_row(
-                "SELECT COUNT(*) > 0 FROM app_settings WHERE key = ?1",
-                params![REVIEW_FEEDBACK_ROUTE_REPAIR_FLAG],
-                |row| row.get(0),
-            )?;
-            if already_done {
-                return Ok(());
-            }
-            let to_sql_error = |error: String| {
-                rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    error,
-                )))
-            };
-            let circuits: Vec<(i64, String, bool, bool)> = {
-                let mut stmt = conn.prepare(
-                    "SELECT c.id, c.graph_json, c.is_preset != 0,
-                            EXISTS(SELECT 1 FROM autopilot_circuit_runs r WHERE r.circuit_id = c.id AND r.state IN ('pending', 'running', 'paused'))
-                     FROM autopilot_circuits c ORDER BY c.id",
-                )?;
-                let rows = stmt.query_map([], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                })?;
-                rows.collect::<SqlResult<Vec<_>>>()?
-            };
-            for (id, graph_json, is_preset, active) in circuits {
-                let mut graph = match crate::circuit::model::CircuitGraph::from_json(&graph_json) {
-                    Ok(graph) => graph,
-                    Err(error) => {
-                        tracing::warn!(
-                            "evolve_to: cannot inspect circuit {} for the feedback route repair: {}",
-                            id,
-                            error
-                        );
-                        continue;
-                    }
-                };
-                if !upgrade_stored_circuit_graph(conn, id, &mut graph, is_preset, active)? {
-                    continue;
-                }
-                let repaired_json = graph.to_json().map_err(to_sql_error)?;
-                conn.execute(
-                    "UPDATE autopilot_circuits SET graph_json = ?2, updated_at = datetime('now') WHERE id = ?1",
-                    params![id, repaired_json],
-                )?;
-            }
-            // A run that can still reach its review step would fail the same way
-            // on its pinned graph. Only the dead route is removed there: the
-            // topology a run started with is not upgraded under it.
-            let snapshots: Vec<(i64, String)> = {
-                let mut stmt = conn.prepare(
-                    "SELECT s.run_id, s.graph_json FROM circuit_run_snapshots s
-                     JOIN autopilot_circuit_runs r ON r.id = s.run_id
-                     WHERE r.state != 'completed' ORDER BY s.run_id",
-                )?;
-                let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-                rows.collect::<SqlResult<Vec<_>>>()?
-            };
-            for (run_id, graph_json) in snapshots {
-                let mut graph = match crate::circuit::model::CircuitGraph::from_json(&graph_json) {
-                    Ok(graph) => graph,
-                    Err(error) => {
-                        tracing::warn!(
-                            "evolve_to: cannot inspect run {} snapshot for the feedback route repair: {}",
-                            run_id,
-                            error
-                        );
-                        continue;
-                    }
-                };
-                if !crate::circuit::stored_graph::upgrade(
-                    &mut graph,
-                    crate::circuit::stored_graph::UpgradeTarget::RunSnapshot,
-                ) {
-                    continue;
-                }
-                conn.execute(
-                    "UPDATE circuit_run_snapshots SET graph_json = ?2 WHERE run_id = ?1",
-                    params![run_id, graph.to_json().map_err(to_sql_error)?],
-                )?;
-            }
-            conn.execute(
-                "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, '1')",
-                params![REVIEW_FEEDBACK_ROUTE_REPAIR_FLAG],
+            upgrade_stored_review_graphs(
+                conn,
+                REVIEW_FEEDBACK_ROUTE_REPAIR_FLAG,
+                "the feedback route repair",
+                repair_run_snapshot_feedback_routes,
             )?;
         }
     }
     Ok(())
+}
+
+/// The body the review-topology migrations share: skip while `flag` is
+/// recorded, upgrade each stored circuit graph (pinning run snapshots on the
+/// way), run `after_circuits`, and only then write the flag — a crash before the
+/// flag lands must leave the work repeatable. `purpose` names the migration in
+/// the warning logged for a row whose graph cannot be parsed.
+fn upgrade_stored_review_graphs(
+    conn: &Connection,
+    flag: &str,
+    purpose: &str,
+    after_circuits: impl FnOnce(&Connection) -> SqlResult<()>,
+) -> SqlResult<()> {
+    if !table_present(conn, "autopilot_circuits")?
+        || !table_present(conn, "autopilot_circuit_runs")?
+        || !table_present(conn, "circuit_run_snapshots")?
+    {
+        return Ok(());
+    }
+    let already_done: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM app_settings WHERE key = ?1",
+        params![flag],
+        |row| row.get(0),
+    )?;
+    if already_done {
+        return Ok(());
+    }
+    let circuits: Vec<(i64, String, bool, bool)> = {
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.graph_json, c.is_preset != 0,
+                    EXISTS(SELECT 1 FROM autopilot_circuit_runs r WHERE r.circuit_id = c.id AND r.state IN ('pending', 'running', 'paused'))
+             FROM autopilot_circuits c ORDER BY c.id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?;
+        rows.collect::<SqlResult<Vec<_>>>()?
+    };
+    for (id, graph_json, is_preset, active) in circuits {
+        let mut graph = match crate::circuit::model::CircuitGraph::from_json(&graph_json) {
+            Ok(graph) => graph,
+            Err(error) => {
+                tracing::warn!(
+                    "evolve_to: cannot inspect circuit {} for {}: {}",
+                    id,
+                    purpose,
+                    error
+                );
+                continue;
+            }
+        };
+        if !upgrade_stored_circuit_graph(conn, id, &mut graph, is_preset, active)? {
+            continue;
+        }
+        conn.execute(
+            "UPDATE autopilot_circuits SET graph_json = ?2, updated_at = datetime('now') WHERE id = ?1",
+            params![id, graph.to_json().map_err(graph_json_error)?],
+        )?;
+    }
+    after_circuits(conn)?;
+    conn.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, '1')",
+        params![flag],
+    )?;
+    Ok(())
+}
+
+/// A run that can still reach its review step would fail the same way on its
+/// pinned graph. Only the dead route is removed there: the topology a run
+/// started with is not upgraded under it.
+fn repair_run_snapshot_feedback_routes(conn: &Connection) -> SqlResult<()> {
+    let snapshots: Vec<(i64, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT s.run_id, s.graph_json FROM circuit_run_snapshots s
+             JOIN autopilot_circuit_runs r ON r.id = s.run_id
+             WHERE r.state != 'completed' ORDER BY s.run_id",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<SqlResult<Vec<_>>>()?
+    };
+    for (run_id, graph_json) in snapshots {
+        let mut graph = match crate::circuit::model::CircuitGraph::from_json(&graph_json) {
+            Ok(graph) => graph,
+            Err(error) => {
+                tracing::warn!(
+                    "evolve_to: cannot inspect run {} snapshot for the feedback route repair: {}",
+                    run_id,
+                    error
+                );
+                continue;
+            }
+        };
+        if !crate::circuit::stored_graph::upgrade(
+            &mut graph,
+            crate::circuit::stored_graph::UpgradeTarget::RunSnapshot,
+        ) {
+            continue;
+        }
+        conn.execute(
+            "UPDATE circuit_run_snapshots SET graph_json = ?2 WHERE run_id = ?1",
+            params![run_id, graph.to_json().map_err(graph_json_error)?],
+        )?;
+    }
+    Ok(())
+}
+
+/// `CircuitGraph` reports its encode failure as a message; rusqlite needs it
+/// as a conversion failure carrying that message.
+fn graph_json_error(error: String) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        error,
+    )))
 }
 
 /// Resolve storage ownership once; graph upgrade ordering stays in the domain.
@@ -2118,12 +2043,7 @@ fn upgrade_stored_circuit_graph(
         // Earlier migrations normalized unpinned runs before the publication
         // upgrade captured them. Keep that boundary without adopting new topology.
         upgrade(&mut run_graph, UpgradeTarget::UnpinnedRun { active });
-        let run_json = run_graph.to_json().map_err(|error| {
-            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                error,
-            )))
-        })?;
+        let run_json = run_graph.to_json().map_err(graph_json_error)?;
         conn.execute(
             "INSERT OR IGNORE INTO circuit_run_snapshots (run_id, graph_json, behavior_revision)
              SELECT id, ?2, 1 FROM autopilot_circuit_runs WHERE circuit_id = ?1",
