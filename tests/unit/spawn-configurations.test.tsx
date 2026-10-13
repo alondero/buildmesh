@@ -129,8 +129,12 @@ describe('Spawn configurations', () => {
     expect(items.filter((item) => item.tabIndex === 0)).toHaveLength(1);
     expect(items.filter((item) => item.tabIndex === -1)).toHaveLength(items.length - 1);
     fireEvent.keyDown(items[0], { key: 'ArrowDown' });
-    expect(document.activeElement).toBe(items[1]);
-    expect(items[1].tabIndex).toBe(0);
+    // Re-query rather than reusing the pre-keydown nodes: the ArrowDown handler
+    // re-renders the list, so `items` may hold nodes that are no longer mounted
+    // and `toBe` on one of those fails on identity instead of on behaviour.
+    const moved = within(panel).getAllByRole('menuitem');
+    expect(document.activeElement).toBe(moved[1]);
+    expect(moved[1].tabIndex).toBe(0);
   });
 
   it('retains failed edits for retry and reports failed deletes', async () => {
