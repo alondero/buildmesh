@@ -22,19 +22,10 @@ import { formatError } from './lib/errorUtils';
 import { runBoot } from './lib/bootSequence';
 import { useMeshStore } from './stores/meshStore';
 import { useAgentNodeStore } from './stores/agentNodeStore';
-import { focusNode } from './lib/navigation';
-import { useNodeActivityStore } from './stores/nodeActivityStore';
 import { useExitPromptStore } from './stores/exitPromptStore';
 import { useUIStore } from './stores/uiStore';
-import { createShortcutGuard } from './lib/shortcutGuard';
-import { createKeyRepeatThrottle } from './lib/keyRepeatThrottle';
-import { isTextInputFocused, isTerminalFocused } from './lib/focusGuard';
-import { traversalTargetId } from './lib/gridTraversal';
-import { toggleGridMaximize, cycleGridMode, buildFocusGridSearchBinding, triggerNewAgentShortcut } from './lib/gridShortcuts';
-import { deriveScope } from './lib/viewModes';
-import { activityRootId, groupActivityNodes, indexAgentNodes } from './lib/nodeActivities';
-import type { NonSingleViewMode } from './stores/uiStore';
-import { jumpToNextAwaitingNode } from './lib/awaitingInputShortcuts';
+import { isTerminalFocused } from './lib/focusGuard';
+import { dispatchShortcut, shortcutBindings } from './lib/shortcutDispatch';
 import { isMac } from './lib/platform';
 import { useFileDropToTerminal } from './hooks/useFileDropToTerminal';
 import { useNamingBackendFailureToast } from './hooks/useNamingBackendFailureToast';
@@ -42,29 +33,6 @@ import * as api from './lib/tauri';
 import { addToast, dismissToast, useToastStore } from './stores/toastStore';
 import type { CircuitNotificationPayload } from './types/generated/CircuitEvents';
 import './App.css';
-
-const createNodeGuard = createShortcutGuard(300);
-// Cooldown for the Alt+G / Cmd+G grid-toggle (issue #668). Same 300ms budget
-// as the new-agent guard: long enough that holding the key doesn't fire a
-// burst of toggles, short enough that a deliberate second press feels
-// responsive.
-const toggleMaximizeGuard = createShortcutGuard(300);
-// Cooldown for the Ctrl+Alt+G / Cmd+Alt+G view-mode cycle (ticket #987). Same
-// 300ms budget as the grid-toggle guard: a held key must not burst-rotate
-// through Mesh → Pinned → All faster than the user can read the switcher.
-const cycleViewModeGuard = createShortcutGuard(300);
-// Cooldown for the ?-key cheatsheet toggle (issue #731). Belt-and-braces
-// against accidental double-taps (e.g. finger-roll on the keyboard) firing
-// the modal twice within 300 ms; the `e.repeat` guard inside the handler
-// is the primary defense against OS autorepeat (held `?`).
-const cheatsheetGuard = createShortcutGuard(300);
-// Leading-edge throttle (DIFFERENT primitive from the guards above —
-// block-all vs first-press-passes-then-rate-limit) for the arrow-traversal
-// handler below. 200ms = ~5 moves/sec on a held key; 100ms snappier than the
-// 300ms cooldowns because navigation benefits from responsiveness, while
-// still comfortably catching the OS autorepeat flood (~30 Hz Windows,
-// ~15 Hz macOS).
-const arrowThrottle = createKeyRepeatThrottle(200);
 
 function App() {
   // Issue #1246 — select actions individually. Subscribing to the bare
@@ -115,292 +83,24 @@ function App() {
   // Paste absolute file paths into the hovered agent terminal on OS file drop.
   useFileDropToTerminal();
 
-  // Keyboard shortcuts — use Tauri's globalShortcut plugin so they work even when
-  // an xterm.js terminal has keyboard focus (xterm intercepts window keydown events).
-  // Only register shortcuts when the window is focused so they don't steal from other apps.
-  // Ctrl/Cmd+Alt+←/→/↑/↓ traverses the on-screen agent-node grid of the active
-  // View Mode (Mesh / Pinned / All / Filtered — tickets #987, #1609).
-  // We use TWO modifiers here (not bare Ctrl/Cmd+Arrow) because Ctrl+←/→ is
-  // the readline `backward-word` / `forward-word` gesture in bash/zsh/fish/
-  // PSReadLine and every node/python REPL — the global-shortcut plugin
-  // captures at the OS layer (before xterm sees the keydown), so bare
-  // Ctrl+Arrow would silently steal word-movement whenever the user tries to
-  // fix a typo in a long agent prompt. Adding `Alt+` matches the Windows
-  // Snap / tmux prefix+Arrow / i3 / VS Code "Move Editor Group" precedent
-  // for pane navigation and collides with nothing.
-  // Alt+G (Win/Linux) / Cmd+G (macOS) toggles grid ↔ single-view (issue #668).
-  // The focus-tracking + register/unregister bookkeeping is owned by
-  // `useGlobalShortcuts` (issue #1249); it papers over the StrictMode
-  // mount→unmount→mount races that the previous inline effect hit
-  // (focus listener leak + stranded shortcut bindings).
+  // Keyboard shortcuts — Tauri's globalShortcut plugin, so they work even
+  // when an xterm.js terminal has keyboard focus (xterm intercepts window
+  // keydown events). Only register while the window is focused so they don't
+  // steal from other apps; that focus-tracking + register/unregister
+  // bookkeeping is owned by `useGlobalShortcuts` (issue #1249), which papers
+  // over the StrictMode mount→unmount→mount races.
   //
-  // Tauri 2's global-shortcut plugin doesn't expose an `AltOrCommand`
-  // combinator (only `CommandOrControl`, which means Cmd on Mac and Ctrl
-  // elsewhere). Issue #668 explicitly wants `Alt+G` on Windows/Linux —
-  // the mnemonic "G for Grid" — and `Cmd+G` on macOS. So we register
-  // the platform-appropriate binding only, branched on `isMac`. The
-  // handler below is platform-agnostic: same action, same store calls.
-  const gridToggleShortcut = isMac
-    ? { key: 'CommandOrControl+G', action: 'toggle-maximize-grid' as const }
-    : { key: 'Alt+G', action: 'toggle-maximize-grid' as const };
-
-  // Issue #1409 — the Universal Command Omnibar. The chord MUST fire while
-  // an xterm terminal has focus, so it lives here as a Tauri global
-  // shortcut (same reason as Ctrl+T / Ctrl+. above). But bare
-  // CommandOrControl+K / +P would steal readline's Ctrl+K (kill-line) and
-  // Ctrl+P (previous-history) from every Win/Linux shell — the same war
-  // the Alt+Grid-toggle and Ctrl/Cmd+Alt+Arrow bindings already fought
-  // (see the arrow comment above). So like the grid toggle, we branch the
-  // binding on platform: Cmd+K / Cmd+P on macOS (meta is free), and
-  // Ctrl+Shift+K / Ctrl+Shift+P elsewhere (Shift-augmented, no readline
-  // collision). Both dispatch the same two actions.
-  const omnibarShortcuts = isMac
-    ? [
-        { key: 'CommandOrControl+K', action: 'open-omnibar' as const },
-        { key: 'CommandOrControl+P', action: 'open-omnibar-commands' as const },
-      ]
-    : [
-        { key: 'CommandOrControl+Shift+K', action: 'open-omnibar' as const },
-        { key: 'CommandOrControl+Shift+P', action: 'open-omnibar-commands' as const },
-      ];
-
-  // Issue #998 — focus the grid search input. The platform-branch logic
-  // and the macOS `⌘+⌥+F` collision carve-out (vs. `term-find` on bare
-  // `⌘+F`) live in `buildFocusGridSearchBinding` so the branch can be
-  // unit-tested directly without regexing this file. See
-  // `src/lib/gridShortcuts.ts` for the full rationale.
-  const focusGridSearchShortcut = buildFocusGridSearchBinding(isMac);
-
-  // Controls snapshot for the arrow-traversal + focus-grid-search handlers
-  // below. Read at dispatch time (not subscribed) so App re-renders stay
-  // independent of filter keystrokes — #1609 moved search-driven narrowing
-  // into the Filtered view, and traversal must match that grid exactly.
-  const filteredControls = () => {
-    const s = useUIStore.getState();
-    return {
-      gridSearchQuery: s.gridSearchQuery,
-      gridProviderFilter: s.gridProviderFilter,
-      gridStatusFilter: s.gridStatusFilter,
-    };
-  };
-
-  const shortcuts = [
-    { key: 'CommandOrControl+T', action: 'new-agent' },
-    ...omnibarShortcuts,
-    { key: 'CommandOrControl+Alt+ArrowLeft', action: 'arrow-left' },
-    { key: 'CommandOrControl+Alt+ArrowRight', action: 'arrow-right' },
-    { key: 'CommandOrControl+Alt+ArrowUp', action: 'arrow-up' },
-    { key: 'CommandOrControl+Alt+ArrowDown', action: 'arrow-down' },
-    // Cycle to the next agent node with `status === 'awaiting_input'`
-    // (issue #64). Registered as a Tauri global shortcut (not a window
-    // keydown listener) so the binding fires while an xterm terminal has
-    // focus — the typical state when the user notices a node waiting for
-    // input and wants to jump to it without clicking. The cycle logic
-    // (next-after-current + wrap, scoped to the active node's mesh) lives
-    // in src/lib/awaitingInputShortcuts.ts as a pure store mutator so it
-    // can be unit-tested without standing up the plugin.
-    { key: 'CommandOrControl+Period', action: 'jump-to-next-awaiting' },
-    // Ctrl+Alt+G (Win/Linux) / Cmd+Alt+G (macOS) cycles the grid View Modes
-    // Mesh → Pinned → All (ticket #987) — the keyboard peer to the mouse-only
-    // ViewModeSwitcher. Platform-uniform `CommandOrControl+Alt+G`: it can't
-    // collide with the Single solo toggle (`Alt+G` on Win/Linux, `Cmd+G` on
-    // macOS) because it carries the extra Alt/⌥ modifier.
-    { key: 'CommandOrControl+Alt+G', action: 'cycle-grid-modes' },
-    focusGridSearchShortcut,
-    gridToggleShortcut,
-  ];
-
+  // Issue #2240 — the bindings, their guards and their handlers are ONE table
+  // in `lib/shortcutDispatch.ts`; this is the only wiring App does. The table
+  // is also where the cheatsheet rows come from, so a binding and its
+  // discoverability surface cannot drift, and tests fire
+  // `dispatchShortcut(action)` instead of regexing this file. Platform
+  // branching (Alt+G vs ⌘+G, Ctrl+Shift+K vs ⌘+K, the macOS ⌘+⌥+F carve-out)
+  // lives in each row's `accelerator`.
   useGlobalShortcuts({
-    bindings: shortcuts,
-    onTrigger: (action) => {
-      window.dispatchEvent(new CustomEvent('shortcut-triggered', { detail: action }));
-    },
+    bindings: shortcutBindings(isMac),
+    onTrigger: dispatchShortcut,
   });
-
-  // Handle shortcut events (Ctrl+T new-agent; Ctrl/Cmd+Alt+Arrow for node
-  // traversal). Arrow traversal works in two phases: in Single view mode the
-  // first arrow press exits the solo view back onto the node the user was
-  // viewing (activeNodeId already points at it); on the next press (and beyond)
-  // we walk the on-screen grid of the active View Mode from that node. Edge
-  // semantics are defined in `arrowTargetIndex` (src/lib/gridTraversal.ts):
-  // Left/Right wrap within the row, Up/Down are no-ops at the grid's vertical
-  // edges.
-  //
-  // Note: this differs from the Escape-to-exit-Single path in AgentNodeView.tsx
-  // (which leaves activeNodeId alone). Esc is a passive exit; Ctrl+Arrow is an
-  // exit-and-move, so it makes sense to refocus the node the user was on.
-  useEffect(() => {
-    const ARROW_DIRECTIONS = ['left', 'right', 'up', 'down'] as const;
-    type ArrowDirection = (typeof ARROW_DIRECTIONS)[number];
-    const isArrowAction = (a: string): a is `arrow-${ArrowDirection}` =>
-      a.startsWith('arrow-') && (ARROW_DIRECTIONS as readonly string[]).includes(a.slice('arrow-'.length));
-
-    const handleShortcut = (e: Event) => {
-      const action = (e as CustomEvent<string>).detail;
-
-      if (action === 'new-agent') {
-        createNodeGuard(() => triggerNewAgentShortcut());
-        return;
-      }
-
-      if (action === 'toggle-maximize-grid') {
-        // Issue #668 — Alt+G (Win/Linux) / Cmd+G (macOS). The toggle logic
-        // (restore if maximized, else maximize active node) is a pure
-        // store-mutator extracted to `src/lib/gridShortcuts.ts` for unit
-        // testing; here we only own the platform wiring: cooldown so a held
-        // key doesn't burst-toggle, and a text-input focus guard so typing
-        // an inline-renamed node header or a future search box doesn't
-        // accidentally collapse the grid.
-        //
-        // Check the focus guard BEFORE wrapping in `toggleMaximizeGuard`:
-        // the guard sets `blocked = true` on entry, so a no-op press would
-        // burn the 300ms cooldown and silently drop the user's next
-        // deliberate Alt+G inside that window.
-        if (isTextInputFocused()) return;
-        toggleMaximizeGuard(async () => {
-          toggleGridMaximize();
-        });
-        return;
-      }
-
-      if (action === 'cycle-grid-modes') {
-        // Ticket #987 — Ctrl+Alt+G / Cmd+Alt+G rotates the grid View Modes; the
-        // rotation itself is the pure `cycleGridMode` mutator. Same wiring
-        // discipline as Alt+G: focus guard so the canvas doesn't rotate behind
-        // an inline rename, cooldown so a held key can't burst-cycle. Guard
-        // BEFORE the cooldown wrapper — a no-op press must not burn the window.
-        if (isTextInputFocused()) return;
-        cycleViewModeGuard(async () => {
-          cycleGridMode();
-        });
-        return;
-      }
-
-      if (action === 'focus-grid-search') {
-        // Issue #998 — Ctrl+F (Win/Linux) / ⌘+⌥+F (macOS) focuses the grid
-        // search input. Since #1609 the search lives in the Filtered view
-        // (its controls are hidden in other modes), so the shortcut first
-        // lands the canvas there — matching every editor's "find in files"
-        // gesture — then bumps the request counter. The actual `.focus()`
-        // + `.select()` calls live in the `GridControls` component's
-        // `useLayoutEffect` (which subscribes to
-        // `useUIStore.focusGridSearchRequest`). A request counter is the
-        // React-idiomatic channel for "imperative command from outside
-        // the component tree" — no ref forwarding, no module-level
-        // singleton, no leaky DOM registration. Ordering is guaranteed by
-        // React, not by defensive no-ops: `setViewMode('filtered')` and
-        // the counter bump happen in this same event handler, so React
-        // re-renders ONCE (18 batching) with both values — TitleBar mounts
-        // GridControls, the input ref attaches during commit, and
-        // GridControls' `useLayoutEffect` runs after the DOM mutation but
-        // before paint, reading the already-bumped counter. There is no
-        // intermediate committed frame in which the input is absent, so
-        // no press can be dropped; no "input not mounted yet" state
-        // exists to defend against.
-        //
-        // No cooldown: a held key must not burn a window — the user
-        // re-pressing while already focused is a harmless re-focus, and
-        // the counter pattern (0 → 1 → 2) naturally fires the effect
-        // on every distinct press.
-        //
-        // #2076 — the flip, the focus request and the "these results span
-        // Meshes" notice are one store action, shared with the Filtered
-        // segment. The notice is informational and runs after the mode flip
-        // and the focus bump, so it can never suppress either.
-        useUIStore.getState().enterFilteredFromSearch();
-        return;
-      }
-
-      if (action === 'jump-to-next-awaiting') {
-        // Issue #64 — Ctrl/Cmd+. cycles to the next agent node whose
-        // `status === 'awaiting_input'` in the active node's mesh, wrapping
-        // at the end. No focus guard: the user is most likely focused on an
-        // xterm prompt (the reason they're noticing the agent needs input),
-        // and `isTextInputFocused` carves out the xterm-helper-textarea so
-        // this fires from a terminal prompt — exactly what we want. No
-        // cooldown either: rapid presses are a legitimate "skip through"
-        // gesture, and the cycle is purely synchronous so there's no IPC
-        // round-trip to rate-limit.
-        jumpToNextAwaitingNode();
-        return;
-      }
-
-      if (action === 'open-omnibar' || action === 'open-omnibar-commands') {
-        // Issue #1409 — ⌘/Ctrl+K and ⌘/Ctrl+P (Cmd on macOS, Ctrl+Shift on
-        // Win/Linux — see the binding split above) open the Universal
-        // Command Omnibar. The K/P distinction is carried in the action so
-        // the palette can preselect its mode. `toggleOmnibar` gives the
-        // universal "activation chord closes the open modal" behaviour.
-        const mode = action === 'open-omnibar-commands' ? 'commands' : 'files';
-        useUIStore.getState().toggleOmnibar(mode);
-        return;
-      }
-
-      if (!isArrowAction(action)) return;
-      // Defensive focus guard (matches the Alt+G handler above). The binding
-      // is Ctrl/Cmd+Alt+Arrow, which has no readline collision, but if the
-      // user is focused on a real text input (an inline rename, a future
-      // search box) we'd rather not move the grid behind their typing. The
-      // xterm-helper-textarea carve-out in isTextInputFocused() means this
-      // guard is a no-op when an agent terminal has focus — exactly what we
-      // want.
-      if (isTextInputFocused()) return;
-      // Throttle sits BELOW the focus guard: a held arrow inside a rename box
-      // must not consume the budget, or the user's next real traversal press
-      // (after they tab out of the input) would also be blocked.
-      if (!arrowThrottle()) return;
-      const direction: ArrowDirection = action.slice('arrow-'.length) as ArrowDirection;
-
-      // Phase 1: in Single view mode (which subsumes the old maximize —
-      // wayfinder #982), the first arrow press restores the grid AND keeps
-      // focus on the soloed node. Single renders the active node, so
-      // exiting the mode is all that's needed — activeNodeId already points
-      // at the node the user was viewing.
-      const ui = useUIStore.getState();
-      if (ui.viewMode === 'single') {
-        ui.exitSingleMode();
-        return;
-      }
-      // Capture the narrowed mode here — right after the 'single' guard, before
-      // any intervening call — so TS keeps `ui.viewMode` as NonSingleViewMode.
-      const mode: NonSingleViewMode = ui.viewMode;
-
-      // Phase 2: walk the grid the active View Mode actually renders. Ticket
-      // #987 — the derived scope returns exactly the on-screen node set (Mesh
-      // for the selected mesh, Pinned cross-mesh, All, or Filtered narrowed by
-      // the Grid Controls — #1609) in the store's canonical (mesh_id, position)
-      // order, so traversal matches AgentNodeView cell-for-cell. This replaces
-      // the old `mesh_id === activeNode.mesh_id` filter, which stranded
-      // Ctrl+Alt+Arrow on the active node's mesh in Pinned/All. #2071 reads the
-      // one `deriveScope` definition the grid render reads, instead of
-      // re-deriving scope here — and with the Mesh fallback chain gone, a Mesh
-      // Grid with no selection walks an empty set (there is nothing on screen
-      // to walk). Focusing within the current grid preserves its mesh scope.
-      const activeNode = useAgentNodeStore.getState().getActiveNode();
-      if (!activeNode) return;
-      // Issue #1384 — `getAgentNodes()` is the store's derived getter; it
-      // allocates a fresh ordered array from `nodesById` + `nodeIds` on
-      // each call. Cheaper than reading the old (now-removed) `agentNodes`
-      // field, and matches the imperative-reader pattern used by
-      // `awaitingInputShortcuts` / `meshStore.deleteMesh`.
-      const agentNodes = useAgentNodeStore.getState().getAgentNodes();
-      const selectedMeshId = useMeshStore.getState().selectedMeshId;
-      // #1609 — pass the Grid Controls so traversal in Filtered walks the
-      // same narrowed set the grid renders (the other scopes ignore them).
-      const ownerships = useAgentNodeStore.getState().circuitOwnerships;
-      const nodeIndex = indexAgentNodes(agentNodes);
-      const groups = useNodeActivityStore.getState().groups;
-      const scope = deriveScope({ viewMode: mode, lastNonSingleMode: ui.lastNonSingleMode, agentNodes, selectedMeshId, activeNodeId: activeNode.id, controls: filteredControls() });
-      const visibleNodes = groupActivityNodes(scope.visibleNodes, nodeIndex, ownerships, groups);
-      const targetId = traversalTargetId(visibleNodes, activityRootId(activeNode.id, nodeIndex, ownerships, groups), direction);
-      if (targetId !== null) {
-        focusNode(targetId);
-      }
-    };
-
-    window.addEventListener('shortcut-triggered', handleShortcut);
-    return () => window.removeEventListener('shortcut-triggered', handleShortcut);
-  }, []);
 
   // ?-key cheatsheet toggle (issue #731). Plain window keydown listener
   // (NOT a Tauri global-shortcut registration) for two reasons:
@@ -416,7 +116,9 @@ function App() {
   //      (terminals are the only place the user might want to type `?`
   //      as a literal character).
   //
-  // Three early-exit guards protect the user's keystroke:
+  // The two keydown-shape guards stay here because they are about the
+  // *keystroke*, not the action; the action's own guards (text-input focus
+  // + 300ms cooldown) and its handler live in the dispatch table:
   //   - `e.repeat`: a held `?` autorepeats at ~30 Hz after ~500 ms on
   //     Windows; without this guard the modal flickers open/closed for
   //     as long as the user keeps the key down.
@@ -425,19 +127,19 @@ function App() {
   //     help request. This is the inverse of the `isTextInputFocused`
   //     xterm carve-out used by Alt+G (which DOES want to fire from a
   //     terminal prompt).
-  //   - `isTextInputFocused()`: catches inline-renames, the terminal
-  //     search box, and any future text input — same as the other
-  //     handlers.
+  //
+  // `preventDefault()` is keyed off the dispatch outcome rather than a
+  // duplicated focus check: blocking it on `blocked-focus` is what keeps a
+  // `?` typed into an inline rename (or the terminal search box) from being
+  // swallowed by the handler.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== '?') return;
       if (e.repeat) return;
       if (isTerminalFocused()) return;
-      if (isTextInputFocused()) return;
-      e.preventDefault();
-      cheatsheetGuard(async () => {
-        useUIStore.getState().toggleCheatsheet();
-      });
+      if (dispatchShortcut('open-cheatsheet') !== 'blocked-focus') {
+        e.preventDefault();
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);

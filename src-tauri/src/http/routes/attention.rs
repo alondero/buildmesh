@@ -1,6 +1,10 @@
 //! Loopback attention webhook: node/session ownership, HTTP security and one lifecycle fan-out.
-//! Harness wire validation and mapping live in `attention::normalizers`.
+//! Harness wire validation and mapping live in `attention::normalizers`;
+//! the provider-session identity seam lives in `attention::continuation`.
 mod common;
+mod continuation;
+#[cfg(test)]
+mod continuation_tests;
 #[cfg(test)]
 mod isolation_tests;
 mod normalizers;
@@ -100,6 +104,10 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
         .as_ref()
         .and_then(|n| n.cli_session_id.clone())
         .unwrap_or_default();
+    let node_path = node
+        .as_ref()
+        .map(|node| node.path.clone())
+        .unwrap_or_default();
     let provider = provider_owned.as_str();
     if !verify_attention_token(
         provider,
@@ -172,6 +180,36 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
             description: turn.description,
         });
 
+    // Issue #2263 — a hook session that is neither the stored identity nor a
+    // proven native successor is still a stale drop. Proving the lineage is
+    // transcript I/O, so `continuation::prove` runs on the blocking pool before
+    // the apply pass, with no database connection held.
+    let prove_provider = provider_owned.clone();
+    let prove_stored = stored_cli_session_id.clone();
+    let prove_hook = hook_uuid.clone();
+    let continued_successor = match tokio::task::spawn_blocking(move || {
+        continuation::prove(
+            &prove_provider,
+            &node_path,
+            &prove_stored,
+            prove_hook.as_deref(),
+        )
+    })
+    .await
+    {
+        Ok(successor) => successor,
+        // No proof is no lineage: the callback is dropped below, but it is not
+        // a retired process and must not be logged as one.
+        Err(error) => {
+            tracing::warn!(
+                session_id,
+                %error,
+                "attention webhook could not prove a native session continuation"
+            );
+            None
+        }
+    };
+
     // Issue #1389 — every step below is blocking SQLite; one `spawn_blocking`
     // hop for the whole sequence. `app` is `&'static AppHandle` (returned by
     // `state::app_handle()`), which is what lets `move ||` capture it.
@@ -238,23 +276,29 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
 
             // Issue #1364 §1 — ordering token: a hook whose provider session
             // id is a valid UUID that differs from the node's stored one
-            // belongs to a previous process generation. It must never
-            // overwrite the newer state — the POST is answered 200 (the
-            // harness's fail-open contract) and dropped. N1 fix: this
-            // uses `stored_cli_session_id_owned` (captured above; one
-            // DB hit, not two).
-            if !stored_cli_session_id_owned.is_empty() {
+            // belongs to a previous process generation, unless the transcripts
+            // prove it is the successor of a native session continuation
+            // (issue #2263), in which case the stored identity moves first and
+            // the callback proceeds. Either way the POST is answered 200 (the
+            // harness's fail-open contract); only the second one publishes.
+            // N1 fix: this uses `stored_cli_session_id_owned` (captured above;
+            // one DB hit, not two).
+            if !continuation::admit(
+                session_id,
+                hook_generation,
+                &stored_cli_session_id_owned,
+                hook_uuid.as_deref(),
+                continued_successor.as_deref(),
+            )? {
                 if let Some(hook) = hook_uuid.as_deref() {
-                    if hook != stored_cli_session_id_owned {
-                        tracing::info!(
-                            "attention webhook for node {}: stale callback from a previous \
-                             process (hook session {hook} != active {stored_cli_session_id_owned}) \
-                             — dropped (issue #1364 ordering token)",
-                            session_id
-                        );
-                        return Ok(Applied::StaleDropped);
-                    }
+                    tracing::info!(
+                        "attention webhook for node {}: stale callback from a previous \
+                         process (hook session {hook} != active {stored_cli_session_id_owned}) \
+                         — dropped (issue #1364 ordering token)",
+                        session_id
+                    );
                 }
+                return Ok(Applied::StaleDropped);
             }
             detail.provider = Some(provider_owned);
 

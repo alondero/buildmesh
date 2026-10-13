@@ -146,6 +146,16 @@ credential store gh and git credential helpers resolve GitHub auth from (issue
 `docs/learning/harness-attention-reliability.md` for the evidence matrix and
 remaining limitations.
 
+### Native session continuation (issue #2263)
+A hook session id that differs from `agent_nodes.cli_session_id` is normally a callback from a previous process generation, and the ordering token drops it. Claude Code can also carry a **running** process into a *new* native session, in which case every later callback legitimately carries an id Buildmesh has never stored: the run then looks permanently busy and its Circuit cannot observe its own report. The transition is recorded in the transcript of the session it came from — `{"type":"continued-in","sessionId":<old>,"continuedInSessionId":<new>}` — and that record is the only evidence separating the two cases.
+
+`http/routes/attention/continuation.rs` owns the seam, split by what each phase touches:
+
+- `prove` resolves the chain through the Claude Code transcript reader (`continued_session_id`, which accepts only a well-formed record naming its own session, bounded at 8 hops). It is file I/O, so the route runs it on the blocking pool *before* the apply pass with no database connection held. A callback that already matches the stored identity returns without touching a transcript, and any harness whose `TranscriptFormat` is not `ClaudeCode` is never granted lineage — Cursor reuses the parser over its own store and never writes the record.
+- `admit` performs the identity write: `db::adopt_continued_cli_session_id`, conditional on `cli_session_id = <old>` **and** `session_started_at` (the process generation read with the request) **and** a live status **and** no other live node owning the successor. A node that respawned, restarted or whose identity was captured elsewhere keeps the newer identity, so a retired process's successor callback is dropped instead of resurrecting its conversation.
+
+Only the chain's terminal session is adoptable. Absent, malformed or non-UUID records prove nothing (the declared id becomes a transcript filename on the next hop and reaches the harness as `--resume <id>`), a reversed record is never lineage, and an id the chain has already passed is superseded. Because the stored identity moves first and only then does the callback publish, the lifecycle observation and the Circuit's report read (`coordinator::enrichment::circuit_report_snapshot` → `readiness::prepare`, which requires `owner.session_id == agent.cli_session_id`) follow the successor together.
+
 ### Auto-Spawn Behavior
 `AgentTerminal` component auto-spawns the agent when mounting an agent node with `status === 'idle'` and a `provider`. It uses `fitAddon.proposeDimensions()` to get PTY size before calling `spawn_agent`. This couples terminal mount directly to agent spawn — debugging attention issues requires tracing this path.
 

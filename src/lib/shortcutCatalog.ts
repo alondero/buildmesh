@@ -1,20 +1,23 @@
 /**
- * Keyboard shortcut catalog (issue #731).
+ * Keyboard shortcut catalog (issue #731; table-driven since #2240).
  *
- * The single source of truth for the in-app cheatsheet. App.tsx owns the
- * Tauri-binding side (which fires even when an xterm terminal has focus
- * and so can't be served by a plain window keydown listener); this module
- * owns the *display* side: platform-aware key labels, the action name
- * each binding corresponds to, the human description, and the group the
- * cheatsheet renders the entry under.
+ * The single source of truth for the in-app cheatsheet: platform-aware key
+ * labels, the action name each binding corresponds to, the human description,
+ * and the group the cheatsheet renders the entry under.
  *
- * Why not colocate the binding list with the catalog? Because the two
- * layers have different concerns: the binding list is Tauri accelerator
- * strings (`CommandOrControl+T` — one canonical key per action), the
- * catalog is *display* labels (`⌘+T` on macOS, `Ctrl+T` elsewhere). A
- * shared `action` id is the join key; keeping the wiring and the
- * metadata in their natural homes avoids over-fitting a "single source
- * of truth" past its useful shape.
+ * Two provenances, one list:
+ *
+ *   - **Window-global actions** (`app` and most of `grid`) are declared in
+ *     `shortcutDispatch.ts` — the table that also carries each action's
+ *     accelerator, guards and handler — and their catalog rows are derived
+ *     from it by `globalShortcutCatalogEntries()`. A binding, the cheatsheet
+ *     row that advertises it, and the code that runs it therefore cannot
+ *     drift apart, and a test can fire the action instead of grepping
+ *     `App.tsx`.
+ *   - **Context-bound actions** (terminal zoom / `term-*`, the grid-search
+ *     Esc, the Modal's Esc) have no entry in that table: they are bound on a
+ *     focused xterm instance or handled by a component's own key handler, not
+ *     by the app-level dispatcher. Their rows are declared below.
  *
  * Conventions from `feedback-keyboard-shortcut-conventions.md`:
  * - ⌘ on macOS, Ctrl on Windows/Linux for CommandOrControl+* bindings.
@@ -24,12 +27,13 @@
  * - Single canonical binding per action — no Ctrl+1..9 / Alt+1..9
  *   parallel paths.
  */
+import { globalShortcutCatalogEntries } from './shortcutDispatch';
 import { isMac } from './platform';
 
 export type ShortcutGroup = 'app' | 'grid' | 'terminal' | 'modal';
 
 export interface ShortcutEntry {
-  /** Stable action id shared with App.tsx's Tauri-binding side. */
+  /** Stable action id shared with the dispatch table's `action`. */
   action: string;
   /** Group for the cheatsheet's section heading. */
   group: ShortcutGroup;
@@ -71,159 +75,18 @@ const GROUP_TITLES: Record<ShortcutGroup, string> = {
 };
 
 /**
- * Every shortcut shipped in the app. Pinned by `tests/unit/shortcut-catalog.test.ts`.
+ * Context-bound shortcuts: rows the cheatsheet renders whose handler is NOT
+ * the app-level dispatcher. These live on a focused xterm instance
+ * (`attachCustomKeyEventHandler` in TerminalRegistry.ts, the zoom keydown
+ * listener in Terminal.tsx) or on a component's own key handler (the grid
+ * search input's Esc, the &lt;Modal&gt; primitive's Esc), so they have no row
+ * in the dispatch table — `dispatchShortcut` reports them as
+ * `'unknown-action'`.
  *
- * `action` ids are *stable React keys for the catalog itself*, not a
- * contract with App.tsx dispatch or with the terminal key resolvers.
- * The bindings live in three different places (Tauri global-shortcut
- * registrations in App.tsx, the terminal's `attachCustomKeyEventHandler`
- * chain in TerminalRegistry.ts, and the window-level keydown listener in
- * App.tsx) — each binding has its own native identifier. The catalog's
- * `action` id is the join key the cheatsheet uses to render the row; it
- * does NOT need to match any of those identifiers.
- *
- * Drift policy:
- *   - Adding a binding in App.tsx / TerminalRegistry.ts without adding a
- *     catalog entry: the cheatsheet will silently omit it. Reviewable
- *     by code review; no automated guard.
- *   - Adding a catalog entry without a live binding: the cheatsheet will
- *     advertise a key that does nothing. The catalog test pins the
- *     required entries by name (the *reverse* direction), so this is
- *     caught at test time.
+ * The window-global rows come first in `SHORTCUT_CATALOG` because they are
+ * derived from `globalShortcutCatalogEntries()`, in the table's own order.
  */
-export const SHORTCUT_CATALOG: ReadonlyArray<ShortcutEntry> = [
-  // --- App (window-global, Tauri global-shortcut plugin) -----------------
-  {
-    action: 'new-agent',
-    group: 'app',
-    description: 'New agent node',
-    winKey: 'Ctrl+T',
-    macKey: '⌘+T',
-    splash: true,
-  },
-  {
-    action: 'open-cheatsheet',
-    group: 'app',
-    description: 'Show this cheatsheet',
-    winKey: '?',
-    macKey: '?',
-    splash: true,
-  },
-  {
-    // Issue #64: jump to the next agent node with `status === 'awaiting_input'`.
-    // Surfaced in the splash (not just the cheatsheet) because the typical use
-    // case is "I just noticed a node needs my input while I'm focused on a
-    // terminal prompt" — the splash hint teaches the gesture before the user
-    // ever opens the help modal. `Ctrl+.` is the conventional "next" chord
-    // (matches `Cmd+.` for "next issue" in many editors).
-    action: 'jump-to-next-awaiting',
-    group: 'app',
-    description: 'Jump to next node awaiting input',
-    winKey: 'Ctrl+.',
-    macKey: '⌘+.',
-    splash: true,
-  },
-  {
-    // Issue #1409 — the Universal Command Omnibar. ⌘/Ctrl+K opens the palette
-    // with the default (files) mode; ⌘/Ctrl+P opens it in command mode
-    // (editors' "quick open file / run command" convention). `splash: true`
-    // on the K row only: the splash is the pre-spawn empty-state hint, where
-    // "command" mode has nothing to run yet — same discipline as
-    // `cycle-grid-modes`.
-    //
-    // Windows/Linux carry the Shift modifier: bare Ctrl+K (readline
-    // kill-line) and Ctrl+P (previous-history) must keep reaching the shell,
-    // so the palette chords are Ctrl+Shift+K / Ctrl+Shift+P — matching the
-    // platform branch in App.tsx (issue #1409 review).
-    action: 'open-omnibar',
-    group: 'app',
-    description: 'Open the universal command bar',
-    winKey: 'Ctrl+Shift+K',
-    macKey: '⌘+K',
-    splash: true,
-  },
-  {
-    action: 'open-omnibar-commands',
-    group: 'app',
-    description: 'Open the universal command bar (commands)',
-    winKey: 'Ctrl+Shift+P',
-    macKey: '⌘+P',
-  },
-
-  // --- Grid (window-global) -----------------------------------------------
-  {
-    action: 'toggle-maximize-grid',
-    group: 'grid',
-    description: 'Toggle grid / single view',
-    winKey: 'Alt+G',
-    macKey: '⌘+G',
-    splash: true,
-  },
-  {
-    // Ticket #987 — keyboard peer to the mouse-only ViewModeSwitcher. Not
-    // flagged `splash`: cycling grid modes is meaningless on the pre-spawn
-    // empty canvas the splash advertises (no nodes to scope Mesh/Pinned/All).
-    action: 'cycle-grid-modes',
-    group: 'grid',
-    description: 'Cycle grid modes (Mesh → Pinned → All)',
-    winKey: 'Ctrl+Alt+G',
-    macKey: '⌘+⌥+G',
-  },
-  {
-    action: 'arrow-left',
-    group: 'grid',
-    description: 'Move focus left (wrap within row)',
-    winKey: 'Ctrl+Alt+←',
-    macKey: '⌘+⌥+←',
-    splash: true,
-  },
-  {
-    action: 'arrow-right',
-    group: 'grid',
-    description: 'Move focus right (wrap within row)',
-    winKey: 'Ctrl+Alt+→',
-    macKey: '⌘+⌥+→',
-    splash: true,
-  },
-  {
-    action: 'arrow-up',
-    group: 'grid',
-    description: 'Move focus up (no-op at top edge)',
-    winKey: 'Ctrl+Alt+↑',
-    macKey: '⌘+⌥+↑',
-    splash: true,
-  },
-  {
-    action: 'arrow-down',
-    group: 'grid',
-    description: 'Move focus down (no-op at bottom edge)',
-    winKey: 'Ctrl+Alt+↓',
-    macKey: '⌘+⌥+↓',
-    splash: true,
-  },
-  {
-    // Issue #998 — focus the grid search input. `Cmd/Ctrl+F` is the
-    // editors' universal "find" chord, so the issue text asks for it
-    // verbatim. On Win/Linux bare `Ctrl+F` is free (no readline gesture
-    // uses it), so we use it as-is. On macOS, bare `⌘+F` is already
-    // taken by `term-find` (the xterm helper's find action, registered
-    // at the focus level by Terminal.tsx's `attachCustomKeyEventHandler`),
-    // and Tauri's global-shortcut plugin would beat that focus-level
-    // registration if we claimed it here — every `⌘+F` in an agent
-    // terminal would jump to the grid search instead of opening the
-    // terminal's find bar. The two-modifier carve-out (⌘+⌥+F) follows
-    // the readline-free two-modifier principle shared by the
-    // `Ctrl/Cmd+Alt+Arrow*` grid-traversal bindings in App.tsx — no
-    // readline, terminal, or other app shortcut uses two meta+alt
-    // modifiers together, so the chord stays free. Not flagged
-    // `splash`: searching the grid is meaningless on the pre-spawn
-    // empty canvas the splash advertises (no nodes to search).
-    action: 'focus-grid-search',
-    group: 'grid',
-    description: 'Focus grid search',
-    winKey: 'Ctrl+F',
-    macKey: '⌘+⌥+F',
-  },
+const CONTEXT_SHORTCUT_ENTRIES: ReadonlyArray<ShortcutEntry> = [
   {
     // Issue #998 — Esc clears the grid search. Handled contextually by
     // the search input's own `onKeyDown` (it `e.preventDefault()`s the
@@ -322,6 +185,24 @@ export const SHORTCUT_CATALOG: ReadonlyArray<ShortcutEntry> = [
     macKey: 'Esc',
     splash: true,
   },
+];
+
+/**
+ * Every shortcut shipped in the app: the window-global rows derived from the
+ * dispatch table (`shortcutDispatch.ts`), then the context-bound rows above.
+ * Pinned by `tests/unit/shortcut-catalog.test.ts` and, for the dispatch
+ * half, by `tests/unit/shortcut-catalog-binding.test.ts`.
+ *
+ * Drift policy (issue #2240): the table rows and the catalog rows are the same
+ * objects, so "a binding exists but the cheatsheet omits it" is no longer
+ * possible for window-global actions — the parity test pins the two sets as
+ * equal in both directions. A context row can still be orphaned (nothing
+ * dispatches it); the parity test pins those action ids explicitly so a new
+ * orphan has to be declared.
+ */
+export const SHORTCUT_CATALOG: ReadonlyArray<ShortcutEntry> = [
+  ...globalShortcutCatalogEntries(),
+  ...CONTEXT_SHORTCUT_ENTRIES,
 ];
 
 /**

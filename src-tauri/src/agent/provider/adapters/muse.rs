@@ -133,6 +133,22 @@
 //! the wait must be closed as well as opened, or a node whose answer does not
 //! clear the flag by another path stays stranded in `AwaitingInput`.
 //!
+//! **Reasoning effort (issue #1704).** `muse --help` advertises
+//! `--reasoning-effort <EFFORT>` — "Meta reasoning effort:
+//! none|minimal|low|medium|high|xhigh|max|ultra (default: high)" — on both the
+//! interactive root command and `muse exec`, so the PTY path Buildmesh spawns
+//! accepts it. The adapter advertises that closed vocabulary through
+//! `effort_control()`, which is what lets `resolve_agent_config` keep a mesh
+//! override, an application default, or an explicit spawn argument instead of
+//! dropping it.
+//!
+//! Both halves of the wiring are load-bearing. The flag has **no `--effort`
+//! alias**, so `effort_args` is overridden as well: the trait default emits
+//! `["--effort", level]`, which Muse rejects as an unknown option and which
+//! would turn a previously ignored effort setting into a launch it refuses.
+//! The vocabulary lives in [`MUSE_EFFORT_ALLOWED`], shared with the resolver's
+//! mask, so anything outside the eight levels is dropped rather than forwarded.
+//!
 //! **Flags Buildmesh never passes (issue #1710).** `supports_extra_args` is
 //! `true`, so `extra_args` reaches any flag Muse accepts — unvalidated, which
 //! is correct for an escape hatch and wrong for a default. Every flag this
@@ -182,7 +198,9 @@
 //! template if one ever does (`HarnessConfigValue` + `ResolvedAgentConfig` +
 //! capability gate + an adapter `*_args` helper, never a provider-name check at
 //! a call site).
-use crate::agent::capabilities::{PermissionModeOption, PERMISSION_MODE_UNATTENDED};
+use crate::agent::capabilities::{
+    EffortControlKind, PermissionModeOption, MUSE_EFFORT_ALLOWED, PERMISSION_MODE_UNATTENDED,
+};
 use crate::agent::provider::{
     AgentProvider, LaunchRuntime, Platform, ResolvedPath, SpawnRecipe, UiMeta, WindowsShell,
 };
@@ -769,6 +787,27 @@ impl AgentProvider for MuseAdapter {
         vec![text.into()]
     }
 
+    /// Issue #1704 — Muse's reasoning-effort flag is `--reasoning-effort`,
+    /// with no `--effort` alias. The trait default's `["--effort", value]`
+    /// would make Muse reject the launch, so the recipe shape is overridden
+    /// alongside `effort_control` below.
+    fn effort_args(&self, effort: &str) -> Vec<String> {
+        vec!["--reasoning-effort".into(), effort.into()]
+    }
+
+    /// Issue #1704 — `muse --help` documents `--reasoning-effort <EFFORT>`
+    /// with the eight-level closed vocabulary kept in
+    /// [`MUSE_EFFORT_ALLOWED`] (verified on the installed 1.3.0). Advertising
+    /// it here is what stops `resolve_agent_config` from dropping every effort
+    /// value, and it gives the Spawn Menu and Inspector their `<select>`
+    /// options. Out-of-vocabulary values are masked by the resolver, never
+    /// forwarded to the child.
+    fn effort_control(&self) -> EffortControlKind {
+        EffortControlKind::Closed {
+            allowed: MUSE_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
     fn recover_suspended_session_id(
         &self,
         spawn_path: &str,
@@ -936,6 +975,10 @@ mod tests {
         assert_eq!(MUSE.resume_args("session-uuid"), ["resume", "session-uuid"]);
         assert_eq!(MUSE.prefill_args("fix the bug"), ["fix the bug"]);
         assert_eq!(MUSE.model_args("model-id"), ["--model", "model-id"]);
+        // Issue #1704: Muse's effort flag is `--reasoning-effort` and has no
+        // `--effort` alias, so the recipe shape is adapter-owned — pinned
+        // alongside the flag-followed-by-value recipe pin below.
+        assert_eq!(MUSE.effort_args("high"), ["--reasoning-effort", "high"]);
         assert!(!MUSE.captures_session_id_from_pty());
         assert!(MUSE.prefill_requires_pty("follow-up"));
         // The baked `--disable-approval` + `--disable-sandbox` policy
@@ -1010,6 +1053,88 @@ mod tests {
                 recipe.base_args
             );
         }
+    }
+
+    /// Issue #1704 — recipe pin. When the resolver forwards an effort value,
+    /// `default_prepare` must append `--reasoning-effort <level>` to the
+    /// recipe, and must never append the trait default's `--effort`: Muse
+    /// documents no such alias, so the wrong flag turns a silently-ignored
+    /// effort setting into a launch the CLI rejects outright. The table-driven
+    /// `spawn::command_tests::capability_recipe_coherence` covers the
+    /// forwarding for every adapter; this focused pin makes the Muse shape —
+    /// including the flag that must not appear — explicit.
+    #[test]
+    fn muse_recipe_appends_reasoning_effort_arg_when_resolved() {
+        use crate::agent::capabilities::ResolvedAgentConfig;
+        use crate::agent::launch::{
+            assert_flag_followed_by_value, default_prepare, HarnessLaunchInput, SessionIdModeRef,
+        };
+
+        // The advertised vocabulary and the shared constant must agree, so a
+        // future refactor that moves the vocabulary cannot desync the resolver
+        // mask from the UI options.
+        let caps = MUSE.capabilities();
+        let advertised: Vec<String> = match &caps.effort_control {
+            EffortControlKind::Closed { allowed } => allowed.clone(),
+            other => panic!("expected Closed, got {other:?}"),
+        };
+        let expected: Vec<String> = MUSE_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            advertised, expected,
+            "Muse effort vocabulary must be exactly MUSE_EFFORT_ALLOWED"
+        );
+
+        // `ultra` is the level that proves the eight-value vocabulary reached
+        // the recipe rather than a shorter one copied from a sibling harness.
+        let config = ResolvedAgentConfig {
+            model: None,
+            effort: Some("ultra".into()),
+            extra_args: None,
+            permission_mode: None,
+        };
+        let input = HarnessLaunchInput {
+            platform: Platform::Linux,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::None,
+            config: &config,
+            prefill: None,
+            sandbox: false,
+        };
+        let prepared = default_prepare(&MUSE, input);
+        assert_flag_followed_by_value(&prepared.recipe.base_args, "--reasoning-effort", "ultra");
+        assert!(
+            !prepared.recipe.base_args.iter().any(|a| a == "--effort"),
+            "Muse has no `--effort` alias — the trait default must never reach \
+             the child argv; got {:?}",
+            prepared.recipe.base_args
+        );
+
+        // Without an effort layer the flag is absent: the recipe carries only
+        // what the effective permission mode contributes. The exact
+        // `--disable-approval --disable-sandbox` argv of a no-effort launch is
+        // already pinned exactly by
+        // `default_prepare_fresh_launch_carries_disable_approval_with_model_and_prefill`,
+        // so this assertion stays scoped to the effort flag.
+        let without_effort = default_prepare(
+            &MUSE,
+            HarnessLaunchInput {
+                platform: Platform::Linux,
+                runtime: EnvType::Windows,
+                session: SessionIdModeRef::None,
+                config: &ResolvedAgentConfig::default(),
+                prefill: None,
+                sandbox: false,
+            },
+        );
+        assert!(
+            !without_effort
+                .recipe
+                .base_args
+                .iter()
+                .any(|a| a == "--reasoning-effort"),
+            "no resolved effort must mean no --reasoning-effort; got {:?}",
+            without_effort.recipe.base_args
+        );
     }
 
     /// Pin the exact `available_on()` set. Pre-fix this failed with
@@ -1178,13 +1303,18 @@ mod tests {
     /// composition they behave identically: Buildmesh does not write them.
     ///
     /// Deliberately **absent**: the flags owned by sibling issues
-    /// (`--reasoning-effort` #1704, `--approval-mode` / `--permission-profile` /
+    /// (`--approval-mode` / `--permission-profile` /
     /// `--approval-judge` #1705, `--trust-workspace` #1706, the
     /// `--sandbox-network` / `--disable-write` / `--disable-shell` /
     /// `--enable-shell-tool` group #1707/#1788, and `--no-session-log`'s
     /// watcher consequences #1709). Those verdicts win on overlap and may
     /// legitimately start being emitted, so pinning them here would only
-    /// obstruct the sibling work. The lists mirror the tables in
+    /// obstruct the sibling work. `--reasoning-effort` (#1704) used to sit in
+    /// that group and has since graduated: Buildmesh now emits it as
+    /// `--reasoning-effort <level>` from resolved configuration, so it is not
+    /// a declined flag and would fail this assertion if listed. Its emitted
+    /// form is pinned by `muse_recipe_appends_reasoning_effort_arg_when_resolved`
+    /// instead. The lists mirror the tables in
     /// `docs/learning/muse-harness-capabilities.md`, verified against the
     /// installed 1.3.0 `muse --help` / `muse exec --help`.
     #[test]

@@ -178,6 +178,33 @@ export default [
       // TypeScript already owns this; the legacy ESLint rule produces
       // false positives against TS-narrowed symbols.
       'no-undef': 'off',
+
+      // ---- Zustand whole-store subscriptions (issue #1246) ------------------
+      // `useSomeStore()` with NO selector subscribes the component to the
+      // entire state object, so every write (an attention flip, a status
+      // update, a spawn event) re-renders every subscriber. Per-action
+      // selectors return references Zustand stores once at creation, so
+      // `Object.is` short-circuits and the component stays quiet. App.tsx
+      // pays this cost more than anyone: it sits above every node.
+      //
+      // `useSomeStore.getState()` is unaffected (the callee is a member
+      // expression, not an identifier) — imperative reads inside handlers and
+      // effects are the right tool and stay allowed.
+      //
+      // This rule replaced a test that read `src/App.tsx` and regexed it for
+      // the anti-pattern spelling (issue #2240): one file's source text is a
+      // weaker gate than a lint rule over every file, and the behavioural
+      // cases in `tests/unit/app-zustand-subscription.test.tsx` already pin
+      // the re-render contract the fix depends on.
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector:
+            "CallExpression[callee.type='Identifier'][callee.name=/^use[A-Z][A-Za-z0-9]*Store$/]:not([arguments.0])",
+          message:
+            'Whole-store Zustand subscription: pass a per-action selector (issue #1246). `useStore.getState()` is the right call for imperative reads.',
+        },
+      ],
     },
   },
 

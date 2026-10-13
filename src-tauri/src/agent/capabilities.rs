@@ -582,6 +582,20 @@ pub const COMMANDCODE_EFFORT_ALLOWED: &[&str] = &["low", "medium", "high"];
 /// resolver and the capability descriptor agree on the same vocabulary.
 pub const CLINE_EFFORT_ALLOWED: &[&str] = &["none", "low", "medium", "high", "xhigh"];
 
+/// The closed vocabulary Muse Code's `--reasoning-effort <EFFORT>` accepts
+/// (issue #1704). Verified against the installed `Muse Code 1.3.0
+/// (1.3.0-R3401.1)` — `muse --help` prints "Meta reasoning effort:
+/// none|minimal|low|medium|high|xhigh|max|ultra (default: high)", on both the
+/// interactive root command and `muse exec`; the 1.1.1 help quoted in #1704
+/// carries the same eight values.
+///
+/// Unlike Grok's, Muse's flag has **no `--effort` alias**, which is why the
+/// adapter must override `effort_args` as well as `effort_control`: the trait
+/// default would forward a flag the CLI rejects.
+pub const MUSE_EFFORT_ALLOWED: &[&str] = &[
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+];
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1062,11 +1076,22 @@ mod tests {
         // Issue #1708 — transcript reader is wired.
         assert!(muse.produces_readable_transcript);
         assert!(muse.supports_model_override);
-        assert!(!muse.supports_effort_override);
+        // Issue #1704 — `muse --help` advertises
+        // `--reasoning-effort <EFFORT>` with the eight-level closed vocabulary
+        // in `MUSE_EFFORT_ALLOWED`, so the resolver stops dropping effort and
+        // the Spawn Menu offers the knob. The flag itself is adapter-owned:
+        // `MuseAdapter::effort_args` emits `--reasoning-effort`, never the
+        // trait default `--effort`, which Muse does not accept.
+        assert!(muse.supports_effort_override);
         assert!(muse.supports_extra_args);
         assert!(muse.supports_prefill);
         assert!(!muse.is_plain_terminal);
-        assert_eq!(muse.effort_control, EffortControlKind::None);
+        assert_eq!(
+            muse.effort_control,
+            EffortControlKind::Closed {
+                allowed: MUSE_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
+            }
+        );
         // Order matches `MuseAdapter::available_on()`:
         // `&[Platform::Linux, Platform::Macos, Platform::Windows]` — the
         // Windows entry landed in Muse 1.3.0 (2026-09). Mirrors the pin
@@ -1337,6 +1362,46 @@ mod tests {
             resolved.effort.is_none(),
             "Claude Code rejects values outside the closed vocabulary; got {:?}",
             resolved.effort
+        );
+    }
+
+    /// Issue #1704 — Muse's mask is the eight-level closed vocabulary its own
+    /// help documents. The `EffortControlKind::None` default dropped every
+    /// effort value for a muse node, so the vocabulary pin above is only
+    /// reachable if the resolver actually forwards what it advertises: this
+    /// walks every level (including `ultra`, the one that separates Muse from
+    /// Grok's seven) and then proves an out-of-vocabulary value is dropped
+    /// rather than forwarded to the child.
+    #[test]
+    fn resolver_keeps_muse_effort_inside_its_eight_level_vocabulary() {
+        let resolve_explicit = |effort: &str| {
+            resolve_agent_config(
+                &muse_caps(),
+                AgentConfigInputs {
+                    model: FieldInputs::default(),
+                    effort: FieldInputs {
+                        explicit: Some(effort),
+                        mesh: None,
+                        application: None,
+                    },
+                    permission_mode: FieldInputs::default(),
+                },
+                None,
+            )
+            .effort
+        };
+
+        for level in MUSE_EFFORT_ALLOWED {
+            assert_eq!(
+                resolve_explicit(level).as_deref(),
+                Some(*level),
+                "`muse --help` documents `{level}`; the resolver must forward it"
+            );
+        }
+        assert_eq!(
+            resolve_explicit("bogus"),
+            None,
+            "an effort outside MUSE_EFFORT_ALLOWED must be dropped, never forwarded"
         );
     }
 

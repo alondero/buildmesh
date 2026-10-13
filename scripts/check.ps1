@@ -11,12 +11,19 @@
     * Builds dist/mobile/ first — a fresh worktree has no dist/ (it's gitignored),
       and the Rust test `mobile_assets_include_built_index_html` rust-embeds
       dist/mobile/index.html, so `cargo test` panics without it.
-    * Clears BUILDMESH_PREFILL — leaked from the agent env, it fails the unrelated
-      `prefill_stays_argv_for_wsl` test.
+    * Scrubs the environment an agent shell leaks (issue #1426), and prints the
+      names it cleared. NODE_ENV=production is the load-bearing one: React's
+      production build exports no `act`, so every .tsx test fails with
+      `React.act is not a function`.
     * Runs vitest with --pool=threads — the default forks pool silently times out
       every worker in a worktree and reports PASS(0) FAIL(0) exit 0 (false green).
     * Runs cargo from src-tauri so Cargo loads its local config and ts-rs keeps
       generated bindings under src/types/generated.
+
+  A leaked npm_config_omit=dev has usually already done its damage before this
+  script runs: `npm ci` / `npm install` honour it and install no devDependencies,
+  leaving a worktree without vite, vitest, jsdom or typescript. That repair
+  cannot be made from here — reinstall the worktree with `npm ci --include=dev`.
 
   Situational escalations NOT applied by default (add the flag if you hit them):
     -CleanRust         cargo clean -p buildmesh first (incremental stale binary:
@@ -84,6 +91,69 @@ if ($gitWrong -or $opensslWrong) {
   $env:PATH = "$($pin -join ';');$env:PATH"
 }
 
+function Clear-LeakedEnv {
+  # Issue #1426 - an agent shell leaks variables that fail the gates below for
+  # reasons unrelated to their names. Cleared for this process only, before any
+  # gate runs, and printed when they fire so a green bar stays explainable:
+  #   * NODE_ENV - `production` is the load-bearing leak: React ships no `act` in
+  #     its production build, so @testing-library/react throws `React.act is not
+  #     a function` across every .tsx test (~1200 failures in 131 files) with no
+  #     hint of the real cause. `test` is what this repository documents for the
+  #     frontend test env and what Vitest wants, so it is kept rather than
+  #     scrubbed: clearing it would work by accident, and reporting it would
+  #     punish the documented value.
+  #   * npm_config_omit=dev - `npm ci` / `npm install` then strip every
+  #     devDependency from a fresh worktree (~75 packages instead of ~325), so
+  #     vite / vitest / jsdom / typescript vanish and unrelated gates fail later
+  #     with `Cannot find module ...\node_modules\vite\bin\vite.js`. Clearing it
+  #     here cannot repair an install that already ran; that repair is
+  #     `npm ci --include=dev`.
+  #   * COMMANDCODE_SCRATCHPAD and BUILDMESH_PREFILL - the other two casualties
+  #     recorded in #1426. Their Rust tests are hermetic now (#2216 gave
+  #     curated_env a planted baseline via env_clear, and both prefill tests
+  #     remove BUILDMESH_PREFILL themselves), and harness.mjs and
+  #     rust-test-shards.mjs already scrub BUILDMESH_PREFILL the same way.
+  #     Clearing them here costs nothing and keeps this wrapper's promise from
+  #     resting on those tests staying that way.
+  #
+  # Declared ahead of Resolve-NpmCommand deliberately: the #2255 regression
+  # slices Resolve-NpmCommand..Ensure-MobileBuilt out of this file and evaluates
+  # that region, so a helper defined between those two markers would be executed
+  # by that test as well. Keep this one outside its range.
+  $leaked = @()
+  $nodeEnv = (Get-Item -Path 'Env:NODE_ENV' -ErrorAction SilentlyContinue).Value
+  if ($nodeEnv -and $nodeEnv -ne 'test') { $leaked += 'NODE_ENV' }
+  $leaked += @('npm_config_omit', 'COMMANDCODE_SCRATCHPAD', 'BUILDMESH_PREFILL') |
+    Where-Object { (Get-Item -Path "Env:$_" -ErrorAction SilentlyContinue).Value }
+  foreach ($name in $leaked) { Set-Item -Path "Env:$name" -Value $null }
+  if ($leaked.Count -gt 0) {
+    Write-Host "== env leak from the calling shell: cleared $($leaked -join ', ') ==" -ForegroundColor Yellow
+  }
+}
+
+# Before any gate runs, and for this process only: a leak inherited from the
+# calling shell must not decide the outcome. Clear-LeakedEnv owns the list, so a
+# gate cannot quietly reintroduce a variable it should have scrubbed.
+Clear-LeakedEnv
+
+function Resolve-NpmCommand {
+  # Issue #2255 - npm ships two Windows shims that do not accept arguments the
+  # same way. npm.cmd takes a real argument vector. In its `-Command` branch
+  # npm.ps1 instead rebuilds its own argument list by re-parsing the *text* of
+  # the command that called it, and in that branch the wrapper's `@args` splat
+  # is lost: npm gets no script name, prints the lifecycle script list and exits
+  # 0. That is how `npm run build` became a script listing, leaving the bundle
+  # gate to fail later on a missing dist or stale output.
+  #
+  # Only the forwarding helper needs this. The bare `& npm run <script>` calls
+  # below pass literal arguments, which that re-parse reconstructs correctly, so
+  # they are deliberately left alone rather than churned for consistency.
+  $cmd = Get-Command 'npm.cmd' -CommandType Application -ErrorAction SilentlyContinue
+  if ($cmd) { return $cmd.Source }
+  # No .cmd shim to reach: pwsh on POSIX, or a PATH carrying only npm.ps1.
+  return 'npm'
+}
+
 function Invoke-ProductionBuild {
   # Issue #2013 - run a build command under Vite's production environment and
   # restore the caller's NODE_ENV afterwards, instead of inheriting whatever
@@ -95,7 +165,7 @@ function Invoke-ProductionBuild {
   # only when NODE_ENV is not production.
   $previous = $env:NODE_ENV
   $env:NODE_ENV = 'production'
-  try { & npm run @args } finally { $env:NODE_ENV = $previous }
+  try { & (Resolve-NpmCommand) run @args } finally { $env:NODE_ENV = $previous }
 }
 
 function Ensure-MobileBuilt {
@@ -239,8 +309,9 @@ function Invoke-BundleBudget {
 
 function Invoke-Rust {
   Write-Host '== rust (cargo test) ==' -ForegroundColor Cyan
-  # Clear the leaked env var for this process only.
-  $env:BUILDMESH_PREFILL = $null
+  # BUILDMESH_PREFILL is cleared once, for this process, by Clear-LeakedEnv
+  # before any gate runs — not here, so the rust gate cannot be the only place
+  # that knows the leak exists.
   # Run inside src-tauri so Cargo loads its .cargo/config.toml. In particular,
   # this keeps ts-rs output in src/types/generated instead of creating a
   # root-level bindings/ directory when cargo test is launched from the repo.

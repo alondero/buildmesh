@@ -481,7 +481,7 @@ The current built-in catalog is:
 | Command Code | Yes | Passive watcher | Transcript-based lifecycle support is available. If typing does nothing, see [Command Code does not accept typing](troubleshooting.md#command-code-does-not-accept-typing) |
 | Freebuff | Yes | None | Model and effort overrides are not available |
 | Cline | Yes | Hook | Needs Cline 3.0.62 or newer. Manage providers with `cline auth`; Buildmesh injects account credentials at spawn |
-| Meta Muse | Yes | Passive watcher | Native on Windows since v1.3.0; WSL guest otherwise |
+| Meta Muse | Yes | Passive watcher | Native on Windows since v1.3.0; WSL guest otherwise. Reasoning effort is available as `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra` |
 | Terminal | No | None | A plain shell; closing the app loses its live process |
 
 Capabilities can change with the installed CLI and runtime. Buildmesh hides
