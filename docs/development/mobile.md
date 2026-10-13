@@ -75,6 +75,13 @@ events sockets are what a reconnecting phone opens first.
 - **Only 401 recovers.** A 403 means the device authenticated and was refused for a scope it
   does not hold; no refresh can grant it. See "only a genuine authorization failure may reach
   `onAuthFailed`" above.
+- **A refresh that reaches no verdict is not a rejection.** The refresh has three outcomes —
+  refreshed, rejected, and unavailable (the desktop app unreachable, rate-limited or erroring).
+  Only *rejected* lets a screen call `onAuthFailed`. *Unavailable* surfaces as an ordinary
+  non-auth error, so the screen takes its usual offline/error path and the stored token
+  survives: a network blip must not cost a phone a pairing that is still valid. This is the
+  distinction that keeps "clear credentials only when the refresh is rejected" true rather
+  than aspirational.
 - **The transport never clears the credential.** It re-raises the 401 and the screen's
   `onAuthFailed` remains the single owner of the clear-and-show-Connect transition, so the
   screen-stays-mounted guarantee and the re-pair path cannot drift apart. The token rides one
