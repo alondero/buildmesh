@@ -298,8 +298,15 @@ mod tests {
         )
         .unwrap();
         conn.execute_batch(
-            "INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, state) VALUES (10, 1, 1, 'running');
-             DELETE FROM app_settings WHERE key IN ('issue_review_first_turn_upgrade_v2', 'issue_review_verdict_upgrade_v1');",
+            "INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, state) VALUES (10, 1, 1, 'running');",
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM app_settings WHERE key IN (?1, ?2)",
+            rusqlite::params![
+                crate::db::migrations::ISSUE_REVIEW_FIRST_TURN_UPGRADE_FLAG,
+                crate::db::migrations::ISSUE_REVIEW_VERDICT_UPGRADE_FLAG
+            ],
         )
         .unwrap();
 
@@ -392,9 +399,13 @@ mod tests {
         }
         conn.execute_batch(
             "INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, trigger_identity, state) VALUES
-                (10, 2, 1, 'issue:7:run', 'running'), (11, 1, 1, 'manual:a', 'failed');
-             DELETE FROM app_settings WHERE key = 'review_publication_flow_upgrade_v1';",
+                (10, 2, 1, 'issue:7:run', 'running'), (11, 1, 1, 'manual:a', 'failed');",
         ).unwrap();
+        conn.execute(
+            "DELETE FROM app_settings WHERE key = ?1",
+            [crate::db::migrations::REVIEW_PUBLICATION_FLOW_UPGRADE_FLAG],
+        )
+        .unwrap();
 
         crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         let read = |id: i64| -> String {
@@ -482,8 +493,12 @@ mod tests {
             "INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, trigger_identity, state) VALUES
                 (10, 1, 1, 'issue:7:a', 'running'),
                 (11, 1, 1, 'issue:7:b', 'failed'),
-                (12, 1, 1, 'issue:7:c', 'completed');
-             DELETE FROM app_settings WHERE key = 'review_feedback_route_repair_v1';",
+                (12, 1, 1, 'issue:7:c', 'completed');",
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM app_settings WHERE key = ?1",
+            [crate::db::migrations::REVIEW_FEEDBACK_ROUTE_REPAIR_FLAG],
         )
         .unwrap();
 
@@ -597,8 +612,12 @@ mod tests {
         }
         conn.execute_batch(
             "INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, trigger_identity, state) VALUES
-                (10, 2, 1, 'issue:7:run', 'running');
-             DELETE FROM app_settings WHERE key = 'merge_verification_upgrade_v1';",
+                (10, 2, 1, 'issue:7:run', 'running');",
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM app_settings WHERE key = ?1",
+            [crate::db::migrations::MERGE_VERIFICATION_UPGRADE_FLAG],
         )
         .unwrap();
 
@@ -749,8 +768,8 @@ mod tests {
         assert_eq!(unchanged_custom, custom_json);
         assert_eq!(
             conn.query_row(
-                "SELECT value FROM app_settings WHERE key = 'review_contract_prompt_upgrade_v1'",
-                [],
+                "SELECT value FROM app_settings WHERE key = ?1",
+                [crate::db::migrations::REVIEW_CONTRACT_PROMPT_UPGRADE_FLAG],
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
@@ -785,8 +804,8 @@ mod tests {
         );
         assert_eq!(
             conn.query_row(
-                "SELECT value FROM app_settings WHERE key = 'review_contract_prompt_upgrade_v1'",
-                [],
+                "SELECT value FROM app_settings WHERE key = ?1",
+                [crate::db::migrations::REVIEW_CONTRACT_PROMPT_UPGRADE_FLAG],
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
@@ -902,8 +921,11 @@ mod tests {
             [issue.to_json().unwrap(), copy.to_json().unwrap()],
         ).unwrap();
         conn.execute(
-            "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', ?1), ('review_contract_prompt_upgrade_v1', 'complete')",
-            [crate::db::migrations::SCHEMA_VERSION.to_string()],
+            "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', ?1), (?2, 'complete')",
+            rusqlite::params![
+                crate::db::migrations::SCHEMA_VERSION.to_string(),
+                crate::db::migrations::REVIEW_CONTRACT_PROMPT_UPGRADE_FLAG
+            ],
         )
         .unwrap();
 
@@ -944,8 +966,8 @@ mod tests {
         );
         assert_eq!(
             conn.query_row(
-                "SELECT value FROM app_settings WHERE key = 'review_contract_prompt_upgrade_v1'",
-                [],
+                "SELECT value FROM app_settings WHERE key = ?1",
+                [crate::db::migrations::REVIEW_CONTRACT_PROMPT_UPGRADE_FLAG],
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
@@ -995,8 +1017,8 @@ mod tests {
         crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         assert_eq!(
             conn.query_row(
-                "SELECT value FROM app_settings WHERE key = 'review_contract_prompt_upgrade_v1'",
-                [],
+                "SELECT value FROM app_settings WHERE key = ?1",
+                [crate::db::migrations::REVIEW_CONTRACT_PROMPT_UPGRADE_FLAG],
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
@@ -1097,8 +1119,8 @@ mod tests {
         let first_json = graph_json(1);
         assert_eq!(
             conn.query_row(
-                "SELECT value FROM app_settings WHERE key = 'issue_review_first_turn_upgrade_v2'",
-                [],
+                "SELECT value FROM app_settings WHERE key = ?1",
+                [crate::db::migrations::ISSUE_REVIEW_FIRST_TURN_UPGRADE_FLAG],
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
