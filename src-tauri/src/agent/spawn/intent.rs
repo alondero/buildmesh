@@ -269,6 +269,9 @@ pub(crate) struct SpawnRequest {
     /// recoverable lifecycle. Ordinary desktop/HTTP spawns leave this off so
     /// the low-level orchestrator does not query circuit recovery state.
     pub(crate) lifecycle_lease: bool,
+    /// Permit staging failure to delete this node when the caller created it
+    /// for the handover. Existing-node handovers leave this off.
+    pub(crate) cleanup_new_node_on_handover_failure: bool,
 }
 
 impl SpawnRequest {
@@ -289,6 +292,7 @@ impl SpawnRequest {
             explicit: ExplicitSpawnOverrides::default(),
             worktree_policy: WorktreePolicy::RespectMesh,
             lifecycle_lease: false,
+            cleanup_new_node_on_handover_failure: false,
         }
     }
 
@@ -317,6 +321,13 @@ impl SpawnRequest {
     /// execution uses it to fence cleanup against a concurrent resume.
     pub(crate) fn with_lifecycle_lease(mut self) -> Self {
         self.lifecycle_lease = true;
+        self
+    }
+
+    /// Mark that this request owns the newly created node, so a failed
+    /// handover stage may remove that unstarted row.
+    pub(crate) fn with_new_node_handover_cleanup(mut self) -> Self {
+        self.cleanup_new_node_on_handover_failure = true;
         self
     }
 }

@@ -371,9 +371,10 @@ pub fn delete_mesh_inner(mesh_id: i64) -> Result<(), String> {
     // forever (#2019). Release it after the commit; a failed delete leaves the
     // nodes live, so their state must stay.
     let node_ids = db::delete_mesh_returning_node_ids(mesh_id).map_err(|e| e.to_string())?;
+    let app_data_dir = crate::preferences::app_data_dir();
     for node_id in node_ids {
         crate::agent::node_teardown::release(node_id);
-        crate::agent::node_teardown::release_after_delete(node_id);
+        crate::agent::node_teardown::release_after_delete(node_id, app_data_dir.as_deref());
     }
     for path in pool_paths {
         if let Err(e) = crate::git::worktree::remove_one_worktree(&path) {

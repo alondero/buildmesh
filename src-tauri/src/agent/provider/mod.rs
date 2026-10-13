@@ -15,6 +15,18 @@ use crate::models::EnvType;
 use std::future::Future;
 use std::pin::Pin;
 
+/// Resolve the provider a persisted node will launch. A saved launch snapshot
+/// wins over mutable profile defaults so existing nodes keep their recipe.
+pub(crate) fn resolve_node_provider(node: &crate::models::AgentNode) -> crate::models::Provider {
+    node.launch_configuration
+        .as_ref()
+        .and_then(|configuration| configuration.resolved.as_ref())
+        .map_or_else(
+            || crate::preferences::resolve_harness_provider(&node.provider),
+            |plan| crate::models::Provider::from_db_str(&plan.harness.harness),
+        )
+}
+
 /// Runtime facts resolved by provider preflight and shared with the adapter's
 /// provisioning seams. An empty context means the adapter should resolve its
 /// ordinary native/default runtime. `harness_home` is a harness-specific

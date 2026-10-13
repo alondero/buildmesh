@@ -62,7 +62,7 @@ pub(crate) fn prepare(
     match crate::db::agent_node_exists(node.id) {
         Ok(true) => {}
         Ok(false) => {
-            remove_node_files(node.id);
+            remove_node_files(node.id, app_data_dir);
             return Err("Could not save the handover: the target node was deleted".into());
         }
         Err(error) => {
@@ -92,8 +92,8 @@ fn remove_staged_file(path: &Path) {
     }
 }
 
-pub(crate) fn remove_node_files(node_id: i64) {
-    let Some(root) = crate::preferences::app_data_dir() else {
+pub(crate) fn remove_node_files(node_id: i64, app_data_dir: Option<&Path>) {
+    let Some(root) = app_data_dir else {
         return;
     };
     if let Err(error) = std::fs::remove_dir_all(node_dir(&root, node_id)) {
@@ -297,19 +297,8 @@ mod tests {
     }
 
     #[test]
-    fn saved_launch_harness_takes_precedence_over_the_profile_id() {
-        let mut fixture = Fixture::new();
-        fixture.node.provider = "launch/saved-reviewer".into();
-        fixture.node.launch_configuration = Some(serde_json::from_value(serde_json::json!({
-            "id": "launch/saved-reviewer", "name": "Reviewer", "spawn_option_id": "custom-codex",
-            "model": null, "effort": null, "extra_args": null,
-            "resolved": {
-                "configuration_id": "launch/saved-reviewer", "configuration_name": "Reviewer",
-                "spawn_option_id": "custom-codex",
-                "harness": { "id": "custom-codex", "name": "Codex", "harness": "codex" },
-                "route": null, "model": null, "effort": null, "extra_args": null
-            }
-        })).unwrap());
+    fn handover_staging_uses_the_resolved_provider_argument() {
+        let fixture = Fixture::new();
         let text = "review\n".repeat(100);
         let prompt = prepare(
             &fixture.node,
@@ -324,17 +313,6 @@ mod tests {
             text.as_bytes()
         );
 
-        fixture.node.provider = "codex".into();
-        fixture
-            .node
-            .launch_configuration
-            .as_mut()
-            .unwrap()
-            .resolved
-            .as_mut()
-            .unwrap()
-            .harness
-            .harness = "anthropic".into();
         assert_eq!(
             prepare(
                 &fixture.node,
@@ -346,6 +324,18 @@ mod tests {
             .prompt(),
             text
         );
+    }
+
+    #[test]
+    fn node_file_cleanup_uses_the_supplied_app_data_root() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = node_dir(root.path(), 42);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("saved.md"), "handover").unwrap();
+
+        remove_node_files(42, Some(root.path()));
+
+        assert!(!dir.exists());
     }
 
     #[test]

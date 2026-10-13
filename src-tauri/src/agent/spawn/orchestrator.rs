@@ -132,18 +132,19 @@ pub(super) fn prepare_initial_prompt(
     }
 }
 
-/// A Handover intent reaches this branch for a node just created for that
-/// selection. Remove that empty node if its file cannot be staged; if removal
-/// also fails, the caller reports the spawn error through the normal lifecycle
-/// path so the row is not left Idle.
-pub(super) fn prepare_new_node_handover_prompt(
+/// Prepare a handover prompt, optionally removing a node the caller created
+/// for this selection if staging fails. The staging error is returned either
+/// way so `spawn_with_intent` can report the failed spawn.
+pub(super) fn prepare_handover_prompt(
     node: &crate::models::AgentNode,
     intent: &SpawnIntent,
     provider: crate::models::Provider,
+    cleanup_new_node_on_handover_failure: bool,
     app_data_dir: Option<std::path::PathBuf>,
 ) -> Result<Option<String>, String> {
     match prepare_initial_prompt(node, intent, provider, app_data_dir.as_deref()) {
         Ok(prompt) => Ok(prompt),
+        Err(error) if !cleanup_new_node_on_handover_failure => Err(error),
         Err(error) => match crate::services::agent_node::delete(node.id, false) {
             Ok(()) => Err(error),
             Err(cleanup_error) => Err(format!(
@@ -186,6 +187,7 @@ pub(crate) async fn spawn_with_intent(
         explicit,
         worktree_policy,
         lifecycle_lease,
+        cleanup_new_node_on_handover_failure,
     } = request;
     // Bind the type name so the `ExplicitSpawnOverrides` re-export stays
     // live at the module scope (the destructure pattern alone doesn't
@@ -236,14 +238,7 @@ pub(crate) async fn spawn_with_intent(
     {
         return Ok(SpawnOutcome::Skipped(node));
     }
-    let provider = node
-        .launch_configuration
-        .as_ref()
-        .and_then(|c| c.resolved.as_ref())
-        .map_or_else(
-            || crate::preferences::resolve_harness_provider(&node.provider),
-            |plan| crate::models::Provider::from_db_str(&plan.harness.harness),
-        );
+    let provider = crate::agent::provider::resolve_node_provider(&node);
     let adapter = provider.adapter();
     let is_resume_intent = matches!(intent, SpawnIntent::Resume { .. });
 
@@ -335,7 +330,13 @@ pub(crate) async fn spawn_with_intent(
         let prompt_intent = intent.clone();
         let app_data_dir = crate::preferences::app_data_dir();
         crate::commands::run_blocking("prepare_handover_prompt", move || {
-            prepare_new_node_handover_prompt(&prompt_node, &prompt_intent, provider, app_data_dir)
+            prepare_handover_prompt(
+                &prompt_node,
+                &prompt_intent,
+                provider,
+                cleanup_new_node_on_handover_failure,
+                app_data_dir,
+            )
         })
         .await
     } else {

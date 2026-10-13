@@ -2896,14 +2896,7 @@ fn prepare_existing_node_handover(
 ) -> Result<crate::agent::handover::PreparedHandover, String> {
     validate_handover_text(text)?;
     let node = db::get_agent_node_by_id(target_node_id).map_err(|error| error.to_string())?;
-    let provider = node
-        .launch_configuration
-        .as_ref()
-        .and_then(|configuration| configuration.resolved.as_ref())
-        .map_or_else(
-            || crate::preferences::resolve_harness_provider(&node.provider),
-            |plan| crate::models::Provider::from_db_str(&plan.harness.harness),
-        );
+    let provider = crate::agent::provider::resolve_node_provider(&node);
     crate::agent::handover::prepare(&node, provider, text, app_data_dir)
 }
 

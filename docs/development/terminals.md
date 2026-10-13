@@ -38,7 +38,7 @@ terminal or initial launch prompt. Existing-node handovers and new-node
 configurations. Short selections and other harnesses retain inline delivery.
 A save failure rejects the handover; it does not fall back to a long paste. If
 staging fails for a newly created node, Buildmesh deletes that unstarted node;
-if the row cannot be deleted, the normal spawn failure path marks it Error.
+if deletion also fails, the spawn error reports both failures.
 When an existing-node PTY rejects a pointer before accepting it, only that
 attempt's file is removed. Accepted pointers keep their files across process
 exit and restart, and permanent node deletion removes the node's handover

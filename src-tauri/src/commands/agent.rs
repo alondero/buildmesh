@@ -253,7 +253,8 @@ async fn spawn_new_agent_impl(
 
     let outcome = spawn_with_intent(
         app,
-        SpawnRequest::new(node.id, intent, TerminalSize::default()),
+        SpawnRequest::new(node.id, intent, TerminalSize::default())
+            .with_new_node_handover_cleanup(),
     )
     .await?;
 
