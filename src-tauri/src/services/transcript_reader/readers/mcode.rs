@@ -40,8 +40,8 @@ use crate::services::transcript_reader::types::{
 /// assistant. An idle session then never reads the finished result — the
 /// stall in issue #2105. A detector driven by that reminder would never fire
 /// during the stall it exists to break, so this uses native terminal tool
-/// receipts and the CLI's on-disk terminal summaries instead. See
-/// [`detect_background_task_stall`].
+/// receipts, the host's `<background-task-finished>` notice and the CLI's
+/// on-disk terminal summaries instead. See [`detect_background_task_stall`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BackgroundTaskStall {
     /// Newest finished task that has not been read in this session.
@@ -110,10 +110,12 @@ pub(crate) struct LaunchedTask {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TaskStoreFact {
     pub task_id: String,
-    /// Terminal receipt/summary timestamp, or the latest output write for a
-    /// task whose terminal state is still unknown.
-    pub settled_at_ms: i64,
-    /// A native terminal receipt or summary proves the task is over.
+    /// Terminal receipt/notice/summary timestamp, or the latest output write for
+    /// a task whose terminal state is still unknown. `None` when the task is
+    /// provably over but no source dated it: the pending count may settle, but
+    /// the stall detector has no ordering to compare against the assistant.
+    pub settled_at_ms: Option<i64>,
+    /// A native terminal receipt, host notice or summary proves the task is over.
     pub finished: bool,
 }
 
@@ -131,14 +133,15 @@ fn background_task_id(details: &serde_json::Value) -> Option<&str> {
 }
 
 /// Tasks the host itself reports terminal in a `<background-task-finished>`
-/// notice, with the time each one ended.
+/// notice, with the time each one ended when the record says so: the element's
+/// `ended_at_ms`, else the record's own timestamp, else `None`.
 ///
 /// This is the only terminal evidence for a task that failed or was cancelled
 /// while the agent's last `task_output` poll raced the exit (that poll still
 /// says `running`, and the CLI writes `summary.txt` for successes only). Only
 /// the host's structured `hostMetadata.backgroundTaskOrigin` counts: the notice
 /// text alone is forgeable by an agent quoting it or a user pasting it.
-fn host_terminal_tasks(message: &serde_json::Value) -> Vec<(String, i64)> {
+fn host_terminal_tasks(message: &serde_json::Value) -> Vec<(String, Option<i64>)> {
     let Some(origin) = message
         .get("hostMetadata")
         .and_then(|metadata| metadata.get("backgroundTaskOrigin"))
@@ -149,10 +152,7 @@ fn host_terminal_tasks(message: &serde_json::Value) -> Vec<(String, i64)> {
         return Vec::new();
     }
     let text = message_text(message);
-    let notice_at = message
-        .get("timestamp")
-        .and_then(|t| t.as_i64())
-        .unwrap_or_default();
+    let notice_at = message.get("timestamp").and_then(|t| t.as_i64());
     origin
         .get("taskIds")
         .and_then(|ids| ids.as_array())
@@ -160,12 +160,7 @@ fn host_terminal_tasks(message: &serde_json::Value) -> Vec<(String, i64)> {
         .flatten()
         .filter_map(|id| id.as_str())
         .filter(|id| valid_background_task_id(id))
-        .map(|id| {
-            (
-                id.to_owned(),
-                notice_ended_at_ms(&text, id).unwrap_or(notice_at),
-            )
-        })
+        .map(|id| (id.to_owned(), notice_ended_at_ms(&text, id).or(notice_at)))
         .collect()
 }
 
@@ -252,19 +247,24 @@ pub(crate) fn detect_background_task_stall(
         if !fact.finished {
             continue;
         }
+        // An undated terminal fact cannot be ordered against the assistant, so
+        // it never proves the session missed it.
+        let Some(settled_at_ms) = fact.settled_at_ms else {
+            continue;
+        };
         if let Some(last) = last_assistant_at_ms {
-            if last >= fact.settled_at_ms {
+            if last >= settled_at_ms {
                 // The session has spoken since the task finished.
                 continue;
             }
         }
         let newer = stall
             .as_ref()
-            .is_none_or(|current| fact.settled_at_ms > current.ended_at_ms);
+            .is_none_or(|current| settled_at_ms > current.ended_at_ms);
         if newer {
             stall = Some(BackgroundTaskStall {
                 task_id: fact.task_id.clone(),
-                ended_at_ms: fact.settled_at_ms,
+                ended_at_ms: settled_at_ms,
                 last_assistant_at_ms,
             });
         }
@@ -294,15 +294,27 @@ fn task_store_facts(tasks_dir: &Path, launched: &[LaunchedTask]) -> Vec<TaskStor
             }?;
             Some(TaskStoreFact {
                 task_id: task.task_id.clone(),
-                settled_at_ms,
+                settled_at_ms: Some(settled_at_ms),
                 finished,
             })
         })
         .collect()
 }
 
-/// Combine native terminal tool receipts with the CLI's terminal summaries.
-/// Missing or partial canonical history stays unknown rather than clearing a veto.
+/// Record `task_id` as finished, replacing any earlier fact for it.
+fn settle(facts: &mut Vec<TaskStoreFact>, task_id: &str, settled_at_ms: Option<i64>) {
+    facts.retain(|fact| fact.task_id != task_id);
+    facts.push(TaskStoreFact {
+        task_id: task_id.to_owned(),
+        settled_at_ms,
+        finished: true,
+    });
+}
+
+/// Combine the three terminal sources for a launched task: native terminal tool
+/// receipts, the host's `<background-task-finished>` notice, and the CLI's
+/// terminal summaries. Missing or partial canonical history stays unknown
+/// rather than clearing a veto.
 fn background_facts(
     lines: &str,
     tasks_dir: &Path,
@@ -322,12 +334,7 @@ fn background_facts(
         if role == "user" {
             for (task_id, settled_at_ms) in host_terminal_tasks(message) {
                 if launched.iter().any(|task| task.task_id == task_id) {
-                    facts.retain(|fact| fact.task_id != task_id);
-                    facts.push(TaskStoreFact {
-                        task_id,
-                        settled_at_ms,
-                        finished: true,
-                    });
+                    settle(&mut facts, &task_id, settled_at_ms);
                 }
             }
             continue;
@@ -360,12 +367,7 @@ fn background_facts(
         let Some(settled_at_ms) = message.get("timestamp").and_then(|t| t.as_i64()) else {
             continue;
         };
-        facts.retain(|fact| fact.task_id != task_id);
-        facts.push(TaskStoreFact {
-            task_id: task_id.to_owned(),
-            settled_at_ms,
-            finished: true,
-        });
+        settle(&mut facts, task_id, Some(settled_at_ms));
     }
     Some(facts)
 }
@@ -770,7 +772,7 @@ mod stall_tests {
     fn fact(task_id: &str, settled_at_ms: i64, finished: bool) -> TaskStoreFact {
         TaskStoreFact {
             task_id: task_id.to_string(),
-            settled_at_ms,
+            settled_at_ms: Some(settled_at_ms),
             finished,
         }
     }
@@ -1037,6 +1039,92 @@ mod stall_tests {
         )
         .unwrap();
         assert!(facts.is_empty());
+    }
+
+    /// A host notice with neither a usable `ended_at_ms` nor a record timestamp.
+    fn undated_finished_notice(task_id: &str) -> String {
+        let mut record: serde_json::Value =
+            serde_json::from_str(&finished_notice(0, task_id, "failed", 0)).unwrap();
+        let message = record["message"].as_object_mut().unwrap();
+        message.remove("timestamp");
+        message["content"][0]["text"] = format!(
+            "<background-task-finished>\n  <task task_id=\"{task_id}\" status=\"failed\" ended_at_ms=\"soon\"/>\n</background-task-finished>"
+        )
+        .into();
+        record.to_string()
+    }
+
+    #[test]
+    fn an_undated_finished_notice_settles_the_task_without_inventing_a_time() {
+        let lines = stream([
+            promoted(T_LAST_TALK - 60_000, TASK),
+            undated_finished_notice(TASK),
+        ]);
+        let facts = background_facts(
+            &lines,
+            Path::new("X:\\no-such-tasks-dir"),
+            &launched(&lines),
+        )
+        .unwrap();
+        assert_eq!(
+            facts,
+            vec![TaskStoreFact {
+                task_id: TASK.into(),
+                settled_at_ms: None,
+                finished: true,
+            }]
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("messages.jsonl");
+        std::fs::write(&transcript, &lines).unwrap();
+        assert_eq!(
+            count_pending_background_tasks_in(&transcript, &dir.path().join("background-tasks")),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn an_undated_terminal_fact_is_never_reported_as_a_stall() {
+        // An undated fact has no ordering against the assistant. Dated `0` it
+        // would be reported as a stall that "ended" at epoch 0 whenever the
+        // session had said nothing, and hidden whenever it had; either way the
+        // date was invented. Declining is the only claim the evidence supports.
+        for assistant_records in [vec![], vec![assistant(T_LAST_TALK)]] {
+            let mut records = vec![promoted(T_LAST_TALK - 60_000, TASK)];
+            records.extend(assistant_records);
+            records.push(undated_finished_notice(TASK));
+            let lines = stream(records);
+            let facts = background_facts(
+                &lines,
+                Path::new("X:\\no-such-tasks-dir"),
+                &launched(&lines),
+            )
+            .unwrap();
+            assert_eq!(
+                detect_background_task_stall(
+                    &launched(&lines),
+                    &facts,
+                    newest_assistant_at(&lines),
+                    NOW
+                ),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn a_dated_notice_falls_back_to_the_record_timestamp_without_ended_at() {
+        let mut record: serde_json::Value =
+            serde_json::from_str(&finished_notice(T_END + 5_000, TASK, "failed", T_END)).unwrap();
+        record["message"]["content"][0]["text"] = "<background-task-finished/>".into();
+        let lines = stream([promoted(T_LAST_TALK, TASK), record.to_string()]);
+        let facts = background_facts(
+            &lines,
+            Path::new("X:\\no-such-tasks-dir"),
+            &launched(&lines),
+        )
+        .unwrap();
+        assert_eq!(facts, vec![fact(TASK, T_END + 5_000, true)]);
     }
 
     #[test]

@@ -210,7 +210,10 @@ these records it, because each misses a case the others cover:
   forged by a quote. For a failed task whose poll raced the exit this can be the
   only record (circuit run 478: a task exited 101 and no other record of it was
   found; the stale "pending" count made the final `Stop` read as background
-  work, so the node stayed `running`).
+  work, so the node stayed `running`). A notice settles the task at its
+  `ended_at_ms`, else the record's timestamp; if neither is usable the task is
+  still settled but undated, and the stall detector does not report an undated
+  task (it cannot be ordered against the assistant's last message).
 
 The worker turns that into `CircuitEvent::NudgeIdleSession`, which the stepper
 turns into at most one `Effect::NudgeIdleAgent` per step attempt, fenced to the
