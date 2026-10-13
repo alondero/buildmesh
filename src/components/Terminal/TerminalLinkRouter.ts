@@ -22,19 +22,30 @@ import type { ILinkProviderOptions } from '@xterm/addon-web-links';
  * The press cannot simply be left to the agent, either. xterm records the link
  * under the pointer on `mousedown` and activates on `mouseup` only when that
  * record survived, so stopping the press before it is forwarded also cancels
- * our own activation. While the PTY app owns mouse input, this router
- * therefore owns a left press that lands on a link: it stops the press before
- * xterm forwards it and opens the hovered URI itself. A press anywhere else —
- * and every non-primary button — is left alone and still reaches the agent.
+ * our own activation.
+ *
+ * So while the PTY app owns mouse input this router owns the whole gesture
+ * around a link: it stops the press before xterm can forward it or record it,
+ * waits for the release, and opens the URI itself when the release lands on
+ * the link the press started on. It stops that release too, because xterm
+ * keeps a `_mouseDownLink` from earlier gestures and never clears it after
+ * activating (`Linkifier.ts:216-231`) — a release that reached xterm could
+ * therefore activate a link this router has already opened.
+ *
+ * A press away from a link, and every non-primary button (Codex binds
+ * right-click to paste), are left to the agent untouched.
  */
 export class TerminalLinkRouter {
   /**
    * The link under the pointer, or null. Tracked from both providers'
    * `hover`/`leave` callbacks — xterm only re-resolves the link under the
-   * cursor on mousemove, so this is what a press can be matched against
-   * without reaching into xterm's private linkifier.
+   * cursor when the pointer moves to a different cell (`Linkifier.ts:83-85`),
+   * so this stays valid across repeated clicks on one link and is what a press
+   * is matched against without reaching into xterm's private linkifier.
    */
   private hoveredUri: string | null = null;
+  /** The link a press we intercepted started on, pending its release. */
+  private pressedUri: string | null = null;
   private term: Terminal | null = null;
   private element: HTMLElement | null = null;
 
@@ -78,9 +89,15 @@ export class TerminalLinkRouter {
     this.term = term;
     const element = term.element;
     if (!element || element === this.element) return;
-    this.unbindElement();
+    this.unbindListeners();
     this.element = element;
+    // Capture on the element runs before xterm's own listeners on the screen
+    // element beneath it, so the press never reaches the PTY or the linkifier.
     element.addEventListener('mousedown', this.onPress, true);
+    // The release is resolved on the document so a release outside this
+    // terminal still ends the gesture; only a release inside it is withheld
+    // from xterm.
+    document.addEventListener('mouseup', this.onRelease, true);
   }
 
   /**
@@ -89,38 +106,53 @@ export class TerminalLinkRouter {
    * own teardown stays on `TerminalRegistry`'s single dispose path.
    */
   dispose(): void {
-    this.unbindElement();
+    this.unbindListeners();
     this.term = null;
     this.hoveredUri = null;
+    this.pressedUri = null;
   }
 
-  private unbindElement(): void {
+  private unbindListeners(): void {
     this.element?.removeEventListener('mousedown', this.onPress, true);
+    document.removeEventListener('mouseup', this.onRelease, true);
     this.element = null;
   }
 
   private readonly onPress = (event: MouseEvent): void => {
     const term = this.term;
     const uri = this.hoveredUri;
-    if (!term || uri === null) return;
-    // Only the primary button is a link click. Codex binds right-click to
-    // paste, so every other button keeps reaching the agent even when the
-    // pointer happens to be over a link.
-    if (event.button !== 0) return;
+    // Any press ends the gesture we were tracking, whether or not this one is
+    // ours.
+    this.pressedUri = null;
+    // Only the primary button is a link click.
+    if (!term || uri === null || event.button !== 0) return;
     // Only a mouse-tracking TUI would also read this press as a click on the
     // link it is drawing. Without tracking xterm never reports it, so the
     // press has to keep reaching its normal activate-on-release path.
     if (term.modes.mouseTrackingMode === 'none') return;
 
-    // Mirror the two things xterm's own mousedown handler does before it
-    // forwards the press, then take the press away from the PTY. The mouseup
-    // is deliberately left alone: xterm will not activate (it has no
-    // mousedown record), so this press opens the link exactly once.
+    // Mirror what xterm's own mousedown handler does before it forwards the
+    // press, then take the press away from both the PTY and the linkifier.
     event.preventDefault();
     event.stopPropagation();
-    this.hoveredUri = null;
+    this.pressedUri = uri;
     term.focus();
-    this.open(uri);
+  };
+
+  private readonly onRelease = (event: MouseEvent): void => {
+    const uri = this.pressedUri;
+    if (uri === null) return;
+    this.pressedUri = null;
+    // Released outside this terminal: the gesture ends without an open, and
+    // whatever the release landed on keeps handling it.
+    if (!this.element?.contains(event.target as Node | null)) return;
+    if (event.button !== 0) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    // xterm activates only when the press and the release are on the same
+    // link, so a drag off the link must not open it.
+    if (this.hoveredUri === uri) this.open(uri);
   };
 
   private open(uri: string): void {
