@@ -1,76 +1,111 @@
-import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import {
+  _resetShortcutRateGatesForTests,
+  dispatchShortcut,
+} from '../../src/lib/shortcutDispatch';
+import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
+import { useMeshStore } from '../../src/stores/meshStore';
+import { useUIStore } from '../../src/stores/uiStore';
+import { makeAgentNode } from './helpers/makeAgentNode';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 /**
- * Pins that the Ctrl/Cmd+Alt+Arrow grid-traversal handler in src/App.tsx is
- * wired through `createKeyRepeatThrottle`. Without the throttle, holding the
- * arrow key floods the handler with OS autorepeat events (~30 Hz on Windows,
- * ~15 Hz on macOS) and focus flies from one end of the row to the other
- * before the user can lift their finger.
+ * Rate limiting on the shortcut table (issue #2240).
  *
- * Static-analysis shape (matches the regression tests for `grid-shortcut-
- * binding` and the `CommandExt::creation_flags` setter-only case): the
- * throttle is a single inline literal in `src/App.tsx` and its helper is
- * imported by name, so reading the file is the cheapest way to keep both
- * sides honest without mocking the global-shortcut plugin or fake-timing
- * the whole App tree.
+ * Without a limiter, holding a key floods the handler with OS autorepeat
+ * events (~30 Hz on Windows, ~15 Hz on macOS). The table declares two
+ * different primitives per action and the distinction is behavioural, not
+ * cosmetic:
  *
- * What the assertions cover:
- *   - `import { createKeyRepeatThrottle } from './lib/keyRepeatThrottle';`
- *     appears exactly once (the helper is only used by this handler today).
- *   - The arrow handler invokes `arrowThrottle()` BEFORE doing any store
- *     mutation, so an autorepeat flood can't sneak past via a Phase 1
- *     (restore-from-maximized) early-return.
- *   - The interval constant lives near the throttle creation so a future
- *     tweak (e.g. 150ms for snappier, 300ms for more deliberate) is a
- *     single-site change.
+ *   - **cooldown** (one-shot toggles: new-agent, Alt+G, the view-mode cycle,
+ *     the `?` cheatsheet) blocks EVERY press inside the window.
+ *   - **throttle** (the four arrow directions) lets the leading press through
+ *     and rate-limits the rest, because a held arrow key *should* repeat —
+ *     just slower. Wrapping arrows in a cooldown instead would silently turn
+ *     grid traversal into a one-shot move, which is exactly the regression
+ *     this file pins.
+ *
+ * The old version asserted the wiring by reading `src/App.tsx` and slicing the
+ * source between two comment markers. These cases fire the actions and read
+ * the reported outcome.
  */
-describe('arrow traversal key-repeat throttle', () => {
-  const appSource = readFileSync(
-    resolve(__dirname, '../../src/App.tsx'),
-    'utf8',
-  );
-
-  it('imports createKeyRepeatThrottle from src/lib/keyRepeatThrottle', () => {
-    // Single-source-of-truth check: a future refactor that drops the
-    // import (e.g. moves the throttle inline) would lose the testable
-    // helper and re-grow the "burst-on-hold" bug silently.
-    const importLine = /import\s+\{\s*createKeyRepeatThrottle\s*\}\s+from\s+['"]\.\/lib\/keyRepeatThrottle['"]/;
-    expect(importLine.test(appSource)).toBe(true);
+describe('shortcut rate limiting', () => {
+  beforeEach(() => {
+    _resetShortcutRateGatesForTests();
+    vi.useFakeTimers();
+    seedAgentNodes([
+      makeAgentNode({ id: 1, mesh_id: 1, position: 0 }),
+      makeAgentNode({ id: 2, mesh_id: 1, position: 1 }),
+    ], 1);
+    useMeshStore.setState({ selectedMeshId: null });
+    useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all' });
   });
 
-  it('constructs the throttle at module scope (matching the sibling guards)', () => {
-    // `createShortcutGuard` instances in App.tsx are module-scope constants
-    // (createNodeGuard/toggleMaximizeGuard/cheatsheetGuard, lines 33/38/43);
-    // the arrow throttle must live alongside them so the lifetime/sharing
-    // convention stays uniform — App is the root, mounts once, so the
-    // distinction is cosmetic today, but copy-pasting into a remounting
-    // component would expose a per-mount reset bug.
-    const constructLine = /const\s+arrowThrottle\s*=\s*createKeyRepeatThrottle\(\s*\d+\s*\)/;
-    expect(constructLine.test(appSource)).toBe(true);
+  afterEach(() => {
+    vi.useRealTimers();
+    document.body.innerHTML = '';
   });
 
-  it('invokes the throttle BEFORE the maximized-restore branch', () => {
-    // Regression guard: a future change that moves the throttle check
-    // below Phase 1 (`maximizedId !== null`) would let the first autorepeat
-    // event re-fire Phase 1, double-clearing `maximizedNodeId` and
-    // re-setting the active node. The check has to gate BOTH phases.
-    const arrowSection = appSource.slice(
-      appSource.indexOf('if (!isArrowAction(action))'),
-      appSource.indexOf('Phase 1: if a node is maximized'),
-    );
-    expect(/arrowThrottle\(\)/.test(arrowSection)).toBe(true);
+  it('blocks a second toggle inside the 300ms cooldown, then admits it', async () => {
+    expect(dispatchShortcut('toggle-maximize-grid')).toBe('handled');
+    expect(useUIStore.getState().viewMode).toBe('single');
+
+    expect(dispatchShortcut('toggle-maximize-grid')).toBe('blocked-cooldown');
+    // The blocked press must not have run the handler either.
+    expect(useUIStore.getState().viewMode).toBe('single');
+
+    // Async variant: the cooldown's unblock timer is scheduled from a promise
+    // `.finally`, so the microtask has to flush before the timer exists.
+    await vi.advanceTimersByTimeAsync(300);
+    expect(dispatchShortcut('toggle-maximize-grid')).toBe('handled');
+    expect(useUIStore.getState().viewMode).toBe('all');
   });
 
-  it('does NOT also wrap arrows in createShortcutGuard (regression guard)', () => {
-    // `createShortcutGuard` (src/lib/shortcutGuard.ts) blocks ALL calls
-    // within the cooldown — the wrong shape for arrows because the user
-    // DOES want to repeat, just slower. A future contributor who wraps
-    // arrows in `createShortcutGuard(300)` to "be safe" would silently
-    // turn grid traversal into a one-shot move. Substring check covers
-    // either an inline call or a hoisted const named `arrowGuard`.
-    const wrongWiring = /arrowGuard|createShortcutGuard\(\s*\d+\s*\)[\s\S]{0,80}arrow-/;
-    expect(wrongWiring.test(appSource)).toBe(false);
+  it('throttles (does NOT cooldown) the arrow directions: the repeat gets through', () => {
+    // Two nodes in one row: right → node 2, left → node 1. If the arrows were
+    // wrapped in a cooldown the second press would be dropped and traversal
+    // would stop dead after one move.
+    expect(dispatchShortcut('arrow-right')).toBe('handled');
+    expect(dispatchShortcut('arrow-right')).toBe('blocked-throttle');
+    vi.advanceTimersByTime(200);
+    expect(dispatchShortcut('arrow-right')).toBe('handled');
+  });
+
+  it('shares ONE throttle across the four arrow directions', () => {
+    // The OS autorepeat flood is a property of the key being held, not of the
+    // direction. Four separate limiters would let a held Left reset the budget
+    // and starve Right.
+    expect(dispatchShortcut('arrow-right')).toBe('handled');
+    expect(dispatchShortcut('arrow-left')).toBe('blocked-throttle');
+    expect(dispatchShortcut('arrow-up')).toBe('blocked-throttle');
+    expect(dispatchShortcut('arrow-down')).toBe('blocked-throttle');
+  });
+
+  it('gates the Single-view exit behind the throttle too', () => {
+    // Regression guard for the old source-slice assertion: if the throttle sat
+    // below the "restore from Single" branch, the autorepeat flood would
+    // re-fire the exit and stomp the grid the user just left.
+    useUIStore.setState({ viewMode: 'single', lastNonSingleMode: 'all' });
+    expect(dispatchShortcut('arrow-down')).toBe('handled');
+    expect(useUIStore.getState().viewMode).toBe('all');
+
+    expect(dispatchShortcut('arrow-down')).toBe('blocked-throttle');
+    expect(useUIStore.getState().viewMode).toBe('all');
+  });
+
+  it('does not let a focus-blocked press burn the limiter budget', () => {
+    // The limiter records a press the moment it is consulted, so the focus
+    // gate has to run FIRST (it does, in `dispatchShortcut`). If it didn't, a
+    // no-op press inside an inline rename would silently swallow the user's
+    // next deliberate Alt+G within the window.
+    const input = document.createElement('input');
+    document.body.appendChild(input);
+    input.focus();
+
+    expect(dispatchShortcut('toggle-maximize-grid')).toBe('blocked-focus');
+    input.blur();
+
+    expect(dispatchShortcut('toggle-maximize-grid')).toBe('handled');
+    expect(useUIStore.getState().viewMode).toBe('single');
   });
 });

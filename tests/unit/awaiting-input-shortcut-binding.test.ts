@@ -1,61 +1,74 @@
-import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import {
+  _resetShortcutRateGatesForTests,
+  dispatchShortcut,
+  shortcutBindings,
+} from '../../src/lib/shortcutDispatch';
+import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
+import { useMeshStore } from '../../src/stores/meshStore';
+import { useUIStore } from '../../src/stores/uiStore';
+import { makeAgentNode } from './helpers/makeAgentNode';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 /**
- * Pins the Ctrl/Cmd+. binding for the "jump to next awaiting node" cycle
- * (issue #64). Same static-analysis shape as
- * `tests/unit/grid-shortcut-binding.test.ts`: Tauri's global-shortcut plugin
- * captures at the OS layer (before xterm.js sees the keydown), so this
- * binding fires even when an agent terminal has focus — exactly the state
- * the user is in when they notice a node is waiting for input.
+ * The Ctrl/Cmd+. binding for the "jump to next awaiting node" cycle (issue
+ * #64), fired through the dispatcher (issue #2240).
  *
- * The accelerator string is `CommandOrControl+Period`: Tauri aliases
- * `Period` to the `.` key (via the underlying `global_hotkey` crate, which
- * also accepts the literal `.`). `CommandOrControl` resolves to Cmd on macOS
- * and Ctrl on Windows/Linux, so the same string works cross-platform.
+ * Tauri's global-shortcut plugin captures at the OS layer (before xterm.js sees
+ * the keydown), so this binding fires even when an agent terminal has focus —
+ * exactly the state the user is in when they notice a node is waiting for
+ * input. The accelerator is `CommandOrControl+Period`: Tauri aliases `Period`
+ * to the `.` key (via the underlying `global_hotkey` crate, which also accepts
+ * a literal `.`), and `CommandOrControl` resolves to Cmd on macOS and Ctrl on
+ * Windows/Linux, so one string covers both platforms.
  *
- * Match the `key:`-then-`action:` pair on the same object entry — a binding
- * string appearing in a comment or docblock doesn't satisfy the assertion.
- * This closes the coverage gap where a refactor could swap the action
- * (e.g. `Period` → `Comma`) and still pass a substring-contains check on
- * the modifier alone.
+ * The previous version of this file read `src/App.tsx` and regexed for
+ * `key:`-then-`action:` pairs plus a character-budget window between the branch
+ * and its call site. That broke whenever the branch grew, and it never proved
+ * the binding did anything. Now the action is fired and the store is read.
  */
-describe('awaiting-input shortcut binding (issue #64)', () => {
-  const appSource = readFileSync(
-    resolve(__dirname, '../../src/App.tsx'),
-    'utf8',
-  );
+describe('jump-to-next-awaiting dispatch (issue #64)', () => {
+  beforeEach(() => {
+    _resetShortcutRateGatesForTests();
+    seedAgentNodes([]);
+    useMeshStore.setState({ selectedMeshId: null });
+    useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
+  });
 
-  it('binds CommandOrControl+Period → action jump-to-next-awaiting', () => {
-    const entry = new RegExp(
-      `key:\\s*'CommandOrControl\\+Period',\\s*action:\\s*'jump-to-next-awaiting'`,
-    );
-    expect(entry.test(appSource)).toBe(true);
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('binds CommandOrControl+Period → action jump-to-next-awaiting on both platforms', () => {
+    for (const mac of [true, false]) {
+      const binding = shortcutBindings(mac).find(b => b.action === 'jump-to-next-awaiting');
+      expect(binding?.key, `mac=${mac}`).toBe('CommandOrControl+Period');
+    }
   });
 
   it('uses CommandOrControl (not bare Ctrl/Cmd) so the binding matches both platforms', () => {
     // Regression guard: a future change that hard-codes `Ctrl+Period` would
     // leave macOS users without a way to cycle. The accelerator must use the
-    // platform-aware `CommandOrControl` combinator — the global_hotkey crate
-    // (and Tauri's plugin on top) resolves it to Cmd on Mac, Ctrl elsewhere.
-    const bareCtrl = /key:\s*'Ctrl\+Period'/;
-    const bareCmd = /key:\s*'Cmd\+Period'/;
-    expect(bareCtrl.test(appSource), 'Ctrl+Period is not cross-platform').toBe(false);
-    expect(bareCmd.test(appSource), 'Cmd+Period is not cross-platform').toBe(false);
+    // platform-aware `CommandOrControl` combinator.
+    const keys = shortcutBindings(false).map(b => b.key);
+    expect(keys).not.toContain('Ctrl+Period');
+    expect(keys).not.toContain('Cmd+Period');
   });
 
-  it('dispatches the action in the shortcut-triggered handler', () => {
-    // The App.tsx useEffect listener must contain a branch that calls
-    // jumpToNextAwaitingNode() for the action — otherwise the binding
-    // registers but never fires. Pair-check (binding + dispatch) closes the
-    // gap where one half of the wiring exists without the other. The 800-char
-    // budget accommodates the explanatory comment block between the action
-    // match and the call site; tight enough that a stale or orphaned branch
-    // would still fail.
-    const dispatch = new RegExp(
-      `action === 'jump-to-next-awaiting'[\\s\\S]{0,800}jumpToNextAwaitingNode\\(\\)`,
-    );
-    expect(dispatch.test(appSource)).toBe(true);
+  it('moves focus to the next awaiting node when the action is fired', () => {
+    seedAgentNodes([
+      makeAgentNode({ id: 1, mesh_id: 1, position: 0, status: 'running' }),
+      makeAgentNode({ id: 2, mesh_id: 1, position: 1, status: 'awaiting_input' }),
+    ], 1);
+
+    expect(dispatchShortcut('jump-to-next-awaiting')).toBe('handled');
+    expect(useAgentNodeStore.getState().activeNodeId).toBe(2);
+  });
+
+  it('leaves the active node alone when nothing is awaiting input', () => {
+    // The "no-op" case must not steal focus from the user's current prompt.
+    seedAgentNodes([makeAgentNode({ id: 1, mesh_id: 1, position: 0, status: 'running' })], 1);
+    expect(dispatchShortcut('jump-to-next-awaiting')).toBe('handled');
+    expect(useAgentNodeStore.getState().activeNodeId).toBe(1);
   });
 });

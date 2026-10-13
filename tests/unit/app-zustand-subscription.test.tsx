@@ -1,7 +1,7 @@
 ﻿/**
  * Issue #1246 — whole-store Zustand subscriptions caused the entire app to
- * re-render on every `patchAgentNode` (attention flip, status update,
- * spawn event, …). The fix in src/App.tsx replaces `useMeshStore()` /
+ * re-render on every `patchAgentNode` (attention flip, status update, spawn
+ * event, …). The fix in src/App.tsx replaces `useMeshStore()` /
  * `useAgentNodeStore()` destructuring with per-action selectors whose
  * references are stable across renders.
  *
@@ -14,9 +14,13 @@
  *      behavioural test catches it before the production fix silently
  *      regresses.
  *
- *   2. Source-level: a static read of src/App.tsx asserts no whole-store
- *      `useMeshStore()` / `useAgentNodeStore()` calls remain. If anyone
- *      reintroduces the anti-pattern, this fails.
+ *   2. Lint (moved here from a source read in issue #2240): `no-restricted-syntax`
+ *      in eslint.config.js forbids a zero-argument `useXStore()` call anywhere
+ *      in `src/` and `tests/`. The old layer-2 read src/App.tsx off disk at
+ *      test time and regexed it for the anti-pattern spelling, which proved
+ *      one file's text rather than the codebase's behaviour — a lint rule is
+ *      the stronger gate and applies to every file. The two intentional
+ *      harnesses below that reproduce the anti-pattern carry a scoped disable.
  *
  * We don't mount the real <App /> — its surface pulls in xterm, Tauri
  * global-shortcut, the sidebar's dnd-kit wiring, the probe panel, etc.,
@@ -26,8 +30,6 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { render, act, cleanup } from '@testing-library/react';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import { useMeshStore } from '../../src/stores/meshStore';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
@@ -52,11 +54,15 @@ function AppSubscriptionPattern({ onRender }: { onRender: () => void }) {
   return null;
 }
 
-/** Reproduces the pre-fix anti-pattern from src/App.tsx (issue #1246). */
+/** Reproduces the pre-fix anti-pattern from src/App.tsx (issue #1246) — this
+ *  component exists ONLY to prove the anti-pattern re-renders, so it opts out
+ *  of the `no-restricted-syntax` rule that keeps it out of `src/`. */
 function AppWholeStoreAntiPattern({ onRender }: { onRender: () => void }) {
   onRender();
+  /* eslint-disable no-restricted-syntax -- the deliberate whole-store subscription this test pins. */
   const { fetchMeshes } = useMeshStore();
   const { fetchAgentNodes, initAttentionListeners } = useAgentNodeStore();
+  /* eslint-enable no-restricted-syntax */
   const storeError = useAgentNodeStore((state) => state.error);
   return null;
 }
@@ -129,35 +135,4 @@ describe('App.tsx Zustand subscription pattern (issue #1246)', () => {
     });
     expect(renders).toBeGreaterThan(baseline);
   });
-
-  it('src/App.tsx contains no whole-store useMeshStore() calls', () => {
-    // Source-level regression guard. Reading the file from disk keeps the
-    // test honest even if the App.tsx test mount is skipped in CI for
-    // being too heavy — the static check runs in milliseconds.
-    const appPath = resolve(__dirname, '../../src/App.tsx');
-    const src = readFileSync(appPath, 'utf8');
-    // Strip JS comments so an explanatory // line that mentions the
-    // pattern in prose doesn't trip the regex. `useStore.getState()`
-    // is allowed (imperative reads in callbacks); the discriminator is
-    // the bare `useStore()` call.
-    const stripped = stripJsComments(src);
-    expect(stripped).not.toMatch(/useMeshStore\(\)/);
-  });
-
-  it('src/App.tsx contains no whole-store useAgentNodeStore() calls', () => {
-    const appPath = resolve(__dirname, '../../src/App.tsx');
-    const src = readFileSync(appPath, 'utf8');
-    const stripped = stripJsComments(src);
-    expect(stripped).not.toMatch(/useAgentNodeStore\(\)/);
-  });
 });
-
-/** Drop // and /* * / comments from JS/TS source so a regression-guard regex
- *  doesn't false-positive on a prose mention of the anti-pattern. The
- *  goal is to detect the *code* form, not the spelled-out name. */
-function stripJsComments(src: string): string {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, '') // /* block */
-    .replace(/^\s*\/\/.*$/gm, '') // // line
-    .replace(/[ \t]+\/\/.*$/gm, ''); // trailing // comment on a code line
-}
