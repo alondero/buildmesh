@@ -85,7 +85,11 @@ describe("durable mobile pairing", () => {
     });
   });
 
-  it("migrates an existing device credential once and removes localStorage", async () => {
+  it("migrates an existing device credential and keeps it as the recovery secret", async () => {
+    // Issue #1577: the migrated token is the same device credential the cookie
+    // carries, and it is the only one JavaScript can re-present. Deleting it on
+    // the first successful boot left the device with no way back if its cookie
+    // was later lost.
     localStorage.setItem("buildmesh_token", "legacy-device");
     const fetchMock = vi.fn().mockResolvedValueOnce(response(401)).mockResolvedValueOnce(response(204));
     vi.stubGlobal("fetch", fetchMock);
@@ -93,7 +97,7 @@ describe("durable mobile pairing", () => {
     expect(fetchMock.mock.calls[1]).toEqual(["/api/session", {
       method: "POST", credentials: "include", headers: { Authorization: "Bearer legacy-device" },
     }]);
-    expect(localStorage.getItem("buildmesh_token")).toBeNull();
+    expect(localStorage.getItem("buildmesh_token")).toBe("legacy-device");
   });
 
   it("removes a revoked legacy credential, but preserves it across network failure", async () => {
