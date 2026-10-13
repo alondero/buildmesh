@@ -137,7 +137,11 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
     // Normalize only after the HTTP gates. Transcript reconciliation is file I/O,
     // so it runs on the blocking pool, with no database connection held.
     let normalize_provider = provider_owned.clone();
-    let normalize_session = stored_cli_session_id.clone();
+    let normalize_session = normalizers::reconciliation_session_id(
+        raw_payload.as_ref(),
+        provider,
+        &stored_cli_session_id,
+    );
     let normalize_path = node
         .as_ref()
         .map(|node| {

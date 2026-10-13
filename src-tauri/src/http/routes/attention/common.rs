@@ -583,7 +583,14 @@ pub(super) fn completion(
         return Classified::ready(detail);
     };
     let host_path = crate::env::to_host_path(path);
-    match count_pending(Path::new(&host_path)) {
+    completion_from_pending(detail, count_pending(Path::new(&host_path)))
+}
+
+pub(super) fn completion_from_pending(
+    detail: HookSignalDetail,
+    pending: Option<usize>,
+) -> Classified {
+    match pending {
         Some(n) if n > 0 => Classified::suppress(detail),
         Some(_) => Classified::ready(detail),
         None => Classified {

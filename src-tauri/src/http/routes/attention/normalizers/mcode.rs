@@ -16,7 +16,13 @@ pub(super) fn classify(
     match payload.event().as_str() {
         "sessionstart" => ignore(detail),
         "permissionrequest" => permission(detail),
-        "stop" => completion(payload, detail, count_pending),
+        // Native reconciliation is bound to the resolved node/session by the
+        // route. Its compatible transcript path is optional and often expires;
+        // it must not bypass the lookup. Supply cwd as the native context hint.
+        "stop" => completion_from_pending(
+            detail,
+            count_pending(Path::new(payload.cwd.as_deref().unwrap_or_default())),
+        ),
         _ => unavailable(detail),
     }
 }

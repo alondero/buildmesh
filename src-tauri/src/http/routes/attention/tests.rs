@@ -5,10 +5,24 @@ fn minimax_stop_uses_canonical_background_receipts() {
     let launch = serde_json::json!({"message":{"role":"toolResult","timestamp":100,
         "details":{"status":"auto_promoted","task_id":"bg_owned"},"content":[]}})
     .to_string();
-    let stop = serde_json::json!({"hook_event_name":"Stop", "session_id":"mvs_owned",
-        "transcript_path": dir.path().join("expired.compatible.jsonl"), "cwd":"repo"});
-    let normalize = || {
-        normalizers::normalize(Some(&stop), "mcode", |_| {
+    for compatible_path in [
+        None,
+        Some("".to_owned()),
+        Some(
+            dir.path()
+                .join("expired.compatible.jsonl")
+                .to_str()
+                .unwrap()
+                .to_owned(),
+        ),
+    ] {
+        let mut stop =
+            serde_json::json!({"hook_event_name":"Stop", "session_id":"mvs_owned", "cwd":"repo"});
+        if let Some(path) = compatible_path {
+            stop["transcript_path"] = path.into();
+        }
+        let normalize = || {
+            normalizers::normalize(Some(&stop), "mcode", |_| {
             crate::services::transcript_reader::adapters::mcode::count_pending_background_tasks_in(
                 &transcript,
                 &dir.path().join("tasks"),
@@ -16,16 +30,47 @@ fn minimax_stop_uses_canonical_background_receipts() {
         })
         .classified
         .decision
-    };
-    std::fs::write(&transcript, &launch).unwrap();
-    assert_eq!(normalize(), Decision::SuppressPendingBackground);
-    let terminal = serde_json::json!({"message":{"role":"toolResult","timestamp":200,
+        };
+        std::fs::write(&transcript, &launch).unwrap();
+        assert_eq!(normalize(), Decision::SuppressPendingBackground);
+        let terminal = serde_json::json!({"message":{"role":"toolResult","timestamp":200,
         "details":{"status":"succeeded","task_id":"bg_owned"},"content":[]}})
-    .to_string();
-    std::fs::write(&transcript, format!("{launch}\n{terminal}")).unwrap();
-    assert_eq!(normalize(), Decision::Ready);
-    std::fs::write(&transcript, "{partial").unwrap();
-    assert_eq!(normalize(), Decision::MarkInput);
+        .to_string();
+        std::fs::write(&transcript, format!("{launch}\n{terminal}")).unwrap();
+        assert_eq!(normalize(), Decision::Ready);
+        std::fs::write(&transcript, "{partial").unwrap();
+        assert_eq!(normalize(), Decision::MarkInput);
+    }
+}
+
+#[test]
+fn minimax_first_stop_reads_the_ownership_resolved_session() {
+    let id = "mvs_0123456789abcdef0123456789abcdef";
+    let stop = serde_json::json!({"hook_event_name":"Stop", "session_id":id,
+        "cwd":"repo", "transcript_path":"compatible.jsonl"});
+    let session = normalizers::reconciliation_session_id(Some(&stop), "mcode", "");
+    let observed = normalizers::normalize(Some(&stop), "mcode", |_| {
+        assert_eq!(
+            session, id,
+            "first Stop must read its ownership-resolved canonical session"
+        );
+        Some(0)
+    });
+    assert_eq!(observed.classified.decision, Decision::Ready);
+    assert_eq!(
+        normalizers::reconciliation_session_id(Some(&stop), "mcode", "stored"),
+        "stored"
+    );
+    let invalid =
+        serde_json::json!({"hook_event_name":"Stop", "session_id":"untrusted", "cwd":"repo"});
+    assert_eq!(
+        normalizers::reconciliation_session_id(Some(&invalid), "mcode", ""),
+        ""
+    );
+    assert_eq!(
+        normalizers::reconciliation_session_id(Some(&stop), "anthropic", ""),
+        ""
+    );
 }
 
 fn apply_status_fixture(
