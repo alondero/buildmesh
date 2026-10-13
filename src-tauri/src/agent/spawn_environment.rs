@@ -10,7 +10,7 @@
 //!   (used by Codex so ANSI escapes propagate correctly through ConPTY). When
 //!   the node's directory is UNC and the executable is a batch shim, this
 //!   becomes `cmd.exe /d /c <temp-batch.cmd>`, where the batch `pushd`s the
-//!   quoted directory and then runs the same `-EncodedCommand` payload — cmd.exe
+//!   quoted directory and then loads a companion PowerShell script — cmd.exe
 //!   rejects a UNC current directory, and a batch file is the only place a
 //!   `&`-containing directory can be quoted so cmd parses it as one argument.
 //!   See [`needs_unc_pushd`] and [`mapped_launch_batch`].
@@ -198,8 +198,8 @@ fn needs_unc_pushd(executable: &str, spawn_path: &str) -> bool {
 /// `WSLENV` dependency this route had, along with the silent-wrong-directory
 /// failure that came with it.
 ///
-/// The Base64 payload is safe to inline: it is `A-Za-z0-9+/=` with no
-/// metacharacters.
+/// Only the short, encoded loader is inline. Encoding the full spawn script
+/// here would spend cmd's 8,191-character batch-line budget on Base64 expansion.
 fn mapped_launch_batch(encoded: &str, directory: &str) -> String {
     format!(
         "@echo off\r\n\
@@ -309,7 +309,9 @@ fn sweep_stale_mapped_batches(directory: &std::path::Path) {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if !name.starts_with(MAPPED_BATCH_PREFIX) || !name.ends_with(".cmd") {
+            if !name.starts_with(MAPPED_BATCH_PREFIX)
+                || !(name.ends_with(".cmd") || name.ends_with(".ps1"))
+            {
                 continue;
             }
             let Ok(metadata) = entry.metadata() else {
@@ -327,14 +329,15 @@ fn sweep_stale_mapped_batches(directory: &std::path::Path) {
 
 const MAPPED_BATCH_PREFIX: &str = "buildmesh-mapped-spawn-";
 
-/// Write the one-shot batch file.
+/// Write a batch file and its companion PowerShell script.
 ///
 /// The name carries a random suffix from `tempfile`: a pid-and-counter name
 /// restarts its counter after a process restart, so the same pid could
 /// overwrite a file a still-running `cmd.exe` holds open.
 fn write_mapped_launch_batch(
     target: &MappedLaunchTarget,
-    contents: &str,
+    script: &str,
+    directory: &str,
 ) -> Result<String, String> {
     sweep_stale_mapped_batches(&target.write_path);
     let mut file = tempfile::Builder::new()
@@ -347,19 +350,8 @@ fn write_mapped_launch_batch(
                 target.write_path.display()
             )
         })?;
-    std::io::Write::write_all(&mut file, contents.as_bytes()).map_err(|error| {
-        format!(
-            "writing the mapped spawn script in {}: {error}",
-            target.write_path.display()
-        )
-    })?;
-    let (_handle, path) = file.keep().map_err(|error| {
-        format!(
-            "releasing the mapped spawn script in {}: {error}",
-            target.write_path.display()
-        )
-    })?;
-    let name = path
+    let name = file
+        .path()
         .file_name()
         .ok_or_else(|| "the mapped spawn script has no file name".to_string())?;
     let windows_path = format!("{}\\{}", target.windows_path, name.to_string_lossy());
@@ -372,6 +364,51 @@ fn write_mapped_launch_batch(
             "the temp directory for a mapped spawn contains a character cmd.exe treats as a \
              command operator: {windows_path}"
         ));
+    }
+    let script_path = file.path().with_extension("ps1");
+    let script_handle = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&script_path)
+        .map_err(|error| format!("creating the mapped PowerShell script: {error}"))?;
+    let mut script_file = tempfile::NamedTempFile::from_parts(
+        script_handle,
+        tempfile::TempPath::try_from_path(&script_path)
+            .map_err(|error| format!("tracking the mapped PowerShell script: {error}"))?,
+    );
+    std::io::Write::write_all(&mut script_file, script.as_bytes())
+        .map_err(|error| format!("writing the mapped PowerShell script: {error}"))?;
+    let windows_script = format!(
+        "{}\\{}",
+        target.windows_path,
+        script_path.file_name().unwrap().to_string_lossy()
+    );
+    // Read as UTF-8 through .NET and invoke as a script block: -File would add
+    // an execution-policy dependency, and Windows PowerShell's default file
+    // decoding would corrupt non-ASCII prompts without a BOM.
+    let loader = format!(
+        "$ErrorActionPreference = 'Stop'; & ([scriptblock]::Create([IO.File]::ReadAllText({}))); exit $LASTEXITCODE",
+        ps_single_quote(&windows_script)
+    );
+    let encoded = encode_for_powershell(&loader);
+    let spent = POWERSHELL_ENCODED_PREFIX.len() + encoded.len();
+    if spent > CMD_EXE_COMMAND_LINE_CHARS {
+        return Err(format!(
+            "the mapped spawn loader needs a {spent} character PowerShell command line, over \
+             cmd.exe's {CMD_EXE_COMMAND_LINE_CHARS} character batch-line limit"
+        ));
+    }
+    std::io::Write::write_all(
+        &mut file,
+        mapped_launch_batch(&encoded, directory).as_bytes(),
+    )
+    .map_err(|error| format!("writing the mapped spawn batch: {error}"))?;
+    let (_script_handle, kept_script) = script_file
+        .keep()
+        .map_err(|error| format!("releasing the mapped PowerShell script: {error}"))?;
+    if let Err(error) = file.keep() {
+        let _ = std::fs::remove_file(kept_script);
+        return Err(format!("releasing the mapped spawn batch: {error}"));
     }
     Ok(windows_path)
 }
@@ -511,7 +548,9 @@ fn ensure_windows_command_line_fits(
 ) -> Result<(), String> {
     match windows_shell {
         WindowsShell::PowerShell => {
-            ensure_powershell_command_line_fits(encoded_script.unwrap_or_default())?;
+            if let Some(script) = encoded_script {
+                ensure_powershell_command_line_fits(script)?;
+            }
             if is_batch_shim(executable) {
                 ensure_cmd_command_line_fits(executable, args)?;
             }
@@ -539,9 +578,8 @@ fn ensure_windows_command_line_fits(
 /// inside the drive it mapped: cmd.exe can only be given a drive-letter current
 /// directory, so cmd is the shell that has to do the mapping. That mapping runs
 /// from [`mapped_launch_batch`] so the directory never appears on a command
-/// line. The agent's argv stays inside the Base64 payload, so none of it
-/// crosses cmd's tokenizer — the property `format_powershell_command` exists
-/// to preserve.
+/// line. The agent's argv stays in the companion script, preserving the
+/// literal PowerShell arguments from `format_powershell_command`.
 ///
 /// The batch file is swept by age rather than deleted when the child exits:
 /// cmd.exe reads a batch file incrementally, so neither the batch's own
@@ -552,13 +590,13 @@ fn powershell_spawn(
     script: &str,
     mapped: Option<&str>,
 ) -> Result<CommandBuilder, String> {
-    let encoded = encode_for_powershell(script);
     // -NoProfile skips loading the user's PowerShell profile, which can add
     // hundreds of ms (modules, prompt frameworks) to *every* agent spawn. This
     // shell only needs to relay the agent CLI's ANSI output through ConPTY — it
     // never touches profile state, and the agent binary is already resolved to
     // an absolute path.
     let Some(directory) = mapped else {
+        let encoded = encode_for_powershell(script);
         tracing::info!("spawn_environment: building powershell.exe for the spawn script");
         let mut c = CommandBuilder::new("powershell.exe");
         c.args(["-NoLogo", "-NoProfile", "-EncodedCommand", &encoded]);
@@ -566,19 +604,7 @@ fn powershell_spawn(
     };
     tracing::info!("spawn_environment: mapping the UNC spawn directory through a cmd pushd script");
     let launch = mapped_launch_directory(env_type)?;
-    // A batch file is itself read by cmd.exe one line at a time, and a batch
-    // line caps at the same 8,191 characters. Carrying the encoded script on
-    // one line therefore has its own, tighter budget than the line that starts
-    // the batch does.
-    if POWERSHELL_ENCODED_PREFIX.len() + encoded.len() > CMD_EXE_COMMAND_LINE_CHARS {
-        return Err(format!(
-            "the mapped spawn script needs a {} character PowerShell command line, over \
-             cmd.exe's {CMD_EXE_COMMAND_LINE_CHARS} character batch-line limit; shorten the \
-             initial prompt or the harness's extra arguments",
-            POWERSHELL_ENCODED_PREFIX.len() + encoded.len()
-        ));
-    }
-    let batch = write_mapped_launch_batch(&launch, &mapped_launch_batch(&encoded, directory))?;
+    let batch = write_mapped_launch_batch(&launch, script, directory)?;
     let mut c = CommandBuilder::new("cmd.exe");
     c.args(["/d", "/c", &batch]);
     Ok(c)
@@ -730,7 +756,7 @@ pub fn wrap(
                 WindowsShell::PowerShell,
                 executable,
                 &recipe.base_args,
-                Some(&launch_script),
+                (!mapped).then_some(launch_script.as_str()),
             )?;
         }
         let mut command = powershell_spawn(env_type, &launch_script, mapped.then_some(spawn_path))?;
@@ -834,7 +860,7 @@ pub fn wrap(
                         windows_shell,
                         executable,
                         &recipe.base_args,
-                        Some(&cmd_str),
+                        (!mapped).then_some(cmd_str.as_str()),
                     )?;
                 }
                 powershell_spawn(env_type, &cmd_str, mapped.then_some(spawn_path))?
@@ -1114,34 +1140,101 @@ mod tests {
         assert_eq!(argv[0], "powershell.exe", "{argv:?}");
     }
 
+    #[test]
+    fn mapped_codex_launch_accepts_a_prompt_that_fits_the_child_budget() {
+        for env_type in [EnvType::Windows, EnvType::WindowsInterop] {
+            let args = vec![format!("{}x", "review homelab\n".repeat(229))];
+            let executable = r"C:\Users\alond\AppData\Roaming\npm\codex.CMD";
+            super::ensure_cmd_command_line_fits(executable, &args).unwrap();
+            let script = super::format_powershell_command(executable, &args);
+            assert_eq!(
+                super::powershell_command_line_chars(&super::encode_for_powershell(&script)),
+                9350
+            );
+            let recipe = SpawnRecipe {
+                binary: "codex",
+                base_args: args,
+                trailing_args: vec![],
+                windows_shell: WindowsShell::PowerShell,
+            };
+            let command = super::wrap(
+                recipe,
+                env_type,
+                None,
+                Some(executable),
+                UNC_SPAWN_PATH,
+                5406,
+                false,
+            )
+            .expect("Base64 expansion must not consume the mapped batch-line budget");
+            assert_maps_through_pushd(&command, UNC_SPAWN_PATH, &encoded_script(&command));
+            remove_mapped_batch(&command);
+        }
+    }
+
+    #[test]
+    fn mapped_script_does_not_spend_the_encoded_process_budget_on_literal_quotes() {
+        let executable = r"C:\Users\alond\AppData\Roaming\npm\codex.CMD";
+        let args = vec!["'".repeat(7_000)];
+        super::ensure_cmd_command_line_fits(executable, &args).unwrap();
+        let script = super::format_powershell_command(executable, &args);
+        assert!(
+            super::ensure_powershell_command_line_fits(&script).is_err(),
+            "doubled literal quotes exceed the inline encoded process budget"
+        );
+        let recipe = SpawnRecipe {
+            binary: "codex",
+            base_args: args,
+            trailing_args: vec![],
+            windows_shell: WindowsShell::PowerShell,
+        };
+        let command = super::wrap(
+            recipe,
+            EnvType::WindowsInterop,
+            None,
+            Some(executable),
+            UNC_SPAWN_PATH,
+            5406,
+            false,
+        )
+        .expect("the mapped script is on disk, so only its loader occupies the process line");
+        assert_eq!(
+            encoded_script(&command),
+            format!("{script}; exit $LASTEXITCODE")
+        );
+        remove_mapped_batch(&command);
+    }
+
     /// The guard's other half: an oversized launch fails here, naming the
     /// budget it crossed, instead of handing a shell a line it will refuse and
     /// leaving the node to report a cryptic message.
     #[cfg(windows)]
     #[test]
     fn a_launch_over_the_cmd_exe_budget_is_refused_with_that_budget() {
-        let mut base_args = vec!["--sandbox".into(), "danger-full-access".into()];
-        base_args.push("review this".repeat(1_000));
-        let recipe = SpawnRecipe {
-            binary: "codex",
-            base_args,
-            trailing_args: vec![],
-            windows_shell: WindowsShell::PowerShell,
-        };
-        let error = super::wrap(
-            recipe,
-            EnvType::Windows,
-            None,
-            Some(r"C:\Users\alond\AppData\Roaming\npm\codex.CMD"),
-            ".",
-            5351,
-            false,
-        )
-        .expect_err("a launch cmd.exe cannot parse must be refused before it is spawned");
-        assert!(
-            error.contains("cmd.exe") && error.contains("8191"),
-            "{error}"
-        );
+        for spawn_path in [".", UNC_SPAWN_PATH] {
+            let mut base_args = vec!["--sandbox".into(), "danger-full-access".into()];
+            base_args.push("review this".repeat(1_000));
+            let recipe = SpawnRecipe {
+                binary: "codex",
+                base_args,
+                trailing_args: vec![],
+                windows_shell: WindowsShell::PowerShell,
+            };
+            let error = super::wrap(
+                recipe,
+                EnvType::Windows,
+                None,
+                Some(r"C:\Users\alond\AppData\Roaming\npm\codex.CMD"),
+                spawn_path,
+                5351,
+                false,
+            )
+            .expect_err("a launch cmd.exe cannot parse must be refused before it is spawned");
+            assert!(
+                error.contains("cmd.exe") && error.contains("8191"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
@@ -1553,14 +1646,15 @@ mod tests {
         let cmd_shim = npm_dir.path().join("probe.cmd");
         std::fs::write(
             &cmd_shim,
-            "@echo off\r\necho shim-ran-in-node-dir> probe.txt\r\n",
+            "@echo off\r\necho shim-ran-in-node-dir> probe.txt\r\necho %~1> prompt.txt\r\n",
         )
         .unwrap();
         let mut resolved = crate::env::resolve_raw_path(directory.path().to_str().unwrap());
         crate::env::apply_harness_runtime(&mut resolved, crate::models::EnvType::Windows);
+        let prompt = "Review homelab. ".repeat(240);
         let recipe = crate::agent::provider::SpawnRecipe {
             binary: "probe",
-            base_args: vec![],
+            base_args: vec![prompt.clone()],
             trailing_args: vec![],
             windows_shell: crate::agent::provider::WindowsShell::PowerShell,
         };
@@ -1574,9 +1668,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let pair = crate::agent::spawn::open_pty_pair(24, 80).unwrap();
-        let mut child = crate::agent::spawn::spawn_child(&pair, command).unwrap();
-        assert!(child.wait().unwrap().success());
+        run_and_expect_probe(&command, &directory.path().join("probe.txt"));
         // Existence first: a `read_to_string().unwrap()` here would report
         // NotFound, which is exactly the symptom and hides the cause.
         let probe = directory.path().join("probe.txt");
@@ -1589,6 +1681,12 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&probe).unwrap().trim(),
             "shim-ran-in-node-dir"
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("prompt.txt"))
+                .unwrap()
+                .trim_end(),
+            prompt.trim_end()
         );
     }
 
@@ -1654,24 +1752,12 @@ mod tests {
         if let Some(index) = argv.iter().position(|arg| arg == "-EncodedCommand") {
             return decode_ps(&argv[index + 1]);
         }
-        // Mapped arm: cmd.exe runs a batch file, so the payload is on disk —
-        // at the host spelling of the Windows path in the argv.
+        // Mapped arm: the original script is beside the batch, at the host
+        // spelling of the Windows path in argv.
         let batch =
             mapped_batch_path(command).expect("the mapped arm passes a batch file to cmd.exe");
-        let contents = std::fs::read_to_string(&batch)
-            .unwrap_or_else(|error| panic!("reading the mapped batch {batch:?}: {error}"));
-        let payload = contents
-            .lines()
-            .filter_map(|line| {
-                let mut fields = line
-                    .split_ascii_whitespace()
-                    .skip_while(|f| *f != "-EncodedCommand");
-                fields.next().map(|_| fields.next())
-            })
-            .flatten()
-            .next()
-            .unwrap_or_else(|| panic!("no -EncodedCommand payload in {contents}"));
-        decode_ps(payload)
+        std::fs::read_to_string(batch.with_extension("ps1"))
+            .expect("the mapped batch has a companion PowerShell script")
     }
 
     /// Assert the spawn maps the UNC directory through cmd's ``pushd`` without
@@ -1807,13 +1893,10 @@ mod tests {
         let unmappable = ["\\\\", "nope.invalid", "share", "directory"].join("\\");
         let command = super::powershell_spawn(EnvType::Windows, "exit 0", Some(&unmappable))
             .expect("the mapped spawn should be buildable");
-        let batch = mapped_batch_path(&command);
         let pair = crate::agent::spawn::open_pty_pair(24, 80).unwrap();
-        let mut child = crate::agent::spawn::spawn_child(&pair, command).unwrap();
+        let mut child = crate::agent::spawn::spawn_child(&pair, command.clone()).unwrap();
         let success = child.wait().unwrap().success();
-        if let Some(batch) = batch {
-            let _ = std::fs::remove_file(batch);
-        }
+        remove_mapped_batch(&command);
         assert!(
             !success,
             "a directory cmd cannot pushd must fail the spawn rather than start the agent \
@@ -1849,7 +1932,6 @@ mod tests {
     /// could not remove for itself.
     #[cfg(windows)]
     fn run_and_expect_probe(command: &portable_pty::CommandBuilder, probe: &std::path::Path) {
-        let batch = mapped_batch_path(command);
         let pair = crate::agent::spawn::open_pty_pair(24, 80).unwrap();
         let mut child = crate::agent::spawn::spawn_child(&pair, command.clone()).unwrap();
         let status = child.wait().unwrap().success();
@@ -1858,9 +1940,7 @@ mod tests {
         // production the file is swept by age instead. A test knows its child
         // has exited, so it can clean up directly rather than leaving 28 files
         // behind per run.
-        if let Some(batch) = batch {
-            let _ = std::fs::remove_file(batch);
-        }
+        remove_mapped_batch(command);
         assert!(
             status,
             "the mapped spawn exited non-zero, so pushd or the agent failed"
@@ -1898,7 +1978,67 @@ mod tests {
     /// inspects the command would otherwise leave one behind per run.
     fn remove_mapped_batch(command: &portable_pty::CommandBuilder) {
         if let Some(batch) = mapped_batch_path(command) {
+            let _ = std::fs::remove_file(batch.with_extension("ps1"));
             let _ = std::fs::remove_file(batch);
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn mapped_long_script_preserves_unicode_and_literal_prompt_text() {
+        let directory = tempfile::Builder::new()
+            .prefix("bm R&D long script ")
+            .tempdir()
+            .unwrap();
+        let prompt = "homelab: café 🦀 'quoted' `code` $env:PATH <tag> | & ;\n".repeat(80);
+        let script = format!(
+            "[IO.File]::WriteAllText((Join-Path ($PWD).Path 'probe.txt'), {})",
+            super::ps_single_quote(&prompt)
+        );
+        assert!(
+            super::powershell_command_line_chars(&super::encode_for_powershell(&script))
+                > super::CMD_EXE_COMMAND_LINE_CHARS
+        );
+        let command = super::powershell_spawn(
+            EnvType::Windows,
+            &script,
+            Some(directory.path().to_str().unwrap()),
+        )
+        .expect("a long script should be loaded from disk");
+        let batch = batch_file(&command);
+        assert!(batch
+            .lines()
+            .all(|line| line.encode_utf16().count() <= super::CMD_EXE_COMMAND_LINE_CHARS));
+        run_and_expect_probe(&command, &directory.path().join("probe.txt"));
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("probe.txt")).unwrap(),
+            prompt
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn mapped_loader_propagates_child_failure_and_missing_script_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        for remove_script in [false, true] {
+            let command = super::powershell_spawn(
+                EnvType::Windows,
+                "cmd.exe /d /c exit 23",
+                Some(directory.path().to_str().unwrap()),
+            )
+            .unwrap();
+            if remove_script {
+                std::fs::remove_file(mapped_batch_path(&command).unwrap().with_extension("ps1"))
+                    .unwrap();
+            }
+            let pair = crate::agent::spawn::open_pty_pair(24, 80).unwrap();
+            let mut child = crate::agent::spawn::spawn_child(&pair, command.clone()).unwrap();
+            let status = child.wait().unwrap();
+            remove_mapped_batch(&command);
+            assert!(!status.success());
+            if !remove_script {
+                assert_eq!(status.exit_code(), 23);
+            }
         }
     }
 

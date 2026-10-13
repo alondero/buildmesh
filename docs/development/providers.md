@@ -293,10 +293,22 @@ lifetime of that shell. `PowerShell` has the same problem for a different
 reason: it cannot run a `.cmd`/`.bat` shim at all, so it delegates to
 `cmd.exe /c` and lands straight back on the rejection. So when the spawn is a
 batch shim in a UNC directory, the PowerShell arm runs *inside* cmd's `pushd`:
-`cmd.exe /d /c <temp-batch.cmd>`, where the batch reads the directory from a
-`BUILDMESH_SPAWN_DIR` environment variable and `pushd`s it before invoking the
-same `-EncodedCommand` payload. The agent's argv stays in that Base64 payload,
-so none of it crosses cmd's tokenizer.
+`cmd.exe /d /c <temp-batch.cmd>`, where the batch `pushd`s the directory quoted
+literally in the file. A short `-EncodedCommand` loader reads a companion UTF-8
+PowerShell script through .NET and invokes it as a script block. The original
+script retains the single-quoted harness arguments, including multiline and
+Unicode prompts. Using a script block avoids introducing a `-File` execution
+policy requirement.
+
+The full encoded spawn script must not occupy a batch line: UTF-16LE plus
+Base64 expands ordinary text to about 2.7 times its length, so an otherwise
+valid launch can cross cmd's 8,191-character batch-line limit. The mapped path
+budgets the loader's line and the actual harness command separately. A batch
+shim's child command still has cmd's 8,191-character limit; direct processes
+and unmapped encoded PowerShell launches retain the Windows process budget.
+The temporary `.cmd` and `.ps1` files share a random stem and are reclaimed by
+the stale-file sweep. Setup and script-read failures abort the launch, and the
+loader propagates the child exit code.
 
 The decision is taken from the command and never by probing the filesystem: on
 the `WindowsInterop` arm Buildmesh runs on the Linux host, so a Windows path is
@@ -316,19 +328,16 @@ Two mechanical traps in that mapping, both learned the hard way:
   portable-pty escapes a `"` inside an argument, so a pre-quoted path arrives as
   `"\"<unc>\""` and `pushd` rejects the line with *The filename, directory name,
   or volume label syntax is incorrect.* The mapping therefore runs from a
-  one-shot batch file that expands a `BUILDMESH_SPAWN_DIR` environment variable
-  inside quotes, so the only thing on the command line is the batch file's own
-  path. The `Cmd` arm still passes its UNC path as a plain argument and keeps
+  one-shot batch file with the directory quoted literally, so the command line
+  carries the batch file's own path. The `Cmd` arm still passes its UNC path as a plain argument and keeps
   that exposure; see [`needs_unc_pushd`] in the module for why it is out of scope
   for this change.
 
-On `WindowsInterop` the batch file crosses the WSL boundary and needs three
-things the native arm does not: a **Windows-visible** directory to live in
-(`std::env::temp_dir()` on the Linux host is the guest's `/tmp`), the node
-directory forwarded through `WSLENV`, and a fail-closed guard, because a batch
-expands an unset variable to nothing and `pushd ""` succeeds. The last one is
-what turns a forwarding regression from a failure into a silent wrong-directory
-spawn.
+On `WindowsInterop` both temporary files need a **Windows-visible** directory
+(`std::env::temp_dir()` on the Linux host is the guest's `/tmp`). The batch
+carries the node directory itself, so mapping does not depend on forwarding a
+directory variable through `WSLENV`. A failed `pushd` aborts before the harness
+runs.
 
 The same split governs the batch file's own path: written through the host
 spelling of a Windows directory (`/mnt/c/...`), because that is how Linux opens
