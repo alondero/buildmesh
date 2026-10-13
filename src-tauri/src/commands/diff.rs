@@ -476,6 +476,69 @@ fn resolve_base_tree<'r>(repo: &'r git2::Repository, base_ref: &str) -> Option<g
     }
 }
 
+/// Single place the diff walk consults its cancellation token, so the
+/// delta-boundary and per-hunk polls can't drift apart in ordering or in
+/// which polls the test seam below can see.
+fn cancel_requested(cancel: Option<&AtomicBool>) -> bool {
+    let Some(token) = cancel else { return false };
+    #[cfg(test)]
+    note_cancel_poll();
+    token.load(Ordering::SeqCst)
+}
+
+// Test-only observer for the polls in `cancel_requested` (issue #2229).
+//
+// The mid-walk cancellation test has to flip the token *between* two
+// polls of a walk that is already running. A sibling thread that sleeps
+// and then stores leaves the flip's timing to the scheduler; issue
+// #2229 recorded the walk reaching the end first, so the assertion got
+// `Ok` rather than the sentinel. The probe fires from the one poll
+// helper on the walking thread, so the test picks the poll at which the
+// flip happens. Each test thread has its own slot, so a probe one test
+// installs is invisible to the tests running beside it.
+/// Probe handed the 0-based poll number at each cancellation poll.
+#[cfg(test)]
+type CancelPollProbe = std::rc::Rc<dyn Fn(usize)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Polls observed on this thread since the probe was installed.
+    static CANCEL_POLL_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CANCEL_POLL_PROBE: std::cell::RefCell<Option<CancelPollProbe>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Install (or clear) the cancellation-poll probe for the current thread
+/// and reset its poll count.
+#[cfg(test)]
+fn set_cancel_poll_probe(probe: Option<CancelPollProbe>) {
+    CANCEL_POLL_COUNT.with(|count| count.set(0));
+    CANCEL_POLL_PROBE.with(|slot| *slot.borrow_mut() = probe);
+}
+
+/// Polls this thread reached since [`set_cancel_poll_probe`] installed
+/// its probe.
+#[cfg(test)]
+fn cancel_poll_count() -> usize {
+    CANCEL_POLL_COUNT.with(|count| count.get())
+}
+
+/// Announce a poll that is about to load the token, handing the probe the
+/// 0-based poll number. Called without the slot borrowed, so a probe that
+/// blocks on a channel — or panics — leaves the seam usable.
+#[cfg(test)]
+fn note_cancel_poll() {
+    let index = CANCEL_POLL_COUNT.with(|count| {
+        let index = count.get();
+        count.set(index + 1);
+        index
+    });
+    let probe = CANCEL_POLL_PROBE.with(|slot| slot.borrow().clone());
+    if let Some(probe) = probe {
+        probe(index);
+    }
+}
+
 /// Core diff used by the desktop review panel and the mobile changes view.
 /// Diffs the working directory against the merge-base with `base_ref`, so the
 /// result is everything the agent changed since branching — committed *and*
@@ -538,10 +601,8 @@ fn diff_against_base(
         // delta, and the walk is delta-bounded so we can't park here
         // long. Pairs with the per-hunk poll below for files whose
         // highlight passes dominate the cost.
-        if let Some(c) = cancel {
-            if c.load(Ordering::SeqCst) {
-                return Err(DIFF_CANCELLED.to_string());
-            }
+        if cancel_requested(cancel) {
+            return Err(DIFF_CANCELLED.to_string());
         }
         let Some(path) = delta.new_file().path().or_else(|| delta.old_file().path()) else {
             continue;
@@ -605,10 +666,8 @@ fn diff_against_base(
         let hunks = groups
             .iter()
             .map(|g| {
-                if let Some(c) = cancel {
-                    if c.load(Ordering::SeqCst) {
-                        return Err(());
-                    }
+                if cancel_requested(cancel) {
+                    return Err(());
                 }
                 Ok(build_hunk(g, &rel))
             })
@@ -1942,17 +2001,53 @@ mod tests {
         );
     }
 
-    /// A flag flipped mid-walk returns the cancellation sentinel
-    /// before the no-cancel baseline completes. The bound is loose
-    /// (1s) — CI flake guard — but must be well under the no-cancel
-    /// baseline on any reasonable machine, otherwise pool-pressure
-    /// mitigation is moot. Each file carries enough lines that the
-    /// syntect highlight pass dominates the cost (50 files × 100 lines
-    /// ≈ several hundred ms on a fast machine), so the 1ms flipper
-    /// delay is unambiguously mid-walk on any reasonable host — if
-    /// the test still flips within 1s the poll is in the right place.
+    /// Bounded stand-in for `{:?}` on a whole `DiffResult`: this fixture
+    /// makes hundreds of highlighted lines, and dumping them turned an
+    /// assertion failure into a multi-megabyte log line that hid the
+    /// actual signal. Counts plus the first path still say which way the
+    /// walk went.
+    fn describe_diff_result(result: &Result<DiffResult, String>) -> String {
+        match result {
+            Ok(diff) => {
+                let hunks: usize = diff.files.iter().map(|f| f.hunks.len()).sum();
+                format!(
+                    "Ok(DiffResult {{ files: {}, total_hunks: {}, first_path: {:?} }})",
+                    diff.files.len(),
+                    hunks,
+                    diff.files.first().map(|f| f.path.as_str())
+                )
+            }
+            Err(err) => format!("Err({err:?})"),
+        }
+    }
+
+    /// A flag flipped mid-walk returns the cancellation sentinel, and the
+    /// walk stops at the poll that observed it.
+    ///
+    /// Determinism comes from a handshake, not a timing race. The walk
+    /// thread parks at poll `FLIP_AT` until a sibling thread has stored
+    /// `true` and acknowledged, so the flip lands between two polls of a
+    /// walk that has already built a file's hunks — the previous version
+    /// just slept 1 ms on a sibling thread, and on a loaded machine that
+    /// sleep (plus scheduling) outlasted the entire walk, so the
+    /// assertion saw `Ok` (issue #2229). The store still happens on
+    /// another thread, so the walk still proves it observes a
+    /// cross-thread flip of its `SeqCst` token.
+    ///
+    /// The poll count replaces the old `elapsed < 1s` bound as the
+    /// short-circuit proof: timing a wall clock to argue that a walk
+    /// stopped early is the same flake wearing a different hat, whereas
+    /// "the walk stopped at the poll that saw the flip" is exact.
     #[test]
     fn diff_against_base_returns_cancelled_when_flag_flipped_mid_walk() {
+        // Poll 0 is the first delta boundary and poll 1 the first file's
+        // hunk, so poll 2 is reached only once the walk is genuinely
+        // mid-file-set — with real work already done behind it.
+        const FLIP_AT: usize = 2;
+        // Bounds a stall of the flipper thread while the walk is parked;
+        // it is a hang guard, not the mechanism under test.
+        const FLIP_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
         let tmp = DiffFixture::new();
         // Drop the repo handle immediately — this test only needs the
         // on-disk repo structure, and `diff_against_base` opens its own
@@ -1960,13 +2055,10 @@ mod tests {
         // (and any Windows file locks) for the entire test.
         init_repo_with_base(&tmp);
 
-        // Enough files × lines that the highlight pass dominates the
-        // cost and the 1ms flipper delay fires unambiguously mid-walk.
-        // Without the per-line weight, a fast SSD + a single-file diff
-        // walker can complete 50 small files in under 1ms and miss the
-        // flip — see the historical regression that motivated the
-        // heavier workload (issue #149 regression class).
-        for i in 0..50 {
+        // One changed file per reachable poll past the first delta is all
+        // the walk needs; the files stay multi-line so each really
+        // produces a hunk to highlight.
+        for i in 0..3 {
             let mut body = String::new();
             for line in 0..100 {
                 body.push_str(&format!("file {} line {} {}\n", i, line, "x".repeat(40)));
@@ -1975,30 +2067,50 @@ mod tests {
         }
 
         let token = Arc::new(AtomicBool::new(false));
-        let token_for_flipper = Arc::clone(&token);
-
-        // Flip the flag from a sibling thread after a tiny delay so
-        // the walk is already mid-flight when the flag is observed.
+        let (flip_tx, flip_rx) = std::sync::mpsc::channel::<()>();
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel::<()>();
+        let flipper_token = Arc::clone(&token);
         let flipper = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            token_for_flipper.store(true, Ordering::SeqCst);
+            // Bounded: a walk with no polls sends no signal, and the
+            // regression under test should surface as a failed assertion
+            // rather than a suite that hangs until the gate times out.
+            if flip_rx.recv_timeout(FLIP_ACK_TIMEOUT).is_err() {
+                return;
+            }
+            flipper_token.store(true, Ordering::SeqCst);
+            // Acknowledge only after the store, so the walk resumes
+            // its poll after the flip is visible.
+            let _ = ack_tx.send(());
         });
 
-        let start = std::time::Instant::now();
-        let result = diff_against_base(tmp.to_str().unwrap(), "base", None, Some(&token));
-        let elapsed = start.elapsed();
+        set_cancel_poll_probe(Some(std::rc::Rc::new(move |poll| {
+            if poll == FLIP_AT {
+                flip_tx.send(()).expect("flipper thread is alive");
+                ack_rx
+                    .recv_timeout(FLIP_ACK_TIMEOUT)
+                    .expect("flipper must store the token while the walk is parked");
+            }
+        })));
 
-        flipper.join().unwrap();
+        let result = diff_against_base(tmp.to_str().unwrap(), "base", None, Some(&token));
+        let polls = cancel_poll_count();
+        set_cancel_poll_probe(None);
+        // Join only when the probe reached the flip point; the
+        // assertions below report a walk that stopped short of it.
+        if polls > FLIP_AT {
+            flipper.join().unwrap();
+        }
 
         assert_eq!(
             result.as_ref().err().map(|s| s.as_str()),
             Some(DIFF_CANCELLED),
-            "mid-walk flag flip must return the cancellation sentinel; got {:?}",
-            result
+            "mid-walk flag flip must return the cancellation sentinel; got {}",
+            describe_diff_result(&result)
         );
-        assert!(
-            elapsed < std::time::Duration::from_secs(1),
-            "cancellation must short-circuit the walk promptly; took {elapsed:?}"
+        assert_eq!(
+            polls,
+            FLIP_AT + 1,
+            "the walk must stop at the poll that observed the flip, not run on to the end"
         );
     }
 }
