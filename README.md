@@ -14,7 +14,7 @@ If you use Claude Code / Antigravity / OpenCode from your shell and find yoursel
 
 Buildmesh is a Tauri desktop app for orchestrating multiple AI coding agents — **Claude Code, Codex, Antigravity, OpenCode, Cursor, Grok Code, Kimi Code, MiniMax Code, DeepSeek Harness, Command Code, Freebuff, Cline, Meta Muse**, and a plain **Terminal** harness — across multiple meshes at the same time. It runs each agent as a durable process in a persistent xterm.js terminal, isolates work via Git worktrees, and exposes a tiled grid view so you can orchestrate them all at once.
 
-![45-second walkthrough of Buildmesh](docs/media/v1.4.0/buildmesh-demo.gif)
+![30-second walkthrough of Buildmesh](docs/media/v1.4.0/buildmesh-demo.webp)
 
 [Watch the full-resolution video](docs/media/v1.4.0/buildmesh-demo.mp4) · [Start here / how to report](https://github.com/alondero/buildmesh/discussions/2251)
 
