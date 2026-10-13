@@ -242,6 +242,68 @@ describe("mobile session-cookie recovery (issue #1577)", () => {
     expect(server.count("/api/agents/5/git/status")).toBe(1);
   });
 
+  it("keeps the credential when the refresh cannot reach the server", async () => {
+    // A network drop between the 401 and the refresh says nothing about the
+    // stored token. Reporting it as a rejection would cost a phone a valid
+    // pairing because the desktop app was briefly asleep or off the network.
+    const server = cookieServer({
+      session: async () => {
+        throw new TypeError("Failed to fetch");
+      },
+    });
+    vi.stubGlobal("fetch", server.fetchMock);
+
+    const failure = await listNodes().catch((e) => e);
+
+    // `isAuthError === false` is the load-bearing assertion: it is what keeps
+    // screens on their ordinary offline/error path instead of `onAuthFailed`.
+    expect(isAuthError(failure)).toBe(false);
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).status).toBe(0);
+    expect(readStoredToken()).toBe(DEVICE_TOKEN);
+    // No verdict, so no replay either.
+    expect(server.count("/api/nodes")).toBe(1);
+    expect(server.count("/api/session")).toBe(1);
+  });
+
+  it("leaves the screen mounted and keeps the credential when the refresh is offline", async () => {
+    const server = cookieServer({
+      session: async () => {
+        throw new TypeError("Failed to fetch");
+      },
+      routes: {
+        "/api/agents/5/git/status": () => unauthorized(),
+        "/api/agents/5/git/summary": () => unauthorized(),
+        "/api/agents/5/git/branch": () => unauthorized(),
+        "/api/gh/auth": () => unauthorized(),
+      },
+    });
+    vi.stubGlobal("fetch", server.fetchMock);
+
+    render(
+      <AuthRecoveryHarness>
+        {(onAuthFailed) => (
+          <ChangesScreen
+            node={node}
+            onBack={() => {}}
+            onOpenDiff={() => {}}
+            onOpenPr={() => {}}
+            onAuthFailed={onAuthFailed}
+          />
+        )}
+      </AuthRecoveryHarness>,
+    );
+
+    // The screen takes its ordinary error path — proof that `onAuthFailed` did
+    // not fire — and the pairing survives the blip.
+    await waitFor(() => {
+      expect(screen.getByTestId("changes-error")).toBeTruthy();
+    });
+    expect(screen.getByTestId("changes-screen")).toBeTruthy();
+    expect(screen.queryByTestId("connect-screen")).toBeNull();
+    expect(readStoredToken()).toBe(DEVICE_TOKEN);
+  });
+
   it("replays at most once when the refreshed cookie is still unauthorized", async () => {
     // A cookie that survives a refresh but still 401s means the device itself
     // was revoked. Retrying again would loop, so the transport gives up and

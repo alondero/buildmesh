@@ -67,26 +67,51 @@ function fallbackMessage(status: number): string {
  * a burst of 401s. They all join this one promise instead of each minting their
  * own cookie — one refresh, one replay per caller, one device row.
  */
-let sessionRecovery: Promise<boolean> | null = null;
+let sessionRecovery: Promise<RecoveryOutcome> | null = null;
+
+/**
+ * What one recovery refresh attempt concluded.
+ *
+ * Only `refreshed` buys a replay. The two failure outcomes stay distinct
+ * because only one of them says anything about the stored credential:
+ *
+ * - **rejected** — the server refused the token (401/403), or there was none to
+ *   present. The caller's original 401 stands, so the screen may clear the
+ *   credential and show Connect.
+ * - **unavailable** — the refresh never reached a verdict: the desktop app was
+ *   unreachable, rate-limited or erroring. Nothing is known about the token, so
+ *   the caller surfaces this instead of the 401 and the credential survives —
+ *   issue #1577 clears local credentials *only* when the refresh is rejected.
+ */
+type RecoveryOutcome =
+  | { kind: "refreshed" }
+  | { kind: "rejected" }
+  | { kind: "unavailable"; error: ApiError };
 
 /**
  * Re-mint the session cookie from the saved device token, coalescing
  * concurrent callers onto a single request.
  *
- * Resolves `false` — never rejects — when the refresh is rejected, when there
- * is no saved token to present, or when the network fails. The caller re-raises
- * its original 401 and the screen's existing recovery callback owns the
- * decision to clear credentials and show Connect (issue #1577).
+ * Never rejects: every failure is a value, so the shared promise cannot strand
+ * a concurrent caller on an unhandled rejection.
  *
  * The token rides an `Authorization` header on this one refresh call and never
  * a URL — `exchangeSession` is the same code path the boot-time migration uses
  * (issue #500).
  */
-function recoverSession(): Promise<boolean> {
+function recoverSession(): Promise<RecoveryOutcome> {
   const token = readStoredToken();
-  if (!token) return Promise.resolve(false);
+  if (!token) return Promise.resolve({ kind: "rejected" });
   sessionRecovery ??= exchangeSession("/api/session", token)
-    .catch(() => false)
+    .then((minted): RecoveryOutcome =>
+      // `exchangeSession` resolves `false` for a refusal and throws only for a
+      // failure that is not a refusal, which is what keeps the two apart.
+      minted ? { kind: "refreshed" } : { kind: "rejected" },
+    )
+    .catch((e: unknown): RecoveryOutcome => ({
+      kind: "unavailable",
+      error: e instanceof ApiError ? e : new ApiError(0, fallbackMessage(0)),
+    }))
     .finally(() => {
       // Clear before the next caller can observe the settled promise, so a
       // later 401 gets a fresh attempt instead of a cached rejection.
@@ -129,8 +154,15 @@ async function sendRequest(
     ...init,
   });
   if (resp.ok) return resp;
-  if (resp.status === 401 && !retried && (await recoverSession())) {
-    return sendRequest(path, init, true);
+  if (resp.status === 401 && !retried) {
+    const outcome = await recoverSession();
+    if (outcome.kind === "refreshed") return sendRequest(path, init, true);
+    // A refresh that never reached a verdict proves nothing about the cookie or
+    // the stored token. Surface its own failure so the screen takes its ordinary
+    // offline/error path — `NodeList` routes any non-auth error to `onOffline()`
+    // — instead of reading this as a revoked device (issue #1577).
+    if (outcome.kind === "unavailable") throw outcome.error;
+    // Rejected: fall through and re-raise the original 401, which is the truth.
   }
   // Routes report failures as {"error": "..."} — surface that text to the
   // user instead of a bare status code when it's available.
@@ -525,8 +557,10 @@ async function fetchMintTicket(
   });
   if (resp.status === 429) return resp; // carry the 429 (with headers) to the orchestrator
   if (!resp.ok) {
-    if (resp.status === 401 && !retried && (await recoverSession())) {
-      return fetchMintTicket(target, true);
+    if (resp.status === 401 && !retried) {
+      const outcome = await recoverSession();
+      if (outcome.kind === "refreshed") return fetchMintTicket(target, true);
+      if (outcome.kind === "unavailable") throw outcome.error;
     }
     const detail = await safeJsonError(resp);
     throw new ApiError(resp.status, detail || fallbackMessage(resp.status));
