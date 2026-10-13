@@ -55,6 +55,10 @@ export default function Connect({ onConnected, notice }: Props) {
         setBusy(false);
         return;
       }
+      // A fresh pair mints a NEW device identity server-side and returns it
+      // only as an HttpOnly cookie, so any credential still held here belongs
+      // to the identity we just replaced. Drop it — unlike `restoreSession`,
+      // this is a supersession, not a migration (issue #1577).
       clearStoredToken();
       onConnected();
     } catch {
