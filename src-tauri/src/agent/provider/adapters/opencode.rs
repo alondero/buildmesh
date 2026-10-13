@@ -392,6 +392,17 @@ impl AgentProvider for OpenCodeAdapter {
         vec!["--session".into(), id.into()]
     }
 
+    /// Regenerate-on-the-same-harness branches instead of continuing in
+    /// place (issue #1550). `--fork` immediately after `--session <id>`:
+    /// the new session is a sibling that leaves the parent transcript
+    /// untouched, so regenerating on a provider swap does not overwrite the
+    /// history it branched from. Verified against OpenCode 1.18.3.
+    fn resume_args_fork(&self, id: &str) -> Vec<String> {
+        let mut args = self.resume_args(id);
+        args.push("--fork".into());
+        args
+    }
+
     fn session_assign_args(&self, _id: &str) -> Vec<String> {
         vec![]
     }
@@ -847,17 +858,22 @@ mod tests {
 
     /// Resume argv is `--auto` (unattended permission default, issue
     /// #2151 — where the base recipe used to carry it) plus `--session
-    /// <id>` (flag, not subcommand, issue #1297).
+    /// <id>` (flag, not subcommand, issue #1297). No `--fork`: an
+    /// Explicit / Startup resume continues the conversation in place.
     #[test]
     fn resume_recipe_carries_session_flag() {
         use crate::agent::capabilities::ResolvedAgentConfig;
         use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
+        use crate::agent::spawn::ResumeCause;
 
         let config = ResolvedAgentConfig::default();
         let input = HarnessLaunchInput {
             platform: Platform::Windows,
             runtime: EnvType::Windows,
-            session: SessionIdModeRef::Resume("ses_fc52ccfb9ffek1jl23ZwpRuSP7"),
+            session: SessionIdModeRef::Resume {
+                id: "ses_fc52ccfb9ffek1jl23ZwpRuSP7",
+                cause: ResumeCause::Explicit,
+            },
             config: &config,
             prefill: None,
             sandbox: false,
@@ -875,6 +891,71 @@ mod tests {
         assert!(
             !args.iter().any(|a| a == "--resume" || a == "--session-id"),
             "must not emit Claude/Codex resume flags; got {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a == "--fork"),
+            "an in-place resume must not fork — that would strand the parent \
+             transcript the user is continuing; got {args:?}"
+        );
+    }
+
+    /// Issue #1550 — `resume_args_fork` is the adapter seam the
+    /// orchestrator calls for a `ResumeCause::Regenerate` resume, and
+    /// OpenCode's `--fork` must land immediately after `--session <id>`
+    /// (verified against CLI 1.18.3).
+    #[test]
+    fn resume_args_fork_appends_fork_after_session() {
+        assert_eq!(
+            OPENCODE.resume_args_fork("ses_fc52ccfb9ffek1jl23ZwpRuSP7"),
+            vec![
+                "--session".to_string(),
+                "ses_fc52ccfb9ffek1jl23ZwpRuSP7".to_string(),
+                "--fork".to_string()
+            ],
+            "fork form is --session <id> --fork"
+        );
+        assert_eq!(
+            OPENCODE.resume_args("ses_fc52ccfb9ffek1jl23ZwpRuSP7"),
+            vec![
+                "--session".to_string(),
+                "ses_fc52ccfb9ffek1jl23ZwpRuSP7".to_string()
+            ],
+            "the plain resume shape must stay fork-free — it is what Startup \
+             and Explicit resumes compose"
+        );
+    }
+
+    /// End-to-end through the shared helper: a `Regenerate` resume on
+    /// OpenCode produces the forked argv, so the same-harness provider
+    /// swap that reuses the captured `ses_…` id does not keep appending
+    /// to the transcript it branches from.
+    #[test]
+    fn regenerate_resume_recipe_forks_off_the_captured_session() {
+        use crate::agent::capabilities::ResolvedAgentConfig;
+        use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
+        use crate::agent::spawn::ResumeCause;
+
+        let config = ResolvedAgentConfig::default();
+        let input = HarnessLaunchInput {
+            platform: Platform::Windows,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::Resume {
+                id: "ses_fc52ccfb9ffek1jl23ZwpRuSP7",
+                cause: ResumeCause::Regenerate,
+            },
+            config: &config,
+            prefill: None,
+            sandbox: false,
+        };
+        let prepared = default_prepare(&OPENCODE, input);
+        assert_eq!(
+            prepared.recipe.base_args,
+            vec![
+                "--auto".to_string(),
+                "--session".to_string(),
+                "ses_fc52ccfb9ffek1jl23ZwpRuSP7".to_string(),
+                "--fork".to_string()
+            ]
         );
     }
 

@@ -734,6 +734,22 @@ pub trait AgentProvider: Send + Sync {
         vec!["--resume".into(), id.into()]
     }
 
+    /// Args appended when resuming a session that must **branch** off the
+    /// captured transcript instead of continuing it in place. Used for the
+    /// regenerate-same-harness resume (`ResumeCause::Regenerate`, issue
+    /// #1550): the swap reuses the captured `cli_session_id`, and a plain
+    /// resume would keep appending to the transcript the user is
+    /// regenerating from.
+    ///
+    /// Defaults to [`AgentProvider::resume_args`] — most harnesses have no
+    /// fork concept, and an extra flag their CLI does not know aborts the
+    /// launch. A harness opts in by overriding this, which keeps the flag
+    /// spelling in the adapter that owns the CLI instead of spreading
+    /// `--fork` through the orchestrator.
+    fn resume_args_fork(&self, id: &str) -> Vec<String> {
+        self.resume_args(id)
+    }
+
     /// Args for model override.
     fn model_args(&self, model: &str) -> Vec<String> {
         vec!["--model".into(), model.into()]

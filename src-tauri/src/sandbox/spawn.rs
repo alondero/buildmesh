@@ -558,6 +558,7 @@ mod tests {
             &crate::agent::capabilities::ResolvedAgentConfig::default(),
             None,
             true, // sandbox
+            crate::agent::spawn::ResumeCause::Explicit,
         )
         .expect("sandboxed command assembly (run with BUILDMESH_SANDBOX=1)");
         eprintln!(
@@ -959,6 +960,7 @@ mod tests {
             &crate::agent::capabilities::ResolvedAgentConfig::default(),
             None,
             true, // sandbox
+            crate::agent::spawn::ResumeCause::Explicit,
         )
         .expect("sandboxed command assembly (run with BUILDMESH_SANDBOX=1)");
         eprintln!(

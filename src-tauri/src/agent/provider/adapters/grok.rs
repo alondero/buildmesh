@@ -765,7 +765,10 @@ mod tests {
         let input = HarnessLaunchInput {
             platform: Platform::Linux,
             runtime: EnvType::Windows,
-            session: SessionIdModeRef::Resume("01a0400a-6ac5-7d90-a1a6-b5397ff81d62"),
+            session: SessionIdModeRef::Resume {
+                id: "01a0400a-6ac5-7d90-a1a6-b5397ff81d62",
+                cause: crate::agent::spawn::ResumeCause::Explicit,
+            },
             config: &config,
             prefill: Some("continue from the last turn"),
             sandbox: false,
