@@ -226,6 +226,7 @@ fn codex_launch_carries_the_review_prompt_next_to_its_attention_hooks() {
             &ResolvedAgentConfig::default(),
             Some(&prompt),
             false,
+            crate::agent::spawn::ResumeCause::Explicit,
         )
         .unwrap();
         let argv: Vec<String> = command
