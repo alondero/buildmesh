@@ -578,14 +578,23 @@ pub(crate) fn record_prompt_submission_locked(
     revision_inner(db, run_id).map_err(|e| e.to_string())
 }
 
-fn newest_submission_seq(db: &Connection, agent_node_id: i64) -> Result<i64, String> {
-    db.query_row(
-        "SELECT COALESCE(MAX(json_extract(detail,'$.submission_seq')),0)
+/// The SQL `newest_submission_seq` runs, kept as a constant so the plan test
+/// in this module pins the statement production actually executes.
+///
+/// SQLite matches an expression index against the expression the query uses,
+/// so the `json_extract(detail,'$.agent_node_id')` term here has to stay the
+/// same expression `idx_circuit_history_submission` indexes. A changed JSON
+/// path or a different function stops the match, which puts the full
+/// `circuit_run_history` scan back on this hot path (issue #1932).
+const NEWEST_SUBMISSION_SEQ_SQL: &str =
+    "SELECT COALESCE(MAX(json_extract(detail,'$.submission_seq')),0)
          FROM circuit_run_history
-         WHERE kind='prompt_submitted' AND json_extract(detail,'$.agent_node_id')=?1",
-        params![agent_node_id],
-        |row| row.get(0),
-    )
+         WHERE kind='prompt_submitted' AND json_extract(detail,'$.agent_node_id')=?1";
+
+fn newest_submission_seq(db: &Connection, agent_node_id: i64) -> Result<i64, String> {
+    db.query_row(NEWEST_SUBMISSION_SEQ_SQL, params![agent_node_id], |row| {
+        row.get(0)
+    })
     .map_err(|e| e.to_string())
 }
 
@@ -895,7 +904,12 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
     // review verdict is different: it is a person's judgement about someone
     // else's work, so the evidence is part of the verdict and is required.
     let note = request.reason.trim();
-    if note.is_empty() && matches!(request.action, CheckpointAction::ReviewPass | CheckpointAction::ReviewFail) {
+    if note.is_empty()
+        && matches!(
+            request.action,
+            CheckpointAction::ReviewPass | CheckpointAction::ReviewFail
+        )
+    {
         return Err("Give the evidence behind your review decision.".into());
     }
     let tx = db.transaction().map_err(|e| e.to_string())?;
@@ -3234,6 +3248,54 @@ mod tests {
             vec![1, 2, 1],
             "ordinals are per agent node, not global"
         );
+    }
+
+    /// Issue #1932 — `newest_submission_seq` runs on the prompt-submission and
+    /// receipt-binding hot paths, while `circuit_run_history` grows with all
+    /// Circuit activity on the install. The plan is read from the same SQL
+    /// constant production runs, so a dropped index, or a query term that no
+    /// longer matches the indexed expression, fails here instead of quietly
+    /// restoring the full scan. The rows span two agent nodes and a
+    /// non-submission kind because the partial index is only useful if those
+    /// still resolve through one indexed seek.
+    #[test]
+    fn submission_ordinal_lookup_uses_its_partial_index() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch("INSERT INTO meshes (id,name,path) VALUES (1,'test','/repo');
+            INSERT INTO autopilot_circuits (id,mesh_id,name) VALUES (1,1,'test');
+            INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,state) VALUES (1,1,1,'running');
+            INSERT INTO circuit_run_history (run_id,node_id,attempt,kind,detail) VALUES
+                (1,'spawn',1,'prompt_submitted','{\"agent_node_id\":9,\"submission_seq\":2}'),
+                (1,'spawn',1,'step_transition','{\"agent_node_id\":9,\"status\":\"working\"}'),
+                (1,'spawn',1,'prompt_submitted','{\"agent_node_id\":10,\"submission_seq\":1}');")
+            .unwrap();
+
+        let mut stmt = db
+            .prepare(&format!("EXPLAIN QUERY PLAN {NEWEST_SUBMISSION_SEQ_SQL}"))
+            .unwrap();
+        let plan: Vec<String> = stmt
+            .query_map(params![9_i64], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<SqlResult<Vec<_>>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("idx_circuit_history_submission")),
+            "the ordinal lookup must drive idx_circuit_history_submission, got: {plan:?}"
+        );
+        assert!(
+            !plan
+                .iter()
+                .any(|step| step.starts_with("SCAN circuit_run_history")),
+            "the ordinal lookup must not full-scan circuit_run_history, got: {plan:?}"
+        );
+
+        // Index or no index, the ledger answers from the same rows: each
+        // agent reads back its own sequence, and an unknown agent reads zero.
+        assert_eq!(newest_submission_seq(&db, 9).unwrap(), 2);
+        assert_eq!(newest_submission_seq(&db, 10).unwrap(), 1);
+        assert_eq!(newest_submission_seq(&db, 11).unwrap(), 0);
     }
 
     #[test]

@@ -191,6 +191,76 @@ fn codex_spawn_carries_attention_hooks_for_the_launched_node() {
     }
 }
 
+/// The PR probe's initial prompt is a launch argument, and the Windows launch
+/// that carries it is one re-encoded PowerShell script. Node 5351 died because
+/// the encoded payload — hooks plus prompt — was large enough that the
+/// `cmd.exe` PowerShell delegates to for the npm `codex.CMD` shim refused to
+/// parse it. The budget that failure crossed is asserted against the assembled
+/// launch in `spawn_environment`'s tests; what is pinned here is that the
+/// prompt still reaches the launch at all, alongside every attention hook.
+#[test]
+fn codex_launch_carries_the_review_prompt_next_to_its_attention_hooks() {
+    use super::command::build_spawn_command;
+    use super::reader::SessionIdMode;
+
+    for runtime in [EnvType::Windows, EnvType::WindowsInterop, EnvType::Wsl] {
+        let resolved = crate::env::ResolvedPath {
+            host_path: ".".into(),
+            spawn_path: ".".into(),
+            raw_path: ".".into(),
+            env_type: runtime,
+        };
+        let prompt = format!(
+            "Review PR #2261\n{}\nhttps://github.com/alondero/buildmesh/pull/2261",
+            crate::review_contract::REVIEW_POLICY
+        );
+        let command = build_spawn_command(
+            &resolved,
+            Provider::Codex,
+            &[],
+            &SessionIdMode::None,
+            5351,
+            &ResolvedAgentConfig::default(),
+            Some(&prompt),
+            false,
+        )
+        .unwrap();
+        let argv: Vec<String> = command
+            .get_argv()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let launch = match argv.last().filter(|_| {
+            (cfg!(windows) && runtime == EnvType::Windows) || runtime == EnvType::WindowsInterop
+        }) {
+            Some(encoded) => {
+                use base64::Engine;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(encoded.as_bytes())
+                    .unwrap();
+                let utf16: Vec<_> = bytes
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .collect();
+                String::from_utf16(&utf16).unwrap()
+            }
+            None => argv.join(" "),
+        };
+        // Windows flattens the prompt's newlines into the one argv element it
+        // can quote for cmd.exe; the words themselves still ride the launch.
+        for fragment in ["Review PR #2261", "grumpy senior engineer", "/pull/2261"] {
+            assert!(
+                launch.contains(fragment),
+                "{runtime:?}: the review prompt must ride the launch: {fragment}"
+            );
+        }
+        assert!(
+            launch.contains("hooks.Stop=["),
+            "{runtime:?}: the launch must still carry its attention hooks"
+        );
+    }
+}
+
 // -----------------------------------------------------------------
 // Issue #1179: capability / recipe coherence table.
 //
