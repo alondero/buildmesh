@@ -21,7 +21,7 @@ import { createTerminalOptions } from './terminalConfig';
 import { resolveKeyAction } from './terminalKeyAction';
 import { isMac } from '../../lib/platform';
 import { TerminalWriter, type TerminalWriteData } from './TerminalWriter';
-import { TerminalLinkRouter } from './TerminalLinkRouter';
+import type { TerminalLinkRouter } from './TerminalLinkRouter';
 import { FontSizeManager } from './FontSizeManager';
 import { ThemeManager } from './ThemeManager';
 import { terminalWebglPool } from './WebglRendererPool';
@@ -473,6 +473,9 @@ export class TerminalRegistry {
       // of these modules, and they're only fetched on first terminal attach.
       // Without this, every byte of @xterm/xterm + 5 addons lands in the
       // desktop initial bundle even for users who never open a canvas.
+      // `TerminalLinkRouter` rides here too: it is only reachable from
+      // `doCreate`, and a static import of it costs the entry bundle enough
+      // to break `check:bundle` (issue #2284 round 2).
       const [
         { Terminal },
         { FitAddon },
@@ -480,6 +483,7 @@ export class TerminalRegistry {
         { SearchAddon },
         { WebLinksAddon },
         { loadUnicode11Widths },
+        { TerminalLinkRouter },
       ] = await Promise.all([
         import('@xterm/xterm'),
         import('@xterm/addon-fit'),
@@ -487,6 +491,7 @@ export class TerminalRegistry {
         import('@xterm/addon-search'),
         import('@xterm/addon-web-links'),
         import('./loadUnicode11Widths'),
+        import('./TerminalLinkRouter'),
       ]);
       // Nothing has been acquired yet — bail before allocating an xterm
       // for a node that was deleted while the chunk was in flight.

@@ -2,6 +2,26 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import type { ILinkHandler, Terminal } from '@xterm/xterm';
 import type { ILinkProviderOptions } from '@xterm/addon-web-links';
 
+/** A range as both link providers report it (buffer or viewport cells). */
+type LinkRange = { start: { x: number; y: number }; end: { x: number; y: number } };
+
+/**
+ * The link under the pointer, identified the way xterm's linkifier identifies
+ * one: by the text it resolves to *and* the range it covers. A URI alone is
+ * not an identity — the same URL printed twice is two links, and a gesture
+ * that starts on one and ends on the other must not open either.
+ */
+interface HoveredLink {
+  uri: string;
+  range: string;
+}
+
+const rangeKey = (range: LinkRange): string =>
+  `${range.start.x},${range.start.y},${range.end.x},${range.end.y}`;
+
+const sameLink = (hovered: HoveredLink | null, pressed: HoveredLink): boolean =>
+  hovered !== null && hovered.uri === pressed.uri && hovered.range === pressed.range;
+
 /**
  * Link-click routing for one agent terminal.
  *
@@ -43,9 +63,9 @@ export class TerminalLinkRouter {
    * so this stays valid across repeated clicks on one link and is what a press
    * is matched against without reaching into xterm's private linkifier.
    */
-  private hoveredUri: string | null = null;
+  private hoveredLink: HoveredLink | null = null;
   /** The link a press we intercepted started on, pending its release. */
-  private pressedUri: string | null = null;
+  private pressedLink: HoveredLink | null = null;
   private term: Terminal | null = null;
   private element: HTMLElement | null = null;
 
@@ -56,11 +76,11 @@ export class TerminalLinkRouter {
    */
   readonly linkHandler: ILinkHandler = {
     activate: (_event, uri) => this.open(uri),
-    hover: (_event, uri) => {
-      this.hoveredUri = uri;
+    hover: (_event, uri, range) => {
+      this.hoveredLink = { uri, range: rangeKey(range) };
     },
     leave: () => {
-      this.hoveredUri = null;
+      this.hoveredLink = null;
     },
   };
 
@@ -71,11 +91,11 @@ export class TerminalLinkRouter {
 
   /** `WebLinksAddon` options that feed the same hovered-link tracking. */
   readonly webLinksOptions: ILinkProviderOptions = {
-    hover: (_event, uri) => {
-      this.hoveredUri = uri;
+    hover: (_event, uri, range) => {
+      this.hoveredLink = { uri, range: rangeKey(range) };
     },
     leave: () => {
-      this.hoveredUri = null;
+      this.hoveredLink = null;
     },
   };
 
@@ -108,8 +128,8 @@ export class TerminalLinkRouter {
   dispose(): void {
     this.unbindListeners();
     this.term = null;
-    this.hoveredUri = null;
-    this.pressedUri = null;
+    this.hoveredLink = null;
+    this.pressedLink = null;
   }
 
   private unbindListeners(): void {
@@ -120,12 +140,12 @@ export class TerminalLinkRouter {
 
   private readonly onPress = (event: MouseEvent): void => {
     const term = this.term;
-    const uri = this.hoveredUri;
+    const link = this.hoveredLink;
     // Any press ends the gesture we were tracking, whether or not this one is
     // ours.
-    this.pressedUri = null;
+    this.pressedLink = null;
     // Only the primary button is a link click.
-    if (!term || uri === null || event.button !== 0) return;
+    if (!term || link === null || event.button !== 0) return;
     // Only a mouse-tracking TUI would also read this press as a click on the
     // link it is drawing. Without tracking xterm never reports it, so the
     // press has to keep reaching its normal activate-on-release path.
@@ -135,14 +155,14 @@ export class TerminalLinkRouter {
     // press, then take the press away from both the PTY and the linkifier.
     event.preventDefault();
     event.stopPropagation();
-    this.pressedUri = uri;
+    this.pressedLink = link;
     term.focus();
   };
 
   private readonly onRelease = (event: MouseEvent): void => {
-    const uri = this.pressedUri;
-    if (uri === null) return;
-    this.pressedUri = null;
+    const pressed = this.pressedLink;
+    if (pressed === null) return;
+    this.pressedLink = null;
     // Released outside this terminal: the gesture ends without an open, and
     // whatever the release landed on keeps handling it.
     if (!this.element?.contains(event.target as Node | null)) return;
@@ -151,8 +171,9 @@ export class TerminalLinkRouter {
     event.preventDefault();
     event.stopPropagation();
     // xterm activates only when the press and the release are on the same
-    // link, so a drag off the link must not open it.
-    if (this.hoveredUri === uri) this.open(uri);
+    // link, so a drag off the link must not open it — and "the same link" is
+    // a range as well as a URI, since one URL can be printed more than once.
+    if (sameLink(this.hoveredLink, pressed)) this.open(pressed.uri);
   };
 
   private open(uri: string): void {

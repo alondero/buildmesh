@@ -10,6 +10,8 @@ vi.mock('@tauri-apps/plugin-opener', () => ({
 const URI = 'https://example.com/codex-link';
 const OTHER_URI = 'https://example.com/other-link';
 const RANGE = { start: { x: 1, y: 1 }, end: { x: 26, y: 1 } };
+// The same URL printed a second time: a different range, so a different link.
+const SAME_URI_OTHER_RANGE = { start: { x: 1, y: 3 }, end: { x: 26, y: 3 } };
 
 /**
  * Stands in for the xterm surface the router touches. `screenPresses` and
@@ -42,7 +44,8 @@ function mount(initialTracking: 'none' | 'x10' | 'vt200' | 'drag' | 'any') {
     screen.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button }));
   const release = (button = 0, target: HTMLElement = screen) =>
     target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button }));
-  const hoverLink = (uri = URI) => router.linkHandler.hover?.(new MouseEvent('mousemove'), uri, RANGE);
+  const hoverLink = (uri = URI, range = RANGE) =>
+    router.linkHandler.hover?.(new MouseEvent('mousemove'), uri, range);
   const leaveLink = () => router.linkHandler.leave?.(new MouseEvent('mousemove'), URI, RANGE);
   const setTracking = (mode: 'none' | 'any') => {
     (term.modes as { mouseTrackingMode: string }).mouseTrackingMode = mode;
@@ -148,6 +151,29 @@ describe('TerminalLinkRouter', () => {
     release();
 
     expect(openUrl).not.toHaveBeenCalled();
+  });
+
+  // A URI is not a link identity: the same URL printed twice is two links, and
+  // xterm distinguishes them by range (Linkifier.ts:395-401), so a gesture that
+  // starts on one occurrence and ends on the other must not open either.
+  it('does not open when the gesture moves to another occurrence of the same URL', () => {
+    const { press, release, hoverLink } = mount('any');
+    hoverLink(URI, RANGE);
+
+    press();
+    hoverLink(URI, SAME_URI_OTHER_RANGE);
+    release();
+
+    expect(openUrl).not.toHaveBeenCalled();
+  });
+
+  it('opens when press and release are on the same occurrence of a repeated URL', () => {
+    const { click, hoverLink } = mount('any');
+    hoverLink(URI, SAME_URI_OTHER_RANGE);
+
+    click();
+
+    expect(openUrl).toHaveBeenCalledExactlyOnceWith(URI);
   });
 
   it('opens on the release rather than the press', () => {
