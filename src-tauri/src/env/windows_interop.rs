@@ -91,14 +91,26 @@ pub(crate) fn windows_codex_home() -> Option<std::path::PathBuf> {
             return None;
         }
         let home = String::from_utf8(output.stdout).ok()?.trim().to_string();
-        super::is_windows_path(&home)
-            .then(|| std::path::PathBuf::from(super::to_host_path(&home)))
+        super::is_windows_path(&home).then(|| std::path::PathBuf::from(super::to_host_path(&home)))
     });
     CODEX_HOME.clone()
 }
 
 pub(crate) fn powershell_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
+    let mut literal = String::with_capacity(value.len() + 2);
+    literal.push('\'');
+    for character in value.chars() {
+        // PowerShell recognizes smart apostrophes as string delimiters too.
+        if matches!(
+            character,
+            '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}'
+        ) {
+            literal.push(character);
+        }
+        literal.push(character);
+    }
+    literal.push('\'');
+    literal
 }
 
 /// Explicitly enter the owning Linux distribution for callbacks. Windows
@@ -107,8 +119,81 @@ pub(crate) fn windows_attention_command(url: Option<&str>) -> Option<String> {
     windows_attention_command_impl(url, None)
 }
 
-pub(crate) fn windows_attention_command_with_json_output(url: Option<&str>) -> Option<String> {
-    windows_attention_command_impl(url, Some("{}"))
+/// The one-line command a Windows-side hook shell runs to POST its stdin to
+/// Buildmesh's loopback attention endpoint.
+///
+/// Codex runs a Windows hook command through `powershell.exe -NoProfile
+/// -Command` (`codex_core::spawn`), so this value is *PowerShell statement
+/// text*, not a nested `powershell.exe` invocation. It must therefore stay
+/// free of double quotes (PowerShell 5.1 drops embedded double quotes on the
+/// way to a native program), single quotes (which would force the TOML value
+/// carrying it into an escaped, double-quoted string) and newlines, because it
+/// rides a `-c` launch argument through Buildmesh's own PowerShell script and
+/// then through the `cmd.exe` that runs an npm `codex.CMD` shim.
+///
+/// Those same constraints are why this used to be a nested
+/// `powershell.exe -EncodedCommand <base64>` payload: the base64 hid the
+/// quotes, at a cost of ~2.7 command-line characters per character of script.
+/// Codex carries one callback per attention event on the launch command line,
+/// so the encoded form alone filled all but a few hundred characters of the
+/// 8,191-character `cmd.exe` limit and any real prompt overflowed it (#2184).
+///
+/// On a WSL host the callback has to reach Buildmesh on the Linux side, so
+/// curl runs inside the owning distribution; everywhere else the host's own
+/// `Invoke-WebRequest` posts it. The body is sent as a UTF-8 byte array
+/// rather than a string: a string body is encoded with the request's charset,
+/// and a charset cannot be named here because the `;` separating it would end
+/// the PowerShell statement.
+pub(crate) fn windows_hook_callback_command(url: &str) -> String {
+    windows_hook_callback_command_for_runtime(url, wsl_host_distro().as_deref())
+}
+
+/// The owning Linux distribution when Buildmesh itself runs under WSL. A
+/// native Windows host has none: its own `localhost` is Buildmesh's.
+fn wsl_host_distro() -> Option<String> {
+    if !is_wsl_host() {
+        return None;
+    }
+    std::env::var("WSL_DISTRO_NAME")
+        .ok()
+        .filter(|d| !d.is_empty())
+}
+
+/// Host-independent core of [`windows_hook_callback_command`], so a caller can
+/// build either runtime's command and tests need not run on that host.
+pub(crate) fn windows_hook_callback_command_for_runtime(url: &str, distro: Option<&str>) -> String {
+    let Some(distro) = distro else {
+        return format!(
+            "[Console]::InputEncoding=[Text.Encoding]::UTF8; \
+             try {{ Invoke-WebRequest -UseBasicParsing -Method Post \
+             -ContentType application/json \
+             -Body ([Text.Encoding]::UTF8.GetBytes([Console]::In.ReadToEnd())) \
+             -TimeoutSec 10 -Uri {url} | Out-Null }} catch {{ }}; \
+             echo ([char]123+[char]125); exit 0"
+        );
+    };
+    if is_shell_safe_token(distro) {
+        return format!(
+            "wsl.exe -d {distro} --exec curl -fsS --connect-timeout 2 \
+             --max-time 10 -o /dev/null -X POST --data-binary `@- {url}; \
+             echo ([char]123+[char]125); exit 0"
+        );
+    }
+    // A distribution name PowerShell would re-parse cannot travel unquoted
+    // (`wsl.exe -d My Distro`), so that name keeps the encoded payload that
+    // quotes it. Rare enough that its command-line cost is acceptable.
+    windows_attention_command_for_distro(distro, Some(url), Some("{}"))
+}
+
+/// Whether a value can appear unquoted in a PowerShell command line. WSL
+/// distribution names are short identifiers; anything holding whitespace or a
+/// shell metacharacter is rejected so the callback never depends on a shell's
+/// re-parse of an unquoted token.
+fn is_shell_safe_token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 fn windows_attention_command_impl(url: Option<&str>, stdout_line: Option<&str>) -> Option<String> {
@@ -156,6 +241,108 @@ pub(crate) fn unix_attention_curl() -> &'static str {
 
 #[cfg(test)]
 mod command_tests {
+    #[test]
+    fn powershell_literal_doubles_ascii_and_smart_apostrophes() {
+        for (input, expected) in [
+            ("'", "''''"),
+            ("\u{2018}", "'\u{2018}\u{2018}'"),
+            ("\u{2019}", "'\u{2019}\u{2019}'"),
+            ("\u{201a}", "'\u{201a}\u{201a}'"),
+            ("\u{201b}", "'\u{201b}\u{201b}'"),
+            ("don't", "'don''t'"),
+            ("don\u{2018}t", "'don\u{2018}\u{2018}t'"),
+            ("don\u{2019}t", "'don\u{2019}\u{2019}t'"),
+            ("don\u{201a}t", "'don\u{201a}\u{201a}t'"),
+            ("don\u{201b}t", "'don\u{201b}\u{201b}t'"),
+            (
+                "'\u{2018}\u{2019}\u{201a}\u{201b}",
+                "'''\u{2018}\u{2018}\u{2019}\u{2019}\u{201a}\u{201a}\u{201b}\u{201b}'",
+            ),
+        ] {
+            assert_eq!(super::powershell_literal(input), expected, "input: {input}");
+        }
+    }
+
+    #[test]
+    fn hook_callback_is_quote_and_newline_free_in_every_runtime() {
+        for command in [
+            super::windows_hook_callback_command_for_runtime(
+                "http://localhost:1992/api/attention/42",
+                None,
+            ),
+            super::windows_hook_callback_command_for_runtime(
+                "http://localhost:1992/api/attention/42",
+                Some("Ubuntu"),
+            ),
+        ] {
+            assert!(!command.contains('"'), "{command}");
+            assert!(!command.contains('\''), "{command}");
+            assert!(!command.contains('\n'), "{command}");
+            assert!(!command.contains('\r'), "{command}");
+            assert!(
+                command.contains("http://localhost:1992/api/attention/42"),
+                "{command}"
+            );
+            // The `{}` Codex's Stop hook requires on stdout, spelled without a
+            // quote character (a bare `{}` parses as a script block in
+            // PowerShell and prints nothing).
+            assert!(command.contains("echo ([char]123+[char]125)"), "{command}");
+            assert!(command.ends_with("exit 0"), "{command}");
+        }
+    }
+
+    #[test]
+    fn native_host_callback_posts_the_hook_stdin_with_its_own_http_client() {
+        let command = super::windows_hook_callback_command_for_runtime(
+            "http://localhost:1992/api/attention/42",
+            None,
+        );
+        // PowerShell statement text, not a nested powershell.exe: the value is
+        // handed to a PowerShell that Codex already started.
+        assert!(!command.contains("EncodedCommand"), "{command}");
+        assert!(command.contains("[Console]::In.ReadToEnd()"), "{command}");
+        assert!(command.contains("Invoke-WebRequest"), "{command}");
+        // A byte-array body: a string body is encoded with the request's
+        // charset, and the `;` that would name one ends the statement.
+        assert!(
+            command.contains("-Body ([Text.Encoding]::UTF8.GetBytes([Console]::In.ReadToEnd()))"),
+            "{command}"
+        );
+        assert!(
+            command.contains("[Console]::InputEncoding=[Text.Encoding]::UTF8"),
+            "{command}"
+        );
+    }
+
+    #[test]
+    fn wsl_host_callback_curls_from_inside_the_owning_distribution() {
+        let command = super::windows_hook_callback_command_for_runtime(
+            "http://localhost:1992/api/attention/42",
+            Some("Ubuntu"),
+        );
+        assert!(
+            command.starts_with("wsl.exe -d Ubuntu --exec curl"),
+            "{command}"
+        );
+        // A Linux Codex resolves the distro's own localhost; the Windows-side
+        // URL would not reach a Buildmesh running under WSL NAT.
+        assert!(command.contains("--data-binary `@-"), "{command}");
+    }
+
+    #[test]
+    fn a_distribution_name_a_shell_would_reparse_keeps_the_encoded_payload() {
+        let command = super::windows_hook_callback_command_for_runtime(
+            "http://localhost:1992/api/attention/42",
+            Some("My Distro"),
+        );
+        let script = super::decode_powershell_command(&command).expect("encoded payload");
+        assert!(script.contains("wsl.exe -d 'My Distro'"), "{script}");
+        assert!(
+            script.contains("[Console]::Out.WriteLine('{}')"),
+            "{script}"
+        );
+    }
+
     #[test]
     fn codex_windows_callback_script_fails_open_and_emits_json() {
         let url = "http://localhost:1992/api/attention/42";

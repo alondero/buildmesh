@@ -802,6 +802,219 @@ test('the Windows wrapper builds in production and leaves the caller environment
     assert.ok(wrapper.includes(call) && !wrapper.includes(`Invoke-ProductionBuild ${call}`), `${call} must keep the test environment`);
   }
 });
+test('the Windows wrapper forwards build arguments to npm, which actually run them (#2255)', { skip: process.platform !== 'win32' ? 'the npm.cmd/npm.ps1 shim split only exists on Windows' : false }, t => {
+  // The text assertions above cannot see this defect: `& npm run @args` is a
+  // perfectly plausible-looking line that dropped its argument on the way to npm.
+  // In its `-Command` branch npm.ps1 rebuilds its own argv by re-parsing the
+  // *text* of the calling command, and the splat did not survive that. Observed
+  // against the pre-fix line: npm printed the lifecycle script list, exited 0,
+  // and the bundle gate only failed later on a missing dist. So drive the
+  // wrapper's own helper, executed, against a fixture package whose scripts
+  // record which one ran and under which NODE_ENV.
+  const cwd = mkdtempSync(join(tmpdir(), 'buildmesh-check-wrapper-'));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  // `npm_lifecycle_event` is npm's own name for the script it dispatched, which
+  // is what makes this a proof that the argument arrived rather than a check
+  // that the wrapper still contains the word `build`.
+  writeFileSync(join(cwd, 'record.cjs'), "const { writeFileSync } = require('node:fs');\nwriteFileSync(process.argv[2], JSON.stringify({ event: process.env.npm_lifecycle_event ?? null, nodeEnv: process.env.NODE_ENV ?? null }));\n");
+  writeFileSync(join(cwd, 'package.json'), JSON.stringify({
+    name: 'check-wrapper-fixture',
+    version: '0.0.0',
+    private: true,
+    scripts: { build: 'node record.cjs build.marker', 'build:mobile': 'node record.cjs mobile.marker' }
+  }, null, 2));
+  // Load the helper out of the real wrapper rather than restating it here, so
+  // this stays a regression against scripts/check.ps1 itself. The helper reads
+  // only $args and $env:NODE_ENV, so the region up to the next function is
+  // self-contained.
+  writeFileSync(join(cwd, 'drive.ps1'), [
+    "$ErrorActionPreference = 'Stop'",
+    "$wrapper = [IO.File]::ReadAllText($args[0])",
+    "$from = $wrapper.IndexOf('function Resolve-NpmCommand')",
+    "$to = $wrapper.IndexOf('function Ensure-MobileBuilt')",
+    "if ($from -lt 0 -or $to -le $from) { throw 'could not locate the production-build helpers in scripts/check.ps1' }",
+    'Invoke-Expression $wrapper.Substring($from, $to - $from)',
+    'Write-Host "RESOLVED=$(Resolve-NpmCommand)"',
+    "$env:NODE_ENV = 'test'",
+    'Push-Location $args[1]',
+    'try {',
+    '  Invoke-ProductionBuild build:mobile',
+    "  Write-Host \"MOBILE_EXIT=$LASTEXITCODE\"",
+    '  Invoke-ProductionBuild build',
+    "  Write-Host \"BUILD_EXIT=$LASTEXITCODE\"",
+    '} finally { Pop-Location }',
+    'Write-Host "RESTORED=[$env:NODE_ENV]"'
+  ].join('\n'));
+
+  const run = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(cwd, 'drive.ps1'), join(root, 'scripts/check.ps1'), cwd], { cwd: root, encoding: 'utf8', timeout: 120000 });
+  const output = `${run.stdout || ''}${run.stderr || ''}`;
+  assert.equal(run.status, 0, `${run.error || ''}\n${output}`);
+  // Pin the branch that fixes the bug: the .cmd shim is the one that carries a
+  // real argument vector. On a PATH without it the wrapper falls back to npm.ps1
+  // and this defect returns, so fail loudly rather than pass by accident.
+  const resolved = /RESOLVED=(.+)/.exec(run.stdout)?.[1]?.trim();
+  assert.match(resolved ?? '', /npm\.cmd$/i, `expected the .cmd shim, resolved "${resolved}"`);
+  // The dropped-argument symptom, named so a regression reports as itself.
+  assert.doesNotMatch(output, /Scripts available in .*npm run/, 'npm listed scripts instead of running one');
+  const marker = name => {
+    const path = join(cwd, name);
+    assert.ok(existsSync(path), `${name} was never written, so the build argument did not reach npm:\n${output}`);
+    return JSON.parse(readFileSync(path, 'utf8'));
+  };
+  assert.deepEqual(marker('mobile.marker'), { event: 'build:mobile', nodeEnv: 'production' });
+  assert.deepEqual(marker('build.marker'), { event: 'build', nodeEnv: 'production' });
+  // npm prints its own banner between the two calls, so assert each exit code
+  // on its own rather than expecting them to be adjacent.
+  assert.match(run.stdout, /MOBILE_EXIT=0/, output);
+  assert.match(run.stdout, /BUILD_EXIT=0/, output);
+  // #2013 still holds across the fixed invocation: the caller's test environment
+  // comes back, because the vitest gates in the same script depend on it.
+  assert.match(run.stdout, /RESTORED=\[test\]/, output);
+});
+// Issue #1426 — the title symptom (`React.act is not a function`, every .tsx
+// test) is not a React or vitest bug: an agent shell leaks NODE_ENV=production
+// and Vitest then loads React's production build, which exports no `act`. The
+// same shell also leaked npm_config_omit=dev, which strips devDependencies at
+// install time. The repair is the shape check.ps1 already used for
+// BUILDMESH_PREFILL: scrub the calling shell's environment once, before any gate
+// runs.
+const LEAKED_ENV = ['NODE_ENV', 'npm_config_omit', 'COMMANDCODE_SCRATCHPAD', 'BUILDMESH_PREFILL'];
+
+// The scrub as the file ships it: the function and the top-level call that runs
+// it, so the executed text is the committed text rather than a copy that can
+// drift away from it.
+//
+// The end of the region is "the next function", never a named one. #2275 landed
+// its own helper (`Resolve-NpmCommand`) into this same stretch of the file, and
+// its regression slices Resolve-NpmCommand..Ensure-MobileBuilt out and evaluates
+// it. A hard-coded end marker therefore silently started spanning a neighbour's
+// helper: the probe would execute unrelated npm-dispatch code, and a reorder
+// would have put this scrub inside *their* evaluated region. Bounding by the
+// next declaration keeps each test on its own helper whatever order they land in.
+function shippedFunction(wrapper, name) {
+  const start = wrapper.indexOf(`function ${name} {`);
+  assert.ok(start > 0, `check.ps1 must define ${name}`);
+  const next = wrapper.indexOf('\nfunction ', start + 1);
+  return wrapper.slice(start, next === -1 ? wrapper.length : next);
+}
+
+function shippedEnvScrub(wrapper = readFileSync(join(root, 'scripts/check.ps1'), 'utf8')) {
+  return shippedFunction(wrapper, 'Clear-LeakedEnv');
+}
+
+test('the Windows wrapper scrubs the caller environment once, before any gate runs', () => {
+  const wrapper = readFileSync(join(root, 'scripts/check.ps1'), 'utf8');
+  const scrub = shippedEnvScrub(wrapper);
+  for (const name of LEAKED_ENV) {
+    assert.ok(scrub.includes(`'${name}'`), `Clear-LeakedEnv must scrub ${name}`);
+  }
+  // Isolation, asserted rather than assumed: the region this test executes must
+  // be the scrub alone. If a future helper is declared inside it, this fails
+  // here instead of quietly running that helper's code inside the probe — and,
+  // in the other direction, it is also how this test's region is kept clear of
+  // the Resolve-NpmCommand..Ensure-MobileBuilt window that #2255 evaluates.
+  for (const other of wrapper.match(/^function (\S+) \{$/gm) ?? []) {
+    const name = other.match(/^function (\S+) \{$/)[1];
+    if (name !== 'Clear-LeakedEnv') assert.ok(!scrub.includes(`function ${name} {`), `${name} must not sit inside the scrub region`);
+  }
+  assert.ok(!scrub.includes('Invoke-Expression'), 'the scrub region must not carry another test\u2019s evaluated region');
+  // The #2255 window must still contain only its own two helpers, so neither PR
+  // can absorb the other's code by reordering the file.
+  const npmWindow = wrapper.slice(wrapper.indexOf('function Resolve-NpmCommand {'), wrapper.indexOf('function Ensure-MobileBuilt'));
+  assert.ok(!npmWindow.includes('function Clear-LeakedEnv {'), 'Clear-LeakedEnv must stay outside the region #2255 evaluates');
+  // Called once, at top level — not nested in a gate, which would leave every
+  // earlier gate exposed. Exactly one bare call, so a second scrub cannot
+  // quietly disagree with the first about the list.
+  const calls = wrapper.match(/^Clear-LeakedEnv$/gm) ?? [];
+  assert.equal(calls.length, 1, 'Clear-LeakedEnv must be invoked exactly once at top level');
+  const invoked = wrapper.indexOf('\nClear-LeakedEnv\n');
+  assert.ok(invoked > 0, 'the top-level call must exist as its own statement');
+  // Ordering is the behaviour: a scrub declared after a vitest call cannot help
+  // that vitest call, and one before Invoke-ProductionBuild cannot be undone by
+  // the build helper re-exporting NODE_ENV for its own invocation.
+  for (const gate of ['npx vitest run --pool=threads tests/unit', 'npx vitest run --pool=threads tests/integration', '& npm run test:agent', "Write-Host '== agent infrastructure"]) {
+    assert.ok(invoked < wrapper.indexOf(gate), `the scrub must precede ${gate}`);
+  }
+  assert.ok(wrapper.indexOf('function Invoke-ProductionBuild') < wrapper.indexOf('npx vitest run --pool=threads tests/unit'));
+  // Single owner. The rust gate used to clear BUILDMESH_PREFILL itself; that
+  // made the rust gate the only place that knew the leak existed, so a new gate
+  // inherited the same fragility.
+  assert.doesNotMatch(wrapper, /\$env:BUILDMESH_PREFILL = \$null/);
+  // An install that honoured npm_config_omit=dev cannot be undone here, so the
+  // repair has to be documented where someone hitting it will look.
+  assert.match(wrapper.slice(0, wrapper.indexOf('[CmdletBinding()]')), /npm ci --include=dev/);
+});
+
+test('the env scrub clears the leaks, keeps the documented test environment, and leaves the rest alone', { skip: process.platform === 'win32' ? false : 'the wrapper is Windows-only' }, t => {
+  // Runs the shipped function text in a real PowerShell child with the leaks
+  // planted, so this asserts the committed statements work — not that the file
+  // mentions the right words. The second run plants nothing, which is the only
+  // observable form of "no leak": PowerShell's Env: provider cannot hold an empty
+  // value distinct from an unset one, so an empty-value probe would assert
+  // nothing.
+  const cwd = mkdtempSync(join(tmpdir(), 'buildmesh-env-scrub-'));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  // Each child starts from a scrubbed parent: PowerShell inherits this process's
+  // environment, so a developer (or CI) that really does export NODE_ENV — the
+  // very leak under test — would otherwise make the "nothing leaked" probe report
+  // a leak it never planted. The leaky probe plants its own.
+  const childEnv = { ...process.env };
+  for (const name of LEAKED_ENV) delete childEnv[name];
+  // `powershell.exe` plus an explicit `-ExecutionPolicy Bypass`, matching the
+  // #2255 probe: a machine whose default script policy is `Restricted` refuses
+  // to run the file at all, which would report as an unrelated spawn failure
+  // instead of a result.
+  const probe = (label, plants, survey) => {
+    const file = join(cwd, `probe-${label}.ps1`);
+    writeFileSync(file, [...plants, shippedEnvScrub(), ...survey].join('\n'));
+    const run = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file], { encoding: 'utf8', timeout: 30000, env: childEnv });
+    // A missing or unlaunchable powershell has no exit status, so checking that
+    // first reports "powershell could not start" instead of a bare null !== 0.
+    assert.ok(!run.error, `could not run powershell: ${run.error?.message ?? 'unknown'}`);
+    assert.equal(run.status, 0, run.stderr || run.stdout);
+    return run.stdout;
+  };
+  const survey = [
+    "$names = @()",
+    `foreach ($n in @(${LEAKED_ENV.map(name => `'${name}'`).join(', ')})) { if ($null -ne [Environment]::GetEnvironmentVariable($n)) { $names += $n } }`,
+    `Write-Output ("SURVIVED=" + $names.Count)`,
+    `if ($names.Count -gt 0) { Write-Output ("SURVIVING=" + ($names -join ',')) }`,
+    `Write-Output ("UNRELATED=" + [Environment]::GetEnvironmentVariable('BUILDMESH_PROBE_UNRELATED'))`,
+  ];
+  const leaky = probe('leaky', [
+    `$env:NODE_ENV = 'production'`,
+    `$env:npm_config_omit = 'dev'`,
+    `$env:COMMANDCODE_SCRATCHPAD = 'C:\\Users\\probe\\AppData\\Local\\Temp\\commandcode\\scratch'`,
+    `$env:BUILDMESH_PREFILL = 'leaked from the agent shell'`,
+    `$env:BUILDMESH_PROBE_UNRELATED = 'keepme'`,
+  ], survey);
+  assert.match(leaky, /^SURVIVED=0$/m, `the scrub left a variable set: ${leaky}`);
+  assert.match(leaky, /^UNRELATED=keepme$/m, 'the scrub must not disturb an unrelated variable');
+  // A green bar nobody can explain is the failure mode this replaces, so the
+  // scrub has to report what it removed rather than muting the gate silently.
+  assert.match(leaky, /env leak from the calling shell: cleared NODE_ENV, npm_config_omit, COMMANDCODE_SCRATCHPAD, BUILDMESH_PREFILL/);
+
+  // …and must stay quiet when there is nothing to report, or every run of the
+  // wrapper claims a leak it never found.
+  const clean = probe('clean', [`$env:BUILDMESH_PROBE_UNRELATED = 'keepme'`], survey);
+  assert.match(clean, /^SURVIVED=0$/m);
+  assert.doesNotMatch(clean, /env leak from the calling shell/, 'nothing leaked, so nothing must be reported');
+  assert.match(clean, /^UNRELATED=keepme$/m);
+
+  // The documented frontend test environment is not a leak. AGENTS.md tells
+  // developers and agents to run vitest with NODE_ENV=test, so scrubbing it and
+  // printing a warning would punish following this project's own advice — and
+  // clearing it only worked by accident, because Vitest defaults back to `test`.
+  const documented = probe('documented', [
+    `$env:NODE_ENV = 'test'`,
+    `$env:BUILDMESH_PROBE_UNRELATED = 'keepme'`,
+  ], survey);
+  assert.match(documented, /^SURVIVING=NODE_ENV$/m, `NODE_ENV=test must survive the scrub: ${documented}`);
+  assert.doesNotMatch(documented, /env leak from the calling shell/, 'the documented test environment is not a leak');
+  assert.match(documented, /^UNRELATED=keepme$/m);
+  // Still distinct from the leak it must clear, or the exemption swallows it.
+  assert.match(leaky, /^SURVIVED=0$/m);
+});
 test('missing dependencies preflight BLOCKED without launching tests', async t => {
   const fixture = repo(t);
   const result = await runGate(fixture.cwd, { id: 'frontend', command: ['npm', 'run', 'test'], minutes: 1, tests: 'vitest' }, fixture.base);

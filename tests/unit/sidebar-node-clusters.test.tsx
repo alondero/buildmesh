@@ -65,7 +65,7 @@ function renderMeshItem(clusters: NodeActivityCluster[], onActivateNode = vi.fn(
     providerList: PROVIDERS, onSelectMesh: vi.fn(), onNewNode: vi.fn(),
     onSelectProvider: vi.fn(), onOpenFilesProbe: vi.fn(), onOpenPropertiesProbe: vi.fn(),
     onOpenWorktreesProbe: vi.fn(), onOpenIssuesProbe: vi.fn(), onOpenSessionHistoryProbe: vi.fn(),
-    nodeClusters: clusters, onActivateNode, selectMesh: vi.fn(), onDeleteNode: vi.fn(),
+    nodeClusters: clusters, onActivateNode, onDeleteNode: vi.fn(),
     getDefaultProvider: vi.fn().mockResolvedValue('anthropic'),
   };
   const result = render(

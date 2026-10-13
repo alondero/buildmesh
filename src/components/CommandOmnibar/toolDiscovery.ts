@@ -45,7 +45,7 @@ const PROJECT_TABS = ['properties', 'worktrees'] as const;
 const GITHUB_TABS = ['issues', 'pulls'] as const;
 const AUTOMATE_TABS = ['circuits'] as const;
 const REMEMBER_TABS = ['sessions', 'scratchpad'] as const;
-const APP_TABS = ['usage'] as const;
+const APP_TABS = ['usage', 'notifications'] as const;
 
 type GroupedTab =
   | (typeof CODE_TABS)[number]

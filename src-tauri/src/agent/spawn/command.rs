@@ -1,3 +1,4 @@
+use super::intent::ResumeCause;
 use super::reader::SessionIdMode;
 use crate::agent::launch::{HarnessLaunchInput, SessionIdModeRef};
 use crate::agent::provider::{Platform, CLAUDE_BACKEND_ENV_VARS};
@@ -40,6 +41,7 @@ pub fn build_spawn_command(
     config: &crate::agent::capabilities::ResolvedAgentConfig,
     prefill: Option<&str>,
     sandbox: bool,
+    resume_cause: ResumeCause,
 ) -> Result<CommandBuilder, String> {
     build_spawn_command_prepared(
         resolved,
@@ -50,6 +52,7 @@ pub fn build_spawn_command(
         config,
         prefill,
         sandbox,
+        resume_cause,
     )
 }
 
@@ -63,6 +66,7 @@ pub fn build_spawn_command_prepared(
     config: &crate::agent::capabilities::ResolvedAgentConfig,
     prefill: Option<&str>,
     sandbox: bool,
+    resume_cause: ResumeCause,
 ) -> Result<CommandBuilder, String> {
     let adapter = provider_enum.adapter();
     let platform = if resolved.env_type == EnvType::Wsl {
@@ -108,7 +112,10 @@ pub fn build_spawn_command_prepared(
     // forward as defence in depth (issue #1179).
     let session_ref = match session_id_mode {
         SessionIdMode::Assign(id) => SessionIdModeRef::Assign(id.as_str()),
-        SessionIdMode::Resume(id) => SessionIdModeRef::Resume(id.as_str()),
+        SessionIdMode::Resume(id) => SessionIdModeRef::Resume {
+            id: id.as_str(),
+            cause: resume_cause,
+        },
         SessionIdMode::None => SessionIdModeRef::None,
     };
     let input = HarnessLaunchInput {

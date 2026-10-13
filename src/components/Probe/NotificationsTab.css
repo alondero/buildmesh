@@ -1,0 +1,37 @@
+.notifications-tab { font-size: 11px; }
+.notification-toolbar, .notification-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 8px; padding: 8px 12px; flex-shrink: 0; color: var(--color-text-secondary); }
+.notification-toolbar { border-bottom: 1px solid var(--color-border-default); }
+.notification-footer { border-top: 1px solid var(--color-border-default); }
+.notification-link { min-height: 28px; padding: 3px 5px; border-radius: 6px; color: var(--color-text-primary); cursor: pointer; }
+.notification-link:hover:enabled { background: var(--color-bg-card-hover); }
+.notifications-tab button:disabled { color: var(--color-text-muted); cursor: default; }
+.notifications-tab button:focus-visible { outline: 2px solid var(--color-accent-cyan); outline-offset: 2px; }
+.notification-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; color: var(--color-text-secondary); }
+.notification-section-heading h3 { font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+.notification-section-heading > span { min-width: 18px; padding: 1px 5px; border-radius: 4px; background: var(--color-bg-card-hover); text-align: center; }
+.notification-attention { margin-bottom: 20px; }
+.notification-attention-card { padding: 12px; margin-bottom: 10px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--color-accent-amber) 30%, var(--color-border-default)); background: color-mix(in srgb, var(--color-accent-amber) 4%, var(--color-bg-card)); }
+.notification-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 3px 8px; }
+.notification-heading h4 { font-size: 11px; font-weight: 600; color: var(--color-text-primary); }
+.notification-time { font-size: 10px; color: var(--color-text-secondary); }
+.notification-node { margin-top: 6px; font-family: var(--font-mono); color: var(--color-text-primary); }
+.notification-attention-card p, .notification-row p { margin-top: 5px; line-height: 1.6; color: var(--color-text-secondary); }
+.notification-attention-card code { display: block; margin-top: 8px; font-size: 10px; color: var(--color-text-secondary); }
+.notification-attention-card, .notification-row-body, .notification-error { overflow-wrap: anywhere; min-width: 0; }
+.notification-card-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-top: 12px; }
+.notification-card-actions > span { font-size: 10px; color: var(--color-text-secondary); }
+.notification-resolve { min-height: 28px; padding: 5px 10px; border-radius: 6px; border: 1px solid var(--color-accent-cyan); background: var(--color-bg-selection); color: var(--color-text-primary); font-weight: 550; cursor: pointer; }
+.notification-resolve:hover { background: var(--color-bg-card-hover); }
+.notification-caught-up { color: var(--color-text-secondary); line-height: 1.6; }
+.notification-row { display: flex; align-items: flex-start; gap: 8px; padding: 10px 8px; border-bottom: 1px solid var(--color-border-subtle); border-radius: 6px; }
+.notification-unread { background: var(--color-bg-highlight); }
+.notification-row-body { flex: 1; }
+.notification-status { display: grid; place-items: center; width: 24px; height: 24px; flex-shrink: 0; border-radius: 6px; font-size: 13px; color: var(--color-text-primary); }
+.notification-warning { background: var(--color-status-warning-bg); }
+.notification-error { background: var(--color-status-error-bg); }
+.notification-success { background: var(--color-status-success-bg); }
+.notification-info { background: var(--color-accent-cyan-glow); }
+div.notification-error { flex-shrink: 0; padding: 8px 12px; line-height: 1.6; }
+.notification-empty { display: flex; align-items: center; flex-direction: column; gap: 8px; padding: 32px 8px; color: var(--color-text-secondary); text-align: center; line-height: 1.6; }
+.notification-empty > svg { width: 28px; height: 28px; margin-bottom: 4px; }
+.notification-empty h3 { color: var(--color-text-primary); font-size: 13px; font-weight: 550; }

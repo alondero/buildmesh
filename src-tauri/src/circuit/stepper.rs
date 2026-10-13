@@ -569,7 +569,7 @@ impl RunView {
         revision: &str,
         stamp: &str,
     ) -> NudgeDecision {
-        if self.state != RunState::Running {
+        if self.state != RunState::Running || self.has_human_wait(node_id) {
             return NudgeDecision::Ignore;
         }
         // A wake-up claimed for this attempt is settled by the
@@ -1255,7 +1255,7 @@ pub enum ResultReminderDecision {
 
 fn result_reminder_prompt(path: &str) -> String {
     format!(
-        "Save your final report, ending with the required result line, to {path} now using UTF-8 (overwrite it). The file is missing, blank, or not valid UTF-8. In Windows PowerShell, use Set-Content -Encoding UTF8. Do not redo the work."
+        "Save your final report, ending with the required result line, to {path} now using UTF-8 (overwrite it). The file is missing, blank, not valid UTF-8, or lacks a valid required result line. In Windows PowerShell, use Set-Content -Encoding UTF8. Do not redo the work."
     )
 }
 
@@ -1682,6 +1682,9 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                     );
                     run.context
                         .set(&format!("node.{node_id}.nudge.delivery"), "claimed");
+                    run.context
+                        .set(&format!("node.{node_id}.nudge.task_id"), task_id.clone());
+                    set_step(run, &mut t, node_id, StepStatus::Running);
                     t.context_changed = true;
                     t.effects
                         .push(nudge_effect(node_id, target_agent_id, task_id));
@@ -1762,7 +1765,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                     );
                     t.context_changed = true;
                     let error = format!(
-                        "Agent finished without saving its result file; reminder {count} of 2 sent."
+                        "Agent finished without a usable result file; reminder {count} of 2 sent."
                     );
                     if let Some(step) = run.step_mut(node_id) {
                         step.status = StepStatus::Running;

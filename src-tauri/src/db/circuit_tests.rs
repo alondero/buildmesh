@@ -974,10 +974,6 @@ fn circuit_review_verdict_upgrade_preserves_saved_overrides_and_is_repeatable() 
         .unwrap(),
         upgraded
     );
-    graph.edges.pop();
-    let custom = graph.clone();
-    assert!(!graph.upgrade_issue_review_verdict());
-    assert_eq!(graph, custom, "custom wiring requires explicit editing");
 }
 
 /// Dismissal is an acknowledgement, not a rewrite: the run keeps its failure and

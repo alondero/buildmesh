@@ -2,6 +2,7 @@ import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 import { useAgentNodeStore, useAllAgentNodes, type AgentNode } from '../../stores/agentNodeStore';
 import { useMeshStore, type Mesh } from '../../stores/meshStore';
+import { enterMesh } from '../../lib/navigation';
 import { useUIStore } from '../../stores/uiStore';
 import { deriveScope, resolveSingleNode, type DerivedScope } from '../../lib/viewModes';
 import { useClickOutside } from '../../hooks/useClickOutside';
@@ -30,8 +31,8 @@ import { dropdownId } from '../../lib/dropdownId';
  *
  * ## The picker
  *
- * Choosing a Mesh calls `uiStore.enterMeshScope` and nothing else — the same
- * store operation the sidebar Mesh row, the sidebar's Mesh-lens Probe
+ * Choosing a Mesh calls `navigation.enterMesh` and nothing else — the same
+ * navigation intent the sidebar Mesh row, the sidebar's Mesh-lens Probe
  * destinations and the omnibar's Mesh-scoped routes call (#2070 review,
  * extended by #2081 when the sidebar's four destination handlers were still
  * calling bare `selectMesh` and so diverged from the palette). That one
@@ -308,9 +309,6 @@ export function ScopeIndicator() {
   const gridStatusFilter = useUIStore(s => s.gridStatusFilter);
   const selectedMeshId = useMeshStore(s => s.selectedMeshId);
   const meshes = useMeshStore(s => s.meshes);
-  // Entering Mesh scope is one store operation (see the picker below); this
-  // component does not decide what re-picking a Mesh in scope means.
-  const enterMeshScope = useUIStore(s => s.enterMeshScope);
   const activeNodeId = useAgentNodeStore(s => s.activeNodeId);
   // `useShallow` on the element list, so a status flip re-renders this one
   // button while unrelated node writes (terminal output, circuit indicators)
@@ -436,13 +434,7 @@ export function ScopeIndicator() {
                 key={mesh.id}
                 type="button"
                 onClick={() => {
-                  // One store operation, shared with the sidebar and the
-                  // omnibar: a selection change moves the canvas through the
-                  // uiStore mesh→mode subscription, and re-picking the Mesh
-                  // already in scope returns the canvas to its grid (#2072).
-                  // The Probe destinations follow the selection itself
-                  // (#2073).
-                  enterMeshScope(mesh.id);
+                  enterMesh(mesh.id);
                   closeAndReturnFocus();
                 }}
                 data-testid={`scope-picker-mesh-${mesh.id}`}

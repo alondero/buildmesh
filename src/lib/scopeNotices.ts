@@ -32,9 +32,7 @@ export const SCOPE_NOTICE_PROVIDER = 'Scope';
 export const SEARCH_ESCAPE_NOTICE =
   'Search results span every Mesh — the search matches Agent Node names, not one Mesh.';
 
-/** Deleting the Mesh the user is looking at clears `selectedMeshId`, which the
- *  mesh→mode subscription turns into All Nodes. Named after what happened
- *  rather than after the deleted-slot bookkeeping behind it. */
+/** Names the move to All Nodes after deleting the selected Mesh. */
 export function meshDeletedScopeNotice(meshName: string): string {
   return `Mesh “${meshName}” was deleted — the canvas moved to All Nodes.`;
 }

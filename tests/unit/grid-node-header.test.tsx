@@ -391,6 +391,19 @@ describe('GridNodeHeader solo view (#65; View Modes wayfinder #982)', () => {
     expect(useUIStore.getState().viewMode).toBe('mesh');
   });
 
+  it('soloing a cross-mesh card preserves the selected mesh and return grid', () => {
+    useMeshStore.setState({ selectedMeshId: 999 });
+    useUIStore.setState({ viewMode: 'pinned', lastNonSingleMode: 'pinned' });
+    const { container } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
+    fireEvent.doubleClick(container.firstChild as Element);
+    expect(useMeshStore.getState().selectedMeshId).toBe(999);
+    expect(useUIStore.getState().viewMode).toBe('single');
+    expect(useAgentNodeStore.getState().activeNodeId).toBe(NODE.id);
+    fireEvent.doubleClick(container.firstChild as Element);
+    expect(useUIStore.getState().viewMode).toBe('pinned');
+    expect(useMeshStore.getState().selectedMeshId).toBe(999);
+  });
+
   it('the explicit button toggles Single and flips its label', () => {
     const { getByLabelText } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
     fireEvent.click(getByLabelText('Maximize agent node'));

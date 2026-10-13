@@ -88,13 +88,8 @@ export function CanvasSpawnMenu({ meshId }: CanvasSpawnMenuProps) {
     // silently spawns in the mesh root regardless of the user's
     // repository configuration. Senior-review finding.
     const useWorktree = altKey ? !targetMesh.use_worktree : targetMesh.use_worktree;
-    // The create→activate→select-mesh invariant (issue #283) lives
-    // entirely inside `selectProviderForMesh`: it creates the node,
-    // sets it active, then selects the mesh. The canvas surface
-    // delegates so the same ordering holds whether the spawn came
-    // from the sidebar's `+ ▾` or the canvas empty state. No
-    // separate `selectMesh` here — that would re-enter the
-    // invariant and race the action's own ordering.
+    // The store owns creation, navigation and spawning; the canvas and
+    // sidebar pass the same worktree override and initial prompt.
     try {
       await selectProviderForMesh(
         targetMesh.id,

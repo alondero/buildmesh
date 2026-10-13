@@ -15,13 +15,12 @@
 //   * a dismissed ("keep worktree") or successfully removed entry leaves the
 //     list, and the dialog closes when nothing is left.
 //
-// The backend suppresses repeated events for an unchanged blocker, so the
-// dialog is opened by an event *and* can be reopened later (the list is always
-// live).
+// The Notifications Probe opens this surface on explicit Resolve.
 
 import { create } from 'zustand';
 import * as api from '../lib/tauri';
-import { addToast } from './toastStore';
+import { addToast, useToastStore } from './toastStore';
+import { readWorktreeNotifications, worktreeNotices } from '../lib/worktreeNotifications';
 import type { PendingWorktreeRemoval } from '../types/generated/PendingWorktreeRemoval';
 import type { BlockingProcess } from '../types/generated/BlockingProcess';
 import type { WorktreeCleanupRetry } from '../types/generated/WorktreeCleanupRetry';
@@ -41,7 +40,7 @@ interface BlockedCleanupState {
   /** The process the user is being asked to confirm ending, if any. */
   pendingKill: { path: string; process: BlockingProcess } | null;
   /** Fetch the queue and open the dialog. */
-  open: () => Promise<void>;
+  open: (selectedPath?: string) => Promise<void>;
   close: () => void;
   retry: (path: string) => Promise<void>;
   dismiss: (path: string) => Promise<void>;
@@ -52,6 +51,8 @@ interface BlockedCleanupState {
   confirmRelease: () => Promise<void>;
 }
 
+let dialogRequest = 0;
+
 export const useBlockedCleanupStore = create<BlockedCleanupState>((set, get) => ({
   entries: [],
   isOpen: false,
@@ -60,13 +61,17 @@ export const useBlockedCleanupStore = create<BlockedCleanupState>((set, get) => 
   actionStatus: {},
   pendingKill: null,
 
-  open: async () => {
+  open: async (selectedPath) => {
+    const owner = ++dialogRequest;
     set({ isOpen: true, loading: true });
     try {
-      const entries = await api.listPendingWorktreeRemovals();
+      const entries = [...await readWorktreeNotifications()];
+      if (owner !== dialogRequest) return;
+      if (selectedPath) entries.sort((a, b) => Number(b.worktree_path === selectedPath) - Number(a.worktree_path === selectedPath));
       set({ entries, loading: false });
       if (entries.length === 0) set({ isOpen: false });
     } catch (error) {
+      if (owner !== dialogRequest) return;
       // A queue that cannot be read is not an empty queue. Keeping the dialog
       // up and saying so is the difference between "nothing is blocked" and
       // "we don't know" — the second must not hide the recovery surface for a
@@ -76,7 +81,7 @@ export const useBlockedCleanupStore = create<BlockedCleanupState>((set, get) => 
     }
   },
 
-  close: () => set({ isOpen: false }),
+  close: () => { ++dialogRequest; set({ isOpen: false, loading: false, pendingKill: null }); },
 
   retry: async (path) => {
     set((state) => ({ actionStatus: { ...state.actionStatus, [path]: 'Retrying…' } }));
@@ -94,6 +99,7 @@ export const useBlockedCleanupStore = create<BlockedCleanupState>((set, get) => 
     // round 1: the old UI collapsed every non-blocked outcome into "removed").
     const status: WorktreeCleanupRetry = result.status;
     if (status === 'removed') {
+      useToastStore.getState().resolveWorktreeNotification(path, 'Removed.');
       const remaining = get().entries.filter((entry) => entry.worktree_path !== path);
       set((state) => ({
         entries: remaining,
@@ -106,6 +112,10 @@ export const useBlockedCleanupStore = create<BlockedCleanupState>((set, get) => 
     }
     if (status === 'still-blocked' && result.record) {
       const record = result.record;
+      const notice = worktreeNotices([record])[0];
+      if (notice) addToast('Worktree', notice.message, 'warning', {
+        kind: 'worktree-cleanup', path: notice.path, nodeName: notice.nodeName, detail: notice.detail,
+      });
       set((state) => ({
         entries: state.entries.map((entry) => (entry.worktree_path === path ? record : entry)),
         blockers: withoutKey(state.blockers, path),
@@ -114,17 +124,19 @@ export const useBlockedCleanupStore = create<BlockedCleanupState>((set, get) => 
       return;
     }
     if (status === 'gone') {
+      useToastStore.getState().resolveWorktreeNotification(path, 'No longer awaiting cleanup.');
       const remaining = get().entries.filter((entry) => entry.worktree_path !== path);
       set((state) => ({
         entries: remaining,
         blockers: withoutKey(state.blockers, path),
-        actionStatus: { ...state.actionStatus, [path]: 'Already gone.' },
+        actionStatus: { ...state.actionStatus, [path]: 'No longer queued.' },
         isOpen: remaining.length > 0,
       }));
-      addToast('Worktree', `Nothing left to retry at ${path} — it was already cleaned.`, 'info');
+      addToast('Worktree', `Nothing left to retry at ${path} — cleanup is no longer queued.`, 'info');
       return;
     }
     if (status === 'claimed') {
+      useToastStore.getState().resolveWorktreeNotification(path, 'Left alone: a live agent now owns this worktree.');
       // A live agent now owns this directory (issue #653): the tombstone was
       // dequeued and the directory deliberately left alone.
       const remaining = get().entries.filter((entry) => entry.worktree_path !== path);
@@ -163,6 +175,7 @@ export const useBlockedCleanupStore = create<BlockedCleanupState>((set, get) => 
       // the entry stays visible (issue #2139 review round 2).
       const result = await api.dismissWorktreeCleanup(path);
       if (result.cancelled) {
+        useToastStore.getState().resolveWorktreeNotification(path, result.message);
         const remaining = get().entries.filter((entry) => entry.worktree_path !== path);
         set((state) => ({
           entries: remaining,
@@ -235,9 +248,7 @@ function withoutKey<T>(map: Record<string, T>, key: string): Record<string, T> {
   return next;
 }
 
-/** Opens the blocked-cleanup dialog from a non-React caller (the
- *  `worktree-cleanup-failed` event listener in App.tsx), mirroring
- *  `requestWorktreeCloseAction`. */
-export function openBlockedCleanups(): void {
-  void useBlockedCleanupStore.getState().open();
+/** Explicit recovery entrypoint; failure events only record notifications. */
+export function openBlockedCleanups(selectedPath?: string): void {
+  void useBlockedCleanupStore.getState().open(selectedPath);
 }

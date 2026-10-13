@@ -1,5 +1,5 @@
 import { useAgentNodeStore } from '../stores/agentNodeStore';
-import { useNodeActivityStore } from '../stores/nodeActivityStore';
+import { focusNode } from './navigation';
 import { useMeshStore } from '../stores/meshStore';
 import { useUIStore } from '../stores/uiStore';
 import type { NonSingleViewMode } from '../stores/uiStore';
@@ -187,5 +187,5 @@ export async function triggerNewAgentShortcut(): Promise<void> {
   const provider =
     activeNode?.provider ?? (await meshStore.getDefaultProvider(mesh.id));
   const node = await nodeStore.selectProviderForMesh(mesh.id, mesh.name, mesh.path, provider, undefined);
-  if (node?.id !== undefined) useNodeActivityStore.getState().activateNode(node.id);
+  if (node?.id !== undefined) focusNode(node.id);
 }

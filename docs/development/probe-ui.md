@@ -13,6 +13,17 @@ The canvas exposes five **View Modes** (wayfinder #982; state model #983; render
 
 The five-segment control is the bespoke `ViewModeSwitcher` in the title bar; the adjacent scope indicator names that scope (the Mesh, or an honest cross-Mesh label carrying an Agent Node count) and doubles as the Mesh picker, so choosing a Mesh is one write that moves the canvas and the Mesh-owned Probe destinations together (#2074, #2077). A search that escapes Mesh scope, and deleting the Mesh the canvas was showing, announce the move instead of changing the view silently (#2076).
 
+`src/lib/navigation.ts` owns desktop navigation across the mesh, agent activity,
+View Mode and Probe stores. `focusNode` can keep the current grid, follow the
+node into its mesh, or solo it; following a node from Single preserves the
+selected grid and its return mode. `enterMesh` restores the chosen mesh grid,
+optionally focusing a node and opening a Probe destination. `revealRun` selects
+the owning mesh before requesting the run in Circuits. Store setters retain
+local invariants, including All Nodes clearing mesh selection; mesh selection
+no longer drives View Mode through a cross-store subscription. Lifecycle
+operations load navigation lazily rather than making the mesh store import
+the UI store during initialization. Mobile navigation is separate.
+
 ## Probe Context Lenses (issue #1456)
 Probe destinations have explicit ownership in `src/lib/probeContext.ts`; the
 complete `PROBE_TAB_DEFINITIONS` record is the source of truth for ownership
@@ -21,7 +32,8 @@ baseline, selection-following, and statefulness. The three lenses are
 `Host` (machine-wide provider/account/runtime state), `Mesh` (one repository,
 its configuration, GitHub feeds, worktrees, automation, and notes), and
 `Agent` (one Agent Node's changes and actions). Agent History is a Host finder
-with an explicit repository filter and a separate discovered-session source. Usage is
+with an explicit repository filter and a separate discovered-session source. Notifications is a fixed Host destination across meshes, reached from the bell
+immediately left of Zoom or the tool palette. Usage is
 Host-lens and must never display or infer a Mesh name. Project Files is
 Mesh-owned but may show a focused Agent Node's working tree; Agent Changes is
 Agent-lens and uses the node-base baseline. The `useProbeContext` hook is the
@@ -62,6 +74,34 @@ pure launchability predicate, and configuration-specific errors retain their
 remediation. The cheap catalog reads the default WSL distribution only if
 startup has already observed it; it never initializes discovery itself.
 Failed preferences disable writes, and retries/unmount invalidate stale reads.
+
+## Notifications
+
+The Notifications Probe puts actionable worktree problems before recent toast
+activity. `toastStore.addToast` captures history in the same transition as the
+visible toast, before the three-toast cap. Dismissal and expiry affect the toast
+stack only. History and read state persist locally; the newest 100 ordinary or
+resolved records are retained alongside all unresolved worktree problems. Mark
+all read and Clear read preserve unresolved problems. The bell prioritizes an
+amber count of unresolved worktrees, otherwise an unread count. Storage failures
+retain the in-memory view.
+
+Worktree failure events record an actionable notification without opening the
+recovery dialog. Resolve refreshes the live queue and opens the existing cleanup
+dialog with the selected worktree first. Definitive Retry/Keep replies update
+the notification with their distinct outcomes; failed retries and failed restores
+retain the problem. Startup, 30-second polling, opening the destination and
+manual Refresh reconcile against the durable queue, restoring failures after
+restart and following automatic recovery. Reads are owned by the latest request
+and fenced by a worktree revision so an older snapshot cannot hide a newer
+failure or resurrect a manual resolution. A read failure preserves last known
+problems and shows a retryable alert outside the scroller. Queue absence means
+only that cleanup is no longer pending, without claiming how it ended.
+
+The destination uses the standard Probe shell, tool rail and 240–720px resize
+bounds. Its toolbar and footer stay pinned around one inner scroller; diagnostic
+text and action rows wrap at the minimum width. The recovery modal is loaded
+after explicit Resolve.
 
 ## Configuration vs maintenance destinations (issue #1460, ADR-0038)
 Two Mesh-lens destinations are split by job and must never merge again:

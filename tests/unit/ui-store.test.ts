@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { useUIStore, type DiffContext } from '../../src/stores/uiStore';
+import { enterMesh } from '../../src/lib/navigation';
 import { useMeshStore } from '../../src/stores/meshStore';
 import { useToastStore } from '../../src/stores/toastStore';
 import { SCOPE_NOTICE_PROVIDER } from '../../src/lib/scopeNotices';
@@ -27,9 +28,6 @@ describe('useUIStore', () => {
   describe('View Modes (wayfinder #982 / #983)', () => {
     beforeEach(() => {
       localStorage.removeItem('buildmesh.view-mode');
-      // meshStore FIRST: the uiStore mesh-subscription fires synchronously
-      // on a selectedMeshId change and would otherwise clobber the viewMode
-      // set below. uiStore's own setState is the final authority.
       useMeshStore.setState({ selectedMeshId: null });
       useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all' });
     });
@@ -67,9 +65,6 @@ describe('useUIStore', () => {
     });
 
     it('setViewMode is idempotent — no subscriber notification on a same-mode call', () => {
-      // The meshStore sync subscription fires on every sidebar selection
-      // change; without this guard a re-select of the same mesh would
-      // re-notify every uiStore subscriber and re-render the canvas.
       useUIStore.setState({ viewMode: 'mesh' });
       let notifyCount = 0;
       const unsub = useUIStore.subscribe(() => { notifyCount += 1; });
@@ -91,45 +86,21 @@ describe('useUIStore', () => {
       expect(localStorage.getItem('buildmesh.view-mode')).toBeNull();
     });
 
-    describe('sidebar sync (one filter, two controls)', () => {
-      it('selecting a mesh switches the canvas to Mesh Grid', () => {
-        useMeshStore.getState().selectMesh(7);
-        expect(useUIStore.getState().viewMode).toBe('mesh');
-      });
-
-      it('clearing the selection (re-click deselect) switches to All Nodes', () => {
-        useMeshStore.getState().selectMesh(7);
-        expect(useUIStore.getState().viewMode).toBe('mesh');
-        useMeshStore.getState().selectMesh(null);
-        expect(useUIStore.getState().viewMode).toBe('all');
-      });
-
-      it('a mesh selection switches modes even out of Single', () => {
-        // A sidebar mesh click always means "show me this mesh" (#983) —
-        // Single offers no resistance.
-        useUIStore.getState().setViewMode('single');
-        useMeshStore.getState().selectMesh(7);
-        expect(useUIStore.getState().viewMode).toBe('mesh');
-      });
-
-      it('a same-value selectMesh does not clobber the current mode', () => {
-        // zustand notifies subscribers on every `set`, even unchanged ones —
-        // the subscription's prevState comparison is what keeps a no-op
-        // selectMesh(null) from yanking the user out of Pinned.
-        useUIStore.setState({ viewMode: 'pinned' });
-        useMeshStore.getState().selectMesh(null);
-        expect(useUIStore.getState().viewMode).toBe('pinned');
-      });
-    });
-
     describe('setViewMode("all") invariant (issue #1002)', () => {
       // The All Nodes invariant — `viewMode === 'all' ⟹ selectedMeshId
       // === null` — is enforced at the transition so every caller
       // (switcher, Pinned empty state, omnibar, keyboard cycle) gets it
       // for free. The reverse is NOT true: a null selectedMeshId is
       // also valid in `pinned`, `filtered`, and `single` modes.
+      it('repairs an All Nodes selection on a same-mode request', () => {
+        useMeshStore.setState({ selectedMeshId: 7 });
+        useUIStore.setState({ viewMode: 'all' });
+        useUIStore.getState().setViewMode('all');
+        expect(useMeshStore.getState().selectedMeshId).toBeNull();
+      });
+
       it('clears the mesh selection when switching to All Nodes', () => {
-        useMeshStore.getState().selectMesh(7);
+        enterMesh(7);
         expect(useUIStore.getState().viewMode).toBe('mesh');
         useUIStore.getState().setViewMode('all');
         expect(useMeshStore.getState().selectedMeshId).toBeNull();
@@ -140,7 +111,7 @@ describe('useUIStore', () => {
         // The invariant is forward-only — a switch to Pinned/Filtered/
         // Mesh/Single must leave selectedMeshId alone so the sidebar
         // highlight and the canvas stay coupled.
-        useMeshStore.getState().selectMesh(7);
+        enterMesh(7);
         useUIStore.setState({ viewMode: 'all' });
         useUIStore.getState().setViewMode('pinned');
         expect(useMeshStore.getState().selectedMeshId).toBe(7);
@@ -611,9 +582,6 @@ describe('useUIStore', () => {
   describe('scope-change notices (#2076)', () => {
     beforeEach(() => {
       localStorage.removeItem('buildmesh.view-mode');
-      // meshStore FIRST: the uiStore mesh→mode subscription fires
-      // synchronously on a selection change and would clobber the viewMode
-      // set below.
       useMeshStore.setState({ selectedMeshId: null });
       useUIStore.setState({
         viewMode: 'all',
@@ -703,16 +671,9 @@ describe('useUIStore', () => {
     });
   });
 
-  // "Enter Mesh scope for Mesh X" is ONE store operation. The sidebar, the
-  // title-bar picker, the omnibar's Mesh-scoped routes and the `view-mesh`
-  // command all route through it, so the same selection means the same scope
-  // change everywhere (#2070 review — the entrypoints had drifted into three
-  // behaviours, one of which still guessed a Mesh).
-  describe('enterMeshScope', () => {
+  describe('enterMesh', () => {
     beforeEach(() => {
       localStorage.removeItem('buildmesh.view-mode');
-      // meshStore FIRST: the mesh→mode subscription fires synchronously on a
-      // selection change and would clobber the viewMode set below it.
       useMeshStore.setState({ selectedMeshId: null });
       useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all', openScopePickerRequest: 0 });
     });
@@ -721,23 +682,19 @@ describe('useUIStore', () => {
       useMeshStore.setState({ selectedMeshId: 1 });
       useUIStore.setState({ viewMode: 'pinned', lastNonSingleMode: 'pinned' });
 
-      useUIStore.getState().enterMeshScope(7);
+      enterMesh(7);
 
       expect(useMeshStore.getState().selectedMeshId).toBe(7);
       expect(useUIStore.getState().viewMode).toBe('mesh');
     });
 
-    // The mesh→mode subscription short-circuits on an unchanged
-    // `selectedMeshId`, so the View Mode setter is the only thing that can
-    // honour the re-click (#2072). Each cross-Mesh mode that legitimately
-    // keeps a Mesh selected is covered.
     it.each(['pinned', 'filtered', 'single'] as const)(
       'returns the canvas to that Mesh Grid when the already-selected Mesh is chosen from %s',
       (mode) => {
         useMeshStore.setState({ selectedMeshId: 7 });
         useUIStore.setState({ viewMode: mode, lastNonSingleMode: mode === 'single' ? 'mesh' : mode });
 
-        useUIStore.getState().enterMeshScope(7);
+        enterMesh(7);
 
         expect(useUIStore.getState().viewMode).toBe('mesh');
         expect(useMeshStore.getState().selectedMeshId).toBe(7);
@@ -748,7 +705,7 @@ describe('useUIStore', () => {
       useMeshStore.setState({ selectedMeshId: 7 });
       useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
 
-      useUIStore.getState().enterMeshScope(7);
+      enterMesh(7);
 
       expect(useUIStore.getState().viewMode).toBe('mesh');
       expect(useMeshStore.getState().selectedMeshId).toBe(7);
@@ -758,7 +715,7 @@ describe('useUIStore', () => {
     // inside `setViewMode` (issue #1002). Entering Mesh scope from there is a
     // real selection change, so there is nothing sticky to restore.
     it('enters Mesh Grid from All Nodes by selecting the Mesh the caller named', () => {
-      useUIStore.getState().enterMeshScope(7);
+      enterMesh(7);
 
       expect(useMeshStore.getState().selectedMeshId).toBe(7);
       expect(useUIStore.getState().viewMode).toBe('mesh');
@@ -772,7 +729,7 @@ describe('useUIStore', () => {
       useMeshStore.setState({ selectedMeshId: 7 });
       useUIStore.setState({ viewMode: 'pinned', lastNonSingleMode: 'pinned' });
 
-      useUIStore.getState().enterMeshScope(7);
+      enterMesh(7);
 
       expect(useUIStore.getState().openScopePickerRequest).toBe(0);
       expect(useMeshStore.getState().selectedMeshId).toBe(7);

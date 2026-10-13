@@ -98,8 +98,13 @@ export type FileDiffStatus =
   | 'untracked';
 
 // Agent Node — renamed from `*Session` to `*AgentNode` in issue #490.
-export const createAgentNode = (meshId: number, name: string, path: string, branch: string, provider?: string, useWorktree?: boolean, configurationId?: string) =>
-  _invoke<AgentNode>('create_agent_node', { meshId, name, path, branch, provider, useWorktree, configurationId });
+export const createAgentNode = (meshId: number, name: string, path: string, branch: string, provider?: string, useWorktree?: boolean, configurationId?: string, initialPrompt?: string) => {
+  const trimmed = initialPrompt?.trim() ?? '';
+  return _invoke<AgentNode>('create_agent_node', {
+    meshId, name, path, branch, provider, useWorktree, configurationId,
+    ...(trimmed !== '' ? { initialPrompt: trimmed } : {}),
+  });
+};
 
 export const listAgentNodes = () =>
   _invoke<AgentNode[]>('list_agent_nodes');

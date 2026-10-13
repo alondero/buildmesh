@@ -105,8 +105,11 @@ pub(crate) fn paste_text_for(adapter: &dyn AgentProvider, text: &str) -> String 
 /// evidence ledger (`submission_digest`) and the bytes staged into the PTY
 /// (`injection_payload`) operate on the exact same transformed text. Specialized
 /// harnesses with custom composer sanitation (such as Codex's split-marker handling)
-/// transform text independently for the PTY by normalizing CRLF/CR to LF, stripping
-/// terminal CSI escape sequences, and dropping non-tab/non-newline control characters.
+/// additionally transform the staged body by stripping terminal CSI escape
+/// sequences and dropping non-tab/non-newline control characters; their line
+/// endings stay whatever [`PreparedPrompt::prepare`] resolved, because the
+/// composer's own paste count is newline-normalized and so does not observe the
+/// ending that ConPTY needs (issue #2199).
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct PreparedPrompt {
     node_id: i64,
@@ -267,7 +270,9 @@ fn stage_prompt_write(
         } => {
             // Codex sanitizes each burst separately. Transform the body before
             // the PTY write so a split CSI cannot change what the proof counts.
-            injection_payload(&std::mem::take(&mut rendered.composer_text))
+            // The proof itself (CountedPasteText) is newline-normalized, so the
+            // CR endings ConPTY requires leave the marker count untouched.
+            injection_payload(&std::mem::take(&mut rendered.payload))
         }
         _ => injection_payload(prompt.text()),
     };
@@ -465,24 +470,44 @@ fn rendered_paste_visible(
 #[derive(Debug)]
 struct RenderedPastePrompt {
     text: CountedPasteText,
-    composer_text: String,
+    /// The sanitized body staged into the PTY, carrying the line endings the
+    /// harness's composer needs. Drained by [`stage_prompt_write`].
+    payload: String,
 }
 
-// Codex 0.160.1 / 0.162.1 apply_paste normalizes newlines to LF, then sanitize_user_text
-// removes CSI sequences and controls. Its marker counts the resulting text.
-fn codex_composer_text(prompt: &str) -> String {
-    let prompt = prompt.replace("\r\n", "\n").replace('\r', "\n");
+/// Strip terminal control text Codex's `sanitize_user_text` removes, keeping
+/// the line endings the caller supplied.
+///
+/// Codex sanitizes each paste burst independently, so this runs before the
+/// bracketed-paste markers are added: a CSI cut at a burst boundary cannot then
+/// leave printable fragments behind. Newlines and tabs survive, as in the
+/// composer.
+fn codex_sanitized_text(prompt: &str) -> String {
     let mut chars = prompt.chars().peekable();
     let mut sanitized = String::with_capacity(prompt.len());
     while let Some(ch) = chars.next() {
         if ch == '\x1b' && chars.next_if_eq(&'[').is_some() {
             // An unfinished CSI consumes the rest, matching the composer.
             let _ = chars.by_ref().find(|ch| ('@'..='~').contains(ch));
-        } else if matches!(ch, '\n' | '\t') || !ch.is_control() {
+        } else if matches!(ch, '\n' | '\r' | '\t') || !ch.is_control() {
             sanitized.push(ch);
         }
     }
     sanitized
+}
+
+/// The text Codex's composer holds and counts: CRLF and bare CR normalized to
+/// LF, then sanitized, exactly as `apply_paste` does before counting its
+/// `[Pasted Content N chars]` marker (Codex 0.160.1 / 0.162.1).
+///
+/// This is the *proof*, not the payload. Because the composer collapses every
+/// line ending to one LF before counting, the count is identical whether the
+/// PTY delivered CR, CRLF or LF — which is why the staged body can carry the
+/// CR endings ConPTY needs without moving this number (issue #2199).
+fn codex_composer_text(prompt: &str) -> String {
+    codex_sanitized_text(prompt)
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
 }
 
 #[derive(Debug)]
@@ -694,11 +719,14 @@ impl CountedPasteText {
 }
 
 impl RenderedPastePrompt {
+    /// `prompt` is the already-prepared text: [`PreparedPrompt::prepare`] has
+    /// resolved its line endings from the adapter's paste policy, so Codex's
+    /// staged body carries CR inside the bracketed paste.
     fn new(prompt: &str) -> Self {
         let composer_text = codex_composer_text(prompt);
         Self {
             text: CountedPasteText::new(&composer_text),
-            composer_text,
+            payload: codex_sanitized_text(prompt),
         }
     }
 
@@ -1011,10 +1039,34 @@ mod tests {
 
     #[test]
     fn harnesses_that_did_not_opt_in_keep_their_line_endings() {
-        use crate::agent::provider::adapters::{ANTHROPIC, CODEX};
+        use crate::agent::provider::adapters::ANTHROPIC;
         for text in ["a\r\nb", "a\nb"] {
             assert_eq!(paste_text_for(&ANTHROPIC, text), text);
-            assert_eq!(paste_text_for(&CODEX, text), text);
+        }
+    }
+
+    /// #2199: Codex needs CR inside its bracketed paste for the same ConPTY
+    /// reason Grok does, even though its own paste count is newline-normalized.
+    #[test]
+    fn codex_paste_text_uses_cr_like_grok() {
+        use crate::agent::provider::adapters::{CODEX, GROK};
+        assert_eq!(
+            paste_text_for(&CODEX, "one\r\ntwo\r\nthree"),
+            "one\rtwo\rthree"
+        );
+        assert_eq!(paste_text_for(&CODEX, "one\ntwo\nthree"), "one\rtwo\rthree");
+        assert_eq!(
+            paste_text_for(&CODEX, "one\r\ntwo\nthree\rfour"),
+            "one\rtwo\rthree\rfour"
+        );
+        assert_eq!(paste_text_for(&CODEX, "no newline"), "no newline");
+        // One policy, one behavior: the two CR-requiring harnesses agree.
+        for text in ["a\r\nb", "a\nb", "a\rb", "a\r\nb\nc\rd"] {
+            assert_eq!(
+                paste_text_for(&CODEX, text),
+                paste_text_for(&GROK, text),
+                "{text:?}"
+            );
         }
     }
 
@@ -1348,58 +1400,93 @@ mod tests {
         evaluator::unregister(id);
     }
 
+    /// #2199: a programmatic multiline prompt to a circuit-piloted Codex node
+    /// reached ConPTY as bare LF inside its bracketed paste, and Windows ConPTY
+    /// drops LF — the composer glued every line together. ConPTY evidence for
+    /// LF / CRLF / CR is in `docs/learning/grok-terminal-paste.md`.
+    ///
+    /// This runs the production path (`PreparedPrompt::prepare`, then
+    /// `stage_prompt_write`) and asserts the literal staged bytes. It does not
+    /// re-derive the defect: the glued composer outcome is a runtime CLI
+    /// property the probe establishes, while this pins the byte stream we send.
     #[test]
-    #[ignore = "#2199"]
-    fn codex_circuit_multiline_delivery_stages_bare_lf_payload() {
+    fn codex_circuit_multiline_delivery_stages_cr_and_never_bare_lf() {
         let _db = crate::db::test_support::isolated();
-        let path = std::env::temp_dir().join(format!("codex-repro-{}", std::process::id()));
-        let path = path.to_string_lossy();
-        let mesh = crate::db::create_mesh("codex repro mesh", &path).unwrap();
-        let node = crate::db::create_agent_node(
-            mesh.id,
-            "source",
-            &path,
-            "main",
-            crate::models::EnvType::Windows,
-            "codex",
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-        let id = node.id;
-        let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
-        evaluator::register(id);
+        for (label, prompt, staged) in [
+            ("lf", "line 1\nline 2", "\x1b[200~line 1\rline 2\x1b[201~"),
+            (
+                "crlf",
+                "line 1\r\nline 2",
+                "\x1b[200~line 1\rline 2\x1b[201~",
+            ),
+            ("cr", "line 1\rline 2", "\x1b[200~line 1\rline 2\x1b[201~"),
+        ] {
+            let id = codex_worker_node(&format!("codex-lf-repro-{label}"));
+            let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
+            evaluator::register(id);
 
-        let prompt = "line 1\r\nline 2";
-        let prepared = PreparedPrompt::prepare(id, prompt).unwrap();
-        let expected = registry.input_stamp(id).unwrap();
-        let _ = stage_prompt_write(&registry, &prepared, Some(&expected)).unwrap();
+            let prepared = PreparedPrompt::prepare(id, prompt).unwrap();
+            let expected = registry.input_stamp(id).unwrap();
+            let _ = stage_prompt_write(&registry, &prepared, Some(&expected)).unwrap();
 
-        let written = writes.recv_timeout(Duration::from_secs(1)).unwrap();
-        // #2199: codex_composer_text converts CRLF/CR to LF (\n), so the staged PTY
-        // payload contains bare LF (\x1b[200~line 1\nline 2\x1b[201~), which Windows
-        // ConPTY drops during bracketed paste. This assertion checks that bare LF is
-        // NOT sent (while allowing CRLF or CR), reproducing the defect until #2199 lands.
-        // Note: the glued-lines composer outcome caused by bare LF under Windows ConPTY
-        // is covered by the probe table in docs/learning/grok-terminal-paste.md; this test
-        // verifies the staged PTY byte stream.
-        let has_bare_lf = written
-            .iter()
-            .enumerate()
-            .any(|(i, &b)| b == b'\n' && (i == 0 || written[i - 1] != b'\r'));
-        assert!(
-            !has_bare_lf,
-            "staged PTY payload for Codex must not contain bare LF, which ConPTY drops in bracketed paste"
-        );
+            let written = writes.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert_eq!(
+                String::from_utf8(written.clone()).unwrap(),
+                staged,
+                "{label}: Codex must stage CR line endings inside the bracketed paste"
+            );
+            let has_bare_lf = written
+                .iter()
+                .enumerate()
+                .any(|(i, &b)| b == b'\n' && (i == 0 || written[i - 1] != b'\r'));
+            assert!(
+                !has_bare_lf,
+                "{label}: staged PTY payload for Codex must not contain bare LF, \
+                 which ConPTY drops in a bracketed paste"
+            );
 
-        evaluator::unregister(id);
-        registry.kill_session(id);
+            evaluator::unregister(id);
+            registry.kill_session(id);
+        }
+    }
+
+    /// #2199 follow-up: the split-marker proof must not move when the staged
+    /// payload carries CR. Codex normalizes CRLF and bare CR to LF *before*
+    /// counting its `[Pasted Content N chars]` marker, so one prompt delivered
+    /// with any line ending produces the same count and the same match.
+    ///
+    /// Each variant is built through the adapter's real paste policy, because
+    /// `RenderedPastePrompt::new` receives text `prepare` has already resolved.
+    #[test]
+    fn codex_split_marker_count_is_identical_for_cr_crlf_and_lf_payloads() {
+        use crate::agent::provider::adapters::CODEX;
+        let body = format!("Review this change\n{}", "x".repeat(1000));
+        let mut counts = Vec::new();
+        for (label, text) in [
+            ("lf", body.clone()),
+            ("crlf", body.replace('\n', "\r\n")),
+            ("cr", body.replace('\n', "\r")),
+        ] {
+            let prepared = paste_text_for(&CODEX, &text);
+            assert!(
+                !prepared.contains('\n'),
+                "{label}: prepare must leave no LF for ConPTY to drop"
+            );
+            let prompt = RenderedPastePrompt::new(&prepared);
+            assert_eq!(
+                prompt.payload, prepared,
+                "{label}: payload keeps the prepared body"
+            );
+            counts.push(prompt.text.offsets.len() - 1);
+            assert!(
+                prompt.visible(
+                    "› Review this change [Pasted Content 1000 chars]",
+                    Instant::now() + RENDERED_PASTE_TOTAL_BUDGET
+                ),
+                "{label}: the same marker must confirm every line ending"
+            );
+        }
+        assert_eq!(counts, [1019, 1019, 1019]);
     }
 
     #[test]
@@ -1755,16 +1842,16 @@ mod tests {
         let (registry, writes) = crate::agent::process::testing::capturing_registry(proxied_id);
         let prompt = "review the change\r\nwith context";
         evaluator::on_output(proxied_id, "old [Pasted Content 30 chars]");
-        let (_, readiness) = stage_prompt_write(
-            &registry,
-            &PreparedPrompt::from_raw(proxied_id, prompt),
-            None,
-        )
-        .unwrap()
-        .unwrap();
+        // A proxied `codex:minimax` node resolves the same Codex adapter, so it
+        // must stage CR endings too (#2199) — the gate still counts 30 chars.
+        let prepared = PreparedPrompt::prepare(proxied_id, prompt).unwrap();
+        assert_eq!(prepared.text(), "review the change\rwith context");
+        let (_, readiness) = stage_prompt_write(&registry, &prepared, None)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             writes.recv_timeout(Duration::from_secs(1)).unwrap(),
-            injection_payload("review the change\nwith context").into_bytes()
+            injection_payload("review the change\rwith context").into_bytes()
         );
         let PasteReadiness::RenderedMultiline {
             chars,
@@ -2454,11 +2541,7 @@ mod tests {
                 (*chars, *normalized_chars),
                 (composer_chars, composer_chars)
             );
-            assert!(split_marker_prompt
-                .as_ref()
-                .unwrap()
-                .composer_text
-                .is_empty());
+            assert!(split_marker_prompt.as_ref().unwrap().payload.is_empty());
             assert!(!rendered_paste_visible(
                 &format!("[Pasted Content {raw_chars} chars]"),
                 *chars,

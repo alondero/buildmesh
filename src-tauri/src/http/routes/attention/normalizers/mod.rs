@@ -131,6 +131,23 @@ pub(super) fn normalize(
     }
 }
 
+pub(super) fn reconciliation_session_id(
+    raw: Option<&Value>,
+    provider: &str,
+    stored: &str,
+) -> String {
+    // MiniMax can deliver its first Stop before identity capture. The route has
+    // already resolved its unique live workspace owner, and still fences the
+    // generation and conditional identity write before applying this observation.
+    if provider == "mcode" && stored.is_empty() {
+        return raw
+            .and_then(mcode::parse)
+            .and_then(|payload| hook_session_id_from_payload(&payload, provider))
+            .unwrap_or_default();
+    }
+    stored.to_owned()
+}
+
 pub(super) fn resolve_node(
     addressed: Option<crate::models::AgentNode>,
     raw: Option<&Value>,

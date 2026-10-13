@@ -4,7 +4,7 @@
  * The old `worktree-cleanup-failed` listener rendered one sentence with the
  * node name in it and nothing else. These tests pin that the alert names the
  * node, the full path, the failed step and the OS error, and that the
- * actionable dialog is actually opened.
+ * problem remains actionable without opening the recovery dialog.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -31,7 +31,7 @@ const PAYLOAD: WorktreeCleanupFailedPayload = {
 
 describe('blocked worktree cleanup alerts (#2139)', () => {
   beforeEach(() => {
-    useToastStore.setState({ toasts: [] });
+    useToastStore.setState({ toasts: [], notifications: [] });
     vi.clearAllMocks();
   });
 
@@ -45,7 +45,7 @@ describe('blocked worktree cleanup alerts (#2139)', () => {
     expect(message).toContain('os error 32');
   });
 
-  it('warns once and opens the blocked-cleanup dialog', async () => {
+  it('warns and records an actionable notification without opening the dialog', async () => {
     await reportBlockedWorktreeCleanup(PAYLOAD);
 
     const toasts = useToastStore.getState().toasts;
@@ -55,6 +55,9 @@ describe('blocked worktree cleanup alerts (#2139)', () => {
     expect(toasts[0].message).toContain('C:/repo/.claude/worktrees/agent-node');
 
     const { openBlockedCleanups } = await import('../../src/stores/blockedCleanupStore');
-    expect(openBlockedCleanups).toHaveBeenCalledTimes(1);
+    expect(openBlockedCleanups).not.toHaveBeenCalled();
+    expect(useToastStore.getState().notifications[0].action).toMatchObject({
+      kind: 'worktree-cleanup', path: PAYLOAD.worktree_path, nodeName: PAYLOAD.node_name,
+    });
   });
 });

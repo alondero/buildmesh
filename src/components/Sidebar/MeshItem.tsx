@@ -4,7 +4,6 @@ import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import type { Mesh } from '../../stores/meshStore';
-import { useUIStore } from '../../stores/uiStore';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import { getMeshColor } from '../../lib/meshColors';
 import { gitSync } from '../../lib/tauri';
@@ -77,7 +76,6 @@ interface MeshItemProps {
    *  own ordered members. */
   nodeClusters: NodeActivityCluster[];
   onActivateNode: (id: number) => void;
-  selectMesh: (id: number | null) => void;
   onDeleteNode: (e: React.MouseEvent, nodeId: number) => void;
   // Issue #378: opens the Probe Panel on the 🐙 Git Issues tab for this
   // mesh. Replaces the legacy `onOpenGitHubIssues` prop, which mounted
@@ -143,7 +141,6 @@ function areMeshItemPropsEqual(previous: MeshItemProps, next: MeshItemProps): bo
     && previous.onOpenPropertiesProbe === next.onOpenPropertiesProbe
     && previous.onOpenWorktreesProbe === next.onOpenWorktreesProbe
     && previous.onActivateNode === next.onActivateNode
-    && previous.selectMesh === next.selectMesh
     && previous.onDeleteNode === next.onDeleteNode
     && previous.getDefaultProvider === next.getDefaultProvider
   );
@@ -169,7 +166,6 @@ function MeshItemView({
   onOpenFilesProbe,
   nodeClusters,
   onActivateNode,
-  selectMesh,
   onDeleteNode,
   onOpenIssuesProbe,
   onOpenSessionHistoryProbe,
@@ -320,24 +316,9 @@ function MeshItemView({
     }
   };
 
-  // Issue #1748 — one id-keyed select handler for every row in this mesh,
-  // stable across renders (both captured actions are stable), so the
-  // memoized `NodeItem` rows can cover it by reference instead of
-  // receiving a fresh closure per row per render.
-  // Single mode stays single (wayfinder #982 / #983): it renders
-  // the active node, so the click retargets the solo view
-  // automatically — this replaces the old setMaximizedNode
-  // retarget. In any grid mode we also select the node's mesh,
-  // which flips the canvas to Mesh Grid via the uiStore sync
-  // (calling selectMesh unconditionally would break out of
-  // Single). Ctrl+Arrow from Single still exits in App.tsx —
-  // keyboard parity follow-up is #987.
-  const handleSelectNode = useCallback((nodeId: number, meshId: number) => {
+  const handleSelectNode = useCallback((nodeId: number) => {
     onActivateNode(nodeId);
-    if (useUIStore.getState().viewMode !== 'single') {
-      selectMesh(meshId);
-    }
-  }, [onActivateNode, selectMesh]);
+  }, [onActivateNode]);
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   // Issue #735 — the menu container ref lets us measure its rendered size

@@ -2683,7 +2683,7 @@ fn missing_result_file_gets_two_reminders_per_attempt_then_is_unverified() {
         vec![Effect::ContinueAgentTurn {
             node_id: "classify".into(),
             target_agent_id: 900,
-            prompt: "Save your final report, ending with the required result line, to C:/runs/run-42/classify-attempt1.result.md now using UTF-8 (overwrite it). The file is missing, blank, or not valid UTF-8. In Windows PowerShell, use Set-Content -Encoding UTF8. Do not redo the work.".into(),
+        prompt: "Save your final report, ending with the required result line, to C:/runs/run-42/classify-attempt1.result.md now using UTF-8 (overwrite it). The file is missing, blank, not valid UTF-8, or lacks a valid required result line. In Windows PowerShell, use Set-Content -Encoding UTF8. Do not redo the work.".into(),
         }]
     );
     assert_eq!(
@@ -2697,7 +2697,7 @@ fn missing_result_file_gets_two_reminders_per_attempt_then_is_unverified() {
     assert_eq!(status_of(&run, "classify"), StepStatus::Running);
     assert_eq!(
         run.step("classify").unwrap().error.as_deref(),
-        Some("Agent finished without saving its result file; reminder 1 of 2 sent.")
+        Some("Agent finished without a usable result file; reminder 1 of 2 sent.")
     );
 
     assert!(

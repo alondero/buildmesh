@@ -1,13 +1,22 @@
-# Buildmesh
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./docs/brand/wordmark-on-dark.png" />
+    <img alt="Buildmesh" src="./docs/brand/wordmark-on-light.png" width="420" />
+  </picture>
+</h1>
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./docs/brand/wordmark-on-dark.png" />
-  <img alt="Buildmesh" src="./docs/brand/wordmark-on-light.png" width="420" />
-</picture>
-
-Buildmesh is a Tauri desktop app for orchestrating multiple AI coding agents — **Claude Code, Codex, Antigravity, OpenCode, Cursor, Grok Code, Kimi Code, MiniMax Code, DeepSeek Harness, Command Code, Freebuff, Cline, Meta Muse**, and a plain **Terminal** harness — across multiple meshes at the same time. It runs each agent as a durable process in a persistent xterm.js terminal, isolates work via Git worktrees, and exposes a tiled grid view so you can watch all of them at once.
-
+Run AI coding agents side by side in persistent terminals, with Git worktrees keeping their changes apart.
 If you use Claude Code / Antigravity / OpenCode from your shell and find yourself `tmux`-ing, copy-pasting between tabs, or losing context when a long-running agent restarts — Buildmesh is what that should look like.
+
+| Agent grid | Spawn menu | Changed files |
+|---|---|---|
+| [![Coding sessions side by side in the Buildmesh grid](docs/media/v1.4.0/grid.png)](docs/media/v1.4.0/grid.png) | [![Choose an installed agent CLI from the Buildmesh spawn menu](docs/media/v1.4.0/spawn-menu.png)](docs/media/v1.4.0/spawn-menu.png) | [![Inspect changed files and a Git diff in Buildmesh](docs/media/v1.4.0/changed-files.png)](docs/media/v1.4.0/changed-files.png) |
+
+Buildmesh is a Tauri desktop app for orchestrating multiple AI coding agents — **Claude Code, Codex, Antigravity, OpenCode, Cursor, Grok Code, Kimi Code, MiniMax Code, DeepSeek Harness, Command Code, Freebuff, Cline, Meta Muse**, and a plain **Terminal** harness — across multiple meshes at the same time. It runs each agent as a durable process in a persistent xterm.js terminal, isolates work via Git worktrees, and exposes a tiled grid view so you can orchestrate them all at once.
+
+![30-second walkthrough of Buildmesh](docs/media/v1.4.0/buildmesh-demo.webp)
+
+[Watch the full-resolution video](docs/media/v1.4.0/buildmesh-demo.mp4) · [Start here / how to report](https://github.com/alondero/buildmesh/discussions/2251)
 
 [![Build](https://github.com/alondero/buildmesh/actions/workflows/build.yml/badge.svg)](https://github.com/alondero/buildmesh/actions/workflows/build.yml)
 [![Latest release](https://img.shields.io/github/v/release/alondero/buildmesh?display_name=tag)](https://github.com/alondero/buildmesh/releases/latest)
@@ -18,10 +27,6 @@ If you use Claude Code / Antigravity / OpenCode from your shell and find yoursel
 - **Something is wrong:** check [Troubleshooting](docs/troubleshooting.md).
 - **Contributors:** read the [developer guide](docs/development/README.md) and [contribution contract](CONTRIBUTING.md).
 - **Maintainers:** use the [release guide](docs/development/releasing.md), [release notes](docs/releases/README.md), and [documentation standards](docs/documentation-standards.md).
-
-## Install Buildmesh
-
-Buildmesh ships as a Windows installer through GitHub Releases and is upgraded in place by the in-app updater. Each release publishes an updater feed, and every update is verified with the app's own minisign signature before it installs. OS code-signing is **not** in place yet, so first launch shows a SmartScreen / Gatekeeper warning — see [SmartScreen & Gatekeeper warnings](#smartscreen--gatekeeper-warnings-unsigned-installers).
 
 ### Download
 
@@ -34,12 +39,16 @@ Grab the latest installer from the [GitHub Releases page](https://github.com/alo
 
 Each installer ships with its matching `.sig` (the **auto-updater** signature — see [Upgrade](#upgrade)) and a `latest.json` updater feed; existing installs read that feed to detect new releases.
 
+## Install Buildmesh
+
+Buildmesh ships as a Windows installer through GitHub Releases and is upgraded in place by the in-app updater. Each release publishes an updater feed, and every update is verified with the app's own minisign signature before it installs. OS code-signing is **not** in place yet, so first launch shows a SmartScreen / Gatekeeper warning — see [SmartScreen & Gatekeeper warnings](#smartscreen--gatekeeper-warnings-unsigned-installers).
+
 ### Supported platforms
 
 | Platform | Status | How to get it |
 |---|---|---|
-| **Windows 10/11** (x64) | **Stable** — installer shipped on every tag. | Download from the Releases page above. |
-| **WSL2** (hybrid Windows/WSL mode) | **Stable** on Windows 10/11 hosts — Linux agents run inside WSL2, the Windows-side backend drives the UI. | Install Windows first, then enable WSL2 from Mesh settings. |
+| **Windows 10/11** (x64) | **Early access** — installer shipped on every tag. | Download from the Releases page above. |
+| **WSL2** (hybrid Windows/WSL mode) | **Early access** on Windows 10/11 hosts — Linux agents run inside WSL2, the Windows-side backend drives the UI. | Install Windows first, then enable WSL2 from Mesh settings. |
 | macOS (Apple Silicon + Intel) | **Preview** — the macOS bundles compile on every weekly CI smoke run, but no signed `.dmg` is published yet. | [Build from source](#build-from-source). |
 | Linux (Ubuntu) | **Preview** — same caveat as macOS. | [Build from source](#build-from-source). |
 
@@ -125,6 +134,7 @@ To upgrade manually, install the new `.msi` or `-setup.exe` over the existing in
 - **Terminal zoom slider**: a *Zoom* button in the title bar opens a text-size slider for every terminal pane (agent and build/run alike). It stays in step with the `Ctrl/Cmd +` / `Ctrl/Cmd -` / `Ctrl/Cmd 0` shortcuts and the `Ctrl`/`Cmd` + mouse-wheel gesture, and your chosen size is remembered across launches.
 
 ### Visibility & review
+- **Notifications**: the bell immediately left of Zoom opens a resizable side panel with worktree problems first and recent toast history below. Toasts stay reviewable after dismissal. Choose Resolve to inspect or retry a blocked worktree cleanup; failures no longer interrupt you with a modal. Mark all read and Clear read keep unresolved problems visible.
 - **File explorer with inline diff**: per-mesh and per-node file trees with line-addition/deletion counts and a side-by-side diff viewer.
 - **Changed Files panel**: aggregated view of modified files across the whole mesh.
 - **Mesh-level PR creation**: uncommitted-changes indicator + `gh pr create` from Mesh Properties.

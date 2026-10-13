@@ -1,3 +1,124 @@
+#[test]
+fn minimax_stop_uses_canonical_background_receipts() {
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("messages.jsonl");
+    let launch = serde_json::json!({"message":{"role":"toolResult","timestamp":100,
+        "details":{"status":"auto_promoted","task_id":"bg_owned"},"content":[]}})
+    .to_string();
+    for compatible_path in [
+        None,
+        Some("".to_owned()),
+        Some(
+            dir.path()
+                .join("expired.compatible.jsonl")
+                .to_str()
+                .unwrap()
+                .to_owned(),
+        ),
+    ] {
+        let mut stop =
+            serde_json::json!({"hook_event_name":"Stop", "session_id":"mvs_owned", "cwd":"repo"});
+        if let Some(path) = compatible_path {
+            stop["transcript_path"] = path.into();
+        }
+        let normalize = || {
+            normalizers::normalize(Some(&stop), "mcode", |_| {
+            crate::services::transcript_reader::adapters::mcode::count_pending_background_tasks_in(
+                &transcript,
+                &dir.path().join("tasks"),
+            )
+        })
+        .classified
+        .decision
+        };
+        std::fs::write(&transcript, &launch).unwrap();
+        assert_eq!(normalize(), Decision::SuppressPendingBackground);
+        let terminal = serde_json::json!({"message":{"role":"toolResult","timestamp":200,
+        "details":{"status":"succeeded","task_id":"bg_owned"},"content":[]}})
+        .to_string();
+        std::fs::write(&transcript, format!("{launch}\n{terminal}")).unwrap();
+        assert_eq!(normalize(), Decision::Ready);
+        std::fs::write(&transcript, "{partial").unwrap();
+        assert_eq!(normalize(), Decision::MarkInput);
+    }
+}
+
+#[test]
+fn minimax_stop_waits_for_pending_foreground_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("messages.jsonl");
+    let stop = serde_json::json!({"hook_event_name":"Stop",
+        "session_id":"mvs_0123456789abcdef0123456789abcdef", "cwd":"repo"});
+    let normalize = || {
+        normalizers::normalize(Some(&stop), "mcode", |_| {
+            crate::services::transcript_reader::adapters::mcode::count_pending_background_tasks_in(
+                &transcript,
+                &dir.path().join("tasks"),
+            )
+        })
+        .classified
+    };
+    let background = concat!(
+        "{\"message\":{\"role\":\"toolResult\",\"timestamp\":100,\"details\":{\"status\":\"auto_promoted\",\"task_id\":\"bg_settled\"},\"content\":[]}}\n",
+        "{\"message\":{\"role\":\"toolResult\",\"timestamp\":200,\"details\":{\"status\":\"succeeded\",\"task_id\":\"bg_settled\"},\"content\":[]}}\n"
+    );
+    let call = serde_json::json!({"message":{"role":"assistant","timestamp":300,
+        "content":[{"type":"toolCall","id":"foreground","name":"bash","arguments":{}}]}});
+    let unrelated = serde_json::json!({"message":{"role":"toolResult","timestamp":400,
+        "toolCallId":"unrelated","content":[]}});
+    let matched = serde_json::json!({"message":{"role":"toolResult","timestamp":500,
+        "toolCallId":"foreground","content":[]}});
+    for prefix in [background, ""] {
+        let pending = format!("{prefix}{call}\n");
+        std::fs::write(&transcript, &pending).unwrap();
+        let classified = normalize();
+        assert_eq!(classified.decision, Decision::MarkInput);
+        assert_eq!(
+            classified.detail.kind,
+            Some(LifecycleKind::SignalUnavailable)
+        );
+        assert!(
+            classified.validated,
+            "an unavailable read retains the Stop's identity and turn fence"
+        );
+
+        std::fs::write(&transcript, format!("{pending}{unrelated}\n")).unwrap();
+        assert_eq!(normalize().decision, Decision::MarkInput);
+        std::fs::write(&transcript, format!("{pending}{unrelated}\n{matched}\n")).unwrap();
+        assert_eq!(normalize().decision, Decision::Ready);
+    }
+}
+
+#[test]
+fn minimax_first_stop_reads_the_ownership_resolved_session() {
+    let id = "mvs_0123456789abcdef0123456789abcdef";
+    let stop = serde_json::json!({"hook_event_name":"Stop", "session_id":id,
+        "cwd":"repo", "transcript_path":"compatible.jsonl"});
+    let session = normalizers::reconciliation_session_id(Some(&stop), "mcode", "");
+    let observed = normalizers::normalize(Some(&stop), "mcode", |_| {
+        assert_eq!(
+            session, id,
+            "first Stop must read its ownership-resolved canonical session"
+        );
+        Some(0)
+    });
+    assert_eq!(observed.classified.decision, Decision::Ready);
+    assert_eq!(
+        normalizers::reconciliation_session_id(Some(&stop), "mcode", "stored"),
+        "stored"
+    );
+    let invalid =
+        serde_json::json!({"hook_event_name":"Stop", "session_id":"untrusted", "cwd":"repo"});
+    assert_eq!(
+        normalizers::reconciliation_session_id(Some(&invalid), "mcode", ""),
+        ""
+    );
+    assert_eq!(
+        normalizers::reconciliation_session_id(Some(&stop), "anthropic", ""),
+        ""
+    );
+}
+
 fn apply_status_fixture(
     state: &mut crate::agent::hook_state::HookState,
     value: serde_json::Value,
@@ -1297,23 +1418,24 @@ fn empty_or_garbage_body_marks_input_with_degraded_health() {
 
 #[test]
 fn review_handoff_stop_after_reading_launch_examples_is_ready() {
-    // The fixture transcript intentionally contains a tool_result whose
-    // body *mentions* a background-task launch pattern in prose. The
-    // shared `count_pending_background_tasks` parser correctly extracts
-    // the launch id from the pattern (the same parser that handles
-    // real launches); a Stop hook firing with that transcript must
-    // therefore surface as `SuppressPendingBackground`, not `Ready`.
-    // The test name preserves the original intent (the parser should
-    // not be tricked by prose mentions of the launch pattern); the
-    // expectation was wrong, not the parser.
+    // The transcript is a Read of the reader's own source, so its
+    // `tool_result` *quotes* both launch phrasings as prose. No launch was
+    // issued and no notification can ever arrive for `xyz`, so the yield is
+    // not a background wait: Stop is `Ready`. Only a result correlated to the
+    // `Bash` call that launched a task counts (issue #2264).
     let transcript = tempfile::NamedTempFile::new().unwrap();
-    let record = serde_json::json!({"type":"user", "message":{"content":[{
-        "type":"tool_result", "content":"659\t// Command running in background with ID: xyz.\n681\tconst LAUNCH_MARKER: &str = \"You will be notified when it completes\";"
+    let call = serde_json::json!({"type":"assistant", "message":{"role":"assistant","content":[{
+        "type":"tool_use", "id":"t-read", "name":"Read",
+        "input":{"file_path":"F:\\src\\buildmesh\\src-tauri\\src\\services\\transcript_reader\\readers\\claude_code.rs","offset":659,"limit":24}
     }]}});
-    std::fs::write(transcript.path(), format!("{record}\n")).unwrap();
+    let result = serde_json::json!({"type":"user", "message":{"role":"user","content":[{
+        "type":"tool_result", "tool_use_id":"t-read",
+        "content":"659 // Command running in background with ID: xyz.\n681 const LAUNCH_MARKER: &str = \"You will be notified when it completes\";"
+    }]}});
+    std::fs::write(transcript.path(), format!("{call}\n{result}\n")).unwrap();
     let body = serde_json::json!({"hook_event_name":"Stop", "transcript_path":transcript.path()})
         .to_string();
-    assert_eq!(classify_decision(body.as_bytes(), "claude", crate::services::transcript_reader::adapters::claude_code::count_pending_background_tasks), Decision::SuppressPendingBackground);
+    assert_eq!(classify_decision(body.as_bytes(), "claude", crate::services::transcript_reader::adapters::claude_code::count_pending_background_tasks), Decision::Ready);
 }
 
 #[test]
@@ -1369,6 +1491,48 @@ fn stop_with_no_pending_tasks_is_ready() {
         classify_decision(&body, "anthropic", |_| Some(0)),
         Decision::Ready
     );
+}
+
+#[test]
+fn claude_stopped_background_task_releases_stop_and_idle_callbacks() {
+    use crate::services::transcript_reader::adapters::claude_code::count_pending_background_tasks;
+
+    // Sanitized launch/TaskStop/CI records from run 457, agent 5354.
+    let records: Vec<_> = include_str!(
+        "../../../../tests/fixtures/transcripts/claude_code/stopped_background_task.jsonl"
+    )
+    .lines()
+    .collect();
+    let transcript = tempfile::NamedTempFile::new().unwrap();
+    for (length, expected) in [
+        (2, Decision::SuppressPendingBackground),
+        (4, Decision::Ready),
+        (6, Decision::SuppressPendingBackground),
+        (7, Decision::Ready),
+    ] {
+        std::fs::write(transcript.path(), records[..length].join("\n")).unwrap();
+        for event in ["Stop", "Notification"] {
+            let body = serde_json::json!({
+                "hook_event_name": event,
+                "notification_type": "idle_prompt",
+                "transcript_path": transcript.path(),
+            });
+            let result =
+                normalizers::normalize(Some(&body), "anthropic", count_pending_background_tasks);
+            assert_eq!(
+                result.classified.decision, expected,
+                "{event} after {length} records"
+            );
+            assert_eq!(
+                result.classified.detail.kind,
+                Some(if expected == Decision::Ready {
+                    crate::agent::session_lifecycle::LifecycleKind::TurnCompleted
+                } else {
+                    crate::agent::session_lifecycle::LifecycleKind::BackgroundRunning
+                })
+            );
+        }
+    }
 }
 
 #[test]

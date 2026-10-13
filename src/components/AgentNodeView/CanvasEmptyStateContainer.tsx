@@ -37,7 +37,7 @@
 import { useMemo } from 'react';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
-import { useNodeActivityStore } from '../../stores/nodeActivityStore';
+import { focusNode } from '../../lib/navigation';
 import { ReadinessSteps } from './ReadinessSteps';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useUIStore } from '../../stores/uiStore';
@@ -128,7 +128,7 @@ export function CanvasEmptyStateContainer({
         const mesh = useMeshStore.getState().meshes.find(m => m.id === selectedMeshId) ?? useMeshStore.getState().meshes[0];
         if (!mesh) return;
         return useAgentNodeStore.getState().selectProviderForMesh(mesh.id, mesh.name, mesh.path, 'terminal')
-          .then(node => useNodeActivityStore.getState().activateNode(node.id))
+          .then(node => { focusNode(node.id); })
           // The store reports creation failures through App's error toast.
           .catch(() => {});
       },

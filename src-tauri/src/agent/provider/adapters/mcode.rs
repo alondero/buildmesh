@@ -1217,7 +1217,10 @@ mod tests {
                 HarnessLaunchInput {
                     platform,
                     runtime: EnvType::Windows,
-                    session: SessionIdModeRef::Resume("mvs_abc123"),
+                    session: SessionIdModeRef::Resume {
+                        id: "mvs_abc123",
+                        cause: crate::agent::spawn::ResumeCause::Explicit,
+                    },
                     config: &config,
                     prefill: Some("Continue the review"),
                     sandbox: false,
@@ -1246,7 +1249,10 @@ mod tests {
         };
         for session in [
             SessionIdModeRef::None,
-            SessionIdModeRef::Resume("mvs_abc123"),
+            SessionIdModeRef::Resume {
+                id: "mvs_abc123",
+                cause: crate::agent::spawn::ResumeCause::Explicit,
+            },
         ] {
             let prepared = default_prepare(
                 &MCODE,

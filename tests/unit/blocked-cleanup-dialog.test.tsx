@@ -209,7 +209,7 @@ describe('BlockedCleanupDialog (#2139)', () => {
     expect(screen.queryByRole('button', { name: /end process/i })).toBeNull();
   });
 
-  it('reports "already gone" rather than "removed" when the retry finds nothing', async () => {
+  it('reports an unqueued cleanup without claiming the folder was removed', async () => {
     openWith([ROW]);
     vi.mocked(api.retryWorktreeCleanup).mockReset().mockResolvedValue({ status: 'gone', record: null });
     render(<BlockedCleanupDialog />);
@@ -221,7 +221,7 @@ describe('BlockedCleanupDialog (#2139)', () => {
     );
     const toasts = useToastStore.getState().toasts;
     expect(
-      toasts.some((toast) => /already cleaned/i.test(toast.message)),
+      toasts.some((toast) => /cleanup is no longer queued/i.test(toast.message)),
       'a gone entry is not reported as removed',
     ).toBe(true);
     expect(toasts.some((toast) => /Worktree removed/i.test(toast.message))).toBe(false);

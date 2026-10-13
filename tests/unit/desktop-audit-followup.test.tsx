@@ -266,7 +266,7 @@ describe('October desktop audit follow-up', () => {
     render(<CanvasEmptyStateContainer selectedMeshId={1} agentNodes={[]} scope={emptyScope('all', 1, [])} />);
     const start = screen.getByRole('button', { name: 'Start Terminal' });
     fireEvent.click(start); fireEvent.click(start);
-    expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'create_agent_node')).toHaveLength(1);
+    await waitFor(() => expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'create_agent_node')).toHaveLength(1));
     expect(invoke).toHaveBeenCalledWith('create_agent_node', expect.objectContaining({ meshId: 1, provider: 'terminal', useWorktree: undefined }));
     expect((start as HTMLButtonElement).disabled).toBe(true);
     await act(async () => creating.reject(new Error('Repository unavailable')));
@@ -356,13 +356,12 @@ describe('October desktop audit follow-up', () => {
       return Promise.resolve(cmd === 'reopen_agent_node' ? { ...archived, status: 'suspended' } : []);
     });
     const spawn = vi.spyOn(useAgentNodeStore.getState(), 'spawnAgent').mockResolvedValue(undefined as never);
-    const activate = vi.spyOn(useNodeActivityStore.getState(), 'activateNode').mockImplementation(() => {});
     render(<AgentHistoryTab />);
     expect(await screen.findByText('Old-web-work')).toBeTruthy();
     fireEvent.change(screen.getByLabelText('History status'), { target: { value: 'archived' } });
     expect(screen.queryByText('API-error')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Reopen' }));
-    await waitFor(() => expect(activate).toHaveBeenCalledWith(4));
+    await waitFor(() => expect(useAgentNodeStore.getState().activeNodeId).toBe(4));
     expect(vi.mocked(invoke)).toHaveBeenCalledWith('reopen_agent_node', { nodeId: 4 });
     expect(useAgentNodeStore.getState().nodesById[4]).toMatchObject({ id: 4, status: 'suspended', cli_session_id: 'saved-session' });
     fireEvent.change(screen.getByLabelText('History status'), { target: { value: '' } });

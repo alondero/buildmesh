@@ -43,9 +43,15 @@ Use the smallest existing seam that hides the external dependency. Avoid exporti
 | Frontend + Rust | `scripts\check.ps1 all` (build + unit + integration + Rust + agent checks). This does not run Clippy, binding drift, or browser tests. |
 | Rust wire types | Regenerate via `cargo test`; inspect `git status --short -- src/types/generated` including new files and commit generated outputs. CI independently checks drift. |
 | Terminal rendering / browser events | `npx playwright test --project=verify-smoke` (Vite + mock IPC; no backend proof). |
-| Visible UI / real runtime | Read `.claude/skills/verify-ui/SKILL.md`; use the dev profile and functional assertions plus inspected screenshots. Full `chromium` e2e has additional runtime requirements; read the specs/config before running it. |
+| Visible UI | Check UI-only changes with `node scripts/ui-shot.mjs --mock --serve --mock-url http://127.0.0.1:3999 --out .tmp/ui-after.png --steps <steps.mjs>` first: real browser, fixture IPC, no native build. Inspect the screenshot, assert the changed behavior and record elapsed time in the PR. Read `.claude/skills/verify-ui/SKILL.md`. |
+| Real backend / runtime | Use the native dev profile when backend behavior is part of the change or a required acceptance check needs it: `scripts\run-dev.ps1 -Detach -CdpPort 9223`, then CDP functional assertions and inspected screenshots. Full `chromium` e2e has additional runtime requirements; read the specs/config before running it. Mock evidence cannot establish backend behavior. |
 
 Vitest defaults to threads, rejects zero discovered tests, and fails on unhandled errors. Do not weaken assertions, ignore errors globally, or change test discovery to get a green result. `cargo check`, `--no-run`, and successful compilation are not executed tests. A filtered Rust invocation that ran zero tests provides no behavioral evidence.
+
+For repeated browser checks, use `npm run dev:bg -- --port 3999` and
+`npm run dev:stop` rather than a foreground Vite command. Start waits for HTTP
+readiness and records its PID under `.harness/`; stop targets only the server
+owned by this worktree. One-shot `ui-shot --mock --serve` manages its own server.
 
 ## Evidence at handoff
 

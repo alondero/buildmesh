@@ -83,13 +83,15 @@ the agent authenticates against the right backend.
 **Per-provider expectations:**
 - **MiniMax** — passes when the prefill lands intact and the agent
   responds coherently.
-- **Kimi** — `KIMI.supports_prefill() == false`, so the orchestrator's
-  prefill gate in `spawn_with_intent` (in
+- **Kimi** — a create that carries an initial prompt (an issue, a handover,
+  a pull request, the omnibar, or mobile capture) is refused, and no node
+  is inserted. For a node that already exists, `KIMI.supports_prefill() == false`,
+  so the orchestrator's prefill gate in `spawn_with_intent` (in
   `src-tauri/src/agent/spawn/orchestrator.rs`) emits the WARN
   `spawn_with_intent: provider 'kimi' does not support prefill;
-  skipping N bytes` and drops the prefill. Kimi's interactive TUI
-  receives its own session bootstrap directly — this is by design, not
-  a regression.
+  skipping N bytes` and drops the prefill. That drop belongs to the spawn
+  pipeline. Kimi's interactive TUI receives its own session bootstrap
+  directly.
 
 ### Test 2 — Backend auth + identity query
 

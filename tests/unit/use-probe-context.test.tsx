@@ -317,6 +317,7 @@ describe('useProbeContext (issue #1456)', () => {
       'circuits',
       'files',
       'issues',
+      'notifications',
       'properties',
       'pulls',
       'review',
@@ -541,7 +542,7 @@ describe('useProbeContext (issue #1456)', () => {
 
     const hostTabs = (Object.keys(PROBE_TAB_DEFINITIONS) as ProbeTab[])
       .filter((tab) => PROBE_TAB_DEFINITIONS[tab].lens === 'host');
-    expect(hostTabs).toEqual(['usage', 'sessions']);
+    expect(hostTabs).toEqual(['usage', 'notifications', 'sessions']);
 
     for (const tab of hostTabs) {
       useUIStore.setState({ probeTab: tab });

@@ -58,6 +58,14 @@ The dev profile is separate from the stable profile. Use the repository scripts
 when possible because they build mobile assets, clear leaked test environment,
 select the safe Vitest pool, and handle Windows worktree behavior.
 
+For a persistent browser dev server, `npm run dev:bg` waits for readiness on
+`http://127.0.0.1:3999` and returns its PID and log path. `npm run dev:stop`
+stops the server recorded by this worktree. Native dev launches can use
+`scripts\run-dev.ps1 -Detach -CdpPort 9223` (or
+`scripts/run-dev.sh --detach` on macOS/Linux) to return after readiness.
+See the [development harness](../agents/development-harness.md#detached-dev-processes)
+for timeout and ownership details.
+
 ## Verification matrix
 
 Start with `npm run verify` for an active harness task, or pass
@@ -73,7 +81,8 @@ recovery. Focused commands below remain useful during iteration.
 | Rust | `scripts\check.ps1 rust` | Rust tests and generated TypeScript binding refresh |
 | Frontend + Rust | `scripts\check.ps1 all` | The default Windows green bar; see the engineering contract for exclusions |
 | Browser smoke | `npx playwright test --project=verify-smoke` | Real browser events with mock IPC; not backend proof |
-| Visible UI/runtime | Read `.claude/skills/verify-ui/SKILL.md` | Functional assertions and inspected screenshots against the dev profile |
+| Visible UI | `node scripts/ui-shot.mjs --mock --serve --mock-url http://127.0.0.1:3999 --out .tmp/ui-after.png --steps <steps.mjs>` | Mock-first functional assertions and inspected screenshots; no native build |
+| Real backend/runtime | Read `.claude/skills/verify-ui/SKILL.md` | Dev-profile checks when the backend is part of the change or required acceptance |
 
 `npm run lint` intentionally excludes Markdown. Documentation has its own
 `check:docs` gate so link and information-architecture failures are visible

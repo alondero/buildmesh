@@ -1,101 +1,116 @@
 /**
- * Static-analysis test: every `action` field in App.tsx's Tauri
- * global-shortcut `shortcuts` array MUST be a key in SHORTCUT_CATALOG.
+ * Catalog ↔ dispatch parity (issues #748 and #2240).
  *
- * Issue #748. The catalog test (`tests/unit/shortcut-catalog.test.ts`) pins
- * the *forward* direction — required entries by name, so an orphan catalog
- * entry that no binding wires up is caught. But nothing pinned the
- * *reverse* direction: a binding added to App.tsx without a catalog entry
- * would silently be omitted from the cheatsheet (the discoverability
- * surface the user opens with `?`). Code review was the only guard.
+ * The cheatsheet advertises a key the user can press, and the dispatch table
+ * is what makes it do something. If those two disagree the app lies to the
+ * user in one of two directions:
  *
- * This file closes the gap by reading `src/App.tsx` source directly,
- * extracting the `shortcuts` array literal at the global-shortcut
- * registration site, and asserting each entry's `action` field is present
- * as a key in `SHORTCUT_CATALOG`. The literal-regex shape matches the
- * sibling test `tests/unit/grid-shortcut-binding.test.ts` — keyed on the
- * `key:`-then-`action:` pair so a binding string appearing in a comment
- * or docblock doesn't satisfy the assertion.
+ *   - a binding with no catalog row — the gesture works but is undiscoverable;
+ *   - a catalog row with no handler — the cheatsheet advertises a key that
+ *     does nothing.
  *
- * Static-analysis shape (not runtime): the Tauri global-shortcut plugin's
- * `register()` returns an unlisten promise that can't be inspected cheaply
- * from a jsdom test, and mocking it would be brittle. Reading the source
- * is the cheapest way to keep the bindings honest — the regression caught
- * by issue #748 was a literal omission in source, not a runtime branch.
+ * `SHORTCUT_CATALOG` is now built from the dispatch table's own rows
+ * (`globalShortcutCatalogEntries()`), so the first direction cannot happen by
+ * construction and is asserted anyway. The second direction is only possible
+ * for the *context-bound* rows (terminal/modal/grid-search gestures owned by a
+ * component, not the app dispatcher), so those are pinned by name: a new
+ * orphan row has to be declared here with its owning surface, and
+ * `dispatchShortcut` reports it as `'unknown-action'`.
+ *
+ * This file previously read `src/App.tsx` and regex-extracted `key:`/`action:`
+ * pairs out of the bindings array. That approach could not see the
+ * helper-generated bindings and missed anything the regex's shape did not
+ * anticipate — the review at issue #2240 called the pair-check brittle and the
+ * coverage one-dimensional.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 
+import { SHORTCUT_ACTIONS, dispatchShortcut } from '../../src/lib/shortcutDispatch';
 import { SHORTCUT_CATALOG } from '../../src/lib/shortcutCatalog';
 
-describe('App.tsx Tauri global-shortcut bindings map to SHORTCUT_CATALOG entries', () => {
-  const appSource = readFileSync(
-    resolve(__dirname, '../../src/App.tsx'),
-    'utf8',
-  );
+/**
+ * Catalog rows with no dispatch-table handler, and where each one is actually
+ * handled. Every catalog entry NOT listed here must have a handler — that is
+ * the assertion below, so adding an undispatched row fails until it is
+ * declared with its owner.
+ */
+const CONTEXT_BOUND: ReadonlyArray<readonly [action: string, owner: string]> = [
+  ['clear-grid-search', "GridControls' search input onKeyDown"],
+  ['zoom-reset', 'Terminal.tsx window keydown listener (resolveZoomKeyAction)'],
+  ['zoom-in', 'Terminal.tsx window keydown listener (resolveZoomKeyAction)'],
+  ['zoom-out', 'Terminal.tsx window keydown listener (resolveZoomKeyAction)'],
+  ['term-copy', 'TerminalRegistry.attachCustomKeyEventHandler'],
+  ['term-paste', 'TerminalRegistry.attachCustomKeyEventHandler'],
+  ['term-select-all', 'TerminalRegistry.attachCustomKeyEventHandler'],
+  ['term-find', 'TerminalRegistry.attachCustomKeyEventHandler'],
+  ['term-clear', 'TerminalRegistry.attachCustomKeyEventHandler'],
+  ['close-modal', 'the <Modal> primitive window keydown listener'],
+];
 
-  // Extract every `{ key: '...', action: '...' }` object literal inside
-  // the `shortcuts = [ ... ]` array at the global-shortcut registration
-  // site. Anchored on the `key:`-then-`action:` pair (same shape as the
-  // sibling `grid-shortcut-binding.test.ts`) so a binding string
-  // appearing in a comment or docblock doesn't satisfy the assertion —
-  // e.g. a future `// Replaced action: 'foo' with bar` would otherwise
-  // pull `'foo'` into the wired set and the "every wired action has a
-  // catalog entry" test would silently enforce a phantom key.
-  //
-  // The platform-branched `gridToggleShortcut` const above the array is
-  // a separate object literal; the regex matches it via its inline
-  // `key:`-then-`action:` form, so platform-branched bindings aren't
-  // missed.
-  const entryMatches = appSource.matchAll(
-    /key:\s*'[A-Za-z0-9+-]+',\s*action:\s*'([a-z][a-z0-9-]*)'/g,
-  );
-  const wiredActions = new Set<string>();
-  for (const m of entryMatches) wiredActions.add(m[1]);
+describe('shortcut catalog ↔ dispatch table parity', () => {
+  const tableActions = SHORTCUT_ACTIONS.map(s => s.action);
+  const catalogActions = SHORTCUT_CATALOG.map(e => e.action);
 
-  // Sanity check on the regex: App.tsx MUST have at least the four
-  // arrow-traversal actions wired. If this fails, the regex itself has
-  // drifted (e.g. someone added `action:` quotes somewhere that breaks
-  // the shape) and the rest of the assertions would be vacuously green.
-  it('regex finds the canonical App.tsx bindings (sanity check)', () => {
-    expect(wiredActions.has('new-agent')).toBe(true);
-    expect(wiredActions.has('arrow-left')).toBe(true);
-    expect(wiredActions.has('arrow-right')).toBe(true);
-    expect(wiredActions.has('arrow-up')).toBe(true);
-    expect(wiredActions.has('arrow-down')).toBe(true);
-    expect(wiredActions.has('toggle-maximize-grid')).toBe(true);
-    // Issue #998 — `focus-grid-search` is *not* in this regex's `wiredActions`
-    // set on purpose. The binding is generated by the
-    // `buildFocusGridSearchBinding(isMac)` helper in `src/lib/gridShortcuts.ts`
-    // (and App.tsx just spreads the result into its shortcuts array), so the
-    // literal `action: 'focus-grid-search'` is inside the helper — not in
-    // App.tsx source. The "every wired action has a matching catalog entry"
-    // assertion below would catch a true orphan, but the orphan-guard is
-    // only as wide as this regex's source. The contract test that matters
-    // lives in `tests/unit/grid-shortcuts.test.ts` (the helper's runtime
-    // contract — see the `describe('buildFocusGridSearchBinding')` block),
-    // and that test pins both the action literal and the macOS
-    // collision-avoidance carve-out. A future refactor that re-inlines the
-    // ternary in App.tsx is fine — the helper test still covers it.
+  it('gives every dispatch-table action a catalog entry (a live binding is discoverable)', () => {
+    const catalogSet = new Set(catalogActions);
+    for (const action of tableActions) {
+      expect(catalogSet.has(action), `'${action}' has a binding but no cheatsheet row`).toBe(true);
+    }
   });
 
-  it('every wired action has a matching SHORTCUT_CATALOG entry', () => {
-    const catalogActions = new Set(SHORTCUT_CATALOG.map(e => e.action));
-    for (const action of wiredActions) {
-      expect(
-        catalogActions.has(action),
-        `App.tsx wires action '${action}' but SHORTCUT_CATALOG has no entry for it — the cheatsheet will silently omit this binding (issue #748)`,
-      ).toBe(true);
+  it('gives every catalog entry a handler, directly or as a declared context-bound gesture', () => {
+    const handled = new Set([...tableActions, ...CONTEXT_BOUND.map(([action]) => action)]);
+    const orphans = catalogActions.filter(action => !handled.has(action));
+    expect(
+      orphans,
+      'these cheatsheet rows have no handler — add one to the dispatch table, or declare the owning surface above',
+    ).toEqual([]);
+  });
+
+  it('declares a real owning surface for every context-bound row', () => {
+    // A declaration with an empty owner string would pass the orphan check
+    // while telling the next reader nothing.
+    for (const [action, owner] of CONTEXT_BOUND) {
+      expect(catalogActions, `${action} is declared context-bound but has no catalog row`).toContain(action);
+      expect(owner.trim().length, `${action} needs an owning surface`).toBeGreaterThan(0);
+    }
+  });
+
+  it('reports the context-bound rows as unknown-action rather than silently claiming them', () => {
+    // The flip side of the parity above: a row with no table entry must not be
+    // swallowed by the dispatcher as "handled".
+    for (const [action] of CONTEXT_BOUND) {
+      expect(dispatchShortcut(action), `${action} must not be app-dispatched`).toBe('unknown-action');
+    }
+  });
+
+  it('keeps action ids unique across the whole catalog', () => {
+    expect(new Set(catalogActions).size).toBe(catalogActions.length);
+  });
+
+  it('keeps action ids unique across the table rows', () => {
+    // A duplicate row would silently lose one of the two handlers: the lookup
+    // map keeps the last row for an id, so the first row's accelerator would
+    // still be registered while its guard and effect never run.
+    expect(new Set(tableActions).size).toBe(tableActions.length);
+  });
+
+  it('gives every catalog row complete display metadata', () => {
+    for (const entry of SHORTCUT_CATALOG) {
+      expect(entry.group, `${entry.action} group`).toBeTruthy();
+      expect(entry.description.trim(), `${entry.action} description`).not.toBe('');
+      expect(entry.winKey.trim(), `${entry.action} winKey`).not.toBe('');
+      expect(entry.macKey.trim(), `${entry.action} macKey`).not.toBe('');
     }
   });
 
   it('does NOT wire the obsolete Ctrl+Alt+D shortcut the README once phantom-documented', () => {
-    // Companion to the catalog test: the catalog already asserts the
-    // catalog doesn't list `delete-mesh` / `open-debug`; here we assert
-    // App.tsx doesn't wire them either. Belt-and-braces: a future
-    // re-introduction would have to slip past both tests.
-    expect(wiredActions.has('delete-mesh')).toBe(false);
-    expect(wiredActions.has('open-debug')).toBe(false);
+    // Companion to `tests/unit/shortcut-catalog.test.ts`: that file asserts the
+    // catalog doesn't list `delete-mesh` / `open-debug`; here we assert neither
+    // side of the app dispatches them either.
+    expect(tableActions).not.toContain('delete-mesh');
+    expect(tableActions).not.toContain('open-debug');
+    expect(catalogActions).not.toContain('delete-mesh');
+    expect(catalogActions).not.toContain('open-debug');
   });
 });

@@ -81,7 +81,8 @@ paste: that comparison watched the composer fill incrementally, this one compare
 the finished composer and what was submitted.
 
 The fix is the adapter capability `paste_requires_cr_newlines`
-(`AgentProvider`), true for Grok, applied by `circuit::delivery::PreparedPrompt::prepare`.
+(`AgentProvider`), true for Grok and Codex, applied by
+`circuit::delivery::PreparedPrompt::prepare`.
 On Windows (and Windows-hosted WSL instances), ConPTY key-event translation causes
 LF to drop newlines and CRLF to submit prematurely; across all platforms (Windows,
 macOS, Linux), manual user pastes in xterm.js rewrite newlines to CR by default
@@ -90,11 +91,10 @@ The Unix basis is inferred from this manual-paste behavior and has not yet been 
 probed on native Linux or macOS PTYs. Circuit prompt dispatches (turns, continuations, and nudges)
 and terminal handovers go through this preparation. The coordinator's `AgentDriver::send_prompt`
 is single-line by contract and bypasses staged delivery. Other harnesses keep their line endings
-as given (with the exception of circuit-piloted Codex nodes, where `codex_composer_text`
-converts CRLF/CR to LF as tracked in #2199; any prompt containing CR or LF is treated
-as multiline, bracketed by `injection_payload`, and subject to non-Generic paste gates).
+as given; any prompt containing CR or LF is treated as multiline, bracketed by
+`injection_payload`, and subject to non-generic paste gates.
 
-### Codex 0.162.1, same probe (tracked in #2199)
+### Codex 0.162.1, same probe (fixed in #2199)
 
 Running the same scratch ConPTY probe (140-by-35, flags `0x2 | 0x4`, bundled 1.24.260710001
 runtime writing a 12-line bracketed paste inside `\x1b[200~ … \x1b[201~`) to Codex 0.162.1:
@@ -106,16 +106,31 @@ runtime writing a 12-line bracketed paste inside `\x1b[200~ … \x1b[201~`) to C
 | CR | Composer draft preserves multiline layout across all lines. |
 
 Nothing was submitted in any run. LF dropped the newlines (lines glued together);
-CRLF and CR both kept the lines. A Windows handover into a standalone Codex node
-(outside any circuit) receives CRLF unchanged and is therefore preserved. However,
-for a circuit-piloted Codex node, `paste_readiness` selects the split-marker gate, whose
-payload builder (`codex_composer_text`) normalizes CRLF and CR to LF. As a result, both
-circuit prompt dispatches and handovers to circuit-piloted Codex nodes reach ConPTY as LF,
-triggering the newline-dropping defect where lines glue together. That path is guarded
-by a rendered-paste check that ignores whitespace, so it does not detect the loss.
-Codex was left unchanged because its gate counts burst boundaries and has not been
-re-verified against CR payloads. Follow-up is tracked in #2199 to investigate opting
-Codex into `paste_requires_cr_newlines` or enforcing CRLF staging without breaking
-split-marker burst boundaries; an automated reproduction test is pinned in
-`src-tauri/src/circuit/delivery.rs` as `codex_circuit_multiline_delivery_stages_bare_lf_payload`
-(`#[ignore = "#2199"]`).
+CRLF and CR both kept the lines. Before #2199 a Windows handover into a standalone
+Codex node (outside any circuit) was the one preserved case: it bypassed the
+split-marker gate and kept the CRLF a selection arrives with. `PreparedPrompt::prepare`
+resolves the adapter from the database row for *every* node it can identify, not only
+circuit-piloted ones, so the new policy normalizes those endings to CR as well —
+preserved by the same evidence, but now by the same mechanism rather than by accident
+of the path taken. Only a node absent from the database keeps its text as given (the
+best-effort arm in `prepare`).
+
+Codex now opts into `paste_requires_cr_newlines`, and the split-marker gate keeps
+two texts apart instead of reusing one. `codex_sanitized_text` is the **payload**:
+control-stripped, with the line endings `prepare` resolved, so the PTY receives CR.
+`codex_composer_text` is the **proof**: the same text with CRLF and bare CR collapsed
+to LF, which is exactly what Codex's `apply_paste` holds and counts. Because the
+composer normalizes before counting, `[Pasted Content N chars]` is identical for
+LF, CRLF and CR payloads, so the CR payload moves no byte of the gate's proof — this
+answers the issue's question directly: Codex needs no custom burst-boundary handling,
+only CR line endings on the wire.
+
+Regressions pin both halves: `codex_circuit_multiline_delivery_stages_cr_and_never_bare_lf`
+asserts the literal staged bytes for LF, CRLF and CR input, and
+`codex_split_marker_count_is_identical_for_cr_crlf_and_lf_payloads` asserts one count
+and one marker match across all three. Both run in CI; they pin the byte stream and the
+proof, which is all the fix depends on.
+
+The live ConPTY probe that produced the table above is a scratch harness and is not
+checked in. Re-recording it — and the measurement problems that come with reading a
+TUI transcript as text — is tracked in [#2290](https://github.com/alondero/buildmesh/issues/2290).

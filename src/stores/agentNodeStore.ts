@@ -11,7 +11,6 @@ import { isActiveForExit } from '../lib/exitGuard';
 // is unchanged — it still sets `state.error`, which App.tsx routes
 // through the generic "System" toast pipeline.
 import { addToast } from './toastStore';
-import { useMeshStore } from './meshStore';
 // Issue #1054 — the event-driven half of the store moved to a typed
 // listeners module (`agentNodeListeners.ts`); the optimistic-with-
 // rollback pattern that `renameAgentNode` / `setNodePinned` /
@@ -47,8 +46,8 @@ export type { AgentNode };
 // would otherwise buy. Adding a second indirection here would add a
 // new abstraction layer for no testability gain.
 //
-// The remaining four reach-throughs (one site each):
-//   * useMeshStore.getState().selectMesh   — selectProviderForMesh (issue #283 invariant)
+// The lifecycle actions use these cross-module boundaries:
+//   * focusNode (lazy navigation intent)    — selectProviderForMesh (issue #283 invariant)
 //   * requestWorktreeCloseAction            — deleteAgentNode Phase 1 safety prompt
 //   * addToast                              — deleteAgentNode Phase 2 failure (issue #1001)
 //   * disposeTerminal                       — deleteAgentNode success path (issue #647)
@@ -374,7 +373,7 @@ interface AgentNodeState {
   /// purges it — presence must not guard a removal (issue #1073
   /// pattern: a skipped fetch must never leave event state unapplied).
   refreshIfStale: (nodeIds?: number[]) => Promise<void>;
-  createAgentNode: (meshId: number, name: string, path: string, branch: string, provider?: string, useWorktree?: boolean, configurationId?: string) => Promise<AgentNode>;
+  createAgentNode: (meshId: number, name: string, path: string, branch: string, provider?: string, useWorktree?: boolean, configurationId?: string, initialPrompt?: string) => Promise<AgentNode>;
   /// Insert a node the backend just created but that did not come back through
   /// `createAgentNode` (e.g. `create_pr_node`'s reviewer sibling). Insert-if-
   /// absent: the `node-created` listener's async `fetchAgentNodes` may have
@@ -945,9 +944,9 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     };
   })(),
 
-  createAgentNode: async (meshId, name, path, branch, provider?: string, useWorktree?: boolean, configurationId?: string): Promise<AgentNode> => {
+  createAgentNode: async (meshId, name, path, branch, provider?: string, useWorktree?: boolean, configurationId?: string, initialPrompt?: string): Promise<AgentNode> => {
     try {
-      const node = await api.createAgentNode(meshId, name, path, branch, provider, useWorktree, configurationId);
+      const node = await api.createAgentNode(meshId, name, path, branch, provider, useWorktree, configurationId, initialPrompt);
       set((state) => ({
         nodesById: { ...state.nodesById, [node.id]: node },
         nodeIds: [...state.nodeIds, node.id],
@@ -976,9 +975,9 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     // could re-arrange them and re-introduce the half-applied
     // "mesh selected but no node" state. Holding the order here makes the
     // invariant unit-testable and impossible to violate from a click handler.
-    const node = await get().createAgentNode(meshId, meshName, meshPath, 'main', providerId, useWorktree, configurationId);
-    get().setActiveNode(node.id);
-    useMeshStore.getState().selectMesh(meshId);
+    const { focusNode } = await import('../lib/navigation');
+    const node = await get().createAgentNode(meshId, meshName, meshPath, 'main', providerId, useWorktree, configurationId, initialPrompt);
+    focusNode(node.id, { view: 'mesh', scope: 'node' });
     // Explicit create-then-spawn (issue #1413 review): the prompt rides
     // on this call, not a store-side dictionary the Terminal mount
     // later peeks at. `spawnAgent` flips the row to `spawning`
@@ -1385,7 +1384,10 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       await get().fetchAgentNodes();
       return node;
     } catch (e) {
-      set({ error: formatError(e) });
+      // Toast here rather than `state.error`: App.tsx already turns that
+      // field into a generic "System" toast, and the terminal catch would
+      // otherwise stack a second copy of the same sentence.
+      addToast('Handover', formatError(e), 'error');
       throw e;
     }
   },

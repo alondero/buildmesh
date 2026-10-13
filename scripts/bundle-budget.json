@@ -12,13 +12,17 @@
     {
       "value": 1130000,
       "reason": "Issue #2151 added the per-harness permission-mode UI to the entry chunk: the mode select plus effective-mode line in `src/components/AppSettings/HarnessDefaultsSection.tsx` and the mode line on Spawn Menu rows in `src/components/Providers/GroupedProviderMenu.tsx` (+4.8 kB minified raw, measured 1124897 B vs the 1120000 B cap). The mode labels and descriptions ride over IPC at runtime so only the controls count here. Bumping the raw cap by 10 kB absorbs the feature plus a small margin; the gzip cap stays unchanged at 360 kB (transfer axis retains ~24 kB of headroom) and the entry CSS cap is unaffected (no new styles — existing utilities only)."
+    },
+    {
+      "value": 1140000,
+      "reason": "PR #2249 bumped @tauri-apps/api from 2.11.x to 2.12.x (and aligned the four @tauri-apps/plugin-* JS packages with their resolved Rust crate versions from #2211) so `tauri-build`'s preflight would accept the tauri 2.12.x / plugin 2.4.x / 2.7.x / 2.13.x Cargo resolved minors. The 2.12.x JS API surface added +450 B minified raw (measured 1,130,450 B vs the 1,130,000 B cap) to the entry chunk. Aligning the JS floor to the exact Rust resolved versions (instead of the latest patch) keeps the lockfile and `Cargo.lock` on the same point-release, which avoids further per-patch churn on the next dependabot run. Bumping the raw cap by 10 kB absorbs the bump plus a small margin; the gzip cap stays unchanged at 360 kB (transfer axis retains ~22 kB of headroom) and the entry CSS cap is unaffected."
     }
   ],
   "checks": [
     {
       "label": "Desktop entry JS (dist/assets/index-*.js)",
       "pattern": "index-*.js",
-      "maxRaw": 1130000,
+      "maxRaw": 1140000,
       "maxGzip": 360000
     },
     {

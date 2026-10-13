@@ -4,6 +4,44 @@ This guide covers the normal desktop workflow. Buildmesh runs the agent
 programs you install; it does not install, authenticate, or upgrade those
 programs for you.
 
+## Table of contents
+
+- [The mental model](#the-mental-model)
+- [Install and authenticate a harness](#install-and-authenticate-a-harness)
+- [Your first session](#your-first-session)
+- [Open tools from the title bar](#open-tools-from-the-title-bar)
+- [See which scope you are looking at](#see-which-scope-you-are-looking-at)
+- [Find agents that need attention](#find-agents-that-need-attention)
+- [Configure Autopilot Circuits](#configure-autopilot-circuits)
+- [Read a node's status mark](#read-a-nodes-status-mark)
+- [Understand a circuit checkpoint](#understand-a-circuit-checkpoint)
+- [Group nodes into tabs](#group-nodes-into-tabs)
+  - [Groups in the sidebar](#groups-in-the-sidebar)
+- [Find open work in the sidebar](#find-open-work-in-the-sidebar)
+- [Paste into a terminal](#paste-into-a-terminal)
+- [Hand work over to another node](#hand-work-over-to-another-node)
+- [Harnesses and capabilities](#harnesses-and-capabilities)
+- [Attention hooks Buildmesh installs on disk](#attention-hooks-buildmesh-installs-on-disk)
+  - [What the hook does](#what-the-hook-does)
+  - [What happens to your existing configuration](#what-happens-to-your-existing-configuration)
+  - [Before you commit](#before-you-commit)
+  - [Removing a hook](#removing-a-hook)
+- [Worktrees, branches, and review](#worktrees-branches-and-review)
+- [Project Settings and Repository](#project-settings-and-repository)
+- [Launch Configurations](#launch-configurations)
+- [Settings that matter](#settings-that-matter)
+- [When Buildmesh cannot read your settings](#when-buildmesh-cannot-read-your-settings)
+- [Harness permission modes](#harness-permission-modes)
+- [Build and Run](#build-and-run)
+- [Remote access](#remote-access)
+  - [Using Buildmesh on your phone](#using-buildmesh-on-your-phone)
+- [AI context portability](#ai-context-portability)
+- [Data, backup, and restore](#data-backup-and-restore)
+  - [Check your stored state](#check-your-stored-state)
+  - [Back up](#back-up)
+  - [Restore](#restore)
+  - [Uninstall](#uninstall)
+
 ## The mental model
 
 - A **Mesh** is a repository workspace and its shared configuration.
@@ -403,8 +441,12 @@ clipboard text through the terminal connection.
 Select text in an agent's terminal and right-click it to hand that selection on
 from the context menu:
 
-- **Handover to new Node** spawns another agent on the Mesh, pre-filled with the
-  selection as its first turn.
+- **Handover to new Node** creates another agent on the Mesh only when that
+  harness can take an initial prompt, and pre-fills it with the selection as
+  its first turn. If the Mesh default cannot take one, the action refuses,
+  shows an error toast, and leaves the source terminal as it is. Change the
+  Mesh default to a harness that accepts a first-turn prompt, or hand the
+  selection to an existing node instead.
 - **Handover to node** sends the selection to an agent you already have. The text
   is staged as a single paste and then submitted, exactly as if you had pasted it
   and pressed Enter — so a multi-line review report arrives as one prompt instead
@@ -439,7 +481,7 @@ The current built-in catalog is:
 | Command Code | Yes | Passive watcher | Transcript-based lifecycle support is available. If typing does nothing, see [Command Code does not accept typing](troubleshooting.md#command-code-does-not-accept-typing) |
 | Freebuff | Yes | None | Model and effort overrides are not available |
 | Cline | Yes | Hook | Needs Cline 3.0.62 or newer. Manage providers with `cline auth`; Buildmesh injects account credentials at spawn |
-| Meta Muse | Yes | Passive watcher | Native on Windows since v1.3.0; WSL guest otherwise |
+| Meta Muse | Yes | Passive watcher | Native on Windows since v1.3.0; WSL guest otherwise. Reasoning effort is available as `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra` |
 | Terminal | No | None | A plain shell; closing the app loses its live process |
 
 Capabilities can change with the installed CLI and runtime. Buildmesh hides
@@ -471,7 +513,7 @@ start a node from Buildmesh.
 | Harness | File Buildmesh writes | Written to |
 |---|---|---|
 | Claude Code | `.claude/settings.local.json` | Project directory |
-| Codex | `.codex/config.toml` and `.codex/hooks.json` | Project directory |
+| Codex | No hook file — the hooks ride the agent's own launch arguments | — |
 | Cursor | `.cursor/hooks.json` | Project directory |
 | Antigravity | `.agents/hooks.json` | Project directory |
 | OpenCode | `.opencode/plugins/buildmesh-attention.js` | Project directory |
@@ -479,6 +521,12 @@ start a node from Buildmesh.
 | Kimi Code | `config.toml` in its configuration home | Configuration home |
 | MiniMax Code | `.claude-plugin/plugin.json` in its plugin directory | Configuration home |
 | Cline | `TaskComplete.ps1` or `TaskComplete.sh` under `hooks/` | Configuration home |
+
+Codex loads its project hooks from the *main checkout's* `.codex/hooks.json`,
+never a worktree's own, so from a git worktree a file beside the node would
+never be read (and one beside the main checkout would be shared by every
+worktree node). Buildmesh therefore passes Codex's callbacks as per-launch
+configuration and removes its own older entries from any `hooks.json` it finds.
 
 *Configuration home* means the harness's own config directory — normally
 `~/.kimi-code` for Kimi Code, `~/.minimax` for MiniMax Code, and `~/.cline` for
@@ -758,6 +806,9 @@ answer there too.
 
 **Probe spawn prompts** (Settings → Prompts) customise the initial prompt
 for agents spawned from the Probe's GitHub Issues and Pull Requests tabs.
+The node is created only when that harness can take an initial prompt.
+If the Mesh default cannot, the Issues tab shows an error toast; pick
+another harness from the spawn menu.
 The built-in templates appear as editable text, so you can adjust their wording
 directly. Changes save when you leave the editor. Click a placeholder button to
 insert it at the cursor or replace selected text; each button explains its value
@@ -861,6 +912,13 @@ Remote access is optional and off by default.
 4. Manage paired phones under **Authorized Devices**. Revoking a device closes
    its active connections and requires a new pairing.
 
+A phone that has a saved device token recovers on its own if it loses its
+session cookie: the app re-establishes the session and retries what you were
+doing, so the screen stays where it was. A phone without one — which includes
+any phone paired by scanning a QR code, because pairing hands the browser a
+cookie and nothing else — is shown the pairing screen instead. Pairing again is
+always required after you revoke a device or clear the browser's site data.
+
 The loopback listener stays plain HTTP for local agent hooks. LAN/VPN interfaces
 use HTTPS/WSS. The status panel lists the interfaces that are actually exposed;
 an enabled toggle with no exposed interface is not a usable phone connection.
@@ -901,7 +959,8 @@ to GitHub Issues and its Archive, plus a button to start an empty agent.
 **Capture** saves an idea draft on this phone as you type. Choose a mesh and
 an available agent (your choices are remembered on this phone), then select **Start working on this**. The idea becomes
 the new agent's initial prompt. Saved launch configurations are available;
-only agents supporting initial prompts are offered. A failed launch retains
+only agents supporting initial prompts are offered. Desktop uses the same rule
+for a prompted new node, a handover, and an issue or pull-request spawn. A failed launch retains
 the draft. If the connection drops during launch, check Work before retrying:
 the desktop may have accepted the request. Drafts are local to the browser,
 are not a desktop backlog, and disappear when site data is cleared.

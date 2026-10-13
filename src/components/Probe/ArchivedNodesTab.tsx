@@ -29,24 +29,18 @@
  * — the picker no longer hides them behind a hardcoded id allow-list
  * (#550 follow-up; see also buildmesh-gh538-unified-claude-harness).
  *
- * After a successful import we:
- *   1. `setActiveNode(node.id)` — focus the freshly-imported card.
- *   2. `selectMesh(meshId)` — keep the sidebar in sync (the node may
- *      belong to a different mesh than the one the probe is showing if
- *      the user is using the "global view" fallback).
- *   3. `spawnAgent(node.id, providerId)` — start the agent process.
- *   4. `toggleProbe()` — hide the dock so the user lands on the
- *      terminal, matching the legacy modal's `onClose()` behaviour.
+ * After import, navigation focuses the card and enters its mesh. The
+ * agent process starts before the dock closes so the terminal is ready.
  *
  * Why `activeMeshPath` from the probe context (not `activePath`)
  * ---------------------------------------------------------------
  * `activePath` resolves to the focused node's working directory (a
  * worktree subdir) when a node is active, but `discover_agent_nodes`
  * walks `.claude/projects/<project>/sessions-index.json` from the
- * *mesh root* — the same place `import_discovered_agent_node` needs
- * to attach the imported node to. The probe context hook exposes
- * `activeMeshPath` for exactly this case; we don't reach into
- * `meshesById` directly.
+ * mesh root. Import attaches the node to the path stored on the mesh
+ * row, so the path passed with the import is not that directory.
+ * The probe context hook exposes `activeMeshPath` for the discovery
+ * walk; we don't reach into `meshesById` directly.
  */
 
 import { formatError } from '../../lib/errorUtils';
@@ -58,7 +52,7 @@ import {
   type ArchivedAgentNode,
 } from '../../lib/tauri';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
-import { useNodeActivityStore } from '../../stores/nodeActivityStore';
+import { enterMesh } from '../../lib/navigation';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
@@ -107,10 +101,8 @@ export function ArchivedNodesTab({ meshId, meshPath }: { meshId?: number; meshPa
   // which repo to attach the imported node to. The probe context hook
   // owns this derivation.
   const getDefaultProvider = useMeshStore((s) => s.getDefaultProvider);
-  const selectMesh = useMeshStore((s) => s.selectMesh);
   const fetchAgentNodes = useAgentNodeStore((s) => s.fetchAgentNodes);
   const spawnAgent = useAgentNodeStore((s) => s.spawnAgent);
-  const activateNode = useNodeActivityStore((s) => s.activateNode);
   const toggleProbe = useUIStore((s) => s.toggleProbe);
 
   const [sessions, setSessions] = useState<ArchivedAgentNode[]>([]);
@@ -223,12 +215,7 @@ export function ArchivedNodesTab({ meshId, meshPath }: { meshId?: number; meshPa
         providerId,
       );
       await fetchAgentNodes();
-      activateNode(node.id);
-      // The imported node's mesh_id may differ from the one the probe
-      // is showing if the user is in the "global view" fallback
-      // (sidebar collapsed, focus follows the active node). Re-select
-      // the mesh to keep the sidebar header in sync.
-      selectMesh(activeMeshId);
+      enterMesh(node.mesh_id, { nodeId: node.id });
       // Spawn the slow PTY-bound work first, then hide the dock. If we
       // hid first a fast user click could orphan the imported node in
       // the DB with no PTY attached.

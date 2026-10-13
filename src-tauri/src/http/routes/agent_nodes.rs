@@ -91,89 +91,36 @@ pub async fn import_and_resume(req: &ParsedRequest) -> Response {
     let cli_session_id = match request::parse_cli_session_id(&parsed.cli_session_id) {
         Some(canonical) => canonical,
         None => {
-            return Response::json_error(
-                "400 Bad Request",
-                "cli_session_id must be a valid UUID",
-            );
+            return Response::json_error("400 Bad Request", "cli_session_id must be a valid UUID");
         }
     };
 
-    let session_name = crate::session_naming::on_spawn();
-    // Store the harness/profile id verbatim (issue #535); resolve to a
-    // concrete executor only at the spawn seam. Absent → "anthropic".
-    let provider_id = parsed.provider.as_deref().unwrap_or("anthropic").to_string();
     let branch_owned = parsed.branch.clone();
     let worktree_owned = parsed.worktree_name.clone();
+    let provider_owned = parsed.provider.clone();
     let cli_session_id_for_closure = cli_session_id.clone();
 
-    // Issue #1389 / PR #1429 review feedback: bundle the entire pre-spawn
-    // SQLite sequence (mesh lookup + create_agent_node + cli_session_id
-    // update + reload) into a single `run_blocking` call so the tokio
-    // worker only hops once. The closure returns
-    // `Result<Option<AgentNode>, String>` — three outcomes:
-    //   * `Ok(Some(node))` — pre-spawn setup succeeded, ready to spawn.
-    //   * `Ok(None)`       — mesh lookup failed → route returns 404.
-    //   * `Err(msg)`       — any SQLite failure → route returns 500.
-    // The reload is folded into the same closure (rather than a fourth
-    // offload) so the returned row already carries the just-written
-    // `cli_session_id`.
-    let node = match crate::commands::run_blocking(
-        "http_import_resume_prepare",
-        move || -> Result<Option<crate::models::AgentNode>, String> {
-            let mesh = match db::get_mesh_by_id(mesh_id) {
-                Ok(m) => m,
-                Err(_) => return Ok(None),
-            };
-            // Issue #1519: persist the effective `worktree_path` so HTTP
-            // imports agree with spawns on the configured directory.
-            let app_dir = crate::preferences::worktree_directory();
-            let effective_dir = crate::env::effective_worktree_dir_raw(
-                &mesh.path,
-                mesh.worktree_directory.as_deref(),
-                app_dir.as_deref(),
-            );
-            let worktree_path_owned: Option<String> = worktree_owned
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(|n| crate::env::resolve_worktree_node_raw(&effective_dir, n));
-            let resolved =
-                crate::env::resolve_agent_path_in_dir(&mesh.path, &effective_dir, worktree_owned.as_deref());
-            let use_worktree = worktree_owned.is_some();
-            let mut node = match db::create_agent_node(
-                mesh_id,
-                &session_name,
-                &mesh.path,
-                &branch_owned,
-                resolved.env_type,
-                &provider_id,
-                worktree_owned.as_deref(),
-                None,
-                None,
-                None, // source_pr_pinned_sha — HTTP route doesn't accept a pinned SHA
-                use_worktree,
-                None,
-                None,
-                worktree_path_owned.as_deref(),
-            ) {
-                Ok(n) => n,
-                Err(e) => return Err(format!("create_agent_node failed: {e}")),
-            };
-            if let Err(e) = db::update_cli_session_id(node.id, &cli_session_id_for_closure) {
-                return Err(format!("update_cli_session_id failed: {e}"));
-            }
-            node = match db::get_agent_node_by_id(node.id) {
-                Ok(n) => n,
-                Err(e) => return Err(format!("Failed to reload node: {e}")),
-            };
-            Ok(Some(node))
-        },
-    )
+    // One offload for the shared import runner (mesh lookup, node insert,
+    // session id, reload). MeshNotFound is 404; every other failure is 500.
+    // Spawn stays here: a spawn failure is 207 with the row still returned.
+    let node = match crate::commands::run_blocking("http_import_resume_prepare", move || {
+        let result = crate::services::agent_node::import_discovered_session(
+            mesh_id,
+            &cli_session_id_for_closure,
+            &branch_owned,
+            worktree_owned.as_deref(),
+            provider_owned.as_deref(),
+        );
+        Ok::<_, String>(result)
+    })
     .await
     {
-        Ok(Some(node)) => node,
-        Ok(None) => {
+        Ok(Ok(node)) => node,
+        Ok(Err(crate::services::agent_node::AgentNodeError::MeshNotFound(_))) => {
             return Response::json_error("404 Not Found", "Mesh not found");
+        }
+        Ok(Err(error)) => {
+            return Response::json_error("500 Internal Server Error", &error.to_string());
         }
         Err(msg) => {
             return Response::json_error("500 Internal Server Error", &msg);
@@ -195,7 +142,8 @@ pub async fn import_and_resume(req: &ParsedRequest) -> Response {
                 rows: parsed.rows,
                 cols: parsed.cols,
             },
-        ).with_lifecycle_lease(),
+        )
+        .with_lifecycle_lease(),
     )
     .await
     {

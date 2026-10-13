@@ -213,6 +213,104 @@ mod tests {
     }
 
     #[test]
+    fn an_early_upgrade_flag_pins_normalized_runs_before_publication_changes() {
+        use crate::circuit::model::{
+            CircuitGraph, CircuitNodeKind, EdgeCondition, OpenPrPolicy, StepOutcome,
+        };
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id, name, path) VALUES (1, 'early upgrade', 'C:/early-upgrade')",
+            [],
+        )
+        .unwrap();
+        let mut legacy = crate::circuit::test_support::pre_publication_issue_review();
+        legacy
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "review_classifier")
+            .unwrap()
+            .kind = CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: Some("reviewer".into()),
+        };
+        legacy
+            .edges
+            .iter_mut()
+            .find(|edge| edge.from == "review_classifier" && edge.to == "follow_feedback")
+            .unwrap()
+            .condition = EdgeCondition::OnOutcome(StepOutcome::Completed);
+        assert!(legacy.retarget_edge("review_retry", "review_exhausted", "complete"));
+        if let CircuitNodeKind::GithubAction { open_pr_policy, .. } = &mut legacy
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "open_pr")
+            .unwrap()
+            .kind
+        {
+            *open_pr_policy = None;
+        }
+        let original = legacy.to_json().unwrap();
+        conn.execute(
+            "INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json) VALUES (1, 1, 'legacy', ?1)",
+            [&original],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, state) VALUES (10, 1, 1, 'running');
+             DELETE FROM app_settings WHERE key IN ('issue_review_first_turn_upgrade_v2', 'issue_review_verdict_upgrade_v1');",
+        )
+        .unwrap();
+
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        let saved: String = conn
+            .query_row(
+                "SELECT graph_json FROM autopilot_circuits WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let upgraded = CircuitGraph::from_json(&saved).unwrap();
+        upgraded.validate().unwrap();
+        assert!(
+            upgraded.has_review_topology_of(&CircuitGraph::issue_driven_autopilot_review(
+                "buildmesh:run"
+            ))
+        );
+        assert!(upgraded.node("merge_verify").is_some());
+        let snapshot: String = conn
+            .query_row(
+                "SELECT graph_json FROM circuit_run_snapshots WHERE run_id = 10",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let snapshot = CircuitGraph::from_json(&snapshot).unwrap();
+        assert!(matches!(
+            &snapshot.node("open_pr").unwrap().kind,
+            CircuitNodeKind::GithubAction {
+                open_pr_policy: Some(OpenPrPolicy::RequireExisting),
+                ..
+            }
+        ));
+        assert!(matches!(
+            &snapshot.node("review_classifier").unwrap().kind,
+            CircuitNodeKind::ReviewVerdict { .. }
+        ));
+        assert!(snapshot.node("close_reviewer").is_some());
+        assert!(snapshot.node("merge_verify").is_none());
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT graph_json FROM autopilot_circuits WHERE id = 1",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            saved
+        );
+    }
+
+    #[test]
     fn review_publication_flow_upgrade_pins_runs_and_rewrites_only_stock_server_owned_graphs() {
         use crate::circuit::model::{CircuitGraph, CircuitNode, CircuitNodeKind};
         use crate::circuit::test_support::{
@@ -2461,6 +2559,54 @@ mod tests {
             canonical_index_names(&conn),
             canonical_index_names(&fresh),
             "legacy and fresh databases must converge on the canonical indexes"
+        );
+    }
+
+    /// Issue #1932 — the submission-ordinal index is index-only DDL with no
+    /// `SCHEMA_VERSION` bump, so it has to reach a database that is already at
+    /// the current version but predates it. The faithful simulation is that
+    /// shape: a current-schema database whose index is absent, holding the
+    /// submissions an upgrade must keep answering for.
+    #[test]
+    fn init_schema_adds_the_submission_index_to_a_current_schema_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::super::init_schema(&conn).unwrap();
+        conn.execute_batch(
+            "
+            DROP INDEX idx_circuit_history_submission;
+            INSERT INTO meshes (id, name, path) VALUES (1, 'legacy', '/repo');
+            INSERT INTO autopilot_circuits (id, mesh_id, name) VALUES (1, 1, 'legacy');
+            INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, state)
+                VALUES (1, 1, 1, 'running');
+            INSERT INTO circuit_run_history (run_id, node_id, attempt, kind, detail)
+                VALUES (1, 'spawn', 1, 'prompt_submitted',
+                        '{\"agent_node_id\":9,\"submission_seq\":4}');
+            ",
+        )
+        .unwrap();
+        assert!(
+            !index_present(&conn, "idx_circuit_history_submission"),
+            "the scenario only means something if the index really is absent"
+        );
+
+        super::super::init_schema(&conn).unwrap();
+
+        assert!(
+            index_present(&conn, "idx_circuit_history_submission"),
+            "the baseline DDL runs on every launch, so the index must be restored"
+        );
+        // Additive DDL: the submissions recorded before the index existed stay
+        // queryable, which is the ordinal fence #1898 depends on.
+        assert_eq!(
+            conn.query_row(
+                "SELECT COALESCE(MAX(json_extract(detail,'$.submission_seq')),0)
+                 FROM circuit_run_history
+                 WHERE kind='prompt_submitted' AND json_extract(detail,'$.agent_node_id')=9",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            4
         );
     }
 }

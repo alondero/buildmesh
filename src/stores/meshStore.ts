@@ -4,43 +4,8 @@ import * as api from '../lib/tauri';
 import { addToast } from './toastStore';
 import { SCOPE_NOTICE_PROVIDER, meshDeletedScopeNotice } from '../lib/scopeNotices';
 import type { Mesh } from '../types/generated/Mesh';
-// Issue #1247 — `deleteMesh` now also (a) refetches the agent-node list so
-// ghost rows drop out of the grid + sidebar, (b) disposes the xterm for
-// every doomed node (the dispose-on-delete invariant is satisfied because
-// the row IS deleted — same pattern as `agentNodeStore.deleteAgentNode`'s
-// success-path dispose, issue #647), and (c) nulls `selectedMeshId` /
-// `activeNodeId` when they pointed into the deleted mesh. The cross-store
-// reach pattern matches the four sites already documented at the top of
-// `agentNodeStore.ts` (#1054); adding this as a fifth reach-through keeps
-// the store layer the single source of truth without inventing a new
-// message-bus layer just for one method.
-//
-// BOTH `useAgentNodeStore` AND `disposeTerminal` are intentionally
-// resolved lazily via `await import(...)` inside `deleteMesh` rather
-// than imported at module-load. Adding either as a static import
-// introduces an ESM cycle that crashes uiStore's `create()` callback:
-//
-//   meshStore → agentNodeStore → Terminal.tsx → uiStore → meshStore
-//
-// In that cycle, uiStore's `create()` callback at uiStore.ts:353 runs
-// `useMeshStore.getState()` while `useMeshStore` is still `undefined`
-// (meshStore is mid-load) and throws. Pre-#1247 meshStore imported
-// neither module at module-load, so the cycle didn't form when
-// something imported `useMeshStore` first (e.g. uiStore.ts itself —
-// the natural entry chain was meshStore → uiStore, with meshStore
-// finishing before uiStore read its exports).
-//
-// `agentNodeStore.ts:4` can still eagerly import `disposeTerminal`
-// because the natural entry chain runs Terminal FIRST, then uiStore,
-// then meshStore, then agentNodeStore — by the time uiStore's
-// `create()` callback reads `useMeshStore`, meshStore has already
-// called `create()`. meshStore is a sink in the original load order;
-// making it import agentNodeStore (which imports Terminal) inverts the
-// chain and creates the cycle.
-//
-// The two local types mirror the imported shapes so TypeScript can
-// type-check the call sites without reaching back into the cyclic
-// modules.
+// Deletion loads resource cleanup and navigation lazily; neither is needed
+// to initialize the mesh data store.
 type DisposeTerminalFn = (nodeId: number) => void;
 type AgentNodeStoreModule = typeof import('./agentNodeStore');
 
@@ -162,9 +127,7 @@ export const useMeshStore = create<MeshState>((set) => {
     //     uses on its success path);
     //   * `selectedMeshId` / `activeNodeId` dangling into the deleted
     //     mesh — the Probe rendered against
-    //     `meshesById.get(danglingId) === undefined`, and `uiStore`'s
-    //     mesh-sync subscription never fired because `selectedMeshId`
-    //     was never nulled.
+    //     `meshesById.get(danglingId) === undefined`.
     //
     // Lazy-import the agent-node store to avoid the
     // meshStore → agentNodeStore → Terminal → uiStore → meshStore
@@ -230,12 +193,12 @@ export const useMeshStore = create<MeshState>((set) => {
     // guard for `activeNodeId`: if the user clicked a different node
     // mid-await, that fresh active id is in a different mesh and we
     // leave it alone.
+    const { useUIStore } = await import('./uiStore');
     const meshAfter = useMeshStore.getState();
     if (meshAfter.selectedMeshId === id) {
-      meshAfter.selectMesh(null);
+      useUIStore.getState().setViewMode('all');
       // #2076 — deleting the Mesh the user is looking at is a scope change
-      // nobody asked for: the clear above flips the canvas to All Nodes via
-      // the mesh→mode subscription, silently. Announce it under the name of
+      // nobody asked for: the transition above moves the canvas to All Nodes. Announce it under the name of
       // what happened. `Mesh “X” was deleted — the canvas moved to All
       // Nodes.` Fire-and-forget through the shared toast stack, after the
       // selection write, so it describes a change that already happened and

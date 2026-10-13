@@ -1,7 +1,7 @@
 import { useRef, useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
-import { useNodeActivityStore } from '../../stores/nodeActivityStore';
+import { focusNode, revealRun } from '../../lib/navigation';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { BuildRunDropdown } from '../BuildRun/BuildRunDropdown';
@@ -95,7 +95,6 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
   const node = useAgentNodeStore(s => s.nodesById[nodeId]);
   const titleNode = useAgentNodeStore(s => s.nodesById[titleNodeId]);
   const renameAgentNode = useAgentNodeStore(s => s.renameAgentNode);
-  const activateNode = useNodeActivityStore(s => s.activateNode);
   const deleteAgentNode = useAgentNodeStore(s => s.deleteAgentNode);
   const toggleNodePinned = useAgentNodeStore(s => s.toggleNodePinned);
   const spawnAgent = useAgentNodeStore(s => s.spawnAgent);
@@ -105,9 +104,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
   const stall = useAgentNodeStore(s => s.stalledInputs[nodeId] ?? null);
   const meshesById = useMeshStore(s => s.meshesById);
   const isSingleMode = useUIStore(s => s.viewMode === 'single');
-  const setViewMode = useUIStore(s => s.setViewMode);
   const exitSingleMode = useUIStore(s => s.exitSingleMode);
-  const openProbeTab = useUIStore(s => s.openProbeTab);
   const headerRef = useRef<HTMLDivElement>(null);
   const width = useResizeWidth(headerRef);
   const providerList = useProviderList();
@@ -150,7 +147,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
   const toggleShortcutHint = `${isMac ? '⌘' : 'Alt'}+G`;
   const handleToggleSolo = () => {
     if (isSingleMode) exitSingleMode();
-    else { activateNode(node.id); setViewMode('single'); }
+    else focusNode(node.id, { view: 'single', scope: 'current' });
   };
   const handleClose = async (event: React.MouseEvent) => {
     event.stopPropagation();
@@ -170,14 +167,13 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
     try { await openInFileManager(gitPath); }
     catch (error) { console.error('Failed to open folder in file manager:', error); }
   };
-  const showDetails = () => { activateNode(node.id); openProbeTab('properties'); };
-  const showChanges = () => { activateNode(node.id); openProbeTab('review'); };
+  const showDetails = () => { focusNode(node.id, { probeTab: 'properties' }); };
+  const showChanges = () => { focusNode(node.id, { probeTab: 'review' }); };
   // Scope the mesh-scoped Probe to this node's mesh before focusing, so the run
   // is present in the snapshot the tab loads (the grid can show nodes from
   // several meshes). Shared by the menu row and the title-bar glyph.
   const openCircuitRun = (runId: number) => {
-    useMeshStore.getState().selectMesh(node.mesh_id);
-    useUIStore.getState().focusCircuitRun(runId);
+    revealRun(node.mesh_id, runId);
   };
   // A glyph with a Circuit ring backed by ownership is the quick link to that
   // run in the Circuits Probe.

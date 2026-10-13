@@ -13,7 +13,7 @@ import { getNodeGitPath } from './paths';
 // runtime import is `./viewModes`, which is itself store-free (its `stores/`
 // imports are types) — the resolver reads the scope rule from the same pure
 // module `deriveScope` uses instead of keeping a second copy of it.
-export type ProbeTab = 'files' | 'review' | 'usage' | 'properties' | 'circuits' | 'issues' | 'pulls' | 'sessions' | 'worktrees' | 'scratchpad';
+export type ProbeTab = 'files' | 'review' | 'usage' | 'notifications' | 'properties' | 'circuits' | 'issues' | 'pulls' | 'sessions' | 'worktrees' | 'scratchpad';
 
 /**
  * The three ownership lenses available to a Probe destination.
@@ -86,6 +86,14 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
     followsSelection: false,
     baseline: 'host',
     stateful: false,
+  },
+  notifications: {
+    label: 'Notifications',
+    tooltip: 'App activity and problems needing attention',
+    lens: 'host',
+    followsSelection: false,
+    baseline: 'host',
+    stateful: true,
   },
   worktrees: {
     // Issue #1460 — renamed from "Worktree Manager". The destination is
@@ -173,6 +181,7 @@ export const PROBE_TAB_ORDER: readonly ProbeTab[] = [
   'files',
   'review',
   'usage',
+  'notifications',
   'worktrees',
   'properties',
   'circuits',

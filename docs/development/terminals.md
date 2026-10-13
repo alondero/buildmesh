@@ -7,8 +7,22 @@ Startup identity recovery (#1555) lives in `services/session_recovery.rs`. List 
 
 `TerminalManager` is a **singleton**. xterm.js instances survive React remounts via a hidden container stack. Never call `dispose()` on a terminal unless the agent node is explicitly deleted — see `src/components/Terminal/Terminal.tsx`. Disposing a terminal causes permanent blanking.
 
+## Terminal creation is cancellable at every await (issue #2016)
+`TerminalRegistry.getOrCreate` creates a `PendingCreation` alongside the in-flight `doCreate` promise, and every resource `doCreate` acquires is registered with that record as it is acquired: the xterm, its resize scheduler, the writer sink, the font-size and theme entries, both `listen` handles, and the binary PTY Channel. `dispose(nodeId)` marks an in-flight creation cancelled and releases what it already owns, so a node deleted while the lazy chunk fetch, a listener registration or the Channel subscription is still in flight never publishes a terminal and never retains a writer entry, a font-size or theme entry, or a listener. `doCreate` checkpoints after each await, abandons the creation, and — because the record is already closed — releases anything a late await acquires instead of parking it. A failure at any stage unwinds the same list, and the unsubscribe for the Channel is chained *behind* its subscribe so a deletion mid-registration still drops the Channel instead of racing it. The record is dropped when the creation settles; there is deliberately no deleted-id tombstone map, and `detach` never cancels anything — an unmount or mesh switch must leave the surviving node's terminal untouched. `destroy()` cancels in-flight creations and releases a module-level `listen` handle that resolves after teardown. `BuildRunTerminalRegistry` reaches the same outcomes through its own `PendingCreation` record plus the per-session queue.
+
 ## xterm + addon lazy-load (issue #1568)
 `@xterm/xterm` and the five `@xterm/addon-*` packages add ~430 kB minified / ~100 kB gzip to the desktop entry chunk if statically imported — too big to pay for users who never open a canvas. `TerminalRegistry.doCreate` and `BuildRunTerminalRegistry.doCreate` keep the runtime imports behind `await import(...)` inside the function body and use `import type { Terminal }` (and the other addon classes) at module scope, so Rollup erases the types and the dynamic imports emit a separate chunk fetched only when a terminal pane is first attached. `WebglRendererPool.activate` dynamic-imports `loadWebglRenderer` (which carries `@xterm/addon-webgl`); the pool reserves the LRU slot synchronously and schedules the renderer attach inside the awaited promise. **Do not** revert to static `@xterm/xterm` imports — see the budget cap at `scripts/bundle-budget.json`; the entry chunk's ceiling is enforced by `scripts/check-bundle-size.mjs` and CI. Two pre-existing Vite warnings remain (`Terminal.tsx` and `agentNodeStore.ts` are both statically and dynamically imported) because the dynamic imports in `meshStore.deleteMesh` are load-bearing workarounds for the `meshStore → agentNodeStore → Terminal.tsx → uiStore → meshStore` ESM cycle (`src/stores/meshStore.ts:5`); clearing them requires restructuring the store layer, which is out of scope for the cold-only-surface mandate.
+
+## Link clicks have exactly one owner
+A press on a terminal link reaches two independent owners inside xterm. The `Linkifier` activates the link — an OSC 8 hyperlink through the `linkHandler` option (what Codex emits), a plain printed URL through `WebLinksAddon` — and, whenever the agent's TUI has turned mouse tracking on (`CSI ? 1003 h` with `CSI ? 1006 h`, which Codex does), xterm *also* forwards the press to the PTY as an SGR mouse report. Codex answers a press on its own OSC 8 hyperlink by opening that URL itself (`codex-rs/tui/src/tui/link_pointer.rs` → `open_url_in_browser`), so one click in a Codex session opened two browser tabs, while a harness printing plain URLs only ever reached ours.
+
+The press cannot simply be left to the agent: xterm records the link under the pointer on `mousedown` and activates on `mouseup` only when that record survived, so suppressing the press also cancels our own activation. While the PTY app owns mouse input, `TerminalLinkRouter` (`src/components/Terminal/TerminalLinkRouter.ts`) therefore owns the whole gesture around a link. It tracks the hovered link from both providers' public `hover`/`leave` callbacks, stops a left press on a link in the capture phase on `term.element` — before xterm can forward it or record it — and opens the URI on the release, when press and release land on the same link.
+
+Both halves of the gesture have to be withheld. xterm keeps a `_mouseDownLink` from earlier gestures and never clears it after activating, so a link clicked before the agent enabled mouse tracking leaves a release that can still activate it; letting that release through would reopen a link the router already opened. Clearing the hovered link after a click is equally wrong, because xterm only re-resolves the hovered link when the pointer moves to another cell — the next click on the same link would arrive with no hover event and escape to the agent. A press away from a link, and every non-primary button (Codex binds right-click to paste), is untouched and still reaches the agent.
+
+"Hovered link" means the link's identity, not its text: the router keeps the hover `range` alongside the URI and compares both, as xterm's linkifier does (`Linkifier.ts:395-401`). A URI alone is not an identity, so the same URL printed twice is two links and a gesture that starts on one and ends on the other opens neither.
+
+The router is dynamically imported alongside xterm and its addons in `doCreate` (see *xterm + addon lazy-load*), because it is only reachable from there and a static import of it broke the entry-chunk budget in `check:bundle`. It binds after `term.open()` (its press guard lives on `term.element`, its release guard on `document` so a release outside the terminal still ends the gesture) and is idempotent per element, so a re-attach re-parents the element without stacking listeners. `openUrl` stays the only sink, so the Tauri WebView never navigates, and `allowNonHttpProtocols` stays unset. Behaviour is pinned by `tests/unit/terminal-link-router.test.ts` and was checked against real xterm 6 for the Codex shape, repeated clicks without pointer movement, mouse tracking switched on after an untracked click, the plain-URL shape, a press off the link, a gesture released off the link, and a drag between two occurrences of the same URL.
 
 ## Command Code keyboard (Ink 7)
 Command Code's Ink TUI can swallow keys when xterm.js leaves an unmatched bracketed-paste wrapper, or when the CLI's kitty-keyboard probe races ConPTY. Agent terminals for the `commandcode` harness set xterm.js `ignoreBracketedPasteMode`; other harnesses keep bracketed paste so a multi-line paste stays one prompt. Spawn sets `TERM_PROGRAM=vscode` so Command Code skips the probe. Every agent PTY is a real terminal: `wrap()` drops inherited `NO_COLOR` / `TERM=dumb` / `FORCE_COLOR=0` and sets `TERM=xterm-256color`, `COLORTERM=truecolor`, and `FORCE_COLOR=3` (and puts those keys on `WSLENV`).
@@ -36,14 +50,20 @@ coordinator's `AgentDriver::send_prompt` is single-line by contract and bypasses
 staged delivery. ConPTY turns every pasted byte into a key event: an LF is dropped
 and a CRLF is an Enter. A terminal selection is CRLF-joined on Windows, so an
 unmodified Grok handover submitted line 1 and queued the rest as separate messages.
-A harness whose adapter returns true from `paste_requires_cr_newlines` (Grok) gets
-CR line endings inside the bracketed paste, which is what xterm.js sends for a
-manual paste. Other harnesses keep their line endings as given (with the exception
-of circuit-piloted Codex nodes, where `codex_composer_text` converts CRLF/CR to LF,
-tracked in [#2199](https://github.com/alondero/buildmesh/issues/2199)), but any prompt
+A harness whose adapter returns true from `paste_requires_cr_newlines` (Grok and
+Codex) gets CR line endings inside the bracketed paste, which is what xterm.js sends
+for a manual paste. Other harnesses keep their line endings as given, but any prompt
 containing CR or LF is treated as multiline: bracketed by `injection_payload` and
 subject to non-generic rendered-paste gates (such as Codex and Muse). See the
 [Grok paste investigation](../learning/grok-terminal-paste.md) for runtime evidence.
+
+A harness with its own paste gate may need two texts rather than one. Codex's
+split-marker gate keeps `codex_sanitized_text` (the payload: control-stripped, line
+endings as `prepare` resolved them) separate from `codex_composer_text` (the proof:
+the same text with CRLF and bare CR collapsed to LF, which is what Codex's
+`apply_paste` holds and counts). Codex normalizes line endings *before* counting, so
+`[Pasted Content N chars]` is identical for LF, CRLF and CR payloads — the CR the
+wire needs costs the gate nothing, and no custom burst-boundary handling is needed.
 
 ## PTY output streaming (issue #1385 / #1393)
 

@@ -239,7 +239,7 @@ describe('ProbeToolRail (ADR-0032)', () => {
     fireEvent.click(screen.getByTestId('probe-rail-all-tools'));
 
     expect(screen.getByTestId('probe-rail-all-tools').getAttribute('aria-expanded')).toBe('true');
-    expect(screen.getAllByRole('menuitemradio')).toHaveLength(10);
+    expect(screen.getAllByRole('menuitemradio')).toHaveLength(11);
     expect(screen.getByTestId('probe-tool-menu-files').getAttribute('aria-checked')).toBe('true');
     expect(screen.getByText('Code')).toBeTruthy();
     expect(screen.getByText('App-wide')).toBeTruthy();
@@ -324,7 +324,7 @@ describe('ProbeToolRail (ADR-0032)', () => {
     fireEvent.keyDown(screen.getByRole('menu', { name: 'All tools' }), { key: 'Escape' });
     fireEvent.keyDown(trigger, { key: 'ArrowUp' });
     expect(screen.getByRole('menu', { name: 'All tools' })).toBeTruthy();
-    expect(document.activeElement?.id).toBe('probe-rail-menu-usage');
+    expect(document.activeElement?.id).toBe('probe-rail-menu-notifications');
   });
 
   it('moves menu focus with Arrow keys without switching destination (manual activation)', () => {
@@ -380,7 +380,7 @@ describe('ProbeToolRail (ADR-0032)', () => {
     fireEvent.keyDown(menu, { key: 'ArrowUp' });
     expect(document.activeElement?.id).toBe('probe-rail-menu-files');
     fireEvent.keyDown(menu, { key: 'ArrowUp' });
-    expect(document.activeElement?.id).toBe('probe-rail-menu-usage');
+    expect(document.activeElement?.id).toBe('probe-rail-menu-notifications');
   });
 
   it('collapses tab labels to icons and stacks the menu in one column at the narrow-width breakpoint', () => {

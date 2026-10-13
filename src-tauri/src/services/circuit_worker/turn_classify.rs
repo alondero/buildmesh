@@ -110,6 +110,7 @@ impl readiness::Candidate {
     pub(crate) fn with_result_file(
         mut self,
         path: &std::path::Path,
+        view: &RunView,
         gate: &StepView,
     ) -> Result<Option<(Self, bool)>, crate::circuit::observation::CircuitObservationBlocker> {
         use crate::services::transcript_reader::report_snapshot::ReportSnapshot;
@@ -120,6 +121,11 @@ impl readiness::Candidate {
             self.binding.input_guard.report_guard.as_ref(),
         ) {
             Ok(Some(report)) => {
+                if report_contract::requires_result_line(view, &gate.node_id)
+                    && !report_contract::declares_completion(view, &gate.node_id, &report.text)
+                {
+                    return Ok(Some((self, true)));
+                }
                 self.output = report.text.clone();
                 self.binding.report_revision = report.revision.clone();
                 self.binding.owner.report_revision = Some(report.revision.clone());
@@ -207,7 +213,7 @@ pub(super) fn classify_step_turn(
     let (candidate, missing_path) = if let Some(path) =
         crate::circuit::handoff::expected_result(active.run.id, agent_node_id)
     {
-        let (candidate, missing) = match candidate.with_result_file(&path, step) {
+        let (candidate, missing) = match candidate.with_result_file(&path, view, step) {
             Ok(Some(result)) => result,
             Ok(None) => return None,
             Err(blocker) => return Some(ClassifiedTurn::deferred(agent_node_id, blocker)),
@@ -1338,7 +1344,7 @@ mod result_continuation_tests {
             )
             .unwrap()
             .unwrap();
-            let Err(blocker) = candidate.with_result_file(&result, run.step("step").unwrap())
+            let Err(blocker) = candidate.with_result_file(&result, &run, run.step("step").unwrap())
             else {
                 panic!("directory result must defer");
             };
@@ -1362,7 +1368,7 @@ mod result_continuation_tests {
                 )
                 .unwrap()
                 .unwrap()
-                .with_result_file(&result, run.step("step").unwrap())
+                .with_result_file(&result, &run, run.step("step").unwrap())
                 .unwrap()
                 .unwrap()
             };

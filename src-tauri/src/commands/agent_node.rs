@@ -45,7 +45,12 @@ pub struct WorktreeCleanupFailedPayload {
     pub retry_not_before: i64,
 }
 
-/// Create a new agent node
+/// Create a new agent node.
+///
+/// `path` stays on the IPC surface and is unused: the runner reads the
+/// mesh path from the mesh row. `initial_prompt` is optional. When it
+/// trims to text, the runner rejects a harness that cannot take one
+/// before inserting a row.
 #[command]
 pub async fn create_agent_node(
     mesh_id: i64,
@@ -55,46 +60,51 @@ pub async fn create_agent_node(
     provider: Option<String>,
     use_worktree: Option<bool>,
     configuration_id: Option<String>,
+    initial_prompt: Option<String>,
 ) -> Result<AgentNode, String> {
-    // Tauri command surface has no PR-spawn plumbing; PR flows go via
-    // `commands::pr::create_pr_node`. If we ever expose PR spawn here,
-    // this is the call site to grow.
-    //
     // Offload: create locks SQLite, touches the filesystem, and may run
     // git worktree operations (issue #1380).
-    //
-    // Issue #1658 step 5 — the mesh-lookup + branch + create dance now
-    // flows through `services::agent_node::create_blocking`, the single
-    // shared runner used by both this command and `http::routes::nodes::create`.
-    // `path` is accepted on the IPC surface (deserialization contract)
-    // but unused — the helper derives `mesh.path` itself from the mesh
-    // row it loads. `branch_override = Some(&branch)` short-circuits the
-    // helper's `get_default_branch_blocking` since the IPC caller
-    // already supplied the branch. The legacy
-    // `provider.unwrap_or("anthropic")` fallback (issue #538 default)
-    // is preserved inside `create_with_source_pr_fork`.
     crate::commands::run_blocking("create_agent_node", move || {
-        let configuration = crate::preferences::spawn_configurations::resolve_saved(
-            provider.as_deref().unwrap_or("anthropic"),
-            configuration_id.as_deref().filter(|s| !s.trim().is_empty()),
-        )
-        .map_err(|error| error.to_string())?;
-        services::agent_node::create_blocking_configured(
+        create_agent_node_blocking(
             mesh_id,
+            &branch,
             provider.as_deref(),
-            Some(&branch),
-            None, // source_issue
-            None, // name_override — Tauri surface doesn't accept one
             use_worktree,
-            false, // pending — Idle matches the prior create(...) semantics
-            configuration.as_ref(),
+            configuration_id.as_deref(),
+            initial_prompt.as_deref(),
         )
-        .map_err(|e| {
-            tracing::error!("create_agent_node failed: {}", e);
-            e.to_string()
-        })
     })
     .await
+}
+
+pub(crate) fn create_agent_node_blocking(
+    mesh_id: i64,
+    branch: &str,
+    provider: Option<&str>,
+    use_worktree: Option<bool>,
+    configuration_id: Option<&str>,
+    initial_prompt: Option<&str>,
+) -> Result<AgentNode, String> {
+    let configuration = crate::preferences::spawn_configurations::resolve_saved(
+        provider.unwrap_or("anthropic"),
+        configuration_id.filter(|id| !id.trim().is_empty()),
+    )
+    .map_err(|error| error.to_string())?;
+    services::agent_node::create_blocking_configured(
+        mesh_id,
+        provider,
+        Some(branch),
+        None,
+        None,
+        use_worktree,
+        false,
+        configuration.as_ref(),
+        initial_prompt,
+    )
+    .map_err(|error| {
+        tracing::error!("create_agent_node failed: {}", error);
+        error.to_string()
+    })
 }
 
 /// List all agent nodes
@@ -532,8 +542,14 @@ pub async fn regenerate_agent_node(
     .await?;
 
     let intent = if resume {
+        // Issue #1550 — a same-harness regenerate reuses the captured
+        // `cli_session_id`, but it must branch off that transcript rather
+        // than continue it: continuing would append the regenerated run to
+        // the very history the user is regenerating from. Harnesses that
+        // cannot fork ignore this (their `resume_args_fork` defaults to
+        // `resume_args`, i.e. the pre-#1550 in-place resume).
         SpawnIntent::Resume {
-            cause: ResumeCause::Explicit,
+            cause: ResumeCause::Regenerate,
         }
     } else {
         SpawnIntent::Fresh
@@ -557,6 +573,39 @@ pub async fn regenerate_agent_node(
 #[cfg(test)]
 mod tests {
     use super::validate_rename_name;
+
+    /// Issue #1550 — the fork argv is only reachable if this call site
+    /// actually asks for `ResumeCause::Regenerate`. `regenerate_agent_node`
+    /// needs a live `tauri::AppHandle` to spawn, so the intent mapping is
+    /// pinned at the source instead: `regenerate_apply_blocking` already
+    /// has behavioural tests for the `resume` decision itself, and
+    /// `agent::launch` / the adapter own the argv.
+    #[test]
+    fn regenerate_resumes_with_the_regenerate_cause() {
+        let src = include_str!("agent_node.rs");
+        let start = src
+            .find("let intent = if resume {")
+            .expect("regenerate_agent_node must build its SpawnIntent here");
+        let rest = &src[start..];
+        let end = rest
+            .find("} else {")
+            .expect("the resume branch must be followed by the fresh branch");
+        let arm = &rest[..end];
+        assert!(
+            arm.contains("SpawnIntent::Resume"),
+            "a same-harness regenerate resumes the captured session; got: {arm}"
+        );
+        assert!(
+            arm.contains("cause: ResumeCause::Regenerate"),
+            "the fork argv is only reachable through ResumeCause::Regenerate \
+             (issue #1550); got: {arm}"
+        );
+        assert!(
+            !arm.contains("cause: ResumeCause::Explicit"),
+            "ResumeCause::Explicit would continue the parent transcript in \
+             place instead of branching off it; got: {arm}"
+        );
+    }
 
     #[test]
     fn validate_accepts_trimmed_name() {

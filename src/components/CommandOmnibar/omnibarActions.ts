@@ -9,8 +9,8 @@
  * rendering React and keeps the palette a pure "search + select" surface.
  *
  * Every Mesh-scoped route — the "Go to Mesh: <name>" entry (#2077) and the
- * destination routes — enters Mesh scope through the one store operation
- * `uiStore.enterMeshScope`, so a palette action that names a Mesh always
+ * destination routes — enters Mesh scope through the navigation intent
+ * `navigation.enterMesh`, so a palette action that names a Mesh always
  * resolves the same scope the sidebar and the title-bar picker do. Ordering
  * still matters for the destination routes: the scope is entered BEFORE the
  * destination opens, because a Mesh-lens destination resolves its subject
@@ -29,8 +29,7 @@ import { mapBackendProviders } from '../../lib/groups';
 import { addToast } from '../../stores/toastStore';
 import * as api from '../../lib/tauri';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
-import { useNodeActivityStore } from '../../stores/nodeActivityStore';
-import { useMeshStore } from '../../stores/meshStore';
+import { enterMesh, focusNode } from '../../lib/navigation';
 import { useUIStore } from '../../stores/uiStore';
 import { PROBE_TAB_DEFINITIONS, PROBE_TAB_ORDER } from '../../lib/probeContext';
 import { requestIssueNavigation } from '../../lib/omnibar/issueNavigation';
@@ -140,12 +139,7 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
     if (!Number.isFinite(nodeId)) return;
     const node = useAgentNodeStore.getState().nodesById[nodeId];
     if (!node) return;
-    const wasSingle = useUIStore.getState().viewMode === 'single';
-    useNodeActivityStore.getState().activateNode(node.id);
-    useMeshStore.getState().selectMesh(node.mesh_id);
-    // Mesh selection drives Mesh mode through the shared subscription. Only
-    // restore Single when that was the source lens.
-    if (wasSingle) ctx.setViewMode('single');
+    focusNode(node.id, { view: 'mesh' });
     return;
   }
   if (id.startsWith('mesh:')) {
@@ -157,7 +151,7 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
     if (!Number.isFinite(meshId)) return;
     const mesh = ctx.meshes.find((item) => item.id === meshId);
     if (!mesh) return;
-    useUIStore.getState().enterMeshScope(mesh.id);
+    enterMesh(mesh.id);
     return;
   }
   if (id.startsWith('command:')) {
@@ -190,7 +184,7 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
         undefined,
         ctx.initialPrompt,
       )
-      .then(node => useNodeActivityStore.getState().activateNode(node.id))
+      .then(node => focusNode(node.id))
       .catch(() => {
         // Spawn failures already toast via the store's error surface.
       });
@@ -212,8 +206,7 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
     if (PROBE_TAB_DEFINITIONS[tab].lens !== 'mesh') return;
     const mesh = ctx.meshes.find((item) => item.id === meshId);
     if (!mesh || !Number.isFinite(meshId)) return;
-    useUIStore.getState().enterMeshScope(mesh.id);
-    ctx.openProbeTab(tab);
+    enterMesh(mesh.id, { probeTab: tab });
     return;
   }
   if (id.startsWith('issue:') || id.startsWith('pull:')) {
@@ -229,12 +222,11 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
     const number = Number(numberPart);
     const mesh = ctx.meshes.find((item) => item.id === meshId);
     if (!mesh || !Number.isFinite(number)) return;
-    useUIStore.getState().enterMeshScope(mesh.id);
     if (id.startsWith('issue:')) {
       requestIssueNavigation({ meshId: mesh.id, issueNumber: number });
-      ctx.openProbeTab('issues');
+      enterMesh(mesh.id, { probeTab: 'issues' });
     } else {
-      ctx.openProbeTab('pulls');
+      enterMesh(mesh.id, { probeTab: 'pulls' });
       useUIStore.getState().openDiff({
         filePath: '',
         rootPath: mesh.path,

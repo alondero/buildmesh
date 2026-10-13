@@ -15,12 +15,17 @@ import { CenterDiffOverlay } from './CenterDiffOverlay';
 import { CircuitEditorOverlay } from '../Circuits/CircuitEditorOverlay';
 import { NodeCard } from './NodeCard';
 import { activityMemberIds, activityRootId } from '../../lib/nodeActivities';
-import { useNodeActivityStore } from '../../stores/nodeActivityStore';
+import { focusNode } from '../../lib/navigation';
+import { useNodeActivityStore, type UtilityMode } from '../../stores/nodeActivityStore';
 import { DropIntentContext, NodeDragPreview, computeDropIntent, type DropIntent } from './nodeDrag';
 import { equalSizes } from '../../hooks/useGridLayout';
 import { useResizable, SPLITTER_HANDLE_WIDTH } from '../../hooks/useResizable';
 import { CanvasEmptyStateContainer } from './CanvasEmptyStateContainer';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
+
+function activateActivity(nodeId: number, utility?: boolean, utilityMode?: UtilityMode): void {
+  focusNode(nodeId, { utility, utilityMode });
+}
 
 const MIN_PANE_PERCENT = 15;
 
@@ -88,7 +93,7 @@ function ResizablePanes({ nodes, activityMembersByRoot, draggable = true }: Resi
   };
 
   const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
-  const activateNode = useNodeActivityStore(state => state.activateNode);
+  const activateNode = activateActivity;
   const isMultiPane = nodes.length > 1;
 
   return (
@@ -161,7 +166,7 @@ export function AgentNodeView() {
       new Set(agentNodes.filter(node => node.status !== 'archived').map(node => node.id)),
     );
   }, [agentNodes]);
-  const activateNode = useNodeActivityStore(state => state.activateNode);
+  const activateNode = activateActivity;
   const reorderAgentNode = useAgentNodeStore(state => state.reorderAgentNode);
   const swapAgentNodes = useAgentNodeStore(state => state.swapAgentNodes);
 

@@ -4,6 +4,22 @@
 # /use and /verify call. It only ever touches buildmesh-dev — never the hub.
 set -euo pipefail
 
+DETACH=false
+READINESS_TIMEOUT_SECONDS=30
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --detach) DETACH=true; shift ;;
+    --readiness-timeout-seconds)
+      READINESS_TIMEOUT_SECONDS="${2:-}"
+      if ! [[ "$READINESS_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] || [ "$READINESS_TIMEOUT_SECONDS" -lt 1 ] || [ "$READINESS_TIMEOUT_SECONDS" -gt 300 ]; then
+        echo 'ERROR: --readiness-timeout-seconds must be between 1 and 300'
+        exit 1
+      fi
+      shift 2 ;;
+    *) echo "ERROR: unknown option $1"; exit 1 ;;
+  esac
+done
+
 cd "$(dirname "$0")/.."
 
 # The dev profile must NOT share src-tauri/target/release/ with the stable
@@ -62,8 +78,10 @@ fi
 
 # 4. Record log position
 BEFORE_LINES=0
+BEFORE_FIRST_LINE=""
 if [ -f "$LOG_PATH" ]; then
   BEFORE_LINES=$(wc -l < "$LOG_PATH")
+  BEFORE_FIRST_LINE=$(head -n 1 "$LOG_PATH")
 fi
 # Same delta-capture for the panic-hook outputs (issue #158). Echo the
 # counts to stdout so /verify can parse them and slice the post-launch file.
@@ -116,9 +134,56 @@ done
 if [ -n "$CLEARED" ]; then
   echo "Cleared Claude Code session markers for this launch:$CLEARED"
 fi
-"$BINARY" &
+if "$DETACH"; then
+  stop_launch() {
+    kill "$PID" 2>/dev/null || true
+    STOP_DEADLINE=$((SECONDS + 3))
+    while kill -0 "$PID" 2>/dev/null && [ "$SECONDS" -lt "$STOP_DEADLINE" ]; do sleep 0.1; done
+    kill -KILL "$PID" 2>/dev/null || true
+    wait "$PID" 2>/dev/null || true
+  }
+  mkdir -p .harness/logs
+  # nohup plus redirected handles lets the invoking shell exit independently.
+  nohup "$BINARY" </dev/null >>.harness/logs/dev-app.stdout.log 2>>.harness/logs/dev-app.stderr.log &
+else
+  "$BINARY" &
+fi
 PID=$!
 echo "Launched PID: $PID"
+echo "Log: $LOG_PATH"
+
+if "$DETACH"; then
+  # Compilation is outside the readiness budget, just as in run-dev.ps1.
+  DEADLINE=$((SECONDS + READINESS_TIMEOUT_SECONDS))
+  while [ "$SECONDS" -lt "$DEADLINE" ]; do
+    for entry in "panic.log:$BEFORE_PANIC_LINES" "panic_early.log:$BEFORE_PANIC_EARLY_LINES"; do
+      path="$LOG_DIR/${entry%%:*}"
+      before_count="${entry##*:}"
+      if [ -f "$path" ] && [ "$(wc -l < "$path")" -gt "$before_count" ]; then
+        echo "ERROR: panic detected in $path. Launch aborted."
+        tail -n +$((before_count + 1)) "$path"
+        stop_launch
+        exit 1
+      fi
+    done
+    if ! kill -0 "$PID" 2>/dev/null; then
+      echo "ERROR: Buildmesh Dev exited before readiness (PID $PID)"
+      exit 1
+    fi
+    if [ -f "$LOG_PATH" ]; then
+      SKIP_LINES=$BEFORE_LINES
+      if [ "$(wc -l < "$LOG_PATH")" -lt "$SKIP_LINES" ] || [ "$(head -n 1 "$LOG_PATH")" != "$BEFORE_FIRST_LINE" ]; then SKIP_LINES=0; fi
+      if tail -n +$((SKIP_LINES + 1)) "$LOG_PATH" | grep -qi 'started\|ready'; then
+        echo "OK - Buildmesh Dev running detached (PID $PID)"
+        exit 0
+      fi
+    fi
+    sleep 0.1
+  done
+  stop_launch
+  echo "ERROR: Buildmesh Dev readiness timed out after ${READINESS_TIMEOUT_SECONDS}s; see $LOG_PATH"
+  exit 1
+fi
 
 # 6. Verify via log
 sleep 3

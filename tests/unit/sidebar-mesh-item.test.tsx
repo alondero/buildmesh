@@ -146,7 +146,6 @@ function renderMeshItem(overrides: Partial<Props> = {}) {
     // pairings passes an empty cluster list rather than a flat node list.
     nodeClusters: [],
     onActivateNode: vi.fn(),
-    selectMesh: vi.fn(),
     onDeleteNode: vi.fn(),
     getDefaultProvider: vi.fn().mockResolvedValue('anthropic'),
     ...overrides,
@@ -231,7 +230,6 @@ describe('MeshItem', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Show agents for my-mesh' }));
     await userEvent.click(screen.getByText('node-a'));
     expect(props.onActivateNode).toHaveBeenCalledWith(10);
-    expect(props.selectMesh).toHaveBeenCalledWith(3);
   });
 
   it('opens a context menu with periphery actions on right-click', () => {
@@ -1223,7 +1221,6 @@ describe('MeshItem — keyboard drag handle a11y (issue #727)', () => {
                 onOpenSessionHistoryProbe={vi.fn()}
                 nodeClusters={[]}
                 onActivateNode={vi.fn()}
-                selectMesh={vi.fn()}
                 onDeleteNode={vi.fn()}
                 getDefaultProvider={vi.fn().mockResolvedValue('anthropic')}
               />

@@ -15,9 +15,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use crate::env;
-use crate::services::transcript_reader::adapter::{
-    LocateCtx, TranscriptAdapter,
-};
+use crate::services::transcript_reader::adapter::{LocateCtx, TranscriptAdapter};
 use crate::services::transcript_reader::types::{
     cap_tool_calls, push_bounded, truncate, truncate_json_strings, Parsed, ToolCall, Turn,
     MAX_TOOL_STRING,
@@ -65,7 +63,6 @@ impl TranscriptAdapter for GrokAdapter {
                 _ => false,
             })
     }
-
 
     fn verify_attention_token(&self, query_string: Option<&str>, minted: Option<&str>) -> bool {
         // Issue #1366 round-2 + round-3: Grok's runner cannot bind
@@ -136,6 +133,90 @@ pub(crate) fn grok_urlencode_cwd(node_path: &str) -> String {
         }
     }
     out
+}
+
+/// How much of `events.jsonl` a turn-end probe reads. A turn's start can be
+/// buried deeper than this, which means "the turn is still running": in the
+/// sessions observed, nothing follows a `turn_ended` until the next `turn_started`.
+const EVENTS_TAIL_BYTES: u64 = 256 * 1024;
+
+/// A completed Grok turn, read from the session's `events.jsonl`.
+///
+/// `chat_history.jsonl` records carry no timestamp, so this sibling file is the
+/// only publication clock and the only native turn boundary. The length and
+/// modification time are taken from the same handle *before* reading, so an
+/// append after the read changes the stamp the freshness check compares.
+#[derive(Debug)]
+pub(crate) struct CompletedTurn {
+    pub completed_at_ms: i64,
+    pub events: PathBuf,
+    pub length: u64,
+    pub modified: std::time::SystemTime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TurnEndUnavailable {
+    /// The last event line is unterminated: a lifecycle event may be mid-write.
+    Partial,
+    /// No events file, or the latest lifecycle event is not a completed turn end.
+    Unfinished,
+}
+
+/// Whether the session beside `chat_history` has just completed a turn.
+///
+/// Only the latest lifecycle event counts. A Stop hook that blocks makes Grok
+/// emit `turn_started` about 100 ms after `turn_ended`, so an earlier
+/// `turn_ended` followed by anything newer is not a finished turn. Other
+/// outcomes (cancelled, failed) leave a last message that is not a report.
+pub(crate) fn completed_turn(chat_history: &Path) -> Result<CompletedTurn, TurnEndUnavailable> {
+    use std::io::{Read, Seek, SeekFrom};
+    use TurnEndUnavailable::{Partial, Unfinished};
+    let events = chat_history.with_file_name("events.jsonl");
+    let mut file = std::fs::File::open(&events).map_err(|_| Unfinished)?;
+    let metadata = file.metadata().map_err(|_| Unfinished)?;
+    let (length, modified) = (metadata.len(), metadata.modified().map_err(|_| Unfinished)?);
+    let start = length.saturating_sub(EVENTS_TAIL_BYTES);
+    file.seek(SeekFrom::Start(start)).map_err(|_| Unfinished)?;
+    let mut bytes = Vec::new();
+    file.take(length - start)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Unfinished)?;
+    match bytes.last() {
+        None => return Err(Unfinished),
+        Some(b'\n') => {}
+        Some(_) => return Err(Partial),
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    // A window that starts mid-file begins inside a record.
+    let lines = text
+        .lines()
+        .skip(usize::from(start > 0))
+        .collect::<Vec<_>>();
+    for line in lines.into_iter().rev() {
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        match event.get("type").and_then(|kind| kind.as_str()) {
+            Some("turn_ended") => {
+                let completed_at_ms = (event.get("outcome").and_then(|o| o.as_str())
+                    == Some("completed"))
+                .then(|| event.get("ts")?.as_str())
+                .flatten()
+                .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+                .map(|time| time.timestamp_millis())
+                .ok_or(Unfinished)?;
+                return Ok(CompletedTurn {
+                    completed_at_ms,
+                    events,
+                    length,
+                    modified,
+                });
+            }
+            Some("turn_started") => return Err(Unfinished),
+            _ => {}
+        }
+    }
+    Err(Unfinished)
 }
 
 // Both parsing and revision tracking must agree on which records are reports.

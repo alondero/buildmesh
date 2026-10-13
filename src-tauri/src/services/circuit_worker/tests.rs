@@ -2715,10 +2715,12 @@ fn a_wake_up_is_fenced_against_its_own_claim_not_the_continuation_s() {
             &view,
             node_id,
             target,
-            SessionStatus::Ready,
-            true,
-            Some(stamp),
-            Some(revision),
+            ContinuationTurn {
+                status: SessionStatus::Ready,
+                alive: true,
+                stamp: Some(stamp),
+                revision: Some(revision),
+            },
             "nudge",
         )
     };
@@ -4090,6 +4092,216 @@ fn result_missing_and_blank_keep_bounded_reminders_through_production_classifier
         let (_, effects, attention) = fixture.probe();
         assert!(effects.is_empty());
         assert_eq!(attention, 0);
+    }
+}
+
+#[test]
+fn result_without_required_decision_is_repaired_before_inference() {
+    let mut fixture = ResultReadFixture::new();
+    std::fs::write(
+        &fixture.result,
+        "Fixes committed and pushed. No blockers.\n",
+    )
+    .unwrap();
+    let (events, effects, attention) = fixture.probe();
+    assert!(matches!(
+        events.as_slice(),
+        [CircuitEvent::ResultFileMissing { .. }]
+    ));
+    assert!(matches!(
+        effects.as_slice(),
+        [crate::circuit::stepper::Effect::ContinueAgentTurn { .. }]
+    ));
+    assert_eq!(attention, 0);
+    assert_eq!(
+        fixture
+            .view
+            .context
+            .get("node.implementation_classifier.classifier_failures.1"),
+        None
+    );
+}
+
+#[test]
+fn unverified_owned_step_can_deliver_its_one_background_wake() {
+    let mut fixture = ResultReadFixture::new();
+    let gate = "implementation_classifier";
+    fixture.view.step_mut(gate).unwrap().status = StepStatus::Unverified;
+    let mut events = Vec::new();
+    observe_waits_with(&fixture.view, &mut events, 1_000, |_, _| {
+        Some(WaitObservation {
+            progress: Some("report:1".into()),
+            observed: true,
+            yielded: true,
+            yielded_budget_ms: 30_000,
+            active_budget_ms: ACTIVE_WAIT_MS,
+            stalled_task_id: Some("bg-finished".into()),
+        })
+    });
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, CircuitEvent::NudgeIdleSession { .. })));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, CircuitEvent::WaitObserved { .. })));
+    let mut effects = Vec::new();
+    for event in events {
+        effects.extend(advance(&mut fixture.view, &event).effects);
+    }
+    assert!(matches!(
+        effects.as_slice(),
+        [crate::circuit::stepper::Effect::NudgeIdleAgent { .. }]
+    ));
+    assert_eq!(fixture.view.step(gate).unwrap().status, StepStatus::Running);
+    advance(
+        &mut fixture.view,
+        &CircuitEvent::NudgeDelivered {
+            node_id: gate.into(),
+            attempt: 1,
+        },
+    );
+    assert_eq!(
+        fixture
+            .view
+            .context
+            .get("node.implementation_classifier.nudge.delivery"),
+        Some("delivered")
+    );
+    assert_eq!(
+        fixture
+            .view
+            .nudge_decision(gate, 1, "new-report", "new-turn"),
+        crate::circuit::stepper::NudgeDecision::Exhausted
+    );
+}
+
+#[test]
+fn background_wake_rechecks_task_identity_activity_and_human_waits() {
+    let mut fixture = ResultReadFixture::new();
+    let gate = "implementation_classifier";
+    fixture
+        .view
+        .context
+        .set(&format!("node.{gate}.nudge.stamp"), "turn");
+    fixture
+        .view
+        .context
+        .set(&format!("node.{gate}.nudge.revision"), "report");
+    fixture
+        .view
+        .context
+        .set(&format!("node.{gate}.nudge.task_id"), "bg_finished");
+    let check = |status, alive, stamp, revision, quiet_ms, task_id, lifecycle_allows_wake| {
+        background_wake_is_current(
+            &fixture.view,
+            gate,
+            fixture.agent_id,
+            BackgroundWakeEvidence {
+                status,
+                alive,
+                stamp,
+                revision,
+                quiet_ms,
+                task_id,
+                lifecycle_allows_wake,
+            },
+        )
+    };
+    assert!(check(
+        SessionStatus::Running,
+        true,
+        Some("turn"),
+        Some("report"),
+        Some(60_000),
+        Some("bg_finished"),
+        true
+    ));
+    assert!(check(
+        SessionStatus::Ready,
+        true,
+        Some("turn"),
+        Some("report"),
+        None,
+        Some("bg_finished"),
+        true
+    ));
+    for (status, alive, stamp, revision, quiet, task, permitted) in [
+        (
+            SessionStatus::Running,
+            true,
+            Some("turn"),
+            Some("report"),
+            Some(0),
+            Some("bg_finished"),
+            true,
+        ),
+        (
+            SessionStatus::Ready,
+            false,
+            Some("turn"),
+            Some("report"),
+            None,
+            Some("bg_finished"),
+            true,
+        ),
+        (
+            SessionStatus::Ready,
+            true,
+            Some("new-turn"),
+            Some("report"),
+            None,
+            Some("bg_finished"),
+            true,
+        ),
+        (
+            SessionStatus::Ready,
+            true,
+            Some("turn"),
+            Some("new-report"),
+            None,
+            Some("bg_finished"),
+            true,
+        ),
+        (
+            SessionStatus::Ready,
+            true,
+            Some("turn"),
+            Some("report"),
+            None,
+            None,
+            true,
+        ),
+        (
+            SessionStatus::Ready,
+            true,
+            Some("turn"),
+            Some("report"),
+            None,
+            Some("bg_other"),
+            true,
+        ),
+        (
+            SessionStatus::Ready,
+            true,
+            Some("turn"),
+            Some("report"),
+            None,
+            Some("bg_finished"),
+            false,
+        ),
+        (
+            SessionStatus::AwaitingInput,
+            true,
+            Some("turn"),
+            Some("report"),
+            None,
+            Some("bg_finished"),
+            true,
+        ),
+    ] {
+        assert!(!check(
+            status, alive, stamp, revision, quiet, task, permitted
+        ));
     }
 }
 

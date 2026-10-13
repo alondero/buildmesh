@@ -19,6 +19,14 @@
 //! [`crate::agent::provider::SpawnRecipe::trailing_args`] rather than
 //! overriding [`AgentProvider::prepare_launch`].
 //!
+//! The resume *shape* is adapter-owned too: [`SessionIdModeRef::Resume`]
+//! carries the cause, and `Regenerate` composes
+//! [`AgentProvider::resume_args_fork`] instead of
+//! [`AgentProvider::resume_args`] so a same-harness regenerate branches off
+//! the captured transcript rather than extending it (issue #1550). The
+//! default fork shape equals the default resume shape, so only adapters
+//! that actually advertise a fork opt in.
+//!
 //! The capability contract travels with the recipe so a single test
 //! (`spawn::tests::capability_recipe_coherence`) can prove they agree:
 //! for every adapter, every session mode, and every value the resolver
@@ -28,6 +36,7 @@
 
 use crate::agent::capabilities::{EffortControlKind, ResolvedAgentConfig};
 use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe};
+use crate::agent::spawn::ResumeCause;
 use crate::models::EnvType;
 
 /// A `SessionIdMode` reference. Owns no allocation; borrows the orchestrator's
@@ -41,7 +50,12 @@ pub enum SessionIdModeRef<'a> {
     Assign(&'a str),
     /// Resume an existing session id (orchestrator already has it; harness
     /// CLI consumes it via `--resume <uuid>` / `--session <id>` / subcommand).
-    Resume(&'a str),
+    /// The cause rides along because it selects the flag shape, not just the
+    /// resume: `Regenerate` composes [`AgentProvider::resume_args_fork`] so
+    /// the run branches off the transcript instead of extending it (issue
+    /// #1550). Carrying it on the variant keeps "fork without a resume"
+    /// unrepresentable at the one place that chooses the resume flags.
+    Resume { id: &'a str, cause: ResumeCause },
     /// No session id — the harness self-assigns (e.g. mcode, kimi)
     /// and the orchestrator relies on the reader's PTY capture to learn it.
     None,
@@ -210,13 +224,20 @@ pub fn default_prepare(
     // stay at index 0 when the permission layer below splices options in.
     let mut subcommand_resume = false;
     let mut recipe = match input.session {
-        SessionIdModeRef::Resume(id) => {
+        SessionIdModeRef::Resume { id, cause } => {
             if let Some(resume_recipe) = adapter.spawn_recipe_for_resume(input.platform, id) {
                 subcommand_resume = true;
                 resume_recipe
             } else {
                 let mut r = base_recipe;
-                let args = adapter.resume_args(id);
+                // Issue #1550 — a regenerate on the same harness reuses the
+                // captured id but must not keep writing to the transcript it
+                // starts from, so it composes the adapter's fork args. Every
+                // other cause continues in place, unchanged.
+                let args = match cause {
+                    ResumeCause::Regenerate => adapter.resume_args_fork(id),
+                    ResumeCause::Startup | ResumeCause::Explicit => adapter.resume_args(id),
+                };
                 if !args.is_empty() {
                     r.base_args.extend(args);
                 }
@@ -419,6 +440,86 @@ mod tests {
     use super::*;
     use crate::agent::provider::adapters::TERMINAL;
 
+    /// Issue #1550 — the fork seam is opt-in, and "opt-in" has to mean
+    /// *byte-identical argv for everyone else*. For every adapter that
+    /// does not override `resume_args_fork`, a `Regenerate` resume must
+    /// compose exactly the argv its `Explicit` resume composes; otherwise
+    /// #1550 would silently change the launch for harnesses whose CLI
+    /// never saw a fork flag.
+    #[test]
+    fn regenerate_resume_matches_explicit_resume_for_adapters_without_a_fork() {
+        let config = ResolvedAgentConfig::default();
+        let mut checked = 0;
+        for provider in crate::models::Provider::all() {
+            let adapter = provider.adapter();
+            // Skip the adapters that actually branch — their argv is
+            // supposed to differ.
+            if adapter.resume_args_fork("probe-session") != adapter.resume_args("probe-session") {
+                continue;
+            }
+            if !adapter.supports_resume() {
+                continue;
+            }
+            checked += 1;
+            let args_for = |cause: ResumeCause| {
+                default_prepare(
+                    adapter,
+                    HarnessLaunchInput {
+                        platform: Platform::Windows,
+                        runtime: EnvType::Windows,
+                        session: SessionIdModeRef::Resume {
+                            id: "probe-session",
+                            cause,
+                        },
+                        config: &config,
+                        prefill: None,
+                        sandbox: false,
+                    },
+                )
+                .recipe
+                .argv()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                args_for(ResumeCause::Regenerate),
+                args_for(ResumeCause::Explicit),
+                "{} must keep its pre-#1550 in-place resume argv for a \
+                 Regenerate cause (no resume_args_fork override)",
+                adapter.id()
+            );
+        }
+        assert!(
+            checked > 1,
+            "expected several fork-less resumable adapters to compare, saw {checked}"
+        );
+    }
+
+    /// The inverse guard on the same table: OpenCode is the adapter that
+    /// opts in, so it must be the one whose `Regenerate` argv differs.
+    /// Without this the test above could pass vacuously if every adapter
+    /// silently lost its fork override.
+    #[test]
+    fn opencode_is_the_only_resumable_adapter_that_opts_into_forking() {
+        let opting_in: Vec<&str> = crate::models::Provider::all()
+            .iter()
+            .filter(|provider| {
+                let adapter = provider.adapter();
+                adapter.supports_resume()
+                    && adapter.resume_args_fork("probe-session")
+                        != adapter.resume_args("probe-session")
+            })
+            .map(|provider| provider.adapter().id())
+            .collect();
+        assert_eq!(
+            opting_in,
+            vec!["opencode"],
+            "fork opt-in is a per-adapter decision; a new entry here means a \
+             harness genuinely supports branching and its resume shape needs \
+             review"
+        );
+    }
+
     /// Empty session + empty config must produce a recipe that exactly
     /// mirrors the adapter's `spawn_recipe` — no synthesised flags.
     #[test]
@@ -589,7 +690,10 @@ mod tests {
         let input = HarnessLaunchInput {
             platform: Platform::Macos,
             runtime: EnvType::Windows,
-            session: SessionIdModeRef::Resume("sess-xyz"),
+            session: SessionIdModeRef::Resume {
+                id: "sess-xyz",
+                cause: ResumeCause::Explicit,
+            },
             config: &config,
             prefill: None,
             sandbox: false,
@@ -627,7 +731,10 @@ mod tests {
         let input = HarnessLaunchInput {
             platform: Platform::Macos,
             runtime: EnvType::Windows,
-            session: SessionIdModeRef::Resume("sess-xyz"),
+            session: SessionIdModeRef::Resume {
+                id: "sess-xyz",
+                cause: ResumeCause::Explicit,
+            },
             config: &config,
             prefill: Some("continue"),
             sandbox: false,

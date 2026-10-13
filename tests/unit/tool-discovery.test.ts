@@ -24,14 +24,16 @@ describe('tool discovery grid traversal', () => {
     ['properties', 'down', 'issues', 'preserves the column across a group heading'],
     ['worktrees', 'down', 'pulls', 'preserves the column from the other Project tile'],
     ['pulls', 'down', 'circuits', 'preserves the column across another group heading'],
-    ['scratchpad', 'down', 'usage', 'clamps into the one-tile final row'],
+    ['scratchpad', 'down', 'notifications', 'preserves the column in the app-wide row'],
+    ['usage', 'right', 'notifications', 'reaches notifications beside usage'],
+    ['notifications', 'down', 'review', 'wraps from the final right column'],
     ['usage', 'down', 'files', 'wraps from the last row to the first'],
     ['files', 'up', 'usage', 'wraps from the first row to the last'],
   ];
 
   it('matches the rendered per-group two-column rows', () => {
     // Legacy Autopilot removal leaves the Automate group with the Circuit tile.
-    expect(TOOL_DISCOVERY_ROW_LAYOUT).toEqual([2, 2, 2, 1, 2, 1]);
+    expect(TOOL_DISCOVERY_ROW_LAYOUT).toEqual([2, 2, 2, 1, 2, 2]);
   });
 
   it('groups the two project destinations together, not with code browsing', () => {

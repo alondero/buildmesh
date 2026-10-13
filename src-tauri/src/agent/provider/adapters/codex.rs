@@ -97,16 +97,14 @@ fn attention_hook_wsl_shell_command(url: &str) -> String {
     )
 }
 
-fn attention_hook_windows_fallback_command(url: &str) -> String {
-    let url = crate::env::powershell_literal(url);
-    // Codex sends UTF-8 JSON; both PowerShell defaults corrupt non-ASCII tool text.
-    let script = format!(
-        "[Console]::InputEncoding=[Text.Encoding]::UTF8; try {{ Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -Method Post {url} -ContentType 'application/json; charset=utf-8' -Body ([Console]::In.ReadToEnd()) -TimeoutSec 10 | Out-Null }} catch {{ }}; [Console]::Out.WriteLine('{{}}'); exit 0"
-    );
-    format!(
-        "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
-        crate::env::encode_powershell(&script)
-    )
+/// The callback a Windows Codex runs. Codex resolves a Windows binary's
+/// command hook to `commandWindows` and runs it in PowerShell, so the value is
+/// PowerShell statement text built by [`crate::env::windows_hook_callback_command`]
+/// — quote-free and newline-free, because it rides a `-c` launch argument
+/// through this module's own PowerShell script and then through the `cmd.exe`
+/// that runs an npm `codex.CMD` shim.
+fn attention_hook_windows_command(url: &str) -> String {
+    crate::env::windows_hook_callback_command(url)
 }
 
 const CODEX_HOOK_RELAY_ENV: &str = "BUILDMESH_CODEX_HOOK_RELAY_URL";
@@ -127,15 +125,6 @@ fn valid_loopback_relay_origin(value: &str) -> Option<&str> {
         return None;
     }
     Some(origin)
-}
-
-/// The callback a Windows Codex binary runs. Encoded PowerShell carries the
-/// URL, the stdin read and the `{}` stdout contract without shell-specific
-/// quoting, so it survives Codex's own `cmd.exe /C` and a PowerShell host
-/// alike.
-fn attention_hook_windows_command(url: &str) -> String {
-    crate::env::windows_attention_command_with_json_output(Some(url))
-        .unwrap_or_else(|| attention_hook_windows_fallback_command(url))
 }
 
 /// The `command` Codex runs when it does not prefer `commandWindows`.
@@ -1409,10 +1398,17 @@ fn discover_supported_install_uncached(env_type: EnvType) -> Result<CodexInstall
     })
 }
 
-/// Longest prompt passed as a launch argument. The hook arguments take about
-/// 19,000 of Windows' 32,767 command-line characters once re-encoded; a prompt
-/// is encoded the same way (and a quote-heavy one doubles), so 2,000 characters
-/// keeps the worst case under the limit.
+/// Longest prompt passed as a launch argument.
+///
+/// A Windows launch crosses two limits, and the smaller one is the binding
+/// one. The whole launch is re-encoded into one PowerShell `-EncodedCommand`
+/// script, which caps at CreateProcess' 32,767 characters (~2.7 characters of
+/// base64 per character of script); PowerShell then runs the npm `codex.CMD`
+/// shim by handing it to `cmd.exe`, whose own command line caps at 8,191
+/// characters. Codex's attention hooks already spend about 3,200 of those 8,191
+/// characters, and a prompt is encoded into the script the same way (a
+/// quote-heavy one doubles), so 2,000 characters keeps the worst case inside
+/// both limits (#2184).
 const MAX_POSITIONAL_PREFILL_CHARS: usize = 2_000;
 
 /// The Codex events Buildmesh listens to. Every event is catch-all except
@@ -1688,6 +1684,23 @@ impl AgentProvider for CodexAdapter {
     /// and the expected inline segments between markers.
     fn paste_gate_policy(&self) -> crate::agent::provider::PasteGatePolicy {
         crate::agent::provider::PasteGatePolicy::RenderedWithSplitMarker
+    }
+
+    /// Codex's composer needs CR line endings inside a bracketed paste.
+    ///
+    /// A ConPTY probe against Codex 0.162.1 (140x35, flags `0x2 | 0x4`,
+    /// bundled 1.24.260710001 runtime) staged a 12-line synthetic paste inside
+    /// `ESC[200~ … ESC[201~` and read the rendered composer: LF dropped every
+    /// newline and glued the lines together, while both CRLF and CR kept the
+    /// multiline layout. Nothing was submitted in any run.
+    ///
+    /// This is safe for the split-marker gate because Codex's `apply_paste`
+    /// normalizes CRLF and bare CR to LF *before* counting, so the
+    /// `[Pasted Content N chars]` proof is identical for all three endings.
+    /// Runtime evidence: `docs/learning/codex-paste-confirmation.md` and
+    /// `docs/learning/grok-terminal-paste.md`; the defect is issue #2199.
+    fn paste_requires_cr_newlines(&self) -> bool {
+        true
     }
 
     fn background_recipe(
@@ -3094,10 +3107,11 @@ mod tests {
     }
 
     /// Every launch command must POST the hook's stdin JSON as the request
-    /// body: curl reads it from `@-`, and the PowerShell callbacks from the
-    /// console.
+    /// body: curl reads it from `@-` (escaped for PowerShell's parser where the
+    /// shell parses the text), and the native callback from the console.
     fn forwards_hook_stdin(command: &str) -> bool {
         command.contains("--data-binary @-")
+            || command.contains("--data-binary `@-")
             || (command.contains("[Console]::In.ReadToEnd()")
                 && command.contains("Invoke-WebRequest"))
     }
@@ -3166,7 +3180,7 @@ mod tests {
         for hook in &hooks {
             let callback = decoded_hook_command(&hook.fields["commandWindows"]);
             assert!(
-                callback.contains("/api/attention/42'"),
+                callback.contains("/api/attention/42"),
                 "{} must POST to node 42: {callback}",
                 hook.event
             );
@@ -3191,22 +3205,37 @@ mod tests {
         for (a, b) in a.iter().zip(&b) {
             let a = decoded_hook_command(&a.fields["commandWindows"]);
             let b = decoded_hook_command(&b.fields["commandWindows"]);
-            assert!(a.contains("/api/attention/41'") && !a.contains("/attention/42"));
-            assert!(b.contains("/api/attention/42'") && !b.contains("/attention/41"));
+            assert!(a.contains("/api/attention/41") && !a.contains("/attention/42"));
+            assert!(b.contains("/api/attention/42") && !b.contains("/attention/41"));
         }
     }
 
     /// Windows PowerShell 5.1 drops double quotes passed to a native program,
-    /// and the whole launch is re-encoded into one PowerShell script that must
-    /// fit a 32,767-character process command line (UTF-16, then base64).
+    /// so no launch argument may carry one. A single quote is legal in the TOML
+    /// syntax the argument is written in, but not inside the callback value it
+    /// wraps: `toml_launch_string` would then escape that value into a
+    /// double-quoted string. Newlines are out for the same reason. The whole
+    /// launch is re-encoded into one PowerShell script that has to fit inside
+    /// both of Windows' command-line budgets: 32,767 characters for the
+    /// process, and the 8,191 `cmd.exe` itself allows for the line it parses
+    /// when it runs an npm `codex.CMD` shim (#2184).
     #[test]
     fn windows_launch_args_are_quote_free_and_fit_the_command_line_budget() {
         for env_type in [EnvType::Windows, EnvType::WindowsInterop] {
             let args = attention_hook_launch_args(42, env_type);
-            assert!(
-                args.iter().all(|arg| !arg.contains('"')),
-                "{env_type:?}: {args:?}"
-            );
+            for arg in &args {
+                assert!(!arg.contains('"'), "{env_type:?}: {args:?}");
+                assert!(!arg.contains('\n'), "{env_type:?}: {args:?}");
+                assert!(!arg.contains('\r'), "{env_type:?}: {args:?}");
+            }
+            for hook in launch_hooks(&args) {
+                let callback = &hook.fields["commandWindows"];
+                assert_eq!(hook.fields["command"], WINDOWS_COMMAND_STUB, "{env_type:?}");
+                // The callback rides inside the TOML literal, so it must need
+                // no escaping of its own.
+                assert!(!callback.contains('\''), "{env_type:?}: {callback}");
+                assert!(!callback.contains('"'), "{env_type:?}: {callback}");
+            }
             // `' '` between arguments plus the two quotes around each.
             let script_chars: usize = args.iter().map(|arg| arg.len() + 3).sum();
             let encoded_chars = script_chars * 2 * 4 / 3;
@@ -3214,9 +3243,14 @@ mod tests {
                 encoded_chars < 20_000,
                 "{env_type:?}: hook arguments alone encode to {encoded_chars} of 32767 characters"
             );
-            for hook in launch_hooks(&args) {
-                assert_eq!(hook.fields["command"], WINDOWS_COMMAND_STUB, "{env_type:?}");
-            }
+            // What `cmd.exe` parses when PowerShell runs the shim: every argv
+            // element quoted, plus the program and its switches.
+            assert!(
+                script_chars < crate::agent::spawn_environment::CMD_EXE_COMMAND_LINE_CHARS,
+                "{env_type:?}: hook arguments alone consume {script_chars} of cmd.exe's {} \
+                 characters, leaving no room for a prompt",
+                crate::agent::spawn_environment::CMD_EXE_COMMAND_LINE_CHARS
+            );
         }
     }
 
@@ -3253,6 +3287,9 @@ mod tests {
         assert_eq!(toml_launch_string("a\nb"), r#""a\nb""#);
     }
 
+    /// A bare `{}` prints nothing in PowerShell: the braces parse as a script
+    /// block. `echo ([char]123+[char]125)` spells the two bytes without a
+    /// quote character anywhere, which is the whole constraint on this value.
     #[test]
     fn attention_hook_commands_fail_open_and_emit_json() {
         let url = "http://localhost:1992/api/attention/42";
@@ -3260,17 +3297,21 @@ mod tests {
         let unix = attention_hook_unix_command(url);
         assert!(unix.contains("2>/dev/null || true; printf {}"), "{unix}");
 
-        let windows = attention_hook_windows_fallback_command(url);
-        let script = crate::env::decode_powershell_command(&windows)
-            .expect("native Windows callback is valid in either PowerShell or cmd.exe");
-        assert!(script.contains("[Console]::In.ReadToEnd()"), "{script}");
-        assert!(script.contains("Invoke-WebRequest"), "{script}");
-        assert!(script.contains("catch { }"), "{script}");
+        // The native arm, built directly so the assertion does not depend on
+        // which host the test runs on; the WSL-host arm is `env`'s own test.
+        let windows = crate::env::windows_hook_callback_command_for_runtime(url, None);
+        assert!(!windows.contains('"'), "{windows}");
+        assert!(!windows.contains('\''), "{windows}");
+        assert!(!windows.contains('\n'), "{windows}");
+        assert!(windows.contains("[Console]::In.ReadToEnd()"), "{windows}");
+        assert!(windows.contains("Invoke-WebRequest"), "{windows}");
+        assert!(windows.contains("catch { }"), "{windows}");
         assert!(
-            script.contains("[Console]::Out.WriteLine('{}')"),
-            "{script}"
+            windows.contains("echo ([char]123+[char]125)"),
+            "the callback must print the empty JSON object without quoting it: {windows}"
         );
-        assert!(script.ends_with("exit 0"), "{script}");
+        assert!(windows.ends_with("exit 0"), "{windows}");
+        assert!(windows.contains(url), "{windows}");
     }
 
     #[test]
@@ -3352,17 +3393,9 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_fallback_emits_json_after_callback_failure() {
-        use std::os::windows::process::CommandExt;
-        use std::process::Command;
-
-        let command =
-            attention_hook_windows_fallback_command("http://localhost:1/api/attention/42");
-        let output = Command::new("cmd.exe")
-            .args(["/d", "/c", &command])
-            .creation_flags(0x08000000)
-            .output()
-            .expect("run attention hook in cmd.exe");
+    fn windows_callback_emits_json_after_callback_failure_in_codex_runner() {
+        let command = attention_hook_windows_command("http://localhost:1/api/attention/42");
+        let output = run_like_codex(&command);
 
         assert!(
             output.status.success(),
@@ -3380,6 +3413,22 @@ mod tests {
     #[cfg(windows)]
     fn run_like_codex(command: &str) -> std::process::Output {
         use std::io::Write;
+
+        let mut child = spawn_like_codex(command);
+        child
+            .stdin
+            .take()
+            .expect("hook stdin")
+            .write_all(br#"{"hook_event_name":"Stop"}"#)
+            .expect("write hook payload");
+        child.wait_with_output().expect("wait for hook")
+    }
+
+    /// Codex's own runner shape: the hook command is handed to PowerShell as
+    /// one `-Command` argument (`codex_core::spawn`), with the hook's JSON on
+    /// stdin and its stdout captured.
+    #[cfg(windows)]
+    fn spawn_like_codex(command: &str) -> std::process::Child {
         use std::process::Stdio;
 
         let mut hook = crate::process_util::command_no_window("powershell.exe");
@@ -3396,14 +3445,7 @@ mod tests {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-        let mut child = hook.spawn().expect("spawn powershell.exe");
-        child
-            .stdin
-            .take()
-            .expect("hook stdin")
-            .write_all(br#"{"hook_event_name":"Stop"}"#)
-            .expect("write hook payload");
-        child.wait_with_output().expect("wait for hook")
+        hook.spawn().expect("spawn powershell.exe")
     }
 
     /// A loopback port nothing listens on, and one answering every request
@@ -3852,89 +3894,64 @@ trust_level = "trusted"
         assert_eq!(trust_project_path(&resolved), "/home/alice/repo");
     }
 
-    /// The native fallback is encoded PowerShell so Codex can invoke it through
-    /// either PowerShell or cmd.exe without shell-specific quoting. Both
-    /// `command` and `commandWindows` carry it on a native Windows node, so
-    /// exercise both: a pre-0.131.0 Codex ignores the override and runs
-    /// `command` through cmd.exe (issue #2036).
+    /// The callback is PowerShell statement text, and Codex evaluates it in
+    /// PowerShell (`codex_core::spawn` invokes `powershell.exe -NoProfile
+    /// -Command`), so run it exactly that way: the hook JSON arrives on stdin
+    /// and the command must post those bytes unaltered and print `{}`. Both
+    /// hook fields carry the same text on a native Windows node.
     #[cfg(windows)]
     #[test]
-    fn windows_attention_hook_posts_utf8_stdin_through_powershell_and_cmd() {
-        use std::os::windows::process::CommandExt;
-        use std::process::{Command, Stdio};
+    fn windows_attention_hook_posts_utf8_stdin_through_powershell() {
+        use std::io::Write;
         for field in ["command", "commandWindows"] {
-            for shell in ["powershell.exe", "cmd.exe"] {
-                let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-                let endpoint = format!("http://{}/api/attention/42", server.server_addr());
-                let handler = attention_hook_handler(42, EnvType::Windows);
-                let original_url = format!(
-                    "http://localhost:{}/api/attention/42",
-                    crate::http_server::current_http_port()
-                );
-                let encoded_command = handler[field]
-                    .as_str()
-                    .unwrap_or_else(|| panic!("{field} hook missing"));
-                let script = crate::env::decode_powershell_command(encoded_command)
-                    .expect("Windows hook command must be encoded PowerShell")
-                    .replace(&original_url, &endpoint);
-                let command = format!(
-                    "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
-                    crate::env::encode_powershell(&script)
-                );
-                // The POST is the observable readiness signal; the budget only
-                // has to outlast a cold shell start on a *loaded* machine —
-                // the shell under test plus the hook's own PowerShell, per
-                // iteration. The old 15 s bound sat close enough to the real
-                // cost that concurrent `cargo test` runs elsewhere produced
-                // `received == None` — the hook never arriving (issue #2173).
-                // Measured under load: ~32 s for all four iterations.
-                const HOOK_POST_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
-                let receiver = std::thread::spawn(move || {
-                    let mut request = server.recv_timeout(HOOK_POST_BUDGET).unwrap()?;
-                    let mut body = String::new();
-                    request.as_reader().read_to_string(&mut body).unwrap();
-                    let path = request.url().to_owned();
-                    request.respond(tiny_http::Response::empty(200)).unwrap();
-                    Some((path, body))
-                });
-                let mut process = Command::new(shell);
-                if shell == "powershell.exe" {
-                    process.args(["-NoProfile", "-NonInteractive", "-Command"]);
-                    process.arg(&command);
-                } else {
-                    process.args(["/D", "/C"]);
-                    // `/C` consumes a shell command line. Passing it through
-                    // `arg()` adds Windows quoting that changes cmd's parse.
-                    process.raw_arg(format!(" {command}"));
-                }
-                let mut child = process
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .creation_flags(0x08000000)
-                    .spawn()
-                    .unwrap();
-                let payload = r#"{"hook_event_name":"PostToolUse","session_id":"controlled-session","tool_name":"exec_command","tool_input":{"cmd":"echo café → 日本語"},"tool_response":"Done… 😀"}"#;
-                child
-                    .stdin
-                    .take()
-                    .unwrap()
-                    .write_all(payload.as_bytes())
-                    .unwrap();
-                let output = child.wait_with_output().unwrap();
-                let received = receiver.join().unwrap();
-                assert!(
-                    output.status.success(),
-                    "{field} through {shell} command {command:?}: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                assert_eq!(
-                    received,
-                    Some(("/api/attention/42".into(), payload.into())),
-                    "{field} through {shell}"
-                );
-                assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
-            }
+            let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+            let endpoint = format!("http://{}/api/attention/42", server.server_addr());
+            let handler = attention_hook_handler(42, EnvType::Windows);
+            let original_url = format!(
+                "http://localhost:{}/api/attention/42",
+                crate::http_server::current_http_port()
+            );
+            let command = handler[field]
+                .as_str()
+                .unwrap_or_else(|| panic!("{field} hook missing"))
+                .replace(&original_url, &endpoint);
+            // The POST is the observable readiness signal; the budget only
+            // has to outlast a cold shell start on a *loaded* machine —
+            // the shell under test plus the hook's own PowerShell, per
+            // iteration. The old 15 s bound sat close enough to the real
+            // cost that concurrent `cargo test` runs elsewhere produced
+            // `received == None` — the hook never arriving (issue #2173).
+            // Measured under load: ~32 s for all four iterations.
+            const HOOK_POST_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+            let receiver = std::thread::spawn(move || {
+                let mut request = server.recv_timeout(HOOK_POST_BUDGET).unwrap()?;
+                let mut body = String::new();
+                request.as_reader().read_to_string(&mut body).unwrap();
+                let path = request.url().to_owned();
+                request.respond(tiny_http::Response::empty(200)).unwrap();
+                Some((path, body))
+            });
+            let mut child = spawn_like_codex(&command);
+            let payload = r#"{"hook_event_name":"PostToolUse","session_id":"controlled-session","tool_name":"exec_command","tool_input":{"cmd":"echo café → 日本語"},"tool_response":"Done… 😀"}"#;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(payload.as_bytes())
+                .unwrap();
+            let output = child.wait_with_output().unwrap();
+            let received = receiver.join().unwrap();
+            assert!(
+                output.status.success(),
+                "{field} command {command:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                received,
+                Some(("/api/attention/42".into(), payload.into())),
+                "{field}"
+            );
+            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
         }
     }
 
@@ -4072,7 +4089,10 @@ trust_level = "trusted"
             let input = HarnessLaunchInput {
                 platform: Platform::Windows,
                 runtime: EnvType::Windows,
-                session: SessionIdModeRef::Resume("sid-123"),
+                session: SessionIdModeRef::Resume {
+                    id: "sid-123",
+                    cause: crate::agent::spawn::ResumeCause::Explicit,
+                },
                 config: &config,
                 prefill: None,
                 sandbox: false,
