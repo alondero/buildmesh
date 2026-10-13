@@ -201,7 +201,7 @@ impl BackgroundLaunch {
                 .or_else(|| which::which(recipe.binary).ok())
                 .ok_or_else(|| format!("{} binary not found; install the selected harness or set its executable in Settings", recipe.binary))?,
         };
-        let mut cmd = super::spawn_environment::background_command(&recipe, Some(&executable));
+        let mut cmd = super::spawn_environment::background_command(&recipe, Some(&executable))?;
         cmd.current_dir(directory);
         // Background inference must not signal turns on the calling agent node.
         for key in [
