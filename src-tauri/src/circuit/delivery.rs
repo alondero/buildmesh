@@ -3377,16 +3377,22 @@ mod tests {
         let node = crate::db::get_agent_node_by_id(id).unwrap();
         let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
         let text = "REQUEST CHANGES.\r\nReview all findings — 🚀\r\n".repeat(40);
-        let prompt = crate::agent::handover::prepare(&node, &text).unwrap();
-        let prepared = PreparedPrompt::prepare(id, &prompt).unwrap();
+        let prompt = crate::agent::handover::prepare(
+            &node,
+            crate::models::Provider::Codex,
+            &text,
+            Some(root.path()),
+        )
+        .unwrap();
+        let prepared = PreparedPrompt::prepare(id, prompt.prompt()).unwrap();
         let (_, readiness) = stage_prompt_write(&registry, &prepared, None)
             .unwrap()
             .unwrap();
         assert_eq!(
             writes.recv_timeout(Duration::from_secs(1)).unwrap(),
-            prompt.as_bytes()
+            prompt.prompt().as_bytes()
         );
-        assert!(!prompt.contains(['\r', '\n']));
+        assert!(!prompt.prompt().contains(['\r', '\n']));
         assert_eq!(
             submit_staged_prompt_result(&registry, id, None, &readiness).unwrap(),
             Some(1)

@@ -7,47 +7,89 @@ fn node_dir(root: &Path, node_id: i64) -> PathBuf {
     root.join("handovers").join(format!("node-{node_id}"))
 }
 
-pub(crate) fn prepare(node: &AgentNode, text: &str) -> Result<String, String> {
-    let provider = node
-        .launch_configuration
-        .as_ref()
-        .and_then(|configuration| configuration.resolved.as_ref())
-        .map_or_else(
-            || crate::preferences::resolve_harness_provider(&node.provider),
-            |plan| Provider::from_db_str(&plan.harness.harness),
-        );
+#[derive(Debug)]
+pub(crate) struct PreparedHandover {
+    prompt: String,
+    staged_file: Option<PathBuf>,
+}
+
+impl PreparedHandover {
+    pub(crate) fn prompt(&self) -> &str {
+        &self.prompt
+    }
+
+    pub(crate) fn into_prompt(self) -> String {
+        self.prompt
+    }
+
+    /// Remove this attempt's file only when the PTY rejected the pointer.
+    pub(crate) fn discard(self) {
+        if let Some(path) = self.staged_file {
+            remove_staged_file(&path);
+        }
+    }
+}
+
+pub(crate) fn prepare(
+    node: &AgentNode,
+    provider: Provider,
+    text: &str,
+    app_data_dir: Option<&Path>,
+) -> Result<PreparedHandover, String> {
     if provider != Provider::Codex
         || text.chars().count() <= crate::circuit::delivery::VISIBLE_PASTE_TEXT_LIMIT
     {
-        return Ok(text.to_string());
+        return Ok(PreparedHandover {
+            prompt: text.to_string(),
+            staged_file: None,
+        });
     }
-    let root = crate::preferences::app_data_dir().ok_or_else(|| {
+    let root = app_data_dir.ok_or_else(|| {
         "Could not save the handover: app data directory is unavailable".to_string()
     })?;
     // A busy node may read the brief after another handover has arrived.
-    let path = node_dir(&root, node.id).join(format!("{}.md", uuid::Uuid::new_v4()));
-    let visible = crate::circuit::handoff::agent_visible_path(&path, node.env);
-    let visible = if node.env == EnvType::WindowsInterop {
-        crate::env::windows_path_from_wsl(&visible)
-    } else {
-        visible
-    };
-    let prompt = crate::circuit::handoff::pointer_line(&format!("\"{visible}\""));
+    let path = node_dir(root, node.id).join(format!("{}.md", uuid::Uuid::new_v4()));
+    let prompt = pointer_line_for_path(&path, node.env);
     if prompt.contains(['\r', '\n']) {
         return Err("Could not save the handover: the file path contains a newline".into());
     }
     crate::circuit::handoff::write_prompt(&path, text)
         .map_err(|error| format!("Could not save the handover: {error}"))?;
     // Deletion can commit and clean up after the caller took its node snapshot.
-    // Checking after the write covers deletion that finished before staging;
-    // deletion that follows this check performs the normal directory cleanup.
-    if !crate::db::agent_node_exists(node.id)
-        .map_err(|error| format!("Could not save the handover: {error}"))?
-    {
-        remove_node_files(node.id);
-        return Err("Could not save the handover: the target node was deleted".into());
+    // Checking after the write covers deletion that finished before staging.
+    // A delete can still commit after this check and remove the file before
+    // the caller submits its pointer; that pointer then targets a deleted node.
+    match crate::db::agent_node_exists(node.id) {
+        Ok(true) => {}
+        Ok(false) => {
+            remove_node_files(node.id);
+            return Err("Could not save the handover: the target node was deleted".into());
+        }
+        Err(error) => {
+            remove_staged_file(&path);
+            return Err(format!("Could not save the handover: {error}"));
+        }
     }
-    Ok(prompt)
+    Ok(PreparedHandover {
+        prompt,
+        staged_file: Some(path),
+    })
+}
+
+fn pointer_line_for_path(path: &Path, env: EnvType) -> String {
+    let visible = crate::circuit::handoff::agent_visible_path(path, env);
+    crate::circuit::handoff::pointer_line(&format!("\"{visible}\""))
+}
+
+fn remove_staged_file(path: &Path) {
+    if let Err(error) = std::fs::remove_file(path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(
+                "Could not remove rejected handover file {}: {error}",
+                path.display()
+            );
+        }
+    }
 }
 
 pub(crate) fn remove_node_files(node_id: i64) {
@@ -122,18 +164,24 @@ mod tests {
     fn long_codex_handover_preserves_the_complete_utf8_text_in_a_file() {
         let fixture = Fixture::new();
         let text = "REQUEST CHANGES.\r\nReview all findings — 🚀\r\n".repeat(40);
-        let prompt = prepare(&fixture.node, &text).unwrap();
+        let prompt = prepare(
+            &fixture.node,
+            Provider::Codex,
+            &text,
+            Some(fixture.root.path()),
+        )
+        .unwrap();
         let files = fixture.files();
         assert_eq!(files.len(), 1);
         assert_eq!(fs::read(&files[0]).unwrap(), text.as_bytes());
         assert_eq!(
-            prompt,
+            prompt.prompt(),
             format!(
                 "Read and follow the complete task brief in this file: \"{}\"",
                 crate::circuit::handoff::agent_visible_path(&files[0], fixture.node.env)
             )
         );
-        assert!(!prompt.contains(['\r', '\n']));
+        assert!(!prompt.prompt().contains(['\r', '\n']));
     }
 
     #[test]
@@ -141,9 +189,21 @@ mod tests {
         let fixture = Fixture::new();
         let first_text = "first review\n".repeat(40);
         let second_text = "second review\n".repeat(40);
-        let first = prepare(&fixture.node, &first_text).unwrap();
-        let second = prepare(&fixture.node, &second_text).unwrap();
-        assert_ne!(first, second);
+        let first = prepare(
+            &fixture.node,
+            Provider::Codex,
+            &first_text,
+            Some(fixture.root.path()),
+        )
+        .unwrap();
+        let second = prepare(
+            &fixture.node,
+            Provider::Codex,
+            &second_text,
+            Some(fixture.root.path()),
+        )
+        .unwrap();
+        assert_ne!(first.prompt(), second.prompt());
         let mut contents: Vec<_> = fixture
             .files()
             .iter()
@@ -157,7 +217,13 @@ mod tests {
     fn a_staging_failure_does_not_fall_back_to_a_long_paste() {
         let fixture = Fixture::new();
         fs::write(fixture.root.path().join("handovers"), "blocked").unwrap();
-        let error = prepare(&fixture.node, &"review\n".repeat(100)).unwrap_err();
+        let error = prepare(
+            &fixture.node,
+            Provider::Codex,
+            &"review\n".repeat(100),
+            Some(fixture.root.path()),
+        )
+        .unwrap_err();
         assert!(error.contains("Could not save the handover"), "{error}");
     }
 
@@ -165,10 +231,30 @@ mod tests {
     fn short_codex_and_other_harness_handovers_keep_their_text() {
         let mut fixture = Fixture::new();
         let at_limit = "é".repeat(256);
-        assert_eq!(prepare(&fixture.node, &at_limit).unwrap(), at_limit);
+        assert_eq!(
+            prepare(
+                &fixture.node,
+                Provider::Codex,
+                &at_limit,
+                Some(fixture.root.path())
+            )
+            .unwrap()
+            .prompt(),
+            at_limit
+        );
         fixture.node.provider = "anthropic".into();
         let long = "long review\r\n".repeat(100);
-        assert_eq!(prepare(&fixture.node, &long).unwrap(), long);
+        assert_eq!(
+            prepare(
+                &fixture.node,
+                Provider::Anthropic,
+                &long,
+                Some(fixture.root.path())
+            )
+            .unwrap()
+            .prompt(),
+            long
+        );
         assert!(!fixture.root.path().join("handovers").exists());
     }
 
@@ -176,7 +262,17 @@ mod tests {
     fn the_first_character_over_the_limit_uses_file_delivery() {
         let fixture = Fixture::new();
         let text = "é".repeat(257);
-        assert_ne!(prepare(&fixture.node, &text).unwrap(), text);
+        assert_ne!(
+            prepare(
+                &fixture.node,
+                Provider::Codex,
+                &text,
+                Some(fixture.root.path())
+            )
+            .unwrap()
+            .prompt(),
+            text
+        );
         assert_eq!(
             fs::read(fixture.files().pop().unwrap()).unwrap(),
             text.as_bytes()
@@ -187,7 +283,13 @@ mod tests {
     fn missing_app_data_prevents_delivery() {
         let fixture = Fixture::new();
         crate::preferences::reset_for_tests();
-        let error = prepare(&fixture.node, &"review\n".repeat(100)).unwrap_err();
+        let error = prepare(
+            &fixture.node,
+            Provider::Codex,
+            &"review\n".repeat(100),
+            None,
+        )
+        .unwrap_err();
         assert_eq!(
             error,
             "Could not save the handover: app data directory is unavailable"
@@ -209,8 +311,14 @@ mod tests {
             }
         })).unwrap());
         let text = "review\n".repeat(100);
-        let prompt = prepare(&fixture.node, &text).unwrap();
-        assert_ne!(prompt, text);
+        let prompt = prepare(
+            &fixture.node,
+            Provider::Codex,
+            &text,
+            Some(fixture.root.path()),
+        )
+        .unwrap();
+        assert_ne!(prompt.prompt(), text);
         assert_eq!(
             fs::read(fixture.files().pop().unwrap()).unwrap(),
             text.as_bytes()
@@ -227,13 +335,29 @@ mod tests {
             .unwrap()
             .harness
             .harness = "anthropic".into();
-        assert_eq!(prepare(&fixture.node, &text).unwrap(), text);
+        assert_eq!(
+            prepare(
+                &fixture.node,
+                Provider::Anthropic,
+                &text,
+                Some(fixture.root.path())
+            )
+            .unwrap()
+            .prompt(),
+            text
+        );
     }
 
     #[test]
     fn process_exit_keeps_files_and_permanent_deletion_removes_them() {
         let fixture = Fixture::new();
-        prepare(&fixture.node, &"review\n".repeat(100)).unwrap();
+        prepare(
+            &fixture.node,
+            Provider::Codex,
+            &"review\n".repeat(100),
+            Some(fixture.root.path()),
+        )
+        .unwrap();
         crate::agent::node_teardown::release(fixture.node.id);
         assert_eq!(fixture.files().len(), 1);
         crate::services::agent_node::delete(fixture.node.id, false).unwrap();
@@ -243,13 +367,34 @@ mod tests {
     #[test]
     fn deletion_before_staging_rejects_the_stale_node_and_removes_recreated_files() {
         let fixture = Fixture::new();
-        prepare(&fixture.node, &"first review\n".repeat(100)).unwrap();
+        prepare(
+            &fixture.node,
+            Provider::Codex,
+            &"first review\n".repeat(100),
+            Some(fixture.root.path()),
+        )
+        .unwrap();
         crate::services::agent_node::delete(fixture.node.id, false).unwrap();
-        let error = prepare(&fixture.node, &"stale review\n".repeat(100)).unwrap_err();
+        let error = prepare(
+            &fixture.node,
+            Provider::Codex,
+            &"stale review\n".repeat(100),
+            Some(fixture.root.path()),
+        )
+        .unwrap_err();
         assert_eq!(
             error,
             "Could not save the handover: the target node was deleted"
         );
         assert!(!node_dir(fixture.root.path(), fixture.node.id).exists());
+    }
+
+    #[test]
+    fn wsl_handover_pointer_uses_the_agent_visible_mnt_path() {
+        let path = Path::new(r"C:\Buildmesh\handovers\node-7\brief.md");
+        assert_eq!(
+            pointer_line_for_path(path, EnvType::Wsl),
+            "Read and follow the complete task brief in this file: \"/mnt/c/Buildmesh/handovers/node-7/brief.md\""
+        );
     }
 }

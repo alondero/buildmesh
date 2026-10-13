@@ -2889,6 +2889,37 @@ fn validate_handover_text(text: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn prepare_existing_node_handover(
+    target_node_id: i64,
+    text: &str,
+    app_data_dir: Option<&std::path::Path>,
+) -> Result<crate::agent::handover::PreparedHandover, String> {
+    validate_handover_text(text)?;
+    let node = db::get_agent_node_by_id(target_node_id).map_err(|error| error.to_string())?;
+    let provider = node
+        .launch_configuration
+        .as_ref()
+        .and_then(|configuration| configuration.resolved.as_ref())
+        .map_or_else(
+            || crate::preferences::resolve_harness_provider(&node.provider),
+            |plan| crate::models::Provider::from_db_str(&plan.harness.harness),
+        );
+    crate::agent::handover::prepare(&node, provider, text, app_data_dir)
+}
+
+fn deliver_prepared_handover(
+    prepared: crate::agent::handover::PreparedHandover,
+    deliver: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<(), String> {
+    match deliver(prepared.prompt()) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            prepared.discard();
+            Err(error)
+        }
+    }
+}
+
 /// Hand the text selected in one node's terminal over to another **running**
 /// node: stage it in the target's PTY input box and submit it. The
 /// existing-node sibling of `commands::agent::spawn_handover_agent`, and the
@@ -2908,11 +2939,13 @@ pub async fn handover_to_agent(
     target_node_id: i64,
     text: String,
 ) -> Result<(), String> {
+    let app_data_dir = crate::preferences::app_data_dir();
     crate::commands::run_blocking("handover_to_agent", move || {
-        validate_handover_text(&text)?;
-        let node = db::get_agent_node_by_id(target_node_id).map_err(|error| error.to_string())?;
-        let text = crate::agent::handover::prepare(&node, &text)?;
-        crate::circuit::delivery::write_prompt_to_pty(target_node_id, &text, &app)
+        let prepared =
+            prepare_existing_node_handover(target_node_id, &text, app_data_dir.as_deref())?;
+        deliver_prepared_handover(prepared, |prompt| {
+            crate::circuit::delivery::write_prompt_to_pty(target_node_id, prompt, &app)
+        })
     })
     .await
 }
@@ -3003,5 +3036,96 @@ pub async fn debug_crash_snapshot() -> CrashSnapshot {
         renamed_sessions: 0,
         buffers_size_bytes: buffers_size,
         turn_counters_entries: 0,
+    }
+}
+
+#[cfg(test)]
+mod handover_command_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn existing_handover_validates_then_stages_and_discards_a_rejected_file() {
+        let database = crate::db::test_support::isolated();
+        let root = tempfile::tempdir().unwrap();
+        crate::preferences::init_for_tests(root.path().to_path_buf());
+        let mesh =
+            crate::db::create_mesh("existing handover", "C:/existing-handover-fixture").unwrap();
+        let node = crate::db::create_agent_node(
+            mesh.id,
+            "existing-handover",
+            &mesh.path,
+            "main",
+            crate::models::EnvType::Windows,
+            "launch/saved-reviewer",
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let configuration: crate::preferences::spawn_configurations::SpawnConfiguration =
+            serde_json::from_value(serde_json::json!({
+                "id": "launch/saved-reviewer", "name": "Reviewer",
+                "spawn_option_id": "launch/saved-reviewer",
+                "model": null, "effort": null, "extra_args": null,
+                "resolved": {
+                    "configuration_id": "launch/saved-reviewer",
+                    "configuration_name": "Reviewer",
+                    "spawn_option_id": "launch/saved-reviewer",
+                    "harness": { "id": "codex", "name": "Codex", "harness": "codex" },
+                    "route": null, "model": null, "effort": null, "extra_args": null
+                }
+            }))
+            .unwrap();
+        crate::db::set_node_launch_snapshot(node.id, &configuration).unwrap();
+
+        let db_handle = database.handle();
+        let invalid = crate::commands::run_blocking("validate_existing_handover_test", move || {
+            let _adopted = crate::db::test_support::adopt(&db_handle);
+            prepare_existing_node_handover(9_999_999, "  ", None).map(|_| ())
+        })
+        .await
+        .unwrap_err();
+        assert!(invalid.contains("Nothing to hand over"), "{invalid}");
+
+        let db_handle = database.handle();
+        let app_data_dir = root.path().to_path_buf();
+        let text = "review all findings\n".repeat(100);
+        let expected_text = text.clone();
+        let prepared = crate::commands::run_blocking("prepare_existing_handover_test", move || {
+            let _adopted = crate::db::test_support::adopt(&db_handle);
+            prepare_existing_node_handover(node.id, &text, Some(&app_data_dir))
+        })
+        .await
+        .unwrap();
+        assert!(prepared
+            .prompt()
+            .contains("Read and follow the complete task brief"));
+        assert!(!prepared.prompt().contains(['\r', '\n']));
+        let files: Vec<_> = std::fs::read_dir(
+            root.path()
+                .join("handovers")
+                .join(format!("node-{}", node.id)),
+        )
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+        assert_eq!(files.len(), 1);
+        assert_eq!(std::fs::read(&files[0]).unwrap(), expected_text.as_bytes());
+
+        let error = deliver_prepared_handover(prepared, |_| {
+            Err("node has no live agent process".to_string())
+        })
+        .unwrap_err();
+        assert_eq!(error, "node has no live agent process");
+        assert!(
+            !files[0].exists(),
+            "a rejected pointer must not leave its file"
+        );
+        crate::preferences::reset_for_tests();
     }
 }

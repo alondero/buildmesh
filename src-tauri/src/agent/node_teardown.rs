@@ -21,8 +21,8 @@ pub(crate) fn release(node_id: i64) {
     crate::agent::provider::muse::telemetry::forget(node_id);
 }
 
-/// Release every process-scoped store for a node whose row is **already
-/// gone**, and retire its PTY broadcast channel.
+/// Retire the PTY broadcast channel and saved handover files after the node's
+/// row is **already gone**.
 ///
 /// Call this only once the deletion has committed. Retiring a channel records a
 /// tombstone that refuses future channel creation, so a node whose row survived
@@ -31,7 +31,6 @@ pub(crate) fn release(node_id: i64) {
 /// and retire the channel afterwards — that is the shape `agent_node::delete`
 /// uses, because its per-node cleanup deliberately runs before the row delete.
 pub(crate) fn release_after_delete(node_id: i64) {
-    release(node_id);
     crate::http::ws::retire_pty_channel(node_id);
     crate::agent::handover::remove_node_files(node_id);
 }

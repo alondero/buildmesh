@@ -36,9 +36,13 @@ only a single-line instruction with the agent-visible path reaches the
 terminal or initial launch prompt. Existing-node handovers and new-node
 `SpawnIntent::Handover` launches share this policy, including saved Codex launch
 configurations. Short selections and other harnesses retain inline delivery.
-A save failure rejects the handover; it does not fall back to a long paste.
-Files survive process exit and restart so a queued agent can still read them,
-and permanent node deletion removes the node's handover directory.
+A save failure rejects the handover; it does not fall back to a long paste. If
+staging fails for a newly created node, Buildmesh deletes that unstarted node;
+if the row cannot be deleted, the normal spawn failure path marks it Error.
+When an existing-node PTY rejects a pointer before accepting it, only that
+attempt's file is removed. Accepted pointers keep their files across process
+exit and restart, and permanent node deletion removes the node's handover
+directory.
 
 Each `write_to_agent` call enqueues one buffer. The per-agent writer thread drains that buffer with a single `write_all`. xterm's paste is one data event, so a large or multi-line paste stays one write, including its bracketed-paste markers. Do not split or pace that write to work around a slow provider. The multi-second stall on a large Windows paste is the provider reading console input one record at a time; evidence and the upstream reader change are in [Large paste latency](../learning/large-paste-latency.md).
 

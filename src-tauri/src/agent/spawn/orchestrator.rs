@@ -110,6 +110,7 @@ pub(super) fn prepare_initial_prompt(
     node: &crate::models::AgentNode,
     intent: &SpawnIntent,
     provider: crate::models::Provider,
+    app_data_dir: Option<&std::path::Path>,
 ) -> Result<Option<String>, String> {
     let Some(prompt) = intent.initial_prompt() else {
         return Ok(None);
@@ -124,9 +125,31 @@ pub(super) fn prepare_initial_prompt(
     }
     let text = prompt.into_string();
     if matches!(intent, SpawnIntent::Handover { .. }) {
-        crate::agent::handover::prepare(node, &text).map(Some)
+        crate::agent::handover::prepare(node, provider, &text, app_data_dir)
+            .map(|prepared| Some(prepared.into_prompt()))
     } else {
         Ok(Some(text))
+    }
+}
+
+/// A Handover intent reaches this branch for a node just created for that
+/// selection. Remove that empty node if its file cannot be staged; if removal
+/// also fails, the caller reports the spawn error through the normal lifecycle
+/// path so the row is not left Idle.
+pub(super) fn prepare_new_node_handover_prompt(
+    node: &crate::models::AgentNode,
+    intent: &SpawnIntent,
+    provider: crate::models::Provider,
+    app_data_dir: Option<std::path::PathBuf>,
+) -> Result<Option<String>, String> {
+    match prepare_initial_prompt(node, intent, provider, app_data_dir.as_deref()) {
+        Ok(prompt) => Ok(prompt),
+        Err(error) => match crate::services::agent_node::delete(node.id, false) {
+            Ok(()) => Err(error),
+            Err(cleanup_error) => Err(format!(
+                "{error}; could not remove the unstarted node: {cleanup_error}"
+            )),
+        },
     }
 }
 
@@ -307,15 +330,23 @@ pub(crate) async fn spawn_with_intent(
     }
 
     // Handover staging writes a file; keep that I/O off the async runtime.
-    let prefill = if matches!(intent, SpawnIntent::Handover { .. }) {
+    let prefill_result = if matches!(intent, SpawnIntent::Handover { .. }) {
         let prompt_node = node.clone();
         let prompt_intent = intent.clone();
+        let app_data_dir = crate::preferences::app_data_dir();
         crate::commands::run_blocking("prepare_handover_prompt", move || {
-            prepare_initial_prompt(&prompt_node, &prompt_intent, provider)
+            prepare_new_node_handover_prompt(&prompt_node, &prompt_intent, provider, app_data_dir)
         })
-        .await?
+        .await
     } else {
-        prepare_initial_prompt(&node, &intent, provider)?
+        prepare_initial_prompt(&node, &intent, provider, None)
+    };
+    let prefill = match prefill_result {
+        Ok(prefill) => prefill,
+        Err(error) => {
+            report_spawn_failure(app, node_id, is_resume_intent, &error);
+            return Err(error);
+        }
     };
 
     if let Some(plan) = node
@@ -408,25 +439,29 @@ pub(crate) async fn spawn_with_intent(
             Ok(SpawnOutcome::Started(refreshed))
         }
         Err(error) => {
-            let sink = session_lifecycle::AppSessionLifecycleSink { app };
-            if is_resume_intent {
-                let _ = session_lifecycle::on_resume_failed(&sink, node_id, &error);
-            } else {
-                let _ = session_lifecycle::on_error(&sink, node_id);
-            }
-            let _ = app.emit(
-                "node-spawn-failed",
-                crate::commands::agent::NodeSpawnFailedPayload {
-                    node_id,
-                    error: error.clone(),
-                },
-            );
+            report_spawn_failure(app, node_id, is_resume_intent, &error);
             Err(error)
         }
     };
     drop(durable_claim);
     drop(claim);
     outcome
+}
+
+fn report_spawn_failure(app: &tauri::AppHandle, node_id: i64, is_resume_intent: bool, error: &str) {
+    let sink = session_lifecycle::AppSessionLifecycleSink { app };
+    if is_resume_intent {
+        let _ = session_lifecycle::on_resume_failed(&sink, node_id, error);
+    } else {
+        let _ = session_lifecycle::on_error(&sink, node_id);
+    }
+    let _ = app.emit(
+        "node-spawn-failed",
+        crate::commands::agent::NodeSpawnFailedPayload {
+            node_id,
+            error: error.to_string(),
+        },
+    );
 }
 
 /// Whether this request intentionally discards the node's prior conversation.

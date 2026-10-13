@@ -460,7 +460,10 @@ the agent receives one short instruction to read the complete handover. This
 applies to both existing and new nodes and avoids a long Windows paste arriving
 as separate messages. Each handover has its own file, which stays available
 until the node is deleted. If saving fails, the action reports an error without
-sending the selection. Short selections and other harnesses are sent inline.
+sending the selection. A failed new-node staging attempt removes its unstarted
+node; if that cleanup fails, the node is marked Error. A rejected existing-node
+handover removes only its own file. Short selections and other harnesses are
+sent inline as one prompt instead of one prompt per line.
 
 The agents this one already shares tabs with are offered first — the pair you
 grouped, or a review agent spawned from this node — which keeps an

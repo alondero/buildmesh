@@ -98,7 +98,7 @@ https://github.com/alondero/buildmesh/issues/247"
 }
 
 #[test]
-fn new_codex_handover_launches_with_the_file_pointer_as_its_initial_prompt() {
+fn new_codex_handover_prepares_the_file_pointer_for_its_initial_prompt() {
     let _db = crate::db::test_support::isolated();
     let root = tempfile::tempdir().unwrap();
     crate::preferences::init_for_tests(root.path().to_path_buf());
@@ -124,10 +124,14 @@ fn new_codex_handover_launches_with_the_file_pointer_as_its_initial_prompt() {
     let intent = SpawnIntent::Handover {
         selected_text: text.clone(),
     };
-    let prompt =
-        super::orchestrator::prepare_initial_prompt(&node, &intent, crate::models::Provider::Codex)
-            .unwrap()
-            .unwrap();
+    let prompt = super::orchestrator::prepare_initial_prompt(
+        &node,
+        &intent,
+        crate::models::Provider::Codex,
+        Some(root.path()),
+    )
+    .unwrap()
+    .unwrap();
     let files: Vec<_> = std::fs::read_dir(
         root.path()
             .join("handovers")
@@ -154,11 +158,70 @@ fn new_codex_handover_launches_with_the_file_pointer_as_its_initial_prompt() {
         super::orchestrator::prepare_initial_prompt(
             &node,
             &ordinary_prompt,
-            crate::models::Provider::Codex
+            crate::models::Provider::Codex,
+            None,
         )
         .unwrap(),
         Some(text)
     );
+    crate::preferences::reset_for_tests();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn new_node_handover_staging_failure_deletes_the_idle_node() {
+    let db = crate::db::test_support::isolated();
+    let root = tempfile::tempdir().unwrap();
+    crate::preferences::init_for_tests(root.path().to_path_buf());
+    let mesh = crate::db::create_mesh("failed handover", "C:/failed-handover-fixture").unwrap();
+    let created = crate::db::create_agent_node(
+        mesh.id,
+        "failed-handover",
+        &mesh.path,
+        "main",
+        crate::models::EnvType::Windows,
+        "codex",
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    const NODE_ID: i64 = 9_540_251;
+    crate::db::write_conn()
+        .execute(
+            "UPDATE agent_nodes SET id = ?1 WHERE id = ?2",
+            (NODE_ID, created.id),
+        )
+        .unwrap();
+    let node = crate::db::get_agent_node_by_id(NODE_ID).unwrap();
+    std::fs::write(root.path().join("handovers"), "blocked").unwrap();
+    let database = db.handle();
+    let app_data_dir = Some(root.path().to_path_buf());
+    let intent = SpawnIntent::Handover {
+        selected_text: "review\n".repeat(100),
+    };
+
+    let result = crate::commands::run_blocking("prepare_handover_prompt_test", move || {
+        let _adopted = crate::db::test_support::adopt(&database);
+        super::orchestrator::prepare_new_node_handover_prompt(
+            &node,
+            &intent,
+            crate::models::Provider::Codex,
+            app_data_dir,
+        )
+    })
+    .await;
+
+    let error = result.unwrap_err();
+    assert!(error.contains("Could not save the handover"), "{error}");
+    assert!(matches!(
+        crate::db::get_agent_node_by_id(NODE_ID),
+        Err(rusqlite::Error::QueryReturnedNoRows)
+    ));
     crate::preferences::reset_for_tests();
 }
 
