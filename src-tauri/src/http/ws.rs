@@ -367,9 +367,12 @@ fn run_autoclear_side_effects(
     if !activity.submitted {
         return;
     }
-    // Routes through SessionLifecycle (issue #132) for the DB write +
-    // desktop emit; the mobile broadcast is a separate channel kept below.
-    let _ = crate::agent::session_lifecycle::on_attention_cleared(sink, node_id);
+    // `on_user_submitted` owns the shell rule and the DB write + desktop emit
+    // (issues #132, #535); only a committed resume reaches the mobile
+    // broadcast below, the same condition the desktop path publishes on.
+    let Ok(Some(_)) = crate::agent::session_lifecycle::on_user_submitted(sink, node_id) else {
+        return;
+    };
     // Also fan out to mobile event subscribers — the desktop Tauri event
     // above only reaches the webview.
     super::events::emit(super::events::EventMsg::AttentionCleared {
@@ -1924,6 +1927,21 @@ mod tests {
             vec![1],
             "an accepted submit must still clear the node's attention"
         );
+    }
+
+    /// Issue #535 on the phone path: a shell's Enter is just shell input. The
+    /// desktop path already skips it; the mobile WS/HTTP path used to flip a
+    /// Terminal node to `Running` and emit `attention-cleared` anyway.
+    #[test]
+    fn a_mobile_submit_into_a_plain_terminal_does_not_resume_the_node() {
+        let mock = MockRegistry::submitted();
+        let sink = RecordingSink::plain_terminal();
+        let outcome = write_mobile_input_with_sink(&mock, &sink, 1, "ls\r").unwrap();
+        assert!(outcome.is_accepted(), "the keystrokes still reach the shell");
+        assert_eq!(*mock.last_write_data.lock().unwrap(), b"ls\r");
+        assert_eq!(sink.status(), None, "a shell has no turn to mark Running");
+        assert!(sink.lifecycle_changed().is_empty());
+        assert!(sink.attention_cleared().is_empty());
     }
 
     /// A backpressured WebSocket write announces the stall on the event
