@@ -49,16 +49,26 @@ use tauri::{command, AppHandle};
 /// running on the Tokio worker pool must wrap this in
 /// `crate::commands::run_blocking` (see `http/routes/attention.rs`).
 pub fn mark_attention(node_id: i64, app: &AppHandle) {
-    mark_attention_with_signal(node_id, app, None, &crate::agent::session_lifecycle::HookSignalDetail::default());
+    mark_attention_with_signal(
+        node_id,
+        app,
+        None,
+        &crate::agent::session_lifecycle::HookSignalDetail::default(),
+    );
 }
 
 pub(crate) fn recover_attention(
-    node_id: i64, app: &AppHandle, recovery: &crate::agent::session_lifecycle::CircuitTurnRecovery<'_>,
+    node_id: i64,
+    app: &AppHandle,
+    recovery: &crate::agent::session_lifecycle::CircuitTurnRecovery<'_>,
 ) {
-    match crate::agent::session_lifecycle::recover_attention(&AppSessionLifecycleSink { app },
-        node_id, recovery) {
+    match crate::agent::session_lifecycle::recover_attention(
+        &AppSessionLifecycleSink { app },
+        node_id,
+        recovery,
+    ) {
         Ok(true) => crate::attention_autoclear::on_signal_marked(node_id, None, None),
-        Ok(false) => {},
+        Ok(false) => {}
         Err(error) => tracing::warn!(node_id, %error, "failed to recover attention"),
     }
 }
@@ -74,7 +84,14 @@ pub fn mark_attention_with_signal(
 ) -> bool {
     let sink = AppSessionLifecycleSink { app };
     let semantic_kind = semantic_turn.as_ref().map(|turn| turn.kind);
-    if !crate::agent::session_lifecycle::on_attention_with_signal(&sink, node_id, semantic_turn, detail).unwrap_or(false) {
+    if !crate::agent::session_lifecycle::on_attention_with_signal(
+        &sink,
+        node_id,
+        semantic_turn,
+        detail,
+    )
+    .unwrap_or(false)
+    {
         return false;
     }
     // Arm the resume-detection safety net (issue #878): if the agent starts
@@ -119,7 +136,10 @@ pub fn clear_attention_node(app: AppHandle, node_id: i64) -> Result<(), String> 
 #[command]
 pub fn list_semantic_turns() -> Result<Vec<SemanticTurnPayload>, String> {
     let rows = db::list_semantic_turns().map_err(|e| e.to_string())?;
-    Ok(rows.into_iter().filter_map(|(_, value)| serde_json::from_str(&value).ok()).collect())
+    Ok(rows
+        .into_iter()
+        .filter_map(|(_, value)| serde_json::from_str(&value).ok())
+        .collect())
 }
 
 /// Whether a node is currently awaiting user input. Derived from the lifecycle
