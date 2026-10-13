@@ -2,6 +2,7 @@ package dev.buildmesh.remote
 
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
+import okhttp3.Protocol
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.tls.HandshakeCertificates
@@ -16,6 +17,12 @@ class TlsConnectionTest {
         val identity = HandshakeCertificates.Builder().heldCertificate(leaf, root.certificate).build()
         MockWebServer().use { server ->
             server.useHttps(identity.sslSocketFactory(), false)
+            // Pin HTTP/1.1. The assertion is that repeated calls over a trusted TLS
+            // connection get independent responses, not how the protocol negotiates.
+            // MockWebServer's HTTP/2 path intermittently resets a pooled stream under
+            // runner load, and httpClient() sets retryOnConnectionFailure = false, so
+            // that race fails the call outright (StreamResetException/SocketException).
+            server.protocols = listOf(Protocol.HTTP_1_1)
             repeat(5) { server.enqueue(MockResponse().setBody("{\"index\":$it}")) }
             val api = BuildmeshApi("https://localhost:${server.port}", root.certificate.encoded)
             try {
