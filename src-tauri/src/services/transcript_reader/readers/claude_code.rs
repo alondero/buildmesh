@@ -242,19 +242,35 @@ pub(crate) fn parse_turns_with_text_limit(
 // with such work still pending is NOT "the user is needed". The
 // transcript records both ends deterministically:
 //
-//   launch  — a `tool_result` whose text says "…background… (ID: xyz) …
-//             You will be notified when it completes."
+//   launch  — a `Bash` `tool_use` and its own `tool_result`, whose text
+//             opens with the receipt "…background… (ID: xyz) … You will
+//             be notified when it completes."
 //   finish  — a line (queue-operation, or the queued_command attachment
 //             that re-invokes the agent) carrying
 //             `<task-id>xyz</task-id>`.
 //
 // Pending = launched minus terminal notifications and successful stops.
 
-/// Matches the task id in either launch phrasing:
-/// `Command running in background with ID: xyz.` and
-/// `…was moved to the background (ID: xyz)`.
-static LAUNCH_ID: once_cell::sync::Lazy<regex::Regex> =
-    once_cell::sync::Lazy::new(|| regex::Regex::new(r"\bID: ([A-Za-z0-9_-]+)").unwrap());
+/// The harness-authored launch receipt, anchored to the start of a
+/// `tool_result` and carrying the task id it owns: the explicit
+/// `run_in_background` form, or the timeout form for a foreground
+/// command that was moved to the background. Both observed phrasings
+/// begin the result text, because the harness composes the message; a
+/// tool returning those sentences as content — `cat`, `Read`, `Grep`,
+/// or a JSON payload quoting them — carries them mid-text, where they
+/// are quoted material rather than proof of a launch (issue #2264).
+/// The trailing prose (output path, completion promise, cwd note) sits
+/// outside the match, so rewording it does not by itself cost a real
+/// launch.
+static LAUNCH_RECEIPT: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+    regex::Regex::new(concat!(
+        r"^\s*(?:Command running in background with ID: ",
+        r"|Command did not complete within (?:its )?\d+s timeout ",
+        r"and was moved to the background \(ID: )",
+        r"(?P<id>[A-Za-z0-9_-]+)",
+    ))
+    .unwrap()
+});
 /// A task-notification's id paired with its status, non-greedy so
 /// several notifications on one line pair correctly. Real transcripts
 /// carry `<status>running</status>` notifications too (e.g. a foreground
@@ -263,11 +279,14 @@ static LAUNCH_ID: once_cell::sync::Lazy<regex::Regex> =
 static NOTIFIED_ID: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
     regex::Regex::new(r"<task-id>([A-Za-z0-9_-]+)</task-id>.*?<status>([a-z_]+)</status>").unwrap()
 });
-/// The phrase that makes a `tool_result` a background-task launch. Both
-/// known launch phrasings carry it; matching the promise (rather than
-/// the two exact sentences) keeps the scan stable across minor wording
-/// changes.
-const LAUNCH_MARKER: &str = "You will be notified when it completes";
+/// Tools whose result can carry a launch receipt. Claude Code launches
+/// background work from `Bash` alone — either `run_in_background: true`
+/// or a foreground command that outlived its timeout — so a receipt is
+/// only evidence of a launch when the `tool_result` resolves to a
+/// `tool_use` naming one of these. Correlation matters as much as the
+/// wording: a tool result carries text too, so a receipt echoed back as
+/// content would otherwise register a task no notification can settle.
+const LAUNCH_TOOLS: [&str; 1] = ["Bash"];
 
 /// Count Claude Code background tasks without a terminal notification or successful
 /// TaskStop result. `None` = the file could not be read — the caller must
@@ -341,6 +360,10 @@ pub(crate) fn pending_background_task_ids(lines: impl Iterator<Item = String>) -
     let mut launched: Vec<String> = Vec::new();
     let mut terminated: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut stop_calls = std::collections::HashMap::new();
+    // `tool_use` ids of launch-capable calls awaiting their result. Each
+    // id is consumed by the `tool_result` it answers, so the set stays
+    // bounded by in-flight calls rather than by transcript length.
+    let mut launch_calls = std::collections::HashSet::new();
     for line in lines {
         // The notification marker is matched on the raw line: it
         // appears in `queue-operation` lines and in the queued_command
@@ -353,7 +376,7 @@ pub(crate) fn pending_background_task_ids(lines: impl Iterator<Item = String>) -
             }
         }
         // Launches only count inside a tool_result block — free text
-        // merely *mentioning* the promise (e.g. an agent quoting these
+        // merely *mentioning* the receipt (e.g. an agent quoting these
         // docs) must not register a phantom task.
         let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
@@ -364,21 +387,26 @@ pub(crate) fn pending_background_task_ids(lines: impl Iterator<Item = String>) -
             continue;
         };
         for block in blocks {
-            if val.get("type").and_then(|t| t.as_str()) == Some("assistant")
-                && block.get("type").and_then(|t| t.as_str()) == Some("tool_use")
-                && block.get("name").and_then(|t| t.as_str()) == Some("TaskStop")
-            {
-                if let (Some(call_id), Some(task_id)) = (
-                    block.get("id").and_then(|v| v.as_str()),
-                    block
-                        .get("input")
-                        .and_then(|v| v.get("task_id"))
-                        .and_then(|v| v.as_str()),
-                ) {
-                    stop_calls.insert(call_id.to_owned(), task_id.to_owned());
+            let outer = val.get("type").and_then(|t| t.as_str());
+            let kind = block.get("type").and_then(|t| t.as_str());
+            if outer == Some("assistant") && kind == Some("tool_use") {
+                let name = block.get("name").and_then(|t| t.as_str()).unwrap_or("");
+                if let Some(call_id) = block.get("id").and_then(|v| v.as_str()) {
+                    if LAUNCH_TOOLS.contains(&name) {
+                        launch_calls.insert(call_id.to_owned());
+                    }
+                    if name == "TaskStop" {
+                        if let Some(task_id) = block
+                            .get("input")
+                            .and_then(|v| v.get("task_id"))
+                            .and_then(|v| v.as_str())
+                        {
+                            stop_calls.insert(call_id.to_owned(), task_id.to_owned());
+                        }
+                    }
                 }
             }
-            if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+            if kind != Some("tool_result") {
                 continue;
             }
             let text = match block.get("content") {
@@ -387,7 +415,7 @@ pub(crate) fn pending_background_task_ids(lines: impl Iterator<Item = String>) -
             };
             // TaskStop can finish without a queued task notification. Require its actual
             // successful result, correlated to the tool call, before ending work.
-            if val.get("type").and_then(|t| t.as_str()) == Some("user")
+            if outer == Some("user")
                 && block.get("is_error").and_then(|v| v.as_bool()) != Some(true)
             {
                 if let Some(task_id) = block
@@ -408,12 +436,26 @@ pub(crate) fn pending_background_task_ids(lines: impl Iterator<Item = String>) -
                     }
                 }
             }
-            if !text.contains(LAUNCH_MARKER) {
+            // Both halves of the exchange must agree: the result answers
+            // a launch-capable call, and its text opens with the receipt.
+            // Wording alone is not evidence — a tool result carries text
+            // too — and an uncorrelated receipt owns no task, so admitting
+            // one would register a wait no notification can settle
+            // (issue #2264).
+            let owned = block
+                .get("tool_use_id")
+                .and_then(|v| v.as_str())
+                .is_some_and(|id| launch_calls.remove(id));
+            if !owned {
                 continue;
             }
-            if let Some(cap) = LAUNCH_ID.captures(&text) {
-                launched.push(cap[1].to_string());
-            }
+            let Some(cap) = LAUNCH_RECEIPT.captures(&text) else {
+                continue;
+            };
+            let Some(id) = cap.name("id") else {
+                continue;
+            };
+            launched.push(id.as_str().to_string());
         }
     }
     launched.retain(|id| !terminated.contains(id));
@@ -871,15 +913,80 @@ mod contract_tests {
         assert_eq!(first_text_block(None), "");
     }
 
-    fn launch_line(id: &str) -> String {
+    /// The native `Bash` call that owns a launch receipt: an explicit
+    /// `run_in_background`, or a foreground command whose own receipt is
+    /// the timeout phrasing.
+    fn bash_call_line(call_id: &str, run_in_background: bool) -> String {
+        serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "id": format!("m-{call_id}"),
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "id": call_id,
+                    "name": "Bash",
+                    "input": {"command": "npm run dev", "run_in_background": run_in_background},
+                }],
+            },
+        })
+        .to_string()
+    }
+
+    /// A tool call plus its result, for any tool name.
+    fn tool_call_and_result(call_id: &str, tool: &str, content: &str) -> [String; 2] {
+        [
+            serde_json::json!({
+                "type": "assistant",
+                "message": {
+                    "id": format!("m-{call_id}"),
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": call_id,
+                        "name": tool,
+                        "input": {"pattern": "background"},
+                    }],
+                },
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{
+                        "tool_use_id": call_id,
+                        "type": "tool_result",
+                        "content": content,
+                        "is_error": false,
+                    }],
+                },
+            })
+            .to_string(),
+        ]
+    }
+
+    /// This module's own source, as an agent reading it sees it: both
+    /// launch phrasings quoted as prose (issue #2264).
+    const READ_QUOTING_LAUNCH: &str = concat!(
+        "659 // Command running in background with ID: xyz.\n",
+        "660 //\n",
+        "681 const LAUNCH_MARKER: &str = \"You will be notified when it completes\";",
+    );
+
+    /// The explicit-background launch receipt, as the `tool_result` of
+    /// `call_id`.
+    fn launch_line(call_id: &str, id: &str) -> String {
         format!(
-            r#"{{"type":"user","message":{{"role":"user","content":[{{"tool_use_id":"t1","type":"tool_result","content":"Command running in background with ID: {id}. Output is being written to: /tmp/{id}.output. You will be notified when it completes. To check interim output, use Read on that file path.","is_error":false}}]}}}}"#
+            r#"{{"type":"user","message":{{"role":"user","content":[{{"tool_use_id":"{call_id}","type":"tool_result","content":"Command running in background with ID: {id}. Output is being written to: /tmp/{id}.output. You will be notified when it completes. To check interim output, use Read on that file path.","is_error":false}}]}}}}"#
         )
     }
 
-    fn timeout_launch_line(id: &str) -> String {
+    /// The timeout phrasing: a foreground `Bash` call that outlived its
+    /// limit and was moved to the background.
+    fn timeout_launch_line(call_id: &str, id: &str) -> String {
         format!(
-            r#"{{"type":"user","message":{{"role":"user","content":[{{"tool_use_id":"t2","type":"tool_result","content":"Command did not complete within its 120s timeout and was moved to the background (ID: {id}). Output is being written to: /tmp/{id}.output. You will be notified when it completes. To check interim output, use Read on that file path.","is_error":false}}]}}}}"#
+            r#"{{"type":"user","message":{{"role":"user","content":[{{"tool_use_id":"{call_id}","type":"tool_result","content":"Command did not complete within its 120s timeout and was moved to the background (ID: {id}). Output is being written to: /tmp/{id}.output. You will be notified when it completes. To check interim output, use Read on that file path.","is_error":false}}]}}}}"#
         )
     }
 
@@ -892,7 +999,13 @@ mod contract_tests {
     #[test]
     fn launched_without_notification_is_pending() {
         let pending = pending_background_task_ids(
-            vec![launch_line("byt1iw94s"), timeout_launch_line("b97ep9a8n")].into_iter(),
+            [
+                bash_call_line("t1", true),
+                launch_line("t1", "byt1iw94s"),
+                bash_call_line("t2", false),
+                timeout_launch_line("t2", "b97ep9a8n"),
+            ]
+            .into_iter(),
         );
         assert_eq!(
             pending,
@@ -906,9 +1019,11 @@ mod contract_tests {
         // `completed` and `failed` both mean the wait is over — the harness
         // re-invokes the agent either way.
         let pending = pending_background_task_ids(
-            vec![
-                launch_line("aaa"),
-                launch_line("bbb"),
+            [
+                bash_call_line("t1", true),
+                launch_line("t1", "aaa"),
+                bash_call_line("t2", true),
+                launch_line("t2", "bbb"),
                 notification_line("aaa", "completed"),
                 notification_line("bbb", "failed"),
             ]
@@ -925,7 +1040,12 @@ mod contract_tests {
         // Real transcripts carry `<status>running</status>` notifications; the
         // task is still in flight, so the Stop is still a false yield.
         let pending = pending_background_task_ids(
-            vec![launch_line("ccc"), notification_line("ccc", "running")].into_iter(),
+            [
+                bash_call_line("t1", true),
+                launch_line("t1", "ccc"),
+                notification_line("ccc", "running"),
+            ]
+            .into_iter(),
         );
         assert_eq!(pending, vec!["ccc".to_string()]);
     }
@@ -937,6 +1057,85 @@ mod contract_tests {
         // block counts.
         let assistant = r#"{"type":"assistant","message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"The tool says: moved to the background (ID: zzz). You will be notified when it completes."}]}}"#.to_string();
         assert!(pending_background_task_ids(std::iter::once(assistant)).is_empty());
+    }
+
+    #[test]
+    fn read_result_quoting_this_files_launch_examples_is_not_a_launch() {
+        // Issue #2264: an agent reading the scanner's own source sees both
+        // launch phrasings as prose. No notification would arrive for
+        // `xyz`, so admitting it registers a wait no notification can end.
+        let lines = tool_call_and_result("t-read", "Read", READ_QUOTING_LAUNCH);
+        assert!(
+            pending_background_task_ids(lines.into_iter()).is_empty(),
+            "a Read result quoting the receipt owns no task"
+        );
+    }
+
+    #[test]
+    fn a_read_result_that_opens_with_the_receipt_owns_no_task() {
+        // The tool correlation, isolated from the wording: this result
+        // carries a pristine receipt, so only the answer to "which call
+        // produced it" can reject it. Without that correlation, reading a
+        // saved transcript would register a task each time it is scanned.
+        let lines = tool_call_and_result(
+            "t-read",
+            "Read",
+            "Command running in background with ID: xyz. Output is being written to: /tmp/xyz.output. You will be notified when it completes.",
+        );
+        assert!(
+            pending_background_task_ids(lines.into_iter()).is_empty(),
+            "only a launch-capable call can own a receipt"
+        );
+    }
+
+    #[test]
+    fn a_receipt_quoted_inside_result_content_is_not_a_launch() {
+        // The wording guard, isolated from the tool: even a Bash result
+        // quotes launch text back as content (a `cat`, a JSON payload).
+        // The harness writes the receipt itself at the start of its
+        // result; anywhere else it is quoted material.
+        let receipt =
+            "Command running in background with ID: xyz. You will be notified when it completes.";
+        let quoted = format!("{{\"note\":\"{receipt}\"}}");
+        let cat = format!("$ cat notes.txt\n{receipt}\n");
+        for (case, content) in [("json", quoted.as_str()), ("cat", cat.as_str())] {
+            let lines = tool_call_and_result("t-x", "Bash", content);
+            assert!(
+                pending_background_task_ids(lines.into_iter()).is_empty(),
+                "{case} content must not register a launch"
+            );
+        }
+    }
+
+    #[test]
+    fn launch_receipt_without_its_own_bash_call_is_not_a_launch() {
+        // Missing correlation is not permission to guess: a receipt whose
+        // `Bash` call is absent, or whose result slot another tool owns,
+        // claims no task.
+        assert!(
+            pending_background_task_ids(std::iter::once(launch_line("t1", "xyz"))).is_empty(),
+            "a receipt with no observed tool call owns nothing"
+        );
+        let mut lines = tool_call_and_result("t1", "Read", "no launch here").to_vec();
+        // The receipt claims result slot `t1`, which the Read already owns.
+        lines.push(launch_line("t1", "xyz"));
+        assert!(
+            pending_background_task_ids(lines.into_iter()).is_empty(),
+            "a receipt correlated to a non-launch call owns nothing"
+        );
+    }
+
+    #[test]
+    fn real_launch_survives_quoted_examples_in_the_same_transcript() {
+        // The phantom must not be admitted, and admitting it must not cost
+        // the genuine task sitting beside it.
+        let mut lines = tool_call_and_result("t-read", "Read", READ_QUOTING_LAUNCH).to_vec();
+        lines.extend([bash_call_line("t1", true), launch_line("t1", "byt1iw94s")]);
+        assert_eq!(
+            pending_background_task_ids(lines.into_iter()),
+            vec!["byt1iw94s".to_string()],
+            "only the correlated Bash launch is pending"
+        );
     }
 
     #[test]
@@ -955,7 +1154,7 @@ mod contract_tests {
             std::fs::read_to_string(fixture("claude_code", "stopped_background_task.jsonl"))
                 .unwrap()
                 .lines()
-                .take(3)
+                .take(4)
                 .map(|line| serde_json::from_str(line).unwrap())
                 .collect();
         for case in [
@@ -969,20 +1168,20 @@ mod contract_tests {
         ] {
             let mut replay = records.clone();
             match case {
-                "failed" => replay[2]["message"]["content"][0]["is_error"] = true.into(),
+                "failed" => replay[3]["message"]["content"][0]["is_error"] = true.into(),
                 "wrong_call" => {
-                    replay[2]["message"]["content"][0]["tool_use_id"] = "unrelated".into()
+                    replay[3]["message"]["content"][0]["tool_use_id"] = "unrelated".into()
                 }
                 "wrong_task" => {
                     let result = serde_json::json!({"task_id":"other", "message":"Successfully stopped task: other (vite)"});
-                    replay[2]["message"]["content"][0]["content"] = result.to_string().into();
+                    replay[3]["message"]["content"][0]["content"] = result.to_string().into();
                 }
-                "different_tool" => replay[1]["message"]["content"][0]["name"] = "Read".into(),
+                "different_tool" => replay[2]["message"]["content"][0]["name"] = "Read".into(),
                 "missing_call" => {
-                    replay.remove(1);
+                    replay.remove(2);
                 }
                 "quoted_success" => {
-                    replay[2]["message"]["content"][0]["content"] =
+                    replay[3]["message"]["content"][0]["content"] =
                         "The tool says: Successfully stopped task: bziuux8nz (vite)".into()
                 }
                 _ => {}
@@ -1004,9 +1203,11 @@ mod contract_tests {
         let path =
             std::env::temp_dir().join(format!("buildmesh_test_pending_tasks_{suffix}.jsonl"));
         let body = [
-            launch_line("early"),
+            bash_call_line("t1", true),
+            launch_line("t1", "early"),
             notification_line("early", "completed"),
-            launch_line("late"),
+            bash_call_line("t2", true),
+            launch_line("t2", "late"),
         ]
         .join("\n");
         std::fs::write(&path, body).unwrap();
