@@ -97,6 +97,71 @@ https://github.com/alondero/buildmesh/issues/247"
     );
 }
 
+#[test]
+fn new_codex_handover_launches_with_the_file_pointer_as_its_initial_prompt() {
+    let _db = crate::db::test_support::isolated();
+    let root = tempfile::tempdir().unwrap();
+    crate::preferences::init_for_tests(root.path().to_path_buf());
+    let mesh = crate::db::create_mesh("new handover", "C:/handover-fixture").unwrap();
+    let node = crate::db::create_agent_node(
+        mesh.id,
+        "handover",
+        &mesh.path,
+        "main",
+        crate::models::EnvType::Windows,
+        "codex",
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let text = "REQUEST CHANGES.\r\nAddress every finding before starting work.\r\n".repeat(40);
+    let intent = SpawnIntent::Handover {
+        selected_text: text.clone(),
+    };
+    let prompt =
+        super::orchestrator::prepare_initial_prompt(&node, &intent, crate::models::Provider::Codex)
+            .unwrap()
+            .unwrap();
+    let files: Vec<_> = std::fs::read_dir(
+        root.path()
+            .join("handovers")
+            .join(format!("node-{}", node.id)),
+    )
+    .unwrap()
+    .map(|entry| entry.unwrap().path())
+    .collect();
+    assert_eq!(files.len(), 1);
+    assert_eq!(std::fs::read(&files[0]).unwrap(), text.as_bytes());
+    assert_eq!(
+        prompt,
+        format!(
+            "Read and follow the complete task brief in this file: \"{}\"",
+            crate::circuit::handoff::agent_visible_path(&files[0], node.env)
+        )
+    );
+    assert!(!crate::models::Provider::Codex
+        .adapter()
+        .prefill_requires_pty(&prompt));
+
+    let ordinary_prompt = SpawnIntent::Prompt { text: text.clone() };
+    assert_eq!(
+        super::orchestrator::prepare_initial_prompt(
+            &node,
+            &ordinary_prompt,
+            crate::models::Provider::Codex
+        )
+        .unwrap(),
+        Some(text)
+    );
+    crate::preferences::reset_for_tests();
+}
+
 // -----------------------------------------------------------------------
 // Resume-skip decision surface (issue #949 regression).
 //

@@ -29,6 +29,17 @@ Command Code's Ink TUI can swallow keys when xterm.js leaves an unmatched bracke
 
 ## PTY input
 
+Terminal handovers to Codex use `agent::handover::prepare` before prompt
+delivery. Selections longer than 256 Unicode characters are written intact as
+UTF-8 to a unique file under the app data directory's `handovers/node-<id>/`;
+only a single-line instruction with the agent-visible path reaches the
+terminal or initial launch prompt. Existing-node handovers and new-node
+`SpawnIntent::Handover` launches share this policy, including saved Codex launch
+configurations. Short selections and other harnesses retain inline delivery.
+A save failure rejects the handover; it does not fall back to a long paste.
+Files survive process exit and restart so a queued agent can still read them,
+and permanent node deletion removes the node's handover directory.
+
 Each `write_to_agent` call enqueues one buffer. The per-agent writer thread drains that buffer with a single `write_all`. xterm's paste is one data event, so a large or multi-line paste stays one write, including its bracketed-paste markers. Do not split or pace that write to work around a slow provider. The multi-second stall on a large Windows paste is the provider reading console input one record at a time; evidence and the upstream reader change are in [Large paste latency](../learning/large-paste-latency.md).
 
 The queue is bounded twice: by message count (`PTY_WRITER_CHANNEL_CAPACITY`, 64) and by buffered bytes (`PTY_INPUT_QUEUE_BYTE_CAPACITY`, 1 MiB). The byte bound is tracked in an `InputQueueGauge` rather than read off the channel, because `SyncSender` exposes no depth introspection. A refusal is a typed `InputDisposition` — `Accepted | Backpressured | Closed` — returned to the caller, and is never dropped behind a success. `Backpressured` means the buffer was **not** queued: the input decoder does not advance, and no activity or first-user-input telemetry fires. That is what makes retrying the identical bytes safe — a refusal cannot duplicate. Only `Accepted` may clear attention, mark a coordinator prompt delivered, or record a first user input.

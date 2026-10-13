@@ -106,6 +106,30 @@ pub(crate) enum ResumeSkipDecision {
 // Public Tauri command interface
 // ---------------------------------------------------------------------------
 
+pub(super) fn prepare_initial_prompt(
+    node: &crate::models::AgentNode,
+    intent: &SpawnIntent,
+    provider: crate::models::Provider,
+) -> Result<Option<String>, String> {
+    let Some(prompt) = intent.initial_prompt() else {
+        return Ok(None);
+    };
+    if !provider.adapter().supports_prefill() {
+        tracing::warn!(
+            "spawn_with_intent: provider '{}' does not support prefill; skipping {} bytes",
+            node.provider,
+            prompt.as_str().len()
+        );
+        return Ok(None);
+    }
+    let text = prompt.into_string();
+    if matches!(intent, SpawnIntent::Handover { .. }) {
+        crate::agent::handover::prepare(node, &text).map(Some)
+    } else {
+        Ok(Some(text))
+    }
+}
+
 /// Start an Agent Node from a domain intent.
 ///
 /// The durable node is the source of truth for provider, path, and session
@@ -278,32 +302,21 @@ pub(crate) async fn spawn_with_intent(
         _ => None,
     };
 
-    // Issue #1180 — the prefill comes from `SpawnIntent::initial_prompt`,
-    // the single source of truth shared with the desktop draft response
-    // and the Circuit worker. `into_string()` consumes the
-    // `InitialPrompt` wrapper, giving us an owned `String` without an
-    // extra `as_str().to_string()` re-allocation. A supporting harness
-    // forwards the same string the user already saw on the draft
-    // response (byte-identical).
-    let prefill = intent
-        .initial_prompt()
-        .map(|prompt| prompt.into_string())
-        .filter(|prefill| {
-            if adapter.supports_prefill() {
-                true
-            } else {
-                tracing::warn!(
-                    "spawn_with_intent: provider '{}' does not support prefill; skipping {} bytes",
-                    node.provider,
-                    prefill.len()
-                );
-                false
-            }
-        });
-
     if is_agent_already_running(&node_id) {
         return Ok(SpawnOutcome::AlreadyActive(node));
     }
+
+    // Handover staging writes a file; keep that I/O off the async runtime.
+    let prefill = if matches!(intent, SpawnIntent::Handover { .. }) {
+        let prompt_node = node.clone();
+        let prompt_intent = intent.clone();
+        crate::commands::run_blocking("prepare_handover_prompt", move || {
+            prepare_initial_prompt(&prompt_node, &prompt_intent, provider)
+        })
+        .await?
+    } else {
+        prepare_initial_prompt(&node, &intent, provider)?
+    };
 
     if let Some(plan) = node
         .launch_configuration

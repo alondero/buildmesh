@@ -8,9 +8,8 @@
 //! Process exit and permanent deletion are deliberately *different* calls
 //! (issue #2019): a restart reuses the node id, so its PTY fanout channel and
 //! the terminal context a reconnecting client replays must survive process
-//! teardown. Only [`release_after_delete`], and the explicit
-//! [`crate::http::ws::retire_pty_channel`] call inside `agent_node::delete`,
-//! may retire that channel — and only after the row delete has committed.
+//! teardown. [`release_after_delete`] retires that channel and removes saved
+//! handover files only after the row delete has committed.
 
 /// Release all callback and attention state owned by `node_id`.
 ///
@@ -34,4 +33,5 @@ pub(crate) fn release(node_id: i64) {
 pub(crate) fn release_after_delete(node_id: i64) {
     release(node_id);
     crate::http::ws::retire_pty_channel(node_id);
+    crate::agent::handover::remove_node_files(node_id);
 }

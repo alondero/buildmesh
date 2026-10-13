@@ -2908,12 +2908,13 @@ pub async fn handover_to_agent(
     target_node_id: i64,
     text: String,
 ) -> Result<(), String> {
-    validate_handover_text(&text)?;
-    // The registry — not the DB status — is the liveness gate
-    // (`write_prompt_to_pty` rejects a target with no live process before
-    // writing): a node still reading `pending`/`spawning` can already accept
-    // input, and an archived row could not.
-    crate::circuit::delivery::write_prompt_to_pty(target_node_id, &text, &app)
+    crate::commands::run_blocking("handover_to_agent", move || {
+        validate_handover_text(&text)?;
+        let node = db::get_agent_node_by_id(target_node_id).map_err(|error| error.to_string())?;
+        let text = crate::agent::handover::prepare(&node, &text)?;
+        crate::circuit::delivery::write_prompt_to_pty(target_node_id, &text, &app)
+    })
+    .await
 }
 
 #[command]
