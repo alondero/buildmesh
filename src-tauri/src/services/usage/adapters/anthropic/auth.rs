@@ -49,11 +49,6 @@ pub(crate) enum ClaudeAuthSource {
     },
     Oauth {
         token: String,
-        // `plan` is no longer read after #1689 cut ProviderUsage.plan;
-        // tracked in #1694 for a follow-up that drops the field plus the
-        // four `plan_label(...)` calls in this module that populate it.
-        #[allow(dead_code)]
-        plan: Option<String>,
         origin: OauthOrigin,
     },
     Missing {
@@ -74,9 +69,8 @@ impl std::fmt::Debug for ClaudeAuthSource {
                 .field("cache_tag", cache_tag)
                 .field("identity", &"<redacted>")
                 .finish(),
-            Self::Oauth { plan, origin, .. } => f
+            Self::Oauth { origin, .. } => f
                 .debug_struct("Oauth")
-                .field("plan", plan)
                 .field("origin", origin)
                 .field("token", &"<redacted>")
                 .finish(),
@@ -149,12 +143,10 @@ pub(crate) fn resolve_claude_auth(lookup: &impl AuthLookup) -> ClaudeAuthSource 
         return managed(PLATFORM_HELPER, "api_key_helper", b"configured");
     }
     if let Some(token) = var("CLAUDE_CODE_OAUTH_TOKEN").filter(|value| !value.is_empty()) {
-        // Env tokens (including `claude setup-token`) are not saved locally.
-        // Plan must come from the token's own profile/usage response later —
-        // never from a dormant /login credential for a different account.
+        // Env tokens (including `claude setup-token`) are not saved locally, so
+        // this arm returns before the `/login` store is consulted.
         return ClaudeAuthSource::Oauth {
             token,
-            plan: None,
             origin: OauthOrigin::Env,
         };
     }
@@ -311,15 +303,6 @@ fn parse_settings(body: &str) -> ClaudeSettings {
 struct ClaudeAiOauth {
     #[serde(rename = "accessToken")]
     access_token: Option<String>,
-    // Plan fields no longer read after #1689 cut ProviderUsage.plan;
-    // tracked in #1694 for a follow-up that drops these plus the
-    // corresponding parse-time normalisation.
-    #[serde(rename = "subscriptionType")]
-    #[allow(dead_code)]
-    subscription_type: Option<String>,
-    #[serde(rename = "rateLimitTier")]
-    #[allow(dead_code)]
-    rate_limit_tier: Option<String>,
     /// Milliseconds since Unix epoch; absent means "treat as usable".
     #[serde(rename = "expiresAt")]
     expires_at: Option<i64>,
@@ -367,11 +350,7 @@ fn parse_oauth_json(body: &str, origin: OauthOrigin) -> Result<ClaudeAuthSource,
     if token_expired(oauth.expires_at) {
         return Err(UsageError::NoCredential("expired accessToken".to_string()));
     }
-    Ok(ClaudeAuthSource::Oauth {
-        plan: None,
-        token,
-        origin,
-    })
+    Ok(ClaudeAuthSource::Oauth { token, origin })
 }
 
 fn token_expired(expires_at_ms: Option<i64>) -> bool {
@@ -422,11 +401,7 @@ fn resolve_named_profile(
         }
         Some(ProfileAuthMode::UserOauth) => {
             match profile_oauth_credentials(lookup, anthropic_cfg, name) {
-                Ok((token, plan)) => ClaudeAuthSource::Oauth {
-                    token,
-                    plan,
-                    origin,
-                },
+                Ok(token) => ClaudeAuthSource::Oauth { token, origin },
                 Err(error) => ClaudeAuthSource::Missing { error },
             }
         }
@@ -488,7 +463,7 @@ fn profile_oauth_credentials(
     lookup: &impl AuthLookup,
     anthropic_cfg: &Path,
     name: &str,
-) -> Result<(String, Option<String>), UsageError> {
+) -> Result<String, UsageError> {
     let path = anthropic_cfg
         .join("credentials")
         .join(format!("{name}.json"));
@@ -496,34 +471,13 @@ fn profile_oauth_credentials(
     #[derive(Deserialize)]
     struct ProfileCreds {
         access_token: Option<String>,
-        // Plan fields are no longer read after #1689 cut
-        // ProviderUsage.plan; tracked in #1694 for a follow-up that
-        // drops these and the parallel fields in the named-profile
-        // credential deserializer below.
-        #[serde(default)]
-        #[allow(dead_code)]
-        subscription_type: Option<String>,
-        #[serde(default, rename = "subscriptionType")]
-        #[allow(dead_code)]
-        subscription_type_camel: Option<String>,
-        #[serde(default)]
-        #[allow(dead_code)]
-        rate_limit_tier: Option<String>,
-        #[serde(default, rename = "rateLimitTier")]
-        #[allow(dead_code)]
-        rate_limit_tier_camel: Option<String>,
     }
     let creds: ProfileCreds =
         serde_json::from_str(&body).map_err(|error| UsageError::Shape(error.to_string()))?;
-    let token = creds
+    creds
         .access_token
         .filter(|token| !token.is_empty())
-        .ok_or_else(|| UsageError::NoCredential(path.to_string_lossy().to_string()))?;
-    // `plan` is no longer read after #1689 cut ProviderUsage.plan;
-    // a follow-up in #1694 will drop the credential-file fields and
-    // the deserialize struct entirely. Until then, always pass None so
-    // the struct compiles.
-    Ok((token, None))
+        .ok_or_else(|| UsageError::NoCredential(path.to_string_lossy().to_string()))
 }
 
 fn paths_equal(left: &Path, right: &Path) -> bool {
@@ -749,18 +703,18 @@ mod tests {
     }
 
     #[test]
-    fn oauth_env_token_beats_stored_login_without_borrowing_its_plan() {
+    fn oauth_env_token_beats_stored_login() {
+        // The dormant `/login` credential still carries `subscriptionType`,
+        // which the resolver no longer parses; the assertions below pin the
+        // env token as the winning credential.
         let mut lookup = with_oauth_file(ENTERPRISE_JSON);
         lookup
             .env
             .insert("CLAUDE_CODE_OAUTH_TOKEN".into(), "sk-ant-oat01-env".into());
         match resolve_claude_auth(&lookup) {
-            ClaudeAuthSource::Oauth { token, plan, .. } => {
+            ClaudeAuthSource::Oauth { token, origin, .. } => {
                 assert_eq!(token, "sk-ant-oat01-env");
-                assert_eq!(
-                    plan, None,
-                    "env tokens must not inherit plan from a dormant local login"
-                );
+                assert_eq!(origin, OauthOrigin::Env);
             }
             other => panic!("expected env oauth, got {other:?}"),
         }
@@ -822,6 +776,44 @@ mod tests {
         match resolve_claude_auth(&lookup) {
             ClaudeAuthSource::Missing { .. } => {}
             other => panic!("missing named profile must not use dormant OAuth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_named_profile_credentials_are_shape_errors() {
+        // Pins the error contract of `profile_oauth_credentials`: a credential
+        // file that will not parse reports `Shape`, and does not degrade into
+        // the dormant `/login` credential sitting alongside it.
+        let mut lookup = with_oauth_file(OAUTH_JSON);
+        lookup.env.insert("ANTHROPIC_PROFILE".into(), "work".into());
+        insert_profile(&mut lookup, "work", "user_oauth", Some("{not json"));
+        match resolve_claude_auth(&lookup) {
+            ClaudeAuthSource::Missing {
+                error: UsageError::Shape(_),
+            } => {}
+            other => {
+                panic!("malformed profile credentials must surface a shape error, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn named_profile_without_access_token_is_no_credential() {
+        // The other half of the contract: a well-formed credential file with no
+        // usable token reports `NoCredential`, kept distinct from `Shape`.
+        let mut lookup = with_oauth_file(OAUTH_JSON);
+        lookup.env.insert("ANTHROPIC_PROFILE".into(), "work".into());
+        insert_profile(
+            &mut lookup,
+            "work",
+            "user_oauth",
+            Some(r#"{"subscriptionType":"enterprise"}"#),
+        );
+        match resolve_claude_auth(&lookup) {
+            ClaudeAuthSource::Missing {
+                error: UsageError::NoCredential(_),
+            } => {}
+            other => panic!("profile without accessToken must report NoCredential, got {other:?}"),
         }
     }
 
@@ -919,11 +911,7 @@ mod tests {
             Some(r#"{"access_token":"sk-ant-oat01-profile","subscriptionType":"enterprise"}"#),
         );
         match resolve_claude_auth(&lookup) {
-            ClaudeAuthSource::Oauth {
-                token,
-                origin,
-                ..
-            } => {
+            ClaudeAuthSource::Oauth { token, origin, .. } => {
                 assert_eq!(token, "sk-ant-oat01-profile");
                 assert_eq!(
                     origin,

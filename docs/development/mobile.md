@@ -48,6 +48,57 @@ sheet's error slot, where the user can pick another node. The same reasoning app
 any new mobile route that resolves user-supplied identity — a 4xx that is not 401 must
 not be able to log someone out.
 
+## Session-cookie recovery
+
+The session is the HttpOnly `bm_session` cookie, so JavaScript cannot read it and the
+cookie cannot repair itself: when a browser loses that cookie while its device is still
+paired, its requests start failing authorization and the phone used to answer by clearing
+the credential and demanding a fresh re-pair (issue #1577).
+
+Recovery needs a credential the client can actually re-present, and that is the paired
+device token in `localStorage` (`buildmesh_token`). `POST /api/session` accepts it as a
+bearer credential and re-mints the cookie from the **same** token. That route only validates
+an existing `device_sessions` row (`routes::session::login`) — minting an identity is
+`pairing::exchange`, reached from `/api/pair` alone — so a recovery refresh adds no device
+row and cannot duplicate a session.
+
+The transport in `src/mobile/api.ts` owns the whole policy, through two entry points:
+`apiFetch` (every data route) and `fetchMintTicket`. The ticket mint cannot route through
+`apiFetch` — it must hand a 429's `Retry-After` back to `mintWsTicketWithBackoff` — so it
+joins the same recovery seam explicitly rather than skipping it, since the terminal and
+events sockets are what a reconnecting phone opens first.
+
+- **One refresh per burst.** Screens fan out several requests at once, so a lost cookie
+  arrives as a burst of 401s. They join a single in-flight `POST /api/session` promise; each
+  caller then replays its own request exactly once. A replayed cookie that still 401s means
+  the device itself was revoked, so the retry is capped at one and the 401 propagates.
+- **Only 401 recovers.** A 403 means the device authenticated and was refused for a scope it
+  does not hold; no refresh can grant it. See "only a genuine authorization failure may reach
+  `onAuthFailed`" above.
+- **A refresh that reaches no verdict is not a rejection.** The refresh has three outcomes —
+  refreshed, rejected, and unavailable (the desktop app unreachable, rate-limited or erroring).
+  Only *rejected* lets a screen call `onAuthFailed`. *Unavailable* surfaces as an ordinary
+  non-auth error, so the screen takes its usual offline/error path and the stored token
+  survives: a network blip must not cost a phone a pairing that is still valid. This is the
+  distinction that keeps "clear credentials only when the refresh is rejected" true rather
+  than aspirational.
+- **The transport never clears the credential.** It re-raises the 401 and the screen's
+  `onAuthFailed` remains the single owner of the clear-and-show-Connect transition, so the
+  screen-stays-mounted guarantee and the re-pair path cannot drift apart. The token rides one
+  `Authorization` header on the refresh call and never a URL.
+
+Credential lifetime follows from that: a successful `restoreSession` **keeps** the token
+(it is the same device credential the cookie carries, and retaining it is what makes the next
+cookie loss recoverable), a **rejected** refresh clears it, a network failure keeps it
+(nothing is yet known about its validity), and a fresh `POST /api/pair` clears it because
+pairing mints a new device identity that reaches the client only as a cookie.
+
+One limit follows from the pairing design and is deliberate rather than a gap to close here:
+`/api/pair` returns an empty body, so a device paired since the cookie migration (#500,
+#1756) has **no** token in `localStorage` and nothing to recover with — it still needs a
+re-pair. Recovery serves the devices that hold a token. Changing that means handing the SPA
+a second, cookie-scoped credential, which is a server contract change, not a client one.
+
 ## Sheet dismissal ownership
 
 A sheet with an in-flight request owns its own dismissal. `Sheet` takes a `dismissible`
