@@ -71,10 +71,19 @@ or backend also needs the dev-profile runtime checks; browser smoke uses mock
 IPC. Focused `check.ps1` targets remain available during implementation.
 
 > **Worktree tip.** Inside a worktree (path contains `.claude/worktrees/`),
-> `check.ps1` already handles the Windows-specific gotchas (clears
-> `BUILDMESH_PREFILL`, forces vitest `--pool=threads`, builds `dist/mobile`
-> first). Prefer it over running the raw commands — the raw forms false-green
-> in a worktree.
+> `check.ps1` already handles the Windows-specific gotchas (clears the
+> environment an agent shell leaks, forces vitest `--pool=threads`, builds
+> `dist/mobile` first). Prefer it over running the raw commands — the raw forms
+> false-green in a worktree.
+>
+> The cleared variables are `NODE_ENV`, `npm_config_omit`, `COMMANDCODE_SCRATCHPAD`
+> and `BUILDMESH_PREFILL` (issue #1426). A leaked `NODE_ENV=production` is the
+> reason a worktree can report `React.act is not a function` across every `.tsx`
+> test: React's production build exports no `act`. The script says which
+> variables it cleared on each run. One leak it cannot repair is
+> `npm_config_omit=dev`, because `npm ci` / `npm install` honour it and install no
+> devDependencies — a stripped worktree then fails with confusing missing-module
+> errors, so reinstall it with `npm ci --include=dev`.
 
 ## Commit & PR conventions
 
