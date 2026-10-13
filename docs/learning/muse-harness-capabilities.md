@@ -87,7 +87,7 @@ alongside `effort_control`. Grok accepts `--effort` as an alias of
 that adapter inherits the trait default; Muse documents **no** such alias, so
 the trait default's `["--effort", level]` would make the CLI reject the launch.
 Enabling the vocabulary without the flag override would convert a silently
-ignored setting into a node that never starts — the pair is pinned together in
+ignored setting into a launch Muse refuses — the pair is pinned together in
 `muse_recipe_appends_reasoning_effort_arg_when_resolved`.
 
 Two limits stay deliberate. Muse's help does not say a given model honours all

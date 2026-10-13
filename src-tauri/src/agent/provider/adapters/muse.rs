@@ -144,9 +144,9 @@
 //!
 //! Both halves of the wiring are load-bearing. The flag has **no `--effort`
 //! alias**, so `effort_args` is overridden as well: the trait default emits
-//! `["--effort", level]`, which Muse rejects outright and which would turn a
-//! previously ignored effort setting into a launch that fails to start. The
-//! vocabulary lives in [`MUSE_EFFORT_ALLOWED`], shared with the resolver's
+//! `["--effort", level]`, which Muse rejects as an unknown option and which
+//! would turn a previously ignored effort setting into a launch it refuses.
+//! The vocabulary lives in [`MUSE_EFFORT_ALLOWED`], shared with the resolver's
 //! mask, so anything outside the eight levels is dropped rather than forwarded.
 //!
 //! **Flags Buildmesh never passes (issue #1710).** `supports_extra_args` is
@@ -1109,9 +1109,12 @@ mod tests {
             prepared.recipe.base_args
         );
 
-        // Without an effort layer the flag is absent, so the recipe stays the
-        // bare `--disable-approval --disable-sandbox` the platform pin above
-        // asserts.
+        // Without an effort layer the flag is absent: the recipe carries only
+        // what the effective permission mode contributes. The exact
+        // `--disable-approval --disable-sandbox` argv of a no-effort launch is
+        // already pinned exactly by
+        // `default_prepare_fresh_launch_carries_disable_approval_with_model_and_prefill`,
+        // so this assertion stays scoped to the effort flag.
         let without_effort = default_prepare(
             &MUSE,
             HarnessLaunchInput {
