@@ -195,6 +195,23 @@ evidence. A task whose output has been written within `TASK_QUIESCENCE_MS` is
 treated as still running, so a live task cannot consume the single wake-up an
 attempt owns.
 
+**Three terminal channels, all read.** A launched task counts as over when any of
+these records it, because each misses a case the others cover:
+
+- `summary.txt` in the task store — observed only for **succeeded** tasks (the
+  failed and cancelled tasks examined in run 478's session left just `output.log`).
+- A `toolResult` receipt from `task_output` with status `succeeded`, `failed`
+  or `canceled`. A poll that races the task's exit can return the final output
+  yet still say `running`, so this can be missing.
+- The host's `<background-task-finished>` notice: a `user` record whose
+  `hostMetadata.backgroundTaskOrigin.kind` is `background-task-terminal`, with
+  `taskIds` and a `<task task_id="…" status="…" ended_at_ms="…"/>` element per
+  task. Only the structured metadata counts; the notice text alone could be
+  forged by a quote. For a failed task whose poll raced the exit this can be the
+  only record (circuit run 478: a task exited 101 and no other record of it was
+  found; the stale "pending" count made the final `Stop` read as background
+  work, so the node stayed `running`).
+
 The worker turns that into `CircuitEvent::NudgeIdleSession`, which the stepper
 turns into at most one `Effect::NudgeIdleAgent` per step attempt, fenced to the
 observed turn's `(report revision, turn stamp)`. Delivery reuses the
