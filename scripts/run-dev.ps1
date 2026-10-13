@@ -24,7 +24,13 @@
 # 127.0.0.1:<n> so Playwright can attach to the REAL app window (drive the DOM,
 # take screenshots) — see scripts/ui-shot.mjs and the /verify-ui skill.
 # Convention: 9223 for agent UI verification. 0 (default) = off.
-param([int]$CdpPort = 0)
+# -Detach: return after bounded, log-confirmed readiness, leaving the app alive.
+# The readiness timeout starts after the build; compilation remains synchronous.
+param(
+    [int]$CdpPort = 0,
+    [switch]$Detach,
+    [ValidateRange(1, 300)][int]$ReadinessTimeoutSeconds = 30
+)
 $ErrorActionPreference = "Stop"
 
 Set-Location "$PSScriptRoot\.."
@@ -138,7 +144,9 @@ if ($ClearedMarkers.Count -gt 0) {
     Write-Output "Cleared Claude Code session markers for this launch: $($ClearedMarkers -join ', ')"
 }
 try {
-    $proc = Start-Process $Binary -PassThru
+    # ShellExecute starts independently on Windows. RedirectStandard* creates
+    # PowerShell stream pumps that can hold a captured shell open until exit.
+    $proc = Start-Process $Binary -PassThru -WindowStyle Hidden
 } finally {
     if ($CdpPort -gt 0) {
         Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
@@ -146,6 +154,45 @@ try {
     Remove-Item Env:RUST_BACKTRACE -ErrorAction SilentlyContinue
 }
 Write-Output "Launched PID: $($proc.Id)"
+Write-Output "Log: $LogPath"
+
+if ($Detach) {
+    $ReadinessClock = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($ReadinessClock.Elapsed.TotalSeconds -lt $ReadinessTimeoutSeconds) {
+        foreach ($p in @(@{Path=$PanicLogPath; Before=$BeforePanic},
+                         @{Path=$PanicEarlyLogPath; Before=$BeforePanicEarly})) {
+            $growth = Compare-LogGrowth -Path $p.Path -Before $p.Before
+            if ($growth.Checked -and $growth.Grew) {
+                Write-Output "ERROR: panic detected in $($p.Path). Launch aborted."
+                $growth.Lines | Select-Object -Skip $p.Before.Lines.Count | ForEach-Object { Write-Output $_ }
+                $proc | Stop-Process -Force -ErrorAction SilentlyContinue
+                exit 1
+            }
+        }
+        if ($proc.HasExited) {
+            Write-Output "ERROR: Buildmesh Dev exited before readiness (PID $($proc.Id))"
+            exit 1
+        }
+        $CurrentLog = Read-LogFile $LogPath
+        if ($BeforeLog.Readable -and $CurrentLog.Readable) {
+            $SkipLines = $BeforeLog.Lines.Count
+            # The rotating writer can replace the log during startup. A shorter
+            # log or changed first line belongs to the new generation.
+            if ($CurrentLog.Lines.Count -lt $SkipLines -or
+                ($SkipLines -gt 0 -and $CurrentLog.Lines.Count -gt 0 -and
+                 $CurrentLog.Lines[0] -cne $BeforeLog.Lines[0])) { $SkipLines = 0 }
+            $started = $CurrentLog.Lines | Select-Object -Skip $SkipLines | Where-Object { $_ -match 'started|ready' }
+            if ($started) {
+                Write-Output "OK - Buildmesh Dev running detached (PID $($proc.Id))"
+                exit 0
+            }
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    $proc | Stop-Process -Force -ErrorAction SilentlyContinue
+    Write-Output "ERROR: Buildmesh Dev readiness timed out after ${ReadinessTimeoutSeconds}s; see $LogPath"
+    exit 1
+}
 
 # 6. Verify via log
 Start-Sleep -Seconds 3
