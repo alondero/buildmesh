@@ -301,8 +301,16 @@ fn task_store_facts(tasks_dir: &Path, launched: &[LaunchedTask]) -> Vec<TaskStor
         .collect()
 }
 
-/// Record `task_id` as finished, replacing any earlier fact for it.
+/// Record `task_id` as finished, replacing any earlier fact for it. An undated
+/// update keeps the date of an earlier terminal fact: learning the task is over
+/// again must not discard when it was known to have ended.
 fn settle(facts: &mut Vec<TaskStoreFact>, task_id: &str, settled_at_ms: Option<i64>) {
+    let settled_at_ms = settled_at_ms.or_else(|| {
+        facts
+            .iter()
+            .find(|fact| fact.task_id == task_id && fact.finished)
+            .and_then(|fact| fact.settled_at_ms)
+    });
     facts.retain(|fact| fact.task_id != task_id);
     facts.push(TaskStoreFact {
         task_id: task_id.to_owned(),
@@ -1081,6 +1089,70 @@ mod stall_tests {
             count_pending_background_tasks_in(&transcript, &dir.path().join("background-tasks")),
             Some(0)
         );
+    }
+
+    #[test]
+    fn an_undated_notice_does_not_erase_dated_terminal_evidence() {
+        // Dated evidence first (a terminal receipt, then a store summary), the
+        // undated notice after it. Replacing the dated fact with `None` hid a
+        // valid stall: the task had been dated all along.
+        let receipt = serde_json::json!({"message":{"role":"toolResult", "timestamp":T_END,
+            "details":{"status":"failed","task_id":TASK},"content":[]}})
+        .to_string();
+        let dir = tempfile::tempdir().unwrap();
+        let tasks = dir.path().join("background-tasks");
+        std::fs::create_dir_all(tasks.join(TASK)).unwrap();
+        std::fs::write(tasks.join(TASK).join("summary.txt"), "finished").unwrap();
+        let summary_mtime = mtime_ms(&tasks.join(TASK).join("summary.txt")).unwrap();
+        let tasks_dir = dir.path().join("none");
+        for (dir_for_facts, expected) in [(&tasks_dir, T_END), (&tasks, summary_mtime)] {
+            let mut records = vec![promoted(T_LAST_TALK - 60_000, TASK)];
+            if expected == T_END {
+                records.push(receipt.clone());
+            }
+            records.push(undated_finished_notice(TASK));
+            let lines = stream(records);
+            let facts = background_facts(&lines, dir_for_facts, &launched(&lines)).unwrap();
+            assert_eq!(facts, vec![fact(TASK, expected, true)]);
+        }
+        // And the consequence the reviewer named: the dated fact still yields a
+        // wake-up for a session that has not spoken since.
+        let lines = stream([
+            promoted(T_LAST_TALK - 60_000, TASK),
+            assistant(T_LAST_TALK),
+            receipt,
+            undated_finished_notice(TASK),
+        ]);
+        let facts = background_facts(&lines, &tasks_dir, &launched(&lines)).unwrap();
+        let stall = detect_background_task_stall(
+            &launched(&lines),
+            &facts,
+            newest_assistant_at(&lines),
+            NOW,
+        )
+        .expect("stall");
+        assert_eq!(stall.ended_at_ms, T_END);
+    }
+
+    #[test]
+    fn a_dated_notice_still_replaces_an_earlier_terminal_date() {
+        // Only an undated update is refused the chance to erase a date; a dated
+        // one keeps the existing latest-record-wins behaviour.
+        let receipt = serde_json::json!({"message":{"role":"toolResult", "timestamp":T_END,
+            "details":{"status":"failed","task_id":TASK},"content":[]}})
+        .to_string();
+        let lines = stream([
+            promoted(T_LAST_TALK, TASK),
+            receipt,
+            finished_notice(T_END + 9_000, TASK, "failed", T_END + 8_000),
+        ]);
+        let facts = background_facts(
+            &lines,
+            Path::new("X:\\no-such-tasks-dir"),
+            &launched(&lines),
+        )
+        .unwrap();
+        assert_eq!(facts, vec![fact(TASK, T_END + 8_000, true)]);
     }
 
     #[test]

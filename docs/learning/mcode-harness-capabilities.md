@@ -213,7 +213,8 @@ these records it, because each misses a case the others cover:
   work, so the node stayed `running`). A notice settles the task at its
   `ended_at_ms`, else the record's timestamp; if neither is usable the task is
   still settled but undated, and the stall detector does not report an undated
-  task (it cannot be ordered against the assistant's last message).
+  task (it cannot be ordered against the assistant's last message). An undated
+  notice never erases a date an earlier receipt or summary already gave the task.
 
 The worker turns that into `CircuitEvent::NudgeIdleSession`, which the stepper
 turns into at most one `Effect::NudgeIdleAgent` per step attempt, fenced to the
