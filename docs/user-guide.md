@@ -513,7 +513,7 @@ start a node from Buildmesh.
 | Harness | File Buildmesh writes | Written to |
 |---|---|---|
 | Claude Code | `.claude/settings.local.json` | Project directory |
-| Codex | `.codex/config.toml` and `.codex/hooks.json` | Project directory |
+| Codex | No hook file — the hooks ride the agent's own launch arguments | — |
 | Cursor | `.cursor/hooks.json` | Project directory |
 | Antigravity | `.agents/hooks.json` | Project directory |
 | OpenCode | `.opencode/plugins/buildmesh-attention.js` | Project directory |
@@ -521,6 +521,12 @@ start a node from Buildmesh.
 | Kimi Code | `config.toml` in its configuration home | Configuration home |
 | MiniMax Code | `.claude-plugin/plugin.json` in its plugin directory | Configuration home |
 | Cline | `TaskComplete.ps1` or `TaskComplete.sh` under `hooks/` | Configuration home |
+
+Codex loads its project hooks from the *main checkout's* `.codex/hooks.json`,
+never a worktree's own, so from a git worktree a file beside the node would
+never be read (and one beside the main checkout would be shared by every
+worktree node). Buildmesh therefore passes Codex's callbacks as per-launch
+configuration and removes its own older entries from any `hooks.json` it finds.
 
 *Configuration home* means the harness's own config directory — normally
 `~/.kimi-code` for Kimi Code, `~/.minimax` for MiniMax Code, and `~/.cline` for
@@ -905,6 +911,13 @@ Remote access is optional and off by default.
    certificate warning is expected until the root is trusted.
 4. Manage paired phones under **Authorized Devices**. Revoking a device closes
    its active connections and requires a new pairing.
+
+A phone that has a saved device token recovers on its own if it loses its
+session cookie: the app re-establishes the session and retries what you were
+doing, so the screen stays where it was. A phone without one — which includes
+any phone paired by scanning a QR code, because pairing hands the browser a
+cookie and nothing else — is shown the pairing screen instead. Pairing again is
+always required after you revoke a device or clear the browser's site data.
 
 The loopback listener stays plain HTTP for local agent hooks. LAN/VPN interfaces
 use HTTPS/WSS. The status panel lists the interfaces that are actually exposed;

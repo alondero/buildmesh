@@ -376,6 +376,162 @@ fn write_mapped_launch_batch(
     Ok(windows_path)
 }
 
+/// Windows' per-process command-line limit. CreateProcess accepts at most
+/// 32,767 characters on one command line, and there is no shell-side
+/// workaround: a launch over it cannot run at all.
+pub(crate) const WINDOWS_PROCESS_COMMAND_LINE_CHARS: usize = 32_767;
+
+/// `cmd.exe`'s own, much tighter limit. It parses only the first 8,191
+/// characters of the command line it is handed and answers the rest with *The
+/// command line is too long.* on its output stream. PowerShell reaches a
+/// `.cmd` / `.bat` shim — which is how an npm-installed Codex is shipped —
+/// by handing exactly such a line to `cmd.exe /c`, so a PowerShell launch
+/// crosses two limits, not one (#2184).
+pub(crate) const CMD_EXE_COMMAND_LINE_CHARS: usize = 8_191;
+
+/// The fixed part of a `powershell.exe -EncodedCommand` launch's command line.
+const POWERSHELL_ENCODED_PREFIX: &str = "powershell.exe -NoLogo -NoProfile -EncodedCommand ";
+
+/// Return the number of UTF-16 code units needed for one Windows command-line
+/// argument using the quoting rules used by `Command`. Quotes and backslashes
+/// before quotes are doubled, so a byte-count approximation can accept a line
+/// that `cmd.exe` still rejects near its limit.
+fn windows_argument_command_line_chars(argument: &str) -> usize {
+    let needs_quotes = argument.is_empty()
+        || argument
+            .chars()
+            .any(|character| character.is_whitespace() || character == '"');
+    if !needs_quotes {
+        return argument.encode_utf16().count();
+    }
+
+    let mut chars = 2; // surrounding quotes
+    let mut backslashes = 0;
+    for character in argument.chars() {
+        if character == '\\' {
+            backslashes += 1;
+        } else if character == '"' {
+            chars += backslashes * 2 + 2;
+            backslashes = 0;
+        } else {
+            chars += backslashes + character.len_utf16();
+            backslashes = 0;
+        }
+    }
+    chars + backslashes * 2
+}
+
+fn windows_command_line_chars(executable: &str, args: &[String]) -> usize {
+    windows_argument_command_line_chars(executable)
+        + args
+            .iter()
+            .map(|arg| 1 + windows_argument_command_line_chars(arg))
+            .sum::<usize>()
+}
+
+fn powershell_command_line_chars(encoded_script: &str) -> usize {
+    windows_command_line_chars(
+        "powershell.exe",
+        &[
+            "-NoLogo".into(),
+            "-NoProfile".into(),
+            "-EncodedCommand".into(),
+            encoded_script.into(),
+        ],
+    )
+}
+
+fn cmd_command_line_chars(args: &[String]) -> usize {
+    windows_command_line_chars("cmd.exe", args)
+}
+
+fn command_line_error(executable: &str, spent: usize, limit: usize, via: &str) -> String {
+    format!(
+        "the launch of {executable} spends {spent} characters on {via}, over Windows' \
+         {limit}-character command-line limit; shorten the initial prompt or the \
+         harness's extra arguments"
+    )
+}
+
+fn ensure_powershell_command_line_fits(script: &str) -> Result<(), String> {
+    let encoded = encode_for_powershell(script);
+    let spent = powershell_command_line_chars(&encoded);
+    if spent > WINDOWS_PROCESS_COMMAND_LINE_CHARS {
+        return Err(command_line_error(
+            "powershell.exe",
+            spent,
+            WINDOWS_PROCESS_COMMAND_LINE_CHARS,
+            "the encoded PowerShell process command line",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_cmd_command_line_fits(executable: &str, args: &[String]) -> Result<(), String> {
+    let mut command_args = vec!["/d".into(), "/c".into(), executable.into()];
+    command_args.extend_from_slice(args);
+    ensure_cmd_arguments_fit(&command_args, executable)
+}
+
+fn ensure_cmd_arguments_fit(command_args: &[String], executable: &str) -> Result<(), String> {
+    let spent = cmd_command_line_chars(command_args);
+    if spent > WINDOWS_PROCESS_COMMAND_LINE_CHARS {
+        return Err(command_line_error(
+            executable,
+            spent,
+            WINDOWS_PROCESS_COMMAND_LINE_CHARS,
+            "the cmd.exe process command line",
+        ));
+    }
+    if spent > CMD_EXE_COMMAND_LINE_CHARS {
+        return Err(command_line_error(
+            executable,
+            spent,
+            CMD_EXE_COMMAND_LINE_CHARS,
+            "the cmd.exe command line that runs it",
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse a Windows launch whose assembled command line cannot fit the limits
+/// above, instead of spawning a shell that prints *The command line is too
+/// long.* into the node's terminal and exits (#2184).
+///
+/// A launch's arguments travel twice under the `PowerShell` arm: once inside
+/// the Base64 script this process hands `powershell.exe`, and again inside the
+/// line PowerShell builds for the child it starts. Only the child's line has a
+/// second, tighter limit — and only when the child has to be reached through
+/// `cmd.exe`, which is how PowerShell runs a batch shim.
+fn ensure_windows_command_line_fits(
+    windows_shell: WindowsShell,
+    executable: &str,
+    args: &[String],
+    encoded_script: Option<&str>,
+) -> Result<(), String> {
+    match windows_shell {
+        WindowsShell::PowerShell => {
+            ensure_powershell_command_line_fits(encoded_script.unwrap_or_default())?;
+            if is_batch_shim(executable) {
+                ensure_cmd_command_line_fits(executable, args)?;
+            }
+        }
+        WindowsShell::Cmd => ensure_cmd_command_line_fits(executable, args)?,
+        WindowsShell::Direct => {
+            let spent = windows_command_line_chars(executable, args);
+            if spent > WINDOWS_PROCESS_COMMAND_LINE_CHARS {
+                return Err(command_line_error(
+                    executable,
+                    spent,
+                    WINDOWS_PROCESS_COMMAND_LINE_CHARS,
+                    "the process command line",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Build the Windows-native invocation for a PowerShell-wrapped spawn.
 ///
 /// Normally that is `powershell.exe -EncodedCommand <script>`. When `mapped`
@@ -410,6 +566,18 @@ fn powershell_spawn(
     };
     tracing::info!("spawn_environment: mapping the UNC spawn directory through a cmd pushd script");
     let launch = mapped_launch_directory(env_type)?;
+    // A batch file is itself read by cmd.exe one line at a time, and a batch
+    // line caps at the same 8,191 characters. Carrying the encoded script on
+    // one line therefore has its own, tighter budget than the line that starts
+    // the batch does.
+    if POWERSHELL_ENCODED_PREFIX.len() + encoded.len() > CMD_EXE_COMMAND_LINE_CHARS {
+        return Err(format!(
+            "the mapped spawn script needs a {} character PowerShell command line, over \
+             cmd.exe's {CMD_EXE_COMMAND_LINE_CHARS} character batch-line limit; shorten the \
+             initial prompt or the harness's extra arguments",
+            POWERSHELL_ENCODED_PREFIX.len() + encoded.len()
+        ));
+    }
     let batch = write_mapped_launch_batch(&launch, &mapped_launch_batch(&encoded, directory))?;
     let mut c = CommandBuilder::new("cmd.exe");
     c.args(["/d", "/c", &batch]);
@@ -453,7 +621,7 @@ fn maps_directory_with_pushd(
 pub(crate) fn background_command(
     recipe: &SpawnRecipe,
     executable: Option<&std::path::Path>,
-) -> std::process::Command {
+) -> Result<std::process::Command, String> {
     let executable = executable
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_else(|| recipe.binary.into());
@@ -463,6 +631,12 @@ pub(crate) fn background_command(
             "{}; exit $LASTEXITCODE",
             format_powershell_command(&executable, &args)
         );
+        ensure_windows_command_line_fits(
+            WindowsShell::PowerShell,
+            &executable,
+            &args,
+            Some(&script),
+        )?;
         let mut cmd = crate::process_util::command_no_window("powershell.exe");
         cmd.args([
             "-NoLogo",
@@ -473,10 +647,14 @@ pub(crate) fn background_command(
         cmd
     } else {
         let mut cmd = if cfg!(windows) && recipe.windows_shell == WindowsShell::Cmd {
+            ensure_windows_command_line_fits(WindowsShell::Cmd, &executable, &args, None)?;
             let mut cmd = crate::process_util::command_no_window("cmd.exe");
             cmd.args(["/d", "/c", &executable]);
             cmd
         } else {
+            if cfg!(windows) {
+                ensure_windows_command_line_fits(WindowsShell::Direct, &executable, &args, None)?;
+            }
             crate::process_util::command_no_window(executable)
         };
         cmd.args(args);
@@ -493,7 +671,7 @@ pub(crate) fn background_command(
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    cmd
+    Ok(cmd)
 }
 
 pub fn wrap(
@@ -515,7 +693,7 @@ pub fn wrap(
     // working-directory gate below.
     let mapped = maps_directory_with_pushd(env_type, windows_shell, executable, spawn_path);
     let mut cmd = if env_type == EnvType::WindowsInterop {
-        let script = if windows_shell == WindowsShell::Cmd {
+        let cmd_args = if windows_shell == WindowsShell::Cmd {
             let mut args = vec![
                 "/d".into(),
                 "/c".into(),
@@ -525,7 +703,12 @@ pub fn wrap(
                 executable.into(),
             ];
             args.extend(recipe.base_args.clone());
-            format_powershell_command("cmd.exe", &args)
+            Some(args)
+        } else {
+            None
+        };
+        let script = if let Some(args) = &cmd_args {
+            format_powershell_command("cmd.exe", args)
         } else if mapped {
             // `pushd` already established the directory. Re-issuing
             // `Set-Location` to the UNC form would hand the cmd.exe that runs
@@ -538,11 +721,19 @@ pub fn wrap(
                 format_powershell_command(executable, &recipe.base_args)
             )
         };
-        let mut command = powershell_spawn(
-            env_type,
-            &format!("{script}; exit $LASTEXITCODE"),
-            mapped.then_some(spawn_path),
-        )?;
+        let launch_script = format!("{script}; exit $LASTEXITCODE");
+        if let Some(args) = &cmd_args {
+            ensure_cmd_arguments_fit(args, executable)?;
+            ensure_powershell_command_line_fits(&launch_script)?;
+        } else {
+            ensure_windows_command_line_fits(
+                WindowsShell::PowerShell,
+                executable,
+                &recipe.base_args,
+                Some(&launch_script),
+            )?;
+        }
+        let mut command = powershell_spawn(env_type, &launch_script, mapped.then_some(spawn_path))?;
         if let Ok(distro) = std::env::var("WSL_DISTRO_NAME") {
             command.env("BUILDMESH_WSL_HOST", distro);
         }
@@ -555,22 +746,27 @@ pub fn wrap(
         tracing::info!("spawn_environment: building WSL command via wsl.exe");
         let mut c = CommandBuilder::new("wsl.exe");
         let default_distro = crate::env::get_default_wsl_distro();
+        let mut wsl_args = Vec::new();
         if let Some(distro) = wsl_distro.or(default_distro.as_deref()) {
-            c.args(["-d", distro]);
+            wsl_args.extend(["-d".into(), distro.into()]);
         }
         // Use the same login environment as discovery. Positional parameters
         // preserve arbitrary prompts without evaluating them as shell code.
-        c.args([
-            "--cd",
-            spawn_path,
-            "--exec",
-            "sh",
-            "-lc",
-            "export PATH=\"$HOME/.local/bin:$HOME/.npm-global/bin:$PATH\"; exec \"$@\"",
-            "buildmesh",
-            executable,
+        wsl_args.extend([
+            "--cd".into(),
+            spawn_path.into(),
+            "--exec".into(),
+            "sh".into(),
+            "-lc".into(),
+            "export PATH=\"$HOME/.local/bin:$HOME/.npm-global/bin:$PATH\"; exec \"$@\"".into(),
+            "buildmesh".into(),
+            executable.into(),
         ]);
-        c.args(recipe.base_args);
+        wsl_args.extend(recipe.base_args);
+        if cfg!(windows) {
+            ensure_windows_command_line_fits(WindowsShell::Direct, "wsl.exe", &wsl_args, None)?;
+        }
+        c.args(wsl_args);
         Ok(c)
     } else if cfg!(target_os = "macos") {
         // macOS Seatbelt sandbox (issue #497). When the Mesh has the sandbox
@@ -633,6 +829,14 @@ pub fn wrap(
                 // backticks) would otherwise be parsed as separate PowerShell
                 // statements after newline boundaries.
                 let cmd_str = format_powershell_command(executable, &recipe.base_args);
+                if cfg!(windows) {
+                    ensure_windows_command_line_fits(
+                        windows_shell,
+                        executable,
+                        &recipe.base_args,
+                        Some(&cmd_str),
+                    )?;
+                }
                 powershell_spawn(env_type, &cmd_str, mapped.then_some(spawn_path))?
             }
             WindowsShell::Cmd => {
@@ -640,15 +844,24 @@ pub fn wrap(
                     "spawn_environment: building Windows cmd.exe /c for {}",
                     executable
                 );
-                let mut c = CommandBuilder::new("cmd.exe");
-                if is_unc_path(spawn_path) {
-                    // cmd cannot use a UNC current directory. Its own pushd
-                    // maps the share for the lifetime of this shell.
-                    c.args(["/d", "/c", "pushd", spawn_path, "&&", executable]);
+                let mut command_args = if is_unc_path(spawn_path) {
+                    vec![
+                        "/d".into(),
+                        "/c".into(),
+                        "pushd".into(),
+                        spawn_path.into(),
+                        "&&".into(),
+                        executable.into(),
+                    ]
                 } else {
-                    c.args(["/c", executable]);
+                    vec!["/c".into(), executable.into()]
+                };
+                command_args.extend(recipe.base_args);
+                if cfg!(windows) {
+                    ensure_cmd_arguments_fit(&command_args, executable)?;
                 }
-                c.args(recipe.base_args);
+                let mut c = CommandBuilder::new("cmd.exe");
+                c.args(command_args);
                 c
             }
             WindowsShell::Direct => {
@@ -656,6 +869,14 @@ pub fn wrap(
                     "spawn_environment: building direct Windows spawn for {}",
                     executable
                 );
+                if cfg!(windows) {
+                    ensure_windows_command_line_fits(
+                        windows_shell,
+                        executable,
+                        &recipe.base_args,
+                        None,
+                    )?;
+                }
                 let mut c = CommandBuilder::new(executable);
                 c.args(recipe.base_args);
                 c
@@ -847,6 +1068,171 @@ mod tests {
         });
     }
 
+    /// Node 5351: a Codex reviewer spawned for PR #2261 printed *The command
+    /// line is too long.* into its own terminal and exited. Its launch —
+    /// attention hooks, model flags and the review policy prompt — crossed the
+    /// 8,191-character line `cmd.exe` accepts from the PowerShell that runs an
+    /// npm `codex.CMD` shim. The launch is now modelled against both budgets,
+    /// so it fits, and one that genuinely cannot is refused up front.
+    #[test]
+    fn a_realistic_codex_launch_fits_the_windows_command_line_budgets() {
+        let adapter = crate::models::Provider::Codex.adapter();
+        let mut base_args = vec![
+            "--sandbox".to_string(),
+            "danger-full-access".into(),
+            "--dangerously-bypass-hook-trust".into(),
+            "--model".into(),
+            "gpt-6-luna".into(),
+        ];
+        base_args.extend(adapter.launch_hook_args(5351, EnvType::Windows));
+        let prompt = format!(
+            "Review PR #2261\n{}\nhttps://github.com/alondero/buildmesh/pull/2261",
+            crate::review_contract::REVIEW_POLICY
+        );
+        base_args.push(prompt);
+        let recipe = SpawnRecipe {
+            binary: "codex",
+            base_args,
+            trailing_args: vec![],
+            windows_shell: WindowsShell::PowerShell,
+        };
+        let cmd = super::wrap(
+            recipe,
+            EnvType::Windows,
+            None,
+            Some(r"C:\Users\alond\AppData\Roaming\npm\codex.CMD"),
+            ".",
+            5351,
+            false,
+        )
+        .expect("a Codex review launch fits both command-line budgets");
+        let argv: Vec<String> = cmd
+            .get_argv()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(argv[0], "powershell.exe", "{argv:?}");
+    }
+
+    /// The guard's other half: an oversized launch fails here, naming the
+    /// budget it crossed, instead of handing a shell a line it will refuse and
+    /// leaving the node to report a cryptic message.
+    #[cfg(windows)]
+    #[test]
+    fn a_launch_over_the_cmd_exe_budget_is_refused_with_that_budget() {
+        let mut base_args = vec!["--sandbox".into(), "danger-full-access".into()];
+        base_args.push("review this".repeat(1_000));
+        let recipe = SpawnRecipe {
+            binary: "codex",
+            base_args,
+            trailing_args: vec![],
+            windows_shell: WindowsShell::PowerShell,
+        };
+        let error = super::wrap(
+            recipe,
+            EnvType::Windows,
+            None,
+            Some(r"C:\Users\alond\AppData\Roaming\npm\codex.CMD"),
+            ".",
+            5351,
+            false,
+        )
+        .expect_err("a launch cmd.exe cannot parse must be refused before it is spawned");
+        assert!(
+            error.contains("cmd.exe") && error.contains("8191"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn windows_interop_cmd_launch_accounts_for_the_outer_powershell_script() {
+        let recipe = SpawnRecipe {
+            binary: "codex",
+            base_args: vec!["--model".into(), "gpt-6-luna".into()],
+            trailing_args: vec![],
+            windows_shell: WindowsShell::Cmd,
+        };
+        // Single quotes are valid Windows path characters. PowerShell doubles
+        // each one in the encoded script, making the outer process line cross
+        // 32,767 while the inner cmd.exe line remains below 8,191.
+        let spawn_path = format!("C:\\{}", "'".repeat(7_000));
+        let error = super::wrap(
+            recipe,
+            EnvType::WindowsInterop,
+            None,
+            Some(r"C:\\Users\\alond\\AppData\\Roaming\\npm\\codex.CMD"),
+            &spawn_path,
+            5351,
+            false,
+        )
+        .expect_err("the encoded Windows interop PowerShell script exceeds CreateProcess");
+        assert!(error.contains("32767"), "{error}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cmd_budget_accounts_for_windows_quote_and_backslash_escaping() {
+        let recipe = SpawnRecipe {
+            binary: "codex",
+            base_args: vec![std::iter::repeat("\\\"").take(2_200).collect::<String>()],
+            trailing_args: vec![],
+            windows_shell: WindowsShell::Cmd,
+        };
+        let error = super::wrap(recipe, EnvType::Windows, None, None, ".", 5351, false)
+            .expect_err("serialized cmd.exe arguments exceed the shell budget");
+        assert!(error.contains("8191"), "{error}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn background_windows_launch_over_the_process_budget_is_refused() {
+        let recipe = SpawnRecipe {
+            binary: "codex",
+            base_args: vec!["x".repeat(40_000)],
+            trailing_args: vec![],
+            windows_shell: WindowsShell::PowerShell,
+        };
+        let error = super::background_command(&recipe, None)
+            .expect_err("background launches must use the same Windows process budget");
+        assert!(error.contains("32767"), "{error}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_cmd_unc_launch_accounts_for_its_pushd_path() {
+        let recipe = SpawnRecipe {
+            binary: "codex",
+            base_args: vec!["--model".into(), "gpt-6-luna".into()],
+            trailing_args: vec![],
+            windows_shell: WindowsShell::Cmd,
+        };
+        let spawn_path = format!("\\\\server\\repo-{}", "x".repeat(8_200));
+        let error = super::wrap(
+            recipe,
+            EnvType::Windows,
+            None,
+            Some(r"C:\Users\alond\AppData\Roaming\npm\codex.CMD"),
+            &spawn_path,
+            5351,
+            false,
+        )
+        .expect_err("cmd.exe must budget the UNC pushd command it actually receives");
+        assert!(error.contains("8191"), "{error}");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn native_linux_direct_launch_does_not_use_windows_command_line_limits() {
+        let recipe = SpawnRecipe {
+            binary: "codex",
+            base_args: vec!["x".repeat(40_000)],
+            trailing_args: vec![],
+            windows_shell: WindowsShell::Direct,
+        };
+        super::wrap(recipe, EnvType::Windows, None, None, ".", 5351, false)
+            .expect("native Linux direct launches do not use Windows command-line limits");
+    }
+
     /// The background launch path is a second instance of the same leak: it
     /// builds a `std::process::Command`, which does not share `wrap`'s loop.
     #[test]
@@ -857,7 +1243,7 @@ mod tests {
             trailing_args: vec![],
             windows_shell: WindowsShell::Direct,
         };
-        let cmd = super::background_command(&recipe, None);
+        let cmd = super::background_command(&recipe, None).expect("assemble background command");
         // `get_envs` reports the command's explicit overrides, where a removal
         // is the entry `(key, None)`.
         let cleared: std::collections::BTreeMap<String, Option<String>> = cmd
@@ -900,7 +1286,8 @@ mod tests {
             trailing_args: vec![],
             windows_shell: WindowsShell::Direct,
         };
-        let mut command = super::background_command(&recipe, None);
+        let mut command =
+            super::background_command(&recipe, None).expect("assemble background command");
         command.stdout(Stdio::piped());
         let mut child = Reap(
             command
