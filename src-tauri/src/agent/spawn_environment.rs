@@ -108,9 +108,8 @@ fn encode_for_powershell(cmd: &str) -> String {
 }
 
 /// Quote a single PowerShell argument as a single-quoted string literal.
-/// Single quotes inside the string must be doubled (`'` → `''`); everything else
-/// (newlines, backticks, brackets, `$`, etc.) is preserved verbatim because
-/// single-quoted PowerShell strings perform no interpolation or escapes.
+/// Shared PowerShell quoting escapes ASCII and smart apostrophes. Newlines,
+/// backticks, brackets and `$` remain literal inside the quoted string.
 fn ps_single_quote(s: &str) -> String {
     crate::env::powershell_literal(s)
 }
@@ -182,46 +181,27 @@ fn needs_unc_pushd(executable: &str, spawn_path: &str) -> bool {
 
 /// The batch file the mapped spawn runs.
 ///
-/// The node directory is written **literally into the file**, quoted, rather
-/// than passed through an environment variable. That is not a stylistic
-/// choice. cmd.exe re-parses the result of `%VAR%` expansion, so a directory
-/// containing `&` splits the line even when the expansion sits inside quotes:
-///
-/// ```text
-/// pushd "%BUILDMESH_SPAWN_DIR%"     ->  ...interop R
-///                                      'D-x5RP8H]' is not recognized
-/// ```
-///
-/// Verified against a live `\\wsl.localhost\...` directory with an ampersand in
-/// its name. Quotes written into the file are real tokens to cmd's parser, so
-/// the whole path arrives as one `pushd` argument. That also removes the
-/// `WSLENV` dependency this route had, along with the silent-wrong-directory
-/// failure that came with it.
+/// The node directory is quoted inside the file rather than carried on the
+/// outer command line, where portable-pty's argument quoting leaves some cmd
+/// metacharacters exposed. Percent signs are doubled because cmd expands them
+/// inside batch files even within quotes. The batch carries the directory
+/// itself, so this route needs no directory variable forwarded through WSLENV.
 ///
 /// Only the short, encoded loader is inline. Encoding the full spawn script
 /// here would spend cmd's 8,191-character batch-line budget on Base64 expansion.
 fn mapped_launch_batch(encoded: &str, directory: &str) -> String {
     format!(
         "@echo off\r\n\
-         rem The node directory is quoted here, in the file, rather than expanded\r\n\
-         rem from a variable: cmd re-parses %VAR% expansion, so an `&` in a node\r\n\
-         rem directory would split this line even inside quotes.\r\n\
+         rem Keep the directory quoted in the file and escape batch percent signs.\r\n\
          rem Fail closed if the share cannot be mapped, so the agent reports it\r\n\
          rem instead of quietly running somewhere else.\r\n\
          pushd \"{}\"\r\n\
          if errorlevel 1 exit /b 1\r\n\
          powershell.exe -NoLogo -NoProfile -EncodedCommand {encoded}\r\n",
-        directory.replace('"', "\"\"")
+        directory.replace('%', "%%").replace('"', "\"\"")
     )
 }
 
-/// The directory the one-shot batch file goes in.
-///
-/// On `WindowsInterop` Buildmesh runs on the Linux host, so
-/// `std::env::temp_dir()` is the guest's `/tmp` — a path Windows cannot open.
-/// Handing that to `cmd.exe` fails with *is not recognized as an internal or
-/// external command*. The Windows-side temp directory is the only place the
-/// file can live.
 /// Where the one-shot batch file is written, and the name `cmd.exe` is given.
 ///
 /// The two differ on `WindowsInterop`. Buildmesh runs on the Linux host and
@@ -247,6 +227,8 @@ impl MappedLaunchTarget {
     }
 }
 
+/// Resolve a Windows-visible directory for the companion launch files.
+/// A Linux host's `/tmp` is not openable by Windows-side cmd.exe.
 fn mapped_launch_directory(env_type: EnvType) -> Result<MappedLaunchTarget, String> {
     // `is_wsl_host` is the discriminator, not just the env type. On a Windows
     // host an interop spawn is not a real configuration, so the native shape is
@@ -279,10 +261,9 @@ fn mapped_launch_directory(env_type: EnvType) -> Result<MappedLaunchTarget, Stri
 /// Characters cmd.exe treats as something other than path text when they appear
 /// on its command line.
 ///
-/// `%` is here for a different reason than the rest. `pushd "%VAR%"` is safe
-/// *inside a batch file* because the quotes come from the script, but this path
-/// is passed as `cmd.exe /c <path>` — command text, which cmd expands before it
-/// runs. A temp directory containing a segment like `%USERNAME%` is therefore
+/// Unlike the node directory written inside the batch, this path is passed as
+/// `cmd.exe /c <path>` — command text, which cmd expands before it runs. A temp
+/// directory containing a segment like `%USERNAME%` is therefore
 /// substituted before the script is even opened, and the spawn fails or reaches
 /// the wrong file. `!` is included for the same reason: delayed expansion is off
 /// by default, but it is a policy setting rather than a guarantee.
@@ -381,7 +362,10 @@ fn write_mapped_launch_batch(
     let windows_script = format!(
         "{}\\{}",
         target.windows_path,
-        script_path.file_name().unwrap().to_string_lossy()
+        script_path
+            .file_name()
+            .ok_or_else(|| "the mapped PowerShell script has no file name".to_string())?
+            .to_string_lossy()
     );
     // Read as UTF-8 through .NET and invoke as a script block: -File would add
     // an execution-policy dependency, and Windows PowerShell's default file
@@ -1142,7 +1126,12 @@ mod tests {
 
     #[test]
     fn mapped_codex_launch_accepts_a_prompt_that_fits_the_child_budget() {
-        for env_type in [EnvType::Windows, EnvType::WindowsInterop] {
+        let env_types = if cfg!(windows) {
+            &[EnvType::Windows, EnvType::WindowsInterop][..]
+        } else {
+            &[EnvType::WindowsInterop][..]
+        };
+        for &env_type in env_types {
             let args = vec![format!("{}x", "review homelab\n".repeat(229))];
             let executable = r"C:\Users\alond\AppData\Roaming\npm\codex.CMD";
             super::ensure_cmd_command_line_fits(executable, &args).unwrap();
@@ -1770,9 +1759,9 @@ mod tests {
     /// would run whatever followed the ampersand. Quoting inside the argument
     /// is not available either: portable-pty escapes a ``"`` inside an
     /// argument, so a pre-quoted path arrives as ``"\"<dir>\""`` and ``pushd``
-    /// rejects the line outright. The directory therefore travels as an
-    /// environment variable, and the only thing on the command line is the
-    /// batch file that expands it.
+    /// rejects the line outright. The directory is therefore quoted inside
+    /// the batch, with percent signs doubled to prevent expansion. Only the
+    /// batch file's path travels on the outer command line.
     fn assert_maps_through_pushd(
         command: &portable_pty::CommandBuilder,
         spawn_path: &str,
@@ -1796,7 +1785,7 @@ mod tests {
              unquoted. It belongs quoted inside the batch file; got: {argv:?}"
         );
         assert!(
-            batch_file(command).contains(&format!("pushd \"{spawn_path}\"")),
+            batch_file(command).contains(&format!("pushd \"{}\"", spawn_path.replace('%', "%%"))),
             "the batch must pushd the node directory as one quoted argument, which is the \
              only form cmd parses without splitting on a metacharacter; got: {}",
             batch_file(command)
@@ -1965,7 +1954,15 @@ mod tests {
     /// the structural tests that call it run on every platform.
     fn mapped_batch_path(command: &portable_pty::CommandBuilder) -> Option<std::path::PathBuf> {
         let windows = command.get_argv().last()?;
-        let host = std::path::PathBuf::from(crate::env::to_host_path(&windows.to_string_lossy()));
+        let host = crate::env::to_host_path(&windows.to_string_lossy());
+        // Structural tests can build the native Windows arm on Linux: its
+        // batch path combines the Linux temp directory with a Windows separator.
+        let host = if cfg!(windows) {
+            host
+        } else {
+            host.replace('\\', "/")
+        };
+        let host = std::path::PathBuf::from(host);
         let is_batch = host.file_name().is_some_and(|name| {
             name.to_string_lossy()
                 .starts_with(super::MAPPED_BATCH_PREFIX)
@@ -2018,6 +2015,49 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
+    fn powershell_prompt_preserves_smart_apostrophes_through_the_pty() {
+        let prompt = "don't; don\u{2018}t; don\u{2019}t; don\u{201a}t; don\u{201b}t";
+        for mapped in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let probe = directory.path().join("probe.txt");
+            let script = format!(
+                "[IO.File]::WriteAllText({}, {})",
+                super::ps_single_quote(probe.to_str().unwrap()),
+                super::ps_single_quote(prompt)
+            );
+            let command = super::powershell_spawn(
+                EnvType::Windows,
+                &script,
+                mapped.then_some(directory.path().to_str().unwrap()),
+            )
+            .unwrap();
+            run_and_expect_probe(&command, &probe);
+            assert_eq!(std::fs::read_to_string(&probe).unwrap(), prompt);
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn mapped_percent_directory_reaches_the_harness_literally() {
+        for prefix in ["bm 50%off ", "bm %USERNAME% "] {
+            let directory = tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
+            let command = super::powershell_spawn(
+                EnvType::Windows,
+                "[IO.File]::WriteAllText((Join-Path ($PWD).Path 'probe.txt'), 'literal directory')",
+                Some(directory.path().to_str().unwrap()),
+            )
+            .unwrap();
+            let probe = directory.path().join("probe.txt");
+            run_and_expect_probe(&command, &probe);
+            assert_eq!(
+                std::fs::read_to_string(&probe).unwrap(),
+                "literal directory"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
     fn mapped_loader_propagates_child_failure_and_missing_script_errors() {
         let directory = tempfile::tempdir().unwrap();
         for remove_script in [false, true] {
@@ -2046,14 +2086,12 @@ mod tests {
     /// Windows-side batch shim, and a node directory reached through the WSL
     /// boundary.
     ///
-    /// This is the route the whole change exists for and the one no hermetic
-    /// test can cover. Three things can only go wrong here, and all three did:
-    /// the batch file must be written somewhere Windows can open it (the Linux
-    /// `std::env::temp_dir()` is the guest's `/tmp`), `BUILDMESH_SPAWN_DIR` must
-    /// cross into Windows via WSLENV, and an unset variable must fail the batch
-    /// rather than `pushd ""` silently. A hermetic test on a Windows host runs
-    /// the interop *code* with a Windows filesystem behind it, which is why the
-    /// round-4 interop test passed while this route was broken.
+    /// The companion files must be written through a host path Windows can
+    /// open and referenced by their Windows spelling. The directory is quoted
+    /// in the batch with percent signs escaped; it needs no directory variable
+    /// forwarded through WSLENV. A long prompt must reach the shim intact in
+    /// the mapped directory. This test needs a Linux Buildmesh host in WSL to
+    /// exercise interop process launch and PTY behavior.
     #[test]
     #[cfg(target_os = "linux")]
     #[ignore = "requires WSL with Windows interop enabled"]
@@ -2074,7 +2112,11 @@ mod tests {
             });
         let npm_dir = tempfile::tempdir_in(&windows_temp).unwrap();
         let shim = npm_dir.path().join("probe.cmd");
-        std::fs::write(&shim, "@echo off\r\necho shim-ran> probe.txt\r\n").unwrap();
+        std::fs::write(
+            &shim,
+            "@echo off\r\necho %~1> prompt.txt\r\necho shim-ran> probe.txt\r\n",
+        )
+        .unwrap();
         // PowerShell is a Windows process, so it needs the *Windows* spelling
         // of the shim. `windows_cli_home` returns the host spelling — correct
         // for writing the file, wrong for telling Windows where it is — which
@@ -2084,13 +2126,20 @@ mod tests {
         // name so a directory that reached cmd.exe on the command line would be
         // split rather than mapped.
         let directory = tempfile::Builder::new()
-            .prefix("buildmesh mapped interop R&D-")
+            .prefix("buildmesh mapped interop R&D 50%off %USERNAME%-")
             .tempdir()
             .unwrap();
         let spawn_path = crate::env::windows_path_from_wsl(directory.path().to_str().unwrap());
+        let prompt = "Review homelab. ".repeat(240);
+        let full_script =
+            super::format_powershell_command(&shim_windows, std::slice::from_ref(&prompt));
+        assert!(
+            super::powershell_command_line_chars(&super::encode_for_powershell(&full_script))
+                > super::CMD_EXE_COMMAND_LINE_CHARS
+        );
         let recipe = SpawnRecipe {
             binary: "probe",
-            base_args: vec![],
+            base_args: vec![prompt.clone()],
             trailing_args: vec![],
             windows_shell: WindowsShell::PowerShell,
         };
@@ -2126,7 +2175,7 @@ mod tests {
         );
         let script = std::fs::read_to_string(crate::env::to_host_path(&batch)).unwrap();
         assert!(
-            script.contains(&format!("pushd \"{spawn_path}\"")),
+            script.contains(&format!("pushd \"{}\"", spawn_path.replace('%', "%%"))),
             "the batch must pushd the node directory quoted, which is the only form cmd parses \
              without splitting on a metacharacter; got: {script}"
         );
@@ -2138,7 +2187,7 @@ mod tests {
             .take_writer()
             .expect("a PTY master hands out one writer");
         let mut master = pair.master.try_clone_reader().unwrap();
-        let mut child = crate::agent::spawn::spawn_child(&pair, command).unwrap();
+        let mut child = crate::agent::spawn::spawn_child(&pair, command.clone()).unwrap();
         // Drain the PTY. Without this the console output is discarded, and a
         // failure inside the batch — `pushd` refusing a share, `powershell.exe`
         // not resolving — is invisible: all the test can report is that the
@@ -2201,6 +2250,7 @@ mod tests {
         let _ = child.kill();
         drop(pair);
         let _ = reader.join();
+        remove_mapped_batch(&command);
         // Tail only: the console is full of repaint escapes once PowerShell is
         // up, and the error that matters is the last thing it printed.
         let tail: String = captured
@@ -2221,11 +2271,17 @@ mod tests {
              Console output (tail):\n{tail}",
             directory.path().display()
         );
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("prompt.txt"))
+                .unwrap()
+                .trim_end(),
+            prompt.trim_end()
+        );
     }
 
     /// The batch path is passed as `cmd.exe /c` command text, which cmd expands
-    /// before it runs — so `%` is a hazard there in a way it is not inside the
-    /// batch, where the quotes come from the script.
+    /// before it runs. Unlike the node directory inside the batch, this path
+    /// cannot rely on doubled percent signs in the file.
     #[test]
     fn a_batch_path_carrying_percent_or_bang_is_refused() {
         for path in [

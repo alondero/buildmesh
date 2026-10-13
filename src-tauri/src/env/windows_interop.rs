@@ -97,7 +97,20 @@ pub(crate) fn windows_codex_home() -> Option<std::path::PathBuf> {
 }
 
 pub(crate) fn powershell_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
+    let mut literal = String::with_capacity(value.len() + 2);
+    literal.push('\'');
+    for character in value.chars() {
+        // PowerShell recognizes smart apostrophes as string delimiters too.
+        if matches!(
+            character,
+            '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}'
+        ) {
+            literal.push(character);
+        }
+        literal.push(character);
+    }
+    literal.push('\'');
+    literal
 }
 
 /// Explicitly enter the owning Linux distribution for callbacks. Windows
