@@ -803,7 +803,10 @@ mod tests {
         for platform in CLINE.available_on() {
             for session in [
                 SessionIdModeRef::None,
-                SessionIdModeRef::Resume("1789757012702_7of3e"),
+                SessionIdModeRef::Resume {
+                    id: "1789757012702_7of3e",
+                    cause: crate::agent::spawn::ResumeCause::Explicit,
+                },
             ] {
                 let config = ResolvedAgentConfig {
                     model: Some("unbiased/pareto".to_string()),
@@ -860,7 +863,10 @@ mod tests {
             HarnessLaunchInput {
                 platform: Platform::Windows,
                 runtime: EnvType::Windows,
-                session: SessionIdModeRef::Resume("1789757012702_7of3e"),
+                session: SessionIdModeRef::Resume {
+                    id: "1789757012702_7of3e",
+                    cause: crate::agent::spawn::ResumeCause::Explicit,
+                },
                 config: &config,
                 prefill: None,
                 sandbox: false,

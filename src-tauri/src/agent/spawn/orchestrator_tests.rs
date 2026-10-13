@@ -3,8 +3,8 @@ use super::orchestrator::{
     decide_startup_resume, intent_replaces_conversation, ResumeSkipDecision,
 };
 use super::{
-    ExplicitSpawnOverrides, IssueContext, ResumeCause, SpawnIntent, SpawnRequest,
-    TerminalSize, WorktreePolicy,
+    ExplicitSpawnOverrides, IssueContext, ResumeCause, SpawnIntent, SpawnRequest, TerminalSize,
+    WorktreePolicy,
 };
 
 /// `SpawnRequest` must carry an `explicit` field (issue #1155 AC #1).
@@ -163,6 +163,28 @@ fn decide_startup_resume_startup_with_session_id_and_adapter_accepts_proceeds() 
     assert_eq!(d, ResumeSkipDecision::Proceed("uuid-7".to_string()));
 }
 
+/// Issue #1550 — `Regenerate` is user-driven exactly like `Explicit`: it
+/// must proceed whenever a session id was captured, and must NOT be gated
+/// on `auto_resume_on_startup()`. The cause only changes the flag shape at
+/// argv composition (`resume_args_fork`), never whether the spawn happens.
+#[test]
+fn decide_startup_resume_regenerate_behaves_like_an_explicit_resume() {
+    for auto_resume in [true, false] {
+        assert_eq!(
+            decide_startup_resume(Some("ses_abc"), ResumeCause::Regenerate, auto_resume),
+            decide_startup_resume(Some("ses_abc"), ResumeCause::Explicit, auto_resume),
+            "a Regenerate resume must reach the same decision as an Explicit \
+             one (auto_resume_on_startup={auto_resume})"
+        );
+    }
+    assert_eq!(
+        decide_startup_resume(None, ResumeCause::Regenerate, true),
+        ResumeSkipDecision::NoSessionId,
+        "no captured id means nothing to branch off — fall through to a \
+         fresh launch rather than erroring"
+    );
+}
+
 /// The in-flight claim is a named local of spawn_agent_inner, held until
 /// after the last phase. Binding it as `_claim` (or returning it from
 /// prepare as a tuple a match can ignore) reopens the #650 race.
@@ -181,8 +203,10 @@ fn spawn_intent_holds_named_claim_before_identity_mutation_and_across_phases() {
         src.contains("drop(claim)"),
         "claim must stay live until after the last phase (explicit drop is the use)"
     );
-    assert!(src.find("SpawnInFlightClaim::try_claim(node_id)").unwrap()
-        < src.find("db::clear_cli_session_id(node_id)").unwrap());
+    assert!(
+        src.find("SpawnInFlightClaim::try_claim(node_id)").unwrap()
+            < src.find("db::clear_cli_session_id(node_id)").unwrap()
+    );
 }
 
 /// spawn_with_intent is the sole owner of terminal spawn-failure reporting.
