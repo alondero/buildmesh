@@ -238,7 +238,7 @@ function shippedReleaseRanges(repoRoot) {
   return ranges;
 }
 
-test('the real repository resolves its own base to the v1.3.0 boundary', (t) => {
+test('the real repository resolves its own base to the latest release boundary', (t) => {
   // Guards the actual bug: if this ever regresses to reachability, the draft
   // silently includes hundreds of already-shipped commits.
   // fileURLToPath, not a manual leading-slash strip: that would turn
@@ -254,17 +254,34 @@ test('the real repository resolves its own base to the v1.3.0 boundary', (t) => 
   }).filter(Boolean);
   const resolved = resolveBase({ version, tags, releaseCommits, reachableTag: 'v1.0.0' });
 
-  // Derive the expectation from the repo rather than pinning a hash, so a
-  // rebase does not break the guard — what matters is the version, not the SHA.
-  const expected = releaseCommits.find((entry) => entry.version === 'v1.3.0');
-  assert.ok(expected, 'expected a chore(release): v1.3.0 commit on the first-parent history');
-  assert.equal(resolved.ref, expected.commit, 'base must be the v1.3.0 release commit, not v1.0.0');
+  // Derive the expectation from the repo rather than pinning a hash or a
+  // version, so a rebase does not break the guard and so shipping a release
+  // does not silently invalidate it either. `resolveBase` picks the highest
+  // released tag below the version being drafted; the guard has to name the
+  // same one, or the moment a tag lands this test fails on correct code —
+  // which is exactly what happened to the pinned `v1.3.0` when v1.4.0 shipped.
+  const released = tags
+    .filter((tag) => /^v\d+\.\d+\.\d+$/.test(tag) && compareVersions(tag, version) < 0)
+    .sort((a, b) => compareVersions(a, b) - compareVersions(b, a))
+    .pop();
+  assert.ok(released, `expected a released vX.Y.Z tag below ${version} to exist`);
+  const expected = releaseCommits.find((entry) => entry.version === released);
+  assert.ok(expected, `expected a chore(release): ${released} commit on the first-parent history`);
+  assert.equal(resolved.ref, expected.commit, `base must be the ${released} release commit, not v1.0.0`);
   assert.notEqual(resolved.ref, 'v1.0.0', 'must not fall back to the only reachable tag');
 
   const count = Number(execFileSync('git', ['rev-list', '--no-merges', '--count', `${resolved.ref}..HEAD`], { cwd: repoRoot, encoding: 'utf8' }).trim());
   const reachabilityCount = Number(execFileSync('git', ['rev-list', '--no-merges', '--count', 'v1.0.0..HEAD'], { cwd: repoRoot, encoding: 'utf8' }).trim());
   assert.ok(count < reachabilityCount, `range ${count} should be far smaller than reachability ${reachabilityCount}`);
-  assert.ok(count > 0, 'the release range must not be empty');
+
+  // Only meaningful when there is history past the boundary. The pull request
+  // that performs the post-release version bump makes the boundary commit the
+  // branch HEAD, so the range is legitimately empty there — and an empty draft
+  // is the correct output for a branch that has nothing to describe yet.
+  const headHash = log.split('\n')[0]?.split('\x1f')[1];
+  if (resolved.ref !== headHash) {
+    assert.ok(count > 0, 'the release range must not be empty');
+  }
 
   // The bound below is derived, never a fixed literal. The old `count < 200`
   // counted down the whole repository and failed a pull request for having
