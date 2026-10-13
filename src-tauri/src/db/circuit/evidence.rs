@@ -904,7 +904,12 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
     // review verdict is different: it is a person's judgement about someone
     // else's work, so the evidence is part of the verdict and is required.
     let note = request.reason.trim();
-    if note.is_empty() && matches!(request.action, CheckpointAction::ReviewPass | CheckpointAction::ReviewFail) {
+    if note.is_empty()
+        && matches!(
+            request.action,
+            CheckpointAction::ReviewPass | CheckpointAction::ReviewFail
+        )
+    {
         return Err("Give the evidence behind your review decision.".into());
     }
     let tx = db.transaction().map_err(|e| e.to_string())?;
