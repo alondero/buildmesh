@@ -9,13 +9,13 @@ use super::reader::SpawnTimer;
 use super::wire::emit_provider_error;
 use super::{MeshSyncOutcome, MeshSyncWarningPayload};
 use crate::agent::session_lifecycle::SessionLifecycleSink as _;
+use crate::env;
 use crate::git::worktree::provision::{
     fork_remote_alias, locked_fetch_pr_head, provision_for_spawn, read_origin_ref_sha,
     AppHandleSink, ProvisionHooks, SpawnContext, SpawnSource,
 };
 use crate::models::{AgentNode, EnvType, Provider};
 use tauri::Emitter;
-use crate::env;
 
 /// Git/workspace inputs for this phase. Launch knobs (PTY size, prefill,
 /// cascade overrides) stay on [`super::launch::LaunchParams`].
@@ -287,7 +287,9 @@ pub(super) async fn provision_workspace(
     let routing_harness_id = node.provider.clone();
     let routing_resolved = env::node_working_path(&node);
     let routing_task = tauri::async_runtime::spawn_blocking(move || {
-        if let Some(plan) = crate::db::node_spawn_configuration(session_id, &routing_harness_id)?.and_then(|c| c.resolved) {
+        if let Some(plan) = crate::db::node_spawn_configuration(session_id, &routing_harness_id)?
+            .and_then(|c| c.resolved)
+        {
             return crate::agent::launch_routing::prepare_snapshot(&plan, &routing_resolved);
         }
         crate::agent::launch_routing::prepare(&routing_harness_id, provider, &routing_resolved)
@@ -305,9 +307,15 @@ pub(super) async fn provision_workspace(
         if !host_path_exists {
             let freshness_path = node.path.clone();
             let since_fetch = crate::blocking::run_blocking("fetch_freshness", move || {
-                Ok(crate::services::fetch_freshness::time_since_success(&freshness_path))
-            }).await?;
-            if crate::services::fetch_freshness::is_fresh_enough(since_fetch, crate::services::fetch_freshness::SPAWN_FETCH_TTL) {
+                Ok(crate::services::fetch_freshness::time_since_success(
+                    &freshness_path,
+                ))
+            })
+            .await?;
+            if crate::services::fetch_freshness::is_fresh_enough(
+                since_fetch,
+                crate::services::fetch_freshness::SPAWN_FETCH_TTL,
+            ) {
                 tracing::info!(
                     "provision_workspace: skipping auto-sync for session {} — mesh {} was synced {}s ago (< TTL)",
                     session_id,
@@ -520,7 +528,8 @@ pub(super) async fn provision_workspace(
             );
         }
         Ok(())
-    }).await?;
+    })
+    .await?;
     timer.checkpoint("after_worktree_sanitize");
     let checkout_host_path = resolved.host_path.clone();
 

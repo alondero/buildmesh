@@ -12,7 +12,7 @@ use ts_rs::TS;
 use crate::services::gh_auth_cache::GhAuthCache;
 
 use crate::db;
-use crate::env::{to_host_path};
+use crate::env::to_host_path;
 use crate::git::{health, primitives};
 use crate::models::MeshHealth;
 
@@ -240,8 +240,10 @@ pub(crate) fn get_git_status_blocking(path: String) -> Result<Vec<GitStatus>, St
         let (additions, deletions) = line_stats.get(&path).copied().unwrap_or((0, 0));
 
         changed_files.push(GitStatus {
-            project_path: std::path::Path::new(&path).strip_prefix(&project.relative_folder)
-                .ok().map(|path| path.to_string_lossy().replace('\\', "/")),
+            project_path: std::path::Path::new(&path)
+                .strip_prefix(&project.relative_folder)
+                .ok()
+                .map(|path| path.to_string_lossy().replace('\\', "/")),
             path,
             status: status_str.to_string(),
             additions,
@@ -654,8 +656,10 @@ pub(crate) fn get_mesh_health_blocking(mesh_id: i64) -> Result<MeshHealth, Strin
     // Scoped to `mesh_id` — the holder can only live inside this repo, so
     // nodes from other meshes are dead weight here.
     if let Some(local_base) = health.local_base_branch.clone() {
-        let nodes = crate::git::project::repository_nodes(&mesh.path,
-            db::list_agent_nodes().map_err(|e| format!("failed to list agent nodes: {e}"))?)?;
+        let nodes = crate::git::project::repository_nodes(
+            &mesh.path,
+            db::list_agent_nodes().map_err(|e| format!("failed to list agent nodes: {e}"))?,
+        )?;
         let active_paths = crate::git::project::active_paths(&nodes);
         health.base_branch_holder =
             health::find_base_branch_holder(&repo, &local_base, &active_paths);
@@ -923,7 +927,9 @@ pub(crate) fn stage_file_blocking(repo_path: &str, file_path: &str) -> Result<()
     let repo = primitives::open_from_host_path(&host)
         .map_err(|e| format!("failed to open repo at {}: {}", host, e))?;
     let rel = std::path::Path::new(file_path);
-    let root = repo.workdir().ok_or_else(|| "Git repository has no working directory".to_string())?;
+    let root = repo
+        .workdir()
+        .ok_or_else(|| "Git repository has no working directory".to_string())?;
     let abs = root.join(rel);
     assert_inside_repo(root, rel)?;
 
@@ -979,7 +985,9 @@ pub(crate) fn revert_file_blocking(repo_path: &str, file_path: &str) -> Result<(
     let repo = primitives::open_from_host_path(&host)
         .map_err(|e| format!("failed to open repo at {}: {}", host, e))?;
     let rel = std::path::Path::new(file_path);
-    let root = repo.workdir().ok_or_else(|| "Git repository has no working directory".to_string())?;
+    let root = repo
+        .workdir()
+        .ok_or_else(|| "Git repository has no working directory".to_string())?;
     let abs = root.join(rel);
     assert_inside_repo(root, rel)?;
 

@@ -128,7 +128,8 @@ pub fn is_fresh_enough(time_since_success: Duration, ttl: Duration) -> bool {
 
 /// Convenience wrapper for the spawn path: was `mesh_path` successfully
 /// synced within [`SPAWN_FETCH_TTL`]?
-pub fn spawn_can_skip_fetch(mesh_path: &str) -> bool {
+#[cfg(test)]
+fn spawn_can_skip_fetch(mesh_path: &str) -> bool {
     is_fresh_enough(time_since_success(mesh_path), SPAWN_FETCH_TTL)
 }
 

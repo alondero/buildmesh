@@ -314,17 +314,38 @@ pub fn create_git_worktree(
     worktree_mode: &str,
     base_ref: &str,
 ) -> Result<(), String> {
-    create_git_worktree_with_timeout(project_root, worktree_host_path, branch_name, worktree_mode, base_ref,
-        crate::git::sync::SPAWN_SYNC_LOCK_TIMEOUT)
+    create_git_worktree_with_timeout(
+        project_root,
+        worktree_host_path,
+        branch_name,
+        worktree_mode,
+        base_ref,
+        crate::git::sync::SPAWN_SYNC_LOCK_TIMEOUT,
+    )
 }
 
-fn create_git_worktree_with_timeout(project_root: &str, worktree_host_path: &str, branch_name: &str,
-    worktree_mode: &str, base_ref: &str, timeout: std::time::Duration) -> Result<(), String> {
+fn create_git_worktree_with_timeout(
+    project_root: &str,
+    worktree_host_path: &str,
+    branch_name: &str,
+    worktree_mode: &str,
+    base_ref: &str,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
     let project = super::project::resolve(project_root)?;
     let project_root = project.working_root.as_str();
     crate::services::sync_lock::try_with_mesh_sync_lock_timeout(project_root, timeout, || {
-        create_git_worktree_at_root(project_root, worktree_host_path, branch_name, worktree_mode, base_ref)
-    }).ok_or_else(|| "Timed out waiting for repository synchronization; retry the launch".to_string())?
+        create_git_worktree_at_root(
+            project_root,
+            worktree_host_path,
+            branch_name,
+            worktree_mode,
+            base_ref,
+        )
+    })
+    .ok_or_else(|| {
+        "Timed out waiting for repository synchronization; retry the launch".to_string()
+    })?
 }
 
 fn create_git_worktree_at_root(
@@ -545,7 +566,9 @@ pub(crate) fn ensure_container_excluded(project_root: &str, container_host_path:
         }
         n
     }
-    let Ok(project) = super::project::resolve(project_root) else { return; };
+    let Ok(project) = super::project::resolve(project_root) else {
+        return;
+    };
     let root = squash(&project.working_root);
     let container = squash(container_host_path);
     // Prefix check is case-insensitive on Windows (case-insensitive FS);
@@ -565,7 +588,9 @@ pub(crate) fn ensure_container_excluded(project_root: &str, container_host_path:
     if rel.is_empty() {
         return;
     }
-    let Ok(repo) = super::project::open(project_root) else { return; };
+    let Ok(repo) = super::project::open(project_root) else {
+        return;
+    };
     let exclude = repo.commondir().join("info").join("exclude");
     let pattern = format!("{rel}/");
     let existing = std::fs::read_to_string(&exclude).unwrap_or_default();
@@ -604,7 +629,9 @@ pub(crate) fn ensure_container_excluded(project_root: &str, container_host_path:
 /// before an Issue/PR spawn adopts the entry, so re-applying on adoption keeps
 /// an adopted worktree byte-for-byte equivalent to a cold-spawned one.
 pub(crate) fn apply_worktree_include(project_root: &str, host_path: &std::path::Path) {
-    let Ok(project) = super::project::resolve(project_root) else { return; };
+    let Ok(project) = super::project::resolve(project_root) else {
+        return;
+    };
     let project_root = project.working_root.as_str();
     let include_file_path = std::path::Path::new(project_root).join(".worktreeinclude");
     if !include_file_path.exists() {
@@ -1502,14 +1529,22 @@ mod tests {
         let root = td.path().to_string_lossy().to_string();
         let (held_tx, held_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let holder = std::thread::spawn(move || crate::services::sync_lock::with_mesh_sync_lock(&root, || {
-            held_tx.send(()).unwrap();
-            release_rx.recv().unwrap();
-        }));
+        let holder = std::thread::spawn(move || {
+            crate::services::sync_lock::with_mesh_sync_lock(&root, || {
+                held_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            })
+        });
         held_rx.recv().unwrap();
         let target = td.path().join("owned");
-        let outcome = super::create_git_worktree_with_timeout(td.path().join("scope").to_str().unwrap(),
-            target.to_str().unwrap(), "bounded", "detached", "HEAD", std::time::Duration::from_millis(10));
+        let outcome = super::create_git_worktree_with_timeout(
+            td.path().join("scope").to_str().unwrap(),
+            target.to_str().unwrap(),
+            "bounded",
+            "detached",
+            "HEAD",
+            std::time::Duration::from_millis(10),
+        );
         release_tx.send(()).unwrap();
         holder.join().unwrap();
         assert!(outcome.unwrap_err().contains("Timed out"));

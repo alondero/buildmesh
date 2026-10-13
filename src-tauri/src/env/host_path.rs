@@ -879,7 +879,10 @@ pub fn node_working_path(node: &AgentNode) -> ResolvedPath {
     let mut resolved = node_filesystem_path(node);
     if worktree_segment(node).is_some() {
         if let Some(scope) = node.project_scope.as_deref().filter(|s| !s.is_empty()) {
-            resolved = resolve_raw_path(&format!("{}/{scope}", resolved.raw_path.trim_end_matches(['/', '\\'])));
+            resolved = resolve_raw_path(&format!(
+                "{}/{scope}",
+                resolved.raw_path.trim_end_matches(['/', '\\'])
+            ));
         }
     }
     apply_harness_runtime(&mut resolved, node.env);
@@ -903,16 +906,40 @@ mod harness_runtime_tests {
     #[test]
     fn saved_scope_changes_only_cwd_across_runtime_path_shapes() {
         for (root, runtime, spawn) in [
-            ("F:/Code/owned", EnvType::Windows, "F:/Code/owned/family/parents"),
-            ("F:/Code/owned", EnvType::Wsl, "/mnt/f/Code/owned/family/parents"),
-            ("/home/user/owned", EnvType::Wsl, "/home/user/owned/family/parents"),
-            ("/mnt/f/owned", EnvType::WindowsInterop, "F:\\owned\\family\\parents"),
+            (
+                "F:/Code/owned",
+                EnvType::Windows,
+                "F:/Code/owned/family/parents",
+            ),
+            (
+                "F:/Code/owned",
+                EnvType::Wsl,
+                "/mnt/f/Code/owned/family/parents",
+            ),
+            (
+                "/home/user/owned",
+                EnvType::Wsl,
+                "/home/user/owned/family/parents",
+            ),
+            (
+                "/mnt/f/owned",
+                EnvType::WindowsInterop,
+                "F:\\owned\\family\\parents",
+            ),
         ] {
-            let node = AgentNode { path: "/missing/source".into(),
-                use_worktree: true, worktree_name: Some("owned".into()),
-                worktree_path: Some(root.into()), project_scope: Some("family/parents".into()),
-                env: runtime, ..Default::default() };
-            assert_eq!(node_working_path(&node).spawn_path.replace('\\', "/"), spawn.replace('\\', "/"));
+            let node = AgentNode {
+                path: "/missing/source".into(),
+                use_worktree: true,
+                worktree_name: Some("owned".into()),
+                worktree_path: Some(root.into()),
+                project_scope: Some("family/parents".into()),
+                env: runtime,
+                ..Default::default()
+            };
+            assert_eq!(
+                node_working_path(&node).spawn_path.replace('\\', "/"),
+                spawn.replace('\\', "/")
+            );
             assert_eq!(node_worktree_path(&node).unwrap().raw_path, root);
             assert_eq!(node_git_path(&node).raw_path, root);
         }
@@ -970,8 +997,14 @@ pub fn node_git_path(node: &AgentNode) -> ResolvedPath {
 }
 
 pub fn validate_project_scope(scope: &str) -> Result<(), String> {
-    if scope.is_empty() { return Ok(()); }
-    if scope.contains(['\\', ':']) || scope.split('/').any(|s| s.is_empty() || s == "." || s == "..") {
+    if scope.is_empty() {
+        return Ok(());
+    }
+    if scope.contains(['\\', ':'])
+        || scope
+            .split('/')
+            .any(|s| s.is_empty() || s == "." || s == "..")
+    {
         return Err(format!("Invalid relative project folder: {scope}"));
     }
     Ok(())
@@ -980,7 +1013,9 @@ pub fn validate_project_scope(scope: &str) -> Result<(), String> {
 pub fn canonical_host_path_string(path: &Path) -> String {
     let value = path.to_string_lossy();
     #[cfg(windows)]
-    let value = value.strip_prefix("\\\\?\\UNC\\").map(|s| format!("\\\\{s}"))
+    let value = value
+        .strip_prefix("\\\\?\\UNC\\")
+        .map(|s| format!("\\\\{s}"))
         .unwrap_or_else(|| value.strip_prefix("\\\\?\\").unwrap_or(&value).to_string());
     value.replace('\\', "/")
 }

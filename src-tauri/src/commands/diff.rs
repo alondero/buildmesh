@@ -384,8 +384,11 @@ fn diff_file_against_head_blocking(
     session_path: String,
     file_path: String,
 ) -> Result<DiffResult, String> {
-    let repo = crate::git::primitives::open_from_host_path(&session_path).map_err(|e| e.to_string())?;
-    let root = repo.workdir().ok_or_else(|| "Git repository has no working directory".to_string())?;
+    let repo =
+        crate::git::primitives::open_from_host_path(&session_path).map_err(|e| e.to_string())?;
+    let root = repo
+        .workdir()
+        .ok_or_else(|| "Git repository has no working directory".to_string())?;
 
     let head = repo.head().ok();
     let head_content = if let Some(reference) = &head {
@@ -405,8 +408,7 @@ fn diff_file_against_head_blocking(
         None
     };
 
-    let current_content =
-        fs::read_to_string(root.join(&file_path)).unwrap_or_default();
+    let current_content = fs::read_to_string(root.join(&file_path)).unwrap_or_default();
 
     let old_content = head_content.as_deref().unwrap_or("");
     let lines = compute_file_diff(old_content, &current_content);
@@ -594,7 +596,9 @@ fn diff_against_base(
     find.renames(true);
     let _ = diff.find_similar(Some(&mut find));
 
-    let root = repo.workdir().ok_or_else(|| "Git repository has no working directory".to_string())?;
+    let root = repo
+        .workdir()
+        .ok_or_else(|| "Git repository has no working directory".to_string())?;
     let mut files = Vec::new();
 
     for delta in diff.deltas() {
@@ -899,11 +903,25 @@ mod tests {
     #[test]
     fn scoped_project_diffs_remain_repository_relative() {
         let td = crate::env::test_helpers::TestDir::new("scoped-diff");
-        crate::env::test_helpers::init_repo_with_commit(td.path(), &[("family/parents/file.txt", "before\n"), ("sibling.txt", "before\n")]);
+        crate::env::test_helpers::init_repo_with_commit(
+            td.path(),
+            &[
+                ("family/parents/file.txt", "before\n"),
+                ("sibling.txt", "before\n"),
+            ],
+        );
         std::fs::write(td.path().join("family/parents/file.txt"), "after\n").unwrap();
         std::fs::write(td.path().join("sibling.txt"), "outside\n").unwrap();
-        let selected = td.path().join("family/parents").to_string_lossy().to_string();
-        let diff = super::diff_file_against_head_blocking(selected.clone(), "family/parents/file.txt".into()).unwrap();
+        let selected = td
+            .path()
+            .join("family/parents")
+            .to_string_lossy()
+            .to_string();
+        let diff = super::diff_file_against_head_blocking(
+            selected.clone(),
+            "family/parents/file.txt".into(),
+        )
+        .unwrap();
         assert_eq!(diff.files[0].path, "family/parents/file.txt");
         assert!(!diff.files[0].hunks.is_empty());
         let diff = super::diff_against_base(&selected, "HEAD", None, None).unwrap();
@@ -1011,28 +1029,28 @@ mod tests {
     fn summary_folds_the_changed_files_list() {
         let files = vec![
             GitStatus {
-            project_path: None,
+                project_path: None,
                 path: "a.rs".into(),
                 status: "added".into(),
                 additions: 3,
                 deletions: 0,
             },
             GitStatus {
-            project_path: None,
+                project_path: None,
                 path: "b.rs".into(),
                 status: "modified".into(),
                 additions: 1,
                 deletions: 1,
             },
             GitStatus {
-            project_path: None,
+                project_path: None,
                 path: "c.rs".into(),
                 status: "deleted".into(),
                 additions: 0,
                 deletions: 5,
             },
             GitStatus {
-            project_path: None,
+                project_path: None,
                 path: "d.rs".into(),
                 status: "untracked".into(),
                 additions: 2,

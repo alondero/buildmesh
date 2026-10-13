@@ -407,10 +407,8 @@ pub(crate) fn read_origin_ref_sha(project_root: &str, remote_ref: &str) -> Optio
 /// scanning freshly-written files is paid ONCE on app startup, not per
 /// spawn.
 ///
-/// Best-effort by design: any failure here is logged by the caller and the
-/// spawn falls through. The agent lands on the warm entry's current HEAD
-/// (still at base_ref) instead of the mesh's named branch — strictly worse
-/// than the branched path, but never worse than a cold spawn would be.
+/// Failure returns the manual claim to the pool and leaves the node in error;
+/// the caller does not launch a detached fallback.
 ///
 /// `command_no_window` already applies CREATE_NO_WINDOW on Windows
 /// (`process_util::command_no_window`), so we don't need per-OS cfg
@@ -664,7 +662,11 @@ pub struct ProvisionHooks {
 /// and the per-mesh maintenance thread from those arguments.
 pub(crate) trait ProvisionSink: Sync {
     /// Return a refused manual upgrade to the pool without adopting its slug.
-    fn return_warm_row(&self, entry: &crate::services::warm_pool::ClaimedWarmEntry, mesh_id: i64) -> Result<(), String>;
+    fn return_warm_row(
+        &self,
+        entry: &crate::services::warm_pool::ClaimedWarmEntry,
+        mesh_id: i64,
+    ) -> Result<(), String>;
     // `Sync` is required because `&dyn ProvisionSink` crosses a
     // `spawn_blocking` boundary inside `provision_for_spawn`'s callers
     // (the orchestrator sends the sink across threads). The trade-off —
@@ -719,8 +721,13 @@ pub(crate) struct AppHandleSink {
 }
 
 impl ProvisionSink for AppHandleSink {
-    fn return_warm_row(&self, entry: &crate::services::warm_pool::ClaimedWarmEntry, mesh_id: i64) -> Result<(), String> {
-        crate::db::mark_warm_worktree_available(entry.id, entry.base_sha.as_deref()).map_err(|e| e.to_string())?;
+    fn return_warm_row(
+        &self,
+        entry: &crate::services::warm_pool::ClaimedWarmEntry,
+        mesh_id: i64,
+    ) -> Result<(), String> {
+        crate::db::mark_warm_worktree_available(entry.id, entry.base_sha.as_deref())
+            .map_err(|e| e.to_string())?;
         crate::services::warm_pool::emit_pool_changed(&self.app, mesh_id);
         Ok(())
     }
@@ -795,7 +802,13 @@ pub(crate) struct NullSink;
 
 #[cfg(test)]
 impl ProvisionSink for NullSink {
-    fn return_warm_row(&self, _entry: &crate::services::warm_pool::ClaimedWarmEntry, _mesh_id: i64) -> Result<(), String> { Ok(()) }
+    fn return_warm_row(
+        &self,
+        _entry: &crate::services::warm_pool::ClaimedWarmEntry,
+        _mesh_id: i64,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     fn forget_warm_row(&self, _id: i64) {}
     fn adopt_manual_slug(&self, _node_id: i64, _slug: &str, _worktree_path: Option<&str>) {}
     fn on_pool_maintenance_required(&self, _mesh_id: i64, _do_refresh: bool, _do_refill: bool) {}
@@ -1017,8 +1030,11 @@ pub fn provision_for_spawn(
             // A refused manual branch creation must not become a successful
             // detached launch via the materialized-path fallback.
             if ctx.source == SpawnSource::Manual {
-                sink.return_warm_row(&entry, ctx.node.mesh_id).map_err(|error| format!("{warm_err}; cannot return pool claim: {error}"))?;
-                return Err(format!("provision_for_spawn: manual warm upgrade failed: {warm_err}"));
+                sink.return_warm_row(&entry, ctx.node.mesh_id)
+                    .map_err(|error| format!("{warm_err}; cannot return pool claim: {error}"))?;
+                return Err(format!(
+                    "provision_for_spawn: manual warm upgrade failed: {warm_err}"
+                ));
             }
             // Warm path failed. The failure happens in one of three places:
             //   (a) resolve_base_ref_sha failed — disk untouched.
@@ -1244,7 +1260,13 @@ mod tests {
     fn scoped_cold_warm_manual_issue_and_pr_own_whole_checkouts() {
         let td = TestDir::new("scoped-provision");
         let root = td.path();
-        init_repo_with_commit(root, &[("family/parents/AGENTS.md", "parents rules"), ("family/children/README.md", "sibling")]);
+        init_repo_with_commit(
+            root,
+            &[
+                ("family/parents/AGENTS.md", "parents rules"),
+                ("family/children/README.md", "sibling"),
+            ],
+        );
         let selected = root.join("family/parents");
         let sibling = make_pool_entry(root, "sibling");
         for (name, source, warm) in [
@@ -1256,30 +1278,55 @@ mod tests {
             let entry_path = warm.then(|| make_pool_entry(root, &format!("pool-{name}")));
             let target = if warm && matches!(source, SpawnSource::Manual) {
                 entry_path.clone().unwrap()
-            } else { selected.join(".claude/worktrees").join(name) };
+            } else {
+                selected.join(".claude/worktrees").join(name)
+            };
             let mut node = empty_node(&selected, Some(name));
             node.project_scope = Some("family/parents".into());
             node.worktree_path = Some(target.to_string_lossy().into_owned());
             if matches!(source, SpawnSource::Manual) && warm {
                 node.worktree_name = Some(format!("pool-{name}"));
             }
-            let warm_entry = entry_path.as_ref().map(|p| claimed_warm(p, &format!("pool-{name}")));
-            let ctx = make_ctx(node.clone(), source, target.to_string_lossy().into_owned(), warm_entry);
+            let warm_entry = entry_path
+                .as_ref()
+                .map(|p| claimed_warm(p, &format!("pool-{name}")));
+            let ctx = make_ctx(
+                node.clone(),
+                source,
+                target.to_string_lossy().into_owned(),
+                warm_entry,
+            );
             let result = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink).unwrap();
             match (warm, source, result) {
-                (false, _, ProvisionOutcome::Created { .. }) |
-                (true, SpawnSource::Manual, ProvisionOutcome::Upgraded { .. }) |
-                (true, SpawnSource::Issue | SpawnSource::PullRequest, ProvisionOutcome::Adopted { .. }) => {},
+                (false, _, ProvisionOutcome::Created { .. })
+                | (true, SpawnSource::Manual, ProvisionOutcome::Upgraded { .. })
+                | (
+                    true,
+                    SpawnSource::Issue | SpawnSource::PullRequest,
+                    ProvisionOutcome::Adopted { .. },
+                ) => {}
                 other => panic!("wrong provision branch: {other:?}"),
             }
             assert!(git2::Repository::open(&target).unwrap().is_worktree());
             let cwd = crate::env::node_working_path(&node);
-            assert_eq!(fs::read_to_string(Path::new(&cwd.host_path).join("AGENTS.md")).unwrap(), "parents rules");
-            assert_eq!(crate::env::node_worktree_path(&node).unwrap().host_path, target.to_string_lossy());
+            assert_eq!(
+                fs::read_to_string(Path::new(&cwd.host_path).join("AGENTS.md")).unwrap(),
+                "parents rules"
+            );
+            assert_eq!(
+                crate::env::node_worktree_path(&node).unwrap().host_path,
+                target.to_string_lossy()
+            );
             // A saved cwd is usable even when the selected source no longer exists.
-            node.path = root.join("source-no-longer-present").to_string_lossy().into_owned();
+            node.path = root
+                .join("source-no-longer-present")
+                .to_string_lossy()
+                .into_owned();
             assert_eq!(crate::env::node_working_path(&node).raw_path, cwd.raw_path);
-            assert_eq!(crate::env::node_working_path(&node).spawn_path, cwd.spawn_path);
+            assert_eq!(
+                crate::env::node_working_path(&node).spawn_path,
+                cwd.spawn_path
+            );
             super::super::remove_one_worktree(&target.to_string_lossy()).unwrap();
             assert!(!target.exists());
             assert!(sibling.join("family/parents/AGENTS.md").exists());
@@ -1298,7 +1345,15 @@ mod tests {
         let target = td.path().join("worktree");
         let mut node = empty_node(&selected, Some("missing"));
         node.project_scope = Some("family/parents".into());
-        let ctx = SpawnContext { base_ref: old_ref.clone(), ..make_ctx(node, SpawnSource::Manual, target.to_string_lossy().into_owned(), None) };
+        let ctx = SpawnContext {
+            base_ref: old_ref.clone(),
+            ..make_ctx(
+                node,
+                SpawnSource::Manual,
+                target.to_string_lossy().into_owned(),
+                None,
+            )
+        };
         let err = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink).unwrap_err();
         assert!(err.contains("family/parents"), "{err}");
         assert!(err.contains(&old_ref), "{err}");
@@ -1353,7 +1408,14 @@ mod tests {
         init_repo_with_commit(root, &[("f.txt", "prior\n")]);
 
         let host_path = root.join("existing-worktree");
-        super::super::create_git_worktree(root.to_str().unwrap(), host_path.to_str().unwrap(), "existing-worktree", "detached", "HEAD").unwrap();
+        super::super::create_git_worktree(
+            root.to_str().unwrap(),
+            host_path.to_str().unwrap(),
+            "existing-worktree",
+            "detached",
+            "HEAD",
+        )
+        .unwrap();
         fs::write(host_path.join("agent-notes.md"), "carried over").unwrap();
 
         let node = empty_node(root, Some("existing-worktree"));
@@ -1906,7 +1968,11 @@ mod tests {
     }
 
     impl ProvisionSink for RecordingSink {
-        fn return_warm_row(&self, entry: &crate::services::warm_pool::ClaimedWarmEntry, _mesh_id: i64) -> Result<(), String> {
+        fn return_warm_row(
+            &self,
+            entry: &crate::services::warm_pool::ClaimedWarmEntry,
+            _mesh_id: i64,
+        ) -> Result<(), String> {
             self.state.lock().unwrap().warm_rows_returned.push(entry.id);
             Ok(())
         }
@@ -1948,24 +2014,58 @@ mod tests {
         let mesh = crate::db::create_mesh("warm", td.path().to_str().unwrap()).unwrap();
         let pool = make_pool_entry(td.path(), "warm-collision");
         let branch_oid = repo.head().unwrap().peel_to_commit().unwrap().id();
-        repo.branch("warm-collision", &repo.find_commit(branch_oid).unwrap(), false).unwrap();
-        let row_id = crate::db::insert_warm_worktree(mesh.id, pool.to_str().unwrap(), "warm-collision", None,
-            crate::db::WarmWorktreeStatus::Claimed).unwrap();
+        repo.branch(
+            "warm-collision",
+            &repo.find_commit(branch_oid).unwrap(),
+            false,
+        )
+        .unwrap();
+        let row_id = crate::db::insert_warm_worktree(
+            mesh.id,
+            pool.to_str().unwrap(),
+            "warm-collision",
+            None,
+            crate::db::WarmWorktreeStatus::Claimed,
+        )
+        .unwrap();
         let mut claim = claimed_warm(&pool, "warm-collision");
         claim.id = row_id;
         let node = empty_node(td.path(), Some("warm-collision"));
-        let mut ctx = make_ctx(node, SpawnSource::Manual, pool.to_string_lossy().to_string(), Some(claim));
+        let mut ctx = make_ctx(
+            node,
+            SpawnSource::Manual,
+            pool.to_string_lossy().to_string(),
+            Some(claim),
+        );
         ctx.worktree_mode = "branched".into();
-        let error = provision_for_spawn(ctx, &ProvisionHooks::default(), &DbWritingSink).unwrap_err();
+        let error =
+            provision_for_spawn(ctx, &ProvisionHooks::default(), &DbWritingSink).unwrap_err();
         assert!(error.contains("manual warm upgrade failed"));
-        assert_eq!(repo.find_branch("warm-collision", git2::BranchType::Local).unwrap().get().target(), Some(branch_oid));
-        assert!(git2::Repository::open(&pool).unwrap().head_detached().unwrap());
+        assert_eq!(
+            repo.find_branch("warm-collision", git2::BranchType::Local)
+                .unwrap()
+                .get()
+                .target(),
+            Some(branch_oid)
+        );
+        assert!(git2::Repository::open(&pool)
+            .unwrap()
+            .head_detached()
+            .unwrap());
         assert!(pool.join("file.txt").exists());
-        assert_eq!(crate::db::count_available_warm_for_mesh(mesh.id).unwrap(), 1);
+        assert_eq!(
+            crate::db::count_available_warm_for_mesh(mesh.id).unwrap(),
+            1
+        );
     }
     impl ProvisionSink for DbWritingSink {
-        fn return_warm_row(&self, entry: &crate::services::warm_pool::ClaimedWarmEntry, _mesh_id: i64) -> Result<(), String> {
-            crate::db::mark_warm_worktree_available(entry.id, entry.base_sha.as_deref()).map_err(|e| e.to_string())
+        fn return_warm_row(
+            &self,
+            entry: &crate::services::warm_pool::ClaimedWarmEntry,
+            _mesh_id: i64,
+        ) -> Result<(), String> {
+            crate::db::mark_warm_worktree_available(entry.id, entry.base_sha.as_deref())
+                .map_err(|e| e.to_string())
         }
         fn forget_warm_row(&self, _id: i64) {}
         fn adopt_manual_slug(&self, node_id: i64, slug: &str, worktree_path: Option<&str>) {

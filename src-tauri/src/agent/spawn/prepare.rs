@@ -307,13 +307,19 @@ pub(super) async fn prepare_context(
         if use_worktree && can_infer_scope && node.project_scope.is_none() {
             let root = env::node_worktree_path(&node)
                 .ok_or_else(|| "Worktree node has no checkout path".to_string())?;
-            if let Some(scope) = crate::git::project::scope_for_checkout(&node.path, &root.host_path, None, can_infer_scope)? {
+            if let Some(scope) = crate::git::project::scope_for_checkout(
+                &node.path,
+                &root.host_path,
+                None,
+                can_infer_scope,
+            )? {
                 db::save_project_scope(node.id, &scope).map_err(|e| e.to_string())?;
                 node.project_scope = Some(scope);
             }
         }
         Ok(node)
-    }).await?;
+    })
+    .await?;
 
     // Spawn path. The pool claim (issue #609/#612) decides whether
     //    the spawn adopts a pre-warmed worktree (Manual: pool slug IS the

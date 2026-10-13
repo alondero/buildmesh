@@ -574,9 +574,13 @@ mod lifecycle_snapshot_tests {
 fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
     let project_scope: Option<String> = row.get(24)?;
     if let Some(scope) = project_scope.as_deref() {
-        crate::env::validate_project_scope(scope).map_err(|error| rusqlite::Error::FromSqlConversionFailure(
-            24, rusqlite::types::Type::Text,
-            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error))))?;
+        crate::env::validate_project_scope(scope).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                24,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+            )
+        })?;
     }
     Ok(AgentNode {
         id: row.get(0)?,
@@ -739,10 +743,17 @@ pub(crate) fn get_agent_node_by_id_inner(conn: &Connection, id: i64) -> SqlResul
 }
 
 pub fn save_project_scope(id: i64, scope: &str) -> SqlResult<()> {
-    crate::env::validate_project_scope(scope).map_err(|error| rusqlite::Error::ToSqlConversionFailure(
-        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, error))))?;
+    crate::env::validate_project_scope(scope).map_err(|error| {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            error,
+        )))
+    })?;
     let conn = write_conn();
-    conn.execute("UPDATE agent_nodes SET project_scope = ?1 WHERE id = ?2 AND project_scope IS NULL", params![scope, id])?;
+    conn.execute(
+        "UPDATE agent_nodes SET project_scope = ?1 WHERE id = ?2 AND project_scope IS NULL",
+        params![scope, id],
+    )?;
     Ok(())
 }
 
@@ -984,15 +995,27 @@ pub(crate) fn create_agent_node_configured_inner(
     // transaction. Imports deliberately keep their discovered identity.
     let unique_name = if use_worktree && (source_issue.is_some() || source_pr.is_some()) {
         let mut stmt = db.prepare("SELECT worktree_name FROM agent_nodes WHERE use_worktree = 1 AND worktree_name IS NOT NULL")?;
-        let names = stmt.query_map([], |r| r.get::<_, String>(0))?
+        let names = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
             .collect::<SqlResult<std::collections::HashSet<_>>>()?;
         crate::session_naming::disambiguate_node_name(name, &names)
-    } else { name.to_string() };
+    } else {
+        name.to_string()
+    };
     let relocated = if unique_name != name {
-        worktree_path.and_then(|p| p.rfind(['/', '\\']).map(|i| format!("{}{unique_name}", &p[..=i])))
-    } else { None };
+        worktree_path.and_then(|p| {
+            p.rfind(['/', '\\'])
+                .map(|i| format!("{}{unique_name}", &p[..=i]))
+        })
+    } else {
+        None
+    };
     let worktree_path = relocated.as_deref().or(worktree_path);
-    let worktree_name = if unique_name != name { worktree_name.map(|_| unique_name.as_str()) } else { worktree_name };
+    let worktree_name = if unique_name != name {
+        worktree_name.map(|_| unique_name.as_str())
+    } else {
+        worktree_name
+    };
     let name = unique_name.as_str();
     // Append at the end of this mesh's grid order. New nodes land last so an
     // existing arrangement isn't disturbed by a fresh spawn.

@@ -11,9 +11,8 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use git2::{Oid, Repository, StatusOptions};
 use crate::env::to_host_path;
-
+use git2::{Oid, Repository, StatusOptions};
 
 /// Discover the nearest repository using the host-readable spelling. Source
 /// folder callers that need the Git root use `project::resolve`; owned checkout
