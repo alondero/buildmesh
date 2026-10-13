@@ -107,6 +107,12 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
  * loop. `init` is replayed verbatim, which is safe because every caller
  * serialises its body to a string before it gets here.
  *
+ * Replaying a POST is side-effect-free because the server denies at the auth
+ * boundary before dispatching a handler: an `Admin` route returns its 401 from
+ * `router::dispatch_matched` without ever reaching `run_handler`, and the
+ * public `/api/ws-ticket` route authorizes before it mints. A 401 therefore
+ * means the request did nothing, so the retry cannot double-apply it.
+ *
  * Only 401 recovers. A 403 means the device authenticated and was refused for
  * a scope it does not hold — a refresh cannot grant it, so it stays an error.
  */
