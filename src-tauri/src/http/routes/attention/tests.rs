@@ -1,3 +1,33 @@
+#[test]
+fn minimax_stop_uses_canonical_background_receipts() {
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("messages.jsonl");
+    let launch = serde_json::json!({"message":{"role":"toolResult","timestamp":100,
+        "details":{"status":"auto_promoted","task_id":"bg_owned"},"content":[]}})
+    .to_string();
+    let stop = serde_json::json!({"hook_event_name":"Stop", "session_id":"mvs_owned",
+        "transcript_path": dir.path().join("expired.compatible.jsonl"), "cwd":"repo"});
+    let normalize = || {
+        normalizers::normalize(Some(&stop), "mcode", |_| {
+            crate::services::transcript_reader::adapters::mcode::count_pending_background_tasks_in(
+                &transcript,
+                &dir.path().join("tasks"),
+            )
+        })
+        .classified
+        .decision
+    };
+    std::fs::write(&transcript, &launch).unwrap();
+    assert_eq!(normalize(), Decision::SuppressPendingBackground);
+    let terminal = serde_json::json!({"message":{"role":"toolResult","timestamp":200,
+        "details":{"status":"succeeded","task_id":"bg_owned"},"content":[]}})
+    .to_string();
+    std::fs::write(&transcript, format!("{launch}\n{terminal}")).unwrap();
+    assert_eq!(normalize(), Decision::Ready);
+    std::fs::write(&transcript, "{partial").unwrap();
+    assert_eq!(normalize(), Decision::MarkInput);
+}
+
 fn apply_status_fixture(
     state: &mut crate::agent::hook_state::HookState,
     value: serde_json::Value,

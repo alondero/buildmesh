@@ -739,7 +739,7 @@ mod tests {
                 fs::write(&result, content).unwrap();
             }
             let (candidate, missing) = prepare()
-                .with_result_file(&result, run.step("await_source").unwrap())
+                .with_result_file(&result, &run, run.step("await_source").unwrap())
                 .unwrap()
                 .unwrap();
             assert!(missing);
@@ -749,7 +749,8 @@ mod tests {
         // An unreadable path is not evidence that the agent omitted its file.
         fs::remove_file(&result).unwrap();
         fs::create_dir(&result).unwrap();
-        let failed_read = prepare().with_result_file(&result, run.step("await_source").unwrap());
+        let failed_read =
+            prepare().with_result_file(&result, &run, run.step("await_source").unwrap());
         assert!(
             matches!(failed_read, Err(crate::circuit::observation::CircuitObservationBlocker::ResultFileUnavailable { path, reason })
             if path == result.display().to_string() && !reason.is_empty()),
@@ -759,7 +760,7 @@ mod tests {
         fs::write(&result, report).unwrap();
         let candidate = prepare();
         let (candidate, missing) = candidate
-            .with_result_file(&result, run.step("await_source").unwrap())
+            .with_result_file(&result, &run, run.step("await_source").unwrap())
             .unwrap()
             .unwrap();
         assert!(!missing);
@@ -861,7 +862,7 @@ mod tests {
                         fs::write(path, "Changed result publication\n").unwrap();
                     }
                 },
-                || candidate.with_result_file(&result, run.step("await_source").unwrap()),
+                || candidate.with_result_file(&result, &run, run.step("await_source").unwrap()),
             )
             .unwrap();
             assert!(
@@ -1044,7 +1045,7 @@ mod tests {
             let report = "Full result report\nBUILDMESH_HANDOFF_V1: READY\n";
             fs::write(&result, report).unwrap();
             let (candidate, missing) = candidate
-                .with_result_file(&result, run.step("await_source").unwrap())
+                .with_result_file(&result, &run, run.step("await_source").unwrap())
                 .unwrap()
                 .unwrap();
             assert!(!missing);

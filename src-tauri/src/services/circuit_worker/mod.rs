@@ -1761,43 +1761,80 @@ fn continuation_is_current(
         view,
         node_id,
         target,
-        status,
-        alive,
-        stamp,
-        revision,
+        ContinuationTurn {
+            status,
+            alive,
+            stamp,
+            revision,
+        },
         "continuation",
     )
 }
 
-/// The same fence, parameterised by the run-context key prefix that owns the
-/// delivery. A wake-up keeps its own `nudge.*` bookkeeping, so it must compare
-/// against the stamp and revision its own claim recorded — reading the
-/// continuation's keys would make every nudge look obsolete the moment the two
-/// lifecycles diverged.
+struct ContinuationTurn<'a> {
+    status: SessionStatus,
+    alive: bool,
+    stamp: Option<&'a str>,
+    revision: Option<&'a str>,
+}
+
+/// Compare with the claim belonging to this delivery kind. A wake-up's
+/// `nudge.*` keys are independent of a continuation's claim.
 fn continuation_is_current_for(
     view: &RunView,
     node_id: &str,
     target: i64,
-    status: SessionStatus,
-    alive: bool,
-    stamp: Option<&str>,
-    revision: Option<&str>,
+    turn: ContinuationTurn<'_>,
     prefix: &str,
 ) -> bool {
-    alive
+    turn.alive
         && matches!(
-            status,
+            turn.status,
             SessionStatus::Ready | SessionStatus::Completed | SessionStatus::AwaitingInput
         )
         && view.context.source_agent_id() != Some(target)
         && view.continuation_target(node_id) == Some(target)
-        && stamp.is_some()
-        && stamp == view.context.get(&format!("node.{node_id}.{prefix}.stamp"))
-        && revision.is_some()
-        && revision
+        && turn.stamp.is_some()
+        && turn.stamp == view.context.get(&format!("node.{node_id}.{prefix}.stamp"))
+        && turn.revision.is_some()
+        && turn.revision
             == view
                 .context
                 .get(&format!("node.{node_id}.{prefix}.revision"))
+}
+
+struct BackgroundWakeEvidence<'a> {
+    status: SessionStatus,
+    alive: bool,
+    stamp: Option<&'a str>,
+    revision: Option<&'a str>,
+    quiet_ms: Option<u128>,
+    task_id: Option<&'a str>,
+    lifecycle_allows_wake: bool,
+}
+
+fn background_wake_is_current(
+    view: &RunView,
+    node_id: &str,
+    target: i64,
+    evidence: BackgroundWakeEvidence<'_>,
+) -> bool {
+    evidence.lifecycle_allows_wake
+        && observation::background_wake_status(evidence.status, evidence.quiet_ms)
+        && evidence.task_id.is_some()
+        && evidence.task_id == view.context.get(&format!("node.{node_id}.nudge.task_id"))
+        && continuation_is_current_for(
+            view,
+            node_id,
+            target,
+            ContinuationTurn {
+                status: SessionStatus::Ready,
+                alive: evidence.alive,
+                stamp: evidence.stamp,
+                revision: evidence.revision,
+            },
+            "nudge",
+        )
 }
 
 /// Dispatch one `CallGithub` effect. App-free: the recheck lookup and the
@@ -2235,6 +2272,10 @@ pub(super) fn execute_effects(
                     continue;
                 }
                 let node = db::get_agent_node_by_id(*target_agent_id).map_err(|e| e.to_string())?;
+                // Re-read native completion before the identity/status fences:
+                // an agent may have resumed since observation claimed the wake.
+                let task_id = observation::stalled_background_task(&node);
+                let node = db::get_agent_node_by_id(*target_agent_id).map_err(|e| e.to_string())?;
                 let stamp = db::agent_turn_stamp(*target_agent_id).map_err(|e| e.to_string())?;
                 let revision =
                     crate::coordinator::enrichment::assistant_report(&node).map(|r| r.revision);
@@ -2246,16 +2287,15 @@ pub(super) fn execute_effects(
                 // observed as stalled. Reuse the continuation fence, bound to
                 // this nudge's own claim keys: a turn that has since moved on
                 // needs nothing.
-                let valid = continuation_is_current_for(
-                    view,
-                    node_id,
-                    *target_agent_id,
-                    node.status,
-                    crate::agent::process::PROCESS_REGISTRY.is_alive(target_agent_id),
-                    stamp.as_deref(),
-                    revision.as_deref(),
-                    "nudge",
-                );
+                let valid = background_wake_is_current(view, node_id, *target_agent_id, BackgroundWakeEvidence {
+                    status: node.status,
+                    alive: crate::agent::process::PROCESS_REGISTRY.is_alive(target_agent_id),
+                    stamp: stamp.as_deref(), revision: revision.as_deref(),
+                    quiet_ms: crate::circuit::evaluator::millis_since_last_output(*target_agent_id),
+                    task_id: task_id.as_deref(),
+                    lifecycle_allows_wake: matches!(db::agent_node::circuit_lifecycle_blocker(*target_agent_id),
+                        Ok(None | Some(crate::circuit::observation::CircuitObservationBlocker::KnownWorkOutstanding))),
+                });
                 if !valid {
                     outcome_events.push(CircuitEvent::NudgeObsolete {
                         node_id: node_id.clone(),

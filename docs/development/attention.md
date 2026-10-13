@@ -43,6 +43,14 @@ See [Agent Node status observation](node-status-observation.md) for
 ordering, health, recovery and harness capability limits.
 
 ### False-Yield Suppression (issue #878)
+
+MiniMax Code Stop reconciliation reads the node's canonical `messages.jsonl`
+and native `background-tasks` store, resolved through its own session ID and
+spawn environment. It does not apply Claude's task scanner to MiniMax's
+temporary compatible hook transcript. Explicit and timeout-promoted launches
+remain pending until a native terminal tool receipt or terminal summary settles
+them. Missing or partial canonical history remains unavailable evidence.
+
 Claude Code ends its turn when it launches background work (`run_in_background` Bash, timeout-backgrounded commands) and re-invokes itself when the `<task-notification>` arrives — so a Stop (or 60s-idle Notification) is *not* always "the user is needed". The route reads `transcript_path` from the hook payload and asks `transcript_reader::count_pending_background_tasks` for launched-but-unnotified task IDs (launch = a `tool_result` promising "You will be notified when it completes"; finish = a `<task-id>` notification with a **terminal** status — `running`-status notifications don't count). Pending work → the Node Turn is published via `node_turn::publish_hook` with `background_running` (naming/autopilot still fire; no attention mark). Permission-prompt Notifications always mark, even mid-background-wait. Any unknown (empty/garbage body, unreadable transcript) degrades to marking — never to silence.
 
 Claude Code can stop a background command through `TaskStop` without queuing a terminal task notification. The transcript scan also accepts a successful `TaskStop` result bound to the matching tool call and task ID. A failed stop, a request without its result, or unrelated tool output keeps that task pending. Stop and idle Notification callbacks use this same scan.

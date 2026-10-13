@@ -601,7 +601,8 @@ fn unreadable_result_defers_without_reminding_then_recovers_from_the_written_rep
         .unwrap()
     };
     for probe in 1..=3 {
-        let Err(blocker) = prepare(&run).with_result_file(&path, run.step("step").unwrap()) else {
+        let Err(blocker) = prepare(&run).with_result_file(&path, &run, run.step("step").unwrap())
+        else {
             panic!("an unreadable result must defer observation");
         };
         let mut script = Script {
@@ -626,7 +627,7 @@ fn unreadable_result_defers_without_reminding_then_recovers_from_the_written_rep
     let report = "Full completed result\nBUILDMESH_HANDOFF_V1: READY\n";
     std::fs::write(&path, report).unwrap();
     let (candidate, missing) = prepare(&run)
-        .with_result_file(&path, run.step("step").unwrap())
+        .with_result_file(&path, &run, run.step("step").unwrap())
         .unwrap()
         .unwrap();
     assert!(!missing);

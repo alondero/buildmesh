@@ -144,6 +144,10 @@ pub(super) fn declares_completion(view: &RunView, node_id: &str, output: &str) -
     matches!(result(view, node_id, output), Ok(Some(_)))
 }
 
+pub(super) fn requires_result_line(view: &RunView, node_id: &str) -> bool {
+    is_review(view, node_id) || awaits_review_turn(view, node_id) || is_issue_handoff(view, node_id)
+}
+
 pub(super) fn interpretation(
     view: &RunView,
     node_id: &str,

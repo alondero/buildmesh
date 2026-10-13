@@ -32,16 +32,16 @@ use crate::services::transcript_reader::types::{
     MAX_TOOL_STRING,
 };
 
-/// A background task the harness finished but never delivered to the session.
+/// A background task that finished without another assistant turn.
 ///
 /// MiniMax Code records task completion out of band, and its own
 /// `background_task_cadence_reminder` is injected **at the start of the next
-/// turn**, never when the task actually ends. An idle session therefore takes
-/// no turn, receives no reminder, and never reads the finished result — the
+/// turn**. A runtime completion notice can also arrive without resuming the
+/// assistant. An idle session then never reads the finished result — the
 /// stall in issue #2105. A detector driven by that reminder would never fire
-/// during the stall it exists to break, so this is built on the CLI's on-disk
-/// task store instead, which is written as the task runs and stops growing
-/// when it ends. See [`detect_background_task_stall`].
+/// during the stall it exists to break, so this uses native terminal tool
+/// receipts and the CLI's on-disk terminal summaries instead. See
+/// [`detect_background_task_stall`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BackgroundTaskStall {
     /// Newest finished task that has not been read in this session.
@@ -68,6 +68,32 @@ fn newest_assistant_at(lines: &str) -> Option<i64> {
         .max()
 }
 
+fn has_pending_tool_call(lines: &str) -> Option<bool> {
+    let mut pending = std::collections::HashSet::new();
+    for line in lines.lines().filter(|line| !line.trim().is_empty()) {
+        let record: serde_json::Value = serde_json::from_str(line).ok()?;
+        let message = record_message(&record)?;
+        match message_role(message) {
+            Some("assistant") => {
+                if let Some(content) = message.get("content").and_then(|value| value.as_array()) {
+                    for item in content {
+                        if item.get("type").and_then(|value| value.as_str()) == Some("toolCall") {
+                            pending.insert(item.get("id")?.as_str()?.to_owned());
+                        }
+                    }
+                }
+            }
+            Some("toolResult") => {
+                if let Some(id) = message.get("toolCallId").and_then(|value| value.as_str()) {
+                    pending.remove(id);
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(!pending.is_empty())
+}
+
 /// A background task this session launched, from the `bash_background`
 /// acknowledgement the CLI writes **during the turn that starts it**.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,23 +110,27 @@ pub(crate) struct LaunchedTask {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TaskStoreFact {
     pub task_id: String,
-    /// When the CLI last wrote this task's output — for a finished task, when
-    /// it finished. Measured to the second against the reminder's `endedAtMs`.
+    /// Terminal receipt/summary timestamp, or the latest output write for a
+    /// task whose terminal state is still unknown.
     pub settled_at_ms: i64,
-    /// The CLI wrote a terminal summary, so the task is definitively over.
+    /// A native terminal receipt or summary proves the task is over.
     pub finished: bool,
 }
 
-/// How long a task's output must have been quiet before a wake-up is spent on
-/// it. The CLI flushes a running task's output periodically, so a task that
-/// merely wrote recently is still running and must not consume the single
-/// wake-up an attempt is allowed.
-pub(crate) const TASK_QUIESCENCE_MS: i64 = 3 * 60_000;
+fn background_task_id(details: &serde_json::Value) -> Option<&str> {
+    let id = details.get("task_id")?.as_str()?;
+    (id.starts_with("bg_")
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == b'_' || ch == b'-'))
+    .then_some(id)
+}
 
 /// Pull every background task this session launched out of the transcript.
 ///
 /// Only the launch acknowledgement counts: it carries `details.task_id` and
-/// `details.status == "started"`, and it is written while the turn that
+/// `details.status == "started" | "auto_promoted"`, and it is written while the turn that
 /// started the task is still running — so it is present during the stall.
 pub(crate) fn launched_background_tasks(lines: &str) -> Vec<LaunchedTask> {
     let mut tasks: Vec<LaunchedTask> = Vec::new();
@@ -111,13 +141,19 @@ pub(crate) fn launched_background_tasks(lines: &str) -> Vec<LaunchedTask> {
         let Some(message) = record_message(&record) else {
             continue;
         };
+        if message_role(message) != Some("toolResult") {
+            continue;
+        }
         let Some(details) = message.get("details") else {
             continue;
         };
-        if details.get("status").and_then(|s| s.as_str()) != Some("started") {
+        if !matches!(
+            details.get("status").and_then(|s| s.as_str()),
+            Some("started" | "auto_promoted")
+        ) {
             continue;
         }
-        let Some(task_id) = details.get("task_id").and_then(|t| t.as_str()) else {
+        let Some(task_id) = background_task_id(details) else {
             continue;
         };
         if tasks.iter().any(|task| task.task_id == task_id) {
@@ -147,16 +183,23 @@ pub(crate) fn detect_background_task_stall(
     launched: &[LaunchedTask],
     facts: &[TaskStoreFact],
     last_assistant_at_ms: Option<i64>,
-    now_ms: i64,
+    _now_ms: i64,
 ) -> Option<BackgroundTaskStall> {
+    // Another owned task may still be running (or its state unreadable).
+    // Quiet output alone never establishes that it has finished.
+    if launched.iter().any(|task| {
+        !facts
+            .iter()
+            .any(|fact| fact.task_id == task.task_id && fact.finished)
+    }) {
+        return None;
+    }
     let mut stall: Option<BackgroundTaskStall> = None;
     for fact in facts {
         if !launched.iter().any(|task| task.task_id == fact.task_id) {
             continue;
         }
-        // Still running: a recent write means the CLI may append more.
-        let quiet = now_ms - fact.settled_at_ms;
-        if !fact.finished && quiet < TASK_QUIESCENCE_MS {
+        if !fact.finished {
             continue;
         }
         if let Some(last) = last_assistant_at_ms {
@@ -181,27 +224,115 @@ pub(crate) fn detect_background_task_stall(
 
 /// Read the CLI's own completion facts for these tasks from its task store.
 ///
-/// `<dataDir>/background-tasks/<taskId>/` is written as the task runs and stops
-/// growing when it ends, so `output.log`'s modification time is the CLI's
-/// record of the task's end — measured to the second against the `endedAtMs`
-/// the cadence reminder carries. `summary.txt` appears only once the task has
-/// finished, and is the stronger signal when present.
+/// `summary.txt` in `<dataDir>/background-tasks/<taskId>/` appears once the task
+/// has finished. An output log without that summary records activity, but its
+/// modification time cannot prove termination.
 fn task_store_facts(tasks_dir: &Path, launched: &[LaunchedTask]) -> Vec<TaskStoreFact> {
     launched
         .iter()
         .filter_map(|task| {
             let dir = tasks_dir.join(&task.task_id);
+            let summary = dir.join("summary.txt");
             let output = dir.join("output.log");
             // A missing or unreadable store entry is not evidence: another
             // session may own the task, or the CLI may not have written yet.
-            let settled_at_ms = mtime_ms(&output)?;
+            let finished = summary.is_file();
+            let settled_at_ms = if finished {
+                mtime_ms(&summary)
+            } else {
+                mtime_ms(&output)
+            }?;
             Some(TaskStoreFact {
                 task_id: task.task_id.clone(),
                 settled_at_ms,
-                finished: dir.join("summary.txt").is_file(),
+                finished,
             })
         })
         .collect()
+}
+
+/// Combine native terminal tool receipts with the CLI's terminal summaries.
+/// Missing or partial canonical history stays unknown rather than clearing a veto.
+fn background_facts(
+    lines: &str,
+    tasks_dir: &Path,
+    launched: &[LaunchedTask],
+) -> Option<Vec<TaskStoreFact>> {
+    let mut facts = task_store_facts(tasks_dir, launched);
+    for line in lines.lines().filter(|line| !line.trim().is_empty()) {
+        let record: serde_json::Value = serde_json::from_str(line).ok()?;
+        let message = record_message(&record)?;
+        let role = message_role(message)?;
+        if !matches!(
+            role,
+            "user" | "assistant" | "toolResult" | "custom" | "compactionSummary"
+        ) {
+            return None;
+        }
+        if role != "toolResult" {
+            continue;
+        }
+        let Some(details) = message.get("details") else {
+            continue;
+        };
+        if matches!(
+            details.get("status").and_then(|s| s.as_str()),
+            Some("started" | "auto_promoted")
+        ) {
+            background_task_id(details)?;
+            continue;
+        }
+        if !matches!(
+            details.get("status").and_then(|s| s.as_str()),
+            Some("succeeded" | "failed" | "canceled" | "cancelled")
+        ) {
+            continue;
+        }
+        let Some(task_id) = details.get("task_id").and_then(|id| id.as_str()) else {
+            continue;
+        };
+        if !launched.iter().any(|task| task.task_id == task_id) {
+            continue;
+        }
+        let Some(settled_at_ms) = message.get("timestamp").and_then(|t| t.as_i64()) else {
+            continue;
+        };
+        facts.retain(|fact| fact.task_id != task_id);
+        facts.push(TaskStoreFact {
+            task_id: task_id.to_owned(),
+            settled_at_ms,
+            finished: true,
+        });
+    }
+    Some(facts)
+}
+
+pub(crate) fn count_pending_background_tasks(session_id: &str, spawn_path: &str) -> Option<usize> {
+    let data_dir = minimax_data_dir_for_spawn(spawn_path)?;
+    let transcript = find_mcode_transcript_in(&data_dir.join("v2").join("sessions"), session_id)?;
+    count_pending_background_tasks_in(&transcript, &data_dir.join("background-tasks"))
+}
+
+pub(crate) fn count_pending_background_tasks_in(
+    transcript: &Path,
+    tasks_dir: &Path,
+) -> Option<usize> {
+    let lines = std::fs::read_to_string(transcript).ok()?;
+    if lines.trim().is_empty() {
+        return None;
+    }
+    let launched = launched_background_tasks(&lines);
+    let facts = background_facts(&lines, tasks_dir, &launched)?;
+    Some(
+        launched
+            .iter()
+            .filter(|task| {
+                !facts
+                    .iter()
+                    .any(|fact| fact.task_id == task.task_id && fact.finished)
+            })
+            .count(),
+    )
 }
 
 /// Modification time as epoch milliseconds.
@@ -251,12 +382,15 @@ impl TranscriptAdapter for McodeAdapter {
         spawn_path: &str,
         now_ms: i64,
     ) -> Option<String> {
+        if has_pending_tool_call(lines)? {
+            return None;
+        }
         let launched = launched_background_tasks(lines);
         if launched.is_empty() {
             return None;
         }
         let tasks_dir = minimax_data_dir_for_spawn(spawn_path)?.join("background-tasks");
-        let facts = task_store_facts(&tasks_dir, &launched);
+        let facts = background_facts(lines, &tasks_dir, &launched)?;
         detect_background_task_stall(&launched, &facts, newest_assistant_at(lines), now_ms)
             .map(|stall| stall.task_id)
     }
@@ -513,7 +647,6 @@ pub(crate) fn parse_mcode_turns_with_text_limit(
 }
 
 #[cfg(test)]
-#[cfg(test)]
 mod stall_tests {
     use super::*;
 
@@ -592,13 +725,27 @@ mod stall_tests {
     }
 
     #[test]
+    fn auto_promoted_bash_is_owned_background_work() {
+        let mut record: serde_json::Value =
+            serde_json::from_str(&launch(T_LAST_TALK, TASK)).unwrap();
+        record["message"]["details"]["status"] = "auto_promoted".into();
+        assert_eq!(
+            launched(&record.to_string()),
+            vec![LaunchedTask {
+                task_id: TASK.into(),
+                started_at_ms: T_LAST_TALK,
+            }]
+        );
+    }
+
+    #[test]
     fn detects_a_finished_task_the_session_never_saw() {
         // The stall: the task ended 111s after the session last spoke, and the
         // session said nothing for 3h14m afterwards.
         let lines = stream([launch(T_LAST_TALK - 60_000, TASK), assistant(T_LAST_TALK)]);
         let stall = detect_background_task_stall(
             &launched(&lines),
-            &[fact(TASK, T_END, false)],
+            &[fact(TASK, T_END, true)],
             newest_assistant_at(&lines),
             NOW,
         )
@@ -636,6 +783,82 @@ mod stall_tests {
                 now,
             ),
             None
+        );
+    }
+
+    #[test]
+    fn silent_or_unreadable_owned_tasks_do_not_prove_completion() {
+        let tasks = vec![LaunchedTask {
+            task_id: TASK.into(),
+            started_at_ms: T_LAST_TALK,
+        }];
+        for facts in [vec![], vec![fact(TASK, T_END, false)]] {
+            assert_eq!(
+                detect_background_task_stall(&tasks, &facts, Some(T_LAST_TALK), NOW),
+                None
+            );
+        }
+        let mut tasks = tasks;
+        tasks.push(LaunchedTask {
+            task_id: "bg_other".into(),
+            started_at_ms: T_LAST_TALK,
+        });
+        assert_eq!(
+            detect_background_task_stall(
+                &tasks,
+                &[fact(TASK, T_END, true)],
+                Some(T_LAST_TALK),
+                NOW
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn canonical_native_receipts_reconcile_pending_tasks_without_compatible_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("messages.jsonl");
+        let tasks = dir.path().join("background-tasks");
+        let mut promoted: serde_json::Value =
+            serde_json::from_str(&launch(T_LAST_TALK, TASK)).unwrap();
+        promoted["message"]["details"]["status"] = "auto_promoted".into();
+        let launched = promoted.to_string();
+        std::fs::write(&transcript, &launched).unwrap();
+        assert_eq!(
+            count_pending_background_tasks_in(&transcript, &tasks),
+            Some(1)
+        );
+        // Source text quoting a launch is not a native acknowledgement.
+        let quoted = serde_json::json!({"message":{"role":"assistant", "timestamp":T_END,
+            "content":[{"type":"text","text":"Command running in background with ID: example. You will be notified when it completes"}]}}).to_string();
+        for status in ["succeeded", "failed", "cancelled"] {
+            let terminal = serde_json::json!({"message":{"role":"toolResult", "timestamp":T_END,
+                "details":{"status":status,"task_id":TASK},"content":[]}})
+            .to_string();
+            let lines = stream([launched.clone(), terminal, quoted.clone()]);
+            std::fs::write(&transcript, &lines).unwrap();
+            assert_eq!(
+                count_pending_background_tasks_in(&transcript, &tasks),
+                Some(0)
+            );
+        }
+        std::fs::write(&transcript, format!("{launched}\n{{partial")).unwrap();
+        assert_eq!(count_pending_background_tasks_in(&transcript, &tasks), None);
+        for invalid in [
+            serde_json::json!({"message": {"content": []}}),
+            serde_json::json!({"message": {"role": "unknown"}}),
+            serde_json::json!({"message": {"role": "toolResult", "details": {"status": "started", "task_id": "../other"}}}),
+        ] {
+            std::fs::write(&transcript, invalid.to_string()).unwrap();
+            assert_eq!(count_pending_background_tasks_in(&transcript, &tasks), None);
+        }
+        std::fs::write(&transcript, &launched).unwrap();
+        let task_dir = tasks.join(TASK);
+        std::fs::create_dir_all(&task_dir).unwrap();
+        std::fs::write(task_dir.join("summary.txt"), "finished").unwrap();
+        assert_eq!(
+            count_pending_background_tasks_in(&transcript, &tasks),
+            Some(0)
         );
     }
 
@@ -722,10 +945,14 @@ mod stall_tests {
     }
 
     #[test]
-    fn the_quiescence_window_is_longer_than_a_running_tasks_flush_cadence() {
-        // Guards the constant against being tuned down to something that would
-        // let a still-running task consume the one wake-up an attempt owns.
-        assert!(TASK_QUIESCENCE_MS >= 60_000);
+    fn unfinished_foreground_tool_calls_prevent_a_background_wake() {
+        let call = serde_json::json!({"message":{"role":"assistant", "timestamp":T_LAST_TALK,
+            "content":[{"type":"toolCall","id":"foreground","name":"bash","arguments":{}}]}})
+        .to_string();
+        assert_eq!(has_pending_tool_call(&call), Some(true));
+        let result = serde_json::json!({"message":{"role":"toolResult","toolCallId":"foreground","content":[]}}).to_string();
+        assert_eq!(has_pending_tool_call(&stream([call, result])), Some(false));
+        assert_eq!(has_pending_tool_call("{partial"), None);
     }
 
     #[test]

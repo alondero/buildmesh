@@ -137,9 +137,23 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
     // Normalize only after the HTTP gates. Transcript reconciliation is file I/O,
     // so it runs on the blocking pool, with no database connection held.
     let normalize_provider = provider_owned.clone();
+    let normalize_session = stored_cli_session_id.clone();
+    let normalize_path = node
+        .as_ref()
+        .map(|node| {
+            node.worktree_path
+                .as_deref()
+                .unwrap_or(&node.path)
+                .to_owned()
+        })
+        .unwrap_or_default();
     let normalizers::Normalized { payload: hook_payload, classified, semantic, session_id: hook_uuid, native_hook } =
         tokio::task::spawn_blocking(move || normalizers::normalize(raw_payload.as_ref(), &normalize_provider,
-            crate::services::transcript_reader::adapters::claude_code::count_pending_background_tasks))
+            |path| if normalize_provider == "mcode" {
+                crate::services::transcript_reader::adapters::mcode::count_pending_background_tasks(&normalize_session, &normalize_path)
+            } else {
+                crate::services::transcript_reader::adapters::claude_code::count_pending_background_tasks(path)
+            }))
         .await.unwrap_or_default();
     let mut detail = classified.detail.clone();
     detail.semantic_turn = semantic

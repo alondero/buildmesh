@@ -433,7 +433,10 @@ pub(super) fn observe_waits_with(
         return;
     }
     for step in &view.steps {
-        if !matches!(step.status, StepStatus::Running | StepStatus::Blocked) {
+        if !matches!(
+            step.status,
+            StepStatus::Running | StepStatus::Blocked | StepStatus::Unverified
+        ) {
             continue;
         }
         if events.iter().any(|e| matches!(e, CircuitEvent::TurnClassified { node_id, .. } if node_id == &step.node_id)) { continue; }
@@ -495,16 +498,18 @@ pub(super) fn observe_waits_with(
         let timeout_ms = explicit_budget.unwrap_or(timeout_ms);
         // A step with no agent has nothing to observe; only a bound agent can
         // be "unobserved".
-        events.push(CircuitEvent::WaitObserved {
-            node_id: step.node_id.clone(),
-            attempt: step.attempt,
-            now_ms,
-            progress,
-            observed: observed.unwrap_or(true),
-            explicit_budget: explicit_budget.is_some(),
-            reason,
-            timeout_ms,
-        });
+        if step.status != StepStatus::Unverified {
+            events.push(CircuitEvent::WaitObserved {
+                node_id: step.node_id.clone(),
+                attempt: step.attempt,
+                now_ms,
+                progress,
+                observed: observed.unwrap_or(true),
+                explicit_budget: explicit_budget.is_some(),
+                reason,
+                timeout_ms,
+            });
+        }
         // Issue #2105: a yielded session with a finished background task it
         // cannot learn about on its own. The prompt this produces is the only
         // thing that starts the turn in which the CLI would have announced the
@@ -723,8 +728,8 @@ pub(super) fn live_wait(view: &RunView, step: &StepView, id: i64) -> Option<Wait
     let progress =
         crate::coordinator::enrichment::assistant_report(&node).map(|report| report.revision);
     let policy = observer_policy::for_agent(&node);
-    // A session still producing output is never stalled, whatever its
-    // transcript says; only a yielded one can be missing a wake-up.
+    // A stale Running projection can hide a lost background-task turn.
+    // Quiet output only admits a task-store probe; it never proves completion.
     let yielded = matches!(
         node.status,
         SessionStatus::AwaitingInput | SessionStatus::Ready | SessionStatus::Completed
@@ -744,7 +749,16 @@ pub(super) fn live_wait(view: &RunView, step: &StepView, id: i64) -> Option<Wait
         }
         None => false,
     };
-    let stalled_task_id = (yielded && nudge_possible)
+    let eligible = background_wake_status(
+        node.status,
+        crate::circuit::evaluator::millis_since_last_output(id),
+    );
+    let human_wait = !matches!(
+        db::agent_node::circuit_lifecycle_blocker(id),
+        Ok(None
+            | Some(crate::circuit::observation::CircuitObservationBlocker::KnownWorkOutstanding))
+    );
+    let stalled_task_id = (eligible && nudge_possible && !human_wait)
         .then(|| stalled_background_task(&node))
         .flatten();
     Some(WaitObservation {
@@ -768,7 +782,7 @@ pub(super) fn live_wait(view: &RunView, step: &StepView, id: i64) -> Option<Wait
 /// never a database read, so it cannot hold a connection across disk. Any
 /// failure (unknown harness, missing transcript, unparsable record, no task
 /// store) yields `None`: an unreadable session is not evidence of a stall.
-fn stalled_background_task(node: &crate::models::AgentNode) -> Option<String> {
+pub(super) fn stalled_background_task(node: &crate::models::AgentNode) -> Option<String> {
     let harness = crate::circuit::strategy::selector_for_agent(node)
         .provider()
         .map(|provider| provider.adapter().id())?;
@@ -776,7 +790,13 @@ fn stalled_background_task(node: &crate::models::AgentNode) -> Option<String> {
     crate::services::transcript_reader::stalled_background_task(
         format,
         node.cli_session_id.as_deref(),
-        node.worktree_path.as_deref().unwrap_or_default(),
+        node.worktree_path.as_deref().unwrap_or(&node.path),
         chrono::Utc::now().timestamp_millis(),
     )
+}
+
+pub(super) fn background_wake_status(status: SessionStatus, quiet_ms: Option<u128>) -> bool {
+    matches!(status, SessionStatus::Ready | SessionStatus::Completed)
+        || (status == SessionStatus::Running
+            && quiet_ms.is_some_and(|quiet| quiet >= turn_classify::LOST_TURN_QUIET_MS))
 }
