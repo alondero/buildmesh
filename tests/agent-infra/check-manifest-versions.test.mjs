@@ -190,3 +190,24 @@ test('reads the Cargo.toml version from [package] only', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('reads a CRLF checkout of Cargo.lock, as the release runner has', () => {
+  // release.yml builds on windows-latest, where actions/checkout materialises
+  // the LF-stored Cargo.lock as CRLF. An LF-only match made the release job
+  // fail with "Could not find a version for the buildmesh package" while the
+  // ubuntu Manifest versions job, checking out LF, stayed green.
+  const dir = stage();
+  try {
+    setVersion(dir, '9.9.9-0');
+    for (const file of ['Cargo.lock', 'Cargo.toml']) {
+      const path = join(dir, 'src-tauri', file);
+      writeFileSync(path, readFileSync(path, 'utf8').replace(/\n/g, '\r\n'));
+    }
+    const result = run(dir, ['--expect', '9.9.9-0']);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /src-tauri\/Cargo\.lock: 9\.9\.9-0/);
+    assert.match(result.stdout, /all 6 version sites match the expected 9\.9\.9-0/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -93,9 +93,16 @@ function cargoTomlVersion(file) {
 
 // Cargo.lock lists the crate like any other dependency, so the entry is found
 // by name rather than by position.
+//
+// The `\r?` is load-bearing, not decoration. Cargo.lock is stored with LF
+// endings and no .gitattributes override, so `actions/checkout` materialises it
+// as CRLF on the windows-latest runner that release.yml builds on, and a bare
+// `\n` between the three lines matches nothing there. The Manifest versions job
+// runs on ubuntu, so it checks out LF and passes: the gate reads green on every
+// pull request and then fails the release itself.
 function cargoLockVersion(file) {
   const match = read(file).match(
-    /^\[\[package\]\]\nname = "buildmesh"\nversion = "([^"]+)"/m,
+    /^\[\[package\]\]\r?\nname = "buildmesh"\r?\nversion = "([^"]+)"/m,
   );
   if (!match) fail(`Could not find a version for the buildmesh package in ${file}.`);
   return match[1];
