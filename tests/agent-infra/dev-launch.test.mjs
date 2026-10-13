@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
+import { createServer as createHttpServer } from 'node:http';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
@@ -77,8 +78,21 @@ test('detached Vite returns, survives its CLI, and stops only its worktree serve
     assert.equal(result.code, 0, result.output);
     assert.equal(state(first).pid, owned.pid, 'repeat start reuses the recorded owner');
 
+    result = await run(process.execPath, [cli(first), 'start', '--port', String(await freePort())]);
+    assert.equal(result.code, 1, result.output);
+    assert.match(result.output, /run npm run dev:stop first/);
+    assert.equal(state(first).pid, owned.pid, 'a confirmed owner must retain its record');
+
+    mkdirSync(join(second, '.harness'));
+    writeFileSync(join(second, '.harness', 'dev-server.json'), JSON.stringify({
+      pid: owned.pid, controlPort: await freePort(), token: 'stale', port,
+    }));
+
     result = await run(process.execPath, [cli(second), 'start', '--port', String(port)]);
     assert.equal(result.code, 1, 'an occupied port cannot be adopted');
+    assert.match(result.output, /Discarding unconfirmed dev server record/);
+    assert.match(result.output, /Starting Vite PID:/);
+    assert.equal(existsSync(join(second, '.harness', 'dev-server.json')), false);
     assert.equal(alive(owned.pid), true);
 
     result = await run(process.execPath, [cli(second), 'start', '--port', String(await freePort())]);
@@ -112,6 +126,68 @@ test('a stale PID record cannot stop an unrelated live process', { timeout: 6000
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+for (const failure of ['unavailable', 'forbidden', 'invalid JSON', 'wrong owner', 'timeout']) {
+  test(`unconfirmed live PID recovery: ${failure}`, { timeout: 90000 }, async () => {
+    const dir = fixture();
+    const cli = join(dir, 'scripts', 'dev-server.mjs');
+    const statePath = join(dir, '.harness', 'dev-server.json');
+    const endpoint = createHttpServer((_request, response) => {
+      if (failure === 'timeout') return;
+      if (failure === 'forbidden') response.writeHead(403).end();
+      else if (failure === 'invalid JSON') response.end('invalid JSON');
+      else response.end(JSON.stringify({ pid: process.pid, token: 'wrong' }));
+    });
+    try {
+      let controlPort = await freePort();
+      if (failure !== 'unavailable') {
+        await new Promise(resolvePromise => endpoint.listen(0, '127.0.0.1', resolvePromise));
+        controlPort = endpoint.address().port;
+      }
+      const port = await freePort();
+      mkdirSync(join(dir, '.harness'));
+      writeFileSync(statePath, JSON.stringify({ pid: process.pid, controlPort, token: 'stale', port }));
+      // Timeout is covered by start below; avoid spending a second timeout here.
+      if (failure !== 'timeout') {
+        const stopped = await run(process.execPath, [cli, 'stop']);
+        assert.equal(stopped.code, 1, stopped.output);
+        assert.match(stopped.output, /ownership could not be confirmed for stop/);
+        if (failure === 'forbidden') assert.match(stopped.output, /HTTP 403/);
+        if (failure === 'invalid JSON') assert.match(stopped.output, /invalid JSON response/);
+        assert.doesNotMatch(stopped.output, /Unexpected end of JSON/);
+        assert.equal(JSON.parse(readFileSync(statePath, 'utf8')).pid, process.pid);
+      }
+      const started = await run(process.execPath, [cli, 'start', '--port', String(port)]);
+      assert.equal(started.code, 0, started.output);
+      assert.match(started.output, /Discarding unconfirmed dev server record/);
+      assert.match(started.output, /ownership could not be confirmed for status/);
+      const replacement = JSON.parse(readFileSync(statePath, 'utf8'));
+      assert.notEqual(replacement.pid, process.pid);
+      assert.equal(alive(process.pid), true, 'recovery must leave the unrelated PID alive');
+      assert.equal(alive(replacement.pid), true);
+      assert.match(await (await fetch(replacement.url)).text(), /detached fixture/);
+      const stopped = await run(process.execPath, [cli, 'stop']);
+      assert.equal(stopped.code, 0, stopped.output);
+      assert.equal(alive(replacement.pid), false);
+      assert.equal(alive(process.pid), true);
+    } finally {
+      if (existsSync(statePath) && JSON.parse(readFileSync(statePath, 'utf8')).pid !== process.pid) {
+        const stopped = await run(process.execPath, [cli, 'stop']);
+        assert.equal(stopped.code, 0, stopped.output);
+      }
+      endpoint.closeAllConnections();
+      await new Promise(resolvePromise => endpoint.close(resolvePromise));
+      await rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    }
+  });
+}
+
+test('out-of-range ports are invalid values for a known option', async () => {
+  const result = await run(process.execPath, [join(root, 'scripts', 'dev-server.mjs'), 'start', '--port', '70000']);
+  assert.equal(result.code, 1, result.output);
+  assert.match(result.output, /Invalid value for --port/);
+  assert.doesNotMatch(result.output, /Unknown option/);
+});
+
 test('Vite readiness timeout kills its new child and leaves no ownership record', { timeout: 60000 }, async () => {
   const dir = fixture();
   try {
@@ -129,8 +205,10 @@ test('Vite readiness timeout kills its new child and leaves no ownership record'
 
 // Exercise the shipped launcher and a long-lived fixture executable. The build
 // is stubbed: this proves process/handle/readiness behavior without native UI.
-for (const outcome of ['ready', 'rotated', 'timeout', 'panic']) {
-  test(`run-dev detached ${outcome}: bounded return and launched PID lifecycle`, { timeout: 90000 }, async () => {
+const launchOutcomes = ['ready', 'rotated', 'timeout', 'panic'];
+if (process.platform === 'win32') launchOutcomes.push('interactive');
+for (const outcome of launchOutcomes) {
+  test(`run-dev ${outcome === 'interactive' ? 'interactive' : `detached ${outcome}`}: bounded return and launched PID lifecycle`, { timeout: 90000 }, async () => {
     const dir = fixture();
     const readinessSeconds = 6;
     let pid;
@@ -143,13 +221,15 @@ for (const outcome of ['ready', 'rotated', 'timeout', 'panic']) {
       mkdirSync(logDir, { recursive: true });
       if (outcome === 'rotated') writeFileSync(join(logDir, 'buildmesh.log'), 'old startup ready\nold data\nold tail\n');
       const preload = join(dir, 'app.cjs');
-      writeFileSync(preload, `if (process.execPath.includes('buildmesh-dev') || process.platform !== 'win32') {\nconst fs = require('node:fs');\nfs.writeFileSync(${JSON.stringify(join(dir, 'app-pid'))}, String(process.pid));\nfs.writeFileSync(${JSON.stringify(join(dir, 'launch-env.json'))}, JSON.stringify({backtrace: process.env.RUST_BACKTRACE, marker: process.env.CLAUDE_CODE_CHILD_SESSION}));\n${outcome === 'ready' ? `fs.appendFileSync(${JSON.stringify(join(logDir, 'buildmesh.log'))}, 'fixture ready\\n');` : outcome === 'rotated' ? `fs.writeFileSync(${JSON.stringify(join(logDir, 'buildmesh.log'))}, 'fixture ready\\n');` : outcome === 'panic' ? `fs.appendFileSync(${JSON.stringify(join(logDir, 'panic.log'))}, 'fixture panic\\n');` : ''}\nsetInterval(() => console.log('still alive'), 1000);\n}\n`);
+      writeFileSync(preload, `if (process.execPath.includes('buildmesh-dev') || process.platform !== 'win32') {\nconst fs = require('node:fs');\nfs.writeFileSync(${JSON.stringify(join(dir, 'app-pid'))}, String(process.pid));\nfs.writeFileSync(${JSON.stringify(join(dir, 'launch-env.json'))}, JSON.stringify({backtrace: process.env.RUST_BACKTRACE, marker: process.env.CLAUDE_CODE_CHILD_SESSION}));\n${['ready', 'interactive'].includes(outcome) ? `fs.appendFileSync(${JSON.stringify(join(logDir, 'buildmesh.log'))}, 'fixture ready\\n');` : outcome === 'rotated' ? `fs.writeFileSync(${JSON.stringify(join(logDir, 'buildmesh.log'))}, 'fixture ready\\n');` : outcome === 'panic' ? `fs.appendFileSync(${JSON.stringify(join(logDir, 'panic.log'))}, 'fixture panic\\n');` : ''}\nsetInterval(() => console.log('still alive'), 1000);\n}\n`);
       let result;
       if (process.platform === 'win32') {
         copyFileSync(process.execPath, join(binaryDir, 'buildmesh-dev.exe'));
         const wrapper = join(dir, 'launch.ps1');
         const quote = value => `'${value.replaceAll("'", "''")}'`;
-        writeFileSync(wrapper, `function npm { $global:LASTEXITCODE = 0 }\nfunction Get-Process { param($Name, $Id) if ($Id) { Microsoft.PowerShell.Management\\Get-Process -Id $Id -ErrorAction SilentlyContinue } }\n& ${quote(join(dir, 'scripts', 'run-dev.ps1'))} -Detach -ReadinessTimeoutSeconds ${readinessSeconds}\nexit $LASTEXITCODE\n`);
+        // Assert normal app visibility at the real launch boundary, then hide
+        // only this console fixture through the cmdlet adapter.
+        writeFileSync(wrapper, `function npm { $global:LASTEXITCODE = 0 }\nfunction Get-Process { param($Name, $Id) if ($Id) { Microsoft.PowerShell.Management\\Get-Process -Id $Id -ErrorAction SilentlyContinue } }\nfunction Start-Process { param($FilePath, [switch]$PassThru, $WindowStyle) if ($WindowStyle -eq 'Hidden') { throw 'Dev GUI visibility must not be forced hidden' }; Microsoft.PowerShell.Management\\Start-Process -FilePath $FilePath -PassThru:$PassThru -WindowStyle Hidden }\n& ${quote(join(dir, 'scripts', 'run-dev.ps1'))} ${outcome === 'interactive' ? '' : '-Detach'} -ReadinessTimeoutSeconds ${readinessSeconds}\nexit $LASTEXITCODE\n`);
         result = await run(ps, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', wrapper], {
           env: { ...environment, APPDATA: join(dir, 'data'), NODE_OPTIONS: `--require "${preload.replaceAll('\\', '/')}"`, CLAUDE_CODE_CHILD_SESSION: 'must-be-cleared' },
         });
@@ -170,7 +250,7 @@ for (const outcome of ['ready', 'rotated', 'timeout', 'panic']) {
       pid = Number(readFileSync(join(dir, 'app-pid'), 'utf8'));
       assert.match(result.output, new RegExp(`Launched PID: ${pid}`));
       assert.match(result.output, /Log: /);
-      const ready = ['ready', 'rotated'].includes(outcome);
+      const ready = ['ready', 'rotated', 'interactive'].includes(outcome);
       assert.ok(result.launchedAt, 'the launcher must report its PID');
       // Configured readiness budget, three-second Unix cleanup budget, and
       // one second for host scheduling; successful readiness needs no cleanup.
@@ -180,7 +260,7 @@ for (const outcome of ['ready', 'rotated', 'timeout', 'panic']) {
       const env = JSON.parse(readFileSync(join(dir, 'launch-env.json'), 'utf8'));
       assert.equal(env.backtrace, '1');
       assert.equal(env.marker, undefined);
-      if (ready) assert.match(result.output, /OK - Buildmesh Dev running detached/);
+      if (ready) assert.match(result.output, outcome === 'interactive' ? /OK - Buildmesh Dev running/ : /OK - Buildmesh Dev running detached/);
       else assert.match(result.output, outcome === 'panic' ? /panic detected/ : /readiness timed out/);
     } finally {
       if (!pid && existsSync(join(dir, 'app-pid'))) pid = Number(readFileSync(join(dir, 'app-pid'), 'utf8'));

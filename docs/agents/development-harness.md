@@ -131,8 +131,11 @@ Repeated starts reuse this worktree's server; a different requested port
 requires stopping it first. Occupied ports fail rather than adopting another
 server. Stop confirms ownership through the private loopback endpoint and
 closes only that Vite instance. Stale dead-PID records are removed; a live PID
-whose ownership cannot be confirmed is left alone with a diagnostic. CLI
-operations serialize with `.harness/dev-server.lock` and reclaim dead owners.
+whose ownership cannot be confirmed is left alone with a diagnostic. Stop
+retains that record on failure; a new start discards the unconfirmed record
+and tries a fresh strict-port launch without stopping the old PID. An occupied
+port still fails. CLI operations serialize with `.harness/dev-server.lock`
+and reclaim dead owners.
 Startup failure or timeout ends the newly launched child. Its handles are
 redirected, so the invoking shell can exit while the ready server keeps running.
 
@@ -142,8 +145,9 @@ to 30 seconds for a new `started|ready` log entry while the launched PID is
 alive. Configure that readiness budget with `-ReadinessTimeoutSeconds <n>` or
 `--readiness-timeout-seconds <n>` (1–300 seconds). A panic, early exit or timeout
 fails the launch and cleans up its PID. Success prints the PID and app log path
-and leaves the app running. Windows uses an independent ShellExecute launch;
-macOS/Linux redirect console output to `.harness/logs/dev-app.*.log` with nohup.
+and leaves the app running. Windows uses an independent ShellExecute launch
+with normal GUI visibility; macOS/Linux redirect console output to
+`.harness/logs/dev-app.*.log` with nohup.
 Stop the printed dev PID when finished. Existing dev instances are replaced
 as before; the stable hub is unaffected. Without detach, the existing launch
 check retains its process-alive fallback.

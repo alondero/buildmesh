@@ -28,13 +28,18 @@ function readState(path = statePath) {
 }
 
 async function control(state, action) {
-  const response = await fetch(`http://127.0.0.1:${state.controlPort}/${action}`, {
-    method: 'POST', headers: { Authorization: `Bearer ${state.token}` },
-    signal: AbortSignal.timeout(10000),
-  });
-  const reply = await response.json();
-  if (!response.ok || reply.pid !== state.pid || reply.token !== state.token) {
-    throw new Error('Dev server ownership could not be confirmed; no process was stopped');
+  try {
+    const response = await fetch(`http://127.0.0.1:${state.controlPort}/${action}`, {
+      method: 'POST', headers: { Authorization: `Bearer ${state.token}` },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const reply = await response.json().catch(error => {
+      throw new Error('invalid JSON response', { cause: error });
+    });
+    if (reply?.pid !== state.pid || reply?.token !== state.token) throw new Error('PID or token mismatch');
+  } catch (error) {
+    throw new Error(`Dev server ownership could not be confirmed for ${action}: ${error.message}`, { cause: error });
   }
 }
 
@@ -47,10 +52,16 @@ async function start({ port, timeoutMs }) {
   const remaining = () => Math.max(1, deadline - Date.now());
   const previous = readState();
   if (previous && alive(previous.pid)) {
-    await control(previous, 'status');
-    if (previous.port !== port) throw new Error(`This worktree already serves ${previous.url}; run npm run dev:stop first`);
-    describe(previous);
-    return;
+    let confirmed = false;
+    try { await control(previous, 'status'); confirmed = true; }
+    catch (error) {
+      console.warn(`Discarding unconfirmed dev server record for PID ${previous.pid}; leaving that process alone. ${error.message}`);
+    }
+    if (confirmed) {
+      if (previous.port !== port) throw new Error(`This worktree already serves ${previous.url}; run npm run dev:stop first`);
+      describe(previous);
+      return;
+    }
   }
   if (previous) unlinkSync(statePath);
   const log = openSync(logPath, 'a');
@@ -87,7 +98,13 @@ async function start({ port, timeoutMs }) {
     const response = await fetch(state.url, { signal: AbortSignal.timeout(remaining()) });
     if (!response.ok) throw new Error(`Vite readiness returned HTTP ${response.status}`);
     writeFileSync(statePath, JSON.stringify(state, null, 2) + '\n', { mode: 0o600 });
-    child.send('detach');
+    await new Promise((resolvePromise, reject) => {
+      const timer = setTimeout(() => reject(new Error('Vite detach message timed out')), remaining());
+      child.send('detach', error => {
+        clearTimeout(timer);
+        if (error) reject(error); else resolvePromise();
+      });
+    });
     child.disconnect();
     child.unref();
     describe(state);
@@ -167,7 +184,10 @@ async function main() {
   for (let i = 0; i < args.length; i += 2) {
     const value = Number(args[i + 1]);
     if (!Number.isInteger(value) || value <= 0) throw new Error(`Invalid value for ${args[i]}`);
-    if (args[i] === '--port' && value <= 65535) options.port = value;
+    if (args[i] === '--port') {
+      if (value > 65535) throw new Error('Invalid value for --port: expected 1-65535');
+      options.port = value;
+    }
     else if (args[i] === '--timeout-seconds') options.timeoutMs = value * 1000;
     else throw new Error(`Unknown option ${args[i]}`);
   }

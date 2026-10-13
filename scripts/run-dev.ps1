@@ -146,7 +146,7 @@ if ($ClearedMarkers.Count -gt 0) {
 try {
     # ShellExecute starts independently on Windows. RedirectStandard* creates
     # PowerShell stream pumps that can hold a captured shell open until exit.
-    $proc = Start-Process $Binary -PassThru -WindowStyle Hidden
+    $proc = Start-Process $Binary -PassThru
 } finally {
     if ($CdpPort -gt 0) {
         Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
