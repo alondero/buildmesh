@@ -62,7 +62,11 @@ an existing `device_sessions` row (`routes::session::login`) — minting an iden
 `pairing::exchange`, reached from `/api/pair` alone — so a recovery refresh adds no device
 row and cannot duplicate a session.
 
-The transport (`apiFetch` in `src/mobile/api.ts`) owns the whole policy:
+The transport in `src/mobile/api.ts` owns the whole policy, through two entry points:
+`apiFetch` (every data route) and `fetchMintTicket`. The ticket mint cannot route through
+`apiFetch` — it must hand a 429's `Retry-After` back to `mintWsTicketWithBackoff` — so it
+joins the same recovery seam explicitly rather than skipping it, since the terminal and
+events sockets are what a reconnecting phone opens first.
 
 - **One refresh per burst.** Screens fan out several requests at once, so a lost cookie
   arrives as a burst of 401s. They join a single in-flight `POST /api/session` promise; each
