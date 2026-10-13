@@ -802,6 +802,75 @@ test('the Windows wrapper builds in production and leaves the caller environment
     assert.ok(wrapper.includes(call) && !wrapper.includes(`Invoke-ProductionBuild ${call}`), `${call} must keep the test environment`);
   }
 });
+test('the Windows wrapper forwards build arguments to npm, which actually run them (#2255)', { skip: process.platform !== 'win32' ? 'the npm.cmd/npm.ps1 shim split only exists on Windows' : false }, t => {
+  // The text assertions above cannot see this defect: `& npm run @args` is a
+  // perfectly plausible-looking line that dropped its argument on the way to npm.
+  // In its `-Command` branch npm.ps1 rebuilds its own argv by re-parsing the
+  // *text* of the calling command, and the splat did not survive that. Observed
+  // against the pre-fix line: npm printed the lifecycle script list, exited 0,
+  // and the bundle gate only failed later on a missing dist. So drive the
+  // wrapper's own helper, executed, against a fixture package whose scripts
+  // record which one ran and under which NODE_ENV.
+  const cwd = mkdtempSync(join(tmpdir(), 'buildmesh-check-wrapper-'));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  // `npm_lifecycle_event` is npm's own name for the script it dispatched, which
+  // is what makes this a proof that the argument arrived rather than a check
+  // that the wrapper still contains the word `build`.
+  writeFileSync(join(cwd, 'record.cjs'), "const { writeFileSync } = require('node:fs');\nwriteFileSync(process.argv[2], JSON.stringify({ event: process.env.npm_lifecycle_event ?? null, nodeEnv: process.env.NODE_ENV ?? null }));\n");
+  writeFileSync(join(cwd, 'package.json'), JSON.stringify({
+    name: 'check-wrapper-fixture',
+    version: '0.0.0',
+    private: true,
+    scripts: { build: 'node record.cjs build.marker', 'build:mobile': 'node record.cjs mobile.marker' }
+  }, null, 2));
+  // Load the helper out of the real wrapper rather than restating it here, so
+  // this stays a regression against scripts/check.ps1 itself. The helper reads
+  // only $args and $env:NODE_ENV, so the region up to the next function is
+  // self-contained.
+  writeFileSync(join(cwd, 'drive.ps1'), [
+    "$ErrorActionPreference = 'Stop'",
+    "$wrapper = [IO.File]::ReadAllText($args[0])",
+    "$from = $wrapper.IndexOf('function Resolve-NpmCommand')",
+    "$to = $wrapper.IndexOf('function Ensure-MobileBuilt')",
+    "if ($from -lt 0 -or $to -le $from) { throw 'could not locate the production-build helpers in scripts/check.ps1' }",
+    'Invoke-Expression $wrapper.Substring($from, $to - $from)',
+    'Write-Host "RESOLVED=$(Resolve-NpmCommand)"',
+    "$env:NODE_ENV = 'test'",
+    'Push-Location $args[1]',
+    'try {',
+    '  Invoke-ProductionBuild build:mobile',
+    "  Write-Host \"MOBILE_EXIT=$LASTEXITCODE\"",
+    '  Invoke-ProductionBuild build',
+    "  Write-Host \"BUILD_EXIT=$LASTEXITCODE\"",
+    '} finally { Pop-Location }',
+    'Write-Host "RESTORED=[$env:NODE_ENV]"'
+  ].join('\n'));
+
+  const run = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(cwd, 'drive.ps1'), join(root, 'scripts/check.ps1'), cwd], { cwd: root, encoding: 'utf8', timeout: 120000 });
+  const output = `${run.stdout || ''}${run.stderr || ''}`;
+  assert.equal(run.status, 0, `${run.error || ''}\n${output}`);
+  // Pin the branch that fixes the bug: the .cmd shim is the one that carries a
+  // real argument vector. On a PATH without it the wrapper falls back to npm.ps1
+  // and this defect returns, so fail loudly rather than pass by accident.
+  const resolved = /RESOLVED=(.+)/.exec(run.stdout)?.[1]?.trim();
+  assert.match(resolved ?? '', /npm\.cmd$/i, `expected the .cmd shim, resolved "${resolved}"`);
+  // The dropped-argument symptom, named so a regression reports as itself.
+  assert.doesNotMatch(output, /Scripts available in .*npm run/, 'npm listed scripts instead of running one');
+  const marker = name => {
+    const path = join(cwd, name);
+    assert.ok(existsSync(path), `${name} was never written, so the build argument did not reach npm:\n${output}`);
+    return JSON.parse(readFileSync(path, 'utf8'));
+  };
+  assert.deepEqual(marker('mobile.marker'), { event: 'build:mobile', nodeEnv: 'production' });
+  assert.deepEqual(marker('build.marker'), { event: 'build', nodeEnv: 'production' });
+  // npm prints its own banner between the two calls, so assert each exit code
+  // on its own rather than expecting them to be adjacent.
+  assert.match(run.stdout, /MOBILE_EXIT=0/, output);
+  assert.match(run.stdout, /BUILD_EXIT=0/, output);
+  // #2013 still holds across the fixed invocation: the caller's test environment
+  // comes back, because the vitest gates in the same script depend on it.
+  assert.match(run.stdout, /RESTORED=\[test\]/, output);
+});
 test('missing dependencies preflight BLOCKED without launching tests', async t => {
   const fixture = repo(t);
   const result = await runGate(fixture.cwd, { id: 'frontend', command: ['npm', 'run', 'test'], minutes: 1, tests: 'vitest' }, fixture.base);
