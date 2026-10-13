@@ -208,17 +208,37 @@ impl CircuitGraph {
                     .iter()
                     .any(|edge| edge.from == from && edge.to == to && edge.condition == condition)
             };
-        for edge in canonical.edges.iter().filter(|edge| {
-            matches!(
-                edge.from.as_str(),
-                "review_classifier" | "review_retry" | "close_approved"
-            ) && matches!(
-                edge.to.as_str(),
-                "follow_feedback" | "close_approved" | "review_exhausted" | "complete"
-            )
-        }) {
-            if missing_edge(&edge.from, &edge.to, edge.condition, &self.edges) {
-                self.edges.push(edge.clone());
+        // The routes the verdict shape shipped with, written out rather than
+        // copied from today's blueprint: approval closed the reviewer and
+        // completed the run, because the merge step came later. Reading them off
+        // the current blueprint hands the graph `close_approved -> merge` naming
+        // a node this upgrade never adds, and the publication-flow upgrade then
+        // has no `close_approved -> complete` edge left to retarget.
+        let introduced = [
+            (
+                "review_classifier",
+                "follow_feedback",
+                EdgeCondition::OnOutcome(StepOutcome::Working),
+            ),
+            (
+                "review_classifier",
+                "close_approved",
+                EdgeCondition::OnOutcome(StepOutcome::Completed),
+            ),
+            (
+                "review_retry",
+                "review_exhausted",
+                EdgeCondition::OnOutcome(StepOutcome::Failed),
+            ),
+            ("close_approved", "complete", EdgeCondition::Always),
+        ];
+        for (from, to, condition) in introduced {
+            if missing_edge(from, to, condition, &self.edges) {
+                self.edges.push(CircuitEdge {
+                    from: from.into(),
+                    to: to.into(),
+                    condition,
+                });
                 changed = true;
             }
         }
@@ -726,6 +746,38 @@ mod tests {
             assert!(!upgrade(&mut actual, target), "second pass changes nothing");
             assert_eq!(actual, after);
         }
+    }
+
+    #[test]
+    fn the_oldest_saved_issue_review_reaches_todays_topology() {
+        // The verdict upgrade introduces `close_approved` but only the merge
+        // step's edge out of it; without that edge the publication-flow upgrade
+        // finds nothing to retarget and the chain stops, leaving approval on a
+        // dead end. The oldest saved shape must still arrive at today's flow.
+        let mut legacy = CircuitGraph::from_json(include_str!(
+            "../../tests/fixtures/legacy-issue-review-circuit.json"
+        ))
+        .unwrap();
+        let mut verdict = legacy.clone();
+        assert!(verdict.upgrade_issue_review_verdict());
+        assert!(verdict.validate().is_ok());
+        assert!(
+            verdict.edges.iter().any(|edge| {
+                edge.from == "close_approved"
+                    && edge.to == "complete"
+                    && edge.condition == EdgeCondition::Always
+            }),
+            "the verdict shape must hand approval to the completed run"
+        );
+
+        assert!(upgrade(&mut legacy, UpgradeTarget::Blueprint));
+        legacy.validate().unwrap();
+        assert!(
+            legacy.has_review_topology_of(&CircuitGraph::issue_driven_autopilot_review(
+                "buildmesh:run"
+            ))
+        );
+        assert!(legacy.node("merge_verify").is_some());
     }
 
     #[test]
