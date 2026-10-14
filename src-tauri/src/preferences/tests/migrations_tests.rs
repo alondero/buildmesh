@@ -2,24 +2,20 @@
 
 use super::super::migrations::migrate_prefs_json;
 use super::with_temp_dir;
-use crate::preferences::{
-    load, save, ApiSurface, AppPreferences, ProviderAccount,
-};
+use crate::preferences::{load, save, ApiSurface, AppPreferences, ProviderAccount};
 
 #[test]
 fn provider_accounts_migrates_stored_kimi_via_claude_into_first_class_kimi() {
     with_temp_dir(|_| {
         save(AppPreferences {
-            provider_accounts: vec![
-                ProviderAccount {
-                    id: "kimi-via-claude".to_string(),
-                    name: "Kimi (via Claude)".to_string(),
-                    enabled: true,
-                    billing_mode: crate::preferences::BillingMode::PayAsYouGo,
-                    claude_compatible: true,
-                    api_key: Some("key-from-companion".to_string()),
-                },
-            ],
+            provider_accounts: vec![ProviderAccount {
+                id: "kimi-via-claude".to_string(),
+                name: "Kimi (via Claude)".to_string(),
+                enabled: true,
+                billing_mode: crate::preferences::BillingMode::PayAsYouGo,
+                claude_compatible: true,
+                api_key: Some("key-from-companion".to_string()),
+            }],
             ..Default::default()
         })
         .unwrap();
@@ -102,11 +98,7 @@ fn migrate_prefs_json_does_not_auto_pair_after_flag_set() {
     });
     let changed = migrate_prefs_json(&mut value);
     assert!(!changed);
-    let pairings = value
-        .get("provider_pairings")
-        .unwrap()
-        .as_array()
-        .unwrap();
+    let pairings = value.get("provider_pairings").unwrap().as_array().unwrap();
     assert!(pairings.is_empty());
 }
 
@@ -128,11 +120,7 @@ fn migrate_prefs_json_skips_keyed_generic_without_endpoint() {
     });
     let changed = migrate_prefs_json(&mut value);
     assert!(changed);
-    let pairings = value
-        .get("provider_pairings")
-        .unwrap()
-        .as_array()
-        .unwrap();
+    let pairings = value.get("provider_pairings").unwrap().as_array().unwrap();
     assert!(pairings.is_empty());
 }
 

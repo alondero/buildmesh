@@ -285,7 +285,9 @@ pub(super) async fn provision_workspace(
     let routing_harness_id = node.provider.clone();
     let routing_resolved = resolved.clone();
     let routing_task = tauri::async_runtime::spawn_blocking(move || {
-        if let Some(plan) = crate::db::node_spawn_configuration(session_id, &routing_harness_id)?.and_then(|c| c.resolved) {
+        if let Some(plan) = crate::db::node_spawn_configuration(session_id, &routing_harness_id)?
+            .and_then(|c| c.resolved)
+        {
             return crate::agent::launch_routing::prepare_snapshot(&plan, &routing_resolved);
         }
         crate::agent::launch_routing::prepare(&routing_harness_id, provider, &routing_resolved)
@@ -514,7 +516,8 @@ pub(super) async fn provision_workspace(
             );
         }
         Ok(())
-    }).await?;
+    })
+    .await?;
     timer.checkpoint("after_worktree_sanitize");
 
     // Muse's WSL and native Windows runtimes scan project rules and skills

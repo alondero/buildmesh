@@ -150,8 +150,8 @@ pub(crate) fn write_bundle(
         redacted: prologue.redacted,
         sections: described,
     };
-    let header_bytes = serde_json::to_vec(&header)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let header_bytes =
+        serde_json::to_vec(&header).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     if header_bytes.len() as u64 > MAX_HEADER_BYTES as u64 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -338,9 +338,7 @@ impl BundleReader {
         let section = self
             .header
             .section(name)
-            .ok_or_else(|| {
-                BundleError::Invalid(format!("bundle has no `{name}` section"))
-            })?
+            .ok_or_else(|| BundleError::Invalid(format!("bundle has no `{name}` section")))?
             .clone();
         if section.length > MAX_SECTION_BYTES {
             return Err(BundleError::Invalid(format!(
@@ -354,13 +352,15 @@ impl BundleReader {
 
     /// Stream one section to `dest` without buffering it, so a large database
     /// never lands in memory twice.
-    pub(crate) fn extract_section_to(&mut self, name: &str, dest: &Path) -> Result<u64, BundleError> {
+    pub(crate) fn extract_section_to(
+        &mut self,
+        name: &str,
+        dest: &Path,
+    ) -> Result<u64, BundleError> {
         let section = self
             .header
             .section(name)
-            .ok_or_else(|| {
-                BundleError::Invalid(format!("bundle has no `{name}` section"))
-            })?
+            .ok_or_else(|| BundleError::Invalid(format!("bundle has no `{name}` section")))?
             .clone();
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
@@ -418,7 +418,10 @@ fn read_exact_at(file: &mut File, offset: u64, buf: &mut [u8]) -> io::Result<()>
     if read != buf.len() {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
-            format!("expected {} bytes at offset {offset}, got {read}", buf.len()),
+            format!(
+                "expected {} bytes at offset {offset}, got {read}",
+                buf.len()
+            ),
         ));
     }
     Ok(())

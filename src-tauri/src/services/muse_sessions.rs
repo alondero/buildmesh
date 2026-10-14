@@ -277,11 +277,7 @@ mod tests {
             "payload_type": "runtime.session.metadata",
             "payload": {"kind": "metadata", "record": {"workspace_root": workspace}},
         });
-        std::fs::write(
-            dir.join(SESSION_LOG),
-            format!("{envelope}\n{metadata}\n"),
-        )
-        .unwrap();
+        std::fs::write(dir.join(SESSION_LOG), format!("{envelope}\n{metadata}\n")).unwrap();
     }
 
     #[test]
@@ -327,7 +323,10 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO sessions VALUES (?1, ?2)",
-                rusqlite::params!["01a0c000-0000-7000-8000-000000000000", older.to_str().unwrap()],
+                rusqlite::params![
+                    "01a0c000-0000-7000-8000-000000000000",
+                    older.to_str().unwrap()
+                ],
             )
             .unwrap();
         drop(connection);
@@ -369,8 +368,7 @@ mod tests {
             10_000,
         );
         // No index at all → the tree resolves.
-        assert!(log_path(root.path(), SESSION)
-            .is_some_and(|path| path.ends_with(SESSION_LOG)));
+        assert!(log_path(root.path(), SESSION).is_some_and(|path| path.ends_with(SESSION_LOG)));
 
         // With an index row, the row wins even when the tree also matches.
         let indexed = root.path().join("indexed-elsewhere.jsonl");

@@ -85,7 +85,7 @@ pub struct DiffHunk {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "DiffLine.ts")]
 pub struct DiffLine {
-    pub line_type: String,   // "context" | "add" | "remove"
+    pub line_type: String, // "context" | "add" | "remove"
     pub content: String,
     #[ts(as = "Option<i32>")]
     pub old_num: Option<usize>,

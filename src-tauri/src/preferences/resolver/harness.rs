@@ -18,7 +18,9 @@ pub fn default_harness_profiles() -> Vec<HarnessProfile> {
         id: "terminal".to_string(),
         name: "Terminal".to_string(),
         harness: "terminal".to_string(),
-        runtime: None, wsl_distro: None, executable: None,
+        runtime: None,
+        wsl_distro: None,
+        executable: None,
     }]
 }
 
@@ -33,7 +35,10 @@ pub fn harness_profiles() -> Vec<HarnessProfile> {
     let stored = match load() {
         Ok(prefs) => prefs.harness_profiles,
         Err(e) => {
-            tracing::warn!("preferences::harness_profiles load failed, using defaults: {}", e);
+            tracing::warn!(
+                "preferences::harness_profiles load failed, using defaults: {}",
+                e
+            );
             Vec::new()
         }
     };
@@ -52,7 +57,8 @@ pub fn harness_runtime(profile_id: &str) -> Option<crate::models::EnvType> {
 }
 
 pub fn resolved_harness_profile(profile_id: &str) -> Option<HarnessProfile> {
-    let selected = super::super::launch_configurations::selection_option(profile_id).unwrap_or_else(|_| profile_id.into());
+    let selected = super::super::launch_configurations::selection_option(profile_id)
+        .unwrap_or_else(|_| profile_id.into());
     let profile_id = selected.as_str();
     // Bind the typed value so its lifetime outlives the borrowed
     // `harness_id` slice — issue #1659 item 1 — the original
@@ -61,15 +67,29 @@ pub fn resolved_harness_profile(profile_id: &str) -> Option<HarnessProfile> {
     let id = crate::agent::provider::SpawnOptionId::from(profile_id);
     let harness_id = id.harness_id();
     let profiles = harness_profiles();
-    let preferred = crate::agent::detection::preferred_profiles(&crate::agent::detection::currently_installed_profiles(profiles.clone()),
+    let preferred = crate::agent::detection::preferred_profiles(
+        &crate::agent::detection::currently_installed_profiles(profiles.clone()),
         crate::agent::provider::Platform::current(),
-        if cfg!(windows) { crate::env::get_default_wsl_distro() } else { None }.as_deref());
-    if let Some(profile) = preferred.iter().find(|p| p.id == harness_id) { return Some(profile.clone()); }
+        if cfg!(windows) {
+            crate::env::get_default_wsl_distro()
+        } else {
+            None
+        }
+        .as_deref(),
+    );
+    if let Some(profile) = preferred.iter().find(|p| p.id == harness_id) {
+        return Some(profile.clone());
+    }
     // Canonical ids follow the currently preferred installation; explicit
     // runtime ids below retain their saved profile for existing sessions.
     if let Some(canonical) = crate::agent::detection::canonical_harness(harness_id) {
-        let matching: Vec<_> = preferred.iter().filter(|p| p.harness == canonical).collect();
-        if matching.len() == 1 { return Some(matching[0].clone()); }
+        let matching: Vec<_> = preferred
+            .iter()
+            .filter(|p| p.harness == canonical)
+            .collect();
+        if matching.len() == 1 {
+            return Some(matching[0].clone());
+        }
     }
     if let Some(profile) = profiles.iter().find(|p| p.id == harness_id) {
         return Some(profile.clone());
@@ -78,7 +98,11 @@ pub fn resolved_harness_profile(profile_id: &str) -> Option<HarnessProfile> {
     // installation can supply a runtime for those ids.
     let mut matching = preferred.into_iter().filter(|p| p.harness == harness_id);
     let profile = matching.next()?;
-    if matching.next().is_some() { None } else { Some(profile) }
+    if matching.next().is_some() {
+        None
+    } else {
+        Some(profile)
+    }
 }
 
 /// The user's stored spawn-menu harness order — a list of row ids applied by
@@ -89,7 +113,10 @@ pub fn harness_order() -> Vec<String> {
     match load() {
         Ok(prefs) => prefs.harness_order,
         Err(e) => {
-            tracing::warn!("preferences::harness_order load failed, using natural order: {}", e);
+            tracing::warn!(
+                "preferences::harness_order load failed, using natural order: {}",
+                e
+            );
             Vec::new()
         }
     }
@@ -177,7 +204,11 @@ pub fn merge_detected_profiles(detected: Vec<HarnessProfile>) -> Result<usize, S
     let before = prefs.harness_profiles.len();
     let mut executable_updated = false;
     for profile in detected {
-        if let Some(existing) = prefs.harness_profiles.iter_mut().find(|p| p.id == profile.id) {
+        if let Some(existing) = prefs
+            .harness_profiles
+            .iter_mut()
+            .find(|p| p.id == profile.id)
+        {
             // Refresh only the resolved executable. Never touch the
             // user's `name` / `runtime` / `wsl_distro` — those are
             // user-owned (issue #1773 review: a stored
@@ -222,14 +253,19 @@ pub fn merge_detected_profiles(detected: Vec<HarnessProfile>) -> Result<usize, S
 /// `circuit::compatibility::resolve_circuit_spawn_option` each parsed
 /// `new_provider` twice across the two calls).
 pub fn resolve_harness_provider(profile_id: &str) -> Provider {
-    let selected = super::super::launch_configurations::selection_option(profile_id).unwrap_or_else(|_| profile_id.into());
-    resolve_harness_provider_for(&crate::agent::provider::SpawnOptionId::from(selected.as_str()))
+    let selected = super::super::launch_configurations::selection_option(profile_id)
+        .unwrap_or_else(|_| profile_id.into());
+    resolve_harness_provider_for(&crate::agent::provider::SpawnOptionId::from(
+        selected.as_str(),
+    ))
 }
 
 /// Typed entry point — accept an already-parsed [`SpawnOptionId`] and
 /// resolve the executor from its harness half (see
 /// [`resolve_harness_provider`] for the rationale).
-pub fn resolve_harness_provider_for(spawn_option: &crate::agent::provider::SpawnOptionId) -> Provider {
+pub fn resolve_harness_provider_for(
+    spawn_option: &crate::agent::provider::SpawnOptionId,
+) -> Provider {
     let harness_id = spawn_option.harness_id();
     match harness_profiles().into_iter().find(|p| p.id == harness_id) {
         Some(profile) => Provider::from_db_str(&profile.harness),
@@ -254,7 +290,9 @@ pub fn harness_capabilities_for(profile_id: &str) -> Option<HarnessCapabilities>
     if !is_known_harness_id(profile_id) {
         return None;
     }
-    Some(capabilities_for(resolve_harness_provider(profile_id).adapter()))
+    Some(capabilities_for(
+        resolve_harness_provider(profile_id).adapter(),
+    ))
 }
 
 /// True iff `profile_id` names a known Agent Harness — a built-in adapter id
@@ -276,9 +314,7 @@ pub fn is_known_harness_id(profile_id: &str) -> bool {
     // Built-ins (`BUILTIN_HARNESS_IDS` covers every adapter id plus the
     // legacy `"anthropic"` alias). `contains` short-circuits on the first
     // hit — same semantics as `iter().any()` but cheaper to read.
-    if crate::agent::provider::BUILTIN_HARNESS_IDS
-        .contains(&normalized.as_str())
-    {
+    if crate::agent::provider::BUILTIN_HARNESS_IDS.contains(&normalized.as_str()) {
         return true;
     }
     // User-stored profiles (custom Claude-compatible profiles like

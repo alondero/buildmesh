@@ -31,8 +31,8 @@ pub async fn get_git_prune_info(mesh_id: i64) -> Result<Vec<GitRepoPruneInfo>, S
 /// Sync core for [`get_git_prune_info`] — plain fn so the command can offload
 /// it to the blocking pool.
 fn get_git_prune_info_blocking(mesh_id: i64) -> Result<Vec<GitRepoPruneInfo>, String> {
-    let mesh = db::get_mesh_by_id(mesh_id)
-        .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+    let mesh =
+        db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
 
     // Cross-reference worktree paths AND branch names against THIS mesh's
     // non-archived agent nodes (issue #661 — mesh-scoped symmetry).
@@ -346,7 +346,11 @@ const SQUASH_SCAN_CAP: usize = 2000;
 /// the same way. False negatives are safe (the branch just isn't recommended);
 /// a patch-id match is strong evidence the identical change is already on main.
 fn branch_is_merged_into_main(repo: &Repository, main_oid: Oid, branch_oid: Oid) -> bool {
-    if main_oid == branch_oid || repo.graph_descendant_of(main_oid, branch_oid).unwrap_or(false) {
+    if main_oid == branch_oid
+        || repo
+            .graph_descendant_of(main_oid, branch_oid)
+            .unwrap_or(false)
+    {
         return true;
     }
 
@@ -368,8 +372,14 @@ fn branch_is_merged_into_main(repo: &Repository, main_oid: Oid, branch_oid: Oid)
 /// Patch-id of the cumulative diff from `from` to `to`. `Ok(None)` = the trees
 /// are identical (empty diff); `Err(())` = it could not be computed.
 fn cumulative_patch_id(repo: &Repository, from: Oid, to: Oid) -> Result<Option<Oid>, ()> {
-    let from_tree = repo.find_commit(from).and_then(|c| c.tree()).map_err(|_| ())?;
-    let to_tree = repo.find_commit(to).and_then(|c| c.tree()).map_err(|_| ())?;
+    let from_tree = repo
+        .find_commit(from)
+        .and_then(|c| c.tree())
+        .map_err(|_| ())?;
+    let to_tree = repo
+        .find_commit(to)
+        .and_then(|c| c.tree())
+        .map_err(|_| ())?;
     let diff = repo
         .diff_tree_to_tree(Some(&from_tree), Some(&to_tree), None)
         .map_err(|_| ())?;
@@ -469,7 +479,10 @@ fn collect_prune_info(
         std::collections::HashMap::new();
 
     if let Some(workdir) = repo.workdir() {
-        let path = workdir.to_string_lossy().trim_end_matches(['/', '\\']).to_string();
+        let path = workdir
+            .to_string_lossy()
+            .trim_end_matches(['/', '\\'])
+            .to_string();
         let branch = primitives::head_branch_name(&repo);
         if let Some(ref b) = branch {
             branch_to_wt_path.insert(b.clone(), path.clone());
@@ -494,7 +507,11 @@ fn collect_prune_info(
                 Ok(w) => w,
                 Err(_) => continue,
             };
-            let path = wt.path().to_string_lossy().trim_end_matches(['/', '\\']).to_string();
+            let path = wt
+                .path()
+                .to_string_lossy()
+                .trim_end_matches(['/', '\\'])
+                .to_string();
             let branch = Repository::open(wt.path())
                 .ok()
                 .and_then(|r| primitives::head_branch_name(&r));
@@ -541,9 +558,7 @@ fn collect_prune_info(
             if let Some(upstream_ref) = upstream_buf.as_str() {
                 match repo.find_reference(upstream_ref) {
                     Ok(up_ref) => {
-                        if let (Some(local), Some(up)) =
-                            (branch_oid, up_ref.target())
-                        {
+                        if let (Some(local), Some(up)) = (branch_oid, up_ref.target()) {
                             if let Ok((a, b)) = primitives::ahead_behind(&repo, local, up) {
                                 ahead = a as u64;
                                 behind = b as u64;
@@ -610,7 +625,9 @@ fn collect_prune_info(
 
 fn path_is_active(path: &str, active_paths: &[String]) -> bool {
     let norm = primitives::normalize_for_compare(path);
-    active_paths.iter().any(|p| primitives::normalize_for_compare(p) == norm)
+    active_paths
+        .iter()
+        .any(|p| primitives::normalize_for_compare(p) == norm)
 }
 
 /// A worktree is stale when it points at a branch that no longer exists

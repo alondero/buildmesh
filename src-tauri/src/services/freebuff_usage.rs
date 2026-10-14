@@ -112,8 +112,7 @@ fn freebuff_credential_paths() -> Vec<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         if let Some(username) = env::var("USERNAME").ok().filter(|s| !s.is_empty()) {
-            let linux_path =
-                format!("/home/{}/.config/manicode/credentials.json", username);
+            let linux_path = format!("/home/{}/.config/manicode/credentials.json", username);
             let host_path = crate::env::to_host_path(&linux_path);
             if host_path != linux_path {
                 paths.push(PathBuf::from(host_path));
@@ -166,7 +165,11 @@ fn read_freebuff_credentials(candidates: &[PathBuf]) -> Result<FreebuffAuth, Usa
         let fingerprint = trimmed_non_blank(creds.fingerprint_id.as_deref());
         let email = trimmed_non_blank(creds.email.as_deref());
         if let (Some(token), Some(fingerprint), Some(email)) = (token, fingerprint, email) {
-            return Ok(FreebuffAuth { token, fingerprint, email });
+            return Ok(FreebuffAuth {
+                token,
+                fingerprint,
+                email,
+            });
         }
     }
     Err(UsageError::NoCredential(
@@ -449,8 +452,7 @@ struct StatusEnvelope<'a> {
 /// borrows the `status` slice from `body`.
 fn is_no_active_session(body: &str) -> bool {
     body.is_empty()
-        || serde_json::from_str::<StatusEnvelope>(body)
-            .is_ok_and(|e| e.status == Some("none"))
+        || serde_json::from_str::<StatusEnvelope>(body).is_ok_and(|e| e.status == Some("none"))
 }
 
 /// Classify 401 (Unauthorized). An unparseable body falls through to
@@ -490,9 +492,9 @@ fn classify_403_error(body: &str) -> StatusOutcome {
     };
     match env.status {
         Some("banned") => StatusOutcome::Rejected("Freebuff account suspended".to_string()),
-        Some("country_blocked") => StatusOutcome::Unavailable(
-            "Freebuff is not available in this region".to_string(),
-        ),
+        Some("country_blocked") => {
+            StatusOutcome::Unavailable("Freebuff is not available in this region".to_string())
+        }
         // Any other `status` value (recognised or absent) indicates the
         // upstream actively rejected the request -- surface as
         // Unavailable so the user can investigate without their login
@@ -543,8 +545,8 @@ fn classify_status(status: u16, body: &str) -> StatusOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
     use crate::services::usage::spawn_loopback;
+    use std::path::Path;
 
     /// Helper: write a `credentials.json` with the standard three fields
     /// into a tempdir. Mirrors the cursor / commandcode test fixtures.
@@ -636,7 +638,10 @@ mod tests {
         // the NaN / Infinity branches below.
         let body = r#"{ "earnedSessions": -5.0 }"#;
         let (_, balance) = parse_freebuff_response(body).expect("parse");
-        assert!(balance.is_none(), "negative earnedSessions must be filtered out");
+        assert!(
+            balance.is_none(),
+            "negative earnedSessions must be filtered out"
+        );
     }
 
     #[test]
@@ -668,7 +673,10 @@ mod tests {
         // `<UsagePanel>` card doesn't break its layout.
         let body = "<html>\n  <body><h1>502 Bad Gateway</h1></body>\n</html>";
         let result = clamp_error_body(body);
-        assert!(!result.contains('\n'), "must collapse newlines, got {result:?}");
+        assert!(
+            !result.contains('\n'),
+            "must collapse newlines, got {result:?}"
+        );
         assert!(result.starts_with("<html>"));
         assert!(result.contains("502 Bad Gateway"));
     }
@@ -681,7 +689,10 @@ mod tests {
         let long_body = "a".repeat(ERROR_BODY_MAX_CHARS * 10);
         let result = clamp_error_body(&long_body);
         let char_count = result.chars().count();
-        assert!(char_count <= ERROR_BODY_MAX_CHARS + 1, "got {char_count} chars");
+        assert!(
+            char_count <= ERROR_BODY_MAX_CHARS + 1,
+            "got {char_count} chars"
+        );
         assert!(result.ends_with('…'), "expected `…` suffix, got {result:?}");
     }
 
@@ -734,7 +745,9 @@ mod tests {
         // The process environment is shared state: this mutation has to
         // exclude every other test that mutates it *and* every test that
         // snapshots it, so it takes the one crate-wide lock (issue #2048).
-        let _env = crate::env::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = crate::env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let previous = env::var_os("XDG_CONFIG_HOME");
         // SAFETY: `ENV_LOCK` above excludes every other test that touches the
@@ -785,10 +798,7 @@ mod tests {
         // bearer — the upstream quota endpoint would 401 with
         // incomplete metadata.
         let dir = tempfile::tempdir().unwrap();
-        let path = write_freebuff_credentials(
-            dir.path(),
-            r#"{ "authToken": "fb_test_token_2" }"#,
-        );
+        let path = write_freebuff_credentials(dir.path(), r#"{ "authToken": "fb_test_token_2" }"#);
         let candidates = vec![path];
         let err = read_freebuff_credentials(&candidates).expect_err("missing fields");
         assert!(
@@ -1045,8 +1055,7 @@ mod tests {
         );
         let port = spawn_loopback(1, |req| {
             let _ = req.respond(
-                tiny_http::Response::from_string(r#"{"status":"banned"}"#)
-                    .with_status_code(403),
+                tiny_http::Response::from_string(r#"{"status":"banned"}"#).with_status_code(403),
             );
         });
         match freebuff_usage_with(
@@ -1202,9 +1211,8 @@ mod tests {
             // `long_body` is moved into the `Fn` closure via `move`; `Fn`
             // closures can be called multiple times so `tiny_http::Response::from_string`
             // consuming it would require `Clone` (one clone per request).
-            let _ = req.respond(
-                tiny_http::Response::from_string(long_body.clone()).with_status_code(500),
-            );
+            let _ = req
+                .respond(tiny_http::Response::from_string(long_body.clone()).with_status_code(500));
         });
         match freebuff_usage_with(
             &one_candidate(&path),
@@ -1307,7 +1315,10 @@ mod tests {
             let prefix = format!("{}:", name);
             headers
                 .iter()
-                .find(|h| h.to_ascii_lowercase().starts_with(&prefix.to_ascii_lowercase()))
+                .find(|h| {
+                    h.to_ascii_lowercase()
+                        .starts_with(&prefix.to_ascii_lowercase())
+                })
                 .and_then(|h| h.split_once(": ").map(|(_, v)| v.to_string()))
         };
         let auth = header_lookup("Authorization").expect("Authorization header");

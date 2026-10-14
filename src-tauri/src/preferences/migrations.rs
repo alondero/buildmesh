@@ -32,7 +32,6 @@ pub(crate) fn migrate_prefs_json(value: &mut serde_json::Value) -> bool {
         changed = true;
     }
 
-
     let claude_harness = claude_harness_id_from_json(root.get("harness_profiles"));
     let already_migrated = root
         .get("ad0025_account_pairings_migrated")
@@ -60,10 +59,7 @@ pub(crate) fn migrate_prefs_json(value: &mut serde_json::Value) -> bool {
     let mut pairings_to_add: Vec<serde_json::Value> = Vec::new();
 
     if !already_migrated {
-        if let Some(accounts) = root
-            .get("provider_accounts")
-            .and_then(|v| v.as_array())
-        {
+        if let Some(accounts) = root.get("provider_accounts").and_then(|v| v.as_array()) {
             for account in accounts {
                 let Some(obj) = account.as_object() else {
                     continue;
@@ -76,10 +72,7 @@ pub(crate) fn migrate_prefs_json(value: &mut serde_json::Value) -> bool {
                 if id.is_empty() || !is_claude_compatible_id(&id) {
                     continue;
                 }
-                let enabled = obj
-                    .get("enabled")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
+                let enabled = obj.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
                 let api_key = obj
                     .get("api_key")
                     .and_then(|v| v.as_str())
@@ -201,9 +194,10 @@ fn migrate_kimi_companion_json(root: &mut serde_json::Map<String, serde_json::Va
     else {
         return false;
     };
-    let Some(companion_idx) = accounts.iter().position(|a| {
-        a.get("id").and_then(|v| v.as_str()) == Some("kimi-via-claude")
-    }) else {
+    let Some(companion_idx) = accounts
+        .iter()
+        .position(|a| a.get("id").and_then(|v| v.as_str()) == Some("kimi-via-claude"))
+    else {
         return false;
     };
     let companion = accounts[companion_idx].clone();
@@ -213,9 +207,10 @@ fn migrate_kimi_companion_json(root: &mut serde_json::Map<String, serde_json::Va
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
-    if let Some(kimi) = accounts.iter_mut().find(|a| {
-        a.get("id").and_then(|v| v.as_str()) == Some("kimi")
-    }) {
+    if let Some(kimi) = accounts
+        .iter_mut()
+        .find(|a| a.get("id").and_then(|v| v.as_str()) == Some("kimi"))
+    {
         if let Some(obj) = kimi.as_object_mut() {
             let empty = obj
                 .get("api_key")
@@ -262,15 +257,23 @@ mod circuit_pool_tests {
 
     #[test]
     fn circuit_pool_migration_preserves_pause_limit_and_uncapped_values() {
-        for pool in [serde_json::json!(0), serde_json::json!(5), serde_json::Value::Null] {
+        for pool in [
+            serde_json::json!(0),
+            serde_json::json!(5),
+            serde_json::Value::Null,
+        ] {
             let mut value = serde_json::json!({"autopilot_pool_size": pool});
             migrate_prefs_json(&mut value);
             assert_eq!(value["circuit_agent_pool_size"], pool);
             assert!(value.get("autopilot_pool_size").is_none());
             migrate_prefs_json(&mut value);
             assert_eq!(value["circuit_agent_pool_size"], pool);
-            let preferences: super::super::model::AppPreferences = serde_json::from_value(value).unwrap();
-            assert_eq!(preferences.circuit_agent_pool_size, pool.as_u64().map(|v| v as u32));
+            let preferences: super::super::model::AppPreferences =
+                serde_json::from_value(value).unwrap();
+            assert_eq!(
+                preferences.circuit_agent_pool_size,
+                pool.as_u64().map(|v| v as u32)
+            );
         }
     }
 

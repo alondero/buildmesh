@@ -41,11 +41,17 @@ pub(crate) struct HookState {
 
 impl HookState {
     pub(crate) fn matches_turn(&self, incoming: Option<&str>) -> bool {
-        self.turn.as_deref().zip(incoming).is_some_and(|(known, incoming)| known == incoming)
+        self.turn
+            .as_deref()
+            .zip(incoming)
+            .is_some_and(|(known, incoming)| known == incoming)
     }
 
     pub(crate) fn mismatches_turn(&self, incoming: Option<&str>) -> bool {
-        self.turn.as_deref().zip(incoming).is_some_and(|(known, incoming)| known != incoming)
+        self.turn
+            .as_deref()
+            .zip(incoming)
+            .is_some_and(|(known, incoming)| known != incoming)
     }
 
     pub(crate) fn accepts(&mut self, turn: Option<&str>, starts_turn: bool) -> bool {
@@ -213,8 +219,11 @@ impl HookState {
     }
 
     fn is_quiescent(&self) -> bool {
-        !self.is_turn_active && self.questions.is_empty() && self.children.is_empty()
-            && !self.other_background_pending && self.early_replies.is_empty()
+        !self.is_turn_active
+            && self.questions.is_empty()
+            && self.children.is_empty()
+            && !self.other_background_pending
+            && self.early_replies.is_empty()
     }
 
     pub(crate) fn end_turn(&mut self) {
@@ -297,8 +306,14 @@ mod tests {
     #[test]
     fn old_turn_cannot_finish_a_new_prompt_but_missing_tokens_are_accepted() {
         let mut state = HookState::default();
-        assert!(!state.mismatches_turn(Some("old")), "no current turn means no explicit mismatch");
-        assert!(!state.mismatches_turn(None), "an omitted token is not an explicit mismatch");
+        assert!(
+            !state.mismatches_turn(Some("old")),
+            "no current turn means no explicit mismatch"
+        );
+        assert!(
+            !state.mismatches_turn(None),
+            "an omitted token is not an explicit mismatch"
+        );
         assert!(state.accepts(Some("old"), true));
         assert!(state.accepts(Some("new"), true));
         assert!(state.mismatches_turn(Some("old")));

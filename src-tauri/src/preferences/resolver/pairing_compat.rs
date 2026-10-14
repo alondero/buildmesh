@@ -29,9 +29,7 @@ pub fn endpoint_model_descriptor(pairing: &ProviderPairing) -> EndpointModelDesc
             WireApi::ChatCompletions,
             compatibility::complete_agent_capabilities(),
         ),
-        ApiSurface::OpenAI
-            if pairing.provider_id == "minimax" && model_id != "MiniMax-M3" =>
-        {
+        ApiSurface::OpenAI if pairing.provider_id == "minimax" && model_id != "MiniMax-M3" => {
             (WireApi::Responses, Default::default())
         }
         ApiSurface::OpenAI => (
@@ -39,7 +37,10 @@ pub fn endpoint_model_descriptor(pairing: &ProviderPairing) -> EndpointModelDesc
             compatibility::complete_agent_capabilities(),
         ),
     };
-    let reasoning_effort = (pairing.provider_id == "minimax" && pairing.surface == ApiSurface::OpenAI && model_id == "MiniMax-M3").then_some(true);
+    let reasoning_effort = (pairing.provider_id == "minimax"
+        && pairing.surface == ApiSurface::OpenAI
+        && model_id == "MiniMax-M3")
+        .then_some(true);
     EndpointModelDescriptor {
         provider_id: pairing.provider_id.clone(),
         endpoint,
@@ -75,8 +76,7 @@ pub fn pairing_compatibility(pairing: &ProviderPairing) -> CompatibilityDecision
     {
         decision.compatible = false;
         decision.reason = Some(
-            "MiniMax Codex pairings require the current Responses model ID 'MiniMax-M3'"
-                .into(),
+            "MiniMax Codex pairings require the current Responses model ID 'MiniMax-M3'".into(),
         );
     }
     decision
@@ -84,7 +84,12 @@ pub fn pairing_compatibility(pairing: &ProviderPairing) -> CompatibilityDecision
 
 pub(crate) fn pairing_can_potentially_match(pairing: &ProviderPairing) -> bool {
     let mut candidate = pairing.clone();
-    if candidate.model_tiers.default.as_deref().is_none_or(str::is_empty) {
+    if candidate
+        .model_tiers
+        .default
+        .as_deref()
+        .is_none_or(str::is_empty)
+    {
         candidate.model_tiers.default = Some("model-selected-during-attach".into());
     }
     pairing_compatibility(&candidate).compatible

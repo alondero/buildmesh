@@ -60,7 +60,10 @@ pub async fn export_state_to(path: String, redacted: bool) -> Result<StateExport
 /// because `blocking_save_file` is a synchronous call into the OS file
 /// association layer; that is the same reason `pick_mesh_folder` is offloaded.
 #[command]
-pub async fn export_state(app: tauri::AppHandle, redacted: bool) -> Result<Option<StateExportResult>, String> {
+pub async fn export_state(
+    app: tauri::AppHandle,
+    redacted: bool,
+) -> Result<Option<StateExportResult>, String> {
     crate::commands::run_blocking("export_state", move || {
         let Some(picked) = app
             .dialog()
@@ -82,7 +85,9 @@ pub async fn export_state(app: tauri::AppHandle, redacted: bool) -> Result<Optio
 /// Report what a bundle contains *without* staging it, so the UI can warn
 /// before the user commits. `Ok(None)` means the user closed the dialog.
 #[command]
-pub async fn inspect_state_bundle(app: tauri::AppHandle) -> Result<Option<StateRestorePlan>, String> {
+pub async fn inspect_state_bundle(
+    app: tauri::AppHandle,
+) -> Result<Option<StateRestorePlan>, String> {
     crate::commands::run_blocking("inspect_state_bundle", move || {
         let Some(picked) = app
             .dialog()
@@ -106,7 +111,9 @@ pub async fn inspect_state_bundle(app: tauri::AppHandle) -> Result<Option<StateR
 /// state for rollback, and writes the payload; `run_profile_startup` applies
 /// it on the next launch, before any connection or worker exists.
 #[command]
-pub async fn stage_state_restore(app: tauri::AppHandle) -> Result<Option<StateRestorePlan>, String> {
+pub async fn stage_state_restore(
+    app: tauri::AppHandle,
+) -> Result<Option<StateRestorePlan>, String> {
     crate::commands::run_blocking("stage_state_restore", move || {
         let Some(picked) = app
             .dialog()

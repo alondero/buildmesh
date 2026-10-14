@@ -78,7 +78,11 @@ pub const HTTP_PORT_DEFAULT: u16 = HTTP_PORT_START;
 /// run side-by-side with the stable hub without contending on 1991/1992.
 /// Stable → 0, dev → 1000 (test 2991, HTTP 2992-2994).
 pub fn port_offset(identifier: &str) -> u16 {
-    if identifier.ends_with(".dev") { 1000 } else { 0 }
+    if identifier.ends_with(".dev") {
+        1000
+    } else {
+        0
+    }
 }
 
 /// Short profile label for surface filenames that the user can see
@@ -310,9 +314,7 @@ impl Drop for TestEnumeratorGuard {
 /// guard whose `Drop` restores the prior value — bind it to `let _g = ...`
 /// so test runs are isolated regardless of panic or test ordering.
 #[cfg(test)]
-pub(crate) fn set_interface_enumerator_for_testing(
-    ips: Vec<IpAddr>,
-) -> TestEnumeratorGuard {
+pub(crate) fn set_interface_enumerator_for_testing(ips: Vec<IpAddr>) -> TestEnumeratorGuard {
     let prev = INTERFACE_SNAPSHOT_OVERRIDE
         .lock()
         .expect("interface snapshot override lock poisoned")
@@ -352,8 +354,8 @@ pub(crate) fn enumerate_interfaces() -> Vec<IpAddr> {
 /// the `list_afinet_netifas` IP list with an empty classes map. The bind path
 /// can still proceed with range-heuristic ranking; LAN exposure degrades to
 /// "no gateway awareness" but stays functional (#630 review).
-pub(crate) fn enumerate_interfaces_with_classes_fallback()
--> (Vec<IpAddr>, HashMap<IpAddr, interface_rank::IfaceClass>) {
+pub(crate) fn enumerate_interfaces_with_classes_fallback(
+) -> (Vec<IpAddr>, HashMap<IpAddr, interface_rank::IfaceClass>) {
     (enumerate_interfaces(), HashMap::new())
 }
 
@@ -380,8 +382,7 @@ fn local_snapshot_lock() -> &'static parking_lot::RwLock<LocalSnapshot> {
 /// `walk_adapters` succeeded — non-empty map) or the fallback path (non-Windows
 /// or `walk_adapters` failed — empty map). The QR fallback uses both signals
 /// to short-circuit on a prior bind without re-walking (#630 review).
-pub(crate) fn local_classes_if_populated()
--> Option<HashMap<IpAddr, interface_rank::IfaceClass>> {
+pub(crate) fn local_classes_if_populated() -> Option<HashMap<IpAddr, interface_rank::IfaceClass>> {
     let snapshot = local_snapshot_lock().read();
     Some(snapshot.1.clone())
 }
@@ -428,7 +429,10 @@ mod tests {
     fn port_offset_is_zero_for_stable_and_1000_for_dev() {
         assert_eq!(port_offset("com.alond.buildmesh"), 0);
         assert_eq!(port_offset("com.alond.buildmesh.dev"), 1000);
-        assert_eq!(HTTP_PORT_START + port_offset("com.alond.buildmesh.dev"), 2992);
+        assert_eq!(
+            HTTP_PORT_START + port_offset("com.alond.buildmesh.dev"),
+            2992
+        );
         assert_eq!(HTTP_PORT_END + port_offset("com.alond.buildmesh.dev"), 2994);
     }
 

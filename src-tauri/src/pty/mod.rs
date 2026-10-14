@@ -1,9 +1,9 @@
 pub mod batch;
+#[cfg(all(test, windows))]
+mod conpty_tests;
 pub mod lifecycle;
 mod registry;
 pub mod sink;
-#[cfg(all(test, windows))]
-mod conpty_tests;
 pub use registry::PtyRegistry;
 
 use portable_pty::CommandBuilder;

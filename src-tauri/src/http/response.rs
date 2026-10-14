@@ -124,7 +124,10 @@ mod tests {
         let text = String::from_utf8(bytes).unwrap();
         assert!(text.starts_with("HTTP/1.1 204 No Content\r\n"));
         assert!(text.contains("Content-Length: 0\r\n\r\n"));
-        assert_eq!(text.as_bytes()[text.find("\r\n\r\n").unwrap() + 4..].len(), 0);
+        assert_eq!(
+            text.as_bytes()[text.find("\r\n\r\n").unwrap() + 4..].len(),
+            0
+        );
     }
 
     #[test]
@@ -158,8 +161,7 @@ mod tests {
 
     #[test]
     fn json_error_handles_newlines_and_tabs() {
-        let bytes =
-            Response::json_error("400 Bad Request", "line1\nline2\tend").encode();
+        let bytes = Response::json_error("400 Bad Request", "line1\nline2\tend").encode();
         let text = String::from_utf8(bytes).unwrap();
         let body = text.split("\r\n\r\n").nth(1).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(body).unwrap();

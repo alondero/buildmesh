@@ -108,10 +108,7 @@ impl UsageLastKnownCache {
     /// Test fixture pinned to `dir` with an injected clock (epoch seconds). Two
     /// instances over the same `dir` model two app runs.
     #[cfg(test)]
-    pub(crate) fn for_test(
-        dir: PathBuf,
-        now_fn: impl Fn() -> i64 + Send + Sync + 'static,
-    ) -> Self {
+    pub(crate) fn for_test(dir: PathBuf, now_fn: impl Fn() -> i64 + Send + Sync + 'static) -> Self {
         Self::new_inner(Box::new(move || Some(dir.clone())), Box::new(now_fn))
     }
 
@@ -348,8 +345,13 @@ mod tests {
         // Second "app run", one day later, performs no successful fetch at all.
         let day_two = UsageLastKnownCache::for_test(dir.path().to_path_buf(), || DAY);
         let snapshot = day_two.snapshot();
-        let agy = snapshot.get("agy").expect("cold start serves the cached reading");
-        assert_eq!(agy.cached_at, 0, "timestamp is when it was fetched, not now");
+        let agy = snapshot
+            .get("agy")
+            .expect("cold start serves the cached reading");
+        assert_eq!(
+            agy.cached_at, 0,
+            "timestamp is when it was fetched, not now"
+        );
         assert_eq!(agy.usage.windows[0].used_percent, Some(88.0));
     }
 

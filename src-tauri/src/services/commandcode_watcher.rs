@@ -141,9 +141,15 @@ pub struct TurnTracker {
 
 pub(crate) fn report_turn_finished(lines: &[String]) -> bool {
     let mut tracker = TurnTracker::default();
-    for line in lines { tracker.observe_transcript_line(line); }
-    !tracker.pending_tool_calls && !tracker.deferred_assistant_response
-        && matches!(tracker.state, Some(TranscriptActivity::TurnCompleted | TranscriptActivity::AssistantResponse))
+    for line in lines {
+        tracker.observe_transcript_line(line);
+    }
+    !tracker.pending_tool_calls
+        && !tracker.deferred_assistant_response
+        && matches!(
+            tracker.state,
+            Some(TranscriptActivity::TurnCompleted | TranscriptActivity::AssistantResponse)
+        )
 }
 
 /// Incremental reader for an append-only Command Code JSONL transcript.
@@ -202,9 +208,16 @@ impl TranscriptTail {
         // A late observer can read several turns at once. Only the current
         // terminal state may be published; earlier completions must not mark
         // a newer user/tool turn ready.
-        if self.tracker.pending_tool_calls || self.tracker.deferred_assistant_response
-            || !matches!(self.tracker.state, Some(TranscriptActivity::TurnCompleted
-                | TranscriptActivity::AwaitingInput | TranscriptActivity::AssistantResponse))
+        if self.tracker.pending_tool_calls
+            || self.tracker.deferred_assistant_response
+            || !matches!(
+                self.tracker.state,
+                Some(
+                    TranscriptActivity::TurnCompleted
+                        | TranscriptActivity::AwaitingInput
+                        | TranscriptActivity::AssistantResponse
+                )
+            )
         {
             self.pending_transition = None;
         }
@@ -221,14 +234,19 @@ pub fn start_for_session(
     env_type: EnvType,
     app: &AppHandle,
 ) -> Result<(), String> {
-    if WATCHERS.lock().map_err(|_| "Command Code watcher registry lock poisoned".to_string())?
-        .get(&node_id).is_some_and(|watcher| watcher.session_id == session_id)
+    if WATCHERS
+        .lock()
+        .map_err(|_| "Command Code watcher registry lock poisoned".to_string())?
+        .get(&node_id)
+        .is_some_and(|watcher| watcher.session_id == session_id)
     {
         return Ok(());
     }
     let sessions_dir =
-        crate::services::transcript_reader::adapters::commandcode::commandcode_sessions_dir(env_type, spawn_path)
-            .ok_or_else(|| format!("no Command Code sessions directory for {env_type:?}"))?;
+        crate::services::transcript_reader::adapters::commandcode::commandcode_sessions_dir(
+            env_type, spawn_path,
+        )
+        .ok_or_else(|| format!("no Command Code sessions directory for {env_type:?}"))?;
     let transcript_path = sessions_dir.join(format!("{session_id}.jsonl"));
     start(node_id, session_id, transcript_path, app, None)
 }
@@ -245,8 +263,10 @@ pub fn start_for_resumed_session(
     app: &AppHandle,
 ) -> Result<(), String> {
     let sessions_dir =
-        crate::services::transcript_reader::adapters::commandcode::commandcode_sessions_dir(env_type, spawn_path)
-            .ok_or_else(|| format!("no Command Code sessions directory for {env_type:?}"))?;
+        crate::services::transcript_reader::adapters::commandcode::commandcode_sessions_dir(
+            env_type, spawn_path,
+        )
+        .ok_or_else(|| format!("no Command Code sessions directory for {env_type:?}"))?;
     let transcript_path = sessions_dir.join(format!("{session_id}.jsonl"));
     let offset = std::fs::metadata(&transcript_path)
         .map_err(|e| format!("stat {}: {e}", transcript_path.display()))?
@@ -315,7 +335,8 @@ fn start(
         .watch(&transcript_path, RecursiveMode::NonRecursive)
         .map_err(|e| format!("watch {}: {e}", transcript_path.display()))?;
 
-    let Some(signal) = register_watcher(node_id, session_id, watcher, initial_offset.is_some())? else {
+    let Some(signal) = register_watcher(node_id, session_id, watcher, initial_offset.is_some())?
+    else {
         activation_guard.disarm();
         return Ok(());
     };
@@ -390,23 +411,32 @@ fn register_watcher(
     watcher: RecommendedWatcher,
     resume: bool,
 ) -> Result<Option<Arc<WorkerSignal>>, String> {
-    let activated_nodes = ACTIVATED_NODES.lock()
+    let activated_nodes = ACTIVATED_NODES
+        .lock()
         .map_err(|_| "Command Code activation registry lock poisoned".to_string())?;
-    let mut watchers = WATCHERS.lock()
+    let mut watchers = WATCHERS
+        .lock()
         .map_err(|_| "Command Code watcher registry lock poisoned".to_string())?;
     if !resume {
         if let Some(existing) = watchers.get(&node_id) {
             return if existing.session_id == session_id {
                 Ok(None)
             } else {
-                Err(format!("Command Code node {node_id} already observes a different session"))
+                Err(format!(
+                    "Command Code node {node_id} already observes a different session"
+                ))
             };
         }
     }
     let signal = Arc::new(WorkerSignal::new(activated_nodes.contains(&node_id)));
-    if let Some(previous) = watchers.insert(node_id, ActiveWatcher {
-        session_id: session_id.to_string(), _watcher: watcher, signal: signal.clone(),
-    }) {
+    if let Some(previous) = watchers.insert(
+        node_id,
+        ActiveWatcher {
+            session_id: session_id.to_string(),
+            _watcher: watcher,
+            signal: signal.clone(),
+        },
+    ) {
         previous.signal.cancel();
     }
     Ok(Some(signal))
@@ -621,15 +651,23 @@ fn transcript_activity(line: &str) -> Option<TranscriptActivityInfo> {
             // Native v3 records persist the complete model response at
             // onCommit, with a stable messageId. The record id is a ledger
             // entry id, not the streaming message id used by legacy records.
-            let committed = message.pointer("/meta/source").and_then(|v| v.as_str()) == Some("model")
-                && message.pointer("/meta/messageId").and_then(|v| v.as_str()).is_some_and(|id| !id.is_empty());
+            let committed = message.pointer("/meta/source").and_then(|v| v.as_str())
+                == Some("model")
+                && message
+                    .pointer("/meta/messageId")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|id| !id.is_empty());
             Some(TranscriptActivityInfo {
                 activity: message_activity(message)?,
-                message_id: (!committed).then(|| value
-                    .get("id")
-                    .or_else(|| message.get("id"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)).flatten(),
+                message_id: (!committed)
+                    .then(|| {
+                        value
+                            .get("id")
+                            .or_else(|| message.get("id"))
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .flatten(),
             })
         }
         _ => None,
@@ -663,17 +701,26 @@ mod tests {
         let id = 9_860_002;
         let watcher = || RecommendedWatcher::new(|_| {}, Config::default()).unwrap();
         activate(id);
-        let first = register_watcher(id, "session", watcher(), false).unwrap().unwrap();
+        let first = register_watcher(id, "session", watcher(), false)
+            .unwrap()
+            .unwrap();
         assert!(first.state.lock().unwrap().activated);
-        assert!(register_watcher(id, "session", watcher(), false).unwrap().is_none());
+        assert!(register_watcher(id, "session", watcher(), false)
+            .unwrap()
+            .is_none());
         assert!(first.is_active());
         assert!(register_watcher(id, "different", watcher(), false).is_err());
         assert!(first.is_active());
-        let replacement = register_watcher(id, "session", watcher(), true).unwrap().unwrap();
+        let replacement = register_watcher(id, "session", watcher(), true)
+            .unwrap()
+            .unwrap();
         assert!(!first.is_active());
         stop_if_current(id, &first, false);
         assert!(replacement.is_active());
-        assert!(Arc::ptr_eq(&WATCHERS.lock().unwrap().get(&id).unwrap().signal, &replacement));
+        assert!(Arc::ptr_eq(
+            &WATCHERS.lock().unwrap().get(&id).unwrap().signal,
+            &replacement
+        ));
         stop(id);
         assert!(!replacement.is_active());
         assert!(!WATCHERS.lock().unwrap().contains_key(&id));
@@ -687,7 +734,9 @@ mod tests {
         drop(ActivationGuard::new(id, false));
         assert!(ACTIVATED_NODES.lock().unwrap().contains(&id));
         let watcher = RecommendedWatcher::new(|_| {}, Config::default()).unwrap();
-        let signal = register_watcher(id, "session", watcher, false).unwrap().unwrap();
+        let signal = register_watcher(id, "session", watcher, false)
+            .unwrap()
+            .unwrap();
         assert!(signal.state.lock().unwrap().activated);
         // Worker-thread creation can fail after registry insertion too.
         stop_if_current(id, &signal, true);
@@ -711,7 +760,11 @@ mod tests {
     #[test]
     fn commandcode_late_watcher_does_not_publish_a_previous_turn_during_new_work() {
         let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(file.path(), "{\"type\":\"turn_complete\"}\n{\"type\":\"user_turn\"}\n{\"type\":\"tool_use\"}\n").unwrap();
+        std::fs::write(
+            file.path(),
+            "{\"type\":\"turn_complete\"}\n{\"type\":\"user_turn\"}\n{\"type\":\"tool_use\"}\n",
+        )
+        .unwrap();
         let mut tail = TranscriptTail::default();
         assert_eq!(tail.read_transitions(file.path()).unwrap(), vec![]);
     }
@@ -723,9 +776,17 @@ mod tests {
             std::fs::write(file.path(), "{\"type\":\"turn_complete\"}\n{\"type\":\"").unwrap();
             let mut tail = TranscriptTail::default();
             assert_eq!(tail.read_transitions(file.path()).unwrap(), vec![]);
-            std::fs::OpenOptions::new().append(true).open(file.path()).unwrap()
-                .write_all(format!("{suffix}\"}}\n").as_bytes()).unwrap();
-            let expected = if suffix == "user_turn" { vec![] } else { vec![TerminalTransition::TurnCompleted] };
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(file.path())
+                .unwrap()
+                .write_all(format!("{suffix}\"}}\n").as_bytes())
+                .unwrap();
+            let expected = if suffix == "user_turn" {
+                vec![]
+            } else {
+                vec![TerminalTransition::TurnCompleted]
+            };
             assert_eq!(tail.read_transitions(file.path()).unwrap(), expected);
             assert_eq!(tail.read_transitions(file.path()).unwrap(), vec![]);
         }
@@ -906,10 +967,12 @@ mod tests {
     #[test]
     fn checked_in_commandcode_fixture_has_one_final_turn_completion() {
         let mut tracker = TurnTracker::default();
-        let transitions: Vec<_> = include_str!("../../tests/fixtures/transcripts/commandcode/commandcode_transcript.jsonl")
-            .lines()
-            .filter_map(|line| tracker.observe_transcript_line(line))
-            .collect();
+        let transitions: Vec<_> = include_str!(
+            "../../tests/fixtures/transcripts/commandcode/commandcode_transcript.jsonl"
+        )
+        .lines()
+        .filter_map(|line| tracker.observe_transcript_line(line))
+        .collect();
 
         assert_eq!(transitions, vec![TerminalTransition::TurnCompleted]);
     }

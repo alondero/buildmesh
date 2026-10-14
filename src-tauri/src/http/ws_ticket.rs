@@ -169,11 +169,17 @@ mod tests {
     use super::*;
 
     fn terminal(node_id: i64) -> WsTarget {
-        WsTarget { surface: SURFACE_TERMINAL.to_string(), node_id: Some(node_id) }
+        WsTarget {
+            surface: SURFACE_TERMINAL.to_string(),
+            node_id: Some(node_id),
+        }
     }
 
     fn events() -> WsTarget {
-        WsTarget { surface: SURFACE_EVENTS.to_string(), node_id: None }
+        WsTarget {
+            surface: SURFACE_EVENTS.to_string(),
+            node_id: None,
+        }
     }
 
     #[test]
@@ -287,9 +293,15 @@ mod tests {
         // Missing the required `surface` field.
         assert_eq!(parse_mint_target(br#"{"node_id":7}"#), Err(()));
         // Well-typed JSON but not a legitimate target: terminal needs a node…
-        assert_eq!(parse_mint_target(br#"{"surface":"terminal","node_id":null}"#), Err(()));
+        assert_eq!(
+            parse_mint_target(br#"{"surface":"terminal","node_id":null}"#),
+            Err(())
+        );
         // …and an unknown surface is refused outright.
-        assert_eq!(parse_mint_target(br#"{"surface":"control","node_id":7}"#), Err(()));
+        assert_eq!(
+            parse_mint_target(br#"{"surface":"control","node_id":7}"#),
+            Err(())
+        );
     }
 
     #[test]
@@ -297,10 +309,22 @@ mod tests {
         assert!(terminal(1).is_well_formed());
         assert!(events().is_well_formed());
         // terminal requires a node…
-        assert!(!WsTarget { surface: SURFACE_TERMINAL.into(), node_id: None }.is_well_formed());
+        assert!(!WsTarget {
+            surface: SURFACE_TERMINAL.into(),
+            node_id: None
+        }
+        .is_well_formed());
         // …events must not carry one…
-        assert!(!WsTarget { surface: SURFACE_EVENTS.into(), node_id: Some(1) }.is_well_formed());
+        assert!(!WsTarget {
+            surface: SURFACE_EVENTS.into(),
+            node_id: Some(1)
+        }
+        .is_well_formed());
         // …and an unknown surface is never well-formed.
-        assert!(!WsTarget { surface: "control".into(), node_id: Some(1) }.is_well_formed());
+        assert!(!WsTarget {
+            surface: "control".into(),
+            node_id: Some(1)
+        }
+        .is_well_formed());
     }
 }

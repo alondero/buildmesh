@@ -6,9 +6,9 @@
 //! orchestration only.
 
 use crate::preferences::ProviderAccount;
-use crate::services::usage::types::UsagePage;
 use crate::services::usage::adapter::{api_key_for, UsageAdapter};
 use crate::services::usage::outcome::UsageOutcome;
+use crate::services::usage::types::UsagePage;
 use crate::services::usage::types::{BillingBalance, UsageError};
 use reqwest::blocking::Client;
 use serde::Deserialize;
@@ -18,7 +18,10 @@ pub(crate) struct DeepseekAdapter;
 
 impl UsageAdapter for DeepseekAdapter {
     fn usage_page(&self) -> Option<UsagePage> {
-        Some(UsagePage::new("https://platform.deepseek.com/", "Open console"))
+        Some(UsagePage::new(
+            "https://platform.deepseek.com/",
+            "Open console",
+        ))
     }
 
     fn id(&self) -> &'static str {
@@ -115,11 +118,10 @@ fn parse_deepseek_response(body: &str) -> Result<BillingBalance, UsageError> {
     let info = resp.balance_infos.into_iter().next().ok_or_else(|| {
         UsageError::Shape("DeepSeek balance response had no balance_infos entry".to_string())
     })?;
-    let remaining = info
-        .total_balance
-        .trim()
-        .parse::<f64>()
-        .map_err(|e| UsageError::Shape(format!("DeepSeek total_balance not a number: {}", e)))?;
+    let remaining =
+        info.total_balance.trim().parse::<f64>().map_err(|e| {
+            UsageError::Shape(format!("DeepSeek total_balance not a number: {}", e))
+        })?;
     Ok(BillingBalance {
         remaining,
         monthly_spend: None,
@@ -303,8 +305,8 @@ mod tests {
         // one entry per the wire contract). Treat as a shape error rather
         // than silently zero-balance — a future API that drops the entry
         // would otherwise look like a fresh user with no wallet.
-        let err = parse_deepseek_response(r#"{"is_available":true,"balance_infos":[]}"#)
-            .unwrap_err();
+        let err =
+            parse_deepseek_response(r#"{"is_available":true,"balance_infos":[]}"#).unwrap_err();
         assert!(
             matches!(err, UsageError::Shape(_)),
             "expected Shape error, got {err:?}"

@@ -180,7 +180,11 @@ fn convert_string_sid(s: &str) -> Result<LocalSid, String> {
     unsafe {
         let mut sid: Psid = std::ptr::null_mut();
         if ffi::ConvertStringSidToSidW(wide.as_ptr(), &mut sid) == 0 {
-            return Err(format!("ConvertStringSidToSidW({}) failed: {}", s, ffi::GetLastError()));
+            return Err(format!(
+                "ConvertStringSidToSidW({}) failed: {}",
+                s,
+                ffi::GetLastError()
+            ));
         }
         Ok(LocalSid(sid))
     }
@@ -251,10 +255,16 @@ impl RestrictedToken {
             }
             let mut restricting: Vec<ffi::SID_AND_ATTRIBUTES> = sid_guards
                 .iter()
-                .map(|g| ffi::SID_AND_ATTRIBUTES { sid: g.0, attributes: 0 })
+                .map(|g| ffi::SID_AND_ATTRIBUTES {
+                    sid: g.0,
+                    attributes: 0,
+                })
                 .collect();
             if !logon_sid.is_null() {
-                restricting.push(ffi::SID_AND_ATTRIBUTES { sid: logon_sid, attributes: 0 });
+                restricting.push(ffi::SID_AND_ATTRIBUTES {
+                    sid: logon_sid,
+                    attributes: 0,
+                });
             }
             // The user SID: including it lets msys `bash` create its user-keyed
             // shared sections, at the cost of re-opening user-private home reads
@@ -267,7 +277,10 @@ impl RestrictedToken {
                     .map(|u| u.sid)
                     .unwrap_or(std::ptr::null_mut());
                 if !user_sid.is_null() {
-                    restricting.push(ffi::SID_AND_ATTRIBUTES { sid: user_sid, attributes: 0 });
+                    restricting.push(ffi::SID_AND_ATTRIBUTES {
+                        sid: user_sid,
+                        attributes: 0,
+                    });
                 }
             }
 
@@ -286,7 +299,10 @@ impl RestrictedToken {
                 &mut restricted,
             ) == 0
             {
-                return Err(format!("CreateRestrictedToken failed: {}", ffi::GetLastError()));
+                return Err(format!(
+                    "CreateRestrictedToken failed: {}",
+                    ffi::GetLastError()
+                ));
             }
             let restricted = OwnedToken(restricted);
 
@@ -323,10 +339,19 @@ fn get_token_logon_sid(token: HANDLE) -> Result<Vec<u8>, String> {
     // SAFETY: two-call pattern — first sizes the buffer, then fills it.
     unsafe {
         let mut needed: u32 = 0;
-        ffi::GetTokenInformation(token, ffi::TOKEN_LOGON_SID, std::ptr::null_mut(), 0, &mut needed);
+        ffi::GetTokenInformation(
+            token,
+            ffi::TOKEN_LOGON_SID,
+            std::ptr::null_mut(),
+            0,
+            &mut needed,
+        );
         let err = ffi::GetLastError();
         if needed == 0 {
-            return Err(format!("GetTokenInformation(TokenLogonSid) sizing failed: {}", err));
+            return Err(format!(
+                "GetTokenInformation(TokenLogonSid) sizing failed: {}",
+                err
+            ));
         }
         let mut buf = vec![0u8; needed as usize];
         if ffi::GetTokenInformation(
@@ -337,7 +362,10 @@ fn get_token_logon_sid(token: HANDLE) -> Result<Vec<u8>, String> {
             &mut needed,
         ) == 0
         {
-            return Err(format!("GetTokenInformation(TokenLogonSid) failed: {}", ffi::GetLastError()));
+            return Err(format!(
+                "GetTokenInformation(TokenLogonSid) failed: {}",
+                ffi::GetLastError()
+            ));
         }
         Ok(buf)
     }
@@ -352,11 +380,24 @@ fn get_token_user_sid(token: HANDLE) -> Result<Vec<u8>, String> {
         let mut needed: u32 = 0;
         ffi::GetTokenInformation(token, TOKEN_USER, std::ptr::null_mut(), 0, &mut needed);
         if needed == 0 {
-            return Err(format!("GetTokenInformation(TokenUser) sizing failed: {}", ffi::GetLastError()));
+            return Err(format!(
+                "GetTokenInformation(TokenUser) sizing failed: {}",
+                ffi::GetLastError()
+            ));
         }
         let mut buf = vec![0u8; needed as usize];
-        if ffi::GetTokenInformation(token, TOKEN_USER, buf.as_mut_ptr() as *mut c_void, needed, &mut needed) == 0 {
-            return Err(format!("GetTokenInformation(TokenUser) failed: {}", ffi::GetLastError()));
+        if ffi::GetTokenInformation(
+            token,
+            TOKEN_USER,
+            buf.as_mut_ptr() as *mut c_void,
+            needed,
+            &mut needed,
+        ) == 0
+        {
+            return Err(format!(
+                "GetTokenInformation(TokenUser) failed: {}",
+                ffi::GetLastError()
+            ));
         }
         Ok(buf)
     }
@@ -392,7 +433,12 @@ mod tests {
                 std::mem::size_of::<u32>() as u32,
                 &mut ret,
             );
-            assert_ne!(ok, 0, "GetTokenInformation(TokenHasRestrictions) failed: {}", ffi::GetLastError());
+            assert_ne!(
+                ok,
+                0,
+                "GetTokenInformation(TokenHasRestrictions) failed: {}",
+                ffi::GetLastError()
+            );
             val
         };
         assert_ne!(has_restrictions, 0, "token must carry restricting SIDs");
@@ -407,8 +453,18 @@ mod tests {
         // SAFETY: two-call sizing then fill, reading the mandatory-label SID.
         let il_sid = unsafe {
             let mut needed: u32 = 0;
-            ffi::GetTokenInformation(tok.raw(), ffi::TOKEN_INTEGRITY_LEVEL, std::ptr::null_mut(), 0, &mut needed);
-            assert!(needed > 0, "integrity-level sizing failed: {}", ffi::GetLastError());
+            ffi::GetTokenInformation(
+                tok.raw(),
+                ffi::TOKEN_INTEGRITY_LEVEL,
+                std::ptr::null_mut(),
+                0,
+                &mut needed,
+            );
+            assert!(
+                needed > 0,
+                "integrity-level sizing failed: {}",
+                ffi::GetLastError()
+            );
             let mut buf = vec![0u8; needed as usize];
             let ok = ffi::GetTokenInformation(
                 tok.raw(),
@@ -417,12 +473,20 @@ mod tests {
                 needed,
                 &mut needed,
             );
-            assert_ne!(ok, 0, "integrity-level read failed: {}", ffi::GetLastError());
+            assert_ne!(
+                ok,
+                0,
+                "integrity-level read failed: {}",
+                ffi::GetLastError()
+            );
             let label = &*(buf.as_ptr() as *const ffi::TOKEN_MANDATORY_LABEL);
             // Render the SID back to a string to compare.
             sid_to_string(label.label.sid)
         };
-        assert_eq!(il_sid, "S-1-16-8192", "integrity level must be Medium (Low breaks msys/Bun named objects)");
+        assert_eq!(
+            il_sid, "S-1-16-8192",
+            "integrity level must be Medium (Low breaks msys/Bun named objects)"
+        );
     }
 
     /// Helper: render a SID to its string form for assertions.
@@ -434,7 +498,11 @@ mod tests {
         // SAFETY: `sid` is a live SID; the wide output is freed with LocalFree.
         unsafe {
             let mut out: *mut u16 = std::ptr::null_mut();
-            assert_ne!(ConvertSidToStringSidW(sid, &mut out), 0, "ConvertSidToStringSidW failed");
+            assert_ne!(
+                ConvertSidToStringSidW(sid, &mut out),
+                0,
+                "ConvertSidToStringSidW failed"
+            );
             let mut len = 0usize;
             while *out.add(len) != 0 {
                 len += 1;

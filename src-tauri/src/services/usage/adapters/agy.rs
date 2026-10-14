@@ -10,10 +10,10 @@
 //! to the next source before returning logged-out.
 
 use crate::preferences::ProviderAccount;
-use crate::services::usage::types::UsagePage;
 use crate::services::usage::adapter::UsageAdapter;
 use crate::services::usage::outcome::UsageOutcome;
 use crate::services::usage::types::UsageError;
+use crate::services::usage::types::UsagePage;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -30,7 +30,10 @@ pub(crate) struct AgyAdapter;
 
 impl UsageAdapter for AgyAdapter {
     fn usage_page(&self) -> Option<UsagePage> {
-        Some(UsagePage::new("https://antigravity.google/docs/plans", "Usage guide"))
+        Some(UsagePage::new(
+            "https://antigravity.google/docs/plans",
+            "Usage guide",
+        ))
     }
 
     fn id(&self) -> &'static str {
@@ -100,9 +103,8 @@ pub(crate) fn agy_oauth_token_path() -> PathBuf {
 }
 
 fn read_agy_cli_file_token(file_path: &Path) -> Result<String, UsageError> {
-    let bytes = fs::read(file_path).map_err(|e| {
-        UsageError::NoCredential(format!("{} ({e})", file_path.display()))
-    })?;
+    let bytes = fs::read(file_path)
+        .map_err(|e| UsageError::NoCredential(format!("{} ({e})", file_path.display())))?;
     parse_agy_token(&bytes)
 }
 

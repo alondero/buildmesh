@@ -1,11 +1,13 @@
 //! Pairing resolution — stored-pairing lookups, attach-form defaults, ordering, mutators.
 
 use super::super::model::{
-    ApiSurface, AppPreferences, ModelTiers, ProxiedProviderOrder, ProviderAccount, ProviderPairing,
+    ApiSurface, AppPreferences, ModelTiers, ProviderAccount, ProviderPairing, ProxiedProviderOrder,
 };
 use super::super::storage::{load, save};
 use super::accounts::provider_accounts;
-use super::catalog::{first_class_surfaces, harness_surface, keyed_first_class_template, provider_surfaces};
+use super::catalog::{
+    first_class_surfaces, harness_surface, keyed_first_class_template, provider_surfaces,
+};
 use super::pairing_compat::pairing_can_potentially_match;
 use std::collections::BTreeMap;
 
@@ -23,7 +25,10 @@ pub fn provider_pairings() -> Vec<ProviderPairing> {
     match load() {
         Ok(prefs) => prefs.provider_pairings,
         Err(e) => {
-            tracing::warn!("preferences::provider_pairings load failed, using none: {}", e);
+            tracing::warn!(
+                "preferences::provider_pairings load failed, using none: {}",
+                e
+            );
             Vec::new()
         }
     }
@@ -87,14 +92,15 @@ pub fn proxied_order_for(harness_id: &str) -> Option<Vec<String>> {
 ///     the order is meaningful for any account the user could attach under
 ///     this harness, even before the pairing exists (a user can rearrange
 ///     after a future attach and the slot is reserved).
-pub fn set_proxied_provider_order(harness_id: String, provider_ids: Vec<String>) -> Result<(), String> {
+pub fn set_proxied_provider_order(
+    harness_id: String,
+    provider_ids: Vec<String>,
+) -> Result<(), String> {
     let mut prefs = load()?;
     // Known = effective accounts ∪ keyed first-class catalog (ADR-0025: keyed
     // rows may not be materialised yet but are still attachable / orderable).
-    let mut known_ids: std::collections::HashSet<String> = provider_accounts()
-        .into_iter()
-        .map(|a| a.id)
-        .collect();
+    let mut known_ids: std::collections::HashSet<String> =
+        provider_accounts().into_iter().map(|a| a.id).collect();
     for a in super::catalog::keyed_first_class_catalog() {
         known_ids.insert(a.id);
     }
@@ -113,7 +119,9 @@ pub fn set_proxied_provider_order(harness_id: String, provider_ids: Vec<String>)
             // backend falls through to natural order — a stored empty
             // would silently no-op the ordering seam.
             let _ = entry; // `entry` is borrowed only for the empty-list check
-            prefs.proxied_provider_order.retain(|o| o.harness_id != harness_id);
+            prefs
+                .proxied_provider_order
+                .retain(|o| o.harness_id != harness_id);
         }
         Some(entry) => entry.provider_ids = incoming,
         None if !incoming.is_empty() => prefs.proxied_provider_order.push(ProxiedProviderOrder {
@@ -291,8 +299,10 @@ pub fn compatible_providers_by_harness() -> BTreeMap<String, Vec<ProviderAccount
             AppPreferences::default()
         }
     };
-    let mut harness_ids: Vec<String> =
-        super::harness::harness_profiles().into_iter().map(|p| p.id).collect();
+    let mut harness_ids: Vec<String> = super::harness::harness_profiles()
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
     // Empty is not a harness: a corrupt `spawn_option_id` would otherwise add a
     // `""` key whose empty list is indistinguishable from a real answer.
     let add = |id: String, ids: &mut Vec<String>| {
@@ -370,7 +380,11 @@ pub fn remove_provider_pairing(prefs: &mut AppPreferences, harness_id: &str, pro
         .provider_pairings
         .retain(|p| !(p.harness_id == harness_id && p.provider_id == provider_id));
     let detached = format!("{harness_id}:{provider_id}");
-    if !prefs.detached_provider_routes.iter().any(|d| d == &detached) {
+    if !prefs
+        .detached_provider_routes
+        .iter()
+        .any(|d| d == &detached)
+    {
         prefs.detached_provider_routes.push(detached);
     }
 }

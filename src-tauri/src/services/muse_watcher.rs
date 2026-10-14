@@ -429,7 +429,10 @@ pub(crate) struct PromptReceipt {
 }
 
 impl PromptReceipt {
-    pub(crate) fn capture(node: &crate::models::AgentNode, prompt: &str) -> Result<Option<Self>, String> {
+    pub(crate) fn capture(
+        node: &crate::models::AgentNode,
+        prompt: &str,
+    ) -> Result<Option<Self>, String> {
         let Some(session) = node.cli_session_id.as_deref().filter(|id| !id.is_empty()) else {
             // First-turn delivery precedes session discovery; the initial-turn
             // watcher owns that path. This receipt fences established sessions.
@@ -442,23 +445,38 @@ impl PromptReceipt {
     }
 
     pub(crate) fn from_log(path: PathBuf, prompt: &str) -> Result<Self, String> {
-        let offset = std::fs::metadata(&path).map_err(|error| error.to_string())?.len();
-        Ok(Self { path, offset, prompt: prompt.replace("\r\n", "\n") })
+        let offset = std::fs::metadata(&path)
+            .map_err(|error| error.to_string())?
+            .len();
+        Ok(Self {
+            path,
+            offset,
+            prompt: prompt.replace("\r\n", "\n"),
+        })
     }
 
     pub(crate) fn accepted(&self) -> bool {
-        let Ok(mut file) = File::open(&self.path) else { return false; };
-        if file.seek(SeekFrom::Start(self.offset)).is_err() { return false; }
+        let Ok(mut file) = File::open(&self.path) else {
+            return false;
+        };
+        if file.seek(SeekFrom::Start(self.offset)).is_err() {
+            return false;
+        }
         let mut reader = BufReader::new(file);
         let mut line = String::new();
         loop {
             line.clear();
-            if !matches!(reader.read_line(&mut line), Ok(n) if n > 0) || !line.ends_with('\n') { return false; }
-            let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) else { continue; };
+            if !matches!(reader.read_line(&mut line), Ok(n) if n > 0) || !line.ends_with('\n') {
+                return false;
+            }
+            let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
             if record["payload_type"] == "runtime.session"
                 && record["payload"]["kind"] == "run"
                 && record["payload"]["event"]["kind"] == "started"
-                && record["payload"]["event"]["prompt"].as_str()
+                && record["payload"]["event"]["prompt"]
+                    .as_str()
                     .is_some_and(|prompt| prompt.replace("\r\n", "\n") == self.prompt)
             {
                 return true;
@@ -799,23 +817,39 @@ mod tests {
         use std::io::Write;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
-        let record = |kind: &str, prompt: &str| serde_json::json!({
+        let record = |kind: &str, prompt: &str| {
+            serde_json::json!({
             "payload_type":"runtime.session", "payload":{"kind":"run", "event":{"kind":kind,"prompt":prompt}}
-        }).to_string();
+        }).to_string()
+        };
         std::fs::write(&path, format!("{}\n", record("started", "fix\nreview"))).unwrap();
         let receipt = PromptReceipt::from_log(path.clone(), "fix\r\nreview").unwrap();
-        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
-        for line in ["malformed".into(), record("terminal", "fix\nreview"), record("started", "other task")] {
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        for line in [
+            "malformed".into(),
+            record("terminal", "fix\nreview"),
+            record("started", "other task"),
+        ] {
             writeln!(file, "{line}").unwrap();
             assert!(!receipt.accepted());
         }
-        file.write_all(record("started", "fix\nreview").as_bytes()).unwrap();
-        assert!(!receipt.accepted(), "partial publication is not an acknowledgement");
+        file.write_all(record("started", "fix\nreview").as_bytes())
+            .unwrap();
+        assert!(
+            !receipt.accepted(),
+            "partial publication is not an acknowledgement"
+        );
         file.write_all(b"\n").unwrap();
         assert!(receipt.accepted());
         drop(file);
         std::fs::remove_file(path).unwrap();
-        assert!(!receipt.accepted(), "missing native evidence never falls back to redraw");
+        assert!(
+            !receipt.accepted(),
+            "missing native evidence never falls back to redraw"
+        );
     }
 
     fn run_started(run_id: &str) -> String {
@@ -1361,10 +1395,7 @@ mod tests {
         drop(connection);
 
         let resolved = session_log_path_in(dir.path(), SESSION).expect("known session resolves");
-        assert_eq!(
-            resolved,
-            PathBuf::from(crate::env::to_host_path(GUEST_LOG))
-        );
+        assert_eq!(resolved, PathBuf::from(crate::env::to_host_path(GUEST_LOG)));
         assert!(resolved.ends_with("session.jsonl"));
         assert!(session_log_path_in(dir.path(), "different-session").is_none());
     }
@@ -1465,12 +1496,23 @@ mod tests {
             "resolved a session recorded before this run ({recorded_ms} < {anchor_ms})"
         );
 
-        let log = crate::services::muse_sessions::log_path(&root, &session_id)
-            .expect("session log path");
-        assert!(PromptReceipt { path: log.clone(), offset: 0, prompt: "buildmesh live smoke".into() }.accepted(),
-            "the installed Muse must record the exact accepted prompt at its native run boundary");
-        assert!(!PromptReceipt::from_log(log.clone(), "buildmesh live smoke").unwrap().accepted(),
-            "a captured receipt must ignore the already-finished native run");
+        let log =
+            crate::services::muse_sessions::log_path(&root, &session_id).expect("session log path");
+        assert!(
+            PromptReceipt {
+                path: log.clone(),
+                offset: 0,
+                prompt: "buildmesh live smoke".into()
+            }
+            .accepted(),
+            "the installed Muse must record the exact accepted prompt at its native run boundary"
+        );
+        assert!(
+            !PromptReceipt::from_log(log.clone(), "buildmesh live smoke")
+                .unwrap()
+                .accepted(),
+            "a captured receipt must ignore the already-finished native run"
+        );
         let turn = SessionLogTail::default()
             .read_turns(&log)
             .expect("read live session log")

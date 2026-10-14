@@ -5,9 +5,9 @@
 //! response parsing. `usage.rs` keeps orchestration only.
 
 use crate::preferences::ProviderAccount;
-use crate::services::usage::types::UsagePage;
 use crate::services::usage::adapter::{api_key_for, UsageAdapter};
 use crate::services::usage::outcome::UsageOutcome;
+use crate::services::usage::types::UsagePage;
 use crate::services::usage::types::{BillingBalance, UsageError};
 use reqwest::blocking::Client;
 use serde::Deserialize;
@@ -17,7 +17,10 @@ pub(crate) struct KimiAdapter;
 
 impl UsageAdapter for KimiAdapter {
     fn usage_page(&self) -> Option<UsagePage> {
-        Some(UsagePage::new("https://platform.kimi.ai/console/account", "View usage"))
+        Some(UsagePage::new(
+            "https://platform.kimi.ai/console/account",
+            "View usage",
+        ))
     }
 
     fn id(&self) -> &'static str {
@@ -80,10 +83,7 @@ fn parse_kimi_response(body: &str) -> Result<BillingBalance, UsageError> {
     // balance. Same shape as Moonshot's chat-API errors.
     if let Some(c) = resp.code {
         if c != 0 {
-            return Err(UsageError::Shape(format!(
-                "Kimi API returned code {}",
-                c
-            )));
+            return Err(UsageError::Shape(format!("Kimi API returned code {}", c)));
         }
     }
 
@@ -170,7 +170,6 @@ pub(crate) fn kimi_usage(api_key: &str) -> UsageOutcome {
 mod tests {
     use super::*;
 
-
     // ── Kimi (Moonshot) wallet meter ────────────────────────────────────────
     //
     // The Kimi platform's only Bearer-authenticated public endpoint is
@@ -205,7 +204,10 @@ mod tests {
         // Vendor envelope: non-zero `code` is an error, not a zero balance.
         let json = r#"{"code":401,"data":{"available_balance":0.0},"status":false}"#;
         let err = parse_kimi_response(json).unwrap_err();
-        assert!(matches!(err, UsageError::Shape(_)), "expected Shape error, got {err:?}");
+        assert!(
+            matches!(err, UsageError::Shape(_)),
+            "expected Shape error, got {err:?}"
+        );
     }
 
     #[test]

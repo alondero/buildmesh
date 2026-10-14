@@ -6,9 +6,9 @@
 //! `credits`, `spend_control`, and top-level `additional_rate_limits`.
 
 use crate::preferences::ProviderAccount;
-use crate::services::usage::types::UsagePage;
 use crate::services::usage::adapter::{shared_client, UsageAdapter};
 use crate::services::usage::outcome::UsageOutcome;
+use crate::services::usage::types::UsagePage;
 use crate::services::usage::types::{
     home_dir, BillingBalance, UsageAmount, UsageError, UsageMeter, UsageWindow,
 };
@@ -28,7 +28,10 @@ pub(crate) struct CodexAdapter;
 
 impl UsageAdapter for CodexAdapter {
     fn usage_page(&self) -> Option<UsagePage> {
-        Some(UsagePage::new("https://chatgpt.com/codex/settings/usage", "View usage"))
+        Some(UsagePage::new(
+            "https://chatgpt.com/codex/settings/usage",
+            "View usage",
+        ))
     }
 
     fn id(&self) -> &'static str {
@@ -414,18 +417,10 @@ fn push_rate_limits(
         push_window(primary, label_prefix.map(str::to_string), windows);
     }
     if let Some(secondary) = limits.secondary_window {
-        push_window(
-            secondary,
-            label_prefix.map(str::to_string),
-            windows,
-        );
+        push_window(secondary, label_prefix.map(str::to_string), windows);
     }
     for additional in limits.additional_rate_limits {
-        push_window(
-            additional,
-            label_prefix.map(str::to_string),
-            windows,
-        );
+        push_window(additional, label_prefix.map(str::to_string), windows);
     }
 }
 
@@ -442,11 +437,7 @@ fn parse_codex_response(body: &str) -> Result<CodexParsed, UsageError> {
         match additional {
             CodexAdditionalLimit::Named(named) => {
                 if let Some(limits) = named.rate_limit {
-                    push_rate_limits(
-                        limits,
-                        Some(named.limit_name.as_str()),
-                        &mut windows,
-                    );
+                    push_rate_limits(limits, Some(named.limit_name.as_str()), &mut windows);
                 }
             }
             CodexAdditionalLimit::Window(window) => {
@@ -1041,10 +1032,7 @@ mod tests {
             } => {
                 assert!(windows.is_empty());
                 assert_eq!(balance.as_ref().map(|b| b.remaining), Some(17000.50));
-                assert!(matches!(
-                    meters.first(),
-                    Some(UsageMeter::Metered { .. })
-                ));
+                assert!(matches!(meters.first(), Some(UsageMeter::Metered { .. })));
             }
             other => panic!("expected Reading outcome, got: {other:?}"),
         }

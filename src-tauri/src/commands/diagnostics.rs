@@ -153,8 +153,8 @@ mod tests {
         if crate::startup::installed_paths().is_some() {
             return;
         }
-        let error = get_diagnostic_paths()
-            .expect_err("a process with no bootstrap has no paths to report");
+        let error =
+            get_diagnostic_paths().expect_err("a process with no bootstrap has no paths to report");
         assert!(
             error.contains("not available"),
             "the frontend needs to be able to recognise this, got {error}"

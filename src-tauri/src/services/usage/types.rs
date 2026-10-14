@@ -14,7 +14,6 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::PathBuf;
 
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ts_rs::TS)]
 #[ts(export, export_to = "UsageWindow.ts")]
 /// Generated to src/types/generated/UsageWindow.ts (issue #404). The wire
@@ -256,16 +255,24 @@ mod tests {
 
     #[test]
     fn provider_meters_usage_page_is_additive_and_camel_case() {
-        let mut meter: ProviderMeters = serde_json::from_str(
-            r#"{"provider":"codex","usageTracked":true,"usage":null}"#,
-        )
-        .expect("older meter payloads remain compatible");
+        let mut meter: ProviderMeters =
+            serde_json::from_str(r#"{"provider":"codex","usageTracked":true,"usage":null}"#)
+                .expect("older meter payloads remain compatible");
         assert_eq!(meter.usage_page, None);
-        assert!(serde_json::to_value(&meter).unwrap().get("usagePage").is_none());
+        assert!(serde_json::to_value(&meter)
+            .unwrap()
+            .get("usagePage")
+            .is_none());
 
-        meter.usage_page = Some(UsagePage::new("https://chatgpt.com/codex/settings/usage", "View usage"));
+        meter.usage_page = Some(UsagePage::new(
+            "https://chatgpt.com/codex/settings/usage",
+            "View usage",
+        ));
         let value = serde_json::to_value(&meter).unwrap();
-        assert_eq!(value["usagePage"]["url"], "https://chatgpt.com/codex/settings/usage");
+        assert_eq!(
+            value["usagePage"]["url"],
+            "https://chatgpt.com/codex/settings/usage"
+        );
         assert_eq!(value["usagePage"]["label"], "View usage");
         assert!(value.get("usage_page").is_none());
         let restored: ProviderMeters = serde_json::from_value(value).unwrap();

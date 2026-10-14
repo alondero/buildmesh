@@ -31,12 +31,10 @@
 //! optional plan probe — is the auth arbiter.
 
 use crate::preferences::ProviderAccount;
-use crate::services::usage::types::UsagePage;
 use crate::services::usage::adapter::{shared_client, UsageAdapter};
 use crate::services::usage::outcome::UsageOutcome;
-use crate::services::usage::types::{
-    home_dir, UsageAmount, UsageError, UsageMeter, UsageWindow,
-};
+use crate::services::usage::types::UsagePage;
+use crate::services::usage::types::{home_dir, UsageAmount, UsageError, UsageMeter, UsageWindow};
 use base64::Engine as _;
 use reqwest::blocking::{Client, RequestBuilder};
 use serde::de::DeserializeOwned;
@@ -62,7 +60,10 @@ pub(crate) struct CursorAdapter;
 
 impl UsageAdapter for CursorAdapter {
     fn usage_page(&self) -> Option<UsagePage> {
-        Some(UsagePage::new("https://cursor.com/dashboard?tab=usage", "View usage"))
+        Some(UsagePage::new(
+            "https://cursor.com/dashboard?tab=usage",
+            "View usage",
+        ))
     }
 
     fn id(&self) -> &'static str {
@@ -1822,7 +1823,9 @@ mod tests {
         let outcome = cursor_usage_with_token("test-token", &endpoints(port));
 
         match outcome {
-            UsageOutcome::Reading { meters, windows, .. } => {
+            UsageOutcome::Reading {
+                meters, windows, ..
+            } => {
                 assert_eq!(meters.len(), 1, "one allowance meter");
                 assert!(windows.is_empty());
             }
@@ -1863,12 +1866,10 @@ mod tests {
         let outcome = cursor_usage_with_token("test-token", &endpoints(port));
 
         match outcome {
-            UsageOutcome::Reading { meters, .. } => {
-                match &meters[0] {
-                    UsageMeter::NoIndividualLimit { amount } => assert_eq!(amount.used, 987.65),
-                    other => panic!("expected no-individual-limit spend, got {other:?}"),
-                }
-            }
+            UsageOutcome::Reading { meters, .. } => match &meters[0] {
+                UsageMeter::NoIndividualLimit { amount } => assert_eq!(amount.used, 987.65),
+                other => panic!("expected no-individual-limit spend, got {other:?}"),
+            },
             other => panic!("expected Reading outcome, got: {other:?}"),
         }
         let requests = captured(&recorder);
@@ -1894,12 +1895,10 @@ mod tests {
         let outcome = cursor_usage_with_token("test-token", &endpoints(port));
 
         match outcome {
-            UsageOutcome::Reading { meters, .. } => {
-                match &meters[0] {
-                    UsageMeter::NoIndividualLimit { amount } => assert_eq!(amount.used, 987.65),
-                    other => panic!("expected no-individual-limit spend, got {other:?}"),
-                }
-            }
+            UsageOutcome::Reading { meters, .. } => match &meters[0] {
+                UsageMeter::NoIndividualLimit { amount } => assert_eq!(amount.used, 987.65),
+                other => panic!("expected no-individual-limit spend, got {other:?}"),
+            },
             other => panic!("expected Reading outcome, got: {other:?}"),
         }
         assert!(!captured(&recorder)
@@ -2016,12 +2015,10 @@ mod tests {
         let outcome = cursor_usage_with_token(&token, &endpoints(port));
 
         match outcome {
-            UsageOutcome::Reading { meters, .. } => {
-                match &meters[0] {
-                    UsageMeter::NoIndividualLimit { amount } => assert_eq!(amount.used, 987.65),
-                    other => panic!("expected no-individual-limit spend, got {other:?}"),
-                }
-            }
+            UsageOutcome::Reading { meters, .. } => match &meters[0] {
+                UsageMeter::NoIndividualLimit { amount } => assert_eq!(amount.used, 987.65),
+                other => panic!("expected no-individual-limit spend, got {other:?}"),
+            },
             other => panic!("expected Reading outcome, got: {other:?}"),
         }
 
@@ -2059,12 +2056,10 @@ mod tests {
         let outcome = cursor_usage_with_token("test-token", &endpoints(port));
 
         match outcome {
-            UsageOutcome::Reading { meters, .. } => {
-                match &meters[0] {
-                    UsageMeter::NoIndividualLimit { amount } => assert_eq!(amount.used, 987.65),
-                    other => panic!("expected no-individual-limit spend, got {other:?}"),
-                }
-            }
+            UsageOutcome::Reading { meters, .. } => match &meters[0] {
+                UsageMeter::NoIndividualLimit { amount } => assert_eq!(amount.used, 987.65),
+                other => panic!("expected no-individual-limit spend, got {other:?}"),
+            },
             other => panic!("expected Reading outcome, got: {other:?}"),
         }
         assert!(!captured(&recorder)
@@ -2086,12 +2081,10 @@ mod tests {
         let outcome = cursor_usage_with_token("test-token", &endpoints(port));
 
         match outcome {
-            UsageOutcome::Reading { meters, .. } => {
-                match &meters[0] {
-                    UsageMeter::NoIndividualLimit { amount } => assert_eq!(amount.used, 0.0),
-                    other => panic!("expected zero no-individual-limit spend, got {other:?}"),
-                }
-            }
+            UsageOutcome::Reading { meters, .. } => match &meters[0] {
+                UsageMeter::NoIndividualLimit { amount } => assert_eq!(amount.used, 0.0),
+                other => panic!("expected zero no-individual-limit spend, got {other:?}"),
+            },
             other => panic!("expected Reading outcome, got: {other:?}"),
         }
         assert!(!captured(&recorder)

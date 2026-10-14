@@ -1,8 +1,8 @@
 //! Account quota returned by the same key reconciliation endpoint as Muse /usage.
 use crate::preferences::ProviderAccount;
-use crate::services::usage::types::UsagePage;
 use crate::services::usage::adapter::{shared_client, UsageAdapter, UsageIdentityFingerprint};
 use crate::services::usage::outcome::UsageOutcome;
+use crate::services::usage::types::UsagePage;
 use crate::services::usage::types::UsageWindow;
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -12,7 +12,10 @@ const ENDPOINT: &str = "https://api.meta.ai/muse-code/key";
 
 impl UsageAdapter for MuseCodeAdapter {
     fn usage_page(&self) -> Option<UsagePage> {
-        Some(UsagePage::new("https://accountscenter.meta.com/", "Manage plan"))
+        Some(UsagePage::new(
+            "https://accountscenter.meta.com/",
+            "Manage plan",
+        ))
     }
 
     fn id(&self) -> &'static str {
@@ -168,7 +171,9 @@ impl Snapshot {
         if !self.is_subs_active {
             return Err("No active Muse Code subscription.".into());
         }
-        let quota = self.subs_usage.ok_or("Muse did not report subscription usage.")?;
+        let quota = self
+            .subs_usage
+            .ok_or("Muse did not report subscription usage.")?;
         Ok(UsageOutcome::Reading {
             windows: vec![
                 quota.window.into_window("Current")?,
@@ -195,7 +200,12 @@ mod tests {
             .into_outcome()
             .unwrap();
         match outcome {
-            UsageOutcome::Reading { windows, detail, meters, .. } => {
+            UsageOutcome::Reading {
+                windows,
+                detail,
+                meters,
+                ..
+            } => {
                 assert_eq!(windows.len(), 2);
                 assert_eq!(windows[0].label, "Current");
                 assert_eq!(windows[0].used_percent, Some(94.0));
@@ -227,10 +237,11 @@ mod tests {
             assert!(result.is_err());
         }
         for percent in [0, 100] {
-            let outcome = serde_json::from_str::<Snapshot>(&BODY.replace("94", &percent.to_string()))
-                .unwrap()
-                .into_outcome()
-                .unwrap();
+            let outcome =
+                serde_json::from_str::<Snapshot>(&BODY.replace("94", &percent.to_string()))
+                    .unwrap()
+                    .into_outcome()
+                    .unwrap();
             match outcome {
                 UsageOutcome::Reading { windows, .. } => {
                     assert_eq!(windows[0].used_percent, Some(percent as f64));
@@ -326,9 +337,9 @@ mod tests {
             UsageOutcome::NoCredential { hint } => {
                 assert_eq!(hint, "Muse login missing. Run muse login again.");
             }
-            other => panic!(
-                "expected UsageOutcome::NoCredential (issue #1745 fix), got: {other:?}"
-            ),
+            other => {
+                panic!("expected UsageOutcome::NoCredential (issue #1745 fix), got: {other:?}")
+            }
         }
     }
 
@@ -414,6 +425,9 @@ mod tests {
             }
             other => panic!("expected Reading outcome, got: {other:?}"),
         }
-        println!("{}", serde_json::to_string(&outcome.into_usage("muse-code")).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string(&outcome.into_usage("muse-code")).unwrap()
+        );
     }
 }

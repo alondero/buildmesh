@@ -167,9 +167,7 @@ unsafe fn install_on_main(parent: SendHwnd, window: WebviewWindow) {
     // Hold the lock in a scope so no guard is alive while we call into Win32.
     let already_installed = {
         let guard = STATE.lock();
-        guard
-            .as_ref()
-            .is_some_and(|state| state.parent == parent)
+        guard.as_ref().is_some_and(|state| state.parent == parent)
     };
     if already_installed {
         reposition(parent.get());

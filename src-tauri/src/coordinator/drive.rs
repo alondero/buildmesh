@@ -45,8 +45,8 @@ impl Verdict {
     /// The wire/DB string form — the same token the response serializes to, so
     /// the idempotency ledger stores exactly what a replay returns.
     #[allow(dead_code)] // used by the in-memory `FakeStore` in tests; the
-                       // production `DbIdempotencyStore` goes through
-                       // [`Verdict::as_verdict_str`] instead.
+                        // production `DbIdempotencyStore` goes through
+                        // [`Verdict::as_verdict_str`] instead.
     pub fn as_db_str(self) -> &'static str {
         match self {
             Verdict::Delivered => "delivered",
@@ -153,7 +153,11 @@ pub trait DriveTarget {
     /// Returns the disposition rather than a bare `Ok(())` so a drive can tell
     /// "queued" from "refused by a full queue" (issue #1530). `Err` is a hard
     /// failure; `Ok(Backpressured)` is a refusal that is safe to retry.
-    fn write_prompt(&self, node_id: i64, payload: &str) -> Result<crate::agent::process::InputDisposition, String>;
+    fn write_prompt(
+        &self,
+        node_id: i64,
+        payload: &str,
+    ) -> Result<crate::agent::process::InputDisposition, String>;
     /// Clear attention for the node — flip it `Running` and fan out
     /// `attention-cleared`, mirroring the mobile drive primitive.
     fn clear_attention(&self, node_id: i64);
@@ -238,10 +242,16 @@ impl DriveTarget for RegistryTarget {
     }
 
     fn status(&self, node_id: i64) -> Option<SessionStatus> {
-        crate::db::get_agent_node_by_id(node_id).ok().map(|n| n.status)
+        crate::db::get_agent_node_by_id(node_id)
+            .ok()
+            .map(|n| n.status)
     }
 
-    fn write_prompt(&self, node_id: i64, payload: &str) -> Result<crate::agent::process::InputDisposition, String> {
+    fn write_prompt(
+        &self,
+        node_id: i64,
+        payload: &str,
+    ) -> Result<crate::agent::process::InputDisposition, String> {
         crate::agent::process::PROCESS_REGISTRY
             .write_bytes(node_id, payload.as_bytes())
             .map(|outcome| outcome.disposition)
@@ -303,7 +313,8 @@ pub trait IdempotencyStore {
     /// `Err` is propagated, never swallowed: a genuine read failure must not
     /// be mistaken for "key never seen" (fail-safe contract from issue #320
     /// review).
-    fn claim(&self, node_id: i64, key: &str, prompt_hash: &str) -> Result<ClaimOutcome, DriveError>;
+    fn claim(&self, node_id: i64, key: &str, prompt_hash: &str)
+        -> Result<ClaimOutcome, DriveError>;
 
     /// Finalize a claim: UPDATE the `pending` row to its terminal status +
     /// verdict. Best-effort: a failed finalize leaves the row `pending` and
@@ -377,7 +388,10 @@ pub fn drive_node_idempotent<S: IdempotencyStore, D: AgentDriver>(
     loop {
         match store.claim(node_id, idempotency_key, &prompt_hash)? {
             ClaimOutcome::Replay(verdict) => {
-                return Ok(DriveOutcome { verdict, replayed: true });
+                return Ok(DriveOutcome {
+                    verdict,
+                    replayed: true,
+                });
             }
             ClaimOutcome::Mismatch => return Err(DriveError::KeyPayloadMismatch),
             ClaimOutcome::InProgress => {
@@ -398,7 +412,10 @@ pub fn drive_node_idempotent<S: IdempotencyStore, D: AgentDriver>(
         Ok(prior) => {
             let verdict = driver.verify_delivery(prior);
             store.finalize(node_id, idempotency_key, verdict);
-            Ok(DriveOutcome { verdict, replayed: false })
+            Ok(DriveOutcome {
+                verdict,
+                replayed: false,
+            })
         }
         Err(e) => {
             store.release_claim(node_id, idempotency_key);
@@ -412,7 +429,12 @@ pub fn drive_node_idempotent<S: IdempotencyStore, D: AgentDriver>(
 struct DbIdempotencyStore;
 
 impl IdempotencyStore for DbIdempotencyStore {
-    fn claim(&self, node_id: i64, key: &str, prompt_hash: &str) -> Result<ClaimOutcome, DriveError> {
+    fn claim(
+        &self,
+        node_id: i64,
+        key: &str,
+        prompt_hash: &str,
+    ) -> Result<ClaimOutcome, DriveError> {
         // Same fail-safe contract as the pre-#750 `lookup`: a genuine DB
         // error propagates as `LedgerUnavailable`, never as a "key never
         // seen" that would re-deliver.
@@ -562,13 +584,19 @@ mod tests {
         fn is_plain_terminal(&self, _node_id: i64) -> bool {
             self.plain_terminal
         }
-        fn write_prompt(&self, node_id: i64, payload: &str) -> Result<crate::agent::process::InputDisposition, String> {
+        fn write_prompt(
+            &self,
+            node_id: i64,
+            payload: &str,
+        ) -> Result<crate::agent::process::InputDisposition, String> {
             if self.fail_write {
                 return Err("pty gone".to_string());
             }
             // Recorded either way: the *attempt* is what the test inspects, and
             // a refused attempt must be visibly distinct from a delivered one.
-            self.writes.borrow_mut().push((node_id, payload.to_string()));
+            self.writes
+                .borrow_mut()
+                .push((node_id, payload.to_string()));
             Ok(if self.backpressured {
                 crate::agent::process::InputDisposition::Backpressured
             } else {
@@ -700,7 +728,10 @@ mod tests {
     /// The verdict serializes to the lowercase wire form the response uses.
     #[test]
     fn verdict_serializes_snake_case() {
-        assert_eq!(serde_json::to_string(&Verdict::Delivered).unwrap(), "\"delivered\"");
+        assert_eq!(
+            serde_json::to_string(&Verdict::Delivered).unwrap(),
+            "\"delivered\""
+        );
         assert_eq!(
             serde_json::to_string(&Verdict::Unverified).unwrap(),
             "\"unverified\""
@@ -823,12 +854,24 @@ mod tests {
 
         let first =
             drive_node_idempotent(&store, &driver, 7, "key-abc", "work on issue 23").unwrap();
-        assert_eq!(first, DriveOutcome { verdict: Verdict::Delivered, replayed: false });
+        assert_eq!(
+            first,
+            DriveOutcome {
+                verdict: Verdict::Delivered,
+                replayed: false
+            }
+        );
 
         // Retry with the identical key: a no-op that returns the original verdict.
         let second =
             drive_node_idempotent(&store, &driver, 7, "key-abc", "work on issue 23").unwrap();
-        assert_eq!(second, DriveOutcome { verdict: Verdict::Delivered, replayed: true });
+        assert_eq!(
+            second,
+            DriveOutcome {
+                verdict: Verdict::Delivered,
+                replayed: true
+            }
+        );
 
         // Exactly one write reached the PTY — the prompt never landed twice.
         assert_eq!(
@@ -857,23 +900,36 @@ mod tests {
             ..Default::default()
         });
 
-        let error =
-            drive_node_idempotent(&store, &stalled, 7, "key-stalled", "work on issue 23")
-                .expect_err("a refused write must not report a verdict");
+        let error = drive_node_idempotent(&store, &stalled, 7, "key-stalled", "work on issue 23")
+            .expect_err("a refused write must not report a verdict");
         assert_eq!(error, DriveError::Backpressured);
-        assert!(stalled.target.cleared.borrow().is_empty(),
-            "a prompt that was never queued must not clear the node's attention");
-        assert!(store.recorded.borrow().is_empty(),
-            "the pending claim must be released, not finalized: {:?}", store.recorded.borrow());
+        assert!(
+            stalled.target.cleared.borrow().is_empty(),
+            "a prompt that was never queued must not clear the node's attention"
+        );
+        assert!(
+            store.recorded.borrow().is_empty(),
+            "the pending claim must be released, not finalized: {:?}",
+            store.recorded.borrow()
+        );
 
         // The node recovers. The identical key now drives for real, which is
         // only possible because no cached verdict stands in the way.
         let healthy = awaiting_driver();
         let outcome =
             drive_node_idempotent(&store, &healthy, 7, "key-stalled", "work on issue 23").unwrap();
-        assert_eq!(outcome, DriveOutcome { verdict: Verdict::Delivered, replayed: false });
-        assert_eq!(healthy.target.writes.borrow().len(), 1,
-            "the retry must deliver exactly once");
+        assert_eq!(
+            outcome,
+            DriveOutcome {
+                verdict: Verdict::Delivered,
+                replayed: false
+            }
+        );
+        assert_eq!(
+            healthy.target.writes.borrow().len(),
+            1,
+            "the retry must deliver exactly once"
+        );
     }
 
     /// A drive whose writer thread is gone is terminal, not retryable — the
@@ -891,7 +947,10 @@ mod tests {
         let error = drive_node_idempotent(&store, &driver, 7, "key-closed", "hello")
             .expect_err("a dead writer must not report a verdict");
         assert_eq!(error, DriveError::WriteFailed("pty gone".to_string()));
-        assert!(store.recorded.borrow().is_empty(), "the claim is released for a retry");
+        assert!(
+            store.recorded.borrow().is_empty(),
+            "the claim is released for a retry"
+        );
     }
 
     /// A distinct key drives again — idempotency dedupes retries, not genuinely
@@ -941,7 +1000,13 @@ mod tests {
         let first = drive_node_idempotent(&store, &driver, 3, "k", "follow-up").unwrap();
         assert_eq!(first.verdict, Verdict::Unverified);
         let second = drive_node_idempotent(&store, &driver, 3, "k", "follow-up").unwrap();
-        assert_eq!(second, DriveOutcome { verdict: Verdict::Unverified, replayed: true });
+        assert_eq!(
+            second,
+            DriveOutcome {
+                verdict: Verdict::Unverified,
+                replayed: true
+            }
+        );
         assert_eq!(driver.target.writes.borrow().len(), 1);
     }
 
@@ -973,7 +1038,10 @@ mod tests {
     /// second delivery we can't rule out (issue #320 review).
     #[test]
     fn unreadable_ledger_aborts_without_sending() {
-        let store = FakeStore { fail_claim: true, ..Default::default() };
+        let store = FakeStore {
+            fail_claim: true,
+            ..Default::default()
+        };
         let driver = awaiting_driver();
 
         let result = drive_node_idempotent(&store, &driver, 7, "k", "work on issue 23");
@@ -1010,12 +1078,17 @@ mod tests {
     /// `Replay` once we finalize.
     #[test]
     fn claim_returns_in_progress_until_peer_finalizes() {
-        let store = FakeStore { hold_pending: true, ..Default::default() };
+        let store = FakeStore {
+            hold_pending: true,
+            ..Default::default()
+        };
         // Pre-populate a pending row to simulate a peer mid-send.
-        store
-            .recorded
-            .borrow_mut()
-            .push((7, "k".to_string(), crate::db::hash_token("v1"), "pending".to_string()));
+        store.recorded.borrow_mut().push((
+            7,
+            "k".to_string(),
+            crate::db::hash_token("v1"),
+            "pending".to_string(),
+        ));
 
         // While the row is pending, the second caller sees InProgress.
         assert_eq!(
@@ -1040,14 +1113,19 @@ mod tests {
     #[test]
     #[ignore = "exercises the real IN_PROGRESS_WAIT_TIMEOUT; run with `cargo test -- --ignored`"]
     fn in_progress_surfaces_after_wait_timeout() {
-        let store = FakeStore { hold_pending: true, ..Default::default() };
+        let store = FakeStore {
+            hold_pending: true,
+            ..Default::default()
+        };
         let driver = awaiting_driver();
 
         // Pre-populate a pending row.
-        store
-            .recorded
-            .borrow_mut()
-            .push((7, "k".to_string(), crate::db::hash_token("v1"), "pending".to_string()));
+        store.recorded.borrow_mut().push((
+            7,
+            "k".to_string(),
+            crate::db::hash_token("v1"),
+            "pending".to_string(),
+        ));
 
         let start = Instant::now();
         let result = drive_node_idempotent(&store, &driver, 7, "k", "v1");
@@ -1103,7 +1181,12 @@ mod tests {
     const RENDEZVOUS_TIMEOUT: Duration = Duration::from_secs(5);
 
     impl IdempotencyStore for RendezvousStore {
-        fn claim(&self, _node_id: i64, _key: &str, _hash: &str) -> Result<ClaimOutcome, DriveError> {
+        fn claim(
+            &self,
+            _node_id: i64,
+            _key: &str,
+            _hash: &str,
+        ) -> Result<ClaimOutcome, DriveError> {
             match self.ticker_done.recv_timeout(RENDEZVOUS_TIMEOUT) {
                 Ok(()) => Ok(ClaimOutcome::Claimed),
                 Err(_) => Err(DriveError::LedgerUnavailable(
@@ -1165,7 +1248,10 @@ mod tests {
         assert_eq!(ticks, 100, "the concurrent task did not run to completion");
         assert_eq!(
             outcome.expect("the runtime worker was pinned by the drive"),
-            DriveOutcome { verdict: Verdict::Delivered, replayed: false }
+            DriveOutcome {
+                verdict: Verdict::Delivered,
+                replayed: false
+            }
         );
     }
 }

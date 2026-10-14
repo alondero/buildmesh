@@ -105,13 +105,19 @@ mod tests {
 
         let (fresh, existed) = resolve_clone_destination(&parent, "buildmesh").unwrap();
         assert_eq!(fresh, temp.path().join("buildmesh"));
-        assert!(!existed, "a not-yet-created destination must report existed=false");
+        assert!(
+            !existed,
+            "a not-yet-created destination must report existed=false"
+        );
 
         // git clones into a pre-existing *empty* directory, so that must pass too.
         std::fs::create_dir(&fresh).unwrap();
         let (same, existed) = resolve_clone_destination(&parent, "buildmesh").unwrap();
         assert_eq!(same, fresh);
-        assert!(existed, "an empty pre-existing destination must report existed=true");
+        assert!(
+            existed,
+            "an empty pre-existing destination must report existed=true"
+        );
     }
 
     #[test]

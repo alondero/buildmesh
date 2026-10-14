@@ -48,7 +48,11 @@ pub fn ensure_trusted(resolved: &ResolvedPath) {
         // Windows file alone.
         return;
     }
-    let home = if resolved.env_type == EnvType::WindowsInterop { crate::env::windows_cli_home("") } else { home_dir() };
+    let home = if resolved.env_type == EnvType::WindowsInterop {
+        crate::env::windows_cli_home("")
+    } else {
+        home_dir()
+    };
     let Some(home) = home else { return };
     ensure_trusted_with_home(resolved, &home);
 }
@@ -63,7 +67,11 @@ fn ensure_trusted_with_home(resolved: &ResolvedPath, home: &Path) {
     for (relative, label) in TARGETS {
         // Errors are logged inside `update_settings_file`; a broken trust
         // update is never fatal to a spawn.
-        let project_path = if resolved.env_type == EnvType::WindowsInterop { &resolved.spawn_path } else { &resolved.host_path };
+        let project_path = if resolved.env_type == EnvType::WindowsInterop {
+            &resolved.spawn_path
+        } else {
+            &resolved.host_path
+        };
         update_settings_file(&home.join(relative), label, project_path);
     }
 }
@@ -162,7 +170,9 @@ fn normalize_path(p: &str) -> String {
 /// the user wrote it — matching what Claude Code itself does on those
 /// platforms.)
 fn matches_existing(existing: &serde_json::Value, candidate: &str) -> bool {
-    let Some(s) = existing.as_str() else { return false };
+    let Some(s) = existing.as_str() else {
+        return false;
+    };
     if cfg!(target_os = "windows") || crate::env::is_windows_path(candidate) {
         s.eq_ignore_ascii_case(candidate)
     } else {
@@ -247,14 +257,23 @@ mod tests {
     #[test]
     fn windows_interop_trusts_process_path_in_supplied_runtime_home() {
         let home = TempDir::new().unwrap();
-        write_file(home.path(), ".claude/settings.json", r#"{"trustedWorkspaces":[]}"#);
+        write_file(
+            home.path(),
+            ".claude/settings.json",
+            r#"{"trustedWorkspaces":[]}"#,
+        );
         let resolved = ResolvedPath {
-            host_path: "/host/repository".into(), raw_path: "/host/repository".into(),
-            spawn_path: "C:/work/project".into(), env_type: EnvType::WindowsInterop,
+            host_path: "/host/repository".into(),
+            raw_path: "/host/repository".into(),
+            spawn_path: "C:/work/project".into(),
+            env_type: EnvType::WindowsInterop,
         };
         drive(home.path(), &resolved);
         drive(home.path(), &resolved);
-        assert_eq!(read_trusted(home.path(), ".claude/settings.json"), vec![r"C:\work\project"]);
+        assert_eq!(
+            read_trusted(home.path(), ".claude/settings.json"),
+            vec![r"C:\work\project"]
+        );
     }
 
     #[test]
@@ -349,10 +368,7 @@ mod tests {
             &fs::read_to_string(home.path().join(".claude/settings.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(
-            v["trustedWorkspaces"].as_str().unwrap(),
-            "some-user-string"
-        );
+        assert_eq!(v["trustedWorkspaces"].as_str().unwrap(), "some-user-string");
     }
 
     #[test]

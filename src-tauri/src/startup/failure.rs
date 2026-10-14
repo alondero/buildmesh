@@ -180,11 +180,7 @@ impl StartupFailure {
     /// Build a failure from a stage, a user-facing summary, and a technical
     /// detail. `detail` is scrubbed here, so no call site can leak a token by
     /// forgetting to.
-    pub fn new(
-        stage: StartupStage,
-        summary: impl Into<String>,
-        detail: impl fmt::Display,
-    ) -> Self {
+    pub fn new(stage: StartupStage, summary: impl Into<String>, detail: impl fmt::Display) -> Self {
         Self {
             stage,
             summary: summary.into(),
@@ -329,10 +325,9 @@ impl StartupFailure {
             format!("Buildmesh could not start {what}."),
             error,
         );
-        failure.remediation =
-            "Restarting usually clears this. If it persists, attach the log \
+        failure.remediation = "Restarting usually clears this. If it persists, attach the log \
              file to a bug report."
-                .to_string();
+            .to_string();
         failure
     }
 
@@ -678,7 +673,10 @@ mod tests {
             !text.contains("not a valid database"),
             "an unopenable file is not a damaged one: {text}"
         );
-        assert!(text.contains("permission"), "should name the real problem: {text}");
+        assert!(
+            text.contains("permission"),
+            "should name the real problem: {text}"
+        );
     }
 
     #[test]
@@ -784,7 +782,9 @@ mod tests {
             Some(PathBuf::from("/profiles/stable")),
         );
         assert_eq!(log_failure.log_path(), None);
-        assert!(!log_failure.actions().contains(&StartupAction::OpenLogFolder));
+        assert!(!log_failure
+            .actions()
+            .contains(&StartupAction::OpenLogFolder));
         let text = log_failure.user_text();
         assert!(
             text.contains("could not open a log file for this failure"),
@@ -883,7 +883,10 @@ mod tests {
     fn with_paths_fills_blanks_without_overwriting() {
         let failure = StartupFailure::app_data("no dir", "denied", Some(PathBuf::from("/first")))
             .with_paths(Some(PathBuf::from("/first/logs/buildmesh.log")), None);
-        assert_eq!(failure.log_path(), Some(Path::new("/first/logs/buildmesh.log")));
+        assert_eq!(
+            failure.log_path(),
+            Some(Path::new("/first/logs/buildmesh.log"))
+        );
         let text = failure.user_text();
         assert!(
             text.contains("App data folder:\n/first"),

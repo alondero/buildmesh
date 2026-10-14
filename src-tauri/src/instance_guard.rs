@@ -194,7 +194,11 @@ impl ProfileIdentity {
             // (that applies to file mappings and symlinks), and two users still
             // never collide because their app-data paths differ, and the path
             // is what the digest covers.
-            format!("Global\\{}-{}", sanitize_object_name(&self.identifier), digest)
+            format!(
+                "Global\\{}-{}",
+                sanitize_object_name(&self.identifier),
+                digest
+            )
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -599,11 +603,7 @@ mod platform {
     /// can easily arrive inside that gap. Once a window is found the answer is
     /// final — a later one cannot be better, and a crashed owner will never
     /// produce one, so the bound is what stops this from spinning.
-    pub fn forward_activation(
-        profile_dir: &Path,
-        attempts: u32,
-        retry: Duration,
-    ) -> ForwardReport {
+    pub fn forward_activation(profile_dir: &Path, attempts: u32, retry: Duration) -> ForwardReport {
         let path = profile_dir.join(super::OWNER_PID_FILE);
         let mut owner_pid = None;
         for attempt in 0..attempts.max(1) {
@@ -674,7 +674,9 @@ mod platform {
                 return None;
             }
         }
-        found.into_iter().find(|hwnd| belongs_to(*hwnd, pid) && is_main_window(*hwnd))
+        found
+            .into_iter()
+            .find(|hwnd| belongs_to(*hwnd, pid) && is_main_window(*hwnd))
     }
 
     unsafe extern "system" fn collect_owner_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -748,8 +750,7 @@ mod platform {
             let mut foreground_thread = 0;
             let foreground = GetForegroundWindow();
             if !foreground.is_null() {
-                foreground_thread =
-                    GetWindowThreadProcessId(foreground, std::ptr::null_mut());
+                foreground_thread = GetWindowThreadProcessId(foreground, std::ptr::null_mut());
             }
             let our_thread = GetCurrentThreadId();
             let attached = foreground_thread != 0
@@ -965,7 +966,10 @@ mod tests {
         let held = claim_profile(&canonical).expect("canonical claim");
         assert!(matches!(held, Claim::Primary(_)));
         assert!(
-            matches!(claim_profile(&roundabout).expect("roundabout claim"), Claim::Secondary),
+            matches!(
+                claim_profile(&roundabout).expect("roundabout claim"),
+                Claim::Secondary
+            ),
             "an equivalent path must land on the same claim"
         );
     }
@@ -983,7 +987,10 @@ mod tests {
         drop(claim);
 
         assert!(
-            matches!(claim_profile(&identity).expect("re-claim"), Claim::Primary(_)),
+            matches!(
+                claim_profile(&identity).expect("re-claim"),
+                Claim::Primary(_)
+            ),
             "a released profile must be claimable again"
         );
     }
@@ -1008,8 +1015,14 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn claim_targets_stay_inside_the_object_name_syntax() {
-        assert_eq!(sanitize_object_name("com.alond.buildmesh"), "com.alond.buildmesh");
-        assert_eq!(sanitize_object_name("com.acme/buildmesh"), "com.acme_buildmesh");
+        assert_eq!(
+            sanitize_object_name("com.alond.buildmesh"),
+            "com.alond.buildmesh"
+        );
+        assert_eq!(
+            sanitize_object_name("com.acme/buildmesh"),
+            "com.acme_buildmesh"
+        );
         assert_eq!(sanitize_object_name("a\\b"), "a_b");
         assert_eq!(sanitize_object_name(""), "");
 
@@ -1019,7 +1032,10 @@ mod tests {
         // `Global\`, not `Local\`: a session-scoped object would let a second
         // Windows session open the same profile (issue #1521).
         assert!(target.starts_with("Global\\"), "{target}");
-        assert!(target.len() < 200, "object name must fit MAX_PATH: {target}");
+        assert!(
+            target.len() < 200,
+            "object name must fit MAX_PATH: {target}"
+        );
     }
 
     /// Different identifiers, and different profiles, must never share a claim
@@ -1040,7 +1056,10 @@ mod tests {
         );
         // Two independent constructions of the same identity must agree, or a
         // relaunch would never recognise the profile it already owns.
-        assert_eq!(stable.claim_target(), identity(STABLE_IDENTIFIER, dir.path()).claim_target());
+        assert_eq!(
+            stable.claim_target(),
+            identity(STABLE_IDENTIFIER, dir.path()).claim_target()
+        );
     }
 
     /// A relaunch must be able to take over from the process it replaces.
@@ -1124,11 +1143,10 @@ mod tests {
     fn winning_the_claim_publishes_this_process() {
         let dir = temp_profile();
         let identity = identity(STABLE_IDENTIFIER, dir.path());
-        with_profile_ownership(&identity, |_| {}, || Ok::<_, std::io::Error>(()))
-            .expect("claim");
+        with_profile_ownership(&identity, |_| {}, || Ok::<_, std::io::Error>(())).expect("claim");
 
-        let published = std::fs::read_to_string(dir.path().join(OWNER_PID_FILE))
-            .expect("owner pid published");
+        let published =
+            std::fs::read_to_string(dir.path().join(OWNER_PID_FILE)).expect("owner pid published");
         assert_eq!(parse_owner_pid(&published), Some(std::process::id()));
     }
 
@@ -1163,7 +1181,10 @@ mod tests {
         let report = platform::forward_activation(dir.path(), 1, Duration::from_millis(0));
         // This test process has no Buildmesh window, so there is nothing to
         // focus — but the lookup must have targeted the right pid.
-        assert!(!report.window_found, "no live main window in this test process");
+        assert!(
+            !report.window_found,
+            "no live main window in this test process"
+        );
         assert!(!report.focused);
         assert_eq!(report.owner_pid, Some(std::process::id()));
     }
@@ -1215,8 +1236,14 @@ mod tests {
         let log = ownership_log(dir.path());
         assert_eq!(log.lines().count(), 1, "{log}");
         let line = log.lines().next().unwrap();
-        assert!(line.contains("identifier=com.alond.buildmesh.dev"), "{line}");
-        assert!(line.contains(&format!("pid={}", std::process::id())), "{line}");
+        assert!(
+            line.contains("identifier=com.alond.buildmesh.dev"),
+            "{line}"
+        );
+        assert!(
+            line.contains(&format!("pid={}", std::process::id())),
+            "{line}"
+        );
         assert!(line.contains("window_found=true"), "{line}");
         assert!(line.contains("focused=true"), "{line}");
         assert!(line.contains("owner_pid=Some(517204)"), "{line}");
@@ -1279,10 +1306,9 @@ mod tests {
         let identity = identity(STABLE_IDENTIFIER, &profile);
         let mut report = ForwardReport::default();
 
-        let outcome = with_profile_ownership(&identity, |r| report = *r, || {
-            child_startup(&profile)
-        })
-        .expect("claim");
+        let outcome =
+            with_profile_ownership(&identity, |r| report = *r, || child_startup(&profile))
+                .expect("claim");
 
         let summary = match outcome {
             Startup::Owned => format!("owned:{name}"),
@@ -1307,9 +1333,8 @@ mod tests {
     }
 
     fn spawn_child(profile: &Path, name: &str, hold: bool) -> std::process::Child {
-        let mut command = std::process::Command::new(
-            std::env::current_exe().expect("current test binary"),
-        );
+        let mut command =
+            std::process::Command::new(std::env::current_exe().expect("current test binary"));
         command
             .arg("--ignored")
             .arg("--exact")
@@ -1368,7 +1393,10 @@ mod tests {
         // Loser: a genuine second process, same profile, same identifier.
         let loser = spawn_child(&profile, "loser", false);
         let (status, stderr) = child_output(loser);
-        assert!(status.success(), "the loser must exit cleanly, got {status}: {stderr}");
+        assert!(
+            status.success(),
+            "the loser must exit cleanly, got {status}: {stderr}"
+        );
         assert_eq!(
             std::fs::read_to_string(profile.join("outcome-loser.txt")).unwrap(),
             "forwarded:loser:false",
@@ -1385,11 +1413,17 @@ mod tests {
         // it could never claim).
         std::fs::write(profile.join("release-holder"), "go").unwrap();
         let (status, stderr) = child_output(holder);
-        assert!(status.success(), "the owner must exit cleanly, got {status}: {stderr}");
+        assert!(
+            status.success(),
+            "the owner must exit cleanly, got {status}: {stderr}"
+        );
 
         let next = spawn_child(&profile, "next", false);
         let (status, stderr) = child_output(next);
-        assert!(status.success(), "the third process must run, got {status}: {stderr}");
+        assert!(
+            status.success(),
+            "the third process must run, got {status}: {stderr}"
+        );
         assert_eq!(
             std::fs::read_to_string(profile.join("outcome-next.txt")).unwrap(),
             "owned:next",
