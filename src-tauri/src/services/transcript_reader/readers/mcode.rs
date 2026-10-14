@@ -503,7 +503,7 @@ impl TranscriptAdapter for McodeAdapter {
             .lines()
             .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
             .filter_map(|record| record_message(&record).cloned())
-            .last();
+            .next_back();
         let Some(message) = last else {
             return false;
         };

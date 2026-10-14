@@ -39,13 +39,12 @@ impl TranscriptAdapter for ClaudeCodeAdapter {
         let last_user_text = lines
             .lines()
             .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .filter(|value| {
+            .rfind(|value| {
                 matches!(
                     value.get("type").and_then(|kind| kind.as_str()),
                     Some("user" | "assistant")
                 ) && value.get("isMeta").and_then(|meta| meta.as_bool()) != Some(true)
             })
-            .last()
             .filter(|value| value.get("type").and_then(|kind| kind.as_str()) == Some("user"))
             .and_then(|value| {
                 let content = value.pointer("/message/content")?;
