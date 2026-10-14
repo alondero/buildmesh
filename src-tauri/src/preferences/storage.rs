@@ -77,6 +77,10 @@ pub fn init(app_data_dir: PathBuf) {
 pub(crate) fn init_for_tests(app_data_dir: PathBuf) {
     init(app_data_dir);
     set_cache(None);
+    // A swapped app-data dir is a changed preference source, so derived
+    // caches keyed on the generation (issue #1752) must not serve values
+    // computed against the previous one.
+    bump_generation();
 }
 
 #[cfg(test)]
@@ -84,6 +88,7 @@ pub(crate) fn reset_for_tests() {
     set_app_data_dir(None);
     set_cache(None);
     super::secrets::test_support::reset();
+    bump_generation();
 }
 
 /// The app-data directory `init` was wired to, for sibling config files

@@ -480,3 +480,36 @@ prove account availability or CLI-version compatibility.
 For scoped project launch directories, use `env::node_working_path`; checkout
 ownership and Git watcher identity use separate helpers. See
 [Agent Node worktree support](agent-nodes.md#worktree-support-git2-based).
+
+## The Spawn Menu derivation is memoized per preferences generation
+
+Both production readers of the Spawn Menu — `available_providers` (the mobile
+route `GET /api/providers`) and `list_providers_blocking` (the `list_providers`
+Tauri command) — go through `agent::provider_menu::derived_menu`, which serves a
+memoized `Vec<ProviderInfo>` instead of re-deriving.
+
+Clients read the menu on a timer, not on demand: the Android client polls its
+mesh/node/provider snapshot every 5s while foregrounded (`BuildmeshViewModel`), so
+a paired phone idling on the node list used to re-derive the whole menu — the
+per-runtime Codex probe included, and a failing probe is discarded rather than
+served warm (`CodexInstallCache::discard_failed_entry`), which is why the
+warm-native / cold-foreign split put 400-700ms in every pass — twelve times a
+minute, each pass writing a log line. A cached read is what removes that rate; a
+quieter log level alone would not, because the default filter already admits this
+crate at `debug`.
+
+The memo is keyed on `preferences::generation`, which bumps on every durable
+preference write (`save` / `update`), and a change reaches the rest of the app only
+once one of those lands — so a memoized menu is never older than the preferences
+cache every other reader sees. Generation handling matches
+`agent::launch_routing`: it only moves forward, so a derivation that sampled an
+older generation can neither publish nor evict a newer entry. What the generation
+cannot see is a change made outside Buildmesh (a `npm i -g @openai/codex`, or a
+WSL-side install), so the entry also carries a 45s TTL — the same bound
+`codex::CODEX_INSTALL_CACHE_TTL` already accepts for install metadata.
+
+The derivation's single log line is `debug`, not `info`: it carries the same
+wall-clock and Codex-probe attribution fields it always has, for reading next to a
+slow save-refresh, without ranking a per-poll line above the attention and
+lifecycle lines it used to bury. Its test drives the derivation directly, because
+the memo turns a second `available_providers()` call in one generation into a hit.

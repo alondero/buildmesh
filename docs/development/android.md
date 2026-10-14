@@ -198,13 +198,18 @@ responses into the current desktop prompt. Input controls report disconnection i
 queueing keystrokes. HTTP replies enforce the server's 1024-byte encoded-body
 limit. Enumerated answers are shown as guidance rather than guessed PTY keys.
 
-The ViewModel owns foreground polling and the event socket. Refresh requests
-are coalesced and versioned so polling cannot starve slow responses and older
-responses cannot overwrite a newer event or session. Each socket has one
-reconnect job and one owner. Forgetting or revocation cancels pending actions
-before their callbacks can clear drafts or navigate. Backgrounding
-cancels sockets/polling; foregrounding immediately reconnects with a new
-target-bound WebSocket ticket. Ticket rate limits allow one bounded retry.
+The ViewModel owns foreground polling and the event socket. The poll reads one
+snapshot (`/api/meshes`, `/api/nodes`, `/api/providers`) every 5s while
+foregrounded, so it hits the desktop's provider-menu route even when nothing
+changed; that route memoizes its derivation per preferences generation rather
+than re-deriving per poll (see
+[providers.md](providers.md#the-spawn-menu-derivation-is-memoized-per-preferences-generation)).
+Refresh requests are coalesced and versioned so polling cannot starve slow
+responses and older responses cannot overwrite a newer event or session. Each
+socket has one reconnect job and one owner. Forgetting or revocation cancels
+pending actions before their callbacks can clear drafts or navigate.
+Backgrounding cancels sockets/polling; foregrounding immediately reconnects with
+a new target-bound WebSocket ticket. Ticket rate limits allow one bounded retry.
 Mutating HTTP requests and redirects are never automatically replayed.
 HTTP requests explicitly close their connection to match the embedded server's
 one-request transport; terminal WebSockets retain their separate live connection.

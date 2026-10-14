@@ -14,6 +14,8 @@
 #[cfg(test)]
 use crate::agent::provider::AgentProvider;
 use crate::agent::provider::{EffectivePermissionMode, Platform, ProviderInfo};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tauri::command;
 
 /// Compose the `ProviderInfo` (Spawn Option) row for a single harness profile on the
@@ -313,6 +315,121 @@ fn discover_codex_runtimes_concurrently(
     })
 }
 
+/// Wall-clock bound on one memoized menu.
+///
+/// The preferences generation is what makes the memo correct: it bumps on every
+/// durable preference write, and a change reaches the rest of the app only once
+/// one of those lands, so a memoized menu is never older than the preferences
+/// cache every other reader sees. What the generation cannot see is a change
+/// made outside Buildmesh — a `npm i -g @openai/codex` (or a WSL-side install)
+/// while the window is open. 45s matches `codex::CODEX_INSTALL_CACHE_TTL`, the
+/// staleness bound the Codex install probe already accepts, so the menu never
+/// serves install metadata older than the probe behind it.
+const DERIVED_MENU_TTL: Duration = Duration::from_secs(45);
+
+/// Single-slot memo for the Spawn Menu derivation (issue #2349), keyed on the
+/// preferences generation exactly as `agent::launch_routing` keys its routing
+/// cache. The generation only moves **forward**, so a caller that sampled an
+/// older one must neither evict the newer entry nor publish its own: `get`
+/// clears only on a strictly newer generation, and `put` drops a derivation
+/// whose inputs have already moved past it. `now` is a parameter rather than
+/// an internal clock read so the TTL is testable without sleeping.
+#[derive(Default)]
+struct DerivedMenuCache {
+    generation: u64,
+    derived_at: Option<Instant>,
+    menu: Option<Arc<Vec<ProviderInfo>>>,
+}
+
+impl DerivedMenuCache {
+    fn get(&mut self, generation: u64, now: Instant) -> Option<Arc<Vec<ProviderInfo>>> {
+        if generation < self.generation {
+            // A caller holding an older generation must not evict the newer entry.
+            return None;
+        }
+        if generation > self.generation {
+            self.generation = generation;
+            self.derived_at = None;
+            self.menu = None;
+        }
+        let derived_at = self.derived_at?;
+        let menu = self.menu.clone()?;
+        (now.saturating_duration_since(derived_at) < DERIVED_MENU_TTL).then_some(menu)
+    }
+
+    fn put(&mut self, generation: u64, now: Instant, menu: Arc<Vec<ProviderInfo>>) {
+        // A stale generation means the slot already moved past this
+        // derivation's inputs — dropping it beats storing dead state.
+        if generation != self.generation {
+            return;
+        }
+        self.derived_at = Some(now);
+        self.menu = Some(menu);
+    }
+}
+
+// Global in production (one preferences source per process); per-test-thread
+// in tests, mirroring `agent::launch_routing` — under `cfg(test)` the
+// preferences app-data dir is thread-local (issue #1386), so a shared static
+// would serve one test's preferences to another thread.
+#[cfg(not(test))]
+static DERIVED_MENU_CACHE: once_cell::sync::Lazy<std::sync::Mutex<DerivedMenuCache>> =
+    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(DerivedMenuCache::default()));
+
+#[cfg(test)]
+thread_local! {
+    static DERIVED_MENU_CACHE: std::cell::RefCell<DerivedMenuCache> =
+        std::cell::RefCell::new(DerivedMenuCache::default());
+}
+
+fn with_derived_menu<R>(f: impl FnOnce(&mut DerivedMenuCache) -> R) -> R {
+    #[cfg(not(test))]
+    let result = {
+        let mut guard = DERIVED_MENU_CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        f(&mut guard)
+    };
+    #[cfg(test)]
+    let result = DERIVED_MENU_CACHE.with(|cell| f(&mut cell.borrow_mut()));
+    result
+}
+
+/// Derive the Spawn Menu, or serve the memoized menu (issue #2349).
+///
+/// The Android client re-reads `GET /api/providers` on a fixed 5s timer
+/// while it is foregrounded, so a paired phone idling on the node list
+/// re-derived the whole menu — per-runtime Codex probe included, and a
+/// failing WSL-side probe is discarded rather than cached warm
+/// (`codex::CodexInstallCache::discard_failed_entry`) — twelve times a minute.
+/// Both production entry points come through here ([`available_providers`] for
+/// the mobile route, `list_providers_blocking` for the Tauri command), so the
+/// memo covers every client instead of one caller, and the derivation log line
+/// stops repeating for an idle one.
+///
+/// `derive` runs on a miss only, and a hit returns the rows a derivation
+/// would have produced — the same derivation, less the probes.
+fn derived_menu(derive: impl FnOnce() -> Vec<ProviderInfo>) -> Vec<ProviderInfo> {
+    derived_menu_at(crate::preferences::generation(), derive)
+}
+
+/// [`derived_menu`] with the cache key supplied, so a unit test can pin a
+/// generation. Sampling the real one is inherently racy under a parallel test
+/// binary: `preferences::generation` is process-wide (one preferences source
+/// per process) while the preferences themselves are per-test-thread, so any
+/// other thread's `save`/`update` moves the key mid-test.
+fn derived_menu_at(
+    generation: u64,
+    derive: impl FnOnce() -> Vec<ProviderInfo>,
+) -> Vec<ProviderInfo> {
+    if let Some(menu) = with_derived_menu(|cache| cache.get(generation, Instant::now())) {
+        return menu.as_ref().clone();
+    }
+    let menu = Arc::new(derive());
+    with_derived_menu(|cache| cache.put(generation, Instant::now(), Arc::clone(&menu)));
+    menu.as_ref().clone()
+}
+
 /// Returns the list of agent providers available on this host platform.
 /// Each provider declares which platforms it runs on via `AgentProvider::available_on()`.
 ///
@@ -321,7 +438,7 @@ fn discover_codex_runtimes_concurrently(
 /// `commands::run_blocking` already, so the menu derivation continues to
 /// stay off the async worker pool (issue #634).
 pub(crate) fn available_providers() -> Vec<ProviderInfo> {
-    available_providers_with_preferences(crate::preferences::load().ok())
+    derived_menu(|| available_providers_with_preferences(crate::preferences::load().ok()))
 }
 
 /// Resolve the effective launch permission mode for one menu row (issue
@@ -414,7 +531,7 @@ fn available_providers_with_preferences(
     prefs: Option<crate::preferences::AppPreferences>,
 ) -> Vec<ProviderInfo> {
     // Issue #1937: this derivation dominates the Settings -> Providers load,
-    // so each derivation emits one `info` line (lands in `logs\buildmesh.log`
+    // so each derivation emits one line (lands in `logs\buildmesh.log`
     // on a default install) with the total wall-clock and the Codex probe cost.
     // Only the runtime identity and CLI version travel in the fields - never
     // credentials, keys, or endpoint URLs.
@@ -427,7 +544,13 @@ fn available_providers_with_preferences(
     // per-runtime durations that summed to the same wall clock. The per-runtime
     // `*_codex_cached` bits still discriminate cold from warm, which is what
     // the attribution needed them for.
-    let derivation_started = std::time::Instant::now();
+    // Issue #2349: `debug`, not `info`. The default filter already admits this
+    // crate at `debug`, so the level no longer separates this line from routine
+    // detail - the memo in `derived_menu` is what keeps an idle client from
+    // deriving at all. At `info` a phone on its 5s poll wrote this line twelve
+    // times a minute over the attention and lifecycle lines it exists to help
+    // read.
+    let derivation_started = Instant::now();
     let accounts = crate::preferences::provider_accounts();
     let configured_pairings = crate::preferences::provider_pairings();
     let needs_codex = configured_pairings
@@ -447,7 +570,7 @@ fn available_providers_with_preferences(
         );
     let foreign_codex_cached = needs_codex
         && crate::agent::provider::adapters::codex::codex_install_cached(foreign_runtime);
-    let probe_started = std::time::Instant::now();
+    let probe_started = Instant::now();
     let (native_codex, wsl_codex) = if needs_codex {
         discover_codex_runtimes_concurrently(
             || {
@@ -469,7 +592,7 @@ fn available_providers_with_preferences(
     // filters, harness detection, row ordering, and Launch Configuration
     // attachment. Timed separately so cold Codex discovery is never blamed on
     // composition (or vice versa).
-    let compose_started = std::time::Instant::now();
+    let compose_started = Instant::now();
     let pairings = configured_pairings
         .into_iter()
         .filter(|pairing| {
@@ -516,7 +639,7 @@ fn available_providers_with_preferences(
         }
         None => menu,
     };
-    tracing::info!(
+    tracing::debug!(
         needs_codex,
         codex_probe_duration_ms,
         native_codex_cached,
@@ -815,8 +938,13 @@ pub async fn list_providers() -> Result<Vec<ProviderInfo>, String> {
 }
 
 fn list_providers_blocking() -> Result<Vec<ProviderInfo>, String> {
+    // Load first so an unreadable `preferences.json` still surfaces as the
+    // IPC error this command documents; the memo then serves the rows a
+    // derivation over that same snapshot would have produced.
     let prefs = crate::preferences::load()?;
-    Ok(available_providers_with_preferences(Some(prefs)))
+    Ok(derived_menu(move || {
+        available_providers_with_preferences(Some(prefs))
+    }))
 }
 
 #[cfg(test)]
@@ -2390,7 +2518,7 @@ mod tests {
                 self.fields.push((field.name().to_string(), unquoted));
             }
         }
-        type CapturedEvents = Arc<Mutex<Vec<Vec<(String, String)>>>>;
+        type CapturedEvents = Arc<Mutex<Vec<(tracing::Level, Vec<(String, String)>)>>>;
         struct Capture {
             events: CapturedEvents,
         }
@@ -2406,7 +2534,8 @@ mod tests {
             fn event(&self, event: &Event<'_>) {
                 let mut recorder = Recorder { fields: Vec::new() };
                 event.record(&mut recorder);
-                self.events.lock().unwrap().push(recorder.fields);
+                let level = *event.metadata().level();
+                self.events.lock().unwrap().push((level, recorder.fields));
             }
             fn enter(&self, _: &Id) {}
             fn exit(&self, _: &Id) {}
@@ -2416,13 +2545,18 @@ mod tests {
         // `tracing` caches per-callsite interest globally: a first hit under
         // the default no-op dispatcher pins the site as disabled, and a
         // rebuild only reaches already-registered sites - so a sibling test
-        // hitting `available_providers` first (or between rebuild and emit)
+        // hitting the derivation first (or between rebuild and emit)
         // would silently swallow the line under parallelism. Drive one
         // throwaway derivation first (registering the site under the
         // capturing dispatcher), rebuild, discard its line, and assert on
         // the second derivation. Whatever the initial cache state, the
         // second derivation contributes exactly one line - which also
         // proves the "one line per derivation" budget.
+        //
+        // The derivation itself, not `available_providers`: the memo
+        // (issue #2349) turns a second call in the same preferences
+        // generation into a cache hit, and a hit logs nothing. The line
+        // belongs to the derivation, so drive that directly.
         let run_once = || {
             tracing::dispatcher::with_default(
                 &tracing::dispatcher::Dispatch::new(Capture {
@@ -2430,7 +2564,7 @@ mod tests {
                 }),
                 || {
                     tracing::callsite::rebuild_interest_cache();
-                    available_providers()
+                    available_providers_with_preferences(crate::preferences::load().ok())
                 },
             )
         };
@@ -2442,7 +2576,7 @@ mod tests {
         let events = events.lock().unwrap();
         let derivations: Vec<_> = events
             .iter()
-            .filter(|fields| {
+            .filter(|(_, fields)| {
                 fields.iter().any(|(name, value)| {
                     name == "message" && value == "provider menu derivation completed"
                 })
@@ -2454,7 +2588,16 @@ mod tests {
             "expected exactly one provider menu derivation log line, got {}",
             derivations.len()
         );
-        let fields = derivations[0];
+        // Issue #2349: the line is `debug`. The default filter already admits
+        // this crate at `debug`, so the level is not what stops an idle window
+        // writing it (the memo is) - but the issue asked for it, and `info`
+        // ranked a per-poll line above the lifecycle lines it buried.
+        assert_eq!(
+            derivations[0].0,
+            tracing::Level::DEBUG,
+            "the derivation line must not be logged at info"
+        );
+        let fields = &derivations[0].1;
         let mut names: Vec<&str> = fields
             .iter()
             .filter(|(name, _)| name != "message")
@@ -2535,5 +2678,159 @@ mod tests {
         assert_eq!(value("foreign_codex_cached"), "false");
         assert_eq!(value("native_runtime_identity"), "none");
         assert_eq!(value("foreign_runtime_identity"), "none");
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #2349 — the derived-menu memo. The regression it fixes is a
+    // *rate*: the Android client re-reads `/api/providers` every 5s, so an
+    // idle paired phone re-derived the menu (Codex probe included) twelve
+    // times a minute. These pin the memo that makes a repeat read free and
+    // the invalidation that keeps it honest.
+    // -----------------------------------------------------------------------
+
+    /// A stand-in derivation result, shaped like a real menu row so a memo
+    /// hit can be compared against what the derivation returned.
+    fn memo_row() -> ProviderInfo {
+        use crate::agent::provider::adapters::TERMINAL;
+        ProviderInfo {
+            id: "terminal".to_string(),
+            label: "Terminal".to_string(),
+            color: String::new(),
+            icon: String::new(),
+            resumable: false,
+            harness_id: "terminal".to_string(),
+            provider_id: None,
+            is_proxied: false,
+            group_key: "terminal".to_string(),
+            capabilities: TERMINAL.capabilities(),
+            runtime: None,
+            configurations: Vec::new(),
+            configuration: None,
+            unavailable_reason: None,
+            effective_permission: None,
+        }
+    }
+
+    /// A repeat read inside one generation must not re-derive. Driven
+    /// through the memo seam with a pinned generation and a counting closure
+    /// rather than through wall-clock: the count is the observable, and no
+    /// sleep (or racing preferences write) can make it pass for the wrong
+    /// reason.
+    #[test]
+    fn a_repeat_read_within_the_ttl_does_not_re_derive() {
+        let mut derivations = 0;
+        let mut derive = || {
+            derivations += 1;
+            vec![memo_row()]
+        };
+        let first = derived_menu_at(7, &mut derive);
+        let second = derived_menu_at(7, &mut derive);
+        assert_eq!(derivations, 1, "the second read must be a memo hit");
+        let ids = |rows: &[ProviderInfo]| {
+            rows.iter()
+                .map(|row| row.id.clone())
+                .collect::<Vec<String>>()
+        };
+        assert_eq!(
+            ids(&second),
+            ids(&first),
+            "a memo hit must serve the rows the derivation produced"
+        );
+    }
+
+    /// The invalidation that keeps the memo honest is the preferences
+    /// generation, which every preference write bumps. A read at the next
+    /// generation must derive again.
+    #[test]
+    fn a_newer_generation_re_derives_the_menu() {
+        let mut derivations = 0;
+        let mut derive = || {
+            derivations += 1;
+            vec![memo_row()]
+        };
+        derived_menu_at(7, &mut derive);
+        derived_menu_at(8, &mut derive);
+        assert_eq!(
+            derivations, 2,
+            "a settings write must invalidate the memoized menu"
+        );
+    }
+
+    /// The TTL is the only thing bounding a change made *outside* Buildmesh
+    /// (a `npm i -g @openai/codex` while the window is open), and the
+    /// generation cannot see that. Pinned with a synthetic clock so the
+    /// bound is asserted, not slept through.
+    #[test]
+    fn a_memoized_menu_expires_after_the_ttl() {
+        let mut cache = DerivedMenuCache::default();
+        let derived_at = Instant::now();
+        let menu = Arc::new(Vec::<ProviderInfo>::new());
+        cache.put(0, derived_at, Arc::clone(&menu));
+        assert!(
+            cache
+                .get(0, derived_at + DERIVED_MENU_TTL - Duration::from_nanos(1))
+                .is_some(),
+            "a memoized menu is served until its TTL expires"
+        );
+        assert!(
+            cache.get(0, derived_at + DERIVED_MENU_TTL).is_none(),
+            "an expired menu must re-derive so an out-of-process install shows up"
+        );
+    }
+
+    /// The write-side race guard, mirrored from `agent::launch_routing`: a
+    /// derivation that sampled generation `G` cannot publish or evict once a
+    /// settings write has moved the slot to `G+1`.
+    #[test]
+    fn a_derivation_from_an_older_generation_cannot_publish() {
+        let mut cache = DerivedMenuCache::default();
+        let now = Instant::now();
+        cache.get(2, now); // moves the slot to generation 2
+        cache.put(1, now, Arc::new(Vec::new()));
+        assert!(
+            cache.get(2, now).is_none(),
+            "a stale derivation must not become serveable state"
+        );
+        assert!(
+            cache.get(1, now).is_none(),
+            "an older reader must not evict the newer generation"
+        );
+    }
+
+    /// Both production entry points must route through the memo — that is the
+    /// wiring the rate fix depends on. A stored harness profile shows up in
+    /// the menu only after the write that adds it, whether the menu is read
+    /// through the mobile route's `available_providers` or the Tauri
+    /// command's `list_providers_blocking`.
+    #[test]
+    fn both_menu_entry_points_follow_a_preferences_write() {
+        let scratch = tempfile::tempdir().unwrap();
+        std::fs::write(
+            scratch.path().join("preferences.json"),
+            serde_json::to_vec_pretty(&crate::preferences::AppPreferences::default()).unwrap(),
+        )
+        .unwrap();
+        crate::preferences::init_for_tests(scratch.path().into());
+
+        let present = |rows: &[ProviderInfo]| rows.iter().any(|row| row.id == "second-terminal");
+        assert!(!present(&available_providers()));
+        assert!(!present(&list_providers_blocking().unwrap()));
+
+        crate::preferences::update(|prefs| {
+            prefs
+                .harness_profiles
+                .push(profile("second-terminal", "terminal"))
+        })
+        .expect("preferences write lands");
+
+        assert!(
+            present(&list_providers_blocking().unwrap()),
+            "the command must serve the menu a write just changed"
+        );
+        assert!(
+            present(&available_providers()),
+            "the route must serve the menu a write just changed"
+        );
+        crate::preferences::reset_for_tests();
     }
 }
