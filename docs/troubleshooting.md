@@ -137,11 +137,15 @@ The re-send waits for the confirmation window (30 seconds) because Buildmesh
 knows the prompt was lost only when the harness reports nothing at all after it.
 **Wait for it** rather than pressing Enter again: a second prompt typed
 during that window is the one Buildmesh protects, and the first is left to the
-re-send.
+re-send. The node shows **Running** again as soon as the re-send goes out, and
+returns to **Ready** if the agent does not pick it up either.
 
 The re-send is skipped if you have typed again since, if the prompt was larger
-than 64 KB, or if the harness confirmed the first prompt after all. A prompt
-that is still missing after the window has passed is worth reporting.
+than 64 KB, or if the harness confirmed the first prompt after all. Pressing
+**Ctrl+C** during the window cancels the prompt for good — Buildmesh will not
+bring it back. Clearing the line with backspace does not: that is a typo being
+fixed, and the prompt is still re-sent once the line is empty. A prompt that is
+still missing after the window has passed is worth reporting.
 
 ## A Circuit says terminal input tracking is uncertain
 

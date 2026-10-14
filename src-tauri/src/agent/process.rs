@@ -251,8 +251,11 @@ impl SubmitReplay {
                 .iter()
                 .position(|byte| *byte == b'\r' || *byte == b'\n')
                 .unwrap_or(data.len());
-            let (text, tail) = data.split_at(split);
-            self.terminator = tail.last().copied().unwrap_or(b'\r');
+            // The byte at `split` is the one that submitted *this* draft. Taking
+            // `tail.last()` would pick up a later line ending in a compound
+            // buffer such as "cmd1\rcmd2\n" and re-send the wrong terminator.
+            self.terminator = data.get(split).copied().unwrap_or(b'\r');
+            let text = &data[..split];
             self.submitted = if !self.truncated
                 && self.pending.len().saturating_add(text.len()) <= SUBMIT_REPLAY_BYTE_CAPACITY
             {
@@ -271,9 +274,21 @@ impl SubmitReplay {
             return;
         }
         if prompt_len == 0 {
-            // Cleared without submitting (Ctrl+C, or backspacing to nothing).
+            // Cleared without submitting: Ctrl+C, or backspacing to nothing.
+            // Either way the *typed* text is gone and must not be replayed.
             self.pending.clear();
             self.truncated = false;
+            // Ctrl+C additionally abandons the outstanding submit. Left in
+            // place it would put a refused prompt back on the wire 30 seconds
+            // after the user refused it: the composer is empty, so the
+            // replay's "still empty" fence would pass.
+            //
+            // Backspacing to empty is *not* a cancel — the user is correcting a
+            // typo, and the unconfirmed submit behind it is still the only
+            // recoverable work — so the draft survives that.
+            if data.contains(&0x03) {
+                self.submitted = None;
+            }
             return;
         }
         if self.pending.len().saturating_add(data.len()) > SUBMIT_REPLAY_BYTE_CAPACITY {
@@ -3138,6 +3153,117 @@ mod tests {
         assert!(rx.try_recv().is_err(), "no second replay");
     }
 
+    /// An abandoned prompt must not come back. Submit, then cancel with Ctrl+C:
+    /// the composer is empty again, so the replay's "still empty" fence would
+    /// pass and a retained draft would put the cancelled prompt back on the
+    /// wire 30 seconds after the user abandoned it.
+    #[test]
+    fn a_prompt_the_user_cancelled_after_submitting_is_never_replayed() {
+        let (mut replay, mut input) = (SubmitReplay::default(), TerminalInput::default());
+        feed(&mut replay, &mut input, b"delete everything\r");
+        assert!(input.empty_prompt(), "the submit empties the composer");
+        feed(&mut replay, &mut input, b"\x03");
+        assert!(
+            input.empty_prompt(),
+            "fixture precondition: Ctrl+C must leave the composer empty"
+        );
+        assert_eq!(
+            replay.take_replay(true, true),
+            Err(ReplaySkip::NoRetainedDraft),
+            "an abandoned prompt must not be re-sent"
+        );
+    }
+
+    /// Erasing a line is not a cancel. The user is correcting a typo before
+    /// retyping, and the unconfirmed submit behind it is still the only
+    /// recoverable work — so backspacing the composer empty must not throw that
+    /// prompt away. Contrast with the Ctrl+C test above.
+    #[test]
+    fn erasing_the_composer_does_not_abandon_the_outstanding_prompt() {
+        let (mut replay, mut input) = (SubmitReplay::default(), TerminalInput::default());
+        feed(&mut replay, &mut input, b"first\r");
+        feed(&mut replay, &mut input, b"resent");
+        assert_eq!(
+            replay.take_replay(true, false),
+            Err(ReplaySkip::PromptOccupied),
+            "text typed since the submit is not ours to overwrite"
+        );
+        feed(&mut replay, &mut input, &[0x7f; 6]);
+        assert!(input.empty_prompt());
+        assert_eq!(
+            replay.take_replay(true, true),
+            Ok(b"first\r".to_vec()),
+            "the abandoned line is recoverable again once the composer is clear"
+        );
+    }
+
+    /// A compound buffer carries more than one line ending; the draft's
+    /// terminator is the one that submitted *it*, not whichever came last.
+    #[test]
+    fn a_compound_buffer_keeps_each_prompt_own_terminator() {
+        let (mut replay, mut input) = (SubmitReplay::default(), TerminalInput::default());
+        feed(&mut replay, &mut input, b"cmd1\rcmd2\n");
+        assert_eq!(
+            replay.take_replay(true, true),
+            Ok(b"cmd1\r".to_vec()),
+            "cmd1 was submitted by CR; the trailing LF belongs to cmd2"
+        );
+    }
+
+    /// What survives an occupied prompt is the *next* submit, never the one that
+    /// was skipped. A retained draft is only ever read from a revert armed by a
+    /// submit, and that submit overwrites it — so putting it back cannot
+    /// resurrect a stale prompt, and dropping it would strand the newest one.
+    #[test]
+    fn a_skipped_replay_leaves_the_next_submit_as_the_only_candidate() {
+        let (mut replay, mut input) = (SubmitReplay::default(), TerminalInput::default());
+        feed(&mut replay, &mut input, b"occupied\r");
+        feed(&mut replay, &mut input, b"typed");
+        feed(&mut replay, &mut input, b"\x03");
+        assert_eq!(
+            replay.take_replay(true, true),
+            Err(ReplaySkip::NoRetainedDraft),
+            "erasing the line clears the outstanding prompt"
+        );
+
+        feed(&mut replay, &mut input, b"next\r");
+        assert_eq!(
+            replay.take_replay(true, true),
+            Ok(b"next\r".to_vec()),
+            "the newest submit is the one that can be rescued"
+        );
+    }
+
+    /// A re-send is published like any other submit, so the node leaves `Ready`
+    /// when the TUI starts. The window that re-arms then finds the one-shot
+    /// spent, so a replay that also goes unconfirmed reverts the status without
+    /// putting the prompt on the wire twice.
+    #[test]
+    fn a_replayed_prompt_leaves_an_empty_composer_and_spends_the_one_shot() {
+        let id = -930_044;
+        let (registry, rx) = testing::capturing_registry(id);
+        let agent = registry.get(&id).unwrap();
+        assert!(registry
+            .write_input(id, b"fix the parser\r")
+            .unwrap()
+            .is_accepted());
+        while rx.try_recv().is_ok() {}
+
+        assert_eq!(
+            agent.replay_unconfirmed_submit(true),
+            SubmitReplayOutcome::Sent
+        );
+        assert_eq!(rx.recv().unwrap(), b"fix the parser\r");
+        assert!(agent.input_decoder.lock().unwrap().empty_prompt());
+
+        assert_eq!(
+            agent.replay_unconfirmed_submit(true),
+            SubmitReplayOutcome::Skipped(ReplaySkip::AlreadyReplayed),
+            "the re-armed window must revert without re-sending"
+        );
+        assert!(rx.try_recv().is_err(), "no duplicate prompt on the wire");
+    }
+
     /// A harness that never dropped anything must not be re-fed: the flag is
     /// consulted at the PTY, not inferred from the revert alone.
     #[test]
@@ -3479,10 +3605,34 @@ fn replay_dropped_submit(session_id: i64, harness_opted_in: bool) {
         return;
     };
     match agent.replay_unconfirmed_submit(harness_opted_in) {
-        SubmitReplayOutcome::Sent => tracing::info!(
-            session_id,
-            "re-sent a prompt the harness had dropped before its TUI was reading"
-        ),
+        SubmitReplayOutcome::Sent => {
+            tracing::info!(
+                session_id,
+                "re-sent a prompt the harness had dropped before its TUI was reading"
+            );
+            // A re-send is submitted work, not a silent repair. Publish it the
+            // same way the first submit was published, so the UI leaves Ready
+            // at the moment the TUI starts running instead of sitting on an
+            // idle-looking node until OpenCode's own hook arrives. Re-arming
+            // the confirmation window also means a replay that goes nowhere is
+            // caught: the next revert returns the node to Ready, and the
+            // already-spent one-shot keeps it from replaying again.
+            if let Err(error) = match crate::http::state::app_handle() {
+                Some(app) => commit_submitted_input(
+                    &crate::agent::session_lifecycle::AppSessionLifecycleSink { app },
+                    session_id,
+                ),
+                None => {
+                    commit_submitted_input(&crate::agent::session_lifecycle::DbOnlySink, session_id)
+                }
+            } {
+                tracing::warn!(
+                    session_id,
+                    %error,
+                    "re-sent prompt left the node Ready: resumed work could not be published"
+                );
+            }
+        }
         SubmitReplayOutcome::Skipped(skip) => {
             tracing::info!(session_id, ?skip, "no prompt to re-send")
         }

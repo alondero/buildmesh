@@ -131,6 +131,15 @@ side by side found the following, each now fixed:
   so it does not land on top of text the user has typed since, and it is skipped
   once the retained draft outgrows its cap rather than replayed truncated. A
   confirmed submit re-arms it, so a long-lived node is not left unprotected.
+  Ctrl+C during the confirmation window abandons the outstanding prompt — an
+  explicit cancel is not work to recover — while erasing the line with backspace
+  is not, because that is a user correcting a typo.
+- A re-send is published like any other submit, through the same lifecycle path:
+  `work_resumed` moves the node out of Ready at the moment the TUI starts
+  working, rather than leaving an idle-looking node until the harness's own hook
+  arrives. That also re-arms the confirmation window, so a replay that goes
+  nowhere is caught too — the next revert returns the node to Ready, and the
+  already-spent one-shot keeps it from re-sending again.
 - A user interrupt was either silent or a failure. Claude Code and MiniMax fire
   no hook for Esc; Codex fires `Interrupt`, Grok `StopCancelled`, and OpenCode
   `session.error` naming `MessageAbortedError`. The latter three were shown as
