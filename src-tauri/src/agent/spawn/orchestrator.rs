@@ -106,6 +106,54 @@ pub(crate) enum ResumeSkipDecision {
 // Public Tauri command interface
 // ---------------------------------------------------------------------------
 
+pub(super) fn prepare_initial_prompt(
+    node: &crate::models::AgentNode,
+    intent: &SpawnIntent,
+    provider: crate::models::Provider,
+    app_data_dir: Option<&std::path::Path>,
+) -> Result<Option<String>, String> {
+    let Some(prompt) = intent.initial_prompt() else {
+        return Ok(None);
+    };
+    if !provider.adapter().supports_prefill() {
+        tracing::warn!(
+            "spawn_with_intent: provider '{}' does not support prefill; skipping {} bytes",
+            node.provider,
+            prompt.as_str().len()
+        );
+        return Ok(None);
+    }
+    let text = prompt.into_string();
+    if matches!(intent, SpawnIntent::Handover { .. }) {
+        crate::agent::handover::prepare(node, provider, &text, app_data_dir)
+            .map(|prepared| Some(prepared.into_prompt()))
+    } else {
+        Ok(Some(text))
+    }
+}
+
+/// Prepare a handover prompt, optionally removing a node the caller created
+/// for this selection if staging fails. The staging error is returned either
+/// way so `spawn_with_intent` can report the failed spawn.
+pub(super) fn prepare_handover_prompt(
+    node: &crate::models::AgentNode,
+    intent: &SpawnIntent,
+    provider: crate::models::Provider,
+    cleanup_new_node_on_handover_failure: bool,
+    app_data_dir: Option<std::path::PathBuf>,
+) -> Result<Option<String>, String> {
+    match prepare_initial_prompt(node, intent, provider, app_data_dir.as_deref()) {
+        Ok(prompt) => Ok(prompt),
+        Err(error) if !cleanup_new_node_on_handover_failure => Err(error),
+        Err(error) => match crate::services::agent_node::delete(node.id, false) {
+            Ok(()) => Err(error),
+            Err(cleanup_error) => Err(format!(
+                "{error}; could not remove the unstarted node: {cleanup_error}"
+            )),
+        },
+    }
+}
+
 /// Start an Agent Node from a domain intent.
 ///
 /// The durable node is the source of truth for provider, path, and session
@@ -139,6 +187,7 @@ pub(crate) async fn spawn_with_intent(
         explicit,
         worktree_policy,
         lifecycle_lease,
+        cleanup_new_node_on_handover_failure,
     } = request;
     // Bind the type name so the `ExplicitSpawnOverrides` re-export stays
     // live at the module scope (the destructure pattern alone doesn't
@@ -189,14 +238,7 @@ pub(crate) async fn spawn_with_intent(
     {
         return Ok(SpawnOutcome::Skipped(node));
     }
-    let provider = node
-        .launch_configuration
-        .as_ref()
-        .and_then(|c| c.resolved.as_ref())
-        .map_or_else(
-            || crate::preferences::resolve_harness_provider(&node.provider),
-            |plan| crate::models::Provider::from_db_str(&plan.harness.harness),
-        );
+    let provider = crate::agent::provider::resolve_node_provider(&node);
     let adapter = provider.adapter();
     let is_resume_intent = matches!(intent, SpawnIntent::Resume { .. });
 
@@ -278,32 +320,35 @@ pub(crate) async fn spawn_with_intent(
         _ => None,
     };
 
-    // Issue #1180 — the prefill comes from `SpawnIntent::initial_prompt`,
-    // the single source of truth shared with the desktop draft response
-    // and the Circuit worker. `into_string()` consumes the
-    // `InitialPrompt` wrapper, giving us an owned `String` without an
-    // extra `as_str().to_string()` re-allocation. A supporting harness
-    // forwards the same string the user already saw on the draft
-    // response (byte-identical).
-    let prefill = intent
-        .initial_prompt()
-        .map(|prompt| prompt.into_string())
-        .filter(|prefill| {
-            if adapter.supports_prefill() {
-                true
-            } else {
-                tracing::warn!(
-                    "spawn_with_intent: provider '{}' does not support prefill; skipping {} bytes",
-                    node.provider,
-                    prefill.len()
-                );
-                false
-            }
-        });
-
     if is_agent_already_running(&node_id) {
         return Ok(SpawnOutcome::AlreadyActive(node));
     }
+
+    // Handover staging writes a file; keep that I/O off the async runtime.
+    let prefill_result = if matches!(intent, SpawnIntent::Handover { .. }) {
+        let prompt_node = node.clone();
+        let prompt_intent = intent.clone();
+        let app_data_dir = crate::preferences::app_data_dir();
+        crate::commands::run_blocking("prepare_handover_prompt", move || {
+            prepare_handover_prompt(
+                &prompt_node,
+                &prompt_intent,
+                provider,
+                cleanup_new_node_on_handover_failure,
+                app_data_dir,
+            )
+        })
+        .await
+    } else {
+        prepare_initial_prompt(&node, &intent, provider, None)
+    };
+    let prefill = match prefill_result {
+        Ok(prefill) => prefill,
+        Err(error) => {
+            report_spawn_failure(app, node_id, is_resume_intent, &error);
+            return Err(error);
+        }
+    };
 
     if let Some(plan) = node
         .launch_configuration
@@ -395,25 +440,29 @@ pub(crate) async fn spawn_with_intent(
             Ok(SpawnOutcome::Started(refreshed))
         }
         Err(error) => {
-            let sink = session_lifecycle::AppSessionLifecycleSink { app };
-            if is_resume_intent {
-                let _ = session_lifecycle::on_resume_failed(&sink, node_id, &error);
-            } else {
-                let _ = session_lifecycle::on_error(&sink, node_id);
-            }
-            let _ = app.emit(
-                "node-spawn-failed",
-                crate::commands::agent::NodeSpawnFailedPayload {
-                    node_id,
-                    error: error.clone(),
-                },
-            );
+            report_spawn_failure(app, node_id, is_resume_intent, &error);
             Err(error)
         }
     };
     drop(durable_claim);
     drop(claim);
     outcome
+}
+
+fn report_spawn_failure(app: &tauri::AppHandle, node_id: i64, is_resume_intent: bool, error: &str) {
+    let sink = session_lifecycle::AppSessionLifecycleSink { app };
+    if is_resume_intent {
+        let _ = session_lifecycle::on_resume_failed(&sink, node_id, error);
+    } else {
+        let _ = session_lifecycle::on_error(&sink, node_id);
+    }
+    let _ = app.emit(
+        "node-spawn-failed",
+        crate::commands::agent::NodeSpawnFailedPayload {
+            node_id,
+            error: error.to_string(),
+        },
+    );
 }
 
 /// Whether this request intentionally discards the node's prior conversation.

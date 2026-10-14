@@ -888,7 +888,8 @@ pub fn delete(session_id: i64, remove_worktree: bool) -> Result<(), AgentNodeErr
         // the commit, not before: a tombstone refuses channel creation, so
         // retiring while the row could still survive an error above would leave
         // a live node that can never stream again.
-        crate::http::ws::retire_pty_channel(session_id);
+        let app_data_dir = crate::preferences::app_data_dir();
+        crate::agent::node_teardown::release_after_delete(session_id, app_data_dir.as_deref());
         // Announce the deletion so a frontend that did not initiate it — the
         // Circuit worker's `CloseAgentNode`, cancelled-run retirement, abort
         // compensation — drops the card and disposes its terminal. A

@@ -22,6 +22,7 @@
 pub mod background;
 pub mod capabilities;
 pub mod detection;
+pub(crate) mod handover;
 pub mod harness_catalog;
 pub(crate) mod hook_state;
 pub mod launch;
