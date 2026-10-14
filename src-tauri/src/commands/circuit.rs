@@ -45,20 +45,38 @@ pub fn copy_review_blueprint(circuit_id: i64, name: String) -> Result<AutopilotC
     crate::db::circuit::ledger::copy_review_blueprint(circuit_id, &name)
 }
 
+/// Tell the desktop windows a run changed under them. The mobile HTTP routes
+/// share this with the commands; `None` is a process whose app handle is not
+/// installed yet, which has no window to tell.
+pub(crate) fn emit_run_updated(app: Option<&AppHandle>, run_id: i64, state: &str) {
+    if let Some(app) = app {
+        let _ = app.emit(
+            "circuit-run-updated",
+            crate::services::circuit_worker::CircuitRunUpdatedPayload {
+                run_id,
+                state: state.into(),
+            },
+        );
+    }
+}
+
+/// Record the outcome and wake the worker. Shared by the command and the mobile
+/// route so both obey the same revision and eligibility checks.
+pub(crate) fn record_circuit_outcome_now(
+    request: &crate::db::circuit::evidence::CheckpointRequest,
+) -> Result<(), String> {
+    crate::db::circuit::evidence::record_outcome(request)?;
+    crate::services::circuit_worker::wake_circuit_worker();
+    Ok(())
+}
+
 #[command]
 pub fn record_circuit_outcome(
     app: AppHandle,
     request: crate::db::circuit::evidence::CheckpointRequest,
 ) -> Result<(), String> {
-    crate::db::circuit::evidence::record_outcome(&request)?;
-    crate::services::circuit_worker::wake_circuit_worker();
-    let _ = app.emit(
-        "circuit-run-updated",
-        crate::services::circuit_worker::CircuitRunUpdatedPayload {
-            run_id: request.run_id,
-            state: "running".into(),
-        },
-    );
+    record_circuit_outcome_now(&request)?;
+    emit_run_updated(Some(&app), request.run_id, "running");
     Ok(())
 }
 
@@ -111,15 +129,17 @@ pub fn recover_failed_circuit_run(
     app: AppHandle,
     request: crate::db::circuit::step_recovery::RecoveryRequest,
 ) -> Result<(), String> {
-    crate::db::circuit::step_recovery::recover_failed_run(&request)?;
+    recover_failed_circuit_run_now(&request)?;
+    emit_run_updated(Some(&app), request.run_id, "pending");
+    Ok(())
+}
+
+/// Run Recovery plus the worker wake, shared with the mobile route.
+pub(crate) fn recover_failed_circuit_run_now(
+    request: &crate::db::circuit::step_recovery::RecoveryRequest,
+) -> Result<(), String> {
+    crate::db::circuit::step_recovery::recover_failed_run(request)?;
     crate::services::circuit_worker::wake_circuit_worker();
-    let _ = app.emit(
-        "circuit-run-updated",
-        crate::services::circuit_worker::CircuitRunUpdatedPayload {
-            run_id: request.run_id,
-            state: "pending".into(),
-        },
-    );
     Ok(())
 }
 
@@ -431,7 +451,7 @@ fn release_circuit_source(run_id: i64) {
     }
 }
 
-fn cancel_run_and_cleanup_inner(app: &AppHandle, run_id: i64) -> Result<(), String> {
+fn cancel_run_and_cleanup_inner(app: Option<&AppHandle>, run_id: i64) -> Result<(), String> {
     crate::services::circuit_worker::mark_circuit_run_cancelled(run_id);
     let agent_ids = crate::db::cancel_circuit_run(run_id).map_err(|error| error.to_string())?;
     crate::services::circuit_worker::finish_circuit_run_cancellation(run_id);
@@ -442,14 +462,13 @@ fn cancel_run_and_cleanup_inner(app: &AppHandle, run_id: i64) -> Result<(), Stri
         .map_err(|error| error.to_string())?
         .map(|run| run.state)
         .unwrap_or_else(|| "cancelled".to_string());
-    let _ = app.emit(
-        "circuit-run-updated",
-        crate::services::circuit_worker::CircuitRunUpdatedPayload { run_id, state },
-    );
+    emit_run_updated(app, run_id, &state);
     cleanup
 }
 
-fn cancel_run_and_cleanup(app: &AppHandle, run_id: i64) -> Result<(), String> {
+/// Cancel a run and retire its helper agents. The desktop command and the
+/// mobile route both call this; `app` only decides whether a window is told.
+pub(crate) fn cancel_circuit_run_now(app: Option<&AppHandle>, run_id: i64) -> Result<(), String> {
     // Invalidate the worker's current effect batch before waiting for spawn
     // teardown. This closes the race where a slow external effect would
     // otherwise continue after the user pressed Cancel.
@@ -475,7 +494,7 @@ fn cancel_run_and_cleanup(app: &AppHandle, run_id: i64) -> Result<(), String> {
 
 #[command]
 pub fn cancel_circuit_run(app: AppHandle, run_id: i64) -> Result<(), String> {
-    cancel_run_and_cleanup(&app, run_id)
+    cancel_circuit_run_now(Some(&app), run_id)
 }
 
 #[command]
@@ -602,7 +621,7 @@ pub fn delete_circuit(app: AppHandle, circuit_id: i64) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
         let mut cleanup_errors = Vec::new();
         for run_id in run_ids {
-            if let Err(error) = cancel_run_and_cleanup_inner(&app, run_id) {
+            if let Err(error) = cancel_run_and_cleanup_inner(Some(&app), run_id) {
                 cleanup_errors.push(format!("run {}: {}", run_id, error));
             }
         }
