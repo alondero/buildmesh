@@ -90,6 +90,7 @@ docs/superpowers/
 CODEX.local.md
 codex.local.md
 .claude/worktrees/
+.worktrees/
 .claude/settings.local.json
 .claude/tasks/
 .claude/memory/

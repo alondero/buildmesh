@@ -24,7 +24,7 @@ use crate::services::transcript_reader::{
 /// here is the bug this builder fixes: a worktree node's transcript lives under
 /// `.claude/worktrees/<name>`, not the mesh root, so the old route looked in the
 /// wrong place and every worktree node silently degraded to a spine-only digest.
-fn transcript_dir(node: &AgentNode) -> String {
+pub(crate) fn transcript_dir(node: &AgentNode) -> String {
     env::node_working_path(node).spawn_path
 }
 
@@ -45,6 +45,22 @@ pub(crate) fn native_completion_format_for(
     }
     // No reader wired (issue #1817) means no native completion to observe.
     TranscriptFormat::for_harness(adapter.id())
+}
+
+/// Whether the node's harness recorded that the user interrupted its latest
+/// turn after `pressed_at`, for harnesses that send no completion signal for
+/// an interrupt.
+pub(crate) fn interrupted_turn(node: &AgentNode, pressed_at: std::time::SystemTime) -> bool {
+    crate::circuit::strategy::provider_for_agent(node)
+        .and_then(native_completion_format_for)
+        .is_some_and(|format| {
+            transcript_reader::interrupted_turn(
+                format,
+                node.cli_session_id.as_deref(),
+                &transcript_dir(node),
+                pressed_at,
+            )
+        })
 }
 
 pub(crate) fn native_turn_completion(

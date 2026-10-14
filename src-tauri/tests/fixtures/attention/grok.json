@@ -72,9 +72,9 @@
       "sessionId": "550e8400-e29b-41d4-a716-446655440000"
     },
     "pending": 0,
-    "decision": "MarkInput",
-    "kind": "error",
-    "health": "degraded"
+    "decision": "Ready",
+    "kind": "turn_completed",
+    "health": "ok"
   },
   {
     "name": "malformed-envelope",

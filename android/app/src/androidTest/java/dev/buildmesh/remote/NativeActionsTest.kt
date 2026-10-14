@@ -4,9 +4,11 @@ import android.app.Application
 import androidx.activity.ComponentActivity
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.core.app.ApplicationProvider
+import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.serialization.json.Json
 import okhttp3.mockwebserver.*
 import org.junit.Assert.*
@@ -35,6 +37,8 @@ class NativeActionsTest {
             server.dispatcher = object : Dispatcher() {
                 override fun dispatch(request: RecordedRequest): MockResponse {
                     if (request.path == "/api/session") return MockResponse().setResponseCode(204)
+                    if (request.path == "/api/agents/9/git/branch") return MockResponse().setBody("""{"branch":"main"}""")
+                    if (request.path == "/api/meshes/0/pulls?state=open") return MockResponse().setBody("""{"items":[],"completeness":{"returned":0,"pages_fetched":0,"complete":true,"incomplete_reason":null,"reported_total":null}}""")
                     requests.add(request)
                     return respond(request)
                 }
@@ -113,9 +117,17 @@ class NativeActionsTest {
                 val state by vm.state.collectAsState()
                 ResourceScreen(vm.api!!, 3, "issues", state.copy(providers = providers), vm, { opened = it })
             } }
-            compose.waitUntil(10000) { compose.onAllNodesWithText("Start agent").fetchSemanticsNodes().isNotEmpty() }
+            compose.waitUntil(10000) { compose.onAllNodesWithText("#42 Fix deadline").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("Issue details").assertDoesNotExist()
+            compose.onNodeWithText("#42 Fix deadline").performClick()
+            compose.onNodeWithText("Issue details").assertExists()
             compose.onNodeWithText("Start agent").performClick()
-            compose.onNodeWithText("Agent: Claude Code").assertExists()
+            compose.onNodeWithText("Launch configuration: Mesh default").performClick()
+            compose.onNodeWithText("Terminal").assertDoesNotExist()
+            compose.onNodeWithText("Saved agent").assertDoesNotExist()
+            compose.onNodeWithText("Unavailable agent").assertDoesNotExist()
+            compose.onNodeWithText("Claude Code").performClick()
+            compose.onNodeWithText("Launch configuration: Claude Code").assertExists()
             compose.onNodeWithText("Start").performClick()
             compose.waitUntil(10000) { opened == 17L }
             val request = requests.single { it.method == "POST" }
@@ -136,6 +148,78 @@ class NativeActionsTest {
         }
     }
 
+    private fun issueScreenshot(name: String) {
+        compose.waitForIdle()
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val image = instrumentation.uiAutomation.takeScreenshot()
+        instrumentation.targetContext.filesDir.resolve("$name.png").outputStream().use {
+            check(image.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it))
+        }
+        image.recycle()
+    }
+
+    @Test fun issueTriageFiltersMetadataShowsPartialFeedAndAcknowledgesTags() {
+        var tagged = false
+        var attempts = 0
+        withDesktop({ request ->
+            when (request.path) {
+                "/api/meshes/3/issues" -> MockResponse().setBody("""{"items":[
+                    {"number":42,"title":"Fix the mobile deadline and preserve a long issue title on a narrow phone screen","body":"Expanded issue details","url":"https://github.com/o/r/issues/42","state":"open","labels":["bug"${if (tagged) ",\"buildmesh:run\"" else ""}],"blocked_by":[43,99],"author":"octo"},
+                    {"number":43,"title":"Prerequisite","body":"","url":"","state":"open","labels":[],"blocked_by":[],"author":""}
+                ],"completeness":{"returned":2,"pages_fetched":1,"complete":false,"incomplete_reason":"safety_cap","reported_total":120}}""")
+                "/api/meshes/3/issue-labels" -> MockResponse().setBody("""{"labels":["bug","buildmesh:run"],"autopilot_triggers":{"buildmesh:run":["Ship fixes"]}}""")
+                "/api/meshes/3/issues/42/label" -> {
+                    if (++attempts == 1) MockResponse().setResponseCode(500).setBody("""{"error":"GitHub permission denied"}""")
+                    else { tagged = Json.parseToJsonElement(request.body.clone().readUtf8()).obj().flag("present"); MockResponse().setResponseCode(204) }
+                }
+                else -> MockResponse().setResponseCode(404)
+            }
+        }) { vm, requests ->
+            compose.setContent { BuildmeshTheme {
+                val state by vm.state.collectAsState()
+                ResourceScreen(vm.api!!, 3, "issues", state.copy(providers = providers), vm, {})
+            } }
+            compose.waitUntil(10000) { compose.onAllNodesWithText("@octo").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("Expanded issue details").assertDoesNotExist()
+            compose.onNodeWithText("Blocked by #43").assertExists()
+            compose.onNodeWithText("Showing the first 2 of 120 issues.", substring = true).assertExists()
+            issueScreenshot("issues-android-collapsed")
+            compose.onNodeWithText("Filter issues").performTextInput(" BUG ")
+            compose.onNodeWithText("Prerequisite", substring = true).assertDoesNotExist()
+            compose.onNodeWithText("Blocked by #43").assertExists()
+            compose.onNodeWithText("Filter issues").performTextClearance()
+            compose.onNodeWithText("Filter issues").performTextInput("no match")
+            compose.onNodeWithText("No matches.").assertExists()
+            compose.onNodeWithText("Showing the first 2 of 120 issues.", substring = true).assertExists()
+            compose.onNodeWithText("Filter issues").performTextClearance()
+            compose.onNodeWithText("#42 Fix the mobile", substring = true).performClick()
+            compose.onNodeWithText("Expanded issue details").assertExists()
+            compose.onNodeWithText("Start agent").performScrollTo().performClick()
+            compose.onNodeWithText("Launch configuration: Mesh default").assertExists()
+            issueScreenshot("issues-android-launch")
+            compose.onNodeWithText("Cancel").performClick()
+            assertFalse(requests.any { it.method == "POST" })
+            compose.onNodeWithText("Edit tags for issue #42").performScrollTo().performClick()
+            compose.waitUntil(10000) { compose.onAllNodesWithContentDescription("buildmesh:run").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("Autopilot: Ship fixes.", substring = true).assertExists()
+            issueScreenshot("issues-android-tags")
+            compose.onNodeWithContentDescription("buildmesh:run").assertIsOff().performClick()
+            compose.waitUntil(10000) { vm.state.value.error == "GitHub permission denied" && !vm.state.value.busy }
+            compose.onNodeWithText("GitHub permission denied").assertExists()
+            compose.onNodeWithContentDescription("buildmesh:run").assertIsOff().performClick()
+            compose.waitUntil(10000) { tagged && !vm.state.value.busy }
+            compose.onNodeWithContentDescription("buildmesh:run").assertIsOn()
+            compose.onNodeWithContentDescription("bug").assertIsOn()
+            compose.onNodeWithContentDescription("buildmesh:run").performClick()
+            compose.waitUntil(10000) { attempts == 3 && !vm.state.value.busy }
+            compose.onNodeWithContentDescription("buildmesh:run").assertIsOff()
+            val writes = requests.filter { it.method == "POST" }
+            assertEquals(3, writes.size)
+            assertEquals(listOf(true, true, false), writes.map { Json.parseToJsonElement(it.body.readUtf8()).obj().flag("present") })
+            assertTrue(writes.all { it.path == "/api/meshes/3/issues/42/label" })
+        }
+    }
+
     @Test fun partialArchiveResumeDismissesTheDialogAndReportsTheImportedNode() {
         var opened = 0L
         withDesktop({ request ->
@@ -151,7 +235,7 @@ class NativeActionsTest {
             } }
             compose.waitUntil(10000) { compose.onAllNodesWithText("Import and resume").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithText("Import and resume").performClick()
-            compose.onNodeWithText("Agent: Claude Code").assertExists()
+            compose.onNodeWithText("Launch configuration: Claude Code").assertExists()
             compose.onNodeWithText("Start").performClick()
             compose.waitUntil(10000) { vm.state.value.error.contains("Node 17 was imported") && !vm.state.value.busy }
             compose.onNodeWithText("Choose a launch configuration").assertDoesNotExist()
@@ -187,6 +271,61 @@ class NativeActionsTest {
             val request = requests.single { it.method == "POST" }
             assertEquals("/api/meshes/3/pr", request.path)
             assertEquals("""{"title":"Native change","body":"Explains the change","node_id":17,"head_branch":"topic","base_branch":"main"}""", request.body.readUtf8())
+        }
+    }
+
+    private fun pullResponse(items: String, complete: Boolean = true) = """{"items":$items,"completeness":{"returned":1,"pages_fetched":1,"complete":$complete,"incomplete_reason":${if (complete) "null" else "\"safety_cap\""},"reported_total":null}}"""
+    private val openPull = """[{"number":42,"title":"Fix search","body":"","url":"https://github.com/o/r/pull/42","state":"open","draft":false,"head_ref":"feature/search",
+        "head_repo_owner":"o","head_repo_clone_url":"https://github.com/o/r.git","head_sha":"abc","author":"o","mergeable":true,"mergeable_state":"clean","checks_state":"success","review_decision":"approved"}]"""
+
+    @Test fun aNodePullShowsStatusConfirmsSquashAndRemovesAnAcknowledgedMerge() {
+        var merged = false
+        withDesktop({ request -> when (request.path) {
+            "/api/agents/17/git/branch" -> MockResponse().setBody("""{"branch":"feature/search"}""")
+            "/api/meshes/3/pulls?state=open" -> MockResponse().setBody(pullResponse(if (merged) "[]" else openPull))
+            "/api/meshes/3/pulls/42/mergeability" -> MockResponse().setBody("""{"mergeable":true,"mergeable_state":"clean"}""")
+            "/api/meshes/3/pulls/42/merge" -> { merged = true; MockResponse().setBody("""{"url":"https://github.com/o/r/pull/42","pr_number":42}""") }
+            "/api/nodes", "/api/meshes", "/api/providers" -> MockResponse().setBody("[]")
+            else -> MockResponse().setResponseCode(404)
+        } }) { vm, requests ->
+            val node = Json.parseToJsonElement("""{"id":17,"mesh_id":3,"name":"Fix search","branch":"trunk","provider":"terminal","status":"idle"}""").obj()
+            compose.setContent { BuildmeshTheme { NodeScreen(node, vm, {}, {}, {}) } }
+            compose.waitUntil(10000) { compose.onAllNodesWithText("Checks: passing").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("Review: approved").assertExists()
+            compose.onNodeWithText("Squash and merge").performScrollTo().performClick()
+            compose.onNodeWithText("Squash-merge PR #42 and delete its branch on GitHub?").assertExists()
+            assertFalse(requests.any { it.method == "POST" })
+            compose.onNodeWithText("Cancel").performClick()
+            compose.onNodeWithText("Squash and merge").performClick()
+            compose.onNode(hasClickAction() and hasText("Confirm squash merge")).performClick()
+            compose.waitUntil(10000) { merged && !vm.state.value.busy && compose.onAllNodesWithText("PR #42: Fix search").fetchSemanticsNodes().isEmpty() }
+            assertEquals("PR #42 squash-merged. Branch deleted.", vm.state.value.notice)
+            val post = requests.single { it.method == "POST" }
+            assertEquals("/api/meshes/3/pulls/42/merge", post.path)
+            assertEquals("""{"url":"https://github.com/o/r/pull/42"}""", post.body.readUtf8())
+        }
+    }
+
+    @Test fun meshPullsDiscloseTruncationAndNodeMergeBecomesDisabledAfterStatusRefresh() {
+        var blocked = false
+        withDesktop({ request -> when (request.path) {
+            "/api/agents/17/git/branch" -> MockResponse().setBody("""{"branch":"feature/search"}""")
+            "/api/meshes/3/pulls?state=open" -> MockResponse().setBody(pullResponse(if (blocked) openPull.replace("\"clean\"", "\"blocked\"") else openPull, false))
+            else -> MockResponse().setResponseCode(404)
+        } }) { vm, requests ->
+            var nodeId by androidx.compose.runtime.mutableStateOf<Long?>(null)
+            compose.setContent { BuildmeshTheme { PullRequestsPanel(vm.api!!, 3, vm, nodeId) } }
+            compose.waitUntil(10000) { compose.onAllNodesWithText("Checks: passing").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("Showing first 1 pull requests. Results are incomplete (safety_cap).").assertExists()
+            compose.onNodeWithText("Squash and merge").assertDoesNotExist()
+            compose.runOnIdle { nodeId = 17 }
+            compose.waitUntil(10000) { compose.onAllNodesWithText("Squash and merge").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("Squash and merge").assertIsEnabled()
+            blocked = true
+            compose.onNodeWithText("Refresh PR status").performClick()
+            compose.waitUntil(10000) { compose.onAllNodesWithText("feature/search · open · Blocked by required checks or reviews").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("Squash and merge").assertIsNotEnabled()
+            assertFalse(requests.any { it.method == "POST" })
         }
     }
 

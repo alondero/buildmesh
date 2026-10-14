@@ -1424,8 +1424,14 @@ const ATTENTION_HOOK_EVENTS: [&str; 7] = [
     "Interrupt",
 ];
 
+/// Codex 0.162 asks through `request_user_input_async`; older builds use
+/// `request_user_input`. A prefix rather than an alternation: the matcher
+/// rides the launch command line through cmd.exe, where `|` and `()` are
+/// shell syntax.
+const QUESTION_TOOL_MATCHER: &str = "^request_user_input";
+
 fn attention_hook_matcher(event: &str) -> Option<&'static str> {
-    (event == "PreToolUse").then_some("^request_user_input$")
+    (event == "PreToolUse").then_some(QUESTION_TOOL_MATCHER)
 }
 
 /// Stand-in `command` for a Windows runtime. Codex on Windows runs
@@ -1866,6 +1872,11 @@ impl AgentProvider for CodexAdapter {
     }
 
     fn supports_extra_args(&self) -> bool {
+        true
+    }
+
+    /// Codex fires `UserPromptSubmit` when a prompt starts a turn.
+    fn confirms_prompt_submission(&self) -> bool {
         true
     }
 
@@ -3191,9 +3202,21 @@ mod tests {
             );
             assert_eq!(hook.fields["type"], "command");
             assert_eq!(hook.fields["statusMessage"], BUILDMESH_HOOK_STATUS_MESSAGE);
-            let expected_matcher = (hook.event == "PreToolUse").then_some("^request_user_input$");
+            let expected_matcher = (hook.event == "PreToolUse").then_some(QUESTION_TOOL_MATCHER);
             assert_eq!(hook.matcher.as_deref(), expected_matcher, "{}", hook.event);
         }
+    }
+
+    /// Codex 0.162 asks with `request_user_input_async`; a matcher anchored
+    /// to the synchronous name never sent the ask, so the node read Running
+    /// while the user had a question waiting.
+    #[test]
+    fn question_matcher_selects_sync_and_async_question_tools() {
+        let regex = regex::Regex::new(QUESTION_TOOL_MATCHER).unwrap();
+        assert!(regex.is_match("request_user_input"));
+        assert!(regex.is_match("request_user_input_async"));
+        assert!(!regex.is_match("shell"));
+        assert!(!regex.is_match("exec_command"));
     }
 
     /// Two nodes in one repository must never share a callback: each launch

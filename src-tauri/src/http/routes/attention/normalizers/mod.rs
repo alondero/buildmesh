@@ -131,6 +131,60 @@ pub(super) fn normalize(
     }
 }
 
+/// AGY's tool-hook payloads name no event, so its question hooks put the event
+/// in their URL (`?event=`). Only those two events are taken from it, and never
+/// over a name the payload carries itself.
+pub(super) fn name_event_from_url(
+    raw: Option<Value>,
+    provider: &str,
+    query: Option<&str>,
+) -> Option<Value> {
+    let mut raw = raw?;
+    let event = query
+        .into_iter()
+        .flat_map(|query| query.split('&'))
+        .find_map(|pair| pair.strip_prefix("event="))
+        .filter(|event| matches!(*event, "PreToolUse" | "PostToolUse"));
+    if let (Some(event), Some(object)) = (event.filter(|_| provider == "agy"), raw.as_object_mut())
+    {
+        if !["hookEventName", "hook_event_name", "hookName"]
+            .iter()
+            .any(|key| object.contains_key(*key))
+        {
+            object.insert("hookEventName".into(), event.into());
+        }
+    }
+    Some(raw)
+}
+
+/// A turn that ended on an unanswered question is waiting for the user, not
+/// finished. Only a Stop that would otherwise publish Ready consults the
+/// harness transcript; `waiting` returns the question text when one is open.
+pub(super) fn reconcile_waiting_question(
+    mut normalized: Normalized,
+    waiting: impl FnOnce() -> Option<String>,
+) -> Normalized {
+    let is_stop = normalized
+        .payload
+        .as_ref()
+        .is_some_and(|payload| payload.event() == "stop");
+    if !is_stop || normalized.classified.decision != Decision::Ready {
+        return normalized;
+    }
+    if let Some(question) = waiting() {
+        let detail = normalized.classified.detail.clone();
+        normalized.classified =
+            Classified::mark_input(crate::agent::session_lifecycle::HookSignalDetail {
+                kind: Some(crate::agent::session_lifecycle::LifecycleKind::QuestionRequested),
+                message: clean_description(&question).or(detail.message.clone()),
+                semantic_turn: None,
+                ..detail
+            });
+        normalized.semantic = None;
+    }
+    normalized
+}
+
 pub(super) fn reconciliation_session_id(
     raw: Option<&Value>,
     provider: &str,
@@ -158,6 +212,7 @@ pub(super) fn resolve_node(
     mcode::resolve_attention_node(addressed, payload.as_ref(), generic_mcode, resolve_mcode)
 }
 
+pub(super) use codex::ASYNC_QUESTION_TOOL as CODEX_ASYNC_QUESTION_TOOL;
 #[cfg(test)]
 pub(super) use mcode::resolve_attention_node;
 

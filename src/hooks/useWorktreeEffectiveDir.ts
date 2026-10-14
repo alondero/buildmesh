@@ -8,12 +8,12 @@ import { useAsyncEffect } from './useAsyncEffect';
  * Effective worktree container dir for a Mesh (issue #1519).
  *
  * Mesh-root `GIT_CHANGED` subscribers (e.g. `useMeshHealth`) match events
- * under the legacy `.claude/worktrees/` prefix by default; a mesh with a
+ * under `.worktrees/` and legacy `.claude/worktrees/` by default; a mesh with a
  * custom directory (relative or absolute-outside-the-root) needs its
  * effective container as an extra match dir, or edits in its worktrees
  * never invalidate the mesh-level caches. This hook resolves it once per
  * `meshId` via the backend-authoritative `get_worktree_directory_config`
- * (Mesh override → app default → `.claude/worktrees`) so callers never
+ * (Mesh override → app default → `.worktrees`) so callers never
  * re-spell the precedence rule.
  *
  * Reactive: re-resolves on the backend's `worktree-directory-changed`
@@ -23,7 +23,7 @@ import { useAsyncEffect } from './useAsyncEffect';
  * changes under the new directory would silently skip invalidation.
  *
  * Returns `null` while loading, when `meshId` is null, or when the fetch
- * fails (callers treat null as "no extras" — legacy matching only).
+ * fails (callers treat null as "no extras" — built-in layouts still match).
  */
 export function useWorktreeEffectiveDir(meshId: number | null): string | null {
   const [effective, setEffective] = useState<string | null>(null);

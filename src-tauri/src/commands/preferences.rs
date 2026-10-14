@@ -227,7 +227,7 @@ pub fn set_app_pr_spawn_prompt(prompt: Option<String>) -> Result<(), String> {
 
 /// Set the Buildmesh-wide default Worktree Node directory (issue #1519).
 /// `None` (or blank, which collapses to `None`) clears the override and
-/// restores the `.claude/worktrees` default under each Mesh root.
+/// restores the `.worktrees` default under each Mesh root.
 /// Relative values resolve from each inheriting Mesh's root. Absolute
 /// values are rejected here with an actionable message: one app default
 /// spans meshes in both host environments (native/Windows versus WSL),

@@ -404,6 +404,10 @@ export const BuildmeshAttention = async () => {
         if (requestId) body.request_id = requestId;
         const id = suppliedId ?? cachedSessionId;
         if (isValidSessionId(id)) body.sessionID = id;
+        // A user abort is a `session.error` too (`MessageAbortedError`);
+        // the name lets the route tell it from a real failure.
+        const errorName = event.properties?.error?.name;
+        if (typeof errorName === "string") body.error = errorName;
         await postAttention(body);
         return;
       }

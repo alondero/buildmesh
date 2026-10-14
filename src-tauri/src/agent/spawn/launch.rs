@@ -67,6 +67,16 @@ pub(super) struct LaunchedProcess {
     pub reader: Box<dyn std::io::Read + Send>,
     pub writer: Box<dyn std::io::Write + Send>,
     pub job: Option<crate::process_util::JobHandle>,
+    /// Whether the command line carried a first prompt; see
+    /// [`launch_carries_prompt`].
+    pub launch_prompt: bool,
+}
+
+/// Whether a launch hands the harness a first prompt on its command line.
+/// Mirrors `default_prepare`, which appends prefill args only for a harness
+/// that supports prefill and a non-empty prompt.
+pub(super) fn launch_carries_prompt(supports_prefill: bool, prefill: Option<&str>) -> bool {
+    supports_prefill && prefill.is_some_and(|text| !text.is_empty())
 }
 
 /// Build the spawn command and start the child inside a PTY (sandboxed
@@ -178,6 +188,7 @@ pub(super) async fn launch_process(
     timer.checkpoint("before_command_build");
     // A sandbox-setup failure must not reach the PTY at all, so the error is
     // raised here rather than carried as a poisoned command (#2034).
+    let launch_prompt = launch_carries_prompt(adapter.supports_prefill(), prefill.as_deref());
     let cmd = build_spawn_command_prepared(
         &resolved,
         provider,
@@ -291,6 +302,7 @@ pub(super) async fn launch_process(
         reader,
         writer,
         job,
+        launch_prompt,
     })
 }
 

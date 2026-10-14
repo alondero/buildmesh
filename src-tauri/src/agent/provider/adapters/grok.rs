@@ -95,7 +95,12 @@ pub const GROK_MIN_HOOK_VERSION: &str = "1.0.5";
 /// Grok's SSRF guard requires HTTPS, and Buildmesh intentionally serves
 /// loopback callbacks over plain HTTP.
 const HOOK_COMMAND_UNIX: &str = "curl -sf --noproxy '*' --connect-timeout 1 --max-time 2 -X POST -H 'Content-Type: application/json' --data-binary @- \"http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID?token=$BUILDMESH_HOOK_TOKEN\" >/dev/null 2>&1 || true";
-const HOOK_COMMAND_WINDOWS: &str = "curl.exe -sf --noproxy '*' --connect-timeout 1 --max-time 2 -X POST -H 'Content-Type: application/json' --data-binary '@-' \"http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID?token=$BUILDMESH_HOOK_TOKEN\" > NUL 2>&1; exit 0";
+/// Native Windows Grok runs command hooks through Windows PowerShell 5.1,
+/// where `$BUILDMESH_PORT` is an (empty) script variable rather than the
+/// environment variable, so the URL is assembled from `$env:` reads. The body
+/// is sent as UTF-8 bytes: PowerShell 5.1 would otherwise re-encode the event
+/// with its console code page.
+const HOOK_COMMAND_WINDOWS: &str = "[Console]::InputEncoding=[Text.Encoding]::UTF8; try { Invoke-WebRequest -UseBasicParsing -Method Post -ContentType application/json -Body ([Text.Encoding]::UTF8.GetBytes([Console]::In.ReadToEnd())) -TimeoutSec 10 -Uri ('http://localhost:' + $env:BUILDMESH_PORT + '/api/attention/' + $env:BUILDMESH_SESSION_ID + '?token=' + $env:BUILDMESH_HOOK_TOKEN) | Out-Null } catch { }; exit 0";
 
 /// Grok runs command hooks through the shell belonging to the CLI runtime:
 /// PowerShell for native Windows Grok, POSIX sh for WSL/Linux/macOS Grok.
@@ -511,6 +516,11 @@ impl AgentProvider for GrokAdapter {
         true
     }
 
+    /// Grok fires the provisioned `UserPromptSubmit` hook when a prompt starts a turn.
+    fn confirms_prompt_submission(&self) -> bool {
+        true
+    }
+
     fn supports_prefill(&self) -> bool {
         // Interactive TUI accepts a trailing positional [PROMPT] as the
         // first turn (`grok "fix the bug"`). There is no `--prefill` flag;
@@ -554,6 +564,109 @@ impl AgentProvider for GrokAdapter {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// Run the host platform's hook command through the shell Grok itself
+    /// uses (Windows PowerShell 5.1 natively, `sh` elsewhere) and prove the
+    /// event reaches the node's tokenized endpoint. String-shape assertions
+    /// let a PowerShell `$BUILDMESH_PORT` (a script variable, always empty)
+    /// ship as `http://localhost:/api/attention/=`, which never delivered.
+    #[test]
+    fn host_hook_command_delivers_stdin_to_the_tokenized_node_endpoint() {
+        use std::io::{Read, Seek, Write};
+        use std::time::{Duration, Instant};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("Grok hook did not reach listener: {error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut headers = Vec::new();
+            let mut byte = [0];
+            while !headers.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                headers.push(byte[0]);
+            }
+            let headers = String::from_utf8(headers).unwrap();
+            let length: usize = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|value| value.trim().parse().unwrap())
+                })
+                .unwrap();
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+                .unwrap();
+            (headers, body)
+        });
+
+        let env_type = if cfg!(windows) {
+            EnvType::Windows
+        } else {
+            EnvType::Wsl
+        };
+        let command = hook_command(env_type);
+        let payload = "{\"hook_event_name\":\"Stop\",\"message\":\"caf\u{e9} $HOME & %PATH%\"}";
+        let mut input = tempfile::tempfile().unwrap();
+        input.write_all(payload.as_bytes()).unwrap();
+        input.rewind().unwrap();
+        let mut shell = crate::process_util::command_no_window(if cfg!(windows) {
+            "powershell.exe"
+        } else {
+            "/bin/sh"
+        });
+        if cfg!(windows) {
+            shell.args(["-NoProfile", "-NonInteractive", "-Command", command]);
+        } else {
+            shell.args(["-c", command]);
+        }
+        shell
+            .env("BUILDMESH_PORT", port.to_string())
+            .env("BUILDMESH_SESSION_ID", "741")
+            .env("BUILDMESH_HOOK_TOKEN", "tok-123")
+            .env("NO_PROXY", "localhost,127.0.0.1")
+            .env("no_proxy", "localhost,127.0.0.1")
+            .stdin(std::process::Stdio::from(input));
+        let output = crate::process_util::run_command_with_timeout(
+            shell,
+            "Grok attention command",
+            Duration::from_secs(20),
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let (headers, body) = server.join().unwrap();
+        assert!(
+            headers.starts_with("POST /api/attention/741?token=tok-123 HTTP/1.1\r\n"),
+            "{headers}"
+        );
+        assert!(headers
+            .to_ascii_lowercase()
+            .contains("content-type: application/json"));
+        assert_eq!(String::from_utf8(body).unwrap(), payload);
+    }
 
     #[test]
     fn question_matcher_migration_preserves_user_handlers_in_mixed_group() {
@@ -1098,11 +1211,11 @@ mod tests {
                     panic!("{event} command hook missing or wrong shape: {value:#}")
                 });
             assert!(
-                command.contains("$BUILDMESH_PORT"),
+                command.contains("BUILDMESH_PORT"),
                 "{event} command must expand BUILDMESH_PORT at runner time: {command}"
             );
             assert!(
-                command.contains("$BUILDMESH_SESSION_ID"),
+                command.contains("BUILDMESH_SESSION_ID"),
                 "{event} command must expand BUILDMESH_SESSION_ID at runner time: {command}"
             );
             assert!(
@@ -1178,35 +1291,43 @@ mod tests {
 
     /// Pin both platform command templates to the loopback endpoint,
     /// runtime-scoped token, and stdin-forwarding contract. Command hooks
-    /// avoid Grok's HTTPS-only native HTTP URL validation.
+    /// avoid Grok's HTTPS-only native HTTP URL validation. Delivery itself
+    /// is proven by `host_hook_command_delivers_stdin_to_the_tokenized_node_endpoint`.
     #[test]
     fn hook_commands_forward_stdin_to_the_tokenized_attention_endpoint() {
-        for command in [HOOK_COMMAND_UNIX, HOOK_COMMAND_WINDOWS] {
+        for (command, port, session, token) in [
+            (
+                HOOK_COMMAND_UNIX,
+                "http://localhost:$BUILDMESH_PORT/",
+                "/api/attention/$BUILDMESH_SESSION_ID",
+                "?token=$BUILDMESH_HOOK_TOKEN",
+            ),
+            (
+                HOOK_COMMAND_WINDOWS,
+                "'http://localhost:' + $env:BUILDMESH_PORT",
+                "'/api/attention/' + $env:BUILDMESH_SESSION_ID",
+                "'?token=' + $env:BUILDMESH_HOOK_TOKEN",
+            ),
+        ] {
             assert!(
-                command.contains("--data-binary"),
-                "event stdin must be forwarded: {command}"
-            );
-            assert!(
-                command.contains("http://localhost:$BUILDMESH_PORT/"),
+                command.contains(port),
                 "callback must use loopback: {command}"
             );
             assert!(
-                command.contains("/api/attention/$BUILDMESH_SESSION_ID"),
+                command.contains(session),
                 "callback must target its node: {command}"
             );
             assert!(
-                command.contains("?token=$BUILDMESH_HOOK_TOKEN"),
+                command.contains(token),
                 "runtime token must be sent: {command}"
             );
             assert!(
-                command.contains("Content-Type: application/json"),
+                command.contains("application/json"),
                 "attention route expects JSON: {command}"
             );
-            assert!(
-                command.contains("curl"),
-                "command hook must use curl: {command}"
-            );
         }
+        assert!(HOOK_COMMAND_UNIX.contains("--data-binary @-"));
+        assert!(HOOK_COMMAND_WINDOWS.contains("[Console]::In.ReadToEnd()"));
         assert_eq!(hook_command(EnvType::WindowsInterop), HOOK_COMMAND_WINDOWS);
         if cfg!(windows) {
             assert_eq!(hook_command(EnvType::Windows), HOOK_COMMAND_WINDOWS);

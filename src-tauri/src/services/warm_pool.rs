@@ -349,7 +349,7 @@ pub(crate) fn warm_worktree_host_path_in_dir(effective_dir_raw: &str, slug: &str
 }
 
 /// Effective container dir (raw form) for a warm-pool mesh row.
-/// Precedence: Mesh override → application default → `.claude/worktrees`.
+/// Precedence: Mesh override → application default → `.worktrees`.
 /// Reads the app default via `preferences::worktree_directory()` so the
 /// pool and cold creation agree without the caller threading prefs.
 pub(crate) fn effective_dir_raw_for_mesh(mesh: &db::WarmPoolMeshRow) -> String {
@@ -613,7 +613,7 @@ fn warm_one_body(app: &tauri::AppHandle, mesh: &db::WarmPoolMeshRow) -> Result<(
     // guard for the per-mesh case), but if the directory already exists on
     // disk we re-roll up to a small bounded number of times before bailing.
     // Issue #1519: warm entries live under the mesh's effective worktree
-    // dir (Mesh override → app default → `.claude/worktrees`), not always
+    // dir (Mesh override → app default → `.worktrees`), not always
     // the legacy layout.
     let mut last_err: Option<String> = None;
     for _ in 0..4 {
@@ -1500,21 +1500,19 @@ mod tests {
         );
     }
 
-    /// `warm_worktree_host_path_for_mesh` mirrors `env::resolve_agent_path`'s
-    /// layout exactly for the default (no-config) case, so the spawn-time
-    /// resolution is a no-op on the claimed path.
+    /// Warm pools use the same effective container as newly placed nodes.
     #[test]
-    fn warm_worktree_host_path_matches_resolve_agent_path_layout() {
+    fn warm_worktree_host_path_uses_default_worktrees_container() {
         // No per-Mesh override and no app default (preferences uninitialised
-        // in tests reads as `None`) → legacy `.claude/worktrees` container.
+        // in tests reads as `None`) → `.worktrees` container.
         let mesh = mesh_row(99, 1);
         let path = warm_worktree_host_path_for_mesh(&mesh, "bold-amber-fox");
         // Either forward-slash (POSIX host) or backslash (Windows host) is
-        // acceptable as long as the layout matches `resolve_agent_path`.
+        // acceptable as long as the default layout matches node placement.
         let normalized = path.replace('\\', "/");
         assert!(
-            normalized.ends_with(".claude/worktrees/bold-amber-fox"),
-            "warm pool path must follow the same layout env::resolve_agent_path uses, got {normalized}"
+            normalized.ends_with(".worktrees/bold-amber-fox"),
+            "warm pool path must use the default container, got {normalized}"
         );
     }
 

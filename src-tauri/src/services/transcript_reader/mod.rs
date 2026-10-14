@@ -121,6 +121,34 @@ const WAKEUP_TAIL_BYTES: u64 = 256 * 1024;
 /// A transcript the CLI has not finished flushing is not evidence of a stall,
 /// so an unreadable file is "no signal" rather than a fault, and a harness
 /// whose reader reports no such gap contributes nothing.
+/// Whether the session's latest turn ended in a user interrupt that the
+/// harness recorded without sending a completion signal for it.
+pub(crate) fn interrupted_turn(
+    format: TranscriptFormat,
+    session_id: Option<&str>,
+    node_path: &str,
+    pressed_at: std::time::SystemTime,
+) -> bool {
+    resolve(format, session_id, node_path)
+        .is_ok_and(|(path, _)| interrupted_turn_at(format, &path, pressed_at))
+}
+
+/// The harness must have written its transcript since the interrupt key was
+/// pressed: the interruption is recorded by that write, and without it the
+/// tail is just whatever the turn left so far.
+fn interrupted_turn_at(
+    format: TranscriptFormat,
+    path: &Path,
+    pressed_at: std::time::SystemTime,
+) -> bool {
+    let written_since = std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .is_ok_and(|modified| modified >= pressed_at);
+    written_since
+        && file::tail_lines(path, WAKEUP_TAIL_BYTES)
+            .is_some_and(|(lines, _)| reader(format).interrupted_turn(&lines))
+}
+
 pub(crate) fn stalled_background_task(
     format: TranscriptFormat,
     session_id: Option<&str>,
@@ -270,6 +298,32 @@ fn parse_transcript(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// MiniMax's prompt record is also the last record while the model is
+    /// still thinking; only the abort's own transcript write (observed live at
+    /// the instant of the Esc) separates an interrupt from a turn in progress.
+    #[test]
+    fn an_interrupt_needs_a_transcript_write_after_the_key_press() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("messages.jsonl");
+        std::fs::write(
+            &path,
+            "{\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Write an essay\"}]}}\n",
+        )
+        .unwrap();
+        let written = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let second = std::time::Duration::from_secs(1);
+        assert!(interrupted_turn_at(
+            TranscriptFormat::Mcode,
+            &path,
+            written - second
+        ));
+        assert!(!interrupted_turn_at(
+            TranscriptFormat::Mcode,
+            &path,
+            written + second
+        ));
+    }
 
     #[test]
     fn minimax_wake_reads_work_before_tail_window() {

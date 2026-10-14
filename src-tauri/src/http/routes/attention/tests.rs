@@ -43,6 +43,67 @@ fn minimax_stop_uses_canonical_background_receipts() {
     }
 }
 
+/// MiniMax's `ask_user` ends the turn with the questionnaire still open, so
+/// its Stop read as Ready and nobody was told to answer. The Stop is a
+/// transcript snapshot rather than a tool lifecycle: the next Stop re-reads
+/// it, so the question must not be tracked as an open foreground ask that
+/// only a (never-sent) MiniMax prompt hook could clear.
+#[test]
+fn minimax_stop_with_unanswered_ask_user_requests_an_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("messages.jsonl");
+    let ask = serde_json::json!({"message":{"role":"assistant","timestamp":100,
+        "content":[{"type":"toolCall","id":"call_q","name":"ask_user","arguments":{"mode":"questionnaire",
+        "steps":[{"id":"c","question":"Red or blue?","options":[{"id":"r","label":"Red"}]}]}}]}});
+    let waiting = serde_json::json!({"message":{"role":"toolResult","timestamp":200,
+        "toolCallId":"call_q","toolName":"ask_user","content":[],
+        "details":{"request_id":"ask_1","waiting_for_user":true}}});
+    let reply = serde_json::json!({"message":{"role":"user","timestamp":300,
+        "content":[{"type":"text","text":"Red"}]}});
+    let answered = serde_json::json!({"message":{"role":"assistant","timestamp":400,
+        "content":[{"type":"text","text":"Red it is."}]}});
+    let stop = serde_json::json!({"hook_event_name":"Stop",
+        "session_id":"mvs_0123456789abcdef0123456789abcdef", "cwd":"repo"});
+    let observe = |state: &mut crate::agent::hook_state::HookState| {
+        let normalized = normalizers::normalize(Some(&stop), "mcode", |_| {
+            crate::services::transcript_reader::adapters::mcode::count_pending_background_tasks_in(
+                &transcript,
+                &dir.path().join("tasks"),
+            )
+        });
+        let normalized = normalizers::reconcile_waiting_question(normalized, || {
+            crate::services::transcript_reader::adapters::mcode::waiting_user_question(
+                &std::fs::read_to_string(&transcript).unwrap(),
+            )
+        });
+        let accepted = accept_hook(
+            state,
+            normalized.payload.as_ref().unwrap(),
+            &normalized.classified,
+        );
+        assert!(accepted.accepted);
+        normalized.classified
+    };
+    let mut state = crate::agent::hook_state::HookState::default();
+
+    std::fs::write(&transcript, format!("{ask}\n{waiting}\n")).unwrap();
+    let classified = observe(&mut state);
+    assert_eq!(classified.decision, Decision::MarkInput);
+    assert_eq!(
+        classified.detail.kind,
+        Some(LifecycleKind::QuestionRequested)
+    );
+    assert_eq!(classified.detail.message.as_deref(), Some("Red or blue?"));
+    assert!(!state.has_questions());
+
+    std::fs::write(
+        &transcript,
+        format!("{ask}\n{waiting}\n{reply}\n{answered}\n"),
+    )
+    .unwrap();
+    assert_eq!(observe(&mut state).decision, Decision::Ready);
+}
+
 #[test]
 fn minimax_stop_waits_for_pending_foreground_call() {
     let dir = tempfile::tempdir().unwrap();
@@ -219,6 +280,97 @@ fn codex_answer_resumes_after_question_tool_result() {
             lifecycle_decision(classified.decision, &state, permission_pending, accepted),
             expected
         );
+    }
+    assert!(!state.has_questions());
+}
+
+/// Claude Code 2.1 follows an `AskUserQuestion` dialog with an untargeted
+/// "Claude needs your permission" Notification ~6 s later. Live, that
+/// notification relabelled the open question as a permission request, so the
+/// phone offered Approve/Reject for a multiple-choice question.
+#[test]
+fn claude_permission_notification_does_not_relabel_an_open_question() {
+    let mut state = crate::agent::hook_state::HookState::default();
+    for (body, expected) in [
+        (
+            serde_json::json!({"hook_event_name":"PreToolUse", "tool_name":"AskUserQuestion",
+                "tool_use_id":"toolu_q1", "tool_input":{"questions":[{"question":"Red or blue?",
+                "options":[{"label":"Red"},{"label":"Blue"}]}]}}),
+            Decision::MarkInput,
+        ),
+        (
+            serde_json::json!({"hook_event_name":"Notification",
+                "notification_type":"permission_prompt", "message":"Claude needs your permission"}),
+            Decision::Ignore,
+        ),
+        (
+            serde_json::json!({"hook_event_name":"PostToolUse", "tool_name":"AskUserQuestion",
+                "tool_use_id":"toolu_q1"}),
+            Decision::Running,
+        ),
+    ] {
+        let raw = body.to_string();
+        let payload = HookPayload::parse(raw.as_bytes()).unwrap();
+        let classified = classify(raw.as_bytes(), "anthropic", |_| Some(0));
+        let permission_pending = state.has_permission_requests();
+        let accepted = accept_hook(&mut state, &payload, &classified);
+        let published = if accepted.accepted {
+            lifecycle_decision(classified.decision, &state, permission_pending, accepted)
+        } else {
+            Decision::Ignore
+        };
+        assert_eq!(published, expected, "{body}");
+    }
+    assert!(!state.has_questions());
+}
+
+/// Codex 0.162 asks through `request_user_input_async`: the tool returns at
+/// once (its PostToolUse lands before the user has seen the question), the
+/// model idles or ends the turn, and the answer arrives later as a user
+/// message that fires `UserPromptSubmit`. The question must stay open across
+/// the instant tool result and any Stop, and only the reply resumes the node.
+#[test]
+fn codex_async_question_stays_open_until_the_reply_prompt() {
+    let mut state = crate::agent::hook_state::HookState::default();
+    let tool = |event: &str| {
+        serde_json::json!({"hook_event_name":event, "turn_id":"turn-1",
+            "tool_name":"request_user_input_async", "tool_use_id":"call_4614",
+            "tool_input":{"questions":[{"title":"Do you prefer red or blue?","options":["Red","Blue"]}]}})
+    };
+    for (body, expected) in [
+        (tool("PreToolUse"), Decision::MarkInput),
+        (tool("PostToolUse"), Decision::Ignore),
+        (
+            serde_json::json!({"hook_event_name":"Stop", "turn_id":"turn-1"}),
+            Decision::Ignore,
+        ),
+        (
+            serde_json::json!({"hook_event_name":"UserPromptSubmit", "turn_id":"turn-2",
+                "prompt":"<send_user_message_question_reply>Red</send_user_message_question_reply>"}),
+            Decision::Running,
+        ),
+    ] {
+        let raw = body.to_string();
+        let payload = HookPayload::parse(raw.as_bytes()).unwrap();
+        let classified = classify(raw.as_bytes(), "codex", |_| Some(0));
+        if expected == Decision::MarkInput {
+            assert_eq!(
+                classified.detail.kind,
+                Some(LifecycleKind::QuestionRequested)
+            );
+            assert_eq!(
+                classified.detail.message.as_deref(),
+                Some("Do you prefer red or blue?")
+            );
+        }
+        let permission_pending = state.has_permission_requests();
+        let accepted = accept_hook(&mut state, &payload, &classified);
+        let published = if accepted.accepted {
+            lifecycle_decision(classified.decision, &state, permission_pending, accepted)
+        } else {
+            Decision::Ignore
+        };
+        assert_eq!(published, expected, "{body}");
     }
     assert!(!state.has_questions());
 }
@@ -1211,8 +1363,8 @@ fn grok_dual_case_envelope_keeps_the_native_event_and_session() {
 }
 
 #[test]
-fn failed_and_cancelled_turns_need_review_and_never_claim_success() {
-    for event in ["StopFailure", "StopCancelled", "stop_failure", "Interrupt"] {
+fn failed_turns_need_review_and_never_claim_success() {
+    for event in ["StopFailure", "stop_failure"] {
         let body =
             serde_json::json!({"hook_event_name":event,"last_assistant_message":"partial result"});
         assert_eq!(
@@ -1224,6 +1376,49 @@ fn failed_and_cancelled_turns_need_review_and_never_claim_success() {
             None
         );
     }
+}
+
+/// A turn the user cancelled leaves the agent at its prompt. Observed live:
+/// Codex Esc fires `Interrupt`, Grok Ctrl+C fires `StopCancelled`, OpenCode's
+/// double Esc fires `session.error` naming `MessageAbortedError`. Reported as a
+/// failure, each showed "needs attention" and armed the output autoclear, which
+/// then flipped the idle node to Running on the next redraw.
+#[test]
+fn a_cancelled_turn_is_ready_not_a_failure() {
+    for (provider, body) in [
+        ("codex", serde_json::json!({"hook_event_name":"Interrupt"})),
+        (
+            "grok",
+            serde_json::json!({"hookEventName":"StopCancelled","reason":"user_cancelled"}),
+        ),
+        (
+            "opencode",
+            serde_json::json!({"hook_event_name":"session.error","error":"MessageAbortedError"}),
+        ),
+    ] {
+        let classified = classify(body.to_string().as_bytes(), provider, |_| Some(0));
+        assert_eq!(classified.decision, Decision::Ready, "{provider}");
+        assert_eq!(
+            classified.detail.signal_health,
+            crate::agent::session_lifecycle::SignalHealth::Ok,
+            "{provider}"
+        );
+        assert_eq!(
+            classified.detail.message.as_deref(),
+            Some("turn interrupted by the user"),
+            "{provider}"
+        );
+        assert_eq!(
+            semantic_turn(&HookPayload::parse(body.to_string().as_bytes()).unwrap()),
+            None,
+            "{provider}: an interrupted turn has no finished result to name"
+        );
+    }
+    let failed = serde_json::json!({"hook_event_name":"session.error","error":"APIError"});
+    assert_eq!(
+        classify_decision(failed.to_string().as_bytes(), "opencode", |_| Some(0)),
+        Decision::MarkInput
+    );
 }
 
 #[test]
@@ -2513,6 +2708,110 @@ fn agy_full_release_fixture_parses_all_fields() {
     assert_eq!(
         classify_decision(&body, "agy", |_| Some(0)),
         Decision::Ready
+    );
+}
+
+/// Antigravity 1.3.5's Stop names no event (captured live). The health column
+/// only moves for a callback that names its provider event, so an unnamed Stop
+/// left every Antigravity node `unverified` however many callbacks arrived.
+#[test]
+fn agy_unnamed_stop_earns_ok_delivery_health() {
+    use crate::agent::session_lifecycle::{LifecycleChangedPayload, SignalHealth};
+    let body = serde_json::json!({
+        "artifactDirectoryPath": "C:/Users/dev/.gemini/antigravity-cli/brain/b6c72c09-ca84-4e1e-a9a6-fd7406d125bb",
+        "conversationId": "b6c72c09-ca84-4e1e-a9a6-fd7406d125bb",
+        "error": "",
+        "executionNum": 0,
+        "fullyIdle": true,
+        "modelName": "gemini-3.8-flash-medium",
+        "terminationReason": "NO_TOOL_CALL",
+        "transcriptPath": "C:/Users/dev/.gemini/antigravity-cli/brain/b6c72c09-ca84-4e1e-a9a6-fd7406d125bb/.system_generated/logs/transcript_full.jsonl",
+        "workspacePaths": ["C:/work/s-agy"]
+    });
+    let classified = normalizers::normalize(Some(&body), "agy", |_| Some(0)).classified;
+    assert_eq!(classified.decision, Decision::Ready);
+
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    crate::db::init_schema(&conn).unwrap();
+    conn.execute(
+        "INSERT INTO meshes (id,name,path) VALUES (1,'mesh','C:/mesh')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO agent_nodes (id,mesh_id,name,path,status,signal_health) VALUES (1,1,'node','C:/mesh','running','unverified')",
+        [],
+    )
+    .unwrap();
+    let mut payload = LifecycleChangedPayload::new(
+        1,
+        classified.detail.kind.unwrap(),
+        crate::models::SessionStatus::Ready,
+        &classified.detail,
+        "turn finished",
+    );
+    assert!(crate::db::agent_node::commit_agent_lifecycle_inner(&conn, &mut payload, &[]).unwrap());
+    assert_eq!(
+        crate::db::agent_node::get_agent_node_by_id_inner(&conn, 1)
+            .unwrap()
+            .signal_health,
+        Some(SignalHealth::Ok)
+    );
+}
+
+/// AGY's question dialog blocks the turn with no Stop. Its matcher-scoped tool
+/// hooks (payloads captured live on 1.3.5) name no event, so the hook URL does;
+/// unnamed, the pre-tool payload's `transcriptPath` also made it look like a
+/// Stop receipt.
+#[test]
+fn agy_question_hooks_open_and_resolve_a_question() {
+    let pre = serde_json::json!({
+        "conversationId": "b6c72c09-ca84-4e1e-a9a6-fd7406d125bb",
+        "modelName": "gemini-3.8-flash-medium",
+        "stepIdx": 18,
+        "toolCall": {"args": {"questions": [{"is_multi_select": false, "options": ["Cats", "Dogs"], "question": "Do you prefer cats or dogs?"}], "toolAction": "Asking pet preference", "toolSummary": "Ask pet preference"}, "name": "ask_question"},
+        "transcriptPath": "C:/Users/dev/.gemini/antigravity-cli/brain/b6c72c09-ca84-4e1e-a9a6-fd7406d125bb/.system_generated/logs/transcript_full.jsonl",
+        "workspacePaths": ["C:/work/s-agy"]
+    });
+    let mut post = pre.clone();
+    post["error"] = "".into();
+
+    let opened = normalizers::name_event_from_url(Some(pre), "agy", Some("event=PreToolUse"));
+    let opened = normalizers::normalize(opened.as_ref(), "agy", |_| Some(0));
+    assert_eq!(opened.classified.decision, Decision::MarkInput);
+    assert_eq!(
+        opened.classified.detail.kind,
+        Some(crate::agent::session_lifecycle::LifecycleKind::QuestionRequested)
+    );
+    assert_eq!(
+        opened.classified.detail.message.as_deref(),
+        Some("Do you prefer cats or dogs?")
+    );
+    assert!(
+        opened.native_hook.is_none(),
+        "a question is not a Stop receipt"
+    );
+
+    let answered = normalizers::name_event_from_url(Some(post), "agy", Some("event=PostToolUse"));
+    let answered = normalizers::normalize(answered.as_ref(), "agy", |_| Some(0));
+    assert_eq!(answered.classified.decision, Decision::Running);
+    assert!(answered.native_hook.is_none());
+
+    // The URL never renames an event the payload already names, and only
+    // AGY's question events are taken from it.
+    let named = serde_json::json!({"hookEventName": "Stop", "fullyIdle": true});
+    assert_eq!(
+        normalizers::name_event_from_url(Some(named.clone()), "agy", Some("event=PreToolUse")),
+        Some(named)
+    );
+    let stop = serde_json::json!({"fullyIdle": true});
+    assert_eq!(
+        normalizers::name_event_from_url(Some(stop.clone()), "claude", Some("event=PreToolUse")),
+        Some(stop.clone())
+    );
+    assert_eq!(
+        normalizers::name_event_from_url(Some(stop.clone()), "agy", Some("event=Stop")),
+        Some(stop)
     );
 }
 

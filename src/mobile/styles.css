@@ -967,3 +967,12 @@ button:disabled {
   font-size: 11px;
   color: var(--text-faint);
 }
+/* Pull request details also fit long branch names and titles on a phone. */
+.mobile-pulls { min-width: 0; }
+/* A create-PR success toast may still be open when confirming the merge. */
+.mobile-pulls .sheet-wrap { z-index: 400; }
+.pulls-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.pulls-heading h2 { flex: 1; font-size: 16px; }
+.pull-request-card { padding: 16px; margin-block: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); overflow-wrap: anywhere; }
+.pull-request-card a { color: var(--accent); }
+.pull-request-card p { font-size: 13px; color: var(--text-dim); }

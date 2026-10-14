@@ -45,7 +45,7 @@ fun BuildmeshApp(vm: BuildmeshViewModel, invitation: String = "") {
                 if (screen == "home") BuildmeshWordmark() else {
                     val title = when (screen) {
                         "node", "terminal", "changes", "diff", "pr" -> selected?.text("name") ?: "Agent Node"
-                        "issues" -> "Issues"; "archive" -> "Archive"; "capture" -> "New task"
+                        "issues" -> "Issues"; "pulls" -> "Pull requests"; "archive" -> "Archive"; "capture" -> "New task"
                         "connection" -> "Connection"; else -> "Buildmesh"
                     }
                     Text(title, maxLines = 1)
@@ -91,6 +91,7 @@ fun BuildmeshApp(vm: BuildmeshViewModel, invitation: String = "") {
                     "diff" -> vm.api?.let { DiffScreen(it, nodeId, file, vm) }
                     "capture" -> TaskScreen(state, vm, meshId, { meshId = it }, { id -> nodeId = id; screen = "node" })
                     "issues", "archive" -> vm.api?.let { ResourceScreen(it, meshId, screen, state, vm, { id -> nodeId = id; screen = "node" }) }
+                    "pulls" -> vm.api?.let { PullRequestsScreen(it, meshId, vm) }
                     "pr" -> if (selected != null) vm.api?.let { CreatePrScreen(it, selected.number("mesh_id"), nodeId, vm) }
                         else EmptyMessage("This node is no longer available.")
                     "connection" -> ConnectionScreen(state.origin, vm, {
@@ -162,7 +163,8 @@ fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) 
                 Column(Modifier.fillMaxWidth().padding(14.dp)) {
                     Text(mesh.text("name"), style = MaterialTheme.typography.titleMedium)
                     Text(mesh.text("path"), style = MaterialTheme.typography.bodySmall, color = MeshColors.secondary)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(onClick = { openMesh(mesh.number("id"), "pulls") }) { Text("Pull requests") }
                         TextButton(onClick = { openMesh(mesh.number("id"), "issues") }) { Text("Issues") }
                         TextButton(onClick = { openMesh(mesh.number("id"), "archive") }) { Text("Archive") }
                     }

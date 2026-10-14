@@ -40,6 +40,7 @@ fun NodeScreen(node: JsonObject, vm: BuildmeshViewModel, terminal: () -> Unit, c
         Button(shape = MaterialTheme.shapes.small, onClick = terminal, modifier = Modifier.fillMaxWidth()) { Text("Open terminal") }
         OutlinedButton(shape = MaterialTheme.shapes.small, onClick = changes, modifier = Modifier.fillMaxWidth()) { Text("Review changes") }
         OutlinedButton(shape = MaterialTheme.shapes.small, onClick = createPr, modifier = Modifier.fillMaxWidth()) { Text("Create pull request") }
+        vm.api?.let { PullRequestsPanel(it, node.number("mesh_id"), vm, id) }
         if (canReply || draft.isNotEmpty()) {
             Text("Reply to agent", style = MaterialTheme.typography.titleMedium)
             choices.forEach { choice -> Text("• $choice", color = MeshColors.secondary) }

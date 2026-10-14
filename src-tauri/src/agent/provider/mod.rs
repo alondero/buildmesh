@@ -610,6 +610,16 @@ pub trait AgentProvider: Send + Sync {
         false
     }
 
+    /// Whether the harness's attention integration reports a prompt that
+    /// starts a turn (`UserPromptSubmit`, OpenCode's `session.busy`). Only then can
+    /// a submitted keystroke that no observation follows be read as "started
+    /// no turn" and reverted to Ready
+    /// (`session_lifecycle::on_submit_unconfirmed`). Default `false`: without
+    /// that report a quiet Enter is indistinguishable from a working turn.
+    fn confirms_prompt_submission(&self) -> bool {
+        false
+    }
+
     /// Whether this prompt should be delivered through the live PTY instead
     /// of being placed on the automated launch command line. Harnesses may
     /// accept a positional prompt for short text while still mis-parsing

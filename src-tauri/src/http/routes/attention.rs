@@ -104,10 +104,7 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
         .as_ref()
         .and_then(|n| n.cli_session_id.clone())
         .unwrap_or_default();
-    let node_path = node
-        .as_ref()
-        .map(|node| node.path.clone())
-        .unwrap_or_default();
+    let node_path = continuation::transcript_dir(node.as_ref());
     let provider = provider_owned.as_str();
     if !verify_attention_token(
         provider,
@@ -123,6 +120,7 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
         );
         return Response::empty("403 Forbidden");
     }
+    let raw_payload = normalizers::name_event_from_url(raw_payload, provider, req.query());
     let Some(app) = state::app_handle() else {
         return Response::empty("503 Service Unavailable");
     };
@@ -160,12 +158,20 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
         })
         .unwrap_or_default();
     let normalizers::Normalized { payload: hook_payload, classified, semantic, session_id: hook_uuid, native_hook } =
-        tokio::task::spawn_blocking(move || normalizers::normalize(raw_payload.as_ref(), &normalize_provider,
-            |path| if normalize_provider == "mcode" {
-                crate::services::transcript_reader::adapters::mcode::count_pending_background_tasks(&normalize_session, &normalize_path)
-            } else {
-                crate::services::transcript_reader::adapters::claude_code::count_pending_background_tasks(path)
-            }))
+        tokio::task::spawn_blocking(move || {
+            let normalized = normalizers::normalize(raw_payload.as_ref(), &normalize_provider,
+                |path| if normalize_provider == "mcode" {
+                    crate::services::transcript_reader::adapters::mcode::count_pending_background_tasks(&normalize_session, &normalize_path)
+                } else {
+                    crate::services::transcript_reader::adapters::claude_code::count_pending_background_tasks(path)
+                });
+            if normalize_provider != "mcode" {
+                return normalized;
+            }
+            normalizers::reconcile_waiting_question(normalized, || {
+                crate::services::transcript_reader::adapters::mcode::pending_user_question(&normalize_session, &normalize_path)
+            })
+        })
         .await.unwrap_or_default();
     let mut detail = classified.detail.clone();
     detail.semantic_turn = semantic

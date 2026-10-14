@@ -36,6 +36,7 @@ pub(super) async fn start_streams(
         reader,
         writer,
         job,
+        launch_prompt,
     } = launched;
     let adapter = provider.adapter();
     let reader_alive = Arc::new(AtomicBool::new(true));
@@ -163,7 +164,8 @@ pub(super) async fn start_streams(
     adapter.on_spawn_activated(session_id);
     let app_for_promotion = app.clone();
     std::thread::spawn(move || {
-        // Promote to Running iff the reader hasn't already written Error.
+        // Promote iff the reader hasn't already written Error: to Running
+        // when the launch submitted a prompt, otherwise to Ready.
         // Both delay and reader check must share `EARLY_EXIT_WINDOW`.
         std::thread::sleep(EARLY_EXIT_WINDOW);
         let promotion_sink = session_lifecycle::AppSessionLifecycleSink {
@@ -176,7 +178,9 @@ pub(super) async fn start_streams(
         // would have its strike wiped here before the reader counted it, and
         // the bound would never be reached. The budget resets in the reader
         // epilogue instead, on an exit the guard judged sound.
-        if let Err(e) = session_lifecycle::on_spawn_complete(&promotion_sink, session_id) {
+        if let Err(e) =
+            session_lifecycle::on_spawn_complete(&promotion_sink, session_id, launch_prompt)
+        {
             tracing::warn!(
                 "start_streams: conditional Running promotion failed for session {}: {}",
                 session_id,

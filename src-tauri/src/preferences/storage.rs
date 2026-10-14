@@ -609,7 +609,7 @@ pub fn naming_provider() -> Option<String> {
 
 /// Buildmesh-wide default Worktree Node directory (issue #1519).
 /// Trimmed raw input; blank collapses to `None` (default
-/// `.claude/worktrees` under the Mesh root, overridden per-Mesh).
+/// `.worktrees` under the Mesh root, overridden per-Mesh).
 /// A load failure logs and falls back to `None` like [`default_provider`].
 pub fn worktree_directory() -> Option<String> {
     match load() {

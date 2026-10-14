@@ -117,7 +117,7 @@ lifecycle?: LifecycleChangedPayload, position: number, created_at: string,
  * `Some(raw_path)` for Worktree Nodes created after the configurable
  * directory landed — the effective `<worktree_dir>/<trimmed_name>`
  * computed at creation from Mesh override → app default →
- * `.claude/worktrees`. `None` for Root Nodes and for pre-#1519 rows,
+ * `.worktrees`. `None` for Root Nodes and for pre-#1519 rows,
  * which retain the legacy `<mesh>/.claude/worktrees/<name>` fallback
  * via `env::node_working_path`. Immutable — changing a directory
  * setting affects future nodes without moving live worktrees.

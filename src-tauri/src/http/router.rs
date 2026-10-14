@@ -216,6 +216,8 @@ enum Handler {
     PrMerge,
     ImportResume,
     IssuesSpawn,
+    IssueLabels,
+    IssueSetLabel,
     GitStatus,
     GitSummary,
     GitBranch,
@@ -430,6 +432,27 @@ const ROUTES: &[Route] = &[
         scope: RouteScope::Admin,
         body: BodyPolicy::Cap(256 * 1024),
         handler: Handler::IssuesSpawn,
+    },
+    Route {
+        method: "GET",
+        m: RouteMatch::OneId {
+            prefix: "/api/meshes/",
+            suffix: "/issue-labels",
+        },
+        scope: RouteScope::Admin,
+        body: BodyPolicy::None,
+        handler: Handler::IssueLabels,
+    },
+    Route {
+        method: "POST",
+        m: RouteMatch::TwoId {
+            prefix: "/api/meshes/",
+            mid: "/issues/",
+            suffix: "/label",
+        },
+        scope: RouteScope::Admin,
+        body: BodyPolicy::Cap(8 * 1024),
+        handler: Handler::IssueSetLabel,
     },
     Route {
         method: "GET",
@@ -755,6 +778,8 @@ async fn run_handler(handler: Handler, req: &ParsedRequest) -> DispatchResult {
         Handler::PrMerge => Http(routes::pr::merge(req).await),
         Handler::ImportResume => Http(routes::agent_nodes::import_and_resume(req).await),
         Handler::IssuesSpawn => Http(routes::issues::spawn(req).await),
+        Handler::IssueLabels => Http(routes::issues::labels(req).await),
+        Handler::IssueSetLabel => Http(routes::issues::set_label(req).await),
         Handler::GitStatus => Http(routes::git::status(req).await),
         Handler::GitSummary => Http(routes::git::summary(req).await),
         Handler::GitBranch => Http(routes::git::branch(req).await),
@@ -1072,6 +1097,8 @@ GET /api/meshes/{id}/pr/source -> Admin
 POST /api/meshes/{mesh_id}/pulls/{pr_number}/merge -> Admin
 POST /api/meshes/{id}/agent-nodes/import-and-resume -> Admin
 POST /api/meshes/{mesh_id}/issues/{issue_number}/spawn -> Admin
+GET /api/meshes/{id}/issue-labels -> Admin
+POST /api/meshes/{mesh_id}/issues/{issue_number}/label -> Admin
 GET /api/agents/{id}/git/status -> Admin
 GET /api/agents/{id}/git/summary -> Admin
 GET /api/agents/{id}/git/branch -> Admin

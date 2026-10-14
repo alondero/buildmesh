@@ -11,6 +11,7 @@ import { AgentNode, Mesh, clearStoredToken, restoreSession } from "./api";
 import Connect from "./screens/Connect";
 import NodeList from "./screens/NodeList";
 import NodeOverview from "./screens/NodeOverview";
+import PullRequestsScreen from './screens/PullRequests';
 import { ScreenLoading } from "./ui";
 
 // Terminal pulls in xterm.js + FitAddon (~90 KB gzipped). Most mobile
@@ -50,7 +51,8 @@ export type Screen =
       terminalFromOverview?: boolean;
     } & WorkState)
   | { kind: "sessions"; mesh: Mesh }
-  | { kind: "issues"; mesh: Mesh };
+  | { kind: "issues"; mesh: Mesh }
+  | { kind: "pulls"; mesh: Mesh };
 
 type WorkScreen = Extract<
   Screen,
@@ -113,6 +115,7 @@ export function parentOf(s: Screen): Screen {
         : { kind: "list" };
     case "sessions":
     case "issues":
+    case "pulls":
       return { kind: "list" };
     case "changes":
       return s.fromOverview
@@ -205,6 +208,7 @@ export default function App() {
   // A ref (not state) because the popstate handler is registered once with
   // [] deps and must stay stable.
   const prSheetBusyRef = useRef(false);
+  const issuesBackRef = useRef<(() => boolean) | null>(null);
   const handlePrSheetBusy = useCallback((busy: boolean) => {
     prSheetBusyRef.current = busy;
   }, []);
@@ -228,6 +232,10 @@ export default function App() {
 
   useEffect(() => {
     const onPop = () => {
+      if (issuesBackRef.current?.()) {
+        window.history.pushState({ bm: true }, "");
+        return;
+      }
       // A sheet counts as the topmost "screen": back closes it first.
       if (prSheetRef.current) {
         // While the sheet has a request in flight it owns the dismissal
@@ -375,6 +383,10 @@ export default function App() {
             if (activeRecoveryVersion !== recoveryVersionRef.current) return;
             navigate({ kind: "issues", mesh });
           }}
+          onOpenPulls={(mesh) => {
+            if (activeRecoveryVersion !== recoveryVersionRef.current) return;
+            navigate({ kind: 'pulls', mesh });
+          }}
           onOffline={() => {
             if (activeRecoveryVersion !== recoveryVersionRef.current) return;
             setOffline(true);
@@ -502,6 +514,7 @@ export default function App() {
       {screen.kind === "issues" && (
         <Suspense fallback={<ScreenLoading />}>
           <IssuesScreen
+            backHandlerRef={issuesBackRef}
             mesh={screen.mesh}
             onBack={goBack}
             onSpawned={(node) => {
@@ -516,6 +529,9 @@ export default function App() {
           />
         </Suspense>
       )}
+      {screen.kind === 'pulls' && <Suspense fallback={<ScreenLoading />}>
+        <PullRequestsScreen meshId={screen.mesh.id} name={screen.mesh.name} onBack={goBack} onAuthFailed={handleAuthFailedForActiveScreen} />
+      </Suspense>}
       {prSheet && (
         <Suspense fallback={null}>
           <CreatePrSheet

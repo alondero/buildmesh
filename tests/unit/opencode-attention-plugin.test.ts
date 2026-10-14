@@ -128,6 +128,25 @@ describe("OpenCode attention delivery", () => {
     });
   });
 
+  it("forwards the session error's name so a user abort is not a failure", async () => {
+    vi.stubEnv("BUILDMESH_PORT", "2992");
+    vi.stubEnv("BUILDMESH_SESSION_ID", "42");
+    const fetch = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetch);
+    const plugin = await load()();
+    await plugin.event({ event: {
+      type: "session.error",
+      properties: { sessionID: "ses_Root", error: { name: "MessageAbortedError", data: { message: "The operation was aborted." } } },
+    }});
+    await plugin.event({ event: { type: "session.error", properties: { sessionID: "ses_Root" } } });
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({
+      hook_event_name: "session.error",
+      sessionID: "ses_Root",
+      error: "MessageAbortedError",
+    });
+    expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({ hook_event_name: "session.error", sessionID: "ses_Root" });
+  });
+
   it("replaces a held ask for the same id instead of posting both", async () => {
     vi.useFakeTimers();
     vi.stubEnv("BUILDMESH_PORT", "2992");

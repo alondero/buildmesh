@@ -380,6 +380,65 @@ fn background_facts(
     Some(facts)
 }
 
+/// The question an `ask_user` questionnaire is still waiting on, if any.
+///
+/// MiniMax's `ask_user` tool returns immediately with
+/// `details.waiting_for_user: true` and the model ends its turn, so the Stop
+/// that follows is not a finished turn: the user owes an answer. Any later
+/// `user` record (the reply, or a new prompt) closes the wait. Returns the
+/// first step's question text, or an empty string when it has none.
+pub(crate) fn waiting_user_question(lines: &str) -> Option<String> {
+    let mut asks = std::collections::HashMap::new();
+    let mut waiting: Option<String> = None;
+    for line in lines.lines() {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(message) = record_message(&record) else {
+            continue;
+        };
+        match message_role(message) {
+            Some("assistant") => {
+                for call in message
+                    .get("content")
+                    .and_then(|content| content.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter(|item| item.get("type").and_then(|t| t.as_str()) == Some("toolCall"))
+                {
+                    if let Some(id) = call.get("id").and_then(|id| id.as_str()) {
+                        let question = call
+                            .pointer("/arguments/steps/0/question")
+                            .and_then(|q| q.as_str())
+                            .unwrap_or_default();
+                        asks.insert(id.to_owned(), question.to_owned());
+                    }
+                }
+            }
+            Some("toolResult")
+                if message.pointer("/details/waiting_for_user")
+                    == Some(&serde_json::Value::Bool(true)) =>
+            {
+                let call = message.get("toolCallId").and_then(|id| id.as_str());
+                waiting = Some(
+                    call.and_then(|id| asks.get(id).cloned())
+                        .unwrap_or_default(),
+                );
+            }
+            Some("user") => waiting = None,
+            _ => {}
+        }
+    }
+    waiting
+}
+
+/// [`waiting_user_question`] for a node's live MiniMax session.
+pub(crate) fn pending_user_question(session_id: &str, spawn_path: &str) -> Option<String> {
+    let data_dir = minimax_data_dir_for_spawn(spawn_path)?;
+    let transcript = find_mcode_transcript_in(&data_dir.join("v2").join("sessions"), session_id)?;
+    waiting_user_question(&std::fs::read_to_string(transcript).ok()?)
+}
+
 pub(crate) fn count_pending_background_tasks(session_id: &str, spawn_path: &str) -> Option<usize> {
     let data_dir = minimax_data_dir_for_spawn(spawn_path)?;
     let transcript = find_mcode_transcript_in(&data_dir.join("v2").join("sessions"), session_id)?;
@@ -433,6 +492,32 @@ impl TranscriptAdapter for McodeAdapter {
     fn locate(&self, ctx: LocateCtx<'_>) -> Option<PathBuf> {
         let data_dir = minimax_data_dir_for_spawn(ctx.node_path)?;
         find_mcode_transcript_in(&data_dir.join("v2").join("sessions"), ctx.session_id)
+    }
+
+    /// Esc fires no hook. An interrupted tool leaves an aborted tool result
+    /// last; an interrupted model reply leaves the prompt unanswered. The
+    /// caller's write-after-key-press fence tells the latter from a prompt
+    /// still waiting for its first reply.
+    fn interrupted_turn(&self, lines: &str) -> bool {
+        let last = lines
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|record| record_message(&record).cloned())
+            .next_back();
+        let Some(message) = last else {
+            return false;
+        };
+        match message_role(&message) {
+            Some("user") => true,
+            Some("toolResult") => {
+                message.get("isError").and_then(|e| e.as_bool()) == Some(true)
+                    && matches!(
+                        message.pointer("/content/0/text").and_then(|t| t.as_str()),
+                        Some("This operation was aborted" | "Operation aborted")
+                    )
+            }
+            _ => false,
+        }
     }
 
     fn parse(
@@ -1357,8 +1442,57 @@ mod stall_tests {
 }
 
 #[cfg(test)]
+mod interrupt_tests {
+    use super::*;
+
+    const PROMPT: &str = r#"{"message_id":"msg-user-v1-4b2w","turn_id":"turn_mv88fotx_sf3lun","message":{"role":"user","content":[{"type":"text","text":"Write a 900-word essay about the history of rivers."}],"timestamp":1791989762742}}"#;
+    const TOOL_CALL: &str = r#"{"message_id":"msg-VrbM","turn_id":"turn_mv880gow_oc6b01","message":{"role":"assistant","content":[{"type":"text","text":"Running the 90-second sleep now."},{"type":"toolCall","id":"call_01a13adf02b7723d8fc531fa","name":"bash","arguments":{"command":"Start-Sleep -Seconds 90"}}],"stopReason":"toolUse","timestamp":1791989052000}}"#;
+    const ABORTED_TOOL: &str = r#"{"message_id":"msg-cYa2","turn_id":"turn_mv880gow_oc6b01","message":{"role":"toolResult","toolCallId":"call_01a13adf02b7723d8fc531fa","toolName":"bash","content":[{"type":"text","text":"This operation was aborted"}],"details":{},"isError":true,"timestamp":1791989088384}}"#;
+    const FAILED_TOOL: &str = r#"{"message_id":"msg-f","turn_id":"t","message":{"role":"toolResult","toolCallId":"call_01a13adf02b7723d8fc531fa","toolName":"bash","content":[{"type":"text","text":"exit code 1"}],"details":{},"isError":true,"timestamp":1791989088384}}"#;
+    const REPLY: &str = r#"{"message_id":"msg-z8CV","turn_id":"turn_mv87ovpq_2l59p0","message":{"role":"assistant","content":[{"type":"text","text":"OK"}],"stopReason":"stop","timestamp":1791988512678}}"#;
+
+    /// Esc fires no MiniMax hook (captured live on 2026-10-14). Interrupting a
+    /// running tool appends an aborted tool result; interrupting the model
+    /// leaves the prompt unanswered. Either way nothing follows.
+    #[test]
+    fn an_aborted_tool_or_an_unanswered_prompt_ends_an_interrupted_turn() {
+        let adapter = McodeAdapter;
+        assert!(adapter.interrupted_turn(&format!("{PROMPT}\n{TOOL_CALL}\n{ABORTED_TOOL}\n")));
+        assert!(adapter.interrupted_turn(&format!("{REPLY}\n{PROMPT}\n")));
+        assert!(!adapter.interrupted_turn(&format!("{PROMPT}\n{TOOL_CALL}\n")));
+        assert!(!adapter.interrupted_turn(&format!("{PROMPT}\n{TOOL_CALL}\n{FAILED_TOOL}\n")));
+        assert!(!adapter.interrupted_turn(&format!("{PROMPT}\n{REPLY}\n")));
+        assert!(!adapter.interrupted_turn(""));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ask_user` as MiniMax Code records it (captured live 2026-10-14): the
+    /// tool returns at once with `details.waiting_for_user` and the turn
+    /// ends. Until a user record follows, the session is waiting on the user.
+    #[test]
+    fn unanswered_ask_user_questionnaire_is_a_waiting_question() {
+        let ask = r#"{"message_id":"m1","turn_id":"t1","message":{"role":"assistant","timestamp":1791981974675,"content":[{"type":"toolCall","id":"call_01a13a72","name":"ask_user","arguments":{"mode":"questionnaire","title":"Colour preference","steps":[{"id":"color","header":"Colour","question":"Which colour do you prefer: red or blue?","selectionMode":"single","options":[{"id":"red","label":"Red","recommended":true},{"id":"blue","label":"Blue"}]}]}}]}}"#;
+        let waiting = r#"{"message_id":"m2","turn_id":"t1","message":{"role":"toolResult","toolCallId":"call_01a13a72","toolName":"ask_user","content":[{"type":"text","text":"Questionnaire ask_7d1b is waiting for the local user. Stop this turn until the user replies."}],"details":{"request_id":"ask_7d1b","schema_version":2,"step_count":1,"waiting_for_user":true},"isError":false,"timestamp":1791981977144}}"#;
+        let note = record(
+            "m3",
+            "t1",
+            serde_json::json!({"role":"assistant","timestamp":1791981978000u64,
+                "content":[{"type":"text","text":"Waiting for your answer."}]}),
+        );
+        let lines = format!("{ask}\n{waiting}\n{note}\n");
+        assert_eq!(
+            waiting_user_question(&lines).as_deref(),
+            Some("Which colour do you prefer: red or blue?")
+        );
+
+        let reply = record("m4", "t2", user_msg("Red"));
+        assert_eq!(waiting_user_question(&format!("{lines}{reply}\n")), None);
+        assert_eq!(waiting_user_question(&format!("{note}\n")), None);
+    }
 
     fn record(message_id: &str, turn_id: &str, message: serde_json::Value) -> String {
         serde_json::json!({

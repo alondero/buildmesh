@@ -174,9 +174,9 @@ describe('pathMatchesGitEvent', () => {
 });
 
 describe('getEffectiveWorktreeDir (issue #1519)', () => {
-  it('defaults to .claude/worktrees when unconfigured', () => {
-    expect(getEffectiveWorktreeDir('/repo/mesh', null, null)).toBe('/repo/mesh/.claude/worktrees');
-    expect(getEffectiveWorktreeDir('/repo/mesh', '  ', '')).toBe('/repo/mesh/.claude/worktrees');
+  it('defaults to .worktrees when unconfigured', () => {
+    expect(getEffectiveWorktreeDir('/repo/mesh', null, null)).toBe('/repo/mesh/.worktrees');
+    expect(getEffectiveWorktreeDir('/repo/mesh', '  ', '')).toBe('/repo/mesh/.worktrees');
   });
 
   it('applies a relative app setting to inheriting meshes', () => {
@@ -194,12 +194,19 @@ describe('getEffectiveWorktreeDir (issue #1519)', () => {
   });
 
   it('never doubles separators when the mesh root has a trailing slash', () => {
-    expect(getEffectiveWorktreeDir('/repo/mesh/', null, null)).toBe('/repo/mesh/.claude/worktrees');
+    expect(getEffectiveWorktreeDir('/repo/mesh/', null, null)).toBe('/repo/mesh/.worktrees');
     expect(getEffectiveWorktreeDir('/repo/mesh/', null, 'custom-wt')).toBe('/repo/mesh/custom-wt');
   });
 });
 
 describe('pathMatchesGitEvent with custom dirs (issue #1519)', () => {
+  it('matches new and legacy layouts without waiting for directory config', () => {
+    expect(pathMatchesGitEvent({ path: '/repo/mesh/.worktrees/new-node' }, '/repo/mesh')).toBe(true);
+    expect(pathMatchesGitEvent({ path: '/repo/mesh/.claude/worktrees/old-node' }, '/repo/mesh')).toBe(true);
+    expect(pathMatchesGitEvent({ path: '/repo/mesh/.worktrees-other/node' }, '/repo/mesh')).toBe(false);
+    expect(pathMatchesGitEvent({ path: '/repo/mesh/.worktrees/sibling' }, '/repo/mesh/.worktrees/node')).toBe(false);
+  });
+
   it('matches a mesh root when the event is under the effective dir', () => {
     const event = { path: '/repo/mesh/custom/my-node', internal_path: '/repo/mesh/custom/my-node' };
     expect(pathMatchesGitEvent(event, '/repo/mesh', ['/repo/mesh/custom'])).toBe(true);

@@ -205,7 +205,7 @@ function mockBackend(
         return Promise.resolve(poolCount);
       case 'get_worktree_directory_config':
         return Promise.resolve({
-          effective_directory: '/repos/demo/.claude/worktrees',
+          effective_directory: '/repos/demo/.worktrees',
           app_directory: null,
           mesh_directory: null,
         });
@@ -1387,7 +1387,7 @@ describe('ProjectSettingsTab — worktree strategy (moved from the Worktree Mana
     expect(input.value).toBe('wt/here');
     // The effective path is backend-authoritative, not a TS re-spelling.
     const effective = (await screen.findByText(/Effective:/)).textContent ?? '';
-    expect(effective).toContain('/repos/demo/.claude/worktrees');
+    expect(effective).toContain('/repos/demo/.worktrees');
     // An override is no longer "inherited", so the reset affordance appears.
     expect(screen.getByRole('button', { name: /reset to inherited/i })).toBeTruthy();
   });
@@ -1422,7 +1422,7 @@ describe('ProjectSettingsTab — worktree strategy (moved from the Worktree Mana
     // Match the line, not the nested <code> (testing-library's text matcher
     // returns the deepest element that matches).
     const effective = (await screen.findByText(/Effective:/)).textContent ?? '';
-    expect(effective).toContain('/repos/demo/.claude/worktrees');
+    expect(effective).toContain('/repos/demo/.worktrees');
   });
 });
 

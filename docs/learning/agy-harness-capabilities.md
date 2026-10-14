@@ -20,7 +20,8 @@ Review of Antigravity CLI (`agy`) integration with Buildmesh, covering lifecycle
 | **Attention Hook Delivery** | **Validated & Hardened (#1367)** | `.agents/hooks.json` under `buildmesh-attention` namespace; `Stop` hook forwards stdin to `/api/attention/:session_id` |
 | **Turn Completion Signal** | **Active** | `fullyIdle: true` signals turn settled -> `Decision::Mark` |
 | **Background Yield** | **Active** | `fullyIdle: false` signals background task running -> `Decision::SuppressPendingBackground` |
-| **Permission Gating** | **Skipped by Design** | `--dangerously-skip-permissions` active; `PreToolUse` omitted to prevent synchronous blocking tool execution gates |
+| **Permission Gating** | **Skipped by Design** | `--dangerously-skip-permissions` active; no permission hook is installed |
+| **Question Dialog** | **Active (validated on 1.3.5)** | `PreToolUse`/`PostToolUse` matcher groups scoped to `ask_question`; the pre-tool hook answers `{"decision":"allow"}` and both name their event in the callback URL |
 | **Workspace Trust** | **Pre-provisioned** | `ensure_trusted` populates `~/.gemini/antigravity-cli/settings.json` before spawn |
 | **Session Resume** | **Active (#1499)** | `--conversation <uuid>`; self-assigned UUIDv4 captured by the brain-directory poller (`services::agy_session`, primary — PTY capture is disabled, the TUI prints no UUID), `Stop`-hook `conversationId` as secondary |
 | **Reasoning Effort** | **Active (#1286)** | Closed vocabulary `low`, `medium`, `high` via `--effort` |
@@ -117,13 +118,14 @@ Buildmesh returns `{"decision":"allow"}` unconditionally (fail-open) so agent tu
 
 ---
 
-## 2. Why `Stop` Only Under `--dangerously-skip-permissions`
+## 2. Why `Stop` Plus Question Hooks Under `--dangerously-skip-permissions`
 
 Buildmesh launches AGY with `--dangerously-skip-permissions` to allow automated agent execution without blocking for interactive manual approvals in the terminal for every command.
 
 1. **`PreToolUse` is a synchronous decision gate**, requiring a structured `{ "decision": "allow" | "deny" | "ask" | "force_ask" }` response before each tool executes. It is not an asynchronous notification event.
 2. Under `--dangerously-skip-permissions`, no permission prompts occur. Injecting `PreToolUse` would only add unnecessary synchronous curl execution overhead to every tool call.
-3. Therefore, `Stop` is the sole lifecycle event required for turn completion and background detection.
+3. Therefore, `Stop` is the lifecycle event for turn completion and background detection.
+4. The `ask_question` dialog blocks the turn without a `Stop`, so a node asking the user read Running. A `PreToolUse`/`PostToolUse` pair scoped to that one tool (`matcher: "ask_question"`) reports it. The decision is required, and AGY 1.3.5 denied the question when the hook printed `{}`, so the pre-tool hook prints `{"decision":"allow"}` — on Windows built by PowerShell from `[char]34`, because AGY hands cmd every `"` as `\"`. Tool payloads carry no event name (the post-tool payload differs only by an `error` field), so each hook URL carries `?event=`.
 
 ---
 
@@ -159,7 +161,8 @@ establish for Antigravity Circuit execution:
 | Per-turn token | None — `executionNum` is an opaque 0-based step counter, not identity (retained only so consecutive turns hash to distinct receipt source ids) | Unavailable by design |
 | Child/background registry | None — the payload carries no task/cron lists | Unavailable |
 | Inline final report | None — `Stop` carries no assistant text | Unavailable |
-| Human waits (permission/question) | No hook installed under `--dangerously-skip-permissions` | Unavailable |
+| Human waits (permission) | No hook installed under `--dangerously-skip-permissions` | Unavailable |
+| Human waits (question) | `ask_question` pre/post hooks; the attention route names the event from the URL before the receipt parser runs, so a question is never read as a `Stop` | Validated on 1.3.5 (Windows); WSL-hosted Buildmesh keeps `Stop` only |
 
 Consequences for Circuit execution (`services::circuit_worker::native_hooks`,
 `observer_policy::for_provider("agy")`):

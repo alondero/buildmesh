@@ -107,6 +107,13 @@ pub(crate) trait TranscriptReader: Send + Sync {
         None
     }
 
+    /// Whether the latest turn ended because the user interrupted it, for a
+    /// harness that records the interruption but sends no completion signal
+    /// for it. `lines` is the transcript tail. Default `false`: no evidence.
+    fn interrupted_turn(&self, _lines: &str) -> bool {
+        false
+    }
+
     /// A finished background task this harness recorded but cannot deliver to an
     /// idle session on its own (issue #2105).
     ///

@@ -621,6 +621,23 @@ correct or safe by itself:
 - Use the Repository view to understand which branch and path belong to which
   node. Do not move a live worktree behind Buildmesh's back.
 
+New worktrees and the pre-spawn warm pool use `<mesh>/.worktrees/<name>`.
+Change the application default in **Settings → General → Worktree directory**,
+or override it per Mesh in **Project Settings → Worktree strategy**. Relative
+directories resolve from the Mesh folder; a per-Mesh absolute path places
+worktrees elsewhere. Clear the field to restore inheritance and the `.worktrees` default.
+To keep the previous layout for new nodes, enter `.claude/worktrees`.
+Existing nodes retain their saved paths, including older `.claude/worktrees`
+checkouts; the default change does not move them.
+
+Buildmesh adds an in-repository worktree container to Git's local
+`info/exclude`, keeping it out of `git status` without changing the committed
+`.gitignore`. This also works when the Mesh is itself a linked worktree.
+For IDEs that discourage nested worktrees, including
+[IntelliJ IDEA](https://www.jetbrains.com/help/idea/use-git-worktrees.html),
+choose an absolute directory outside the Mesh, such as a sibling
+`myproject-worktrees` folder.
+
 ## Project Settings and Repository
 
 Two separate views cover everything you can do to a Mesh, and they never mix:
@@ -1004,6 +1021,11 @@ context with other supported agent tools through `AGENTS.md` and
 `.agents/skills` links. Treat those files as code: review the diff before
 committing and never put secrets in them. The project-level context for this
 repository is described in [CONTEXT.md](../CONTEXT.md).
+
+The portability PR also adds runtime ignore patterns to `.gitignore`, including
+`.worktrees/`. Repositories with an older portability block receive just the
+missing worktree addition; repeating the action does not duplicate that block.
+Custom worktree containers are excluded locally when Buildmesh creates them.
 
 ## Data, backup, and restore
 

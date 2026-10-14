@@ -2627,6 +2627,56 @@ mod tests {
         assert!(provider_is_plain_terminal("terminal"));
     }
 
+    /// Esc and Ctrl+C arrive from xterm as single-byte writes; an arrow key
+    /// or any longer sequence starting with Esc is not an interrupt.
+    #[test]
+    fn only_bare_esc_and_ctrl_c_are_interrupt_keys() {
+        assert!(is_interrupt_key(b"\x1b"));
+        assert!(is_interrupt_key(b"\x03"));
+        for other in [b"\x1b[A".as_slice(), b"\x1b\x1b", b"\r", b"q", b""] {
+            assert!(!is_interrupt_key(other), "{other:?}");
+        }
+    }
+
+    /// MiniMax recorded its aborted tool three seconds after Esc, past a
+    /// single fixed check. The watcher keeps looking until the record lands,
+    /// and stops as soon as the node moves on by another path.
+    #[test]
+    fn interrupt_watch_waits_for_a_late_record_and_stops_when_the_node_moves() {
+        use std::cell::RefCell;
+        let run = |answers: &[InterruptProbe], attempts: u32| {
+            let answers = RefCell::new(answers.iter().copied());
+            let calls = RefCell::new(0);
+            let recorded = await_interrupt_record(attempts, std::time::Duration::ZERO, || {
+                *calls.borrow_mut() += 1;
+                answers
+                    .borrow_mut()
+                    .next()
+                    .unwrap_or(InterruptProbe::NotYet)
+            });
+            (recorded, calls.into_inner())
+        };
+        use InterruptProbe::*;
+        assert_eq!(run(&[NotYet, NotYet, Recorded], 20), (true, 3));
+        assert_eq!(run(&[NotYet, Moved, Recorded], 20), (false, 2));
+        assert_eq!(run(&[], 4), (false, 4));
+        let window = crate::agent::session_lifecycle::INTERRUPT_POLL
+            * crate::agent::session_lifecycle::INTERRUPT_ATTEMPTS;
+        assert!(window >= std::time::Duration::from_secs(6), "{window:?}");
+    }
+
+    /// Only harnesses that report a prompt starting a turn may have an
+    /// unconfirmed Enter reverted; for the rest a quiet Enter may be work.
+    #[test]
+    fn prompt_submission_confirmation_follows_the_harness() {
+        for id in ["anthropic", "codex", "grok", "opencode"] {
+            assert!(harness_confirms_prompt_submission(id), "{id}");
+        }
+        for id in ["agy", "mcode", "kimi", "terminal", "cursor"] {
+            assert!(!harness_confirms_prompt_submission(id), "{id}");
+        }
+    }
+
     #[test]
     fn llm_providers_do_emit_attention_signals() {
         // Every non-terminal harness id resolves to an LLM executor, so none skip
@@ -2768,6 +2818,9 @@ pub async fn write_to_agent(
     if outcome.activity.user_input {
         crate::attention_autoclear::disarm(session_id);
     }
+    if outcome.is_accepted() {
+        watch_for_interrupt(session_id, data.as_bytes());
+    }
     if !outcome.is_accepted() || !outcome.activity.submitted {
         return Ok(outcome);
     }
@@ -2812,16 +2865,157 @@ pub(crate) fn write_to_agent_signal_blocking(
     if should_skip_attention_signals(session_id) {
         return Ok(None);
     }
-    match crate::agent::session_lifecycle::commit_user_resumed(
-        &crate::agent::session_lifecycle::DbOnlySink,
-        session_id,
-    ) {
+    match commit_submitted_input(&crate::agent::session_lifecycle::DbOnlySink, session_id) {
         Ok(payload) => Ok(payload),
         Err(error) => {
             tracing::warn!(session_id, %error, "submitted input could not commit a lifecycle");
             Ok(None)
         }
     }
+}
+
+/// Commit a submitted keystroke as resumed work — the desktop and mobile
+/// input paths share it — and, when the node was idling at its prompt under
+/// a harness that reports a prompt starting a turn, check after
+/// [`SUBMIT_CONFIRM_WINDOW`](crate::agent::session_lifecycle::SUBMIT_CONFIRM_WINDOW)
+/// that the harness confirmed it. An unconfirmed Enter started no turn.
+pub(crate) fn commit_submitted_input(
+    sink: &dyn crate::agent::session_lifecycle::SessionLifecycleSink,
+    session_id: i64,
+) -> Result<Option<crate::agent::session_lifecycle::LifecycleChangedPayload>, String> {
+    use crate::agent::session_lifecycle as lifecycle;
+    let awaits_confirmation = db::get_agent_node_by_id(session_id)
+        .ok()
+        .is_some_and(|node| {
+            lifecycle::submit_needs_confirmation(
+                node.status,
+                harness_confirms_prompt_submission(&node.provider),
+            )
+        });
+    let committed = lifecycle::commit_user_resumed(sink, session_id)?;
+    if let Some(submitted) = committed.clone().filter(|_| awaits_confirmation) {
+        std::thread::spawn(move || {
+            std::thread::sleep(lifecycle::SUBMIT_CONFIRM_WINDOW);
+            let reverted = match crate::http::state::app_handle() {
+                Some(app) => lifecycle::on_submit_unconfirmed(
+                    &lifecycle::AppSessionLifecycleSink { app },
+                    &submitted,
+                ),
+                None => lifecycle::on_submit_unconfirmed(&lifecycle::DbOnlySink, &submitted),
+            };
+            match reverted {
+                Ok(true) => tracing::info!(
+                    session_id,
+                    "submitted input was not confirmed by the harness; node is back at its prompt"
+                ),
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(session_id, %error, "unconfirmed-submit revert failed")
+                }
+            }
+        });
+    }
+    Ok(committed)
+}
+
+/// The bytes a terminal sends for the interrupt keys: Esc, and Ctrl+C.
+fn is_interrupt_key(data: &[u8]) -> bool {
+    matches!(data, [0x1b] | [0x03])
+}
+
+/// What one look at an interrupted node found.
+#[derive(Clone, Copy, Debug)]
+enum InterruptProbe {
+    /// The harness recorded the interruption.
+    Recorded,
+    /// Not recorded yet; look again.
+    NotYet,
+    /// The node left the observed `Running` revision by another path.
+    Moved,
+}
+
+/// Look up to `attempts` times, `poll` apart, until the interruption is
+/// recorded (`true`) or the node moves on (`false`).
+fn await_interrupt_record(
+    attempts: u32,
+    poll: std::time::Duration,
+    mut probe: impl FnMut() -> InterruptProbe,
+) -> bool {
+    for _ in 0..attempts {
+        std::thread::sleep(poll);
+        match probe() {
+            InterruptProbe::Recorded => return true,
+            InterruptProbe::Moved => return false,
+            InterruptProbe::NotYet => {}
+        }
+    }
+    false
+}
+
+/// An interrupt key reached a node. Claude Code ends an interrupted turn
+/// without any hook, so after the harness has had time to record the
+/// interruption, a node still `Running` whose transcript shows it is settled
+/// back to `Ready`. Anything else — no transcript evidence, a newer
+/// observation, a harness that reports interrupts natively — leaves it alone.
+pub(crate) fn watch_for_interrupt(session_id: i64, data: &[u8]) {
+    if !is_interrupt_key(data) {
+        return;
+    }
+    let pressed_at = std::time::SystemTime::now();
+    std::thread::spawn(move || {
+        use crate::agent::session_lifecycle as lifecycle;
+        let Ok((crate::models::SessionStatus::Running, observed)) =
+            db::agent_node::agent_status_revision(session_id)
+        else {
+            return;
+        };
+        let recorded = await_interrupt_record(
+            lifecycle::INTERRUPT_ATTEMPTS,
+            lifecycle::INTERRUPT_POLL,
+            || {
+                match db::agent_node::agent_status_revision(session_id) {
+                    Ok((crate::models::SessionStatus::Running, current)) if current == observed => {
+                    }
+                    _ => return InterruptProbe::Moved,
+                }
+                match db::get_agent_node_by_id(session_id) {
+                    Ok(node)
+                        if crate::coordinator::enrichment::interrupted_turn(&node, pressed_at) =>
+                    {
+                        InterruptProbe::Recorded
+                    }
+                    Ok(_) => InterruptProbe::NotYet,
+                    Err(_) => InterruptProbe::Moved,
+                }
+            },
+        );
+        if !recorded {
+            return;
+        }
+        let settled = match crate::http::state::app_handle() {
+            Some(app) => lifecycle::on_turn_interrupted(
+                &lifecycle::AppSessionLifecycleSink { app },
+                session_id,
+                &observed,
+            ),
+            None => lifecycle::on_turn_interrupted(&lifecycle::DbOnlySink, session_id, &observed),
+        };
+        match settled {
+            Ok(true) => tracing::info!(
+                session_id,
+                "interrupted turn settled; node is back at its prompt"
+            ),
+            Ok(false) => {}
+            Err(error) => tracing::warn!(session_id, %error, "interrupted-turn settle failed"),
+        }
+    });
+}
+
+/// Whether the node's harness reports a prompt that starts a turn.
+pub(super) fn harness_confirms_prompt_submission(provider: &str) -> bool {
+    crate::preferences::resolve_harness_provider(provider)
+        .adapter()
+        .confirms_prompt_submission()
 }
 
 /// Sync core for [`write_to_agent`] — **legacy combined entry point**

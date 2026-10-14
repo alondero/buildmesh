@@ -4,6 +4,9 @@
 //! Claude Code can carry a *running* process into a new native session and
 //! records the transition in the transcript of the session it came from
 //! (`{"type":"continued-in",…}`, read by the Claude Code transcript adapter).
+//! `/clear` does the same without that record; its new transcript opens with
+//! the command instead, which [`cleared_successor`] orders against the stored
+//! session.
 //! Callbacks after that transition carry the successor id, which the ordering
 //! token (issue #1364) reads as a previous process — which is what left runs
 //! 455-457 busy with a report nothing could observe (issue #2263).
@@ -23,6 +26,14 @@ use crate::services::transcript_reader::readers::claude_code;
 /// How far a recorded continuation chain is followed before the lineage is
 /// refused. A cycle or a corrupt chain cannot spin the walk.
 const MAX_CONTINUATION_HOPS: usize = 8;
+
+/// The directory this node's transcripts are keyed under, which [`prove`]
+/// reads the lineage from: where the harness ran, so a worktree node's
+/// worktree rather than the mesh root.
+pub(super) fn transcript_dir(node: Option<&crate::models::AgentNode>) -> String {
+    node.map(crate::coordinator::enrichment::transcript_dir)
+        .unwrap_or_default()
+}
 
 /// The successor session this callback is proven to be, or `None` when nothing
 /// on disk proves it. A callback that already matches the stored identity (or
@@ -93,11 +104,29 @@ fn proven_successor(provider: &str, node_path: &str, stored: &str, hook: &str) -
     let mut current = stored.to_string();
     for _ in 0..MAX_CONTINUATION_HOPS {
         let Some(successor) = declared_successor(node_path, &current) else {
-            return (current == hook).then_some(current);
+            if current == hook {
+                return Some(current);
+            }
+            return cleared_successor(node_path, &current, hook);
         };
         current = successor;
     }
     None
+}
+
+/// `/clear` moves the running process into a new session without recording
+/// a continuation. The hook's session is the successor only when its
+/// transcript, in this workspace, opens with the `/clear` and that clear is no
+/// older than anything `current` recorded. A clear that predates `current`'s
+/// records came from an earlier process: `current` was started or resumed
+/// after it.
+fn cleared_successor(node_path: &str, current: &str, hook: &str) -> Option<String> {
+    let hook = crate::http::request::parse_cli_session_id(hook)?;
+    let current_path = claude_code::transcript_path(current, node_path)?;
+    let hook_path = claude_code::transcript_path(&hook, node_path)?;
+    let cleared = claude_code::cleared_at(&hook_path)?;
+    let last = claude_code::last_record_at(&current_path)?;
+    (cleared >= last).then_some(hook)
 }
 
 /// The successor `current` itself records, validated as identity we may adopt:
@@ -127,9 +156,29 @@ pub(super) mod test_support {
         pub(in crate::http::routes::attention) fn new(
             records: &[(&str, Vec<serde_json::Value>)],
         ) -> Self {
+            Self::running_in(records, None)
+        }
+
+        /// As [`Fixture::new`] for a session Claude Code ran in the native
+        /// worktree `name` (`<root>/.claude/worktrees/<name>`), so its
+        /// transcripts are keyed under that directory, not the mesh root.
+        pub(in crate::http::routes::attention) fn in_worktree(
+            records: &[(&str, Vec<serde_json::Value>)],
+            name: &str,
+        ) -> Self {
+            Self::running_in(records, Some(name))
+        }
+
+        fn running_in(records: &[(&str, Vec<serde_json::Value>)], worktree: Option<&str>) -> Self {
             let home = tempfile::tempdir().unwrap();
             let root = home.path().join(".claude");
-            let node_path = home.path().to_str().unwrap().to_owned();
+            let node_path = match worktree {
+                Some(name) => root.join("worktrees").join(name),
+                None => home.path().to_path_buf(),
+            }
+            .to_str()
+            .unwrap()
+            .to_owned();
             with_claude_home(home.path(), || {
                 for (session_id, lines) in records {
                     let path = claude_code::transcript_path(session_id, &node_path).unwrap();
@@ -151,6 +200,11 @@ pub(super) mod test_support {
 
         pub(in crate::http::routes::attention) fn node_path(&self) -> &str {
             &self.node_path
+        }
+
+        /// The mesh root: the directory the fixture's worktrees live under.
+        pub(in crate::http::routes::attention) fn mesh_root(&self) -> &str {
+            self.home.path().to_str().unwrap()
         }
 
         pub(in crate::http::routes::attention) fn home_path(&self) -> &std::path::Path {
@@ -294,6 +348,110 @@ mod tests {
         ]);
         assert_eq!(fixture.prove("anthropic", first, second), None);
         assert_eq!(fixture.prove("anthropic", first, first), None);
+    }
+
+    fn turn(session_id: &str, at: &str) -> serde_json::Value {
+        json!({"type": "assistant", "sessionId": session_id, "timestamp": at,
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}]}})
+    }
+
+    /// The opening of a transcript `/clear` started, as Claude Code 2.1.299
+    /// writes it: untimestamped bookkeeping, the meta caveat, then the
+    /// command itself as the first real user record.
+    fn cleared(session_id: &str, at: &str) -> Vec<serde_json::Value> {
+        vec![
+            json!({"type": "mode", "mode": "normal", "sessionId": session_id}),
+            json!({"type": "user", "isMeta": true, "sessionId": session_id, "timestamp": at,
+                "message": {"role": "user", "content": "<local-command-caveat>The command below was run directly in Claude Code</local-command-caveat>"}}),
+            json!({"type": "user", "sessionId": session_id, "timestamp": at,
+                "message": {"role": "user", "content": "<command-name>/clear</command-name>\n            <command-message>clear</command-message>\n            <command-args></command-args>"}}),
+            turn(session_id, "2026-10-14T12:33:46.532Z"),
+        ]
+    }
+
+    /// `/clear` swaps the running process into a new session and leaves no
+    /// `continued-in` record, so every later callback was dropped as stale
+    /// and the node froze on its last status. The successor transcript opens
+    /// with the `/clear` itself, after everything the stored session wrote.
+    #[test]
+    fn a_clear_that_follows_the_stored_session_proves_the_successor() {
+        let fixture = Fixture::new(&[
+            (OLD, vec![turn(OLD, "2026-10-14T12:33:10.766Z")]),
+            (NEW, cleared(NEW, "2026-10-14T12:33:37.602Z")),
+        ]);
+        assert_eq!(fixture.prove("anthropic", OLD, NEW).as_deref(), Some(NEW));
+    }
+
+    /// A clear that predates the stored session's own records belongs to an
+    /// earlier process of this workspace (the stored session was started or
+    /// resumed after it), and a transcript that merely mentions `/clear`
+    /// later on, or has no stored predecessor to order against, proves nothing.
+    #[test]
+    fn a_clear_that_does_not_follow_the_stored_session_proves_nothing() {
+        let earlier = Fixture::new(&[
+            (OLD, vec![turn(OLD, "2026-10-14T12:40:00.000Z")]),
+            (NEW, cleared(NEW, "2026-10-14T12:33:37.602Z")),
+        ]);
+        assert_eq!(earlier.prove("anthropic", OLD, NEW), None);
+
+        let mut mentioned = vec![json!({"type": "user", "sessionId": NEW,
+            "timestamp": "2026-10-14T12:34:00.000Z",
+            "message": {"role": "user", "content": "what does /clear do?"}})];
+        mentioned.extend(cleared(NEW, "2026-10-14T12:35:00.000Z"));
+        let later = Fixture::new(&[
+            (OLD, vec![turn(OLD, "2026-10-14T12:33:10.766Z")]),
+            (NEW, mentioned),
+        ]);
+        assert_eq!(later.prove("anthropic", OLD, NEW), None);
+
+        let orphan = Fixture::new(&[(NEW, cleared(NEW, "2026-10-14T12:33:37.602Z"))]);
+        assert_eq!(orphan.prove("anthropic", OLD, NEW), None);
+        assert_eq!(
+            Fixture::new(&[
+                (OLD, vec![turn(OLD, "2026-10-14T12:33:10.766Z")]),
+                (NEW, cleared(NEW, "2026-10-14T12:33:37.602Z")),
+            ])
+            .prove("codex", OLD, NEW),
+            None
+        );
+    }
+
+    /// Claude Code runs a worktree node in `.claude/worktrees/<name>` and keys
+    /// its transcripts there. The route read the lineage under the mesh root,
+    /// found no transcript, and dropped every callback after a `/clear` (or a
+    /// recorded continuation) on a worktree node as stale.
+    #[test]
+    fn a_worktree_node_reads_its_lineage_where_it_ran() {
+        let fixture = Fixture::in_worktree(
+            &[
+                (OLD, vec![turn(OLD, "2026-10-14T12:33:10.766Z")]),
+                (NEW, cleared(NEW, "2026-10-14T12:33:37.602Z")),
+            ],
+            "s-anthropic",
+        );
+        let node = crate::models::AgentNode {
+            provider: "anthropic".to_string(),
+            path: fixture.mesh_root().to_string(),
+            worktree_name: Some("s-anthropic".to_string()),
+            use_worktree: true,
+            ..Default::default()
+        };
+        let proven = with_claude_home(fixture.home_path(), || {
+            prove("anthropic", &transcript_dir(Some(&node)), OLD, Some(NEW))
+        });
+        assert_eq!(proven.as_deref(), Some(NEW));
+    }
+
+    /// A clear after a recorded continuation adopts the clear's session: the
+    /// chain is walked to its end before the clear is ordered against it.
+    #[test]
+    fn a_clear_after_a_continuation_proves_the_cleared_session() {
+        let fixture = Fixture::new(&[
+            (OLD, vec![continuation_record(OLD, json!(NEW))]),
+            (NEW, vec![turn(NEW, "2026-10-14T12:33:10.766Z")]),
+            (LAST, cleared(LAST, "2026-10-14T12:33:37.602Z")),
+        ]);
+        assert_eq!(fixture.prove("anthropic", OLD, LAST).as_deref(), Some(LAST));
     }
 
     #[test]
