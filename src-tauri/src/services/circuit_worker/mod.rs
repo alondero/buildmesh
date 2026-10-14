@@ -343,7 +343,7 @@ pub fn request_circuit_approval(run_id: i64, node_id: String) {
 /// Uses `Vec::extract_if` (Rust 1.87+) to partition in-place — no
 /// allocation for the rest-list, no re-assignment. The returned `Vec`
 /// holds only the taken entries' `node_id`s.
-fn drain_approvals_for(run_id: i64) -> Vec<String> {
+pub(crate) fn drain_approvals_for(run_id: i64) -> Vec<String> {
     let mut queue = lock_circuit_worker_static(&APPROVALS);
     queue
         .extract_if(.., |(r, _)| *r == run_id)

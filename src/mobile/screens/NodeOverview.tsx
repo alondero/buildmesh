@@ -5,6 +5,7 @@ import { AppBar } from "../ui";
 import { useVisibilityPolling } from "../useVisibilityPolling";
 import { useWsEvents } from "../useWsEvents";
 import { NodePullRequest } from './PullRequests';
+import { NodeCircuitRunPanel } from './CircuitRun';
 
 export default function NodeOverview({
   node: initial,
@@ -216,6 +217,7 @@ export default function NodeOverview({
             Open terminal
           </button>
         </div>
+        {!missing && <NodeCircuitRunPanel nodeId={node.id} onAuthFailed={onAuthFailed} onOpenTerminal={onTerminal} />}
         {!missing && <NodePullRequest meshId={node.mesh_id} nodeId={node.id} onAuthFailed={onAuthFailed} />}
         <form
           className="reply-panel"

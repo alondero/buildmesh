@@ -15,6 +15,7 @@
 pub mod evidence;
 pub mod leases;
 pub mod ledger;
+pub mod node_run;
 pub mod queue;
 pub mod recovery;
 pub mod step_recovery;

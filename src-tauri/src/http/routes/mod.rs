@@ -4,6 +4,7 @@ pub mod admin;
 pub mod agent_nodes;
 pub mod attention;
 pub mod certs;
+pub mod circuit;
 pub mod coordinator;
 pub mod git;
 pub mod issues;

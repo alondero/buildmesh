@@ -78,6 +78,47 @@ pub(crate) fn should_background_sync(time_since_attempt: Duration) -> bool {
     time_since_attempt >= BACKGROUND_SYNC_INTERVAL
 }
 
+/// Issue #2348: decide whether this tick runs the background sync for
+/// `mesh_path` — and keep the attempt clock honest when it does not.
+///
+/// Three outcomes, and the third is the one that is easy to get wrong:
+///  1. the attempt clock has not reached [`BACKGROUND_SYNC_INTERVAL`] → skip,
+///     touching nothing (including no repository probe);
+///  2. due and the folder can be fetched → run the fetch, which stamps the
+///     attempt itself inside `locked_fetch_origin_blocking`;
+///  3. due but the folder cannot be opened as a git working repository
+///     (`warm_pool::mesh_repo_unusable`) → skip the fetch **and stamp the
+///     attempt**.
+///
+/// That stamp in case 3 is load-bearing. `time_since_attempt` reads
+/// `Duration::MAX` for a mesh with no recorded attempt, and the only thing that
+/// ever wrote one was the fetch we just skipped — so without the stamp a mesh
+/// that can never be fetched re-probes the filesystem on *every* tick (2 s
+/// while any mesh is active, 30 s once the worker backs off) instead of once
+/// per interval, which is precisely the retry-forever behaviour #2348 removed
+/// from the fill path, just moved. `note_attempt` never writes `last_success`,
+/// so the spawn path's freshness gate is untouched: a mesh that cannot be
+/// fetched keeps fetching on spawn.
+///
+/// `attempt_is_due`, `repo_usable` and `stamp` are injected so all three
+/// outcomes are unit-testable without sleeping, a `tauri::AppHandle` or a real
+/// repository — the sequencing above is the whole behaviour.
+fn background_sync_allowed(
+    mesh_path: &str,
+    attempt_is_due: impl FnOnce(&str) -> bool,
+    repo_usable: impl FnOnce() -> bool,
+    stamp: impl FnOnce(&str),
+) -> bool {
+    if !attempt_is_due(mesh_path) {
+        return false;
+    }
+    if !repo_usable() {
+        stamp(mesh_path);
+        return false;
+    }
+    true
+}
+
 /// Number of consecutive no-op passes before the worker backs off from
 /// `TICK_FAST` to `TICK_SLOW`. Three no-op passes at 2 s = 6 s of nothing-
 /// changed — well below the worst-case staleness we care about, so
@@ -345,8 +386,31 @@ pub fn start_background_worker(app: tauri::AppHandle) {
                     // logged and retried next interval; the attempt stamp
                     // (written inside `locked_fetch_origin_blocking`) is
                     // what rate-limits offline retries to one per interval.
-                    if should_background_sync(
-                        crate::services::fetch_freshness::time_since_attempt(&mesh.path),
+                    //
+                    // Issue #2348: a Mesh whose folder cannot be opened as a
+                    // git working repository can never be fetched either, so
+                    // it skips this block too. Without the gate it
+                    // re-attempted (and re-logged `fetch_origin: path ... is
+                    // not a usable git repo`) every interval, which is the same
+                    // log flood the fill gate exists to stop.
+                    // `background_sync_allowed` owns the sequencing: the probe
+                    // runs only once the attempt clock is due, and a suppressed
+                    // mesh is stamped so the probe stays at one per interval
+                    // rather than one per tick. The stamp matters on an
+                    // unreachable drive: `time_since_attempt` already resolves
+                    // the mesh's coordination key — a repository discovery — on
+                    // every tick for every mesh (pre-existing), and without the
+                    // stamp an unpoolable Mesh pays the probe on top of that,
+                    // every tick, on the single worker thread.
+                    if background_sync_allowed(
+                        &mesh.path,
+                        |path| {
+                            should_background_sync(
+                                crate::services::fetch_freshness::time_since_attempt(path),
+                            )
+                        },
+                        || !crate::services::warm_pool::mesh_repo_unusable(&mesh),
+                        crate::services::fetch_freshness::note_attempt,
                     ) {
                         let base_ref = crate::agent::spawn::resolve_base_ref_for_spawn(
                             &mesh.path,
@@ -743,6 +807,117 @@ mod tests {
              the worker needs slack (slow ticks, sync-lock waits) to re-stamp before the TTL lapses",
             BACKGROUND_SYNC_INTERVAL.as_secs(),
             crate::services::fetch_freshness::SPAWN_FETCH_TTL.as_secs()
+        );
+    }
+
+    // ---- background_sync_allowed (issue #2348: an unpoolable Mesh must not
+    //      re-probe the filesystem on every tick) ----
+    //
+    // The bug this pins: `note_attempt` was only ever written inside the fetch
+    // that a non-repository mesh skips, so `time_since_attempt` stayed
+    // `Duration::MAX` and the probe ran every 2 s / 30 s tick forever.
+
+    /// Counters shared with the closures below; `Cell` is enough because each
+    /// test drives the decision synchronously on its own thread.
+    #[derive(Default)]
+    struct SyncGateCalls {
+        probes: std::cell::Cell<u32>,
+        stamps: std::cell::Cell<u32>,
+        stamped_paths: std::cell::RefCell<Vec<String>>,
+    }
+
+    #[test]
+    fn background_sync_skips_a_mesh_that_is_inside_its_interval() {
+        let calls = SyncGateCalls::default();
+        let allowed = background_sync_allowed(
+            "/probe/mesh/stale",
+            |_| false, // attempt clock has not reached BACKGROUND_SYNC_INTERVAL
+            || {
+                calls.probes.set(calls.probes.get() + 1);
+                true
+            },
+            |path| {
+                calls.stamps.set(calls.stamps.get() + 1);
+                calls.stamped_paths.borrow_mut().push(path.to_string());
+            },
+        );
+        assert!(!allowed, "a mesh inside its interval must not be synced");
+        assert_eq!(
+            calls.probes.get(),
+            0,
+            "the repository probe is the expensive call — it must not run \
+             before the interval is due"
+        );
+        assert_eq!(
+            calls.stamps.get(),
+            0,
+            "a not-yet-due mesh must not stamp — the clock already says so"
+        );
+    }
+
+    /// The regression the reviewer found: a due mesh whose folder cannot be
+    /// opened as a repository is suppressed AND stamped. Without the stamp the
+    /// attempt clock never advances, `should_background_sync` stays true, and
+    /// `mesh_repo_unusable` walks the filesystem on every worker tick.
+    #[test]
+    fn unusable_mesh_is_stamped_so_the_probe_waits_for_the_next_interval() {
+        let calls = SyncGateCalls::default();
+        let allowed = background_sync_allowed(
+            "/probe/mesh/unusable",
+            |_| true, // interval elapsed
+            || {
+                calls.probes.set(calls.probes.get() + 1);
+                false // cannot be opened as a git working repository
+            },
+            |path| {
+                calls.stamps.set(calls.stamps.get() + 1);
+                calls.stamped_paths.borrow_mut().push(path.to_string());
+            },
+        );
+        assert!(
+            !allowed,
+            "a mesh that cannot be fetched must not enter the fetch block"
+        );
+        assert_eq!(
+            calls.probes.get(),
+            1,
+            "the probe runs exactly once per due tick"
+        );
+        assert_eq!(
+            calls.stamps.get(),
+            1,
+            "the suppressed sync MUST stamp the attempt, or the probe repeats \
+             every tick forever (issue #2348 review finding)"
+        );
+        assert_eq!(
+            calls.stamped_paths.borrow().as_slice(),
+            ["/probe/mesh/unusable".to_string()],
+            "the stamp must land on the mesh whose clock is being advanced"
+        );
+    }
+
+    /// The healthy path must not stamp here: `locked_fetch_origin_blocking`
+    /// writes the attempt itself, and a second stamp would silently reset the
+    /// interval mid-fetch.
+    #[test]
+    fn usable_due_mesh_runs_the_fetch_without_a_double_stamp() {
+        let calls = SyncGateCalls::default();
+        let allowed = background_sync_allowed(
+            "/probe/mesh/usable",
+            |_| true,
+            || {
+                calls.probes.set(calls.probes.get() + 1);
+                true
+            },
+            |_| calls.stamps.set(calls.stamps.get() + 1),
+        );
+        assert!(allowed, "a due mesh with a usable repository must sync");
+        assert_eq!(calls.probes.get(), 1);
+        assert_eq!(
+            calls.stamps.get(),
+            0,
+            "the fetch path stamps its own attempt — stamping here too would \
+             restart the interval it just consumed"
         );
     }
 
