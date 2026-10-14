@@ -1632,6 +1632,78 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
       expect(screen.getByTestId('run-agent-41').textContent).toContain('ebony-unhelpful-cudgel');
       fireEvent.click(screen.getByTestId('run-agent-open-41'));
       expect(useAgentNodeStore.getState().activeNodeId).toBe(901);
+      fireEvent.click(screen.getByTestId('run-toggle-41'));
+      fireEvent.click(screen.getByTestId('run-step-agent-open-41-reviewer'));
+      expect(useAgentNodeStore.getState().activeNodeId).toBe(901);
+      expect(vi.mocked(invoke)).not.toHaveBeenCalledWith('reopen_agent_node', expect.anything());
+    });
+
+    it.each(['activity', 'history'] as const)('restores a closed reviewer from %s and prevents duplicate restores', async (view) => {
+      const restored = { ...agent(901, 'saved-reviewer'), status: 'suspended' as const };
+      // Cover both an absent row and a retained archived row in the frontend.
+      seedAgentNodes(view === 'history' ? [{ ...restored, status: 'archived' }] : []);
+      const run: CircuitRunDetail = {
+        run: { ...RUN_DONE.run, id: 41, state: view === 'activity' ? 'running' : 'completed' },
+        steps: [step({ node_id: 'reviewer', agent_node_id: 901, status: 'completed', outcome: 'completed' })],
+      };
+      mockBackend({ circuits: [{ ...CIRCUIT, graph_json: JSON.stringify(ISSUE_GRAPH) }], runs: [run] });
+      const backend = vi.mocked(invoke).getMockImplementation()!;
+      let resolve!: (node: AgentNode) => void;
+      const pending = new Promise<AgentNode>(done => { resolve = done; });
+      vi.mocked(invoke).mockImplementation((cmd, args) => cmd === 'reopen_agent_node' ? pending : backend(cmd, args));
+      openProbeDestination('circuits');
+      if (view === 'history') fireEvent.click(await screen.findByTestId('circuits-view-history'));
+      fireEvent.click(await screen.findByTestId('run-toggle-41'));
+      const open = screen.getByTestId('run-step-agent-open-41-reviewer');
+      fireEvent.click(open);
+      fireEvent.click(open);
+      expect((open as HTMLButtonElement).disabled).toBe(true);
+      expect(open.textContent).toBe('Opening…');
+      await waitFor(() => expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'reopen_agent_node')).toEqual([
+        ['reopen_agent_node', { nodeId: 901 }],
+      ]));
+      await act(async () => { resolve(restored); await pending; });
+      expect(useAgentNodeStore.getState().nodesById[901].status).toBe('suspended');
+      expect(useAgentNodeStore.getState().activeNodeId).toBe(901);
+      expect(useUIStore.getState().viewMode).toBe('single');
+      expect(useMeshStore.getState().selectedMeshId).toBe(42);
+    });
+
+    it.each([
+      ['mesh switch', 'resolve'], ['mesh switch', 'reject'],
+      ['unmount', 'resolve'], ['unmount', 'reject'],
+    ] as const)('does not navigate or show stale errors after %s when restoration %s', async (transition, result) => {
+      mockBackend({ runs: [RUN_DONE] });
+      const backend = vi.mocked(invoke).getMockImplementation()!;
+      let resolve!: (node: AgentNode) => void;
+      let reject!: (error: Error) => void;
+      const pending = new Promise<AgentNode>((done, fail) => { resolve = done; reject = fail; });
+      vi.mocked(invoke).mockImplementation((cmd, args) => cmd === 'reopen_agent_node' ? pending : backend(cmd, args));
+      openProbeDestination('circuits');
+      fireEvent.click(await screen.findByTestId('circuits-view-history'));
+      fireEvent.click(await screen.findByTestId('run-toggle-11'));
+      fireEvent.click(screen.getByTestId('run-step-agent-open-11-spawn'));
+      await waitFor(() => expect(vi.mocked(invoke)).toHaveBeenCalledWith('reopen_agent_node', { nodeId: 900 }));
+      const activeNodeId = useAgentNodeStore.getState().activeNodeId;
+      const viewMode = useUIStore.getState().viewMode;
+      if (transition === 'unmount') {
+        act(() => useUIStore.setState({ probeOpen: false }));
+        expect(screen.queryByTestId('circuits-probe-tab')).toBeNull();
+      } else {
+        const otherMesh = { ...MESH, id: 43, name: 'other' };
+        act(() => useMeshStore.setState({ meshes: [MESH, otherMesh],
+          meshesById: new Map([[42, MESH], [43, otherMesh]]), selectedMeshId: 43 }));
+      }
+      await act(async () => {
+        if (result === 'resolve') resolve({ ...agent(900, 'restored'), status: 'suspended' });
+        else reject(new Error('Stale restore failure'));
+        await pending.catch(() => undefined);
+      });
+      expect(useAgentNodeStore.getState().activeNodeId).toBe(activeNodeId);
+      expect(useUIStore.getState().viewMode).toBe(viewMode);
+      expect(useMeshStore.getState().selectedMeshId).toBe(transition === 'mesh switch' ? 43 : 42);
+      expect(screen.queryByTestId('circuits-focus-notice')).toBeNull();
+      expect(useAgentNodeStore.getState().nodesById[900]?.status).toBe(result === 'resolve' ? 'suspended' : undefined);
     });
 
     it('keeps a recognisable name once the implementation node has been closed', async () => {
@@ -1823,7 +1895,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     expect(screen.getByText('Source: circuit_worker.admission · waiting')).toBeTruthy();
   });
 
-  it('reports an unavailable agent node instead of a dead click', async () => {
+  it('reports a restore failure and allows retry for an unavailable agent', async () => {
     mockBackend({
       runs: [{
         ...RUN_DONE,
@@ -1831,13 +1903,26 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
         steps: [],
       }],
     });
+    const backend = vi.mocked(invoke).getMockImplementation()!;
+    let fail = true;
+    vi.mocked(invoke).mockImplementation((cmd, args) => {
+      if (cmd === 'reopen_agent_node') return fail
+        ? Promise.reject(new Error('Agent history unavailable'))
+        : Promise.resolve({ id: 404, mesh_id: 42, name: 'restored', status: 'suspended', provider: 'claude' });
+      return backend(cmd, args);
+    });
     seedAgentNodes([]);
     openProbeDestination('circuits');
 
     const link = await screen.findByTestId('run-agent-31');
-    // No node in the store => no Open button to click.
     expect(link.textContent).toContain('#404');
-    expect(screen.queryByTestId('run-agent-open-31')).toBeNull();
+    fireEvent.click(screen.getByTestId('run-agent-open-31'));
+    expect((await screen.findByTestId('circuits-focus-notice')).textContent).toContain('Agent history unavailable');
+    expect(useAgentNodeStore.getState().nodesById[404]).toBeUndefined();
+    fail = false;
+    fireEvent.click(screen.getByTestId('run-agent-open-31'));
+    await waitFor(() => expect(useAgentNodeStore.getState().activeNodeId).toBe(404));
+    expect(screen.queryByTestId('circuits-focus-notice')).toBeNull();
   });
 
   it('reports an exhausted review without blaming the worker', async () => {

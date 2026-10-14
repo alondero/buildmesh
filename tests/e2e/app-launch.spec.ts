@@ -1,48 +1,49 @@
 /**
- * E2E App Launch Tests (Built Exe)
+ * E2E launch tests for a dev-tools build of the stable profile.
  *
- * Tests that verify the BUILT exe (from `npm run tauri build`) works correctly.
- * This is separate from dev-mode tests because the built exe:
- * - Has frontend embedded (no Vite dev server needed)
- * - Serves HTTP test commands on port 1991
- * - Does NOT serve on port 1420
+ * The release entry points do not pass `dev-tools`, which compiles the test
+ * bridge. These tests need `npx tauri build --features dev-tools` (stable
+ * identifier, so the bridge stays on port 1991) and an embedded frontend
+ * (`dist/`).
  *
- * CRITICAL: These tests will FAIL if the app was built with `cargo build`
- * instead of `npm run tauri build`. The latter embeds the frontend.
+ * The launcher sets `BUILDMESH_PROFILE_DIR` and passes a per-launch credential.
+ * Nothing here kills `buildmesh.exe` by image name.
  *
  * Run with: npx playwright test tests/e2e/app-launch.spec.ts
  */
 import { test, expect } from '@playwright/test';
-import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import { exec } from 'child_process';
-import util from 'util';
-import { waitForPort, waitForPortClosed } from './utils/tauri-http';
+import { fileURLToPath } from 'url';
+import { BRIDGE_MISSING_HINT, invokeViaHttp, isTestServerReady, waitForPort } from './utils/tauri-http';
+import {
+  EXE_PATH,
+  spawnBuildmesh,
+  stableHubIsRunning,
+  terminate,
+  TEST_SERVER_PORT,
+  type BuildmeshProcess,
+} from './utils/buildmesh-launcher';
 
-const execPromise = util.promisify(exec);
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+const DIST_PATH = path.join(repoRoot, 'dist');
+const DEBUG_EXE = path.join(repoRoot, 'src-tauri', 'target', 'debug', 'buildmesh.exe');
 
-const EXE_PATH = 'X:/src/buildmesh/src-tauri/target/release/buildmesh.exe';
-const DIST_PATH = 'X:/src/buildmesh/dist';
+let proc: BuildmeshProcess | null = null;
 
-async function killAllBuildmeshProcesses() {
-  try {
-    await execPromise('taskkill /IM buildmesh.exe /F');
-  } catch {
-    // Ignore errors
-  }
-}
-
-test.describe('built exe app launch', () => {
-
+test.describe('dev-tools exe app launch', () => {
   test.beforeEach(async () => {
-    await killAllBuildmeshProcesses();
-    const portReleased = await waitForPortClosed('127.0.0.1', 1991, 5000);
-    expect(portReleased, 'port 1991 should be free before the next test spawns the exe').toBe(true);
+    test.skip(
+      stableHubIsRunning(),
+      'the stable hub is running (instance-owner.pid). Pause it before this spec. It is not killed by image name, and it does not bind port 1991.',
+    );
   });
 
   test.afterEach(async () => {
-    await killAllBuildmeshProcesses();
+    if (proc) {
+      await terminate(proc);
+      proc = null;
+    }
   });
 
   test('dist folder exists and has content', () => {
@@ -56,71 +57,37 @@ test.describe('built exe app launch', () => {
   test('exe file exists and has reasonable size', () => {
     expect(fs.existsSync(EXE_PATH), `Release exe must exist at ${EXE_PATH}`).toBe(true);
     const stats = fs.statSync(EXE_PATH);
-    // A proper tauri build produces an exe with embedded assets (several MB)
     expect(stats.size, 'Release exe should be several MB with embedded frontend').toBeGreaterThan(1024 * 1024);
   });
 
-  test('release exe is not using debug build', async () => {
-    // Catches the issue where debug build was running instead of release.
-    // Debug builds show "can't reach this page" because they expect Vite on 1420.
-    const debugExe = 'X:/src/buildmesh/src-tauri/target/debug/buildmesh.exe';
-    const debugExists = fs.existsSync(debugExe);
-
-    if (debugExists) {
-      const releaseStats = fs.statSync(EXE_PATH);
-      const debugStats = fs.statSync(debugExe);
-
-      expect(debugStats.mtimeMs, 'Debug build is newer than release! Run `npm run tauri build` before testing release.').toBeLessThan(releaseStats.mtimeMs);
-    }
+  test('release exe is not using debug build', () => {
+    test.skip(
+      !fs.existsSync(DEBUG_EXE) || !fs.existsSync(EXE_PATH),
+      'both the debug and release binaries are required to compare build times',
+    );
+    const releaseStats = fs.statSync(EXE_PATH);
+    const debugStats = fs.statSync(DEBUG_EXE);
+    expect(
+      debugStats.mtimeMs,
+      'Debug build is newer than release. Rebuild the dev-tools stable profile before this spec.',
+    ).toBeLessThan(releaseStats.mtimeMs);
   });
 
-  test('built exe starts and HTTP test server responds', async () => {
-    const appProcess = spawn(EXE_PATH, [], {
-      stdio: 'ignore',
-      windowsHide: true,
-      detached: true,
-    });
-    appProcess.unref();
-
-    try {
-      const serverReady = await waitForPort('127.0.0.1', 1991, 15000);
-      expect(serverReady, 'HTTP test server should be ready on port 1991').toBe(true);
-
-      const response = await fetch('http://127.0.0.1:1991/health');
-      expect(response.ok, 'Health endpoint should respond OK').toBe(true);
-      expect(response.status, 'Health endpoint status should be 200').toBe(200);
-    } finally {
-      await killAllBuildmeshProcesses();
-    }
+  test('dev-tools exe starts and the authenticated bridge answers', async () => {
+    proc = spawnBuildmesh();
+    const serverReady = await waitForPort('127.0.0.1', TEST_SERVER_PORT, 15000);
+    expect(serverReady, BRIDGE_MISSING_HINT).toBe(true);
+    expect(await isTestServerReady(), 'Authenticated /health should return OK').toBe(true);
   });
 
-  test('built exe can create a project via HTTP', async () => {
-    const appProcess = spawn(EXE_PATH, [], {
-      stdio: 'ignore',
-      windowsHide: true,
-      detached: true,
+  test('authenticated bridge can create a mesh in the isolated profile', async () => {
+    proc = spawnBuildmesh();
+    const serverReady = await waitForPort('127.0.0.1', TEST_SERVER_PORT, 15000);
+    expect(serverReady, BRIDGE_MISSING_HINT).toBe(true);
+
+    const project = await invokeViaHttp<{ id: number }>('create_test_mesh', {
+      name: 'Launch Test Project',
     });
-    appProcess.unref();
-
-    try {
-      const serverReady = await waitForPort('127.0.0.1', 1991, 15000);
-      expect(serverReady).toBe(true);
-
-      const response = await fetch('http://127.0.0.1:1991/invoke', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          cmd: 'create_test_mesh',
-          args: { name: 'Launch Test Project' },
-        }),
-      });
-
-      expect(response.ok, 'HTTP invoke should succeed').toBe(true);
-      const json = await response.json() as { ok: boolean; data?: { id: number } };
-      expect(json.ok, 'Command should succeed').toBe(true);
-      expect(json.data?.id, 'Project should have an ID').toBeGreaterThan(0);
-    } finally {
-      await killAllBuildmeshProcesses();
-    }
+    expect(project.id, 'Project should have an ID').toBeGreaterThan(0);
   });
 });

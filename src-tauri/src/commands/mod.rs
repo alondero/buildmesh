@@ -47,6 +47,7 @@ pub mod mesh_properties;
 pub mod mesh_tests;
 pub mod muse;
 pub mod network;
+pub mod node_activated;
 pub mod opencode_oauth;
 pub mod pr;
 pub mod preferences;
@@ -55,5 +56,6 @@ pub mod prune;
 pub mod remote;
 pub mod scratchpad;
 pub mod state_recovery;
+#[cfg(any(debug_assertions, feature = "dev-tools"))]
 pub mod test;
 pub mod usage;

@@ -56,8 +56,9 @@ frontend code, and the Rust suite whenever it touches Rust. The Windows and
 macOS platform smoke builds are not part of this — they are post-merge signals
 that run on pushes to `main`, release tags, and manual dispatches. CI does
 **not** run the full local Playwright
-suite that `npm run test:ci` triggers — that `chromium` project needs a running
-app on :1991 and is a local contract check, not a PR gate. What each required
+suite that `npm run test:ci` triggers — that `chromium` project needs a
+dev-tools build listening on the authenticated test bridge (:1991) and is a
+local contract check, not a PR gate. What each required
 check proves is listed in
 [docs/development/README.md](docs/development/README.md#verification-matrix),
 and the authoritative required-status-check names — plus the release gate and

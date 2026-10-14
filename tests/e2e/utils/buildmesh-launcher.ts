@@ -9,15 +9,18 @@
  * be left running).
  *
  * Per the caveat in CLAUDE.local.md the stable hub must be paused before
- * calling `spawnBuildmesh()` — the spawned exe would bind the same ports
- * the hub owns. `isPortBound()` lets specs surface that constraint loudly
- * via a pre-flight gate instead of failing later with a vague spawn error.
+ * calling `spawnBuildmesh()` — the spawned exe binds the phone/Android
+ * ports the hub owns (1992–1994). The hub does not bind the test bridge.
+ * `stableHubIsRunning()` reads the hub profile's `instance-owner.pid`.
  */
 
 import { spawn, type ChildProcess } from 'child_process';
+import { randomBytes } from 'crypto';
+import { mkdtempSync, readFileSync, rmSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { BRIDGE_ENABLE_ENV, BRIDGE_TOKEN_ENV, PROFILE_DIR_ENV } from '../../../scripts/test-bridge-auth.mjs';
 import { waitForPortClosed } from './tauri-http';
 
 // The repo is ESM (`"type": "module"`), so `__dirname` is undefined at
@@ -31,12 +34,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * segments and produced `tests/src-tauri/...` (no such directory) — silent
  * ENOENT at spawn() that was masked by the spec's pre-flight gate.
  *
- * Override with `BUILDMESH_EXE` for a sideloaded build. NOTE: this point
- * at the BASE profile's ports (1991/1992-1994); a dev-profile exe writes
- * to a different AppData dir AND binds 2991/2992-2994, which the rest of
- * the spec infrastructure (tauri-http.ts:13's hardcoded `1991`) does NOT
- * understand. Don't override `BUILDMESH_EXE` to a dev-profile exe and
- * expect the spec to find the test server.
+ * Override with `BUILDMESH_EXE` for a sideloaded build. The stable-profile
+ * ports are 1991 (test bridge) and 1992–1994 (phone/Android). The release
+ * entry points do not pass `dev-tools`, which is the feature that compiles
+ * the bridge. E2E needs `npx tauri build --features dev-tools` with the
+ * stable identifier so those ports stay put. A dev-profile exe (`*.dev`)
+ * binds 2991/2992–2994 and this helper will not find it.
  */
 export const EXE_PATH =
   process.env.BUILDMESH_EXE ??
@@ -99,6 +102,80 @@ export interface BuildmeshProcess {
   readonly child: ChildProcess;
   /** Pre-captured so callers don't need to re-check `child.pid`. */
   readonly pid: number;
+  /** Bearer for this child. Also copied onto `process.env` for `invokeViaHttp`. */
+  readonly bridgeToken: string;
+  /** Log file inside the isolated profile, which may not exist until the app writes it. */
+  readonly logPath: string;
+  /** Temp root that contains the isolated profile directory. */
+  readonly dataRoot: string;
+  /** Absolute directory passed as `BUILDMESH_PROFILE_DIR`. Holds `buildmesh.db` and `logs/`. */
+  readonly profileDir: string;
+}
+
+const STABLE_APP_NAME = 'com.alond.buildmesh';
+
+function isolatedProfileDir(dataRoot: string): string {
+  return path.join(dataRoot, STABLE_APP_NAME);
+}
+
+function isolatedLogPath(profileDir: string): string {
+  return path.join(profileDir, 'logs', 'buildmesh.log');
+}
+
+/** The stable hub's real profile. This is not the child's override directory. */
+export function stableProfileDir(): string | null {
+  if (process.platform === 'win32') {
+    const appData = process.env.APPDATA;
+    if (!appData) return null;
+    return path.join(appData, STABLE_APP_NAME);
+  }
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Application Support', STABLE_APP_NAME);
+  }
+  const xdg = process.env.XDG_DATA_HOME ?? path.join(os.homedir(), '.local', 'share');
+  return path.join(xdg, STABLE_APP_NAME);
+}
+
+/**
+ * True when the profile directory's `instance-owner.pid` names a live process.
+ * A stale pid from a dead hub does not count. `EPERM` means the process exists
+ * but this caller cannot signal it.
+ */
+export function profileOwnerIsAlive(profileDir: string): boolean {
+  let text: string;
+  try {
+    text = readFileSync(path.join(profileDir, 'instance-owner.pid'), 'utf8');
+  } catch {
+    return false;
+  }
+  const pid = Number(text.trim());
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/** The stable hub publishes its pid in the real profile, not on port 1991. */
+export function stableHubIsRunning(): boolean {
+  const profile = stableProfileDir();
+  if (!profile) return false;
+  return profileOwnerIsAlive(profile);
+}
+
+/**
+ * Delete a spawn's temp root. Only a directory created under the OS temp
+ * folder, named `buildmesh-e2e-…`, is removed. Anything else is left in place.
+ */
+export function removeSpawnDataRoot(dataRoot: string): void {
+  const root = path.resolve(dataRoot);
+  const temp = path.resolve(os.tmpdir());
+  const relative = path.relative(temp, root);
+  if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) return;
+  if (!path.basename(root).startsWith('buildmesh-e2e-')) return;
+  rmSync(root, { recursive: true, force: true });
 }
 
 /**
@@ -110,9 +187,25 @@ export interface BuildmeshProcess {
  * caller can decide to wait it out or bail.
  */
 export function spawnBuildmesh(): BuildmeshProcess {
+  const dataRoot = mkdtempSync(path.join(os.tmpdir(), `buildmesh-e2e-${process.pid}-`));
+  const profileDir = isolatedProfileDir(dataRoot);
+  const bridgeToken = randomBytes(32).toString('hex');
+  // Same-process callers (`invokeViaHttp`) read this. The child gets its own
+  // copy below. Two overlapping spawns would clobber it; specs spawn one.
+  process.env[BRIDGE_TOKEN_ENV] = bridgeToken;
+  // `BUILDMESH_PROFILE_DIR` is the profile itself. Setting APPDATA, HOME, or
+  // XDG_DATA_HOME does not move a Windows Tauri profile.
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    [BRIDGE_ENABLE_ENV]: '1',
+    [BRIDGE_TOKEN_ENV]: bridgeToken,
+    [PROFILE_DIR_ENV]: profileDir,
+  };
+
   const child = spawn(EXE_PATH, [], {
     stdio: 'ignore',
     windowsHide: true,
+    env,
   });
   if (child.pid === undefined) {
     throw new Error(`spawn() returned no PID for ${EXE_PATH}`);
@@ -126,7 +219,14 @@ export function spawnBuildmesh(): BuildmeshProcess {
   // Stash on the child so callers can read it after wait/terminate.
   (child as ChildProcess & { __spawnError?: Error | null }).__spawnError =
     spawnError;
-  return { child, pid: child.pid };
+  return {
+    child,
+    pid: child.pid,
+    bridgeToken,
+    logPath: isolatedLogPath(profileDir),
+    dataRoot,
+    profileDir,
+  };
 }
 
 /**
@@ -164,11 +264,15 @@ export async function terminate(
       // Process already gone — fall through and still drain the socket.
     }
   }
-  const closed = await waitForPortClosed('127.0.0.1', port, 5000);
-  if (!closed) {
-    throw new Error(
-      `Port ${port} remained bound 5000ms after terminating PID ${proc.pid}`,
-    );
+  try {
+    const closed = await waitForPortClosed('127.0.0.1', port, 5000);
+    if (!closed) {
+      throw new Error(
+        `Port ${port} remained bound 5000ms after terminating PID ${proc.pid}`,
+      );
+    }
+  } finally {
+    removeSpawnDataRoot(proc.dataRoot);
   }
 }
 
@@ -198,10 +302,9 @@ export async function isPortBound(
  * SPA shell. Replaces the old single-pass loop that could race the test
  * server's bind by tens of milliseconds and bail.
  *
- * The mobile server doesn't expose `/health` (only the test server on
- * 1991 does — see commands/test.rs:195), so we hit `/` and look for any
- * HTTP status (including 401 for an unauth'd route) as evidence the
- * socket is bound.
+ * The phone/Android server doesn't expose `/health` (only the development
+ * test bridge does), so we hit `/` and look for any HTTP status, including
+ * 401, as evidence the socket is bound.
  */
 export async function findMobilePort(timeoutMs = 10000): Promise<number | null> {
   const deadline = Date.now() + timeoutMs;

@@ -29,6 +29,7 @@
 param(
     [int]$CdpPort = 0,
     [switch]$Detach,
+    [switch]$TestBridge,
     [ValidateRange(1, 300)][int]$ReadinessTimeoutSeconds = 30
 )
 $ErrorActionPreference = "Stop"
@@ -120,6 +121,36 @@ if ($CdpPort -gt 0) {
     Write-Output "CDP enabled on 127.0.0.1:$CdpPort"
 }
 $env:RUST_BACKTRACE = '1'
+# Opt-in development test bridge. The token is generated here and handed to
+# the child through the environment. A copy without a trailing newline is
+# written for scripts in other processes (ui-shot, the Android live check).
+# The value is not printed. Launching without -TestBridge removes a stale file
+# so those scripts cannot authenticate against an app that is not listening.
+function New-TestBridgeToken {
+    $bytes = New-Object byte[] 32
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $rng.GetBytes($bytes)
+    } finally {
+        $rng.Dispose()
+    }
+    return ([System.BitConverter]::ToString($bytes) -replace '-', '').ToLowerInvariant()
+}
+$TestBridgeTokenPath = Join-Path (Get-Location) '.tmp\test-bridge-token'
+if ($TestBridge) {
+    $testBridgeToken = New-TestBridgeToken
+    $testBridgeDir = Split-Path $TestBridgeTokenPath
+    if (-not (Test-Path $testBridgeDir)) {
+        New-Item -ItemType Directory -Path $testBridgeDir | Out-Null
+    }
+    $utf8 = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($TestBridgeTokenPath, $testBridgeToken, $utf8)
+    $env:BUILDMESH_TEST_BRIDGE = '1'
+    $env:BUILDMESH_TEST_BRIDGE_TOKEN = $testBridgeToken
+    Write-Output 'Test bridge enabled; credential written to .tmp/test-bridge-token'
+} elseif (Test-Path $TestBridgeTokenPath) {
+    Remove-Item $TestBridgeTokenPath -Force
+}
 # Issue #2136: /use, /verify and /verify-ui all launch the dev profile from
 # inside an agent's Claude Code session, and that session exports its own
 # markers into every process it spawns. Handed on to an agent Buildmesh
@@ -152,6 +183,8 @@ try {
         Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
     }
     Remove-Item Env:RUST_BACKTRACE -ErrorAction SilentlyContinue
+    Remove-Item Env:BUILDMESH_TEST_BRIDGE -ErrorAction SilentlyContinue
+    Remove-Item Env:BUILDMESH_TEST_BRIDGE_TOKEN -ErrorAction SilentlyContinue
 }
 Write-Output "Launched PID: $($proc.Id)"
 Write-Output "Log: $LogPath"

@@ -6,6 +6,6 @@
  * broadcasts it; the active-node state is read via the IPC refetch.
  *
  * Generated to `src/types/generated/NodeActivatedPayload.ts`; the TS half
- * is imported by `src/stores/agentNodeStore.ts`.
+ * is imported by `src/stores/agentNodeListeners.ts`.
  */
 export type NodeActivatedPayload = { node_id: number, };

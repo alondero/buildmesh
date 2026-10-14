@@ -26,6 +26,7 @@ pub mod provider_verification;
 pub mod session_recovery;
 pub mod state_recovery;
 pub mod sync_lock;
+#[cfg(any(debug_assertions, feature = "dev-tools"))]
 pub(crate) mod test_fixtures;
 pub mod transcript_paths;
 pub mod transcript_reader;

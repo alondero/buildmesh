@@ -152,8 +152,9 @@ describe('IPC contract: every invoke() target must be registered in lib.rs', () 
  * database, and the two `debug_*` commands expose process-registry state.
  * None has a product UI caller, so they are registered behind a dev-only
  * `#[cfg]` and a shipped release build answers "command not found" for all
- * three. The HTTP test bridge keeps its own `create_test_mesh` route for e2e
- * and ui-shot; that route is separate from this handler list.
+ * three. The HTTP test bridge is not a Tauri handler. It is compiled behind
+ * the same cfg. The assertion below checks that source text. It does not
+ * inspect a release binary.
  */
 describe('IPC contract: dev-only commands stay out of the release window', () => {
   const libRsSource = readFileSync(LIB_RS, 'utf8');
@@ -195,6 +196,19 @@ describe('IPC contract: dev-only commands stay out of the release window', () =>
       leaked,
       `src/ still invokes dev-only command(s), which a shipped build does not register:\n${leaked.join('\n')}`,
     ).toEqual([]);
+  });
+
+  it('compiles the HTTP test bridge only behind the dev-tools cfg', () => {
+    const normalize = (source: string) => source.replace(/\r\n/g, '\n');
+    const lib = normalize(libRsSource);
+    const commands = normalize(readFileSync(join(REPO_ROOT, 'src-tauri', 'src', 'commands', 'mod.rs'), 'utf8'));
+    const services = normalize(readFileSync(join(REPO_ROOT, 'src-tauri', 'src', 'services', 'mod.rs'), 'utf8'));
+    const startup = normalize(readFileSync(join(REPO_ROOT, 'src-tauri', 'src', 'startup', 'mod.rs'), 'utf8'));
+    const gate = '#[cfg(any(debug_assertions, feature = "dev-tools"))]';
+    expect(lib).toContain(`${gate}\n    commands::test::start_test_server(`);
+    expect(commands).toContain(`${gate}\npub mod test;`);
+    expect(services).toContain(`${gate}\npub(crate) mod test_fixtures;`);
+    expect(startup).toContain(`${gate}\n    if let Some(override_dir) = profile_dir_override()? {`);
   });
 });
 
