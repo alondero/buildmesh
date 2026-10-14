@@ -2,14 +2,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AgentNode,
   Mesh,
+  NodeCircuitRun,
   Provider,
   createNode,
   isAuthError,
+  listCircuitRuns,
   listMeshes,
   listNodes,
   listProviders,
   sendNodeKeys,
 } from "../api";
+import { circuitStatusLine, needsYou } from "../circuitRun";
 import { ProviderIcon } from "../../components/Providers/ProviderIcon";
 import { AppBar, CenterNote, PulseDots, Sheet } from "../ui";
 import { useWsEvents } from "../useWsEvents";
@@ -85,6 +88,9 @@ export default function NodeList({
   const changeView = onViewChange ?? setLocalView;
   const [meshes, setMeshes] = useState<Mesh[] | null>(null);
   const [nodes, setNodes] = useState<AgentNode[] | null>(null);
+  // Circuit Runs by implementation node id (issue #2314). Secondary data: it
+  // never gates or discards the node list it decorates.
+  const [circuitRuns, setCircuitRuns] = useState<Map<number, NodeCircuitRun>>(new Map());
   const [pickerMeshId, setPickerMeshId] = useState<number | null>(null);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [creating, setCreating] = useState<number | null>(null);
@@ -127,7 +133,14 @@ export default function NodeList({
     async (isLatest: () => boolean) => {
       const revision = ++refreshRevision.current;
       try {
-        const [m, n] = await Promise.all([listMeshes(), listNodes()]);
+        // A circuit read that fails (a desktop mid-restart, an older build)
+        // must not take the node list down with it: `null` keeps the last
+        // lines on screen instead of reporting the desktop offline.
+        const [m, n, runs] = await Promise.all([
+          listMeshes(),
+          listNodes(),
+          listCircuitRuns().catch(() => null),
+        ]);
         // `isLatest()` is the sequence-token check from `useVisibilityPolling`:
         // if a newer refresh started while this fetch was in flight, drop
         // our setState so the hung-fetch-during-mobile-suspend case doesn't
@@ -135,6 +148,7 @@ export default function NodeList({
         if (!isLatest() || !mountedRef.current || revision !== refreshRevision.current) return;
         setMeshes(m);
         setNodes(n);
+        if (runs !== null) setCircuitRuns(new Map(runs.map((run) => [run.node_id, run])));
       } catch (e) {
         if (!isLatest() || !mountedRef.current || revision !== refreshRevision.current) return;
         // A 401 means the token was revoked/expired — bounce to Connect
@@ -531,6 +545,7 @@ export default function NodeList({
                                 ?.name
                             }
                             providers={providers}
+                            circuitRun={circuitRuns.get(node.id)}
                             onClick={() =>
                               onOpenNode(node, nodeInputContext(node))
                             }
@@ -746,6 +761,7 @@ export default function NodeList({
                             onOpenNode(node, nodeInputContext(node))
                           }
                           providers={providers}
+                          circuitRun={circuitRuns.get(node.id)}
                         />
                       ))
                     )}
@@ -1146,11 +1162,13 @@ export function NodeRow({
   onClick,
   providers,
   meshName,
+  circuitRun,
 }: {
   node: AgentNode;
   onClick: () => void;
   providers?: Provider[];
   meshName?: string;
+  circuitRun?: NodeCircuitRun;
 }) {
   // getNodeStatusConfig (src/lib/status.ts) is total over the SessionStatus union
   // — `archived` included (#788) — and safely falls back to idle on unknown
@@ -1235,6 +1253,15 @@ export function NodeRow({
           />
           <span style={{ color: meta.hex }}>{meta.label}</span>
         </div>
+        {circuitRun && (
+          <div
+            className="node-circuit-line"
+            data-testid={`node-circuit-${node.id}`}
+            data-needs-you={needsYou(circuitRun)}
+          >
+            {circuitStatusLine(circuitRun)}
+          </div>
+        )}
       </div>
       <div
         style={{

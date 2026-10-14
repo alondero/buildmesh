@@ -130,6 +130,9 @@ mod circuit_tests;
 mod circuit_review_start_tests;
 
 #[cfg(test)]
+mod circuit_node_run_tests;
+
+#[cfg(test)]
 mod circuit_prune_tests;
 
 #[cfg(test)]
