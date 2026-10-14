@@ -117,6 +117,12 @@ cache still considers them current; from a clean tree,
 `git rm -r --cached . && git reset --hard` re-materialises every file under the
 current policy. Do not run that with uncommitted work in the tree.
 
+If your branch was cut before this policy landed and `main` has moved on, merge
+with `git merge -X renormalize main`. A plain merge conflicts on line endings:
+the merge base stores CRLF where your branch stores LF, so the 3-way merge
+collides and leaves conflict markers. `-X renormalize` re-runs the clean filter
+on the files the merge touches, so the merge resolves on content alone.
+
 ## Harness-enforced rules
 
 Claude Code hooks catch selected edit/commit mistakes. Shell writes and other

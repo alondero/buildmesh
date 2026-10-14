@@ -32,7 +32,12 @@ export function parseEolRecords(text) {
   return text.split('\0').filter(Boolean).map((record) => {
     const separator = record.indexOf('\t');
     const fields = (separator === -1 ? record : record.slice(0, separator)).trim().split(/\s+/);
-    const attributes = fields[2]?.startsWith('attr/') ? fields[2].slice(5) : '';
+    // Git prints the `attr/` marker once and then emits every attribute as its
+    // own whitespace-separated token, so `attr/text=auto eol=lf` is fields[2]
+    // and fields[3]. Reading only fields[2] would silently drop anything git
+    // appends after the text attribute, so collect them all and strip the
+    // marker from the first.
+    const attributes = fields.slice(2).map((field) => field.replace(/^attr\//, ''));
     return {
       index: fields[0]?.startsWith('i/') ? fields[0].slice(2) : '',
       worktree: fields[1]?.startsWith('w/') ? fields[1].slice(2) : '',
@@ -40,7 +45,7 @@ export function parseEolRecords(text) {
       // rather than inferred from the kind: a binary file is never converted,
       // so git still reports the line endings it happens to contain, and the
       // fuzz corpus seeds are legitimately `i/crlf`.
-      binary: attributes.split(/\s+/).includes('-text'),
+      binary: attributes.includes('-text'),
       path: separator === -1 ? '' : record.slice(separator + 1),
     };
   });

@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkDiff } from '../../scripts/check-agent-diff.mjs';
+import { checkAgentRules, checkDiff } from '../../scripts/check-agent-diff.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const hook = join(root, '.claude/hooks/guard-antipatterns.mjs');
@@ -122,6 +122,32 @@ test('flags a PowerShell condition on a native command in scripts/*.ps1 (#1982)'
   const crlf = checkDiff(cwd);
   assert.equal(crlf.length, 1, crlf.join('\n'));
   assert.match(crlf[0], /scripts\/check-merge\.ps1.*powershell-if-native-command/);
+});
+
+test('checkAgentRules returns content-rule and line-ending failures together', t => {
+  const { cwd, git, put } = repo(t);
+  // Each suite alone sees only its own defect: the untracked .tsx is a content
+  // violation, and the staged CRLF file is an index violation. Together they are
+  // what the CLI — and therefore `npm run check:agent`, the harness fast gate
+  // and CI — has to report.
+  put('src/components/NewTerminal.ts', 'terminal.dispose();\n');
+  mkdirSync(join(cwd, 'src/lib'), { recursive: true });
+  put('src/lib/staged.ts', 'export const a = 1;\r\nexport const b = 2;\r\n');
+  git('add', 'src/lib/staged.ts');
+
+  const content = checkDiff(cwd);
+  assert.equal(content.length, 1, content.join('\n'));
+  assert.match(content[0], /NewTerminal\.ts.*terminal-dispose/);
+
+  const both = checkAgentRules(cwd);
+  assert.equal(both.length, 2, both.join('\n'));
+  assert.ok(both.some((failure) => /NewTerminal\.ts.*terminal-dispose/.test(failure)));
+  assert.ok(both.some((failure) => /src\/lib\/staged\.ts.*i\/crlf/.test(failure)));
+
+  const run = spawnSync(process.execPath, [checker], { cwd, encoding: 'utf8' });
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /terminal-dispose/);
+  assert.match(run.stderr, /staged\.ts: stored in the index with CRLF line endings/);
 });
 
 test('configured hooks exist and shared skill entrypoints are readable', () => {

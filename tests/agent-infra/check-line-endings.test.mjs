@@ -139,8 +139,25 @@ test('a checkout that is not a git repository fails instead of reporting success
   assert.match(run.stderr, /Line-ending check failed/);
 });
 
+test('reads -text from any attribute token, not only the first one after attr/', () => {
+  // Git prints `attr/` once and then each attribute as its own token. Reading
+  // only fields[2] happens to work today because the text attribute is printed
+  // first; this locks in reading them all, so a reordering cannot silently stop
+  // exempting the binary fixtures.
+  const [expanded] = parseEolRecords('i/crlf  w/crlf  attr/-diff -merge -text\tseeds/seed.bin\0');
+  assert.equal(expanded.binary, true);
+  const [normal] = parseEolRecords('i/lf    w/lf    attr/text=auto eol=lf\tsrc/app.ts\0');
+  assert.equal(normal.binary, false);
+  assert.equal(normal.index, 'lf');
+  assert.equal(normal.worktree, 'lf');
+  assert.equal(normal.path, 'src/app.ts');
+});
+
 test('this repository declares the policy and its index obeys it', () => {
-  const declared = readFileSync(join(root, '.gitattributes'), 'utf8').split('\n');
+  // `/\r?\n/`, not `'\n'`: a checkout that predates the policy — or any
+  // environment without the `eol=lf` rule yet in force — leaves the `\r` on
+  // every element and the equality check below would fail on the endings alone.
+  const declared = readFileSync(join(root, '.gitattributes'), 'utf8').split(/\r?\n/);
   for (const line of ['* text=auto eol=lf', '*.ps1 text eol=crlf', '*.cmd text eol=crlf', '*.bat text eol=crlf']) {
     assert.ok(declared.includes(line), `.gitattributes no longer declares "${line}"`);
   }
