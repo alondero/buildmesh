@@ -345,9 +345,21 @@ pub fn start_background_worker(app: tauri::AppHandle) {
                     // logged and retried next interval; the attempt stamp
                     // (written inside `locked_fetch_origin_blocking`) is
                     // what rate-limits offline retries to one per interval.
+                    //
+                    // Issue #2348: a Mesh whose folder is not a git working
+                    // repository can never be fetched either, so it skips
+                    // this block too. Without the gate it re-attempted (and
+                    // re-logged `fetch_origin: path ... is not a usable git
+                    // repo`) every interval, which is the same log flood the
+                    // fill gate exists to stop. Checked AFTER the cheap
+                    // attempt-stamp gate so the repository probe costs at most
+                    // one open per interval, and re-read each time so a Mesh
+                    // that becomes a repository mid-session syncs on the next
+                    // interval with no restart.
                     if should_background_sync(
                         crate::services::fetch_freshness::time_since_attempt(&mesh.path),
-                    ) {
+                    ) && !crate::services::warm_pool::mesh_repo_unusable(&mesh)
+                    {
                         let base_ref = crate::agent::spawn::resolve_base_ref_for_spawn(
                             &mesh.path,
                             Some(mesh.base_ref.as_str()),
