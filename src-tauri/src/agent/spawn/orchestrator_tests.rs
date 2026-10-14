@@ -25,6 +25,7 @@ fn spawn_request_carries_explicit_overrides() {
         },
         worktree_policy: WorktreePolicy::RespectMesh,
         lifecycle_lease: false,
+        cleanup_new_node_on_handover_failure: false,
     };
     assert_eq!(req.explicit.model.as_deref(), Some("opus-4-1"));
     assert_eq!(req.explicit.effort.as_deref(), Some("high"));
@@ -53,6 +54,11 @@ fn spawn_request_new_sets_explicit_default() {
     assert_eq!(req.explicit, ExplicitSpawnOverrides::default());
     assert_eq!(req.explicit.model, None);
     assert_eq!(req.explicit.effort, None);
+    assert!(!req.cleanup_new_node_on_handover_failure);
+    assert!(
+        req.with_new_node_handover_cleanup()
+            .cleanup_new_node_on_handover_failure
+    );
 }
 
 #[test]
@@ -95,6 +101,274 @@ fn issue_intent_builds_its_prefill_at_the_spawn_seam() {
 https://github.com/alondero/buildmesh/issues/247"
         )
     );
+}
+
+#[test]
+fn new_node_handover_uses_its_saved_codex_launch_configuration() {
+    let _db = crate::db::test_support::isolated();
+    let root = tempfile::tempdir().unwrap();
+    crate::preferences::init_for_tests(root.path().to_path_buf());
+    let mesh = crate::db::create_mesh("new handover", "C:/handover-fixture").unwrap();
+    let node = crate::db::create_agent_node(
+        mesh.id,
+        "handover",
+        &mesh.path,
+        "main",
+        crate::models::EnvType::Windows,
+        "anthropic",
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let mut node = node;
+    node.launch_configuration = Some(
+        serde_json::from_value(serde_json::json!({
+            "id": "launch/saved-reviewer", "name": "Reviewer", "spawn_option_id": "custom-codex",
+            "model": null, "effort": null, "extra_args": null,
+            "resolved": {
+                "configuration_id": "launch/saved-reviewer", "configuration_name": "Reviewer",
+                "spawn_option_id": "custom-codex",
+                "harness": { "id": "custom-codex", "name": "Codex", "harness": "codex" },
+                "route": null, "model": null, "effort": null, "extra_args": null
+            }
+        }))
+        .unwrap(),
+    );
+    let provider = crate::agent::provider::resolve_node_provider(&node);
+    assert_eq!(provider, crate::models::Provider::Codex);
+    let text = "REQUEST CHANGES.\r\nAddress every finding before starting work.\r\n".repeat(40);
+    let request = SpawnRequest::new(
+        node.id,
+        SpawnIntent::Handover {
+            selected_text: text.clone(),
+        },
+        TerminalSize::default(),
+    )
+    .with_new_node_handover_cleanup();
+    let prompt = super::orchestrator::prepare_handover_prompt(
+        &node,
+        &request.intent,
+        provider,
+        request.cleanup_new_node_on_handover_failure,
+        Some(root.path().to_path_buf()),
+    )
+    .unwrap()
+    .unwrap();
+    let files: Vec<_> = std::fs::read_dir(
+        root.path()
+            .join("handovers")
+            .join(format!("node-{}", node.id)),
+    )
+    .unwrap()
+    .map(|entry| entry.unwrap().path())
+    .collect();
+    assert_eq!(files.len(), 1);
+    assert_eq!(std::fs::read(&files[0]).unwrap(), text.as_bytes());
+    assert_eq!(
+        prompt,
+        format!(
+            "Read and follow the complete task brief in this file: \"{}\"",
+            crate::circuit::handoff::agent_visible_path(&files[0], node.env)
+        )
+    );
+    assert!(!crate::models::Provider::Codex
+        .adapter()
+        .prefill_requires_pty(&prompt));
+
+    let ordinary_prompt = SpawnIntent::Prompt { text: text.clone() };
+    assert_eq!(
+        super::orchestrator::prepare_initial_prompt(
+            &node,
+            &ordinary_prompt,
+            crate::models::Provider::Codex,
+            None,
+        )
+        .unwrap(),
+        Some(text)
+    );
+    crate::preferences::reset_for_tests();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn new_node_handover_staging_failure_deletes_the_idle_node() {
+    let db = crate::db::test_support::isolated();
+    let root = tempfile::tempdir().unwrap();
+    crate::preferences::init_for_tests(root.path().to_path_buf());
+    let mesh = crate::db::create_mesh("failed handover", "C:/failed-handover-fixture").unwrap();
+    let created = crate::db::create_agent_node(
+        mesh.id,
+        "failed-handover",
+        &mesh.path,
+        "main",
+        crate::models::EnvType::Windows,
+        "codex",
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let node_id = created.id;
+    let node = crate::db::get_agent_node_by_id(node_id).unwrap();
+    std::fs::write(root.path().join("handovers"), "blocked").unwrap();
+    let database = db.handle();
+    let app_data_dir = Some(root.path().to_path_buf());
+    let intent = SpawnIntent::Handover {
+        selected_text: "review\n".repeat(100),
+    };
+
+    let result = crate::commands::run_blocking("prepare_handover_prompt_test", move || {
+        let _adopted = crate::db::test_support::adopt(&database);
+        super::orchestrator::prepare_handover_prompt(
+            &node,
+            &intent,
+            crate::models::Provider::Codex,
+            true,
+            app_data_dir,
+        )
+    })
+    .await;
+
+    let error = result.unwrap_err();
+    assert!(error.contains("Could not save the handover"), "{error}");
+    assert!(matches!(
+        crate::db::get_agent_node_by_id(node_id),
+        Err(rusqlite::Error::QueryReturnedNoRows)
+    ));
+    crate::preferences::reset_for_tests();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn existing_node_handover_staging_failure_does_not_delete_the_node() {
+    let db = crate::db::test_support::isolated();
+    let root = tempfile::tempdir().unwrap();
+    crate::preferences::init_for_tests(root.path().to_path_buf());
+    let mesh = crate::db::create_mesh("existing handover", "C:/existing-handover-fixture").unwrap();
+    let node = crate::db::create_agent_node(
+        mesh.id,
+        "existing-handover",
+        &mesh.path,
+        "main",
+        crate::models::EnvType::Windows,
+        "codex",
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let node_id = node.id;
+    std::fs::write(root.path().join("handovers"), "blocked").unwrap();
+    let database = db.handle();
+    let request = SpawnRequest::new(
+        node_id,
+        SpawnIntent::Handover {
+            selected_text: "review\n".repeat(100),
+        },
+        TerminalSize::default(),
+    );
+    assert!(!request.cleanup_new_node_on_handover_failure);
+
+    let result = crate::commands::run_blocking("prepare_existing_node_handover_test", move || {
+        let _adopted = crate::db::test_support::adopt(&database);
+        super::orchestrator::prepare_handover_prompt(
+            &node,
+            &request.intent,
+            crate::models::Provider::Codex,
+            request.cleanup_new_node_on_handover_failure,
+            Some(root.path().to_path_buf()),
+        )
+    })
+    .await;
+
+    let error = result.unwrap_err();
+    assert!(error.contains("Could not save the handover"), "{error}");
+    assert_eq!(
+        crate::db::get_agent_node_by_id(node_id).unwrap().id,
+        node_id
+    );
+    crate::preferences::reset_for_tests();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn new_node_handover_reports_cleanup_failure_and_keeps_the_row() {
+    let db = crate::db::test_support::isolated();
+    let root = tempfile::tempdir().unwrap();
+    crate::preferences::init_for_tests(root.path().to_path_buf());
+    let mesh = crate::db::create_mesh("cleanup failure", "C:/cleanup-failure-fixture").unwrap();
+    let node = crate::db::create_agent_node(
+        mesh.id,
+        "cleanup-failure",
+        &mesh.path,
+        "main",
+        crate::models::EnvType::Windows,
+        "codex",
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let node_id = node.id;
+    // The trigger forces agent_node::delete to fail after staging has already
+    // failed, so this test exercises the combined-error cleanup branch.
+    crate::db::write_conn()
+        .execute_batch(
+            "CREATE TRIGGER prevent_handover_test_node_delete \
+             BEFORE DELETE ON agent_nodes \
+             BEGIN SELECT RAISE(ABORT, 'forced test cleanup failure'); END;",
+        )
+        .unwrap();
+    std::fs::write(root.path().join("handovers"), "blocked").unwrap();
+    let database = db.handle();
+    let app_data_dir = Some(root.path().to_path_buf());
+    let intent = SpawnIntent::Handover {
+        selected_text: "review\n".repeat(100),
+    };
+
+    let result =
+        crate::commands::run_blocking("prepare_handover_cleanup_failure_test", move || {
+            let _adopted = crate::db::test_support::adopt(&database);
+            super::orchestrator::prepare_handover_prompt(
+                &node,
+                &intent,
+                crate::models::Provider::Codex,
+                true,
+                app_data_dir,
+            )
+        })
+        .await;
+
+    let error = result.unwrap_err();
+    assert!(error.contains("Could not save the handover"), "{error}");
+    assert!(
+        error.contains("could not remove the unstarted node"),
+        "{error}"
+    );
+    assert!(error.contains("forced test cleanup failure"), "{error}");
+    assert_eq!(
+        crate::db::get_agent_node_by_id(node_id).unwrap().id,
+        node_id
+    );
+    crate::preferences::reset_for_tests();
 }
 
 // -----------------------------------------------------------------------

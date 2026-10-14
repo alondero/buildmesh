@@ -453,9 +453,17 @@ from the context menu:
   Mesh default to a harness that accepts a first-turn prompt, or hand the
   selection to an existing node instead.
 - **Handover to node** sends the selection to an agent you already have. The text
-  is staged as a single paste and then submitted, exactly as if you had pasted it
-  and pressed Enter — so a multi-line review report arrives as one prompt instead
-  of one prompt per line.
+  is staged and then submitted, as if you had pasted it and pressed Enter.
+
+For Codex, selections longer than 256 characters are saved in a UTF-8 file and
+the agent receives one short instruction to read the complete handover. This
+applies to both existing and new nodes and avoids a long Windows paste arriving
+as separate messages. Each accepted handover has its own file, which stays
+available until the node is deleted. If saving fails, the action reports an
+error without sending the selection. A failed new-node staging attempt removes
+its unstarted node; if that cleanup also fails, the error reports both failures.
+A rejected existing-node handover removes only its own file. Short selections
+and other harnesses are sent inline as one prompt instead of one prompt per line.
 
 The agents this one already shares tabs with are offered first — the pair you
 grouped, or a review agent spawned from this node — which keeps an

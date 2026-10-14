@@ -3368,6 +3368,46 @@ mod tests {
         registry.kill_session(id);
     }
 
+    #[test]
+    fn existing_codex_handover_stages_one_file_pointer_and_one_enter() {
+        let _db = crate::db::test_support::isolated();
+        let root = tempfile::tempdir().unwrap();
+        crate::preferences::init_for_tests(root.path().to_path_buf());
+        let id = codex_worker_node("codex-file-handover");
+        let node = crate::db::get_agent_node_by_id(id).unwrap();
+        let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
+        let text = "REQUEST CHANGES.\r\nReview all findings — 🚀\r\n".repeat(40);
+        let prompt = crate::agent::handover::prepare(
+            &node,
+            crate::models::Provider::Codex,
+            &text,
+            Some(root.path()),
+        )
+        .unwrap();
+        let prepared = PreparedPrompt::prepare(id, prompt.prompt()).unwrap();
+        let (_, readiness) = stage_prompt_write(&registry, &prepared, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            writes.recv_timeout(Duration::from_secs(1)).unwrap(),
+            prompt.prompt().as_bytes()
+        );
+        assert!(!prompt.prompt().contains(['\r', '\n']));
+        assert_eq!(
+            submit_staged_prompt_result(&registry, id, None, &readiness).unwrap(),
+            Some(1)
+        );
+        assert_eq!(drained(&writes), vec![b"\r".to_vec()]);
+        let files: Vec<_> = std::fs::read_dir(root.path().join(format!("handovers/node-{id}")))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(files.len(), 1);
+        assert_eq!(std::fs::read(&files[0]).unwrap(), text.as_bytes());
+        registry.kill_session(id);
+        crate::preferences::reset_for_tests();
+    }
+
     /// The ladder must survive for a buffered node — including one that has not
     /// produced output yet, which is the state `node_launch` injects its prefill
     /// into (it registers the evaluator before spawning). Keying the posture off
