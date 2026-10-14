@@ -24,7 +24,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 // `decode` runs inside the guard so a response shape this build does not
 // understand becomes an error notice instead of a throw during composition.
 @Composable
-private fun <T> rememberRemote(api: BuildmeshApi, path: String, vm: BuildmeshViewModel, reload: Int = 0, decode: (JsonElement) -> T): State<RemoteLoad<T>> {
+internal fun <T> rememberRemote(api: BuildmeshApi, path: String, vm: BuildmeshViewModel, reload: Int = 0, decode: (JsonElement) -> T): State<RemoteLoad<T>> {
     val state by vm.state.collectAsState()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     return produceState(RemoteLoad(), api, path, reload, state.resourceRevision, lifecycle) {
@@ -38,10 +38,10 @@ private fun <T> rememberRemote(api: BuildmeshApi, path: String, vm: BuildmeshVie
     }
 }
 
-private data class RemoteLoad<T>(val loading: Boolean = true, val data: T? = null, val error: String = "")
+internal data class RemoteLoad<T>(val loading: Boolean = true, val data: T? = null, val error: String = "")
 
 @Composable
-private fun LoadNotice(load: RemoteLoad<*>, retry: () -> Unit) {
+internal fun LoadNotice(load: RemoteLoad<*>, retry: () -> Unit) {
     if (load.loading) EmptyMessage("Loading…")
     else if (load.error.isNotEmpty()) Column {
         EmptyMessage(load.error)
@@ -51,6 +51,10 @@ private fun LoadNotice(load: RemoteLoad<*>, retry: () -> Unit) {
 
 @Composable
 fun ResourceScreen(api: BuildmeshApi, meshId: Long, screen: String, state: RemoteState, vm: BuildmeshViewModel, openNode: (Long) -> Unit) {
+    if (screen == "issues") {
+        IssuesResourceScreen(api, meshId, state, vm, openNode)
+        return
+    }
     var reload by remember(state.draftNamespace, meshId, screen) { mutableIntStateOf(0) }
     val path = "/api/meshes/$meshId/" + if (screen == "issues") "issues" else "agent-nodes/discover"
     val load by rememberRemote(api, path, vm, reload) { if (screen == "issues") issueItems(it) else it.objects() }
@@ -79,7 +83,7 @@ fun ResourceScreen(api: BuildmeshApi, meshId: Long, screen: String, state: Remot
     }
     selected?.let { item ->
         AlertDialog(onDismissRequest = { if (!state.busy) selected = null }, title = { Text("Choose a launch configuration") },
-            text = { Selector("Agent", options.map { it.text("id") to it.text("label") }, provider, { provider = it }) },
+            text = { Selector("Launch configuration", options.map { it.text("id") to it.text("label") }, provider, { provider = it }, enabled = !state.busy) },
             confirmButton = { TextButton(enabled = !state.busy && provider.isNotEmpty(), onClick = {
                 vm.action { client ->
                     val node = try { if (screen == "issues") client.post("/api/meshes/$meshId/issues/${item.number("number")}/spawn", buildJsonObject {
@@ -176,7 +180,7 @@ fun CreatePrScreen(api: BuildmeshApi, meshId: Long, nodeId: Long, vm: BuildmeshV
 }
 
 @Composable
-private fun ExternalLink(url: String, label: String) {
+internal fun ExternalLink(url: String, label: String) {
     val handler = LocalUriHandler.current
     TextButton(onClick = { if (url.startsWith("https://")) handler.openUri(url) }) { Text(label) }
 }

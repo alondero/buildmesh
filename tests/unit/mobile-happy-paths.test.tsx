@@ -210,7 +210,7 @@ describe("mobile happy paths (issue #1262)", () => {
   // -----------------------------------------------------------------------
 
   describe("Issue spawn", () => {
-    it("calls onSpawned with the created node when the spawn button is clicked", async () => {
+    it("calls onSpawned with the created node when the launch is confirmed", async () => {
       vi.stubGlobal(
         "fetch",
         vi.fn().mockImplementation(async (url: string) => {
@@ -224,6 +224,7 @@ describe("mobile happy paths (issue #1262)", () => {
           if (url.endsWith("/issues/101/spawn")) {
             return jsonResponse(200, node);
           }
+          if (url === "/api/providers") return jsonResponse(200, []);
           return jsonResponse(404, { error: "not found" });
         }),
       );
@@ -241,6 +242,9 @@ describe("mobile happy paths (issue #1262)", () => {
       await userEvent.click(await screen.findByTestId("issue-101"));
       await userEvent.click(screen.getByTestId("issue-spawn-101"));
 
+      await waitFor(() => expect(screen.getByRole("button", { name: "Start", exact: true })).toHaveProperty("disabled", false));
+      await userEvent.click(screen.getByRole("button", { name: "Start", exact: true }));
+
       await waitFor(() => {
         expect(onSpawned).toHaveBeenCalledWith(node);
       });
@@ -256,6 +260,7 @@ describe("mobile happy paths (issue #1262)", () => {
           if (url.endsWith("/issues/101/spawn")) {
             return jsonResponse(500, { error: "spawn failed" });
           }
+          if (url === "/api/providers") return jsonResponse(200, []);
           return jsonResponse(404, { error: "not found" });
         }),
       );
@@ -271,6 +276,9 @@ describe("mobile happy paths (issue #1262)", () => {
 
       await userEvent.click(await screen.findByTestId("issue-101"));
       await userEvent.click(screen.getByTestId("issue-spawn-101"));
+
+      await waitFor(() => expect(screen.getByRole("button", { name: "Start", exact: true })).toHaveProperty("disabled", false));
+      await userEvent.click(screen.getByRole("button", { name: "Start", exact: true }));
 
       await waitFor(() => {
         expect(screen.getByText("spawn failed")).toBeTruthy();
