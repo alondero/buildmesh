@@ -168,6 +168,35 @@ route validates text size. Whether the harness can take an initial prompt is
 the rule in services::agent_node, shared with the desktop commands.
 Mobile never races terminal startup by injecting the idea as keystrokes.
 
+## Phone issue triage
+
+Both phone clients filter open issues by title, number or label. Cards show
+labels, author and blockers found in the loaded open feed; tapping a card
+expands a bounded body preview and its GitHub link. Blockers outside the loaded
+feed cannot be resolved. Feed completeness stays visible even when a filter
+matches nothing, so a partial read does not imply that the repository is empty.
+
+**Edit tags** lists repository labels and changes one label per acknowledged
+request, preserving collaborators' other labels. Enabled issue-triggered
+Autopilot circuits identify their watched tags in the editor. Adding one makes
+the issue eligible on the next poll; dependencies and existing runs still apply.
+GitHub failures retain the previous selection and allow retry. Repository label
+load failures have a separate retry; older desktops without these routes need
+an update to use the editor.
+
+The admin-only `GET /api/meshes/{id}/issue-labels` returns the generated
+`IssueLabelCatalog` (names and mesh-scoped enabled circuit trigger names).
+`POST /api/meshes/{id}/issues/{number}/label` accepts `{label, present}` and awaits
+the desktop's single-label command. GitHub write failures are HTTP 500, distinct
+from HTTP 401/403 device authorization failures.
+
+**Start agent** opens a launch configuration choice in both clients, with
+**Mesh default** or an available Spawn Option supporting prefill. Saved launch
+recipes are excluded because this route accepts only a Spawn Option. Starting
+requires confirmation; cancellation creates no node, and the picker stays open
+while a request is pending. Browser back first dismisses the web picker and is
+consumed while it is starting.
+
 ## Mobile terminal socket lifecycle
 
 The mobile terminal socket is a **separate** fanout (`http::ws`), keyed by node id in one

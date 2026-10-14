@@ -208,6 +208,7 @@ export default function App() {
   // A ref (not state) because the popstate handler is registered once with
   // [] deps and must stay stable.
   const prSheetBusyRef = useRef(false);
+  const issuesBackRef = useRef<(() => boolean) | null>(null);
   const handlePrSheetBusy = useCallback((busy: boolean) => {
     prSheetBusyRef.current = busy;
   }, []);
@@ -231,6 +232,10 @@ export default function App() {
 
   useEffect(() => {
     const onPop = () => {
+      if (issuesBackRef.current?.()) {
+        window.history.pushState({ bm: true }, "");
+        return;
+      }
       // A sheet counts as the topmost "screen": back closes it first.
       if (prSheetRef.current) {
         // While the sheet has a request in flight it owns the dismissal
@@ -509,6 +514,7 @@ export default function App() {
       {screen.kind === "issues" && (
         <Suspense fallback={<ScreenLoading />}>
           <IssuesScreen
+            backHandlerRef={issuesBackRef}
             mesh={screen.mesh}
             onBack={goBack}
             onSpawned={(node) => {

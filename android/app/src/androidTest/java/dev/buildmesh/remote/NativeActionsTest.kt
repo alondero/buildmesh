@@ -8,6 +8,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.core.app.ApplicationProvider
+import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.serialization.json.Json
 import okhttp3.mockwebserver.*
 import org.junit.Assert.*
@@ -116,9 +117,17 @@ class NativeActionsTest {
                 val state by vm.state.collectAsState()
                 ResourceScreen(vm.api!!, 3, "issues", state.copy(providers = providers), vm, { opened = it })
             } }
-            compose.waitUntil(10000) { compose.onAllNodesWithText("Start agent").fetchSemanticsNodes().isNotEmpty() }
+            compose.waitUntil(10000) { compose.onAllNodesWithText("#42 Fix deadline").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("Issue details").assertDoesNotExist()
+            compose.onNodeWithText("#42 Fix deadline").performClick()
+            compose.onNodeWithText("Issue details").assertExists()
             compose.onNodeWithText("Start agent").performClick()
-            compose.onNodeWithText("Agent: Claude Code").assertExists()
+            compose.onNodeWithText("Launch configuration: Mesh default").performClick()
+            compose.onNodeWithText("Terminal").assertDoesNotExist()
+            compose.onNodeWithText("Saved agent").assertDoesNotExist()
+            compose.onNodeWithText("Unavailable agent").assertDoesNotExist()
+            compose.onNodeWithText("Claude Code").performClick()
+            compose.onNodeWithText("Launch configuration: Claude Code").assertExists()
             compose.onNodeWithText("Start").performClick()
             compose.waitUntil(10000) { opened == 17L }
             val request = requests.single { it.method == "POST" }
@@ -139,6 +148,78 @@ class NativeActionsTest {
         }
     }
 
+    private fun issueScreenshot(name: String) {
+        compose.waitForIdle()
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val image = instrumentation.uiAutomation.takeScreenshot()
+        instrumentation.targetContext.filesDir.resolve("$name.png").outputStream().use {
+            check(image.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it))
+        }
+        image.recycle()
+    }
+
+    @Test fun issueTriageFiltersMetadataShowsPartialFeedAndAcknowledgesTags() {
+        var tagged = false
+        var attempts = 0
+        withDesktop({ request ->
+            when (request.path) {
+                "/api/meshes/3/issues" -> MockResponse().setBody("""{"items":[
+                    {"number":42,"title":"Fix the mobile deadline and preserve a long issue title on a narrow phone screen","body":"Expanded issue details","url":"https://github.com/o/r/issues/42","state":"open","labels":["bug"${if (tagged) ",\"buildmesh:run\"" else ""}],"blocked_by":[43,99],"author":"octo"},
+                    {"number":43,"title":"Prerequisite","body":"","url":"","state":"open","labels":[],"blocked_by":[],"author":""}
+                ],"completeness":{"returned":2,"pages_fetched":1,"complete":false,"incomplete_reason":"safety_cap","reported_total":120}}""")
+                "/api/meshes/3/issue-labels" -> MockResponse().setBody("""{"labels":["bug","buildmesh:run"],"autopilot_triggers":{"buildmesh:run":["Ship fixes"]}}""")
+                "/api/meshes/3/issues/42/label" -> {
+                    if (++attempts == 1) MockResponse().setResponseCode(500).setBody("""{"error":"GitHub permission denied"}""")
+                    else { tagged = Json.parseToJsonElement(request.body.clone().readUtf8()).obj().flag("present"); MockResponse().setResponseCode(204) }
+                }
+                else -> MockResponse().setResponseCode(404)
+            }
+        }) { vm, requests ->
+            compose.setContent { BuildmeshTheme {
+                val state by vm.state.collectAsState()
+                ResourceScreen(vm.api!!, 3, "issues", state.copy(providers = providers), vm, {})
+            } }
+            compose.waitUntil(10000) { compose.onAllNodesWithText("@octo").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("Expanded issue details").assertDoesNotExist()
+            compose.onNodeWithText("Blocked by #43").assertExists()
+            compose.onNodeWithText("Showing the first 2 of 120 issues.", substring = true).assertExists()
+            issueScreenshot("issues-android-collapsed")
+            compose.onNodeWithText("Filter issues").performTextInput(" BUG ")
+            compose.onNodeWithText("Prerequisite", substring = true).assertDoesNotExist()
+            compose.onNodeWithText("Blocked by #43").assertExists()
+            compose.onNodeWithText("Filter issues").performTextClearance()
+            compose.onNodeWithText("Filter issues").performTextInput("no match")
+            compose.onNodeWithText("No matches.").assertExists()
+            compose.onNodeWithText("Showing the first 2 of 120 issues.", substring = true).assertExists()
+            compose.onNodeWithText("Filter issues").performTextClearance()
+            compose.onNodeWithText("#42 Fix the mobile", substring = true).performClick()
+            compose.onNodeWithText("Expanded issue details").assertExists()
+            compose.onNodeWithText("Start agent").performScrollTo().performClick()
+            compose.onNodeWithText("Launch configuration: Mesh default").assertExists()
+            issueScreenshot("issues-android-launch")
+            compose.onNodeWithText("Cancel").performClick()
+            assertFalse(requests.any { it.method == "POST" })
+            compose.onNodeWithText("Edit tags for issue #42").performScrollTo().performClick()
+            compose.waitUntil(10000) { compose.onAllNodesWithContentDescription("buildmesh:run").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("Autopilot: Ship fixes.", substring = true).assertExists()
+            issueScreenshot("issues-android-tags")
+            compose.onNodeWithContentDescription("buildmesh:run").assertIsOff().performClick()
+            compose.waitUntil(10000) { vm.state.value.error == "GitHub permission denied" && !vm.state.value.busy }
+            compose.onNodeWithText("GitHub permission denied").assertExists()
+            compose.onNodeWithContentDescription("buildmesh:run").assertIsOff().performClick()
+            compose.waitUntil(10000) { tagged && !vm.state.value.busy }
+            compose.onNodeWithContentDescription("buildmesh:run").assertIsOn()
+            compose.onNodeWithContentDescription("bug").assertIsOn()
+            compose.onNodeWithContentDescription("buildmesh:run").performClick()
+            compose.waitUntil(10000) { attempts == 3 && !vm.state.value.busy }
+            compose.onNodeWithContentDescription("buildmesh:run").assertIsOff()
+            val writes = requests.filter { it.method == "POST" }
+            assertEquals(3, writes.size)
+            assertEquals(listOf(true, true, false), writes.map { Json.parseToJsonElement(it.body.readUtf8()).obj().flag("present") })
+            assertTrue(writes.all { it.path == "/api/meshes/3/issues/42/label" })
+        }
+    }
+
     @Test fun partialArchiveResumeDismissesTheDialogAndReportsTheImportedNode() {
         var opened = 0L
         withDesktop({ request ->
@@ -154,7 +235,7 @@ class NativeActionsTest {
             } }
             compose.waitUntil(10000) { compose.onAllNodesWithText("Import and resume").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithText("Import and resume").performClick()
-            compose.onNodeWithText("Agent: Claude Code").assertExists()
+            compose.onNodeWithText("Launch configuration: Claude Code").assertExists()
             compose.onNodeWithText("Start").performClick()
             compose.waitUntil(10000) { vm.state.value.error.contains("Node 17 was imported") && !vm.state.value.busy }
             compose.onNodeWithText("Choose a launch configuration").assertDoesNotExist()
