@@ -1240,19 +1240,31 @@ struct RepoInfo {
     remotes: Vec<String>,
 }
 
-/// Return the URL for a configured remote. A missing remote is an expected
-/// absence; other lookup and UTF-8 errors stay visible to callers.
-fn configured_remote_url(repo: &Repository, name: &str) -> Result<Option<String>, String> {
+/// Return the URL for a configured remote, preserving the optional-metadata
+/// behavior used by repo information and GitHub-link callers.
+fn configured_remote_url(repo: &Repository, name: &str) -> Option<String> {
     let remote = match repo.find_remote(name) {
         Ok(remote) => remote,
-        Err(error) if error.code() == git2::ErrorCode::NotFound => return Ok(None),
-        Err(error) => return Err(format!("Failed to find Git remote '{name}': {error}")),
+        Err(error) if error.code() == git2::ErrorCode::NotFound => return None,
+        Err(_) => {
+            tracing::warn!(
+                remote = name,
+                "Could not read Git remote; treating it as unavailable"
+            );
+            return None;
+        }
     };
 
-    remote
-        .url()
-        .map(|url| Some(url.to_string()))
-        .map_err(|error| format!("Failed to read Git remote '{name}' URL: {error}"))
+    match remote.url() {
+        Ok(url) => Some(url.to_string()),
+        Err(_) => {
+            tracing::warn!(
+                remote = name,
+                "Could not read Git remote URL; treating it as unavailable"
+            );
+            None
+        }
+    }
 }
 
 impl RepoInfo {
@@ -1307,9 +1319,15 @@ fn repo_info(path: &str) -> Result<RepoInfo, String> {
     let branch = match repo.head() {
         Ok(head) => {
             if head.is_branch() {
-                head.shorthand()
-                    .map(str::to_string)
-                    .map_err(|error| format!("Failed to read the current branch name: {error}"))?
+                match head.shorthand() {
+                    Ok(name) => name.to_string(),
+                    Err(_) => {
+                        tracing::warn!(
+                            "Could not read Git branch name; treating it as unavailable"
+                        );
+                        String::new()
+                    }
+                }
             } else {
                 head.target()
                     .map(|oid| oid.to_string()[..8].to_string())
@@ -1319,20 +1337,24 @@ fn repo_info(path: &str) -> Result<RepoInfo, String> {
         Err(_) => String::new(),
     };
 
-    let remote_url = configured_remote_url(&repo, "origin")?;
+    let remote_url = configured_remote_url(&repo, "origin");
     let owner_repo = remote_url.as_deref().and_then(github::parse_owner_repo);
-    let remotes = repo
-        .remotes()
-        .map_err(|error| format!("Failed to list Git remotes: {error}"))?
-        .iter()
-        .map(|name| {
-            name.map(|name| name.map(str::to_string))
-                .map_err(|error| format!("Failed to read a Git remote name: {error}"))
-        })
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .flatten()
-        .collect();
+    let remotes = match repo.remotes() {
+        Ok(names) => (0..names.len())
+            .filter_map(|index| match names.get(index) {
+                Ok(Some(name)) => Some(name.to_string()),
+                Ok(None) => None,
+                Err(_) => {
+                    tracing::warn!(index, "Could not read a Git remote name; omitting it");
+                    None
+                }
+            })
+            .collect(),
+        Err(_) => {
+            tracing::warn!("Could not list Git remotes; returning an empty remote list");
+            Vec::new()
+        }
+    };
 
     Ok(RepoInfo {
         branch,
@@ -1363,7 +1385,7 @@ pub(crate) fn resolve_github_owner_repo(
 /// Resolve owner/repo from a path, returning None if no origin remote.
 pub(crate) fn resolve_owner_repo(path: &str) -> Result<Option<(String, String)>, String> {
     let repo = open_github_repo(path)?;
-    let url = configured_remote_url(&repo, "origin")?;
+    let url = configured_remote_url(&repo, "origin");
     Ok(url.and_then(|url| github::parse_owner_repo(&url)))
 }
 

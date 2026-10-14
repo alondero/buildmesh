@@ -10,7 +10,7 @@
 
 ## Tech Stack
 - **Frontend:** React 19, Zustand 5, xterm.js 6.x, Tailwind 4, TypeScript ~5.8, Vite 7
-- **Backend:** Tauri 2, Rust, portable-pty, rusqlite 0.32, git2, tokio
+- **Backend:** Tauri 2, Rust, portable-pty, rusqlite 0.40, git2, tokio
 - **Testing:** Vitest (unit/integration) + Playwright (e2e)
 
 ## Project Structure

@@ -120,11 +120,15 @@ pub(crate) fn compute_mesh_health(repo: &Repository, base_ref: &str) -> Result<M
             let name = if detached {
                 Some("HEAD".to_string())
             } else {
-                Some(
-                    head.shorthand()
-                        .map(str::to_string)
-                        .map_err(|error| format!("failed to read current branch name: {error}"))?,
-                )
+                match head.shorthand() {
+                    Ok(name) => Some(name.to_string()),
+                    Err(_) => {
+                        tracing::warn!(
+                            "Could not read Git branch name while computing mesh health"
+                        );
+                        None
+                    }
+                }
             };
             let short_sha = head
                 .target()

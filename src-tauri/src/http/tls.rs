@@ -214,7 +214,7 @@ pub fn generate(interface_ips: &[IpAddr]) -> Result<CertChain, rcgen::Error> {
 // persisted through `atomic_write_leaf` so a crash mid-rotation never
 // leaves a partial cert/key/sans triplet on disk.
 
-/// In-memory representation of the persisted root CA. The `cached_cert` is
+/// In-memory representation of the persisted root CA. The `cached_issuer` is
 /// an rcgen `Issuer` rebuilt from the loaded key + deterministic params. The
 /// persisted cert bytes remain the trust anchor; the issuer carries the same
 /// subject and signing key for new leaves.
@@ -1356,6 +1356,46 @@ mod tests {
         assert!(
             stdout.contains("CA:TRUE"),
             "root cert MUST declare BasicConstraints CA:TRUE (Android install requirement); got: {stdout}"
+        );
+    }
+
+    /// Existing installs keep a CA created by rcgen 0.13.2. The fixture pair
+    /// was generated with `build_root_ca_params` before the rcgen upgrade; the
+    /// upgraded issuer must still sign leaves that chain to that persisted CA.
+    #[test]
+    fn rcgen_014_leaf_chains_to_persisted_rcgen_013_root() {
+        let app_data = tempfile::tempdir().unwrap();
+        let identity_path = identity_dir(app_data.path()).expect("identity path");
+        std::fs::create_dir_all(&identity_path).expect("identity dir");
+        let old_root_cert = include_bytes!("fixtures/rcgen-0.13.2-ca.der");
+        let old_root_key = include_bytes!("fixtures/rcgen-0.13.2-ca.key.der");
+        std::fs::write(identity_path.join("ca.der"), old_root_cert).expect("persist old CA");
+        std::fs::write(identity_path.join("ca.key.der"), old_root_key).expect("persist old CA key");
+
+        let root = RootKeyPair::load(&identity_path).expect("load rcgen 0.13 CA with rcgen 0.14");
+        let leaf = root
+            .issue_leaf_for(&[])
+            .expect("issue a leaf from the persisted rcgen 0.13 CA");
+
+        let verify_dir = tempfile::tempdir().unwrap();
+        let root_pem = verify_dir.path().join("root.pem");
+        let leaf_pem = verify_dir.path().join("leaf.pem");
+        std::fs::write(&root_pem, pem_encode("CERTIFICATE", old_root_cert)).unwrap();
+        std::fs::write(&leaf_pem, pem_encode("CERTIFICATE", &leaf.cert_der)).unwrap();
+        let output = std::process::Command::new("openssl")
+            .args([
+                "verify",
+                "-CAfile",
+                root_pem.to_str().unwrap(),
+                leaf_pem.to_str().unwrap(),
+            ])
+            .output()
+            .expect("openssl must be on PATH");
+        assert!(
+            output.status.success(),
+            "rcgen 0.14 leaf must chain to the persisted rcgen 0.13 root; stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 

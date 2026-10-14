@@ -289,17 +289,29 @@ fn classify_worktree_add_failure(stderr: &str) -> AddWorktreeFailureKind {
     AddWorktreeFailureKind::Other
 }
 
+fn owned_worktree_name(
+    name: Result<Option<&str>, git2::Error>,
+) -> Result<Option<String>, git2::Error> {
+    name.map(|name| name.map(str::to_string))
+}
+
 /// Remove worktrees whose on-disk path no longer exists.
 fn prune_stale_worktrees(repo: &git2::Repository) {
     if let Ok(worktree_names) = repo.worktrees() {
         for i in 0..worktree_names.len() {
-            if let Ok(Some(name)) = worktree_names.get(i) {
-                if let Ok(wt) = repo.find_worktree(name) {
-                    if wt.validate().is_err() {
-                        let mut prune_opts = git2::WorktreePruneOptions::new();
-                        prune_opts.valid(false);
-                        let _ = wt.prune(Some(&mut prune_opts));
-                    }
+            let name = match owned_worktree_name(worktree_names.get(i)) {
+                Ok(Some(name)) => name,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::warn!(index = i, %error, "Could not read a registered worktree name; stopping stale-worktree pruning");
+                    return;
+                }
+            };
+            if let Ok(wt) = repo.find_worktree(&name) {
+                if wt.validate().is_err() {
+                    let mut prune_opts = git2::WorktreePruneOptions::new();
+                    prune_opts.valid(false);
+                    let _ = wt.prune(Some(&mut prune_opts));
                 }
             }
         }
@@ -478,10 +490,15 @@ fn is_valid_linked_worktree(project_root: &str, host_path: &std::path::Path) -> 
         return false;
     };
     for i in 0..names.len() {
-        let Ok(Some(name)) = names.get(i) else {
-            continue;
+        let name = match owned_worktree_name(names.get(i)) {
+            Ok(Some(name)) => name,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(index = i, %error, "Could not read a registered worktree name; refusing to claim linked-worktree ownership");
+                return false;
+            }
         };
-        if let Ok(wt) = parent_repo.find_worktree(name) {
+        if let Ok(wt) = parent_repo.find_worktree(&name) {
             // `wt.path()` returns git's stored path verbatim — the same form we
             // passed in when we cut the worktree, so direct equality is the
             // safe shape (no canonicalization that could miss symlinks/UNC).
@@ -1411,7 +1428,7 @@ fn prune_orphaned_worktree_entry_with(
         )
     })?;
     for i in 0..names.len() {
-        let Some(name) = names.get(i).map_err(|error| {
+        let Some(name) = owned_worktree_name(names.get(i)).map_err(|error| {
             WorktreeRemovalFailure::new(
                 OP_PRUNE_ADMIN_ENTRY,
                 format!("could not read a registered worktree name for {host_path}: {error}"),
@@ -1420,7 +1437,7 @@ fn prune_orphaned_worktree_entry_with(
         else {
             continue;
         };
-        let Ok(worktree) = repo.find_worktree(name) else {
+        let Ok(worktree) = repo.find_worktree(&name) else {
             continue;
         };
         // `worktree.path()` is the *working* directory, not the admin entry
@@ -1529,6 +1546,24 @@ fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn registered_worktree_name_read_errors_remain_errors() {
+        let name = super::owned_worktree_name(Ok(Some("linked"))).expect("read name");
+        assert_eq!(name.as_deref(), Some("linked"));
+
+        let missing = super::owned_worktree_name(Ok(None)).expect("empty name slot");
+        assert_eq!(missing, None);
+
+        let error = git2::Error::new(
+            git2::ErrorCode::GenericError,
+            git2::ErrorClass::Os,
+            "could not decode registered worktree name",
+        );
+        let failure = super::owned_worktree_name(Err(error))
+            .expect_err("a failed name read must not become an empty slot");
+        assert_eq!(failure.code(), git2::ErrorCode::GenericError);
+    }
+
     #[test]
     fn scoped_cold_create_has_bounded_wait_behind_sibling_sync() {
         let td = crate::env::test_helpers::TestDir::new("scoped-create-lock");
@@ -2128,8 +2163,11 @@ mod tests {
         let repo = git2::Repository::open(root).expect("repo must open");
         let names = repo.worktrees().expect("worktrees must list");
         (0..names.len())
-            .filter_map(|i| names.get(i).ok().flatten())
-            .filter_map(|n| repo.find_worktree(n).ok())
+            .flat_map(|i| {
+                owned_worktree_name(names.get(i))
+                    .expect("registered worktree name must be valid UTF-8")
+            })
+            .filter_map(|name| repo.find_worktree(&name).ok())
             .map(|w| w.path().to_path_buf())
             .collect()
     }

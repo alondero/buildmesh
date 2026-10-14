@@ -39,7 +39,11 @@ The embedded server binds **loopback only by default** (#496). An off-by-default
 - **The toggle rebinds live** without an app restart. A serialized binding operation owns the setting snapshot and listener replacement. Each listener owns its TLS/HTTP/WebSocket tasks and aborts/drains them on shutdown; loopback listeners have separate ownership. Each listener admits at most 64 HTTP/handshake connections and 32 WebSockets, with a five-second TLS deadline. WebSocket output futures remain inside their connection. Disabling LAN also invalidates unused pairing invitations.
 - **HTTP module layout (issue #1658):** `http/server.rs` (bind, TLS, accept, head parse, Host guard, body read, WS upgrade), `http/router.rs` (one `ROUTES` table + `dispatch(ParsedRequest)`), `http/state.rs` (app handle, snapshots, ports, listeners, interface cache). `http/mod.rs` re-exports and exposes `start_http_server` / `reapply_binding`.
 - **`MaybeTls`** (`http::stream`) is the single concrete stream type (`Plain(TcpStream)` | `Tls(Box<TlsStream<TcpStream>>)`); WSS rides the same enum. The server owns the stream. Route handlers take `ParsedRequest` and return `Response` — they never touch `BufStream` / `MaybeTls`.
-- **Crypto provider is `ring`, selected explicitly** via `builder_with_provider` (no process-default; aws-lc-rs is not in the tree).
+- **Crypto provider is `ring`.** The embedded server selects it explicitly via
+  `builder_with_provider`. App startup also installs `ring` as rustls's
+  process-default provider because reqwest 0.13 uses `rustls-no-provider` and
+  its client builder reads that default. The embedded server remains bound to
+  its explicit provider; `aws-lc-rs` is not in the dependency tree.
 
 ## Fuzzing the request-read path
 
