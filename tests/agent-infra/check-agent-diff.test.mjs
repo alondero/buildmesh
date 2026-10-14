@@ -111,6 +111,17 @@ test('flags a PowerShell condition on a native command in scripts/*.ps1 (#1982)'
     'Write-Output "probe"\ngit diff --quiet\nif ($LASTEXITCODE -eq 0) { Write-Output "unchanged" }\n',
   );
   assert.deepEqual(checkDiff(cwd), []);
+
+  // CRLF is the normal shape of a `.ps1` payload: `.gitattributes` stores the
+  // file LF and checks it out CRLF (issue #2044), and an edit sends the bytes on
+  // disk. The rule must not depend on which ending it gets.
+  put(
+    'scripts/check-merge.ps1',
+    'Write-Output "probe"\r\nif (git diff --quiet) { Write-Output "unchanged" }\r\n',
+  );
+  const crlf = checkDiff(cwd);
+  assert.equal(crlf.length, 1, crlf.join('\n'));
+  assert.match(crlf[0], /scripts\/check-merge\.ps1.*powershell-if-native-command/);
 });
 
 test('configured hooks exist and shared skill entrypoints are readable', () => {

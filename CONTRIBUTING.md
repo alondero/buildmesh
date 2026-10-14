@@ -96,6 +96,27 @@ IPC. Focused `check.ps1` targets remain available during implementation.
   whether UI evidence used mock IPC or the real backend.
 - PR titles should follow the commit convention; the current build workflow does not gate titles.
 
+## Line endings
+
+`.gitattributes` decides the line endings, not your editor and not
+`core.autocrlf`: every text file is stored LF and checked out LF on every
+platform, while `.ps1`, `.cmd` and `.bat` files are checked out CRLF so
+`cmd.exe` and PowerShell work. That is what makes a checkout reproducible —
+`scripts/check-manifest-versions.mjs` reads `src-tauri/Cargo.lock` with an LF
+pattern, and it failed the v1.4.0 release because `windows-latest` checked that
+file out as CRLF while every pull-request runner saw LF.
+
+`npm run check:eol` fails when a tracked text file is stored with mixed or CRLF
+line endings, and it also runs as part of `npm run check:agent` and in CI. To
+fix the index: `git add --renormalize .`.
+
+A checkout made before this policy landed keeps its old bytes on disk until git
+rewrites them, and `git status` stays clean, so nothing breaks — the files are
+simply still mixed. `git checkout -- .` does not fix them, because the stat
+cache still considers them current; from a clean tree,
+`git rm -r --cached . && git reset --hard` re-materialises every file under the
+current policy. Do not run that with uncommitted work in the tree.
+
 ## Harness-enforced rules
 
 Claude Code hooks catch selected edit/commit mistakes. Shell writes and other
