@@ -78,6 +78,66 @@ may already have happened. Browser responses are versioned against refresh,
 mutation and unmount; native polling is owned by the screen and foreground
 lifecycle, and is cancelled while merging.
 
+## Circuit Runs on the phone
+
+A node that is inside a Circuit Run shows it. The browser client puts one line on
+the node card, for example `Needs you: Review Blueprint · Round 2 of 3 · Approval gate:
+Needs approval`, and a **Circuit Run** panel on the node screen with the latest
+reviewer verdict and report. The line turns amber only while the run is waiting for a
+person. Wording comes from the desktop's own `circuitVocabulary` and `runNextSteps`
+modules, so a state reads the same on both. The native Android client does not show
+Circuit Runs yet.
+
+`GET /api/circuit-runs` is the single read: one `NodeCircuitRun` per *implementation*
+node (the run's source agent, or an agent a circuit step owns) whose run is queued,
+running or paused, or whose failed run nobody has acknowledged. "Dismiss all" on the
+desktop clears the same failed runs from the phone. A reviewer helper agent is part of
+its source's run and is not listed on its own. The clients refresh it with the node
+list (five seconds while foregrounded), so a run that reaches Needs approval shows
+within one refresh. A desktop that predates the route answers `{"error":"not found"}`
+with `200`; the clients read that as "no circuit support", and a failed circuit read
+never takes the node list offline.
+
+`NodeCircuitRun` is derived by `db::circuit::node_run` and generated to
+`src/types/generated/`. It carries the blueprint name, raw run state, the current step
+with a plain role (`Review`, `Approval gate`), the review round and its limit, the
+verdict and shortened report for the *current* pass only (a retry reuses the node id, so
+an unmatched verdict belongs to an earlier pass), the history `revision`, and
+`needs_you`. Each need has a kind:
+
+| Kind | Meaning | What the phone offers |
+|---|---|---|
+| `approval` | An approval gate is parked (**Needs approval**) | **Approve…**, with a confirmation |
+| `unverified` | Buildmesh cannot verify a step (**Unverified Checkpoint**) | Exactly the checkpoint actions the desktop run card lists for it |
+| `input` | The agent raised a permission or question | **Open terminal to answer**; the answer goes through the existing terminal path |
+| `failed` | The run failed at this step | The run's `recovery` options: **Retry this step**, **I've done this — continue** |
+
+Eligibility is not recomputed for the phone. `unverified` actions and `recovery` come
+from `evidence::attention_inner` and `step_recovery::build_recovery`, the functions the
+desktop run card reads, and the act routes call the desktop commands' implementation.
+So Run Recovery is not offered, and is refused if sent, for a review approval, a
+pull-request lookup or a spawn (`recover_is_refused_for_a_failed_review_approval`). A
+review verdict recorded from the phone requires written evidence, as on the desktop,
+and is attributed to the person.
+
+| Route | Does |
+|---|---|
+| `POST /api/circuit-runs/{id}/approve` `{node_id}` | Approve the parked gate (`approve_circuit_step`) |
+| `POST /api/circuit-runs/{id}/outcome` `CheckpointRequest` | Recheck or record an Operator-recorded Outcome (`record_circuit_outcome`) |
+| `POST /api/circuit-runs/{id}/recover` `RecoveryRequest` | Run Recovery (`recover_failed_circuit_run`) |
+| `POST /api/circuit-runs/{id}/cancel` | Cancel and retire helper agents, as the desktop's Cancel does |
+
+The run id is in the path; a body naming another run is `400`. A missing run is `404`.
+A request the desktop refuses (a stale `expected_revision`, a step that already moved on,
+a recovery that is not offered) is `409` with the desktop's own sentence. These routes
+do not answer `401` or `403` themselves: the client reads those as a revoked device and
+answers by dropping the session. Open sheets re-check the offered action against each refresh and close if it
+is no longer offered, because approval has no revision of its own.
+
+Not in this slice: starting a review from the phone, an attention-filter entry or event
+socket message for "run needs you", the Android client, and authoring or editing circuit
+graphs. Run history beyond the key events stays on the desktop.
+
 ## Session-cookie recovery
 
 The session is the HttpOnly `bm_session` cookie, so JavaScript cannot read it and the

@@ -31,6 +31,14 @@
 //!   `services::pool_worker`'s debounced worker thread, tops every mesh's pool
 //!   back to target while the app is idle — the pool self-heals without
 //!   waiting for the next claim or app restart.
+//! * A Mesh whose folder cannot be opened as a git working repository is not
+//!   poolable: [`mesh_repo_unusable`] gates the two paths that create a
+//!   worktree or fetch — the idle fill and the ADR 0020 background sync
+//!   (issue #2348) — so such a mesh costs one cheap libgit2 open per pass
+//!   instead of a doomed `git worktree add` / fetch and a WARN line each time.
+//!   The drain's `git worktree remove` stays ungated on purpose: it drops the
+//!   row before it touches the disk, so it converges in one pass and cannot
+//!   repeat a warning.
 //!
 //! Module layout
 //! -------------
@@ -65,8 +73,11 @@
 
 use crate::db::{self, WarmWorktreeStatus};
 use crate::session_naming::on_spawn;
+use once_cell::sync::Lazy;
 use rusqlite::Connection;
+use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Mutex;
 use tauri::Emitter;
 
 /// Event name broadcast on every state transition that changes a mesh's
@@ -762,6 +773,72 @@ pub fn drain_and_fill_for_mesh(app: &tauri::AppHandle, mesh_id: i64) -> bool {
     fill_mesh_to_target(app, &mesh) > 0
 }
 
+/// Meshes already reported as "not a git working repository" this app run
+/// (issue #2348). Keyed by `(mesh_id, path)` — not id alone — so a mesh whose
+/// folder is re-pointed gets its own line instead of being silently deduped
+/// against the path that was already reported.
+static NON_REPO_REPORTED: Lazy<Mutex<HashSet<(i64, String)>>> =
+    Lazy::new(|| Mutex::new(HashSet::new()));
+
+/// Claim the one-and-only report for this app run, returning `true` when the
+/// caller is the first to see this `(mesh_id, path)`. The latch is the half of
+/// issue #2348 that must stay quiet; the *probe* deliberately is not latched
+/// (see [`mesh_repo_unusable`]).
+fn claim_non_repo_report(mesh_id: i64, path: &str) -> bool {
+    let key = (mesh_id, path.to_string());
+    match NON_REPO_REPORTED.lock() {
+        Ok(mut seen) => seen.insert(key),
+        Err(poisoned) => poisoned.into_inner().insert(key),
+    }
+}
+
+/// Issue #2348: can this Mesh's folder back a worktree at all?
+///
+/// Both pool paths that create a worktree or fetch consult this first — the
+/// idle fill (`fill_mesh_to_target`) and the worker's background sync
+/// (`services::pool_worker`). `create_git_worktree` resolves its
+/// `project_root` through `git::project::resolve` before it touches anything
+/// else, so every folder this probe rejects is a folder whose worktree add
+/// cannot succeed either: a plain folder is libgit2's `NotFound (-3)`, which
+/// is exactly the error the hub log was full of. Attempting it on every idle
+/// tick cost a doomed `git worktree add` and a WARN line each time — 982 of
+/// them in one day of hub log for a single Mesh (`F:\src\life\finance`),
+/// drowning the diagnostics operators actually read.
+///
+/// The probe is that same `resolve`, re-run whenever work is due rather than
+/// latched: a Mesh whose folder is re-mounted, moved or `git init`-ed
+/// mid-session becomes poolable again on the next pass with no app restart.
+/// Only the log is latched, via [`claim_non_repo_report`], which is what holds
+/// the line count to one per Mesh per app run.
+///
+/// The wording is deliberately "cannot be opened as" rather than "is not":
+/// `resolve` also rejects a missing or unreachable folder (an unplugged
+/// drive) and a bare repository, and the reason travels with the one log line
+/// so those stay diagnosable. None of them report success to a caller — the
+/// pool work is skipped, not silently claimed.
+///
+/// **`refresh_stale_warm_worktrees` is deliberately NOT gated**: it runs only
+/// from `on_fetch_completed` (which this gate now makes unreachable for an
+/// unpoolable Mesh — the background sync is skipped, so no ref can advance) or
+/// from `post_spawn_maintenance` after a spawn that already cut a worktree, and
+/// it reports once per spawn rather than once per tick.
+pub(crate) fn mesh_repo_unusable(mesh: &db::WarmPoolMeshRow) -> bool {
+    let Err(reason) = crate::git::project::resolve(&mesh.path) else {
+        return false;
+    };
+    if claim_non_repo_report(mesh.id, &mesh.path) {
+        tracing::warn!(
+            "warm_pool: mesh {} ({}) cannot be opened as a git working \
+             repository; skipping pool fill and background sync (reported once \
+             per app run): {}",
+            mesh.id,
+            mesh.path,
+            reason
+        );
+    }
+    true
+}
+
 /// Drain any excess, then fill a single mesh up to its `pre_spawn_pool_size`
 /// target (issue #613). Each entry is cut one at a time; the loop runs until
 /// the running `available` count reaches `target` or a `git worktree add`
@@ -777,12 +854,21 @@ pub fn drain_and_fill_for_mesh(app: &tauri::AppHandle, mesh_id: i64) -> bool {
 ///
 /// `count`, `drain` and `warm_one` are passed as closures so the orchestration
 /// can be unit-tested without `tauri::AppHandle` (which is hard to mock) — the
-/// production caller passes the real `count_available_warm_for_mesh` /
-/// `drain_excess_warm_entries` / `warm_one_body` (which close over `app`);
-/// tests pass stubs that drive the drain + warm loop with controlled
-/// responses. `count` is `FnOnce` because it is sampled exactly once, which is
-/// the point of issue #1752. See the `fill_mesh_to_target_*` tests at the
-/// bottom of this module (issue #634).
+/// production caller passes the real `mesh_repo_unusable` /
+/// `count_available_warm_for_mesh` / `drain_excess_warm_entries` /
+/// `warm_one_body` (the last two close over `app`); tests pass stubs that
+/// drive the drain + warm loop with controlled responses. `count` is `FnOnce`
+/// because it is sampled exactly once, which is the point of issue #1752.
+/// See the `fill_mesh_to_target_*` tests at the bottom of this module
+/// (issue #634).
+///
+/// `repo_usable` is the issue #2348 precondition for the warm loop, and it is
+/// consulted only when there is a deficit to fill: a mesh already at target (or
+/// with the pool off) has no `git worktree add` that could fail, so it must not
+/// pay for the probe — on an unreachable drive that open is the expensive call.
+/// When it does answer "not a repository", the drain's changes are still
+/// reported and no worktree is ever cut, which is what stops the retry-forever
+/// WARN flood #2348 was filed for.
 ///
 /// Trade-off of the single sample: the running total only knows about the cuts
 /// this call makes, so a concurrent `try_claim` that drains an `available` row
@@ -794,6 +880,7 @@ pub fn drain_and_fill_for_mesh(app: &tauri::AppHandle, mesh_id: i64) -> bool {
 /// nothing else touches the pool during a fill.
 fn fill_mesh_to_target_with(
     mesh: &db::WarmPoolMeshRow,
+    repo_usable: impl FnOnce() -> bool,
     count: impl FnOnce() -> Result<i64, String>,
     drain: impl FnOnce(&db::WarmPoolMeshRow) -> Result<usize, String>,
     warm_one: impl Fn(&db::WarmPoolMeshRow) -> Result<(), String>,
@@ -836,6 +923,19 @@ fn fill_mesh_to_target_with(
             return changes;
         }
     };
+    // Issue #2348: the one thing `warm_one` cannot do is cut a
+    // worktree from a folder that is not a git working repository —
+    // `create_git_worktree` fails there (libgit2 `NotFound (-3)` for a plain
+    // folder) on every attempt, and each attempt used to log its own WARN.
+    // Probe only when there is a deficit to fill, then stop: the mesh reports
+    // no changes, so the idle worker backs off to TICK_SLOW instead of
+    // retrying on every 2s tick. The drain above still runs — it is DB
+    // bookkeeping plus `git worktree remove` on rows this mesh already owns,
+    // it drops the row first, and it converges in one pass, so it cannot
+    // produce a repeating flood.
+    if available < target && !repo_usable() {
+        return changes;
+    }
     while available < target {
         match warm_one(mesh) {
             Ok(()) => {
@@ -876,6 +976,10 @@ fn fill_mesh_to_target(app: &tauri::AppHandle, mesh: &db::WarmPoolMeshRow) -> us
     }
     fill_mesh_to_target_with(
         mesh,
+        // Issue #2348: a folder that isn't a git working repository can never
+        // be filled. Consulted lazily (only when a fill is due) — see
+        // `fill_mesh_to_target_with`.
+        || !mesh_repo_unusable(mesh),
         // Sampled once per fill (issue #1752) — read after the drain so a
         // downsize is reflected.
         || {
@@ -1367,7 +1471,7 @@ pub fn on_fetch_completed(mesh_id: i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     // ---- event name drift guard ----
     //
@@ -1921,6 +2025,7 @@ mod tests {
 
         let changes = fill_mesh_to_target_with(
             &mesh,
+            || true,
             || Ok(0),
             |_| {
                 *drain_calls.borrow_mut() += 1;
@@ -1952,6 +2057,7 @@ mod tests {
 
         let changes = fill_mesh_to_target_with(
             &mesh,
+            || true,
             || {
                 *count_calls.borrow_mut() += 1;
                 Err("database is locked".into())
@@ -1991,6 +2097,7 @@ mod tests {
 
         fill_mesh_to_target_with(
             &mesh,
+            || true,
             || Ok(0),
             |_| Ok(0),
             |_m| {
@@ -2019,6 +2126,7 @@ mod tests {
 
         let changes = fill_mesh_to_target_with(
             &mesh,
+            || true,
             || {
                 *count_calls.borrow_mut() += 1;
                 Ok(0)
@@ -2057,6 +2165,7 @@ mod tests {
 
         let changes = fill_mesh_to_target_with(
             &mesh,
+            || true,
             || Ok(1),
             |_| Ok(0),
             |_m| {
@@ -2084,6 +2193,7 @@ mod tests {
 
         fill_mesh_to_target_with(
             &mesh,
+            || true,
             || Ok(0),
             |_| Err("drain DB error".into()),
             |_m| {
@@ -2115,7 +2225,7 @@ mod tests {
     fn fill_mesh_to_target_with_returns_count_of_warmed_entries() {
         let mesh = mesh_row(6, 3);
 
-        let changes = fill_mesh_to_target_with(&mesh, || Ok(0), |_| Ok(0), |_m| Ok(()));
+        let changes = fill_mesh_to_target_with(&mesh, || true, || Ok(0), |_| Ok(0), |_m| Ok(()));
         assert_eq!(changes, 3, "3 Warmed responses = 3 changes");
     }
 
@@ -2127,6 +2237,7 @@ mod tests {
         let mesh = mesh_row(7, 1);
         let changes = fill_mesh_to_target_with(
             &mesh,
+            || true,
             || Ok(0),
             |_| Ok(2), // drain removed 2 excess rows
             |_m| Ok(()),
@@ -2145,6 +2256,7 @@ mod tests {
 
         let changes = fill_mesh_to_target_with(
             &mesh,
+            || true,
             || Ok(2),
             |_| Ok(0),
             |_m| {
@@ -2166,8 +2278,263 @@ mod tests {
     #[test]
     fn fill_mesh_to_target_with_returns_zero_when_target_is_zero() {
         let mesh = mesh_row(9, 0);
-        let changes = fill_mesh_to_target_with(&mesh, || Ok(0), |_| Ok(0), |_m| Ok(()));
+        let changes = fill_mesh_to_target_with(&mesh, || true, || Ok(0), |_| Ok(0), |_m| Ok(()));
         assert_eq!(changes, 0);
+    }
+
+    // ---- Meshes that are not git working repositories (issue #2348) ----
+    //
+    // A Mesh whose folder cannot be opened as a git working repository can
+    // never back a warm worktree: `create_git_worktree` resolves
+    // `project_root` through `git::project::resolve` first and rejects the same
+    // folders (libgit2 `NotFound (-3)` for a plain folder). Before the gate,
+    // every idle tick cut a doomed worktree and logged a WARN for it (982 such
+    // lines in one day of hub log for one Mesh), and the worker re-attempted
+    // the background fetch on the same doomed premise.
+
+    /// A Mesh row pointing at a real on-disk folder. `mesh_row`'s synthetic
+    /// `/tmp/buildmesh_fill_test_*` path is not openable, which these tests
+    /// need to be exactly the opposite of.
+    fn mesh_row_at(id: i64, target: i64, path: &std::path::Path) -> db::WarmPoolMeshRow {
+        db::WarmPoolMeshRow {
+            id,
+            path: path.to_str().unwrap().to_string(),
+            pre_spawn_pool_size: target,
+            base_ref: "origin/main".to_string(),
+            worktree_directory: None,
+        }
+    }
+
+    /// The gate stops the warm loop — the only step that shells out to git —
+    /// while the drain's bookkeeping still runs and is still reported, so a
+    /// downsize on an unpoolable mesh still converges. Asserting
+    /// `warm_calls == 0` is the regression: before #2348 the loop ran on every
+    /// idle tick and every attempt logged its own WARN.
+    #[test]
+    fn fill_mesh_to_target_with_does_nothing_for_a_non_repository_mesh() {
+        let mesh = mesh_row(2348, 3);
+        let drain_calls = std::cell::RefCell::new(0);
+        let warm_calls = std::cell::RefCell::new(0);
+
+        let changes = fill_mesh_to_target_with(
+            &mesh,
+            || false,
+            || Ok(0),
+            |_| {
+                *drain_calls.borrow_mut() += 1;
+                Ok(3)
+            },
+            |_m| {
+                *warm_calls.borrow_mut() += 1;
+                Ok(())
+            },
+        );
+
+        assert_eq!(
+            *warm_calls.borrow(),
+            0,
+            "a mesh whose folder is not a git working repository must never \
+             reach `git worktree add` (issue #2348)"
+        );
+        assert_eq!(
+            *drain_calls.borrow(),
+            1,
+            "the drain is pure bookkeeping and still runs"
+        );
+        assert_eq!(
+            changes, 3,
+            "the drain's changes are still reported, and no warm is counted"
+        );
+    }
+
+    /// A mesh with nothing to fill never pays for the probe: an at-target (or
+    /// pool-disabled) mesh has no `git worktree add` that could fail, and on
+    /// an unreachable drive that repository open is the expensive call.
+    #[test]
+    fn fill_mesh_to_target_with_skips_the_probe_when_there_is_nothing_to_fill() {
+        let mesh = mesh_row(2349, 2);
+        let probe_calls = std::cell::RefCell::new(0);
+        let warm_calls = std::cell::RefCell::new(0);
+
+        let changes = fill_mesh_to_target_with(
+            &mesh,
+            || {
+                *probe_calls.borrow_mut() += 1;
+                false // would veto every fill if it were consulted
+            },
+            || Ok(2), // already at target
+            |_| Ok(0),
+            |_m| {
+                *warm_calls.borrow_mut() += 1;
+                Ok(())
+            },
+        );
+
+        assert_eq!(
+            *probe_calls.borrow(),
+            0,
+            "an at-target mesh must not pay for the repository probe"
+        );
+        assert_eq!(*warm_calls.borrow(), 0);
+        assert_eq!(changes, 0);
+    }
+
+    /// The probe is the real thing, not a stub: a plain folder reads as
+    /// unusable, a real `git init` repo does not. The repo half is what stops
+    /// the gate from silently disabling every pool in the app.
+    #[test]
+    fn mesh_repo_unusable_is_true_for_a_plain_folder_and_false_for_a_real_repo() {
+        let (_repo_tmp, repo_path) = fresh_git_repo();
+        let plain = tempfile::TempDir::new().expect("tempdir");
+        let repo_mesh = mesh_row_at(9101, 1, std::path::Path::new(&repo_path));
+        let plain_mesh = mesh_row_at(9102, 1, plain.path());
+
+        assert!(
+            !mesh_repo_unusable(&repo_mesh),
+            "a real repository must stay poolable — the gate is not a pool kill switch"
+        );
+
+        // Claim this mesh's report first: the WARN-budget test below owns the
+        // log line for its own paths, and this test is about the probe's truth
+        // value, not about who logs it.
+        claim_non_repo_report(plain_mesh.id, &plain_mesh.path);
+        assert!(
+            mesh_repo_unusable(&plain_mesh),
+            "a folder that is not a git working repository must be reported unusable"
+        );
+    }
+
+    /// The log latch: the FIRST report for a `(mesh, path)` wins, repeats are
+    /// silent, and a re-pointed mesh reports again. Deterministic (no
+    /// subscriber involved), so it pins the "at most one line per app run"
+    /// budget even where the tracing-capture test cannot run.
+    #[test]
+    fn non_repo_report_latch_covers_each_mesh_path_once() {
+        let id = std::process::id() as i64 * 1000 + 9103;
+        let first_path = format!("C:/nonexistent/mesh-{}/a", id);
+        let moved_path = format!("C:/nonexistent/mesh-{}/b", id);
+
+        assert!(
+            claim_non_repo_report(id, &first_path),
+            "the first sighting of a mesh path must be reportable"
+        );
+        assert!(
+            !claim_non_repo_report(id, &first_path),
+            "a repeat sighting must stay silent — this is the #2348 log flood"
+        );
+        assert!(
+            claim_non_repo_report(id, &moved_path),
+            "a mesh re-pointed at another folder is a new condition and must \
+             report its own line"
+        );
+        assert!(
+            claim_non_repo_report(id + 1, &first_path),
+            "the latch is keyed per mesh AND path: a second mesh on the same \
+             unusable folder still has to be reported"
+        );
+    }
+
+    /// The observable half of the flood fix: a second pass over the SAME
+    /// non-repository mesh adds no log line at all. The idle worker runs this
+    /// path every tick, so "the second pass is silent" is exactly the
+    /// regression #2348 reported.
+    ///
+    /// A hand-rolled capturing subscriber scoped via `with_default` (the same
+    /// shape as `agent::provider_menu`'s log-budget test) keeps this
+    /// parallel-safe without a global subscriber or a new dev-dependency.
+    /// The first pass also asserts that exactly one line arrives — `tracing`
+    /// caches per-callsite interest globally, so that assertion is what proves
+    /// the capture is live and makes the silence below non-vacuous.
+    #[test]
+    fn mesh_repo_unusable_stays_silent_on_repeat_passes() {
+        use tracing::field::{Field, Visit};
+        use tracing::span::{Attributes, Id, Record};
+        use tracing::{Event, Metadata};
+
+        struct MessageRecorder {
+            messages: Vec<String>,
+        }
+        impl Visit for MessageRecorder {
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    let rendered = format!("{value:?}");
+                    self.messages.push(
+                        rendered
+                            .strip_prefix('"')
+                            .and_then(|inner| inner.strip_suffix('"'))
+                            .unwrap_or(&rendered)
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        type Captured = Arc<Mutex<Vec<String>>>;
+        struct Capture {
+            messages: Captured,
+        }
+        impl tracing::Subscriber for Capture {
+            fn enabled(&self, _: &Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &Attributes<'_>) -> Id {
+                Id::from_u64(1)
+            }
+            fn record(&self, _: &Id, _: &Record<'_>) {}
+            fn record_follows_from(&self, _: &Id, _: &Id) {}
+            fn event(&self, event: &Event<'_>) {
+                let mut recorder = MessageRecorder {
+                    messages: Vec::new(),
+                };
+                event.record(&mut recorder);
+                self.messages.lock().unwrap().extend(recorder.messages);
+            }
+            fn enter(&self, _: &Id) {}
+            fn exit(&self, _: &Id) {}
+        }
+
+        let plain = tempfile::TempDir::new().expect("tempdir");
+        let mesh = mesh_row_at(std::process::id() as i64 * 1000 + 9104, 1, plain.path());
+        let captured: Captured = Arc::new(Mutex::new(Vec::new()));
+        let run_pass = || {
+            tracing::dispatcher::with_default(
+                &tracing::dispatcher::Dispatch::new(Capture {
+                    messages: captured.clone(),
+                }),
+                || {
+                    tracing::callsite::rebuild_interest_cache();
+                    mesh_repo_unusable(&mesh)
+                },
+            )
+        };
+        let non_repo_lines = || {
+            captured
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| m.contains("cannot be opened as a git working repository"))
+                .count()
+        };
+
+        assert!(run_pass(), "precondition: a plain folder is not poolable");
+        assert_eq!(
+            non_repo_lines(),
+            1,
+            "the first report emits exactly one line — also what proves this \
+             capture is live, so the silence asserted below is not vacuous"
+        );
+
+        tracing::callsite::rebuild_interest_cache();
+        captured.lock().unwrap().clear();
+        assert!(
+            run_pass(),
+            "the probe stays true on the second pass — the folder is still not a repo"
+        );
+
+        assert_eq!(
+            non_repo_lines(),
+            0,
+            "a repeat pass over a non-repository mesh must add no log line (issue #2348)"
+        );
     }
 
     // ---- End-to-end integration: drain-then-fill on a real temp git repo ----
