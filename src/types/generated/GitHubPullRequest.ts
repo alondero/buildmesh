@@ -84,4 +84,12 @@ mergeable: boolean | null,
  * `unstable`, `unknown`, …) mapped from GraphQL `mergeStateStatus`.
  * Used for the flag wording. `#[serde(default)]` for old payloads.
  */
-mergeable_state: string, };
+mergeable_state: string, 
+/**
+ * Combined check/status state on the head commit; absent means not reported.
+ */
+checks_state: string | null, 
+/**
+ * GitHub review decision; absent means no decision was reported.
+ */
+review_decision: string | null, };

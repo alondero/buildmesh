@@ -38,6 +38,7 @@ type Props = {
   onViewChange?: (view: "overview" | "work" | "capture") => void;
   onOpenAgentNodes: (mesh: Mesh) => void;
   onOpenIssues: (mesh: Mesh) => void;
+  onOpenPulls?: (mesh: Mesh) => void;
   onOffline: () => void;
   onAuthFailed: () => void;
 };
@@ -72,6 +73,7 @@ export default function NodeList({
   onViewChange,
   onOpenAgentNodes,
   onOpenIssues,
+  onOpenPulls,
   onOffline,
   onAuthFailed,
 }: Props) {
@@ -696,6 +698,7 @@ export default function NodeList({
                     </div>
 
                     <div className="mesh-shortcuts">
+                      {onOpenPulls && <button className="chip-btn" onClick={() => onOpenPulls(mesh)}>Pull requests</button>}
                       <button
                         className="chip-btn"
                         onClick={() => onOpenIssues(mesh)}
@@ -801,6 +804,11 @@ export default function NodeList({
             setMeshActions(null);
             onOpenIssues(m);
           }}
+          onOpenPulls={onOpenPulls ? () => {
+            const m = meshActions;
+            setMeshActions(null);
+            onOpenPulls(m);
+          } : undefined}
         />
       )}
 
@@ -862,11 +870,13 @@ function MeshActionsSheet({
   onClose,
   onOpenAgentNodes,
   onOpenIssues,
+  onOpenPulls,
 }: {
   mesh: Mesh;
   onClose: () => void;
   onOpenAgentNodes: () => void;
   onOpenIssues: () => void;
+  onOpenPulls?: () => void;
 }) {
   return (
     <Sheet onClose={onClose} testId="mesh-actions-sheet">
@@ -883,6 +893,7 @@ function MeshActionsSheet({
       >
         {mesh.name}
       </h3>
+      {onOpenPulls && <SheetButton onClick={onOpenPulls} testId="mesh-sheet-pulls" label="Pull requests" hint="See open PR status" />}
       <SheetButton
         onClick={onOpenAgentNodes}
         testId="mesh-sheet-discovered-nodes"

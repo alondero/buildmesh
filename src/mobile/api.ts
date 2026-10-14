@@ -309,6 +309,30 @@ export async function ghAuthOk(): Promise<boolean> {
   return j.ok;
 }
 
+export async function listPulls(meshId: number): Promise<import('../types/generated/GitHubPullRequestFeed').GitHubPullRequestFeed> {
+  const feed = await (await apiFetch(`/api/meshes/${meshId}/pulls?state=open`)).json() as import('../types/generated/GitHubPullRequestFeed').GitHubPullRequestFeed;
+  if (!Array.isArray(feed?.items) || typeof feed.completeness?.complete !== 'boolean') {
+    throw new Error('The desktop sent an unexpected pull requests response. Update Buildmesh or refresh to retry.');
+  }
+  return feed;
+}
+
+export async function prMergeability(meshId: number, number: number): Promise<import('../types/generated/PrMergeability').PrMergeability> {
+  const result = await (await apiFetch(`/api/meshes/${meshId}/pulls/${number}/mergeability`)).json() as import('../types/generated/PrMergeability').PrMergeability;
+  if (!result || (result.mergeable !== null && typeof result.mergeable !== 'boolean') || typeof result.mergeable_state !== 'string') {
+    throw new Error('The desktop sent an unexpected mergeability response. Refresh before trying again.');
+  }
+  return result;
+}
+
+export async function squashMerge(meshId: number, number: number, url: string): Promise<void> {
+  await apiFetch(`/api/meshes/${meshId}/pulls/${number}/merge`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+  });
+}
+
 /**
  * Preview the source/base pair a create-PR would use.
  *

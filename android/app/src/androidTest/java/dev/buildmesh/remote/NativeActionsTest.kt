@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.activity.ComponentActivity
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.core.app.ApplicationProvider
@@ -35,6 +36,8 @@ class NativeActionsTest {
             server.dispatcher = object : Dispatcher() {
                 override fun dispatch(request: RecordedRequest): MockResponse {
                     if (request.path == "/api/session") return MockResponse().setResponseCode(204)
+                    if (request.path == "/api/agents/9/git/branch") return MockResponse().setBody("""{"branch":"main"}""")
+                    if (request.path == "/api/meshes/0/pulls?state=open") return MockResponse().setBody("""{"items":[],"completeness":{"returned":0,"pages_fetched":0,"complete":true,"incomplete_reason":null,"reported_total":null}}""")
                     requests.add(request)
                     return respond(request)
                 }
@@ -187,6 +190,61 @@ class NativeActionsTest {
             val request = requests.single { it.method == "POST" }
             assertEquals("/api/meshes/3/pr", request.path)
             assertEquals("""{"title":"Native change","body":"Explains the change","node_id":17,"head_branch":"topic","base_branch":"main"}""", request.body.readUtf8())
+        }
+    }
+
+    private fun pullResponse(items: String, complete: Boolean = true) = """{"items":$items,"completeness":{"returned":1,"pages_fetched":1,"complete":$complete,"incomplete_reason":${if (complete) "null" else "\"safety_cap\""},"reported_total":null}}"""
+    private val openPull = """[{"number":42,"title":"Fix search","body":"","url":"https://github.com/o/r/pull/42","state":"open","draft":false,"head_ref":"feature/search",
+        "head_repo_owner":"o","head_repo_clone_url":"https://github.com/o/r.git","head_sha":"abc","author":"o","mergeable":true,"mergeable_state":"clean","checks_state":"success","review_decision":"approved"}]"""
+
+    @Test fun aNodePullShowsStatusConfirmsSquashAndRemovesAnAcknowledgedMerge() {
+        var merged = false
+        withDesktop({ request -> when (request.path) {
+            "/api/agents/17/git/branch" -> MockResponse().setBody("""{"branch":"feature/search"}""")
+            "/api/meshes/3/pulls?state=open" -> MockResponse().setBody(pullResponse(if (merged) "[]" else openPull))
+            "/api/meshes/3/pulls/42/mergeability" -> MockResponse().setBody("""{"mergeable":true,"mergeable_state":"clean"}""")
+            "/api/meshes/3/pulls/42/merge" -> { merged = true; MockResponse().setBody("""{"url":"https://github.com/o/r/pull/42","pr_number":42}""") }
+            "/api/nodes", "/api/meshes", "/api/providers" -> MockResponse().setBody("[]")
+            else -> MockResponse().setResponseCode(404)
+        } }) { vm, requests ->
+            val node = Json.parseToJsonElement("""{"id":17,"mesh_id":3,"name":"Fix search","branch":"trunk","provider":"terminal","status":"idle"}""").obj()
+            compose.setContent { BuildmeshTheme { NodeScreen(node, vm, {}, {}, {}) } }
+            compose.waitUntil(10000) { compose.onAllNodesWithText("Checks: passing").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("Review: approved").assertExists()
+            compose.onNodeWithText("Squash and merge").performScrollTo().performClick()
+            compose.onNodeWithText("Squash-merge PR #42 and delete its branch on GitHub?").assertExists()
+            assertFalse(requests.any { it.method == "POST" })
+            compose.onNodeWithText("Cancel").performClick()
+            compose.onNodeWithText("Squash and merge").performClick()
+            compose.onNode(hasClickAction() and hasText("Confirm squash merge")).performClick()
+            compose.waitUntil(10000) { merged && !vm.state.value.busy && compose.onAllNodesWithText("PR #42: Fix search").fetchSemanticsNodes().isEmpty() }
+            assertEquals("PR #42 squash-merged. Branch deleted.", vm.state.value.notice)
+            val post = requests.single { it.method == "POST" }
+            assertEquals("/api/meshes/3/pulls/42/merge", post.path)
+            assertEquals("""{"url":"https://github.com/o/r/pull/42"}""", post.body.readUtf8())
+        }
+    }
+
+    @Test fun meshPullsDiscloseTruncationAndNodeMergeBecomesDisabledAfterStatusRefresh() {
+        var blocked = false
+        withDesktop({ request -> when (request.path) {
+            "/api/agents/17/git/branch" -> MockResponse().setBody("""{"branch":"feature/search"}""")
+            "/api/meshes/3/pulls?state=open" -> MockResponse().setBody(pullResponse(if (blocked) openPull.replace("\"clean\"", "\"blocked\"") else openPull, false))
+            else -> MockResponse().setResponseCode(404)
+        } }) { vm, requests ->
+            var nodeId by androidx.compose.runtime.mutableStateOf<Long?>(null)
+            compose.setContent { BuildmeshTheme { PullRequestsPanel(vm.api!!, 3, vm, nodeId) } }
+            compose.waitUntil(10000) { compose.onAllNodesWithText("Checks: passing").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("Showing first 1 pull requests. Results are incomplete (safety_cap).").assertExists()
+            compose.onNodeWithText("Squash and merge").assertDoesNotExist()
+            compose.runOnIdle { nodeId = 17 }
+            compose.waitUntil(10000) { compose.onAllNodesWithText("Squash and merge").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("Squash and merge").assertIsEnabled()
+            blocked = true
+            compose.onNodeWithText("Refresh PR status").performClick()
+            compose.waitUntil(10000) { compose.onAllNodesWithText("feature/search · open · Blocked by required checks or reviews").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("Squash and merge").assertIsNotEnabled()
+            assertFalse(requests.any { it.method == "POST" })
         }
     }
 

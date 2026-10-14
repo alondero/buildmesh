@@ -11,6 +11,7 @@ import { AgentNode, Mesh, clearStoredToken, restoreSession } from "./api";
 import Connect from "./screens/Connect";
 import NodeList from "./screens/NodeList";
 import NodeOverview from "./screens/NodeOverview";
+import PullRequestsScreen from './screens/PullRequests';
 import { ScreenLoading } from "./ui";
 
 // Terminal pulls in xterm.js + FitAddon (~90 KB gzipped). Most mobile
@@ -50,7 +51,8 @@ export type Screen =
       terminalFromOverview?: boolean;
     } & WorkState)
   | { kind: "sessions"; mesh: Mesh }
-  | { kind: "issues"; mesh: Mesh };
+  | { kind: "issues"; mesh: Mesh }
+  | { kind: "pulls"; mesh: Mesh };
 
 type WorkScreen = Extract<
   Screen,
@@ -113,6 +115,7 @@ export function parentOf(s: Screen): Screen {
         : { kind: "list" };
     case "sessions":
     case "issues":
+    case "pulls":
       return { kind: "list" };
     case "changes":
       return s.fromOverview
@@ -375,6 +378,10 @@ export default function App() {
             if (activeRecoveryVersion !== recoveryVersionRef.current) return;
             navigate({ kind: "issues", mesh });
           }}
+          onOpenPulls={(mesh) => {
+            if (activeRecoveryVersion !== recoveryVersionRef.current) return;
+            navigate({ kind: 'pulls', mesh });
+          }}
           onOffline={() => {
             if (activeRecoveryVersion !== recoveryVersionRef.current) return;
             setOffline(true);
@@ -516,6 +523,9 @@ export default function App() {
           />
         </Suspense>
       )}
+      {screen.kind === 'pulls' && <Suspense fallback={<ScreenLoading />}>
+        <PullRequestsScreen meshId={screen.mesh.id} name={screen.mesh.name} onBack={goBack} onAuthFailed={handleAuthFailedForActiveScreen} />
+      </Suspense>}
       {prSheet && (
         <Suspense fallback={null}>
           <CreatePrSheet

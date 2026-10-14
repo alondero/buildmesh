@@ -163,6 +163,14 @@ Pull requests are created from an Agent Node, because the create route requires
 preview is rejected instead of published (see the
 [mobile client](mobile.md#create-pr-is-node-scoped)).
 
+Node details also show the same-repository open PR for the live worktree
+branch, with checks, review decision and mergeability. **Squash and merge**
+requires confirmation, rechecks mergeability, and deletes the branch after
+merging. The mesh's **Pull requests** shortcut lists open PRs and discloses
+truncated results. Status refreshes while foregrounded; **Refresh PR status**
+retries a failed read. See [PR status and squash merge](mobile.md#pr-status-and-squash-merge)
+for gates and recovery after an interrupted merge.
+
 The client reads untyped JSON, so the resource screens (issues, archive,
 changes, diff, PR source) decode a response inside their loader's error
 handling, and the JSON helpers raise a readable `IllegalStateException` rather

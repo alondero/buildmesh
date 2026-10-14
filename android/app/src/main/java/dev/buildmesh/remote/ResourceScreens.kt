@@ -176,7 +176,7 @@ fun CreatePrScreen(api: BuildmeshApi, meshId: Long, nodeId: Long, vm: BuildmeshV
 }
 
 @Composable
-private fun ExternalLink(url: String, label: String) {
+fun ExternalLink(url: String, label: String) {
     val handler = LocalUriHandler.current
     TextButton(onClick = { if (url.startsWith("https://")) handler.openUri(url) }) { Text(label) }
 }

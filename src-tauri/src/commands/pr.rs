@@ -139,6 +139,12 @@ pub struct GitHubPullRequest {
     /// Used for the flag wording. `#[serde(default)]` for old payloads.
     #[serde(default)]
     pub mergeable_state: String,
+    /// Combined check/status state on the head commit; absent means not reported.
+    #[serde(default)]
+    pub checks_state: Option<String>,
+    /// GitHub review decision; absent means no decision was reported.
+    #[serde(default)]
+    pub review_decision: Option<String>,
 }
 
 /// Wire shape of `get_pr_mergeability` — the per-PR enrichment the panel
@@ -379,6 +385,8 @@ pub(crate) fn get_repo_pulls_blocking(
             author: pr.author,
             mergeable: pr.mergeable,
             mergeable_state: pr.mergeable_state,
+            checks_state: pr.checks_state,
+            review_decision: pr.review_decision,
         })
         .collect();
 
