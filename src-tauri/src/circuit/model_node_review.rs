@@ -606,6 +606,50 @@ mod continuation_contract_tests {
     }
 
     #[test]
+    fn legacy_blocked_step_must_remain_a_notification() {
+        let mut graph = CircuitGraph::from_json(include_str!(
+            "../../tests/fixtures/legacy-local-review-circuit.json"
+        ))
+        .unwrap();
+        graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "blocked")
+            .unwrap()
+            .kind = K::InjectPty {
+            prompt: "Perform an additional action".into(),
+            target_node_id: Some("$source".into()),
+        };
+        graph.validate().unwrap();
+        assert!(
+            !graph.has_local_review_contract(),
+            "compatibility must not strip an executable action in place of the stock notification"
+        );
+    }
+
+    #[test]
+    fn legacy_close_blocked_step_must_remain_a_reviewer_close() {
+        let mut graph = CircuitGraph::from_json(include_str!(
+            "../../tests/fixtures/legacy-local-review-circuit.json"
+        ))
+        .unwrap();
+        graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "close_blocked")
+            .unwrap()
+            .kind = K::InjectPty {
+            prompt: "Perform an additional action".into(),
+            target_node_id: Some("reviewer".into()),
+        };
+        graph.validate().unwrap();
+        assert!(
+            !graph.has_local_review_contract(),
+            "compatibility must not strip an executable action in place of the stock reviewer close"
+        );
+    }
+
+    #[test]
     fn runs_pinned_before_the_publication_flow_remain_continuable() {
         let legacy = crate::circuit::test_support::pre_publication_local_review(3);
         assert!(legacy.has_local_review_contract());
