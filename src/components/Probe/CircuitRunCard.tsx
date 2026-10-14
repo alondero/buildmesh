@@ -168,10 +168,11 @@ interface CircuitRunCardProps {
   reviewCircuit: ReviewCircuitMetadata | null;
   /** Circuit `node_id` → blueprint node, for role/verdict labels. */
   nodeIndex: NodeIndex;
-  /** Resolve an Agent Node's display name, or `null` when it no longer exists. */
+  /** Resolve an Agent Node's display name, or `null` when absent from the workspace. */
   agentName: (nodeId: number) => string | null;
   /** Focus (and solo) an Agent Node — the card's link into the canvas. */
   onFocusAgent: (nodeId: number) => void;
+  openingAgentId: number | null;
   /** True for a beat after the user linked here from that agent node. */
   focused?: boolean;
 }
@@ -201,6 +202,7 @@ export function CircuitRunCard({
   nodeIndex,
   agentName,
   onFocusAgent,
+  openingAgentId,
   focused = false,
 }: CircuitRunCardProps) {
   const { run, steps } = detail;
@@ -360,17 +362,16 @@ export function CircuitRunCard({
               {linkedAgentLabel ?? `#${linkedAgent}`}
             </span>
           )}
-          {linkedAgentLabel !== null && (
-            <button
-              type="button"
-              onClick={() => onFocusAgent(linkedAgent)}
-              data-testid={`run-agent-open-${run.id}`}
-              title="Show this Agent Node on the canvas"
-              className="min-h-[24px] px-1 rounded-md text-accent-cyan hover:bg-accent-cyan/10"
-            >
-              Open
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={() => onFocusAgent(linkedAgent)}
+            disabled={openingAgentId !== null}
+            data-testid={`run-agent-open-${run.id}`}
+            title="Open agent"
+            className="min-h-[24px] px-1 rounded-md text-accent-cyan hover:bg-accent-cyan/10"
+          >
+            {openingAgentId === linkedAgent ? 'Opening…' : 'Open'}
+          </button>
         </div>
       )}
 
@@ -587,16 +588,15 @@ export function CircuitRunCard({
                           <span className="font-mono text-text-secondary">
                             {stepAgentLabel ?? `#${stepAgent}`}
                           </span>
-                          {stepAgentLabel !== null && (
-                            <button
-                              type="button"
-                              onClick={() => onFocusAgent(stepAgent)}
-                              data-testid={`run-step-agent-open-${run.id}-${s.node_id}`}
-                              className="ml-1 text-accent-cyan hover:underline"
-                            >
-                              Open
-                            </button>
-                          )}
+                          <button
+                            type="button"
+                            onClick={() => onFocusAgent(stepAgent)}
+                            disabled={openingAgentId !== null}
+                            data-testid={`run-step-agent-open-${run.id}-${s.node_id}`}
+                            className="ml-1 text-accent-cyan hover:underline"
+                          >
+                            {openingAgentId === stepAgent ? 'Opening…' : 'Open'}
+                          </button>
                         </span>
                       )}
                     </div>

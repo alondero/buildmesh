@@ -525,11 +525,32 @@ export function CircuitsProbeTab() {
     (nodeId: number) => useAgentNodeStore.getState().nodesById[nodeId]?.name ?? null,
     []
   );
-  const handleFocusAgent = useCallback((nodeId: number) => {
-    if (!focusAgentNode(nodeId)) {
-      // The node was archived or deleted since the run was rendered; say so
-      // rather than leaving the click feeling broken.
-      setFocusNotice(`Agent node #${nodeId} is no longer available.`);
+  const [openingAgentId, setOpeningAgentId] = useState<number | null>(null);
+  const openingAgentRef = useRef(false);
+  const handleFocusAgent = useCallback(async (nodeId: number) => {
+    if (openingAgentRef.current) return;
+    setFocusNotice(null);
+    if (focusAgentNode(nodeId)) return;
+    openingAgentRef.current = true;
+    setOpeningAgentId(nodeId);
+    const meshId = activeMeshIdRef.current;
+    try {
+      const { reopenAgentNode } = await import('../../lib/tauri/history');
+      const node = await reopenAgentNode(nodeId);
+      useAgentNodeStore.getState().adoptAgentNode(node);
+      if (useAgentNodeStore.getState().nodesById[nodeId]?.status === 'archived') {
+        useAgentNodeStore.getState().patchAgentNode(nodeId, { status: node.status });
+      }
+      if (mountedRef.current && activeMeshIdRef.current === meshId && !focusAgentNode(nodeId)) {
+        setFocusNotice(`Agent node #${nodeId} is no longer available.`);
+      }
+    } catch (error) {
+      if (mountedRef.current && activeMeshIdRef.current === meshId) {
+        setFocusNotice(`Could not open agent node #${nodeId}: ${formatError(error)}`);
+      }
+    } finally {
+      openingAgentRef.current = false;
+      if (mountedRef.current) setOpeningAgentId(null);
     }
   }, []);
 
@@ -1219,6 +1240,7 @@ setQueueWaits({});
                           nodeIndex={nodeIndex}
                           agentName={agentName}
                           onFocusAgent={handleFocusAgent}
+                          openingAgentId={openingAgentId}
                           focused={highlightRunId === detail.run.id}
                           capacity={capacity}
                           expanded={runExpandOverrides[detail.run.id] ?? false}

@@ -335,6 +335,12 @@ finished and how long it ran. Time spent waiting in the queue is not counted.
 Circuit Run History opens on the key events; **Show technical detail** reveals the
 rest.
 
+In Activity or History, expand a run and choose **Open** beside a step's agent
+to return to its canvas, including the review agent. If the agent is closed,
+Buildmesh restores it from Agent History. A restored agent opens suspended;
+resume its saved session to interact with it again. If restoration fails, the
+inspector shows the error and you can retry **Open**.
+
 Expand the run and inspect its reason and Circuit Run History. The reason can
 identify missing session/report evidence, changed input, or uncertain input
 tracking. Finish or clear a real draft before rechecking; answer an actual

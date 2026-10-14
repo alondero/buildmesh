@@ -16,13 +16,17 @@
     {
       "value": 1140000,
       "reason": "PR #2249 bumped @tauri-apps/api from 2.11.x to 2.12.x (and aligned the four @tauri-apps/plugin-* JS packages with their resolved Rust crate versions from #2211) so `tauri-build`'s preflight would accept the tauri 2.12.x / plugin 2.4.x / 2.7.x / 2.13.x Cargo resolved minors. The 2.12.x JS API surface added +450 B minified raw (measured 1,130,450 B vs the 1,130,000 B cap) to the entry chunk. Aligning the JS floor to the exact Rust resolved versions (instead of the latest patch) keeps the lockfile and `Cargo.lock` on the same point-release, which avoids further per-patch churn on the next dependabot run. Bumping the raw cap by 10 kB absorbs the bump plus a small margin; the gzip cap stays unchanged at 360 kB (transfer axis retains ~22 kB of headroom) and the entry CSS cap is unaffected."
+    },
+    {
+      "value": 1141000,
+      "reason": "Circuit Activity/History can restore closed review agents through the existing Agent History helper. Loading that helper on demand creates one shared lazy chunk and adds 32 B to the initial chunk's preload map (Windows baseline 1139995 B, changed 1140027 B). The baseline had only 5 B of raw headroom. Raising the raw cap by 1 kB accommodates the manifest entry with a small margin; restoration code remains lazy, and the gzip and CSS caps stay unchanged."
     }
   ],
   "checks": [
     {
       "label": "Desktop entry JS (dist/assets/index-*.js)",
       "pattern": "index-*.js",
-      "maxRaw": 1140000,
+      "maxRaw": 1141000,
       "maxGzip": 360000
     },
     {

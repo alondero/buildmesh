@@ -51,6 +51,10 @@ the last worker check, not a promised start time. Queue retains admission order,
 keyboard/drag reordering and cancellation, with issue titles as the primary label.
 
 Run cards start collapsed. Open a card for the step timeline, reports and evidence;
+each retained step agent association offers Open, including reviewers absent
+from the workspace. The Probe uses the existing agent-history reopen command
+to restore closed nodes as suspended, adopts the returned row and focuses its
+canvas. Live nodes focus directly; restoration errors remain visible and retryable.
 Resolve reveals recovery actions for uncertain or failed steps. Review gates that
 are unverified offer explicit **Review passed** and **Request changes** decisions
 when no known work/input/evidence blocker remains. History reads check action
