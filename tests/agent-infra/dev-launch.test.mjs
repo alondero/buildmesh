@@ -107,7 +107,8 @@ test('detached Vite returns, survives its CLI, and stops only its worktree serve
     for (const dir of [first, second]) {
       const stopped = await run(process.execPath, [cli(dir), 'stop']);
       assert.equal(stopped.code, 0, stopped.output);
-      rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+      // Let pending child-process handle cleanup run during bounded removal.
+      await rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
   }
 });

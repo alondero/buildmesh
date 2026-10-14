@@ -7,6 +7,63 @@
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scoped_project_status_stage_and_revert_use_repository_paths() {
+        use crate::commands::git::{
+            get_git_status_blocking, revert_file_blocking, stage_file_blocking,
+        };
+        let td = crate::env::test_helpers::TestDir::new("scoped-actions");
+        let repo = crate::env::test_helpers::init_repo_with_commit(
+            td.path(),
+            &[
+                ("family/parents/file.txt", "before\n"),
+                ("sibling.txt", "before\n"),
+            ],
+        );
+        std::fs::write(td.path().join("family/parents/file.txt"), "after\n").unwrap();
+        std::fs::write(td.path().join("sibling.txt"), "outside\n").unwrap();
+        let selected = td
+            .path()
+            .join("family/parents")
+            .to_string_lossy()
+            .to_string();
+        let status = get_git_status_blocking(selected.clone()).unwrap();
+        assert_eq!(
+            status
+                .iter()
+                .find(|f| f.path == "family/parents/file.txt")
+                .unwrap()
+                .project_path
+                .as_deref(),
+            Some("file.txt")
+        );
+        assert_eq!(
+            status
+                .iter()
+                .find(|f| f.path == "sibling.txt")
+                .unwrap()
+                .project_path,
+            None
+        );
+        stage_file_blocking(&selected, "family/parents/file.txt").unwrap();
+        assert!(repo
+            .status_file(std::path::Path::new("family/parents/file.txt"))
+            .unwrap()
+            .is_index_modified());
+        revert_file_blocking(&selected, "family/parents/file.txt").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(td.path().join("family/parents/file.txt")).unwrap(),
+            "before\n"
+        );
+        std::fs::write(td.path().join("family/parents/new.txt"), "new\n").unwrap();
+        stage_file_blocking(&selected, "family/parents/new.txt").unwrap();
+        revert_file_blocking(&selected, "family/parents/new.txt").unwrap();
+        assert!(!td.path().join("family/parents/new.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(td.path().join("sibling.txt")).unwrap(),
+            "outside\n"
+        );
+    }
     use std::fs;
     use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};

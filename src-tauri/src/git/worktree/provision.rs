@@ -25,7 +25,7 @@
 //! - **`Upgraded { entry, host_path, elapsed_ms }`** — a Manual spawn
 //!   claimed a warm pool entry. The pool's slug is the node's
 //!   `worktree_name`, so the pool directory IS already at `host_path`;
-//!   `git checkout -B <branch>` aligns the worktree's mode with the
+//!   `git checkout -b <branch>` aligns the worktree's mode with the
 //!   mesh's `worktree_mode`, and `.worktreeinclude` is re-applied so the
 //!   agent sees the live source files, not the stale prewarm snapshot
 //!   (issue #639 gap 1). `entry` is what the caller hands to
@@ -397,7 +397,7 @@ pub(crate) fn read_origin_ref_sha(project_root: &str, remote_ref: &str) -> Optio
 /// Upgrade a warm pool entry from detached HEAD to the mesh's configured
 /// worktree mode (issue #609, PRD #608 §3). The pool cuts every entry as
 /// `detached` so a future claim can adopt the directory without ever
-/// touching the mesh's branch refs — the cost is one `git checkout -B
+/// touching the mesh's branch refs — the cost is one `git checkout -b
 /// <branch>` (branched mode, ~50ms) or no-op (detached mode, ~5ms).
 ///
 /// This is the entire warm-path "checkout" cost the tracer bullet buys: the
@@ -407,10 +407,8 @@ pub(crate) fn read_origin_ref_sha(project_root: &str, remote_ref: &str) -> Optio
 /// scanning freshly-written files is paid ONCE on app startup, not per
 /// spawn.
 ///
-/// Best-effort by design: any failure here is logged by the caller and the
-/// spawn falls through. The agent lands on the warm entry's current HEAD
-/// (still at base_ref) instead of the mesh's named branch — strictly worse
-/// than the branched path, but never worse than a cold spawn would be.
+/// Failure returns the manual claim to the pool and leaves the node in error;
+/// the caller does not launch a detached fallback.
 ///
 /// `command_no_window` already applies CREATE_NO_WINDOW on Windows
 /// (`process_util::command_no_window`), so we don't need per-OS cfg
@@ -424,15 +422,8 @@ pub(crate) fn upgrade_warm_to_mode(
     if mode == "detached" {
         // No-op: the pool already cut the entry as detached.
     } else {
-        // Branched mode: `git checkout -B <branch>` from the current HEAD. `-B`
-        // (uppercase) is deliberate here — a manual spawn's branch IS the pool's
-        // preassigned slug (a random adj-adj-noun like `bold-amber-fox`), so a
-        // collision with a pre-existing branch is vanishingly unlikely and `-B`
-        // keeps the call idempotent across a re-claim of a still-detached entry.
-        // (The Issue/PR path uses `-b` instead — see `checkout_worktree_to_base` —
-        // because its branch name is deterministic and `-B` would force-reset a
-        // user's prior work.)
-        run_git_checkout(host_path, &["-B", branch_name])?;
+        // Refuse an existing branch instead of resetting sibling work.
+        run_git_checkout(host_path, &["-b", branch_name])?;
     }
     // Re-apply `.worktreeinclude` so the manual warm claim matches what
     // `create_git_worktree` and `adopt_warm_worktree_by_move` already do
@@ -481,7 +472,7 @@ pub(crate) fn adopt_warm_worktree_by_move(
     // pool entry exactly where it was.
     if mode == "branched" {
         let host_root = crate::env::to_host_path(project_root);
-        match git2::Repository::open(&host_root) {
+        match crate::git::project::open(&host_root) {
             Ok(repo) => {
                 if repo
                     .find_branch(branch_name, git2::BranchType::Local)
@@ -585,7 +576,7 @@ fn run_git_checkout(host_path: &str, args: &[&str]) -> Result<(), String> {
 /// `Issue` and `PullRequest` adopt the warm entry via `git worktree move` to
 /// the node's `gh{N}-`/`pr{N}-` name and `git checkout` it onto the resolved
 /// base SHA. `Manual` keeps the pool's pre-assigned slug as the node's name
-/// and `git checkout -B`s it onto the mesh's mode (issue #609).
+/// and `git checkout -b`s it onto the mesh's mode (issue #609).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnSource {
     Manual,
@@ -670,6 +661,12 @@ pub struct ProvisionHooks {
 /// what-happened; the production impl builds the wire payload (`NodeRenamed`)
 /// and the per-mesh maintenance thread from those arguments.
 pub(crate) trait ProvisionSink: Sync {
+    /// Return a refused manual upgrade to the pool without adopting its slug.
+    fn return_warm_row(
+        &self,
+        entry: &crate::services::warm_pool::ClaimedWarmEntry,
+        mesh_id: i64,
+    ) -> Result<(), String>;
     // `Sync` is required because `&dyn ProvisionSink` crosses a
     // `spawn_blocking` boundary inside `provision_for_spawn`'s callers
     // (the orchestrator sends the sink across threads). The trade-off —
@@ -724,6 +721,16 @@ pub(crate) struct AppHandleSink {
 }
 
 impl ProvisionSink for AppHandleSink {
+    fn return_warm_row(
+        &self,
+        entry: &crate::services::warm_pool::ClaimedWarmEntry,
+        mesh_id: i64,
+    ) -> Result<(), String> {
+        crate::db::mark_warm_worktree_available(entry.id, entry.base_sha.as_deref())
+            .map_err(|e| e.to_string())?;
+        crate::services::warm_pool::emit_pool_changed(&self.app, mesh_id);
+        Ok(())
+    }
     fn forget_warm_row(&self, id: i64) {
         if !crate::db::is_initialized() {
             return;
@@ -795,6 +802,13 @@ pub(crate) struct NullSink;
 
 #[cfg(test)]
 impl ProvisionSink for NullSink {
+    fn return_warm_row(
+        &self,
+        _entry: &crate::services::warm_pool::ClaimedWarmEntry,
+        _mesh_id: i64,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     fn forget_warm_row(&self, _id: i64) {}
     fn adopt_manual_slug(&self, _node_id: i64, _slug: &str, _worktree_path: Option<&str>) {}
     fn on_pool_maintenance_required(&self, _mesh_id: i64, _do_refresh: bool, _do_refill: bool) {}
@@ -833,7 +847,7 @@ pub enum ProvisionOutcome {
         elapsed_ms: u64,
     },
     /// Manual spawn adopted a warm entry in place — the pool's pre-assigned
-    /// slug is the node's name; `git checkout -B <branch>` aligned the
+    /// slug is the node's name; `git checkout -b <branch>` aligned the
     /// worktree's mode with the mesh's `worktree_mode` and re-applied
     /// `.worktreeinclude`. `entry` is the claim the caller hands to
     /// `warm_pool::forget_after_spawn` AND uses as the source for the manual
@@ -857,13 +871,9 @@ pub enum ProvisionOutcome {
 /// (`forget_after_spawn`, Manual name adoption, `post_spawn_maintenance`
 /// trigger) is owned by this function and dispatches through [`ProvisionSink`].
 ///
-/// On the warm path: if `adopt_warm_worktree_by_move` / `upgrade_warm_to_mode`
-/// errors, the seam cleans up both possible paths (idempotent, whichever
-/// was untouched), forgets the pool row, and retries cold with
-/// `warm_entry: None`. Cold failure on top of warm failure returns a combined
-/// error so the orchestrator's `SessionLifecycle::on_error` carries the full
-/// picture. The behaviour preserves the pre-deepening fall-through (issue
-/// #612: warm-adopt failure was a graceful degradation, never fatal).
+/// Issue/PR warm failures use the ownership-aware cold fallback. A refused
+/// manual upgrade returns its claim to the pool and reports an error instead
+/// of launching detached or resetting an existing branch.
 ///
 /// Decision order is deliberate and matches the existing spawn path:
 /// 1. `use_worktree == false` → Root Node, the spawn runs in the mesh root
@@ -872,13 +882,13 @@ pub enum ProvisionOutcome {
 ///    - Manual: the pool's pre-assigned slug is the node's `worktree_name`,
 ///      so the pool directory IS already at `host_path`. The path-exists
 ///      check below must NOT short-circuit — the orchestrator relies on
-///      `Upgraded` to land the `git checkout -B <branch>` and the
+///      `Upgraded` to land the `git checkout -b <branch>` and the
 ///      `.worktreeinclude` re-application. `Upgraded`.
 ///    - Issue/PR: the pool directory sits at the plain-slug path, and
 ///      `host_path` is the node's `gh{N}-`/`pr{N}-` target (does NOT exist
 ///      yet). Move the pool directory to the target, then `git checkout`
 ///      onto `base_ref`. `Adopted`.
-/// 3. The host path already exists → resume / handover / re-spawn; never
+/// 3. The host path is a materialized linked checkout → resume / handover / re-spawn; never
 ///    re-create. `Reused`.
 /// 4. No warm entry: cold `create_git_worktree`. `Created`.
 pub fn provision_for_spawn(
@@ -988,7 +998,7 @@ pub fn provision_for_spawn(
         Ok(Some(o)) => Ok(o),
         Ok(None) => {
             // No warm entry. Two cold branches: path-exists (resume) or genuine create.
-            if std::path::Path::new(&ctx.host_path).exists() {
+            if crate::git::project::is_materialized_checkout(&ctx.host_path) {
                 Ok(ProvisionOutcome::Reused {
                     host_path: ctx.host_path.clone(),
                 })
@@ -1017,6 +1027,15 @@ pub fn provision_for_spawn(
             }
         }
         Err((warm_err, entry)) => {
+            // A refused manual branch creation must not become a successful
+            // detached launch via the materialized-path fallback.
+            if ctx.source == SpawnSource::Manual {
+                sink.return_warm_row(&entry, ctx.node.mesh_id)
+                    .map_err(|error| format!("{warm_err}; cannot return pool claim: {error}"))?;
+                return Err(format!(
+                    "provision_for_spawn: manual warm upgrade failed: {warm_err}"
+                ));
+            }
             // Warm path failed. The failure happens in one of three places:
             //   (a) resolve_base_ref_sha failed — disk untouched.
             //   (b) pre-move branch guard refused (e.g. branch-exists) — disk untouched.
@@ -1050,7 +1069,7 @@ pub fn provision_for_spawn(
             // Cold retry — same SpawnContext with `warm_entry` already cleared.
             // If THIS fails too the spawn surfaces a combined error so the caller
             // can persist a real diagnostic instead of a half-failed warm retry.
-            if std::path::Path::new(&ctx.host_path).exists() {
+            if crate::git::project::is_materialized_checkout(&ctx.host_path) {
                 // Race: another thread cut the worktree between our warm failure
                 // and now. Treat as a resume rather than a create.
                 Ok(ProvisionOutcome::Reused {
@@ -1132,6 +1151,14 @@ pub fn provision_for_spawn(
         sink.on_pool_maintenance_required(ctx.node.mesh_id, do_refresh, do_refill);
     }
 
+    if let Some(scope) = ctx.node.project_scope.as_deref() {
+        crate::env::validate_project_scope(scope)?;
+        let cwd = std::path::Path::new(&ctx.host_path).join(scope);
+        if !cwd.is_dir() {
+            return Err(format!("Project folder '{scope}' is missing from checkout at {} (ref '{}'); restore this folder or create a new node from a ref containing it", ctx.host_path, ctx.base_ref));
+        }
+    }
+
     Ok(outcome)
 }
 
@@ -1200,6 +1227,7 @@ mod tests {
             position: 0,
             created_at: chrono::Utc::now(),
             worktree_path: None,
+            project_scope: None,
         }
     }
 
@@ -1226,6 +1254,110 @@ mod tests {
         )
         .expect("warm pool entry must be cuttable for test setup");
         pool
+    }
+
+    #[test]
+    fn scoped_cold_warm_manual_issue_and_pr_own_whole_checkouts() {
+        let td = TestDir::new("scoped-provision");
+        let root = td.path();
+        init_repo_with_commit(
+            root,
+            &[
+                ("family/parents/AGENTS.md", "parents rules"),
+                ("family/children/README.md", "sibling"),
+            ],
+        );
+        let selected = root.join("family/parents");
+        let sibling = make_pool_entry(root, "sibling");
+        for (name, source, warm) in [
+            ("cold", SpawnSource::Manual, false),
+            ("manual", SpawnSource::Manual, true),
+            ("issue-m1", SpawnSource::Issue, true),
+            ("pr-m1", SpawnSource::PullRequest, true),
+        ] {
+            let entry_path = warm.then(|| make_pool_entry(root, &format!("pool-{name}")));
+            let target = if warm && matches!(source, SpawnSource::Manual) {
+                entry_path.clone().unwrap()
+            } else {
+                selected.join(".claude/worktrees").join(name)
+            };
+            let mut node = empty_node(&selected, Some(name));
+            node.project_scope = Some("family/parents".into());
+            node.worktree_path = Some(target.to_string_lossy().into_owned());
+            if matches!(source, SpawnSource::Manual) && warm {
+                node.worktree_name = Some(format!("pool-{name}"));
+            }
+            let warm_entry = entry_path
+                .as_ref()
+                .map(|p| claimed_warm(p, &format!("pool-{name}")));
+            let ctx = make_ctx(
+                node.clone(),
+                source,
+                target.to_string_lossy().into_owned(),
+                warm_entry,
+            );
+            let result = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink).unwrap();
+            match (warm, source, result) {
+                (false, _, ProvisionOutcome::Created { .. })
+                | (true, SpawnSource::Manual, ProvisionOutcome::Upgraded { .. })
+                | (
+                    true,
+                    SpawnSource::Issue | SpawnSource::PullRequest,
+                    ProvisionOutcome::Adopted { .. },
+                ) => {}
+                other => panic!("wrong provision branch: {other:?}"),
+            }
+            assert!(git2::Repository::open(&target).unwrap().is_worktree());
+            let cwd = crate::env::node_working_path(&node);
+            assert_eq!(
+                fs::read_to_string(Path::new(&cwd.host_path).join("AGENTS.md")).unwrap(),
+                "parents rules"
+            );
+            assert_eq!(
+                crate::env::node_worktree_path(&node).unwrap().host_path,
+                target.to_string_lossy()
+            );
+            // A saved cwd is usable even when the selected source no longer exists.
+            node.path = root
+                .join("source-no-longer-present")
+                .to_string_lossy()
+                .into_owned();
+            assert_eq!(crate::env::node_working_path(&node).raw_path, cwd.raw_path);
+            assert_eq!(
+                crate::env::node_working_path(&node).spawn_path,
+                cwd.spawn_path
+            );
+            super::super::remove_one_worktree(&target.to_string_lossy()).unwrap();
+            assert!(!target.exists());
+            assert!(sibling.join("family/parents/AGENTS.md").exists());
+            assert!(selected.join("AGENTS.md").exists());
+        }
+    }
+
+    #[test]
+    fn scoped_checkout_missing_folder_fails_with_folder_and_ref() {
+        let td = TestDir::new("scoped-missing");
+        let repo = init_repo_with_commit(td.path(), &[("README.md", "old tree")]);
+        let old_ref = repo.head().unwrap().target().unwrap().to_string();
+        fs::create_dir_all(td.path().join("family/parents")).unwrap();
+        commit_file(&repo, td.path(), "family/parents/AGENTS.md", "new scope");
+        let selected = td.path().join("family/parents");
+        let target = td.path().join("worktree");
+        let mut node = empty_node(&selected, Some("missing"));
+        node.project_scope = Some("family/parents".into());
+        let ctx = SpawnContext {
+            base_ref: old_ref.clone(),
+            ..make_ctx(
+                node,
+                SpawnSource::Manual,
+                target.to_string_lossy().into_owned(),
+                None,
+            )
+        };
+        let err = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink).unwrap_err();
+        assert!(err.contains("family/parents"), "{err}");
+        assert!(err.contains(&old_ref), "{err}");
+        assert!(!target.join("family/parents").exists());
     }
 
     // ── Reused ────────────────────────────────────────────────────────────────
@@ -1276,7 +1408,14 @@ mod tests {
         init_repo_with_commit(root, &[("f.txt", "prior\n")]);
 
         let host_path = root.join("existing-worktree");
-        fs::create_dir_all(&host_path).unwrap();
+        super::super::create_git_worktree(
+            root.to_str().unwrap(),
+            host_path.to_str().unwrap(),
+            "existing-worktree",
+            "detached",
+            "HEAD",
+        )
+        .unwrap();
         fs::write(host_path.join("agent-notes.md"), "carried over").unwrap();
 
         let node = empty_node(root, Some("existing-worktree"));
@@ -1616,7 +1755,7 @@ mod tests {
     // ── Upgraded (Manual) ─────────────────────────────────────────────────────
 
     /// Manual warm claim upgrades the pool's detached entry to the mesh's
-    /// `worktree_mode` via `git checkout -B <branch>`. The pool directory
+    /// `worktree_mode` via `git checkout -b <branch>`. The pool directory
     /// is NOT moved — the orchestrator already overwrote the node's
     /// `worktree_name` with the pool's slug, so the target path IS the
     /// pool path.
@@ -1803,6 +1942,7 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingState {
+        warm_rows_returned: Vec<i64>,
         /// `id` for each `forget_warm_row` call.
         warm_rows_forgotten: Vec<i64>,
         /// (node_id, slug, worktree_path) for each `adopt_manual_slug` call.
@@ -1828,6 +1968,14 @@ mod tests {
     }
 
     impl ProvisionSink for RecordingSink {
+        fn return_warm_row(
+            &self,
+            entry: &crate::services::warm_pool::ClaimedWarmEntry,
+            _mesh_id: i64,
+        ) -> Result<(), String> {
+            self.state.lock().unwrap().warm_rows_returned.push(entry.id);
+            Ok(())
+        }
         fn forget_warm_row(&self, id: i64) {
             self.state.lock().unwrap().warm_rows_forgotten.push(id);
         }
@@ -1858,7 +2006,67 @@ mod tests {
     /// `crate::db::test_support::isolated()`; otherwise
     /// `db::is_initialized()` returns false and the write no-ops.
     struct DbWritingSink;
+    #[test]
+    fn manual_warm_branch_collision_returns_claim_without_detached_launch() {
+        let _db = crate::db::test_support::isolated();
+        let td = TestDir::new("manual-warm-branch-collision");
+        let repo = init_repo_with_commit(td.path(), &[("file.txt", "source\n")]);
+        let mesh = crate::db::create_mesh("warm", td.path().to_str().unwrap()).unwrap();
+        let pool = make_pool_entry(td.path(), "warm-collision");
+        let branch_oid = repo.head().unwrap().peel_to_commit().unwrap().id();
+        repo.branch(
+            "warm-collision",
+            &repo.find_commit(branch_oid).unwrap(),
+            false,
+        )
+        .unwrap();
+        let row_id = crate::db::insert_warm_worktree(
+            mesh.id,
+            pool.to_str().unwrap(),
+            "warm-collision",
+            None,
+            crate::db::WarmWorktreeStatus::Claimed,
+        )
+        .unwrap();
+        let mut claim = claimed_warm(&pool, "warm-collision");
+        claim.id = row_id;
+        let node = empty_node(td.path(), Some("warm-collision"));
+        let mut ctx = make_ctx(
+            node,
+            SpawnSource::Manual,
+            pool.to_string_lossy().to_string(),
+            Some(claim),
+        );
+        ctx.worktree_mode = "branched".into();
+        let error =
+            provision_for_spawn(ctx, &ProvisionHooks::default(), &DbWritingSink).unwrap_err();
+        assert!(error.contains("manual warm upgrade failed"));
+        assert_eq!(
+            repo.find_branch("warm-collision", git2::BranchType::Local)
+                .unwrap()
+                .get()
+                .target(),
+            Some(branch_oid)
+        );
+        assert!(git2::Repository::open(&pool)
+            .unwrap()
+            .head_detached()
+            .unwrap());
+        assert!(pool.join("file.txt").exists());
+        assert_eq!(
+            crate::db::count_available_warm_for_mesh(mesh.id).unwrap(),
+            1
+        );
+    }
     impl ProvisionSink for DbWritingSink {
+        fn return_warm_row(
+            &self,
+            entry: &crate::services::warm_pool::ClaimedWarmEntry,
+            _mesh_id: i64,
+        ) -> Result<(), String> {
+            crate::db::mark_warm_worktree_available(entry.id, entry.base_sha.as_deref())
+                .map_err(|e| e.to_string())
+        }
         fn forget_warm_row(&self, _id: i64) {}
         fn adopt_manual_slug(&self, node_id: i64, slug: &str, worktree_path: Option<&str>) {
             crate::db::adopt_manual_pool_slug_with_path(node_id, slug, worktree_path)

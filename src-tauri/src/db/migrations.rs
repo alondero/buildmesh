@@ -162,7 +162,7 @@ use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
 /// suppresses the attention filter/count/sort while leaving run state, steps and
 /// verdicts as they were. NULL is the default and means "still outstanding";
 /// nothing writes it back.
-pub(crate) const SCHEMA_VERSION: u32 = 48;
+pub(crate) const SCHEMA_VERSION: u32 = 49;
 
 // ---------------------------------------------------------------------------
 // ColumnSpec — one column the runner knows how to add and read back.
@@ -830,6 +830,13 @@ const SPECS: &[ColumnSpec] = &[
         version: 46,
         table: "agent_nodes",
         column: "lifecycle_snapshot",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 49,
+        table: "agent_nodes",
+        column: "project_scope",
         type_with_default: "TEXT",
         read_default: ReadDefault::Nullable,
     },

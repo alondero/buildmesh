@@ -931,7 +931,9 @@ test('the Windows wrapper scrubs the caller environment once, before any gate ru
   // quietly disagree with the first about the list.
   const calls = wrapper.match(/^Clear-LeakedEnv$/gm) ?? [];
   assert.equal(calls.length, 1, 'Clear-LeakedEnv must be invoked exactly once at top level');
-  const invoked = wrapper.indexOf('\nClear-LeakedEnv\n');
+  // `\r?\n`, not `\n`: `.gitattributes` stores this file LF and checks it out CRLF
+  // (issue #2044), so the statement delimiter on a Windows worktree is CRLF.
+  const invoked = wrapper.search(/\r?\nClear-LeakedEnv\r?\n/);
   assert.ok(invoked > 0, 'the top-level call must exist as its own statement');
   // Ordering is the behaviour: a scrub declared after a vitest call cannot help
   // that vitest call, and one before Invoke-ProductionBuild cannot be undone by

@@ -324,7 +324,10 @@ async function registerAgentNodeListeners(
   // the sidebar/title-bar renders the red badge without a refetch.
   unlistens.push(
     await listen<NodeSpawnFailedPayload>('node-spawn-failed', (event) => {
-      surface.patchAgentNode(event.payload.node_id, { status: 'error' });
+      const node = surface.findAgentNode(event.payload.node_id);
+      if (node && ['idle', 'spawning', 'error'].includes(node.status)) {
+        surface.patchAgentNode(event.payload.node_id, { status: 'error' });
+      }
     }),
   );
 }

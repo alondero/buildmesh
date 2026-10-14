@@ -228,7 +228,8 @@ mod tests {
                 signal_health TEXT,
                 worktree_path TEXT,
                 spawn_configuration TEXT,
-                lifecycle_snapshot TEXT
+                lifecycle_snapshot TEXT,
+                project_scope TEXT
             );
             INSERT INTO meshes (id, name, path) VALUES (1, 'core', '/tmp/core');
             INSERT INTO agent_nodes (id, mesh_id, name, path, status)

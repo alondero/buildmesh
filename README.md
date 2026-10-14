@@ -147,6 +147,21 @@ To upgrade manually, install the new `.msi` or `-setup.exe` over the existing in
 - **AI context portability**: share `CLAUDE.md`, `.claude/skills`, and friends with Codex, OpenCode, and Antigravity via `AGENTS.md` + `.agents/skills` git symlinks — no per-provider duplication.
 - **Dev / Stable side-by-side profiles**: run an in-development build (`buildmesh-dev`) without interrupting the stable hub you orchestrate agents from.
 
+## Project folders and launch recovery
+
+Meshes can select a repository subfolder. With worktrees enabled, Buildmesh
+checks out the containing repository and starts the agent in the matching
+folder, preserving its scoped instructions. Worktree directory settings still
+control the checkout location. Without worktrees, the agent starts directly in
+the selected folder. Git diffs and cleanup cover the complete checkout.
+
+If the selected starting ref lacks that folder, launch reports the missing
+folder and ref once. Restore the folder in that checkout, or create a new node
+from a ref containing it. After resolving other launch errors, use Restart or
+Start Fresh. Failed automatic launches stay in the error state; reopening
+the terminal does not retry them. Existing nodes retain their saved checkout
+location and starting directory on resume.
+
 ## Agent sandboxing (security, experimental)
 
 > **Not a released feature.** Confinement is incomplete and platform-dependent,

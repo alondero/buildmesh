@@ -9,6 +9,48 @@ mod tests {
     use rusqlite::{Connection, Result as SqlResult};
 
     #[test]
+    fn project_scope_upgrade_preserves_legacy_cwd_and_saved_scope_after_reopen() {
+        let td = crate::env::test_helpers::TestDir::new("scope-db-upgrade");
+        let db_path = td.path().join("scope.sqlite");
+        let conn = Connection::open(&db_path).unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO meshes(id,name,path) VALUES(1,'scope','/repo/family/parents')",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO agent_nodes(id,mesh_id,name,path,use_worktree,worktree_name,worktree_path) VALUES(1,1,'legacy','/repo/family/parents',1,'legacy','/owned/legacy')", []).unwrap();
+        conn.execute_batch("ALTER TABLE agent_nodes DROP COLUMN project_scope; UPDATE app_settings SET value='48' WHERE key='schema_version';").unwrap();
+        for _ in 0..2 {
+            crate::db::init_schema(&conn).unwrap();
+            let node = crate::db::agent_node::get_agent_node_by_id_inner(&conn, 1).unwrap();
+            assert_eq!(node.project_scope, None);
+            assert_eq!(
+                crate::env::node_working_path(&node).raw_path,
+                "/owned/legacy"
+            );
+        }
+        conn.execute(
+            "UPDATE agent_nodes SET project_scope='family/parents' WHERE id=1",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let conn = Connection::open(db_path).unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        let node = crate::db::agent_node::get_agent_node_by_id_inner(&conn, 1).unwrap();
+        assert_eq!(node.project_scope.as_deref(), Some("family/parents"));
+        assert_eq!(
+            crate::env::node_working_path(&node).raw_path,
+            "/owned/legacy/family/parents"
+        );
+        assert_eq!(
+            crate::env::node_worktree_path(&node).unwrap().raw_path,
+            "/owned/legacy"
+        );
+    }
+
+    #[test]
     fn lifecycle_snapshot_upgrade_preserves_existing_nodes_and_repeats() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
@@ -1786,6 +1828,7 @@ mod tests {
                 worktree_path TEXT,
                 spawn_configuration TEXT,
                 lifecycle_snapshot TEXT,
+                project_scope TEXT,
                 pr_url TEXT
             );
             INSERT INTO meshes (id, name, path) VALUES (1, 'm', '/m');
@@ -1985,7 +2028,8 @@ mod tests {
                 worktree_path TEXT,
                 spawn_configuration TEXT,
                 lifecycle_snapshot TEXT,
-                status_changed_at TEXT
+                status_changed_at TEXT,
+                project_scope TEXT
             );
             INSERT INTO agent_nodes (mesh_id, name, path, created_at)
                 VALUES (1, 'n', '/n', '2020-01-01T00:00:00Z');
@@ -2056,7 +2100,8 @@ mod tests {
                 worktree_path TEXT,
                 spawn_configuration TEXT,
                 lifecycle_snapshot TEXT,
-                status_changed_at TEXT
+                status_changed_at TEXT,
+                project_scope TEXT
             );
             INSERT INTO agent_nodes (mesh_id, name, path, created_at)
                 VALUES (1, 'n', '/n', '2020-01-01T00:00:00Z');

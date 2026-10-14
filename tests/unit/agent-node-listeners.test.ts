@@ -624,7 +624,8 @@ describe('attachAgentNodeListeners', () => {
   });
 
 
-  it('node-spawn-failed dispatches patchAgentNode with status error', async () => {
+  it.each(['idle', 'spawning', 'error', 'running', 'archived'] as const)(
+    'node-spawn-failed respects the current %s state', async (status) => {
     const mockListen = listen as ReturnType<typeof vi.fn>;
     let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
     mockListen.mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
@@ -634,13 +635,15 @@ describe('attachAgentNodeListeners', () => {
       return Promise.resolve(() => {});
     });
 
-    const surface = makeSurface();
+    const surface = makeSurface([{ id: 33, status } as AgentNode]);
     await attachAgentNodeListeners(surface);
 
     capturedHandler!({ payload: { node_id: 33 } });
 
     expect(surface.__calls).toEqual([
-      { method: 'patchAgentNode', args: [33, { status: 'error' }] },
+      { method: 'findAgentNode', args: [33] },
+      ...(['idle', 'spawning', 'error'].includes(status)
+        ? [{ method: 'patchAgentNode', args: [33, { status: 'error' }] }] : []),
     ]);
   });
 });
