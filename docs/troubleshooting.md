@@ -126,6 +126,23 @@ on new nodes. If an already-open node is stuck, press Ctrl+C once, then type.
 Downgrading the CLI to 1.55 with `COMMANDCODE_SKIP_UPDATES=1` also restores
 typing outside Buildmesh.
 
+## A prompt typed into a new OpenCode node comes back on its own
+
+OpenCode's TUI attaches its input reader while it starts up, and keystrokes
+that arrive before it is ready are discarded — the composer stays empty and no
+turn starts. Buildmesh re-sends such a prompt once, automatically, so it runs a
+little after you pressed Enter rather than being lost.
+
+The re-send waits for the confirmation window (30 seconds) because Buildmesh
+knows the prompt was lost only when the harness reports nothing at all after it.
+**Wait for it** rather than pressing Enter again: a second prompt typed
+during that window is the one Buildmesh protects, and the first is left to the
+re-send.
+
+The re-send is skipped if you have typed again since, if the prompt was larger
+than 64 KB, or if the harness confirmed the first prompt after all. A prompt
+that is still missing after the window has passed is worth reporting.
+
 ## A Circuit says terminal input tracking is uncertain
 
 An **Unverified Checkpoint** at **Await task** means Buildmesh cannot yet bind

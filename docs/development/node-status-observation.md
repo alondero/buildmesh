@@ -121,6 +121,16 @@ side by side found the following, each now fixed:
   revert is conditional on the same status revision, so any callback wins. The
   window is wide because a PowerShell-hosted Codex hook took 10 seconds on a
   loaded machine.
+- Returning the node to Ready recovered the status but not the prompt. A harness
+  that discards input written before it finished booting (OpenCode's TUI attaches
+  its input reader during startup and drains whatever stdin already holds) loses
+  the keystrokes outright: the composer stays empty and no turn starts. For those
+  harnesses — `AgentProvider::replays_unconfirmed_submit` — Buildmesh retains the
+  bytes behind each submit and writes them to the PTY again, once, at the moment
+  the revert commits. The re-send is refused unless the composer is still empty,
+  so it does not land on top of text the user has typed since, and it is skipped
+  once the retained draft outgrows its cap rather than replayed truncated. A
+  confirmed submit re-arms it, so a long-lived node is not left unprotected.
 - A user interrupt was either silent or a failure. Claude Code and MiniMax fire
   no hook for Esc; Codex fires `Interrupt`, Grok `StopCancelled`, and OpenCode
   `session.error` naming `MessageAbortedError`. The latter three were shown as

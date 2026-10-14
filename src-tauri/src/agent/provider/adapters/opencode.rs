@@ -343,6 +343,18 @@ impl AgentProvider for OpenCodeAdapter {
         true
     }
 
+    /// Issue #2344: the TUI's renderer attaches its stdin listener during boot
+    /// (`setupInput` → `setRawMode` → `on("data")` → `resume()`, and the
+    /// resume path drains whatever stdin already holds). Keystrokes Buildmesh
+    /// writes before that point are consumed without reaching the composer, so
+    /// the first prompt typed into a fresh node vanishes: no `session.busy`, an
+    /// empty input box, and no turn. OpenCode discards early input rather than
+    /// queueing it, which is what makes a re-send safe; a harness that queued
+    /// it would run the user's prompt twice.
+    fn replays_unconfirmed_submit(&self) -> bool {
+        true
+    }
+
     fn supports_prefill(&self) -> bool {
         true
     }

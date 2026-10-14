@@ -620,6 +620,24 @@ pub trait AgentProvider: Send + Sync {
         false
     }
 
+    /// Whether a submit the harness never confirmed should be written to the
+    /// PTY again, exactly once (issue #2344).
+    ///
+    /// Some harnesses attach their input reader asynchronously during boot, so
+    /// keystrokes that arrive before it is ready are consumed without ever
+    /// reaching the composer: the prompt silently disappears and no turn
+    /// starts. Buildmesh cannot see the reader, but it *can* see the effect —
+    /// `on_submit_unconfirmed` returning `Ready` means the harness observed
+    /// nothing after the Enter. A harness that opts in here has its retained
+    /// draft re-sent at that point, into a TUI that has finished booting.
+    ///
+    /// Default `false`: re-sending is only safe for a harness known to discard
+    /// rather than queue early input, and a harness that does queue would get
+    /// the user's prompt twice.
+    fn replays_unconfirmed_submit(&self) -> bool {
+        false
+    }
+
     /// Whether this prompt should be delivered through the live PTY instead
     /// of being placed on the automated launch command line. Harnesses may
     /// accept a positional prompt for short text while still mis-parsing
