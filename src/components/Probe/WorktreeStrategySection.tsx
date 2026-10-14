@@ -278,7 +278,7 @@ export function WorktreeStrategySection({
           </fieldset>
 
           {/* Worktree directory override (issue #1519). Empty = inherit the
-              app default (or `.claude/worktrees`); relative resolves from the
+              app default (or `.worktrees`); relative resolves from the
               mesh root, absolute must match the mesh environment. Changing it
               affects future nodes + pool entries only — live nodes keep their
               persisted directories. */}
@@ -288,7 +288,7 @@ export function WorktreeStrategySection({
               <input
                 type="text"
                 aria-label="Worktree directory"
-                placeholder=".claude/worktrees"
+                placeholder=".worktrees"
                 value={dirDraft}
                 onChange={(e) => setDirDraft(e.target.value)}
                 onBlur={() => {
@@ -302,7 +302,7 @@ export function WorktreeStrategySection({
               />
             </label>
             <p className="text-2xs text-text-muted" aria-live="polite">
-              Effective: <code>{worktreeDirEffective || '…'}</code>
+              Effective: <code className="break-all">{worktreeDirEffective || '…'}</code>
               {worktreeDirectory.trim() === '' ? ' (inherited)' : ''}
             </p>
             {worktreeDirectory.trim() !== '' && (

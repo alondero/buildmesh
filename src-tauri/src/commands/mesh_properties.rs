@@ -238,7 +238,7 @@ pub fn update_mesh_sandbox(mesh_id: i64, sandbox: bool) -> Result<(), String> {
 
 /// Set the per-Mesh Worktree Node directory override (issue #1519).
 /// `None` (or blank, which collapses to `None`) clears the override so the
-/// Mesh inherits the application default (or `.claude/worktrees` when that
+/// Mesh inherits the application default (or `.worktrees` when that
 /// too is unset). Relative values resolve from the Mesh root; absolute
 /// values must be in the same host environment (native/Windows versus WSL)
 /// as the Mesh — a mismatch is rejected with an actionable message.

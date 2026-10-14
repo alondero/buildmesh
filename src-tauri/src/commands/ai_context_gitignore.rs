@@ -18,16 +18,17 @@
 //!   the reader is trying to understand. A dedicated module makes the
 //!   template discoverable and replaceable.
 
-/// Header line that doubles as the idempotency marker. If a `.gitignore`
-/// already contains this line, the portability commit is a no-op for
-/// `.gitignore` — the existing blob OID is reused via the `TreeBuilder`,
-/// no duplicate blob is written.
+/// Marker for the agent harness block. Older blocks still need the
+/// provider-neutral worktree pattern before portability is complete.
 pub const HEADER: &str = "# Agent Harnesses (runtime, local settings, and ephemeral files)";
 
-/// Full canonical block written into the target `.gitignore`. The contents
-/// are the issue #1401 spec block, verbatim.
+/// Incremental addition for repositories with an older harness block.
+const WORKTREE_BLOCK: &str = "# Buildmesh worktrees\n.worktrees/\n";
+
+/// Canonical block written into the target `.gitignore`.
 pub const BLOCK: &str = "\
 # Agent Harnesses (runtime, local settings, and ephemeral files)\n\
+.worktrees/\n\
 .codex/\n\
 CODEX.local.md\n\
 codex.local.md\n\
@@ -70,16 +71,24 @@ CURSOR.local.md\n\
 .windsurf/\n\
 .codeium/\n";
 
-/// True when `gitignore_content` already contains the canonical agent
-/// harness ignore block. Used to keep the portability commit idempotent.
-///
-/// Uses `from_utf8_lossy` so a legacy Windows-1252 / Latin-1 `.gitignore`
-/// (uncommon but legal on Windows) does not silently trigger
-/// duplicate-block appending — at worst the comment header is mangled
-/// for the comparison and we re-append. That's preferable to dropping
-/// non-UTF-8 bytes wholesale, and the duplicate is still safe (same
-/// bytes again).
-pub fn has_block(gitignore_content: &[u8]) -> bool {
+/// Return only the missing block so older portability PRs can be upgraded
+/// without duplicating their harness patterns. Inspect lossily; the caller
+/// preserves the original bytes when appending.
+pub fn missing_block(gitignore_content: &[u8]) -> Option<&'static str> {
     let haystack = String::from_utf8_lossy(gitignore_content);
-    haystack.contains(HEADER)
+    if !haystack.lines().any(|line| line.trim() == HEADER) {
+        Some(BLOCK)
+    } else if !haystack
+        .lines()
+        .any(|line| matches!(line.trim(), ".worktrees/" | "/.worktrees/"))
+    {
+        Some(WORKTREE_BLOCK)
+    } else {
+        None
+    }
+}
+
+/// True when the harness block and the default worktree pattern are present.
+pub fn has_block(gitignore_content: &[u8]) -> bool {
+    missing_block(gitignore_content).is_none()
 }

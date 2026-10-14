@@ -58,7 +58,7 @@ export function GeneralPane() {
 
   // Issue #1519: Buildmesh-wide default Worktree Node directory. Draft is
   // the raw textfield value; `''` means "no app override — each Mesh uses
-  // `.claude/worktrees` unless it has its own override".
+  // `.worktrees` unless it has its own override".
   const [worktreeDirDraft, setWorktreeDirDraft] = useState('');
   const [worktreeDirSaving, setWorktreeDirSaving] = useState(false);
   const worktreeDirSavedRef = useRef('');
@@ -107,7 +107,7 @@ export function GeneralPane() {
 
   // Commit the worktree-directory draft (blur / Enter, issue #1519). `''`
   // (or whitespace-only) clears the app default so inheriting Meshes fall
-  // back to `.claude/worktrees`; anything else stores the trimmed raw input
+  // back to `.worktrees`; anything else stores the trimmed raw input
   // verbatim (no shell/`~` expansion — resolution joins it literally).
   // Optimistic with rollback.
   const commitWorktreeDir = async () => {
@@ -296,7 +296,7 @@ export function GeneralPane() {
               resolve from each mesh root (e.g. <code>worktrees</code>); absolute
               paths are not allowed here because one default spans both native and
               WSL meshes — set an absolute path as a per-mesh override in Project
-              Settings instead. Leave empty for <code>.claude/worktrees</code>. A
+              Settings instead. Leave empty for <code>.worktrees</code>. A
               per-mesh override in Project Settings takes precedence. Changing this
               affects future nodes and pre-spawn pool entries only — live nodes
               keep their existing directories.
@@ -307,7 +307,7 @@ export function GeneralPane() {
             id="worktree-directory"
             type="text"
             aria-label="Worktree directory"
-            placeholder=".claude/worktrees"
+            placeholder=".worktrees"
             value={worktreeDirDraft}
             disabled={!prefsLoaded || worktreeDirSaving}
             onChange={e => {

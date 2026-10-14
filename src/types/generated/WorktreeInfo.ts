@@ -7,7 +7,7 @@
  *
  * `is_pool` distinguishes a pre-spawn pool entry from a normal worktree
  * (issue #611). Pool entries are detached-HEAD worktrees under
- * `{mesh.path}/.claude/worktrees/<slug>` whose path matches a row in
+ * the effective worktree container whose path matches a row in
  * the `warm_worktrees` table; the Worktree Manager tab shows them with
  * a "Pre-spawn Pool" badge and disables the delete action so the
  * background worker can refill on demand. Always `false` for the

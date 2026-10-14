@@ -40,8 +40,8 @@ const PUSH_TIMEOUT: Duration = Duration::from_secs(300);
 ///
 /// Returns `Some(bytes)` when:
 /// - `.gitignore` is absent in HEAD → bytes are the agent block alone, or
-/// - `.gitignore` exists but does not contain the agent block → bytes are
-///   the existing body + a blank line separator + the agent block.
+/// - `.gitignore` exists but is missing portability patterns → append the
+///   full harness block or just the worktree addition for an older block.
 ///
 /// Returns `None` when `.gitignore` already has the canonical block
 /// (idempotent no-op).
@@ -58,16 +58,15 @@ fn gitignore_update_for_portability(
         None => Ok(Some(ai_context_gitignore::BLOCK.as_bytes().to_vec())),
         Some(entry) if entry.kind() == Some(git2::ObjectType::Blob) => {
             let blob = repo.find_blob(entry.id()).map_err(|e| e.to_string())?;
-            if ai_context_gitignore::has_block(blob.content()) {
-                Ok(None)
-            } else {
+            if let Some(missing) = ai_context_gitignore::missing_block(blob.content()) {
                 let existing = blob.content();
-                let mut new_content =
-                    Vec::with_capacity(existing.len() + ai_context_gitignore::BLOCK.len());
+                let mut new_content = Vec::with_capacity(existing.len() + missing.len());
                 new_content.extend_from_slice(existing);
                 append_separator(&mut new_content);
-                new_content.extend_from_slice(ai_context_gitignore::BLOCK.as_bytes());
+                new_content.extend_from_slice(missing.as_bytes());
                 Ok(Some(new_content))
+            } else {
+                Ok(None)
             }
         }
         // `.gitignore` is a submodule or symlink — leave it alone rather
@@ -465,7 +464,7 @@ fn pr_body(added: &[String]) -> String {
                 "- `.agents/skills` → `.claude/skills` (shared Agent Skills directory; Antigravity reads `.agents/skills` natively)"
             }
             ".gitignore" => {
-                "- `.gitignore` — append the agent-harness runtime ignore block (`.agents/hooks.json`, `.codex/`, `.cursor/cache/`, …) so ephemeral files written by Codex, Antigravity, OpenCode, Cursor and friends don't pollute `git status`. Tracked entries like `.agents/skills` remain untouched."
+                "- `.gitignore` — add missing runtime ignore patterns, including `.worktrees/`, so local worktrees and agent files don't pollute `git status`. Tracked entries like `.agents/skills` remain untouched."
             }
             _ => "",
         })
@@ -780,6 +779,87 @@ mod tests {
         assert!(gi_str.contains(ai_context_gitignore::HEADER));
         assert!(gi_str.contains(".agents/hooks.json"));
         assert!(gi_str.contains(".cursor/hooks.json"));
+    }
+
+    #[test]
+    fn upgrades_older_ignore_block_without_duplicating_harness_patterns() {
+        let tr = TempRepo::new();
+        let old = format!(
+            "{}\r\n.codex/\r\n# .worktrees/\r\n",
+            ai_context_gitignore::HEADER
+        );
+        let repo = init_repo(
+            tr.path(),
+            &[
+                ("CLAUDE.md", "# context"),
+                ("AGENTS.md", "CLAUDE.md"),
+                (".gitignore", &old),
+            ],
+        );
+        let head_before = repo.head().unwrap().peel_to_commit().unwrap().id();
+        assert!(
+            !detect_ai_context_blocking(tr.path().to_string_lossy().to_string())
+                .unwrap()
+                .gitignore_has_agent_patterns
+        );
+
+        let added = build_portability_commit(&repo, tr.path(), "upgrade-ignore").unwrap();
+        assert_eq!(added, vec![".gitignore"]);
+        let tree = branch_tree(&repo, "upgrade-ignore");
+        let gi = blob_content(&repo, &tree, ".gitignore");
+        assert!(gi.starts_with(old.as_bytes()));
+        assert!(gi.starts_with(format!("{old}\r\n").as_bytes()));
+        let text = String::from_utf8(gi.clone()).unwrap();
+        assert_eq!(text.matches(ai_context_gitignore::HEADER).count(), 1);
+        assert_eq!(text.lines().filter(|line| *line == ".codex/").count(), 1);
+        assert_eq!(
+            text.lines().filter(|line| *line == ".worktrees/").count(),
+            1
+        );
+        assert_eq!(
+            repo.head().unwrap().peel_to_commit().unwrap().id(),
+            head_before
+        );
+        assert_eq!(
+            fs::read(tr.path().join(".gitignore")).unwrap(),
+            old.as_bytes()
+        );
+
+        repo.set_head("refs/heads/upgrade-ignore").unwrap();
+        assert!(
+            detect_ai_context_blocking(tr.path().to_string_lossy().to_string())
+                .unwrap()
+                .gitignore_has_agent_patterns
+        );
+        assert!(
+            build_portability_commit(&repo, tr.path(), "already-upgraded")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn portability_accepts_root_anchored_worktree_ignore() {
+        let tr = TempRepo::new();
+        let ignore = ai_context_gitignore::BLOCK.replace(".worktrees/\n", "/.worktrees/\n");
+        let repo = init_repo(
+            tr.path(),
+            &[
+                ("CLAUDE.md", "# context"),
+                ("AGENTS.md", "CLAUDE.md"),
+                (".gitignore", &ignore),
+            ],
+        );
+        assert!(
+            detect_ai_context_blocking(tr.path().to_string_lossy().to_string())
+                .unwrap()
+                .gitignore_has_agent_patterns
+        );
+        assert!(
+            build_portability_commit(&repo, tr.path(), "already-ignored")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! Buildmesh owns each Agent Node's git worktree (ADR 0003). This module is the
 //! one home for that ownership — it used to be spread across `env` (create),
 //! `services::agent_node` (close-safety), and `commands::prune` (remove). The
-//! *path* of a worktree (the `.claude/worktrees/<name>` layout and WSL/host
+//! *path* of a worktree (the configurable container and WSL/host
 //! conversion) still belongs to `env`; this module takes an already-resolved
 //! host path and makes / inspects / removes the git worktree there.
 //!
@@ -546,15 +546,14 @@ fn generate_husk_stash_path(host_path: &std::path::Path) -> std::path::PathBuf {
 /// Linked worktrees are NOT auto-ignored by git: a relative container like
 /// `custom-wt/` shows up as an untracked directory, `primitives::is_dirty`
 /// flips true, spawn-time auto-sync aborts, and health reports permanently
-/// dirty. (The legacy `.claude/worktrees/` container never hit this because
-/// `.claude/` is git-ignored in Buildmesh repos.) Appending `<rel>/` to the
+/// dirty. Appending `<rel>/` to the
 /// repo-local `.git/info/exclude` — never the committed `.gitignore` — keeps
-/// the user's ignore rules untouched while restoring the legacy invariant.
+/// the user's committed ignore rules untouched.
 ///
 /// `container_host_path` is the HOST-form container dir itself (not a worktree
 /// path — callers pass the parent). No-op when the container is the root
 /// itself, outside the root (absolute custom dirs), or when `.git` is
-/// missing/not a directory (non-repo mesh, submodule-style `.git` file).
+/// missing. Linked worktrees and submodules use the repository's common dir.
 /// Idempotent: an existing matching line is never duplicated. Best-effort
 /// like `apply_worktree_include` — filesystem errors log and return so a
 /// strict exclude write can never fail a spawn.
@@ -1686,6 +1685,29 @@ mod tests {
 
     // ── container exclusion (issue #1519) ───────────────────────────────────
 
+    fn assert_clean_checkout(repo: &git2::Repository) {
+        assert!(!crate::git::primitives::is_dirty(repo).unwrap());
+        let mut command = crate::process_util::git_command();
+        command.args([
+            "-C",
+            repo.workdir().unwrap().to_str().unwrap(),
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ]);
+        let output = run_bounded_git(command, "git status", GIT_LOCAL_TIMEOUT).unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
     #[test]
     fn container_exclude_appends_relative_container_idempotently() {
         let td = TestDir::new("exclude_relative");
@@ -1740,6 +1762,65 @@ mod tests {
             !bare.path().join(".git").exists(),
             "must not create .git for a non-repo root"
         );
+    }
+
+    #[test]
+    fn default_container_keeps_checkout_clean_without_editing_gitignore() {
+        let td = TestDir::new("exclude_default");
+        init_repo_with_commit(td.path(), &[("f.txt", "v1\n"), (".gitignore", "dist/\n")]);
+        let root = td.path().to_str().unwrap();
+        let container = crate::env::effective_worktree_dir_raw(root, None, None);
+        let wt = crate::env::resolve_worktree_node_raw(&container, "default-node");
+        create_git_worktree(root, &wt, "default-node", "detached", "HEAD").unwrap();
+        let repo = git2::Repository::open(td.path()).unwrap();
+        assert!(repo
+            .is_path_ignored(Path::new(".worktrees/default-node"))
+            .unwrap());
+        assert_clean_checkout(&repo);
+        assert_eq!(fs::read(td.path().join(".gitignore")).unwrap(), b"dist/\n");
+        assert!(Path::new(&wt).join("f.txt").is_file());
+    }
+
+    #[test]
+    fn default_container_in_linked_mesh_uses_common_exclude() {
+        let td = TestDir::new("exclude_linked_default");
+        let main = td.path().join("main");
+        init_repo_with_commit(&main, &[("f.txt", "v1\n")]);
+        let linked = td.path().join("linked");
+        create_git_worktree(
+            main.to_str().unwrap(),
+            linked.to_str().unwrap(),
+            "linked-mesh",
+            "detached",
+            "HEAD",
+        )
+        .unwrap();
+        assert!(linked.join(".git").is_file());
+        let container =
+            crate::env::effective_worktree_dir_raw(linked.to_str().unwrap(), None, None);
+        let wt = crate::env::resolve_worktree_node_raw(&container, "nested-node");
+        create_git_worktree(
+            linked.to_str().unwrap(),
+            &wt,
+            "nested-node",
+            "detached",
+            "HEAD",
+        )
+        .unwrap();
+        let repo = git2::Repository::open(&linked).unwrap();
+        assert!(repo
+            .is_path_ignored(Path::new(".worktrees/nested-node"))
+            .unwrap());
+        assert_clean_checkout(&repo);
+        let excluded = fs::read_to_string(main.join(".git/info/exclude")).unwrap();
+        assert_eq!(
+            excluded
+                .lines()
+                .filter(|line| *line == ".worktrees/")
+                .count(),
+            1
+        );
+        assert!(!linked.join(".gitignore").exists());
     }
 
     #[test]
