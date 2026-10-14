@@ -65,12 +65,16 @@ fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
 fn hook_command(platform: Platform) -> String {
     if platform == Platform::Windows {
         if let Some(command) = crate::env::windows_attention_command(None) {
-            return format!("{command} & echo {{\"decision\":\"allow\"}}");
+            return format!("{command} & echo {{}}");
         }
     }
     let command = match platform {
+        // AGY (Go) passes this to `cmd.exe /c` as one MSVC-quoted argument,
+        // so every embedded `"` reaches cmd as `\"`: keep the Windows form
+        // free of double quotes. `{}` is the empty hook result; a quoted
+        // decision object would be echoed with its backslashes and rejected.
         Platform::Windows => {
-            "curl.exe -sf --connect-timeout 1 --max-time 2 -X POST -H \"Content-Type: application/json\" --data-binary @- http://localhost:%BUILDMESH_PORT%/api/attention/%BUILDMESH_SESSION_ID% >nul 2>nul & echo {\"decision\":\"allow\"}"
+            "curl.exe -sf --connect-timeout 1 --max-time 2 -X POST -H Content-Type:application/json --data-binary @- http://localhost:%BUILDMESH_PORT%/api/attention/%BUILDMESH_SESSION_ID% >nul 2>nul & echo {}"
                 .to_string()
         }
         _ => {
@@ -88,14 +92,53 @@ fn hook_command(platform: Platform) -> String {
     }
 }
 
-/// Ensure `<project>/.agents/hooks.json` carries the Stop attention webhook
+/// AGY's question tool. Its dialog blocks the turn without any Stop.
+const QUESTION_TOOL: &str = "ask_question";
+
+/// The callback for one of the question tool's hooks. The payload names no
+/// event, so the URL does. A pre-tool hook is a gate whose answer is
+/// required: AGY 1.3.5 refused the question when it answered `{}`, so it must
+/// print `{"decision":"allow"}` — which Windows cannot write literally, since
+/// AGY hands cmd every `"` as `\"`, so PowerShell builds the quotes from
+/// `[char]34`. `None` on a WSL host, whose PowerShell callback has not been
+/// validated as a gate.
+fn question_hook_command(platform: Platform, event: &str) -> Option<String> {
+    let pre = event == "PreToolUse";
+    if platform == Platform::Windows {
+        if crate::env::windows_attention_command(None).is_some() {
+            return None;
+        }
+        let output = if pre {
+            "powershell -NoProfile -NonInteractive -Command Write-Output ('{{{0}decision{0}:{0}allow{0}}}' -f [char]34)"
+        } else {
+            "echo {}"
+        };
+        return Some(format!(
+            "curl.exe -sf --connect-timeout 1 --max-time 2 -X POST -H Content-Type:application/json --data-binary @- http://localhost:%BUILDMESH_PORT%/api/attention/%BUILDMESH_SESSION_ID%?event={event} >nul 2>nul & {output}"
+        ));
+    }
+    let output = if pre { r#"{"decision":"allow"}"# } else { "{}" };
+    Some(format!(
+        "{} -sf --connect-timeout 1 --max-time 2 -X POST -H 'Content-Type: application/json' --data-binary @- \"http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID?event={event}\" >/dev/null 2>/dev/null; printf '%s\\n' '{output}'",
+        if cfg!(windows) {
+            "$(command -v curl.exe || command -v curl)"
+        } else {
+            crate::env::unix_attention_curl()
+        }
+    ))
+}
+
+/// Ensure `<project>/.agents/hooks.json` carries the attention webhooks
 /// under the `buildmesh-attention` namespace. `Stop` uses the simple
-/// `[{type, command}]` form. `PreToolUse` fires before every tool and its
-/// required decision response makes it a blocking gate. Buildmesh launches
-/// AGY with permissions skipped, so Stop is the unambiguous Node Turn
-/// signal here. Idempotent, and preserves any unrelated top-level keys the
-/// user added. Writes atomically to prevent corruption.
-fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
+/// `[{type, command}]` form. Tool hooks use matcher groups, scoped to the
+/// question tool so their required pre-tool decision never gates any other
+/// tool. Idempotent, and preserves any unrelated top-level keys the user
+/// added. Writes atomically to prevent corruption.
+fn ensure_hooks_json(
+    path: &Path,
+    command: &str,
+    question: Option<(&str, &str)>,
+) -> Result<(), String> {
     let mut settings: serde_json::Value = match std::fs::read_to_string(path) {
         Ok(content) => serde_json::from_str(&content)
             .map_err(|e| format!("invalid agy hooks.json at {}: {e}", path.display()))?,
@@ -119,7 +162,17 @@ fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
     // is the event) and the `[{type, command}]` form is the one the
     // spec documents for end-of-turn.
     let stop_hook = serde_json::json!({ "type": "command", "command": command });
-    let expected = serde_json::json!({ "Stop": [stop_hook] });
+    let mut expected = serde_json::json!({ "Stop": [stop_hook] });
+    if let Some((pre, post)) = question {
+        let scoped = |command: &str| {
+            serde_json::json!([{
+                "matcher": QUESTION_TOOL,
+                "hooks": [{ "type": "command", "command": command }],
+            }])
+        };
+        expected["PreToolUse"] = scoped(pre);
+        expected["PostToolUse"] = scoped(post);
+    }
     if settings.get("buildmesh-attention") == Some(&expected) {
         return Ok(());
     }
@@ -407,7 +460,13 @@ impl AgentProvider for AgyAdapter {
         } else {
             Platform::current()
         };
-        ensure_hooks_json(&hooks_path, &hook_command(platform))
+        let pre = question_hook_command(platform, "PreToolUse");
+        let post = question_hook_command(platform, "PostToolUse");
+        ensure_hooks_json(
+            &hooks_path,
+            &hook_command(platform),
+            pre.as_deref().zip(post.as_deref()),
+        )
     }
 
     fn supports_model_override(&self) -> bool {
@@ -697,7 +756,7 @@ mod tests {
             "Stop must forward the hook stdin as the POST body: {stop_command}"
         );
 
-        assert!(attention.get("PreToolUse").is_none());
+        assert_eq!(attention["PreToolUse"][0]["matcher"], "ask_question");
     }
 
     /// Re-running injection over an already-correct project is a no-op —
@@ -806,6 +865,169 @@ mod tests {
         }
     }
 
+    fn host_platform() -> Platform {
+        if cfg!(windows) {
+            Platform::Windows
+        } else {
+            Platform::Linux
+        }
+    }
+
+    /// Run a hook command the way AGY does, against a one-shot listener:
+    /// returns the request head, the body it posted, and its stdout.
+    fn deliver(command: &str, payload: &[u8]) -> (String, Vec<u8>, String) {
+        use std::io::{Read, Seek, Write};
+        use std::time::{Duration, Instant};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("AGY hook did not reach listener: {error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut headers = Vec::new();
+            let mut byte = [0];
+            while !headers.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                headers.push(byte[0]);
+            }
+            let headers = String::from_utf8(headers).unwrap();
+            let length: usize = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|value| value.trim().parse().unwrap())
+                })
+                .unwrap();
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+                .unwrap();
+            (headers, body)
+        });
+
+        let mut input = tempfile::tempfile().unwrap();
+        input.write_all(payload).unwrap();
+        input.rewind().unwrap();
+        let mut shell = crate::process_util::command_no_window(if cfg!(windows) {
+            "cmd.exe"
+        } else {
+            "/bin/sh"
+        });
+        shell.args([if cfg!(windows) { "/c" } else { "-c" }, command]);
+        shell
+            .env("BUILDMESH_PORT", port.to_string())
+            .env("BUILDMESH_SESSION_ID", "741")
+            .env("NO_PROXY", "localhost,127.0.0.1")
+            .env("no_proxy", "localhost,127.0.0.1")
+            .stdin(std::process::Stdio::from(input));
+        let output = crate::process_util::run_command_with_timeout(
+            shell,
+            "AGY attention command",
+            Duration::from_secs(15),
+        )
+        .unwrap();
+        let (headers, body) = server.join().unwrap();
+        (headers, body, String::from_utf8(output.stdout).unwrap())
+    }
+
+    /// Run the host command the way AGY does and prove the Stop envelope
+    /// arrives and stdout is valid JSON. On Windows AGY (Go) hands the command
+    /// to `cmd.exe /c` as one MSVC-quoted argument, so embedded `"` reach cmd
+    /// as `\"` — Rust's `Command::arg` quotes identically, which makes this a
+    /// faithful replay. Quoted forms broke the `-H` header and turned the
+    /// decision echo into `{\"decision\":\"allow\"}`, which AGY rejected
+    /// ("failed to unmarshal result ... via protojson").
+    #[test]
+    fn host_hook_command_delivers_stop_and_prints_json() {
+        let payload =
+            br#"{"conversationId":"c-1","fullyIdle":true,"terminationReason":"completed"}"#;
+        let (headers, body, stdout) = deliver(&hook_command(host_platform()), payload);
+        assert!(
+            headers.starts_with("POST /api/attention/741 HTTP/1.1\r\n"),
+            "{headers}"
+        );
+        // HTTP allows optional whitespace after the colon; the quote-free
+        // Windows form sends `Content-Type:application/json`.
+        assert!(
+            headers.lines().any(|line| line
+                .to_ascii_lowercase()
+                .strip_prefix("content-type:")
+                .is_some_and(|value| value.trim() == "application/json")),
+            "{headers}"
+        );
+        assert_eq!(body, payload);
+        assert!(
+            serde_json::from_str::<serde_json::Value>(stdout.trim()).is_ok_and(|v| v.is_object()),
+            "AGY parses hook stdout as a JSON object: {stdout:?}"
+        );
+    }
+
+    /// AGY's question dialog blocks without any Stop, so a node asking the
+    /// user a question read Running (observed on 1.3.5). The tool hooks name
+    /// their event in the URL because the payload does not, and the pre-tool
+    /// hook must answer `allow`: AGY denied the question when it answered `{}`.
+    #[test]
+    fn question_hooks_report_the_event_and_allow_the_question() {
+        let payload = br#"{"conversationId":"c-1","stepIdx":18,"toolCall":{"name":"ask_question","args":{"questions":[{"question":"Tea or coffee?","options":["Tea","Coffee"]}]}}}"#;
+        for (event, expected_stdout) in [
+            ("PreToolUse", serde_json::json!({"decision": "allow"})),
+            ("PostToolUse", serde_json::json!({})),
+        ] {
+            let command = question_hook_command(host_platform(), event)
+                .expect("a non-WSL host provisions question hooks");
+            let (headers, body, stdout) = deliver(&command, payload);
+            assert!(
+                headers.starts_with(&format!(
+                    "POST /api/attention/741?event={event} HTTP/1.1\r\n"
+                )),
+                "{headers}"
+            );
+            assert_eq!(body, payload);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(stdout.trim()).ok(),
+                Some(expected_stdout),
+                "{event} stdout: {stdout:?}"
+            );
+        }
+    }
+
+    /// The pre-tool decision is a gate, so the hooks fire for the question
+    /// tool only and never touch any other tool call.
+    #[test]
+    fn hooks_json_scopes_question_hooks_to_the_question_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hooks.json");
+        ensure_hooks_json(&path, "stop-cmd", Some(("pre-cmd", "post-cmd"))).unwrap();
+        let hooks: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            hooks["buildmesh-attention"],
+            serde_json::json!({
+                "Stop": [{"type": "command", "command": "stop-cmd"}],
+                "PreToolUse": [{"matcher": "ask_question", "hooks": [{"type": "command", "command": "pre-cmd"}]}],
+                "PostToolUse": [{"matcher": "ask_question", "hooks": [{"type": "command", "command": "post-cmd"}]}],
+            })
+        );
+    }
+
     /// AGY invokes hook commands through its own Windows shell wrapper. The
     /// command stored in hooks.json must therefore be a bare command rather
     /// than a second `cmd.exe /c "..."` wrapper. AGY also requires JSON on
@@ -834,9 +1056,10 @@ mod tests {
             }),
             "win: {win}"
         );
+        assert!(original.ends_with("& echo {}"), "win: {win}");
         assert!(
-            original.contains("echo {\"decision\":\"allow\"}"),
-            "win: {win}"
+            !original.contains('"'),
+            "cmd receives quotes as \\\": {original}"
         );
 
         let unix = hook_command(Platform::Linux);
@@ -907,7 +1130,7 @@ mod tests {
         for original in ["{\"user-tool\":", "[]", "null", "\"user configuration\""] {
             std::fs::write(&path, original).unwrap();
 
-            let result = ensure_hooks_json(&path, "echo callback");
+            let result = ensure_hooks_json(&path, "echo callback", None);
 
             assert!(result.is_err(), "must reject existing config: {original}");
             assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
@@ -922,7 +1145,7 @@ mod tests {
         let original = [0xff, 0xfe, b'{', b'}'];
         std::fs::write(&path, original).unwrap();
 
-        let error = ensure_hooks_json(&path, "echo callback").unwrap_err();
+        let error = ensure_hooks_json(&path, "echo callback", None).unwrap_err();
 
         assert!(error.contains("failed to read agy hooks.json"));
         assert_eq!(std::fs::read(&path).unwrap(), original);
@@ -937,7 +1160,7 @@ mod tests {
         let sentinel = path.join("user-data");
         std::fs::write(&sentinel, "keep").unwrap();
 
-        let error = ensure_hooks_json(&path, "echo callback").unwrap_err();
+        let error = ensure_hooks_json(&path, "echo callback", None).unwrap_err();
 
         assert!(error.contains("failed to read agy hooks.json"));
         assert!(path.is_dir());
@@ -947,9 +1170,10 @@ mod tests {
     /// Issue #1367: Under `--dangerously-skip-permissions`, AGY automatically
     /// executes tools without prompting for user permission. PreToolUse is
     /// a blocking execution gate (requiring synchronous decision responses),
-    /// not an async notification hook. Thus, only Stop is injected.
+    /// not an async notification hook, so it is installed for the question
+    /// tool alone and never gates any other tool.
     #[test]
-    fn skip_permissions_mode_omits_pre_tool_use_gate() {
+    fn skip_permissions_mode_gates_only_the_question_tool() {
         let temp = TempDir::new().unwrap();
         provision_agy(temp.path());
 
@@ -959,10 +1183,11 @@ mod tests {
             attention.get("Stop").is_some(),
             "Stop hook must be present for turn completion and background detection"
         );
-        assert!(
-            attention.get("PreToolUse").is_none(),
-            "PreToolUse must NOT be injected under skip-permissions mode"
-        );
+        for event in ["PreToolUse", "PostToolUse"] {
+            let groups = attention[event].as_array().expect(event);
+            assert_eq!(groups.len(), 1, "{event}");
+            assert_eq!(groups[0]["matcher"], "ask_question", "{event}");
+        }
         assert!(
             attention.get("Notification").is_none(),
             "Notification is a Claude/Grok concept; AGY uses Stop"

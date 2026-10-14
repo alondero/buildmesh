@@ -304,6 +304,7 @@ pub(crate) fn write_mobile_input_with_sink(
     // buffer never reached the agent, so treating it as a resumed turn would
     // paint a node as running for input that does not exist.
     if outcome.is_accepted() {
+        crate::agent::process::watch_for_interrupt(node_id, text.as_bytes());
         run_autoclear_side_effects(lifecycle_sink, node_id, outcome.activity);
     }
     Ok(outcome)
@@ -369,7 +370,9 @@ fn run_autoclear_side_effects(
     }
     // Routes through SessionLifecycle (issue #132) for the DB write +
     // desktop emit; the mobile broadcast is a separate channel kept below.
-    let _ = crate::agent::session_lifecycle::on_attention_cleared(sink, node_id);
+    // Shared with the desktop path so an Enter that starts no turn is
+    // reverted the same way whichever client sent it.
+    let _ = crate::agent::process::commit_submitted_input(sink, node_id);
     // Also fan out to mobile event subscribers — the desktop Tauri event
     // above only reaches the webview.
     super::events::emit(super::events::EventMsg::AttentionCleared {
@@ -1915,6 +1918,8 @@ mod tests {
     /// never could have cleared anything.
     #[test]
     fn an_accepted_mobile_write_still_clears_attention() {
+        // A submit looks the node up to decide on a confirmation check.
+        let _db = crate::db::test_support::isolated();
         let mock = MockRegistry::submitted();
         let sink = crate::agent::session_lifecycle::testing::RecordingSink::new();
         let outcome = write_mobile_input_with_sink(&mock, &sink, 1, "build it\r").unwrap();
@@ -2081,6 +2086,8 @@ mod tests {
     /// The real registry's CR/LF and paste decoding is covered below.
     #[test]
     fn autoclear_predicate_cr_only() {
+        // A submit looks the node up to decide on a confirmation check.
+        let _db = crate::db::test_support::isolated();
         let mock = MockRegistry::submitted();
         let sink = RecordingSink::new();
         write_mobile_input_with_sink(&mock, &sink, 1, "y\r").expect("\\r writes");
@@ -2092,6 +2099,8 @@ mod tests {
     /// The lifecycle consumer accepts the same submission evidence for LF.
     #[test]
     fn autoclear_predicate_lf_only() {
+        // A submit looks the node up to decide on a confirmation check.
+        let _db = crate::db::test_support::isolated();
         let mock = MockRegistry::submitted();
         let sink = RecordingSink::new();
         write_mobile_input_with_sink(&mock, &sink, 1, "n\n").expect("\\n writes");
@@ -2116,6 +2125,8 @@ mod tests {
 
     #[test]
     fn mobile_input_uses_streaming_registry_evidence_for_attention() {
+        // A submit looks the node up to decide on a confirmation check.
+        let _db = crate::db::test_support::isolated();
         let id = -930_023;
         let (registry, received) = crate::agent::process::testing::capturing_registry(id);
         let sink = RecordingSink::new();

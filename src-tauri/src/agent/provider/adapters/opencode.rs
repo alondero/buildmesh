@@ -338,6 +338,11 @@ impl AgentProvider for OpenCodeAdapter {
         true
     }
 
+    /// The attention plugin forwards `session.busy` when a prompt starts work.
+    fn confirms_prompt_submission(&self) -> bool {
+        true
+    }
+
     fn supports_prefill(&self) -> bool {
         true
     }

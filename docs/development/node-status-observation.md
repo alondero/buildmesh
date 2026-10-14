@@ -11,9 +11,9 @@ working, and terminal silence is not proof that it finished.
 | State | Meaning | Automation implication |
 | --- | --- | --- |
 | Starting | Provisioning or the process early-exit window | Wait for session evidence |
-| Running | Work resumed or a live process was launched | Launch alone does not prove model activity |
+| Running | Work resumed, or a process was launched with a prompt to work on | Launch alone does not prove model activity |
 | Waiting for background work | The foreground yielded with observed unfinished work | Do not infer task completion |
-| Ready | A clean foreground turn ended with no known outstanding work | Another instruction can be sent; task correctness is not established |
+| Ready | A clean foreground turn ended or was interrupted by the user, or a process launched without a prompt is at its prompt | Another instruction can be sent; task correctness is not established |
 | Needs an answer / Needs permission | A structured human request is outstanding | A matching reply is needed |
 | Needs attention | A generic yield, failure, or degraded observation needs review | Inspect its reason and signal health |
 | Completed | Automation recorded its completion outcome | Distinct from ordinary turn completion |
@@ -65,7 +65,9 @@ instead. See [DESIGN.md principle 6](../../DESIGN.md#principles) and
    lifecycle patch; desktop queues a fresh read and mobile rejects older refreshes.
    The spawn-completed list read happens before the early-exit window elapses, so
    it can still observe `spawning`. When that window promotes the row, the same
-   write stores `process_running` and `running` with one timestamp. Clients adopt
+   write stores `process_running` with one timestamp, and `running` only when
+   the launch command carried a prompt: a resume, a manual fresh launch or hub
+   auto-resume leaves the harness idle at its prompt, so it lands `ready`. Clients adopt
    that status and snapshot. They do not copy the snapshot's signal health onto
    the node, so an unknown health column does not become the unverified tooltip
    and an unverified column is not repaired to ok. The badge cannot stay on
@@ -105,6 +107,39 @@ configuration file, producing terminal output, or sharing another CLI's tool nam
   lifecycle updates, and the legacy desktop clear cannot overwrite a ready/idle
   lifecycle transition.
 
+A live run of Claude Code, Codex, Grok, Antigravity, MiniMax Code and OpenCode
+side by side found the following, each now fixed:
+
+- Every spawn was promoted to Running after the early-exit window, so restarted
+  and resumed nodes read Running while idle. Promotion now follows whether the
+  launch carried a prompt.
+- A submitted keystroke publishes `work_resumed` before the harness confirms
+  anything. A dropped prompt (OpenCode discarded one) or a local command left
+  the node Running forever. For harnesses that report prompt submission
+  natively (`AgentProvider::confirms_prompt_submission`), a submit from Ready
+  that no callback confirms within 30 seconds returns the node to Ready. The
+  revert is conditional on the same status revision, so any callback wins. The
+  window is wide because a PowerShell-hosted Codex hook took 10 seconds on a
+  loaded machine.
+- A user interrupt was either silent or a failure. Claude Code and MiniMax fire
+  no hook for Esc; Codex fires `Interrupt`, Grok `StopCancelled`, and OpenCode
+  `session.error` naming `MessageAbortedError`. The latter three were shown as
+  needing attention with degraded health, which also armed the output autoclear
+  so the next redraw flipped an idle node to Running. A cancel is now Ready.
+  For the hookless harnesses, an Esc or Ctrl+C keystroke to a Running node
+  re-reads the transcript for up to ten seconds; Ready is published only when
+  the harness wrote its transcript after the key press and the tail records the
+  interruption (`TranscriptAdapter::interrupted_turn`).
+- Questions were missed or mislabelled: Codex's async `request_user_input`
+  variant, MiniMax's `ask_user` (whose tool returns at once and ends the turn),
+  and Antigravity's `ask_question` dialog (which blocks with no Stop) all read
+  Running or Ready. A Claude permission notification relabelled an open
+  question as a permission.
+- Antigravity's Stop payload names no event, so its callbacks never earned `ok`
+  delivery health; the Grok and Antigravity Windows hook commands did not
+  deliver at all; and a Claude `/clear` started a new native session whose
+  callbacks were dropped as stale.
+
 ## Validation boundaries
 
 The current adapter declarations have different coverage. This inventory describes
@@ -114,12 +149,14 @@ in `src-tauri/src/agent/provider/adapters/` remain the source of truth.
 
 | Harness | Observation path | Declared lifecycle coverage / limit |
 | --- | --- | --- |
-| Claude Code | Native hooks, plus transcript background evidence | Turn completion, input, questions, permissions, background work; native child identities now participate in node status |
-| Codex | Native hooks | Turn completion, input, questions, permissions, background work; question replies now resume the node |
-| OpenCode | Project plugin events | Turn completion, questions and permissions |
-| Kimi Code / Grok Code | Native hooks | Turn completion, input, questions and permissions; no general background capability advertised |
-| Antigravity / Cursor | Native hooks with background evidence | Turn completion and background work; launch policy suppresses ordinary permission prompts |
-| MiniMax Code / Cline | Plugin or native completion hook | Turn completion only is advertised; do not extrapolate request support |
+| Claude Code | Native hooks, plus transcript background, interrupt and `/clear` evidence | Turn completion, input, questions, permissions, background work, interrupts; native child identities now participate in node status |
+| Codex | Native hooks | Turn completion, input, sync and async questions, permissions, background work, interrupts |
+| OpenCode | Project plugin events | Turn completion, questions, permissions and aborts |
+| Kimi Code / Grok Code | Native hooks | Turn completion, input, questions and permissions; Grok cancellation is Ready; no general background capability advertised |
+| Antigravity | Native hooks with background evidence | Turn completion, background work and `ask_question` dialogs; launch policy suppresses ordinary permission prompts |
+| Cursor | Native hooks with background evidence | Turn completion and background work |
+| MiniMax Code | Plugin completion hook plus transcript evidence | Turn completion, `ask_user` questions, background work and interrupts; no permission signal under its pinned Full Access launch |
+| Cline | Native completion hook | Turn completion only is advertised; do not extrapolate request support |
 | Command Code / Meta Muse | Passive session-log watchers | Supported terminal-turn evidence; watcher activation is not proof that a record arrived |
 | DeepSeek Harness / Freebuff / Terminal | No supported lifecycle observer declared | Process lifecycle only; signal health remains unavailable |
 

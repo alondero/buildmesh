@@ -33,6 +33,30 @@ use crate::services::transcript_reader::types::{
 pub(crate) struct ClaudeCodeAdapter;
 
 impl TranscriptAdapter for ClaudeCodeAdapter {
+    /// Esc fires no hook; Claude Code records the interruption as the last
+    /// user record (`[Request interrupted by user]`, or `… for tool use]`).
+    fn interrupted_turn(&self, lines: &str) -> bool {
+        let last_user_text = lines
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|value| {
+                matches!(
+                    value.get("type").and_then(|kind| kind.as_str()),
+                    Some("user" | "assistant")
+                ) && value.get("isMeta").and_then(|meta| meta.as_bool()) != Some(true)
+            })
+            .last()
+            .filter(|value| value.get("type").and_then(|kind| kind.as_str()) == Some("user"))
+            .and_then(|value| {
+                let content = value.pointer("/message/content")?;
+                content
+                    .as_str()
+                    .or_else(|| content.pointer("/0/text").and_then(|text| text.as_str()))
+                    .map(str::to_owned)
+            });
+        last_user_text.is_some_and(|text| text.starts_with("[Request interrupted by user"))
+    }
+
     fn id(&self) -> &'static str {
         "claude_code"
     }
@@ -319,6 +343,67 @@ pub fn continued_session_id(session_id: &str, path: &Path) -> Option<String> {
     declared_continuation(session_id, reader.lines().map_while(Result::ok))
 }
 
+// --- `/clear` successor sessions ---
+//
+// `/clear` moves the running process into a new session without writing a
+// `continued-in` record. The new transcript instead opens with the command
+// itself: its first non-meta user record is `<command-name>/clear</command-name>`.
+
+/// When this transcript's session was started by `/clear`: the timestamp of
+/// its opening `/clear` record. `None` when it opens any other way or is
+/// unreadable.
+pub fn cleared_at(path: &Path) -> Option<chrono::DateTime<chrono::Utc>> {
+    let file = fs::File::open(path).ok()?;
+    opening_clear(BufReader::new(file).lines().map_while(Result::ok))
+}
+
+/// Pure scan for [`cleared_at`].
+pub(crate) fn opening_clear(
+    lines: impl Iterator<Item = String>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    for line in lines {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if value.get("type").and_then(|kind| kind.as_str()) != Some("user")
+            || value.get("isMeta").and_then(|meta| meta.as_bool()) == Some(true)
+        {
+            continue;
+        }
+        let content = value.pointer("/message/content")?;
+        let text = content
+            .as_str()
+            .or_else(|| content.pointer("/0/text").and_then(|text| text.as_str()))?;
+        if !text
+            .trim_start()
+            .starts_with("<command-name>/clear</command-name>")
+        {
+            return None;
+        }
+        return record_timestamp(&value);
+    }
+    None
+}
+
+/// The newest record timestamp in this transcript. `None` when it has none
+/// or is unreadable.
+pub fn last_record_at(path: &Path) -> Option<chrono::DateTime<chrono::Utc>> {
+    let file = fs::File::open(path).ok()?;
+    BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(&line).ok())
+        .filter_map(|value| record_timestamp(&value))
+        .max()
+}
+
+fn record_timestamp(value: &serde_json::Value) -> Option<chrono::DateTime<chrono::Utc>> {
+    let stamp = value.get("timestamp")?.as_str()?;
+    chrono::DateTime::parse_from_rfc3339(stamp)
+        .ok()
+        .map(|stamp| stamp.with_timezone(&chrono::Utc))
+}
+
 /// Pure scan: the last `continued-in` record whose own `sessionId` is this
 /// transcript. A record naming a different predecessor proves nothing about
 /// *this* session, and the newest record wins if a transcript carries more
@@ -464,6 +549,33 @@ pub(crate) fn pending_background_task_ids(lines: impl Iterator<Item = String>) -
 
 #[allow(unused_imports)]
 use crate::services::transcript_reader::types::TranscriptTail as _UnusedTranscriptTail; // keep type accessible from tests
+
+#[cfg(test)]
+mod interrupt_tests {
+    use super::*;
+
+    /// Esc during a turn fires no Claude Code hook (no `Stop`); the
+    /// transcript records the interruption as the turn's last user record
+    /// (captured live on 2.1.299). Without reading it the node read Running
+    /// forever.
+    #[test]
+    fn an_interrupt_record_ends_the_turn() {
+        let prompt = r#"{"type":"user","timestamp":"2026-10-14T12:30:28.772Z","message":{"role":"user","content":"Write a 2000 word essay"}}"#;
+        let partial = r##"{"type":"assistant","timestamp":"2026-10-14T12:30:35.034Z","message":{"role":"assistant","content":[{"type":"text","text":"# A Crossing"}]}}"##;
+        let interrupted = r#"{"type":"user","timestamp":"2026-10-14T12:30:35.043Z","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#;
+        let tool_interrupt = r#"{"type":"user","timestamp":"2026-10-14T12:30:36.000Z","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}"#;
+        let bookkeeping = r#"{"type":"system","timestamp":"2026-10-14T12:31:46.731Z"}"#;
+        let adapter = ClaudeCodeAdapter;
+        assert!(adapter.interrupted_turn(&format!(
+            "{prompt}\n{partial}\n{interrupted}\n{bookkeeping}\n"
+        )));
+        assert!(adapter.interrupted_turn(&format!("{prompt}\n{tool_interrupt}\n")));
+        // Still working, or a new prompt after the interruption.
+        assert!(!adapter.interrupted_turn(&format!("{prompt}\n{partial}\n")));
+        assert!(!adapter.interrupted_turn(&format!("{interrupted}\n{prompt}\n")));
+        assert!(!adapter.interrupted_turn(""));
+    }
+}
 
 #[cfg(test)]
 mod contract_tests {

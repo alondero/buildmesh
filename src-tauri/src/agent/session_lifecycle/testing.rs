@@ -126,6 +126,21 @@ impl SessionLifecycleSink for RecordingSink {
         self.effects.borrow_mut().push("status-written");
         Ok(true)
     }
+    fn commit_lifecycle_if_current(
+        &self,
+        payload: &mut LifecycleChangedPayload,
+        expected_status: SessionStatus,
+        _expected_changed_at: &str,
+    ) -> Result<bool, String> {
+        self.writes_if
+            .borrow_mut()
+            .push((payload.session_id, payload.status, expected_status));
+        if *self.status.borrow() != Some(expected_status) {
+            return Ok(false);
+        }
+        *self.status.borrow_mut() = Some(payload.status);
+        Ok(true)
+    }
     fn write_status(&self, node_id: i64, new: SessionStatus) -> Result<(), String> {
         self.writes.borrow_mut().push((node_id, new));
         Ok(())

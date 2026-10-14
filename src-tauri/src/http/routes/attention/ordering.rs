@@ -100,9 +100,13 @@ pub(super) fn accept_hook(
         || (event == "pretooluse" && payload.tool_name.as_deref() == Some("ExitPlanMode"));
     // Peek only. The id is consumed after this callback is accepted, so a
     // rejected ask cannot eat a reply that a later callback still needs.
-    let ask_already_resolved =
-        tracks_input_request && event != "notification" && state.has_early_reply(key);
-    if tracks_input_request && event != "notification" && !ask_already_resolved {
+    // Notifications and Stops describe a wait without opening a tool
+    // lifecycle that a later hook closes (a Stop-derived question is a
+    // transcript snapshot the next Stop re-reads), so neither is tracked.
+    let tracks_input_request =
+        tracks_input_request && !matches!(event.as_str(), "notification" | "stop");
+    let ask_already_resolved = tracks_input_request && state.has_early_reply(key);
+    if tracks_input_request && !ask_already_resolved {
         if matches!(event.as_str(), "permissionrequest" | "permission.asked") {
             state.permission_request(key);
         } else {
@@ -143,7 +147,9 @@ pub(super) fn accept_hook(
                 .as_deref()
                 .or(payload.tool_name.as_deref()),
         );
-    } else if matches!(event.as_str(), "posttooluse" | "posttoolusefailure") {
+    } else if matches!(event.as_str(), "posttooluse" | "posttoolusefailure")
+        && payload.tool_name.as_deref() != Some(super::normalizers::CODEX_ASYNC_QUESTION_TOOL)
+    {
         state.resolve_question(
             payload
                 .request_id
@@ -185,6 +191,17 @@ pub(super) fn accept_hook(
             | "question.rejected"
     );
     let preserve_attention = keyed_reply && state.has_foreground_questions();
+    // Claude Code follows an `AskUserQuestion` dialog with an untargeted
+    // "needs your permission" Notification. It names no request, so it cannot
+    // be a second ask; relabelling the open question as a permission would
+    // offer Approve/Reject for a multiple-choice question.
+    if event == "notification"
+        && classified.detail.kind
+            == Some(crate::agent::session_lifecycle::LifecycleKind::PermissionRequested)
+        && state.has_foreground_questions()
+    {
+        return Accept::rejected();
+    }
     let accepted = preserve_attention
         || starts_turn
         || !(state.has_questions()

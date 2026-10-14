@@ -530,7 +530,8 @@ pub(super) fn question(payload: &HookPayload, detail: HookSignalDetail) -> Class
             clean_description(
                 &questions
                     .iter()
-                    .filter_map(|q| q.get("question")?.as_str())
+                    // Codex's async ask titles its questions.
+                    .filter_map(|q| q.get("question").or_else(|| q.get("title"))?.as_str())
                     .collect::<Vec<_>>()
                     .join(" "),
             )
@@ -544,6 +545,16 @@ pub(super) fn failure(detail: HookSignalDetail) -> Classified {
     Classified::mark_input(HookSignalDetail {
         kind: Some(LifecycleKind::Error),
         signal_health: SignalHealth::Degraded,
+        semantic_turn: None,
+        ..detail
+    })
+}
+
+/// The user cancelled the turn: the agent is back at its prompt, which is
+/// `Ready`, not a failure that needs review.
+pub(super) fn interrupted(detail: HookSignalDetail) -> Classified {
+    Classified::ready(HookSignalDetail {
+        message: Some("turn interrupted by the user".into()),
         semantic_turn: None,
         ..detail
     })

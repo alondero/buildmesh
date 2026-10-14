@@ -513,6 +513,14 @@ pub trait SessionLifecycleSink {
     /// On success, `payload` is the envelope that was stored.
     fn commit_spawn_promotion(&self, payload: &mut LifecycleChangedPayload)
         -> Result<bool, String>;
+    /// Commit `payload` only while the row still holds the observed revision —
+    /// the same status and `status_changed_at` — so nothing landed since.
+    fn commit_lifecycle_if_current(
+        &self,
+        payload: &mut LifecycleChangedPayload,
+        expected_status: SessionStatus,
+        expected_changed_at: &str,
+    ) -> Result<bool, String>;
     fn emit_attention_needed_with_payload(
         &self,
         node_id: i64,
@@ -556,6 +564,14 @@ impl SessionLifecycleSink for AppSessionLifecycleSink<'_> {
         payload: &mut LifecycleChangedPayload,
     ) -> Result<bool, String> {
         commit_spawn_promotion_with_logging(payload)
+    }
+    fn commit_lifecycle_if_current(
+        &self,
+        payload: &mut LifecycleChangedPayload,
+        expected_status: SessionStatus,
+        expected_changed_at: &str,
+    ) -> Result<bool, String> {
+        commit_lifecycle_if_current_with_logging(payload, expected_status, expected_changed_at)
     }
     fn write_status(&self, node_id: i64, new: SessionStatus) -> Result<(), String> {
         db::update_agent_node_status(node_id, new).map_err(|e| e.to_string())
@@ -662,6 +678,23 @@ fn commit_spawn_promotion_with_logging(
     }
 }
 
+fn commit_lifecycle_if_current_with_logging(
+    payload: &mut LifecycleChangedPayload,
+    expected_status: SessionStatus,
+    expected_changed_at: &str,
+) -> Result<bool, String> {
+    db::agent_node::commit_lifecycle_if_current_inner(
+        &db::write_conn(),
+        payload,
+        expected_status,
+        expected_changed_at,
+    )
+    .map_err(|error| {
+        tracing::error!(node_id = payload.session_id, %error, "failed to persist conditional lifecycle observation");
+        error.to_string()
+    })
+}
+
 fn commit_lifecycle_with_logging(
     payload: &mut LifecycleChangedPayload,
     forbidden: &[SessionStatus],
@@ -690,6 +723,14 @@ impl SessionLifecycleSink for DbOnlySink {
         payload: &mut LifecycleChangedPayload,
     ) -> Result<bool, String> {
         commit_spawn_promotion_with_logging(payload)
+    }
+    fn commit_lifecycle_if_current(
+        &self,
+        payload: &mut LifecycleChangedPayload,
+        expected_status: SessionStatus,
+        expected_changed_at: &str,
+    ) -> Result<bool, String> {
+        commit_lifecycle_if_current_with_logging(payload, expected_status, expected_changed_at)
     }
     fn write_status(&self, node_id: i64, new: SessionStatus) -> Result<(), String> {
         db::update_agent_node_status(node_id, new).map_err(|e| e.to_string())
@@ -738,21 +779,35 @@ pub fn on_spawn_started(sink: &dyn SessionLifecycleSink, node_id: i64) -> Result
 }
 
 /// The reader thread's `EARLY_EXIT_WINDOW` has elapsed without an
-/// early-exit `Error` — promote `Spawning → Running`. Conditional so the
+/// early-exit `Error` — promote out of `Spawning`. Conditional so the
 /// reader's `Error` write wins if it already fired (issue #654).
 /// Returns `true` iff the promotion fired (false = reader won the race).
-pub fn on_spawn_complete(sink: &dyn SessionLifecycleSink, node_id: i64) -> Result<bool, String> {
+///
+/// `launch_prompt` is whether the command line carried a first prompt. Only
+/// then can the harness be working; a launch without one (resume, manual
+/// fresh launch, startup auto-resume) sits at its prompt and lands `Ready`.
+/// A later prompt submission or native hook moves it on from there.
+pub fn on_spawn_complete(
+    sink: &dyn SessionLifecycleSink,
+    node_id: i64,
+    launch_prompt: bool,
+) -> Result<bool, String> {
     // `node-spawn-completed` is emitted when the process is spawned, before this
     // window elapses, and its refetch can commit `spawning`. The promotion has
     // to be the same envelope a later list read returns, or the badge stays on
     // "Starting…" and a refetch drops the event. One conditional write stores
     // `process_running` only while the row is still `spawning`.
+    let (status, message) = if launch_prompt {
+        (SessionStatus::Running, "agent process is running")
+    } else {
+        (SessionStatus::Ready, "agent process is at its prompt")
+    };
     let mut payload = LifecycleChangedPayload::new(
         node_id,
         LifecycleKind::ProcessRunning,
-        SessionStatus::Running,
+        status,
         &HookSignalDetail::default(),
-        "agent process is running",
+        message,
     );
     let promoted = sink.commit_spawn_promotion(&mut payload)?;
     if !promoted {
@@ -1009,6 +1064,76 @@ pub fn commit_user_resumed(
             "agent resumed work",
         ),
     )
+}
+
+/// How long a harness that reports prompt submission natively has to confirm
+/// a submitted keystroke before [`on_submit_unconfirmed`] reverts it. Hooks
+/// usually arrive within a few seconds, but a PowerShell-hosted hook on a
+/// loaded machine has taken 10 s.
+pub const SUBMIT_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Whether a submitted keystroke should be checked for a harness
+/// confirmation. Only a node idling at its prompt is: Enter on a permission
+/// or question dialog answers it, and an approved tool may run without any
+/// hook, so reverting there would hide real work.
+pub fn submit_needs_confirmation(prior: SessionStatus, harness_confirms: bool) -> bool {
+    harness_confirms && prior == SessionStatus::Ready
+}
+
+/// The confirmation window elapsed. If the row still holds exactly the
+/// envelope the keystroke stored, no observation followed it — the Enter
+/// started no turn (an empty prompt, a local slash command, a dialog
+/// keypress, or input the TUI dropped) — so the node is back at its prompt.
+/// Returns `true` iff the revert was committed and published.
+pub fn on_submit_unconfirmed(
+    sink: &dyn SessionLifecycleSink,
+    submitted: &LifecycleChangedPayload,
+) -> Result<bool, String> {
+    let mut payload = LifecycleChangedPayload::new(
+        submitted.session_id,
+        LifecycleKind::TurnCompleted,
+        SessionStatus::Ready,
+        &HookSignalDetail::default(),
+        "submitted input started no turn",
+    );
+    if !sink.commit_lifecycle_if_current(&mut payload, submitted.status, &submitted.timestamp)? {
+        return Ok(false);
+    }
+    sink.emit_lifecycle_changed(payload);
+    Ok(true)
+}
+
+/// How often, and how many times, the transcript is re-read after an
+/// interrupt key while the harness records the interruption. MiniMax wrote
+/// its aborted tool result three seconds after Esc.
+pub const INTERRUPT_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+pub const INTERRUPT_ATTEMPTS: u32 = 20;
+
+/// The user interrupted a running turn and the harness recorded it without
+/// any completion signal (Claude Code's Esc fires no `Stop`). The node is at
+/// its prompt again. Conditional on the `Running` revision observed before
+/// the transcript was read, so a turn that started since is never settled.
+pub fn on_turn_interrupted(
+    sink: &dyn SessionLifecycleSink,
+    node_id: i64,
+    observed_changed_at: &str,
+) -> Result<bool, String> {
+    let mut payload = LifecycleChangedPayload::new(
+        node_id,
+        LifecycleKind::TurnCompleted,
+        SessionStatus::Ready,
+        &HookSignalDetail::default(),
+        "turn interrupted by the user",
+    );
+    if !sink.commit_lifecycle_if_current(
+        &mut payload,
+        SessionStatus::Running,
+        observed_changed_at,
+    )? {
+        return Ok(false);
+    }
+    sink.emit_lifecycle_changed(payload);
+    Ok(true)
 }
 
 /// A harness reports that work resumed. Unlike manual input, a delayed hook
@@ -1399,7 +1524,7 @@ mod tests {
     #[test]
     fn on_spawn_complete_writes_running_only_if_currently_spawning() {
         let sink = RecordingSink::with_status(SessionStatus::Spawning);
-        let promoted = on_spawn_complete(&sink, 7).unwrap();
+        let promoted = on_spawn_complete(&sink, 7, true).unwrap();
         assert!(
             promoted,
             "on_spawn_complete must report success on a happy path"
@@ -1424,10 +1549,129 @@ mod tests {
         assert!(events[0].provider_event.is_none());
     }
 
+    fn seed_node(status: &str) -> i64 {
+        let db = crate::db::write_conn();
+        db.execute(
+            "INSERT INTO meshes (name, path) VALUES ('submit-mesh', 'C:/submit')",
+            [],
+        )
+        .unwrap();
+        let mesh_id = db.last_insert_rowid();
+        db.execute(
+            "INSERT INTO agent_nodes (mesh_id, name, path, provider, status)
+             VALUES (?1, 'node', 'C:/submit', 'anthropic', ?2)",
+            rusqlite::params![mesh_id, status],
+        )
+        .unwrap();
+        db.last_insert_rowid()
+    }
+
+    fn stored_status(node_id: i64) -> SessionStatus {
+        crate::db::get_agent_node_by_id(node_id).unwrap().status
+    }
+
+    /// Enter on an empty prompt, a local slash command (`/cost` fires no
+    /// hook), a keypress inside a TUI dialog, or input the TUI dropped all
+    /// flipped a Ready node to Running with nothing ever to correct it. When
+    /// the harness reports prompt submission natively and nothing confirmed
+    /// this one, the node returns to Ready.
+    #[test]
+    fn unconfirmed_submit_returns_a_ready_node_to_ready() {
+        let _db = crate::db::test_support::isolated();
+        let node = seed_node("ready");
+        let submitted = commit_user_resumed(&DbOnlySink, node).unwrap().unwrap();
+        assert_eq!(stored_status(node), SessionStatus::Running);
+
+        assert!(on_submit_unconfirmed(&DbOnlySink, &submitted).unwrap());
+        assert_eq!(stored_status(node), SessionStatus::Ready);
+    }
+
+    /// Any observation after the submit — the harness's own prompt-submit
+    /// hook above all — proves the turn started, so the revert must not
+    /// overwrite it.
+    #[test]
+    fn confirmed_submit_is_not_reverted() {
+        let _db = crate::db::test_support::isolated();
+        let node = seed_node("ready");
+        let submitted = commit_user_resumed(&DbOnlySink, node).unwrap().unwrap();
+        // A same-instant confirmation must still read as a newer write.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert!(on_hook_running(&DbOnlySink, node).unwrap());
+
+        assert!(!on_submit_unconfirmed(&DbOnlySink, &submitted).unwrap());
+        assert_eq!(stored_status(node), SessionStatus::Running);
+    }
+
+    /// Claude Code's Esc ends the turn without a `Stop` hook, so the node
+    /// stayed Running. Once the transcript shows the interruption the node is
+    /// at its prompt — unless anything moved the row after it was observed.
+    #[test]
+    fn an_interrupted_turn_settles_only_the_observed_running_revision() {
+        let _db = crate::db::test_support::isolated();
+        let node = seed_node("ready");
+        commit_user_resumed(&DbOnlySink, node).unwrap().unwrap();
+        let (status, observed) = crate::db::agent_node::agent_status_revision(node).unwrap();
+        assert_eq!(status, SessionStatus::Running);
+        assert!(on_turn_interrupted(&DbOnlySink, node, &observed).unwrap());
+        assert_eq!(stored_status(node), SessionStatus::Ready);
+
+        // A new prompt after the observation is a new turn, not the one that
+        // was interrupted.
+        commit_user_resumed(&DbOnlySink, node).unwrap().unwrap();
+        let (_, stale) = crate::db::agent_node::agent_status_revision(node).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert!(on_hook_running(&DbOnlySink, node).unwrap());
+        assert!(!on_turn_interrupted(&DbOnlySink, node, &stale).unwrap());
+        assert_eq!(stored_status(node), SessionStatus::Running);
+    }
+
+    /// Live, with six harnesses starting turns at once, Codex's PowerShell
+    /// `UserPromptSubmit` hook landed 10 s after Enter; an 8 s window flipped
+    /// that working node to Ready. The window must clear observed latency with
+    /// room to spare.
+    #[test]
+    fn the_submit_window_outlasts_observed_hook_latency() {
+        let slowest_observed = std::time::Duration::from_secs(10);
+        assert!(SUBMIT_CONFIRM_WINDOW >= slowest_observed * 2);
+    }
+
+    /// Only a node idling at its prompt is checked. Enter on a permission or
+    /// question dialog answers it, and several harnesses send no hook for an
+    /// approved tool, so reverting there would hide real work.
+    #[test]
+    fn only_a_ready_node_awaits_submit_confirmation() {
+        assert!(submit_needs_confirmation(SessionStatus::Ready, true));
+        assert!(!submit_needs_confirmation(SessionStatus::Ready, false));
+        for prior in [
+            SessionStatus::AwaitingInput,
+            SessionStatus::Running,
+            SessionStatus::Spawning,
+            SessionStatus::Idle,
+        ] {
+            assert!(!submit_needs_confirmation(prior, true), "{prior:?}");
+        }
+    }
+
+    /// A launch with no prompt on its command line (a resume, a manual fresh
+    /// launch, hub auto-resume) leaves the harness idle at its prompt. Calling
+    /// that `Running` was the most visible wrong status: after a hub restart
+    /// every auto-resumed node read Running while none was working, and
+    /// nothing would ever correct it until the user typed.
+    #[test]
+    fn on_spawn_complete_without_a_launch_prompt_lands_ready() {
+        let sink = RecordingSink::with_status(SessionStatus::Spawning);
+        assert!(on_spawn_complete(&sink, 7, false).unwrap());
+        assert_eq!(sink.status(), Some(SessionStatus::Ready));
+        let events = sink.lifecycle_changed();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].status, SessionStatus::Ready);
+        assert_eq!(events[0].kind, LifecycleKind::ProcessRunning);
+    }
+
     #[test]
     fn on_spawn_complete_does_not_publish_when_the_row_left_spawning() {
         let sink = RecordingSink::with_status(SessionStatus::Error);
-        let promoted = on_spawn_complete(&sink, 7).unwrap();
+        let promoted = on_spawn_complete(&sink, 7, true).unwrap();
         assert!(
             !promoted,
             "a row that is no longer Spawning must not be promoted"

@@ -1418,6 +1418,33 @@ pub(crate) fn commit_agent_lifecycle_inner(
     Ok(changed > 0)
 }
 
+/// Commit an observation only while the row still holds the observation it
+/// replaces: the same status and `status_changed_at`. Any write in between
+/// (a hook, a kill, another keystroke) moves the timestamp and wins.
+pub(crate) fn commit_lifecycle_if_current_inner(
+    conn: &Connection,
+    payload: &mut crate::agent::session_lifecycle::LifecycleChangedPayload,
+    expected_status: SessionStatus,
+    expected_changed_at: &str,
+) -> SqlResult<bool> {
+    let Some(snapshot) = lifecycle_snapshot_inner(conn, payload)? else {
+        return Ok(false);
+    };
+    let changed = conn.execute(
+        "UPDATE agent_nodes SET status=?1, status_changed_at=?2, lifecycle_snapshot=?3
+         WHERE id=?4 AND status=?5 AND status_changed_at=?6",
+        params![
+            payload.status.to_db_str(),
+            payload.timestamp,
+            snapshot,
+            payload.session_id,
+            expected_status.to_db_str(),
+            expected_changed_at
+        ],
+    )?;
+    Ok(changed > 0)
+}
+
 /// Promote a `spawning` row and store that envelope in the same write.
 ///
 /// The predicate is the early-exit race guard: any other status, including
@@ -1696,6 +1723,19 @@ pub(crate) fn agent_status_observation(id: i64) -> SqlResult<AgentStatusObservat
 
 /// Identity of the process and its last lifecycle transition. Continuations
 /// observed before user input/regeneration must not write into the new turn.
+/// The row's current status revision: its status and `status_changed_at`,
+/// the pair a conditional lifecycle write is fenced on.
+pub(crate) fn agent_status_revision(id: i64) -> SqlResult<(SessionStatus, String)> {
+    read_conn().query_row(
+        "SELECT status, COALESCE(status_changed_at, '') FROM agent_nodes WHERE id = ?1",
+        params![id],
+        |row| {
+            let status: String = row.get(0)?;
+            Ok((SessionStatus::from_db_str(&status), row.get(1)?))
+        },
+    )
+}
+
 pub(crate) fn agent_turn_stamp(id: i64) -> SqlResult<Option<String>> {
     read_conn().query_row(
         "SELECT session_started_at, status_changed_at FROM agent_nodes WHERE id = ?1",

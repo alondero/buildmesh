@@ -146,6 +146,32 @@ credential store gh and git credential helpers resolve GitHub auth from (issue
 `docs/learning/harness-attention-reliability.md` for the evidence matrix and
 remaining limitations.
 
+A turn the user cancelled is `turn_completed`/`ready` with the message "turn
+interrupted by the user", not a failure: Codex `Interrupt`, Grok
+`StopCancelled`, and an OpenCode `session.error` whose forwarded `error` names
+`MessageAbortedError`. `StopFailure` and other OpenCode errors remain degraded
+review checkpoints. Claude Code and MiniMax fire nothing for Esc, so
+`process::watch_for_interrupt` handles a bare Esc or Ctrl+C written to a
+`running` node: every `INTERRUPT_POLL` for up to `INTERRUPT_ATTEMPTS` looks
+(MiniMax recorded an aborted tool three seconds after Esc) it asks the
+harness's transcript reader (`interrupted_turn`), stopping as soon as the node
+leaves that `running` revision. It settles that exact revision to Ready only
+if the transcript was written after the key press and its tail records
+the interruption (Claude's `[Request interrupted by user…]` record; MiniMax's
+aborted tool result, or a prompt left unanswered by an abort that rewrote the
+file).
+
+Antigravity's question dialog blocks the turn without a Stop, so its hooks file
+also carries `PreToolUse` and `PostToolUse` matcher groups scoped to
+`ask_question`. A pre-tool hook is a gate whose answer is required — AGY 1.3.5
+denied the question when the hook printed `{}` — so it prints
+`{"decision":"allow"}`, built on Windows by PowerShell from `[char]34` because
+AGY passes every `"` to cmd as `\"`. Every other tool is untouched. AGY's
+payloads name no event, so these hooks put it in the URL (`?event=PreToolUse`)
+and the route names the payload before any parser sees it; unnamed, the
+pre-tool payload's `transcriptPath` would read as a Stop receipt. A WSL-hosted
+Buildmesh keeps the Stop hook only.
+
 ### Native session continuation (issue #2263)
 A hook session id that differs from `agent_nodes.cli_session_id` is normally a callback from a previous process generation, and the ordering token drops it. Claude Code can also carry a **running** process into a *new* native session, in which case every later callback legitimately carries an id Buildmesh has never stored: the run then looks permanently busy and its Circuit cannot observe its own report. The transition is recorded in the transcript of the session it came from — `{"type":"continued-in","sessionId":<old>,"continuedInSessionId":<new>}` — and that record is the only evidence separating the two cases.
 
@@ -153,6 +179,8 @@ A hook session id that differs from `agent_nodes.cli_session_id` is normally a c
 
 - `prove` resolves the chain through the Claude Code transcript reader (`continued_session_id`, which accepts only a well-formed record naming its own session, bounded at 8 hops). It is file I/O, so the route runs it on the blocking pool *before* the apply pass with no database connection held. A callback that already matches the stored identity returns without touching a transcript, and any harness whose `TranscriptFormat` is not `ClaudeCode` is never granted lineage — Cursor reuses the parser over its own store and never writes the record.
 - `admit` performs the identity write: `db::adopt_continued_cli_session_id`, conditional on `cli_session_id = <old>` **and** `session_started_at` (the process generation read with the request) **and** a live status **and** no other live node owning the successor. A node that respawned, restarted or whose identity was captured elsewhere keeps the newer identity, so a retired process's successor callback is dropped instead of resurrecting its conversation.
+
+`/clear` also moves a running Claude Code process into a new session, but writes no `continued-in` record. The chain walk therefore ends with `cleared_successor`: the hook's own transcript proves it is the stored session's successor when its first real user record is the `/clear` command and that record is no older than the stored session's last record. A clear that predates the stored session's activity proves nothing. Both proofs read the transcripts under the directory the harness ran in (`coordinator::enrichment::transcript_dir`): a worktree node's transcripts are keyed under its worktree, so reading them under the mesh root finds nothing and drops every successor callback as stale.
 
 Only the chain's terminal session is adoptable. Absent, malformed or non-UUID records prove nothing (the declared id becomes a transcript filename on the next hop and reaches the harness as `--resume <id>`), a reversed record is never lineage, and an id the chain has already passed is superseded. Because the stored identity moves first and only then does the callback publish, the lifecycle observation and the Circuit's report read (`coordinator::enrichment::circuit_report_snapshot` → `readiness::prepare`, which requires `owner.session_id == agent.cli_session_id`) follow the successor together.
 

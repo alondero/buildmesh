@@ -160,6 +160,11 @@ impl AgentProvider for AnthropicAdapter {
         true
     }
 
+    /// Claude Code fires `UserPromptSubmit` when a prompt starts a turn.
+    fn confirms_prompt_submission(&self) -> bool {
+        true
+    }
+
     fn supports_prefill(&self) -> bool {
         true
     }

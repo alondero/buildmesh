@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::path::Path;
 
 pub(super) fn parse(value: &Value) -> Option<HookPayload> {
-    let fields = [COMPATIBLE_FIELDS, &["notification_type"]].concat();
+    let fields = [COMPATIBLE_FIELDS, &["notification_type", "error"]].concat();
     HookPayload::parse_for(value, &fields)
 }
 
@@ -21,6 +21,9 @@ pub(super) fn classify(
         | "question.rejected" => running(detail),
         "permission.asked" => permission(detail),
         "question.asked" => question(payload, detail),
+        "session.error" if payload.error.as_deref() == Some("MessageAbortedError") => {
+            interrupted(detail)
+        }
         "session.error" => failure(detail),
         "notification" if payload.notification_type.as_deref() == Some("permission_prompt") => {
             permission(detail)

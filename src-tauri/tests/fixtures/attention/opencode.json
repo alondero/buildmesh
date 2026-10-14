@@ -45,6 +45,30 @@
     "health": "ok"
   },
   {
+    "name": "session.error-aborted",
+    "payload": {
+      "hook_event_name": "session.error",
+      "sessionID": "ses_fc52ccfb9ffek1jl23ZwpRuSP7",
+      "error": "MessageAbortedError"
+    },
+    "pending": 0,
+    "decision": "Ready",
+    "kind": "turn_completed",
+    "health": "ok"
+  },
+  {
+    "name": "session.error-failed",
+    "payload": {
+      "hook_event_name": "session.error",
+      "sessionID": "ses_fc52ccfb9ffek1jl23ZwpRuSP7",
+      "error": "APIError"
+    },
+    "pending": 0,
+    "decision": "MarkInput",
+    "kind": "error",
+    "health": "degraded"
+  },
+  {
     "name": "question.asked-4",
     "payload": {
       "hook_event_name": "question.asked",

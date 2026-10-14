@@ -20,7 +20,8 @@ pub(super) fn classify(
     match payload.event().as_str() {
         "sessionstart" => ignore(detail),
         "userpromptsubmit" => running(detail),
-        "stopfailure" | "stopcancelled" => failure(detail),
+        "stopcancelled" => interrupted(detail),
+        "stopfailure" => failure(detail),
         "notification" if payload.notification_type.as_deref() == Some("permission_prompt") => {
             permission(detail)
         }
