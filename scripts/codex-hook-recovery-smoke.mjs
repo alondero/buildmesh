@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { mkdirSync, existsSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import os from 'node:os';
@@ -8,6 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { createCodexHookRelay } from './codex-hook-relay.mjs';
+import { BRIDGE_ENABLE_ENV, BRIDGE_TOKEN_ENV, PROFILE_DIR_ENV, bridgeHeaders } from './test-bridge-auth.mjs';
 
 const [nodeMajor, nodeMinor] = process.versions.node.split('.').map(Number);
 const hasUnflaggedSqlite = nodeMajor > 23
@@ -25,6 +27,8 @@ const appIdentifier = 'com.alond.buildmesh.issue1905.dev';
 const cdpPort = Number(process.env.BUILDMESH_1905_CDP_PORT ?? 9224);
 const appHttpPort = 2992;
 const testBridgePort = 2991;
+const bridgeCredential = randomBytes(32).toString('hex');
+const bridgeEnv = { [BRIDGE_TOKEN_ENV]: bridgeCredential };
 const appBinary = path.join(root, 'src-tauri', 'target', 'release', 'buildmesh-dev.exe');
 const appDataRoot = process.platform === 'win32'
   ? runText('powershell.exe', [
@@ -33,12 +37,12 @@ const appDataRoot = process.platform === 'win32'
     '[Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)',
   ])
   : path.join(process.env.USERPROFILE || os.homedir(), 'AppData', 'Roaming');
-const appProfile = path.join(appDataRoot, appIdentifier);
-const databasePath = path.join(appProfile, 'buildmesh.db');
+const realProfile = path.join(appDataRoot, appIdentifier);
 const commit = runText('git', ['rev-parse', 'HEAD'], root);
 const timestamp = new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-');
 const scratchRoot = path.join(root, '.tmp', `codex-hook-recovery-${timestamp}`);
-const scratchAppData = path.join(scratchRoot, 'appdata');
+const scratchProfile = path.join(scratchRoot, 'profile');
+const databasePath = path.join(scratchProfile, 'buildmesh.db');
 const workspace = path.join(scratchRoot, 'workspace');
 const reportPath = path.join(scratchRoot, 'evidence.json');
 const report = {
@@ -53,7 +57,7 @@ const report = {
     provider: 'codex',
     approval: 'never',
     sandbox: 'read-only (fixture relay mode)',
-    profileIsolation: 'Tauri Windows Application Data known folder with an issue-specific identifier; pre-existing profiles are refused',
+    profileIsolation: 'BUILDMESH_PROFILE_DIR points at a scratch profile. The roaming folder for this identifier is refused if it already exists, and it is not deleted.',
     projectHookTrust: 'Buildmesh provisions and bypasses project hook trust for its managed Codex process',
     externalEffects: 'synthetic text-only prompts; no repository writes or tools expected',
   },
@@ -120,7 +124,7 @@ async function waitFor(description, probe, timeoutMs = 120_000) {
 async function testBridge(command, args = {}) {
   const response = await fetch(`http://127.0.0.1:${testBridgePort}/invoke`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: bridgeHeaders({ 'content-type': 'application/json' }, bridgeEnv, null),
     body: JSON.stringify({ cmd: command, args }),
     signal: AbortSignal.timeout(15_000),
   });
@@ -456,15 +460,17 @@ async function scenarioDelayedOldTurn() {
 
 async function main() {
   if (process.platform !== 'win32') throw new Error('The controlled live Codex hook smoke runs on Windows only');
-  if (existsSync(appProfile)) {
-    throw new Error(`Issue 1905 profile already exists at the Tauri data path; refusing to reuse or remove it: ${appProfile}`);
+  if (existsSync(realProfile)) {
+    throw new Error(
+      `Issue 1905 identifier already has a roaming profile. A binary that ignores ${PROFILE_DIR_ENV} would write it, so this run refuses to start: ${realProfile}`,
+    );
   }
   profileOwnedByRun = true;
   report.codexVersion = runText('codex', ['--version']);
   if (!existsSync(appBinary)) throw new Error('Build the isolated dev app first: npm run tauri:build:dev:codex-hook-smoke');
   for (const port of [testBridgePort, appHttpPort, cdpPort]) await assertPortAvailable(port);
 
-  mkdirSync(scratchAppData, { recursive: true });
+  mkdirSync(scratchProfile, { recursive: true });
   mkdirSync(workspace, { recursive: true });
   relay = await createCodexHookRelay();
   app = spawn(appBinary, [], {
@@ -473,7 +479,9 @@ async function main() {
     stdio: 'ignore',
     env: {
       ...process.env,
-      APPDATA: scratchAppData,
+      [PROFILE_DIR_ENV]: scratchProfile,
+      [BRIDGE_ENABLE_ENV]: '1',
+      [BRIDGE_TOKEN_ENV]: bridgeCredential,
       BUILDMESH_CODEX_HOOK_RELAY_URL: relay.baseUrl,
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${cdpPort}`,
       RUST_BACKTRACE: '1',
@@ -484,8 +492,11 @@ async function main() {
     app.once('exit', (code, signal) => resolve({ code, signal }));
   });
 
-  await waitFor('isolated dev app test bridge', async () => {
-    const response = await fetch(`http://127.0.0.1:${testBridgePort}/health`, { signal: AbortSignal.timeout(1_000) });
+  await waitFor('authenticated dev-tools test bridge', async () => {
+    const response = await fetch(`http://127.0.0.1:${testBridgePort}/health`, {
+      headers: bridgeHeaders({}, bridgeEnv, null),
+      signal: AbortSignal.timeout(1_000),
+    });
     return response.ok;
   });
   browser = await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`);
@@ -499,13 +510,21 @@ async function main() {
   if (report.appIdentifier !== appIdentifier) {
     throw new Error(`Expected isolated app identifier ${appIdentifier}, got ${report.appIdentifier}`);
   }
+  if (existsSync(realProfile)) {
+    throw new Error(`The app wrote the roaming profile at ${realProfile}. ${PROFILE_DIR_ENV} was not honored. Rebuild with npm run tauri:build:dev:codex-hook-smoke.`);
+  }
+  if (!existsSync(databasePath)) {
+    throw new Error(
+      `The smoke database was not created at ${databasePath}. A dev-tools build reads ${PROFILE_DIR_ENV}. Rebuild with npm run tauri:build:dev:codex-hook-smoke.`,
+    );
+  }
   database = new DatabaseSync(databasePath);
   if (!database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meshes'").get()) {
-    throw new Error(`The smoke database is not at Tauri's Windows app data path: ${databasePath}`);
+    throw new Error(`The scratch profile has no meshes table: ${databasePath}`);
   }
   report.relayOrigin = relay.baseUrl;
   report.relayModeSandbox = 'read-only';
-  report.testDatabase = `${appIdentifier}/buildmesh.db`;
+  report.testDatabase = path.relative(root, databasePath);
   console.log(`Isolated Buildmesh app ready (${appIdentifier}); starting real Codex callbacks.`);
   await createWorkspaceAndMesh();
 
@@ -581,16 +600,16 @@ async function cleanup() {
     && !appExitResult.error && appExitResult.code === 0;
   report.cleanup.cancelledRuns = [...cancelledRuns];
   report.cleanup.circuitId = circuitId;
-  const profilePath = path.resolve(appProfile);
-  const expectedProfilePath = path.resolve(appDataRoot, appIdentifier);
+  const profilePath = path.resolve(scratchProfile);
+  const expectedProfilePath = path.resolve(scratchRoot, 'profile');
   const safeProfileTarget = profilePath === expectedProfilePath
-    && path.dirname(profilePath) === path.resolve(appDataRoot)
-    && path.basename(profilePath) === appIdentifier
-    && report.appIdentifier === appIdentifier
+    && path.dirname(profilePath) === path.resolve(scratchRoot)
+    && path.basename(profilePath) === 'profile'
+    && profilePath !== path.resolve(realProfile)
     && profileOwnedByRun;
   if (!report.failure && report.scenarios.length === 2 && meshDeleted && report.cleanup.appShutdown && safeProfileTarget) {
     try {
-      rmSync(appProfile, { recursive: true, force: false });
+      rmSync(scratchProfile, { recursive: true, force: false });
       report.cleanup.isolatedProfileRemoved = true;
     } catch (error) {
       report.cleanup.isolatedProfileRemovalError = error.message;

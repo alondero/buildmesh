@@ -8,10 +8,9 @@
  * bind/inspect overhead per spec run).
  *
  * Pre-flight (per CLAUDE.local.md): the stable hub MUST be paused before
- * this spec — the spawned exe binds 1991 (test server) + 1992-1994
- * (mobile SPA), the same ports the stable hub owns. We probe 1991 up
- * front so a violation surfaces as a clear failure rather than a vague
- * spawn error.
+ * this spec — the spawned exe binds 1992-1994 (mobile SPA), the same
+ * ports the stable hub owns. The hub does not bind the test bridge, so
+ * the guard reads `instance-owner.pid` in the real profile.
  *
  * The bm_session cookie carries a freshly minted per-device token
  * (issue #502) — NOT the root token. The cookie assertion checks
@@ -21,7 +20,8 @@
  *
  * Prereqs:
  *   - npm run build          (produces dist/ AND dist/mobile/)
- *   - npm run tauri build    (produces the release exe with assets embedded)
+ *   - npx tauri build --features dev-tools
+ *     (stable identifier, embedded assets, test bridge compiled in)
  *
  * Override the exe path if the build isn't at the default location:
  *   BUILDMESH_EXE=/abs/path/to/buildmesh.exe npx playwright test …
@@ -29,12 +29,12 @@
  * Run: npx playwright test tests/e2e/mobile-spa.spec.ts
  */
 import { test, expect } from '@playwright/test';
-import { invokeViaHttp, waitForPort } from './utils/tauri-http';
+import { BRIDGE_MISSING_HINT, invokeViaHttp, waitForPort } from './utils/tauri-http';
 import {
   spawnBuildmesh,
   terminate,
   findMobilePort,
-  isPortBound,
+  stableHubIsRunning,
   TEST_SERVER_PORT,
   type BuildmeshProcess,
 } from './utils/buildmesh-launcher';
@@ -45,26 +45,20 @@ let mobilePort: number | null = null;
 test.describe('mobile /v2 SPA', () => {
   test.use({ viewport: { width: 390, height: 844 } }); // iPhone 14-ish
 
-  // The pre-flight probes 1991 (the test-server port). Per CLAUDE.local.md,
-  // the stable hub MUST be paused before this spec runs — otherwise the
-  // spawned exe can't bind 1991 and the spawn silently falls back to talking
-  // to the hub's DB.
-  //
-  // We use `test.skip` (not `expect(...).toBe(false)`) so a running hub is a
-  // clean SKIP, not a loud FAIL. The spec then doesn't crash, doesn't kill
-  // anything, and the user can see in the run output exactly why it was
-  // deferred: "skip — port 1991 must be free before this spec …".
+  // The stable hub does not bind port 1991. A live `instance-owner.pid`
+  // in the real profile means this spec would collide on 1992–1994.
+  // `test.skip` keeps that a clean skip: nothing is killed by image name.
   test.beforeAll(async () => {
     test.skip(
-      await isPortBound(TEST_SERVER_PORT),
-      `port ${TEST_SERVER_PORT} is bound (likely the stable hub) — pause it first per CLAUDE.local.md before this spec can run. The skip is intentional: this spec binds the same ports the hub owns.`,
+      stableHubIsRunning(),
+      'the stable hub is running (instance-owner.pid) — pause it first per CLAUDE.local.md before this spec can run. The skip is intentional: this spec binds the phone/Android ports the hub owns.',
     );
 
     proc = spawnBuildmesh();
 
     expect(
       await waitForPort('127.0.0.1', TEST_SERVER_PORT, 15000),
-      'test server ready',
+      BRIDGE_MISSING_HINT,
     ).toBe(true);
     mobilePort = await findMobilePort();
     expect(mobilePort, 'one of 1992-1994 should be bound').not.toBeNull();

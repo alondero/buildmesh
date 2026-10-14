@@ -9,7 +9,6 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use base64::Engine;
-use tauri::Manager;
 
 use crate::db;
 use crate::http::RealizedBind;
@@ -141,16 +140,13 @@ pub struct CertChainStatus {
 }
 
 /// Read the on-disk TLS cert chain and return the snapshot the QR modal
-/// needs (issue #635). Resolves `<app-data>/tls/` from the Tauri app handle
-/// — the same dir `http::tls::acceptor` reads at startup, so the chain the
-/// user sees is guaranteed to match what's currently being served.
+/// needs (issue #635). Resolves `<profile>/tls/` from the directory startup
+/// installed — the same dir `http::tls::acceptor` reads at startup, so the
+/// chain the user sees matches what is currently being served.
 #[command]
-pub fn get_cert_chain_status(app: tauri::AppHandle) -> Result<CertChainStatus, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("tls");
+pub fn get_cert_chain_status() -> Result<CertChainStatus, String> {
+    let dir = crate::http::state::tls_dir()
+        .ok_or_else(|| "profile directory is not initialized".to_string())?;
     let dir = crate::http::tls::identity_dir(&dir).map_err(|e| e.to_string())?;
     let status = crate::http::tls::cert_status(&dir).map_err(|e| e.to_string())?;
     Ok(CertChainStatus {
@@ -176,20 +172,16 @@ pub fn get_cert_chain_status(app: tauri::AppHandle) -> Result<CertChainStatus, S
 /// so a corrupt / 0-byte ca.der cannot leak into a QR payload and
 /// produce a silent install failure on the phone.
 #[command]
-pub fn get_root_cert_der(app: tauri::AppHandle) -> Result<String, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("tls");
+pub fn get_root_cert_der() -> Result<String, String> {
+    let dir = crate::http::state::tls_dir()
+        .ok_or_else(|| "profile directory is not initialized".to_string())?;
     get_root_cert_der_inner(&dir)
 }
 
-/// Inner implementation of [`get_root_cert_der`] extracted so the
-/// `#[command]` wrapper (which takes a `tauri::AppHandle` we can't
-/// construct in a unit test) and the tests below share the same code
-/// path. The same shape as `routes::certs::install_cert_der` but
-/// returns the base64 string the QR data: URL needs.
+/// Inner implementation of [`get_root_cert_der`]. The command resolves the
+/// profile directory; the tests pass a directory and share this read.
+/// The same shape as `routes::certs::install_cert_der` but returns the
+/// base64 string the QR data: URL needs.
 fn get_root_cert_der_inner(dir: &Path) -> Result<String, String> {
     let bytes = crate::http::routes::certs::install_cert_der(dir)?;
     Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
@@ -216,18 +208,14 @@ fn get_root_cert_der_inner(dir: &Path) -> Result<String, String> {
 /// `http::routes::mobileconfig`; this command is the IPC boundary that
 /// turns the persisted root cert + key into the QR payload.
 #[command]
-pub fn get_root_cert_mobileconfig(app: tauri::AppHandle) -> Result<String, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("tls");
+pub fn get_root_cert_mobileconfig() -> Result<String, String> {
+    let dir = crate::http::state::tls_dir()
+        .ok_or_else(|| "profile directory is not initialized".to_string())?;
     get_root_cert_mobileconfig_inner(&dir)
 }
 
-/// Inner implementation of [`get_root_cert_mobileconfig`] — mirrors the
-/// `get_root_cert_der_inner` pattern (extracted so the `tauri::AppHandle`
-/// the `#[command]` macro requires can be bypassed in tests).
+/// Inner implementation of [`get_root_cert_mobileconfig`]. The command
+/// resolves the profile directory; the tests pass a directory.
 fn get_root_cert_mobileconfig_inner(dir: &Path) -> Result<String, String> {
     crate::http::routes::mobileconfig::build_signed_mobileconfig_b64(dir)
 }
@@ -269,12 +257,9 @@ fn get_root_cert_mobileconfig_inner(dir: &Path) -> Result<String, String> {
 ///      server would keep serving a leaf signed by the wiped root until
 ///      the next bind or app restart (issue #1527 split-brain zombie).
 #[command]
-pub async fn reset_trusted_certificates(app: tauri::AppHandle) -> Result<u64, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("tls");
+pub async fn reset_trusted_certificates() -> Result<u64, String> {
+    let dir = crate::http::state::tls_dir()
+        .ok_or_else(|| "profile directory is not initialized".to_string())?;
     // Snapshot the interface set the live listeners are bound for, so
     // the freshly-minted leaf's SANs match what the next bind will
     // need. Cheap clone — `local_interface_ips` already returns a `Vec`

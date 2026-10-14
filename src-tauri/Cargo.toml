@@ -14,12 +14,14 @@ tauri-build = { version = "2", features = [] }
 
 [features]
 # Test and crash-diagnosis IPC commands (`create_test_mesh`,
-# `debug_list_agents`, `debug_crash_snapshot`) are gated in `lib.rs` behind
+# `debug_list_agents`, `debug_crash_snapshot`) are gated behind
 # `#[cfg(any(debug_assertions, feature = "dev-tools"))]` so a shipped release
-# window never answers those names (issue #2153). `debug_assertions` covers
-# `cargo build` and `tauri dev`; the dev profile is built by `tauri build`
-# (release mode, see scripts/run-dev.ps1), so it opts in with this feature via
-# `npm run tauri:build:dev`. Default-off: the release build never passes it.
+# window never answers those names (issue #2153). The loopback HTTP test
+# bridge uses the same cfg, and it binds only when `BUILDMESH_TEST_BRIDGE=1`
+# and a per-launch token are set. `debug_assertions` covers `cargo build` and
+# `tauri dev`; the dev profile is built by `tauri build` (release mode, see
+# scripts/run-dev.ps1), so it opts in with this feature via
+# `npm run tauri:build:dev`. Default-off: the release build does not pass it.
 dev-tools = []
 
 [dependencies]

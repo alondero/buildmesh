@@ -26,7 +26,10 @@ pass.
    Claude Code pairing.
 4. **A test mesh + node** — use the in-app "New Mesh" flow or
    `tests/e2e/agent-output.spec.ts`'s `create_test_mesh` helper if you
-   have the e2e harness around.
+   have the e2e harness around. That helper talks to the development
+   test bridge. The release entry points do not compile that bridge in. Launch
+   with `scripts\run-dev.ps1 -TestBridge` (or `scripts/run-dev.sh --test-bridge`)
+   so the dev-tools build has the bridge credential.
 
 **Note on Kimi's auth surface.** Spec #541 treated Kimi as a
 Claude-compatible backend (alongside MiniMax). Since #541 was filed,

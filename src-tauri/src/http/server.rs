@@ -8,10 +8,9 @@
 //! The only remaining special branch is WebSocket upgrade.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use tauri::{Emitter, Manager};
+use tauri::Emitter;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -233,13 +232,9 @@ async fn get_or_build_acceptor(interface_ips: &[IpAddr]) -> std::io::Result<Opti
                 return Ok(cached_acceptor.clone());
             }
         }
-        let app = state::app_handle()
-            .ok_or_else(|| std::io::Error::other("app handle not set; cannot locate cert dir"))?;
-        let dir: PathBuf = app
-            .path()
-            .app_data_dir()
-            .map_err(std::io::Error::other)?
-            .join("tls");
+        let dir = state::tls_dir().ok_or_else(|| {
+            std::io::Error::other("profile directory is not initialized; cannot locate cert dir")
+        })?;
         let acceptor = tls::acceptor(&dir, &ips)?;
         *guard = Some((wanted_key, acceptor.clone()));
         Ok(acceptor)

@@ -175,13 +175,124 @@ pub fn installed_paths() -> Option<ProfilePaths> {
     INSTALLED.get().map(Bootstrap::paths)
 }
 
+/// Environment variable a debug or `dev-tools` build reads to use a profile
+/// directory other than the platform app-data folder. Release builds do not
+/// compile the read.
+#[cfg(any(debug_assertions, feature = "dev-tools"))]
+pub(crate) const PROFILE_DIR_ENV: &str = "BUILDMESH_PROFILE_DIR";
+
+/// Absolute profile from [`PROFILE_DIR_ENV`], or `None` when it is unset.
+///
+/// A set but empty or relative value is an error. Falling through would write
+/// fixtures into the user's real profile. Windows does not consult `APPDATA`
+/// for this path.
+#[cfg(any(debug_assertions, feature = "dev-tools"))]
+pub(crate) fn profile_dir_override() -> Result<Option<PathBuf>, StartupFailure> {
+    let Some(raw) = std::env::var_os(PROFILE_DIR_ENV) else {
+        return Ok(None);
+    };
+    let text = raw.to_string_lossy();
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err(StartupFailure::app_data(
+            "Buildmesh was given an empty profile directory.",
+            format!("{PROFILE_DIR_ENV} is set but empty"),
+            None,
+        ));
+    }
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return Err(StartupFailure::app_data(
+            "Buildmesh was given a profile directory that is not absolute.",
+            format!("{PROFILE_DIR_ENV} must be an absolute path"),
+            Some(path),
+        ));
+    }
+    Ok(Some(path))
+}
+
+/// The profile directory for this process.
+///
+/// Debug and `dev-tools` builds honor an absolute `BUILDMESH_PROFILE_DIR` and
+/// fail closed when that variable is set but unusable. Otherwise `fallback`
+/// is the platform app-data directory.
+pub(crate) fn resolve_profile_dir(
+    fallback: impl FnOnce() -> Result<PathBuf, StartupFailure>,
+) -> Result<PathBuf, StartupFailure> {
+    #[cfg(any(debug_assertions, feature = "dev-tools"))]
+    if let Some(override_dir) = profile_dir_override()? {
+        return Ok(override_dir);
+    }
+    fallback()
+}
+
+/// Where `panic_early.log` is written. The hook runs before bootstrap, so it
+/// cannot ask the installed profile.
+enum EarlyPanicProfile {
+    /// Absolute profile directory from the debug or dev-tools override.
+    Override(PathBuf),
+    /// No override. Use the platform data directory.
+    Platform,
+    /// The override is set but unusable. Do not touch the real profile.
+    Skip,
+}
+
+fn early_panic_profile() -> EarlyPanicProfile {
+    #[cfg(any(debug_assertions, feature = "dev-tools"))]
+    {
+        match profile_dir_override() {
+            Ok(Some(dir)) => EarlyPanicProfile::Override(dir),
+            Ok(None) => EarlyPanicProfile::Platform,
+            Err(_) => EarlyPanicProfile::Skip,
+        }
+    }
+    #[cfg(not(any(debug_assertions, feature = "dev-tools")))]
+    EarlyPanicProfile::Platform
+}
+
+/// Path of `panic_early.log`.
+///
+/// `profile` is the profile directory itself. It already contains `logs/`.
+/// When it is absent, `platform_root` is the roaming or XDG parent and
+/// `bundle_id` selects the profile under it.
+pub(crate) fn early_panic_log_path(
+    profile: Option<&Path>,
+    platform_root: Option<&Path>,
+    bundle_id: &str,
+) -> Option<PathBuf> {
+    let logs = if let Some(profile) = profile {
+        profile.join("logs")
+    } else {
+        platform_root?.join(bundle_id).join("logs")
+    };
+    Some(logs.join("panic_early.log"))
+}
+
+/// Resolve `panic_early.log` for this process.
+///
+/// A set but unusable override returns `None` instead of the platform path.
+/// Falling through would append a fixture panic to the roaming log.
+pub(crate) fn early_panic_log_path_from_env(
+    bundle_id: &str,
+    platform_root: Option<&Path>,
+) -> Option<PathBuf> {
+    match early_panic_profile() {
+        EarlyPanicProfile::Override(profile) => {
+            early_panic_log_path(Some(&profile), platform_root, bundle_id)
+        }
+        EarlyPanicProfile::Platform => early_panic_log_path(None, platform_root, bundle_id),
+        EarlyPanicProfile::Skip => None,
+    }
+}
+
 /// Resolve the app-data profile and install diagnostics, before any database
 /// or preference work.
 ///
 /// Ordering is the whole point, so it is worth stating what each step can and
 /// cannot have touched on failure:
 ///
-/// 1. `app_data_dir()` — resolves the profile. Nothing on disk has changed.
+/// 1. Resolve the profile. Debug and dev-tools builds may take an absolute
+///    `BUILDMESH_PROFILE_DIR` first. Nothing on disk has changed.
 /// 2. `create_dir_all(profile)` — creates the profile if absent.
 /// 3. `create_dir_all(logs)` — creates the log directory.
 /// 4. open the bounded writer + `try_init` the subscriber.
@@ -201,12 +312,14 @@ pub fn bootstrap(handle: &tauri::AppHandle) -> Result<&'static Bootstrap, Startu
     }
 
     // --- 1. Resolve the profile ---------------------------------------
-    let profile_dir = handle.path().app_data_dir().map_err(|error| {
-        StartupFailure::app_data(
-            "Buildmesh could not work out where to store its data.",
-            error,
-            None,
-        )
+    let profile_dir = resolve_profile_dir(|| {
+        handle.path().app_data_dir().map_err(|error| {
+            StartupFailure::app_data(
+                "Buildmesh could not work out where to store its data.",
+                error,
+                None,
+            )
+        })
     })?;
 
     // --- 2. Create the profile ----------------------------------------
@@ -912,5 +1025,207 @@ mod tests {
         assert!(contents.contains("session=42"), "{contents}");
         assert!(contents.contains("[REDACTED]"), "{contents}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Debug and dev-tools builds take `BUILDMESH_PROFILE_DIR` as the profile
+    /// that holds `buildmesh.db` and `logs/buildmesh.log`. Windows Tauri ignores
+    /// `APPDATA`, so a launcher that only sets that variable still writes the
+    /// roaming profile. A set but unusable value fails closed.
+    #[test]
+    fn profile_override_keeps_the_log_and_mesh_out_of_the_roaming_profile() {
+        let _lock = crate::env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let real_profile =
+            std::env::var_os("APPDATA").map(|dir| PathBuf::from(dir).join("com.alond.buildmesh"));
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let profile = std::env::temp_dir().join(format!(
+            "bm-profile-override-{}-{stamp}",
+            std::process::id()
+        ));
+        let decoy =
+            std::env::temp_dir().join(format!("bm-appdata-decoy-{}-{stamp}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&profile);
+
+        let (log_path, db_path) = crate::env::with_env_vars(
+            &[
+                (PROFILE_DIR_ENV, Some(profile.as_os_str())),
+                ("APPDATA", Some(decoy.as_os_str())),
+            ],
+            || {
+                let resolved = resolve_profile_dir(|| {
+                    panic!("the platform profile must not be used when the override is absolute")
+                })
+                .expect("an absolute override is the profile");
+                assert_eq!(resolved, profile);
+                if let Some(real) = &real_profile {
+                    assert!(
+                        !resolved.starts_with(real),
+                        "override {} must not sit inside {}",
+                        resolved.display(),
+                        real.display()
+                    );
+                }
+
+                std::fs::create_dir_all(&resolved).unwrap();
+                let log_dir = resolved.join("logs");
+                std::fs::create_dir_all(&log_dir).unwrap();
+                let log_path = log_dir.join("buildmesh.log");
+                let log = SharedLog::new(crate::diagnostics::main_log_writer(&log_dir).unwrap());
+                log.append_and_sync("profile override probe").unwrap();
+                drop(log);
+                let log_text = std::fs::read_to_string(&log_path).unwrap();
+                assert!(
+                    log_text.contains("profile override probe"),
+                    "buildmesh.log at {} did not receive the probe: {log_text:?}",
+                    log_path.display()
+                );
+
+                let db_path = resolved.join("buildmesh.db");
+                let conn = rusqlite::Connection::open(&db_path).unwrap();
+                crate::db::init_schema(&conn).unwrap();
+                let mesh = crate::db::create_mesh_inner(
+                    &conn,
+                    "isolation-probe",
+                    &format!("isolation-probe-{stamp}"),
+                )
+                .unwrap();
+                let stored: String = conn
+                    .query_row("SELECT name FROM meshes WHERE id = ?1", [mesh.id], |row| {
+                        row.get(0)
+                    })
+                    .unwrap();
+                drop(conn);
+                assert_eq!(stored, "isolation-probe");
+                assert_eq!(mesh.name, "isolation-probe");
+                eprintln!(
+                    "profile override proof log={} db={} mesh_id={}",
+                    log_path.display(),
+                    db_path.display(),
+                    mesh.id
+                );
+                (log_path, db_path)
+            },
+        );
+
+        assert!(log_path.is_file(), "{}", log_path.display());
+        assert!(db_path.is_file(), "{}", db_path.display());
+        if let Some(real) = &real_profile {
+            assert!(!log_path.starts_with(real), "{}", log_path.display());
+            assert!(!db_path.starts_with(real), "{}", db_path.display());
+        }
+        let _ = std::fs::remove_dir_all(&profile);
+    }
+
+    #[test]
+    fn relative_or_empty_profile_override_fails_closed() {
+        let _lock = crate::env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for value in ["relative\\profile", " ", ""] {
+            let error = crate::env::with_env_vars(
+                &[(PROFILE_DIR_ENV, Some(std::ffi::OsStr::new(value)))],
+                || {
+                    resolve_profile_dir(|| {
+                        panic!("an unusable override must not fall through to the real profile")
+                    })
+                    .expect_err(value)
+                },
+            );
+            let line = error.log_line();
+            assert!(line.contains("profile directory"), "{value:?} -> {line}");
+        }
+    }
+
+    #[test]
+    fn unset_profile_override_uses_the_platform_directory() {
+        let _lock = crate::env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let sentinel = PathBuf::from("SENTINEL_PLATFORM_PROFILE");
+        crate::env::with_env_vars(&[(PROFILE_DIR_ENV, None)], || {
+            assert!(profile_dir_override().unwrap().is_none());
+            let resolved = resolve_profile_dir(|| Ok(sentinel.clone())).unwrap();
+            assert_eq!(resolved, sentinel);
+        });
+    }
+
+    /// `panic_early.log` is written before bootstrap. The profile override is
+    /// the directory itself, so the log sits in `<profile>/logs/` and not
+    /// under the roaming folder plus the bundle id.
+    #[test]
+    fn early_panic_log_uses_the_override_profile_not_the_roaming_folder() {
+        let root = std::env::temp_dir();
+        let profile = root.join("bm-early-override");
+        let roaming = root.join("bm-early-roaming");
+        let path = early_panic_log_path(Some(&profile), Some(&roaming), "com.alond.buildmesh")
+            .expect("an override yields a log path");
+        assert_eq!(path, profile.join("logs").join("panic_early.log"));
+        assert!(
+            !path.starts_with(&roaming),
+            "panic_early.log must not land in the roaming profile: {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn early_panic_log_uses_the_platform_profile_when_the_override_is_unset() {
+        let roaming = std::env::temp_dir().join("bm-early-roaming");
+        let path = early_panic_log_path(None, Some(&roaming), "com.alond.buildmesh")
+            .expect("a platform root yields a log path");
+        assert_eq!(
+            path,
+            roaming
+                .join("com.alond.buildmesh")
+                .join("logs")
+                .join("panic_early.log")
+        );
+        assert!(early_panic_log_path(None, None, "com.alond.buildmesh").is_none());
+    }
+
+    #[test]
+    fn early_panic_log_from_env_honors_the_override_and_fails_closed() {
+        let _lock = crate::env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let profile =
+            std::env::temp_dir().join(format!("bm-early-panic-{}-{stamp}", std::process::id()));
+        let roaming = std::env::temp_dir().join(format!("bm-early-roaming-{stamp}"));
+        crate::env::with_env_vars(&[(PROFILE_DIR_ENV, Some(profile.as_os_str()))], || {
+            let path = early_panic_log_path_from_env("com.alond.buildmesh", Some(&roaming))
+                .expect("an absolute override");
+            assert_eq!(path, profile.join("logs").join("panic_early.log"));
+            assert!(!path.starts_with(&roaming), "{}", path.display());
+        });
+        crate::env::with_env_vars(
+            &[(
+                PROFILE_DIR_ENV,
+                Some(std::ffi::OsStr::new("relative\\profile")),
+            )],
+            || {
+                assert!(
+                    early_panic_log_path_from_env("com.alond.buildmesh", Some(&roaming)).is_none(),
+                    "an unusable override must not fall through to the roaming log"
+                );
+            },
+        );
+        crate::env::with_env_vars(&[(PROFILE_DIR_ENV, None)], || {
+            let path = early_panic_log_path_from_env("com.alond.buildmesh", Some(&roaming))
+                .expect("an unset override uses the platform profile");
+            assert_eq!(
+                path,
+                roaming
+                    .join("com.alond.buildmesh")
+                    .join("logs")
+                    .join("panic_early.log")
+            );
+        });
     }
 }

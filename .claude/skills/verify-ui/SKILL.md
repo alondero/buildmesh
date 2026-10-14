@@ -16,7 +16,7 @@ The change affects something **visible in the UI** (desktop app or mobile SPA) a
 
 ## How it works (one paragraph)
 
-For the native path, `scripts\run-dev.ps1 -Detach -CdpPort 9223` builds **this working tree** into the dev profile (`buildmesh-dev.exe`, ports 2991/2992, own data dir), launches with CDP on loopback and returns its PID/log path after readiness. `scripts/ui-shot.mjs` attaches Playwright to that window and runs functional steps before saving a PNG. The stable hub (`buildmesh.exe`, ports 1991/1992) is never touched.
+For the native path, `scripts\run-dev.ps1 -Detach -CdpPort 9223 -TestBridge` builds **this working tree** into the dev profile (`buildmesh-dev.exe`, phone/Android on 2992, own data dir), launches with CDP on loopback, and enables the dev test bridge on 2991. The bridge stays closed without `-TestBridge`. The launcher writes the bearer to `.tmp/test-bridge-token` and does not print it. `scripts/ui-shot.mjs` attaches Playwright to that window, sends `Authorization: Bearer` from that file, and runs functional steps before saving a PNG. The stable hub (`buildmesh.exe`, phone/Android on 1992) is never touched. The stable hub does not bind 1991.
 
 ## Procedure
 
@@ -36,7 +36,7 @@ Capture the baseline from the **pre-change tree**. Two cases:
 ### 2. Build + launch the changed tree
 
 ```powershell
-powershell -File scripts\run-dev.ps1 -Detach -CdpPort 9223
+powershell -File scripts\run-dev.ps1 -Detach -CdpPort 9223 -TestBridge
 ```
 
 Kills any previous `buildmesh-dev` (never the hub), rebuilds from the current tree, launches with CDP. Fresh launch each time = same window size = comparable screenshots.
@@ -48,8 +48,11 @@ Write a steps module (throwing fails the run — put your functional assertions 
 ```js
 // steps.mjs — context: { page, invoke }
 export default async function ({ page, invoke }) {
-  // Fixture data via the HTTP test bridge (port 2991; only the commands
-  // routed in src-tauri/src/commands/test.rs are available):
+  // Fixture data via the HTTP test bridge (dev profile, port 2991).
+  // `invoke` sends Authorization: Bearer from `.tmp/test-bridge-token`.
+  // Launch with -TestBridge or the request is connection refused, and a
+  // request without the bearer is 401. Only the commands routed in
+  // src-tauri/src/commands/test.rs are available:
   const mesh = await invoke('create_test_mesh', { name: 'Shot fixture' });
   // Bridge writes go straight to the DB and (mostly) emit no frontend
   // events — reload so the stores refetch and the fixture appears:
@@ -116,15 +119,17 @@ node scripts/ui-shot.mjs --out docs/pr-screenshots/<branch>/<slug>-after.png --m
 The mobile UI is served over plain HTTP on loopback — no CDP needed:
 
 ```powershell
-# Token via the test bridge (NOTE: use node fetch — PowerShell's Invoke-RestMethod
-# sends the body in a second TCP segment the bridge's single-read parser never sees):
-$tok = node -e "fetch('http://127.0.0.1:2991/invoke',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd:'get_root_token',args:{}})}).then(r=>r.json()).then(j=>console.log(j.data.token))"
+# Token via the dev-profile test bridge on 2991. The app must have been
+# launched with -TestBridge, which writes .tmp/test-bridge-token.
+# Use node fetch — PowerShell's Invoke-RestMethod sends the body in a
+# second TCP segment the bridge's single-read parser never sees.
+$tok = node -e "const fs=require('fs'); const token=fs.readFileSync('.tmp/test-bridge-token','utf8'); fetch('http://127.0.0.1:2991/invoke',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+token},body:JSON.stringify({cmd:'get_root_token',args:{}})}).then(r=>r.json()).then(j=>{ if(!j.ok) throw new Error(j.error||'bridge rejected the token'); console.log(j.data.token); })"
 node scripts/ui-shot.mjs --out docs/pr-screenshots/<branch>/mobile-after.png --url "http://127.0.0.1:2992/v2?token=$tok" --viewport 390x844
 ```
 
 ## Hard rules & pitfalls
 
-- Keep the stable `buildmesh` process and ports 1991/1992 untouched. Use 3999 for mock Vite checks on every host. The CDP path uses `buildmesh-dev` (2991/2992, CDP 9223); stop only the PID launched for this verification.
+- Keep the stable `buildmesh` process and its phone/Android port 1992 untouched. The test bridge (1991 stable, 2991 dev) is off unless that process was launched with the test-bridge switch. Use 3999 for mock Vite checks on every host. The CDP path uses `buildmesh-dev` (bridge 2991, phone/Android 2992, CDP 9223) launched with `-TestBridge`; stop only the PID launched for this verification.
 - Playwright's webServer starts Vite on 1420. `--project=verify-smoke` uses mock IPC; chromium specs have additional runtime requirements. Read those specs before running them and never stop the stable hub to satisfy a test.
 - CDP attach fails → the app wasn't launched with `-CdpPort` (plain `/use` launches without it) or the window was closed. Re-run step 2.
 - Don't minimize the dev window while shooting — Chromium throttles hidden renderers.
