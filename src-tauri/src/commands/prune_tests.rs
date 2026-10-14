@@ -25,6 +25,80 @@ fn no_pool_paths(_path: &str) -> bool {
     false
 }
 
+#[test]
+fn scoped_mesh_prune_protects_live_sibling_checkout() {
+    let _db = crate::db::test_support::isolated();
+    let td = crate::env::test_helpers::TestDir::new("scoped-prune");
+    crate::env::test_helpers::init_repo_with_commit(
+        td.path(),
+        &[("family/parents/AGENTS.md", "instructions")],
+    );
+    let root = td.path().to_string_lossy().to_string();
+    let selected = td
+        .path()
+        .join("family/parents")
+        .to_string_lossy()
+        .to_string();
+    let main = db::create_mesh("root", &root).unwrap();
+    let mesh = db::create_mesh("parents", &selected).unwrap();
+    let owned = td.path().join("owned").to_string_lossy().to_string();
+    crate::git::worktree::create_git_worktree(&selected, &owned, "owned", "branched", "HEAD")
+        .unwrap();
+    db::create_agent_node(
+        mesh.id,
+        "owned",
+        &selected,
+        "owned",
+        crate::models::EnvType::Windows,
+        "anthropic",
+        Some("owned"),
+        None,
+        None,
+        None,
+        true,
+        None,
+        None,
+        Some(&owned),
+    )
+    .unwrap();
+    for mesh_id in [main.id, mesh.id] {
+        let info = get_git_prune_info_blocking(mesh_id).unwrap();
+        assert!(info[0]
+            .worktrees
+            .iter()
+            .any(|wt| path_is_active(&wt.path, std::slice::from_ref(&owned)) && wt.is_active));
+        assert!(info[0]
+            .local_branches
+            .iter()
+            .any(|branch| branch.name == "owned" && branch.is_active));
+    }
+    let error = remove_worktrees(std::slice::from_ref(&owned)).unwrap_err();
+    assert!(error.contains("active agent"));
+    assert!(std::path::Path::new(&owned)
+        .join("family/parents/AGENTS.md")
+        .exists());
+    let other = crate::env::test_helpers::TestDir::new("unrelated-prune");
+    let repo = crate::env::test_helpers::init_repo_with_commit(other.path(), &[("f", "unrelated")]);
+    repo.branch(
+        "owned",
+        &repo.head().unwrap().peel_to_commit().unwrap(),
+        false,
+    )
+    .unwrap();
+    let others = crate::git::project::repository_nodes(
+        other.path().to_str().unwrap(),
+        db::list_agent_nodes().unwrap(),
+    )
+    .unwrap();
+    assert!(others.is_empty());
+    delete_branches_in_repo(
+        other.path().to_str().unwrap(),
+        &["owned".into()],
+        &crate::env::active_node_branches(&others),
+    )
+    .unwrap();
+}
+
 /// Unique temp directory with RAII cleanup on drop.
 struct TempDir(std::path::PathBuf);
 

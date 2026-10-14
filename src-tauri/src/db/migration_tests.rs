@@ -9,6 +9,48 @@ mod tests {
     use rusqlite::{Connection, Result as SqlResult};
 
     #[test]
+    fn project_scope_upgrade_preserves_legacy_cwd_and_saved_scope_after_reopen() {
+        let td = crate::env::test_helpers::TestDir::new("scope-db-upgrade");
+        let db_path = td.path().join("scope.sqlite");
+        let conn = Connection::open(&db_path).unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO meshes(id,name,path) VALUES(1,'scope','/repo/family/parents')",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO agent_nodes(id,mesh_id,name,path,use_worktree,worktree_name,worktree_path) VALUES(1,1,'legacy','/repo/family/parents',1,'legacy','/owned/legacy')", []).unwrap();
+        conn.execute_batch("ALTER TABLE agent_nodes DROP COLUMN project_scope; UPDATE app_settings SET value='48' WHERE key='schema_version';").unwrap();
+        for _ in 0..2 {
+            crate::db::init_schema(&conn).unwrap();
+            let node = crate::db::agent_node::get_agent_node_by_id_inner(&conn, 1).unwrap();
+            assert_eq!(node.project_scope, None);
+            assert_eq!(
+                crate::env::node_working_path(&node).raw_path,
+                "/owned/legacy"
+            );
+        }
+        conn.execute(
+            "UPDATE agent_nodes SET project_scope='family/parents' WHERE id=1",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let conn = Connection::open(db_path).unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        let node = crate::db::agent_node::get_agent_node_by_id_inner(&conn, 1).unwrap();
+        assert_eq!(node.project_scope.as_deref(), Some("family/parents"));
+        assert_eq!(
+            crate::env::node_working_path(&node).raw_path,
+            "/owned/legacy/family/parents"
+        );
+        assert_eq!(
+            crate::env::node_worktree_path(&node).unwrap().raw_path,
+            "/owned/legacy"
+        );
+    }
+
+    #[test]
     fn lifecycle_snapshot_upgrade_preserves_existing_nodes_and_repeats() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
@@ -256,8 +298,15 @@ mod tests {
         )
         .unwrap();
         conn.execute_batch(
-            "INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, state) VALUES (10, 1, 1, 'running');
-             DELETE FROM app_settings WHERE key IN ('issue_review_first_turn_upgrade_v2', 'issue_review_verdict_upgrade_v1');",
+            "INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, state) VALUES (10, 1, 1, 'running');",
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM app_settings WHERE key IN (?1, ?2)",
+            rusqlite::params![
+                crate::db::migrations::ISSUE_REVIEW_FIRST_TURN_UPGRADE_FLAG,
+                crate::db::migrations::ISSUE_REVIEW_VERDICT_UPGRADE_FLAG
+            ],
         )
         .unwrap();
 
@@ -350,9 +399,13 @@ mod tests {
         }
         conn.execute_batch(
             "INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, trigger_identity, state) VALUES
-                (10, 2, 1, 'issue:7:run', 'running'), (11, 1, 1, 'manual:a', 'failed');
-             DELETE FROM app_settings WHERE key = 'review_publication_flow_upgrade_v1';",
+                (10, 2, 1, 'issue:7:run', 'running'), (11, 1, 1, 'manual:a', 'failed');",
         ).unwrap();
+        conn.execute(
+            "DELETE FROM app_settings WHERE key = ?1",
+            [crate::db::migrations::REVIEW_PUBLICATION_FLOW_UPGRADE_FLAG],
+        )
+        .unwrap();
 
         crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         let read = |id: i64| -> String {
@@ -440,8 +493,12 @@ mod tests {
             "INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, trigger_identity, state) VALUES
                 (10, 1, 1, 'issue:7:a', 'running'),
                 (11, 1, 1, 'issue:7:b', 'failed'),
-                (12, 1, 1, 'issue:7:c', 'completed');
-             DELETE FROM app_settings WHERE key = 'review_feedback_route_repair_v1';",
+                (12, 1, 1, 'issue:7:c', 'completed');",
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM app_settings WHERE key = ?1",
+            [crate::db::migrations::REVIEW_FEEDBACK_ROUTE_REPAIR_FLAG],
         )
         .unwrap();
 
@@ -555,8 +612,12 @@ mod tests {
         }
         conn.execute_batch(
             "INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, trigger_identity, state) VALUES
-                (10, 2, 1, 'issue:7:run', 'running');
-             DELETE FROM app_settings WHERE key = 'merge_verification_upgrade_v1';",
+                (10, 2, 1, 'issue:7:run', 'running');",
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM app_settings WHERE key = ?1",
+            [crate::db::migrations::MERGE_VERIFICATION_UPGRADE_FLAG],
         )
         .unwrap();
 
@@ -707,8 +768,8 @@ mod tests {
         assert_eq!(unchanged_custom, custom_json);
         assert_eq!(
             conn.query_row(
-                "SELECT value FROM app_settings WHERE key = 'review_contract_prompt_upgrade_v1'",
-                [],
+                "SELECT value FROM app_settings WHERE key = ?1",
+                [crate::db::migrations::REVIEW_CONTRACT_PROMPT_UPGRADE_FLAG],
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
@@ -743,8 +804,8 @@ mod tests {
         );
         assert_eq!(
             conn.query_row(
-                "SELECT value FROM app_settings WHERE key = 'review_contract_prompt_upgrade_v1'",
-                [],
+                "SELECT value FROM app_settings WHERE key = ?1",
+                [crate::db::migrations::REVIEW_CONTRACT_PROMPT_UPGRADE_FLAG],
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
@@ -860,8 +921,11 @@ mod tests {
             [issue.to_json().unwrap(), copy.to_json().unwrap()],
         ).unwrap();
         conn.execute(
-            "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', ?1), ('review_contract_prompt_upgrade_v1', 'complete')",
-            [crate::db::migrations::SCHEMA_VERSION.to_string()],
+            "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', ?1), (?2, 'complete')",
+            rusqlite::params![
+                crate::db::migrations::SCHEMA_VERSION.to_string(),
+                crate::db::migrations::REVIEW_CONTRACT_PROMPT_UPGRADE_FLAG
+            ],
         )
         .unwrap();
 
@@ -902,8 +966,8 @@ mod tests {
         );
         assert_eq!(
             conn.query_row(
-                "SELECT value FROM app_settings WHERE key = 'review_contract_prompt_upgrade_v1'",
-                [],
+                "SELECT value FROM app_settings WHERE key = ?1",
+                [crate::db::migrations::REVIEW_CONTRACT_PROMPT_UPGRADE_FLAG],
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
@@ -953,8 +1017,8 @@ mod tests {
         crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         assert_eq!(
             conn.query_row(
-                "SELECT value FROM app_settings WHERE key = 'review_contract_prompt_upgrade_v1'",
-                [],
+                "SELECT value FROM app_settings WHERE key = ?1",
+                [crate::db::migrations::REVIEW_CONTRACT_PROMPT_UPGRADE_FLAG],
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
@@ -1055,8 +1119,8 @@ mod tests {
         let first_json = graph_json(1);
         assert_eq!(
             conn.query_row(
-                "SELECT value FROM app_settings WHERE key = 'issue_review_first_turn_upgrade_v2'",
-                [],
+                "SELECT value FROM app_settings WHERE key = ?1",
+                [crate::db::migrations::ISSUE_REVIEW_FIRST_TURN_UPGRADE_FLAG],
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
@@ -1764,6 +1828,7 @@ mod tests {
                 worktree_path TEXT,
                 spawn_configuration TEXT,
                 lifecycle_snapshot TEXT,
+                project_scope TEXT,
                 pr_url TEXT
             );
             INSERT INTO meshes (id, name, path) VALUES (1, 'm', '/m');
@@ -1963,7 +2028,8 @@ mod tests {
                 worktree_path TEXT,
                 spawn_configuration TEXT,
                 lifecycle_snapshot TEXT,
-                status_changed_at TEXT
+                status_changed_at TEXT,
+                project_scope TEXT
             );
             INSERT INTO agent_nodes (mesh_id, name, path, created_at)
                 VALUES (1, 'n', '/n', '2020-01-01T00:00:00Z');
@@ -2034,7 +2100,8 @@ mod tests {
                 worktree_path TEXT,
                 spawn_configuration TEXT,
                 lifecycle_snapshot TEXT,
-                status_changed_at TEXT
+                status_changed_at TEXT,
+                project_scope TEXT
             );
             INSERT INTO agent_nodes (mesh_id, name, path, created_at)
                 VALUES (1, 'n', '/n', '2020-01-01T00:00:00Z');

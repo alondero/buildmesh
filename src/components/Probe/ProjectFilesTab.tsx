@@ -39,6 +39,8 @@ import { ChangedFilesSection } from '../FileTree/ChangedFilesSection';
 import { PathHeader } from '../shared/PathHeader';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useUIStore } from '../../stores/uiStore';
+import { useAgentNodeStore } from '../../stores/agentNodeStore';
+import { getNodeWorkingPath } from '../../lib/paths';
 
 /** Lucide chevron-right, rotated 90° when a row is expanded (used by the
  *  "File Tree" section header above and by the tree's own directory rows). */
@@ -61,6 +63,8 @@ function ChevronRightIcon({ className }: { className?: string }) {
 
 export function ProjectFilesTab() {
   const { activePath, activeMeshId, activeNodeId } = useProbeContext();
+  const node = useAgentNodeStore(s => activeNodeId === null ? undefined : s.nodesById[activeNodeId]);
+  const browsePath = node ? getNodeWorkingPath(node) : activePath;
   const openDiff = useUIStore((s) => s.openDiff);
 
   const [fileTreeExpanded, setFileTreeExpanded] = useState(true);
@@ -113,7 +117,7 @@ export function ProjectFilesTab() {
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col">
-      <PathHeader path={activePath} />
+      <PathHeader path={browsePath ?? activePath} />
       {treeFailure && <div role="alert" className="shrink-0 min-w-0 break-all border-b border-border-subtle px-3 py-2 text-xs text-status-error">
         <p className="line-clamp-3" title={treeFailure.error}>Files unavailable: {treeFailure.error}</p>
         <button type="button" onClick={treeFailure.retry} className="mt-2 min-h-[24px] rounded-md border border-border-default px-2 text-text-primary hover:bg-bg-card-hover">Retry files</button>
@@ -144,7 +148,8 @@ export function ProjectFilesTab() {
         {fileTreeExpanded && (
           <div id="project-file-tree"><FileTree
             key={`${activeMeshId}:${activeNodeId}`}
-            rootPath={activePath}
+            rootPath={browsePath ?? activePath}
+            gitRootPath={activePath}
             onReadError={handleTreeError}
             showGitStatus
             selectedFile={null}

@@ -62,7 +62,15 @@ Supporting detail that is a current contract rather than architecture: the
 Dated investigations and run write-ups are historical records, not current
 contracts: they live under [archive/](archive/README.md).
 
+Git-backed project folders use `git::project` for nearest-repository discovery
+and common-directory identity. `env::node_working_path` reconstructs saved scope
+for launch; `node_git_path` retains query/watcher identity and
+`node_worktree_path` retains checkout ownership. See
+[Agent Node worktree support](development/agent-nodes.md#worktree-support-git2-based).
+
 ## Anti-Patterns (DO NOT do)
+- Failed automatic launches stay `error`; restoring `idle` after spawn rejection re-arms the terminal launch effect. Explicit retry owns a new request.
+
 - ❌ Call `dispose()` on an xterm.js Terminal — causes permanent terminal blanking
 - ❌ Pass Linux paths (e.g. `/home/user/`) to non-WSL APIs — causes "file not found"
 - ❌ Spawn a provider CLI to fetch a Usage Meter when the CLI is wrapping an HTTP endpoint we can call ourselves. `get_provider_meters` waits for every provider, so a multi-second CLI boot stalls the whole Usage Probe (#1324 spawned `agy --print /usage` ≈6s; the same payload is `POST daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary` in ~250ms, User-Agent gated). Token discovery lives in `usage::adapters::agy`: prefer `<agy_dir>/antigravity-oauth-token` (Windows: `%USERPROFILE%\.gemini\antigravity-cli\antigravity-oauth-token`, honouring `GEMINI_HOME` / `ANTIGRAVITY_HOME`), then Windows Credential Manager `gemini:antigravity`. Corrupt CLI-file JSON surfaces as Shape (no keyring fallback); missing/empty falls through. On HTTP 401/403, try the next source before logged-out. `fetchAvailableModels` is five-hour-only fallback.

@@ -453,8 +453,8 @@ export function AgentTerminal({ nodeId, provider, focusOnAttach = true, focusReq
       const dims = inst.fitAddon.proposeDimensions();
       try {
         await spawnAgent(nodeId, node.provider, dims?.rows, dims?.cols);
-      } catch (e) {
-        console.error('[AgentTerminal] Failed to auto-spawn agent:', e);
+      } catch {
+        // spawnAgent retains the failure and surfaces the IPC detail once.
       }
     })();
   }, [nodeId, node?.provider, node?.status, spawnAgent]);

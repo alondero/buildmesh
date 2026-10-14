@@ -128,7 +128,11 @@ function mockBackend(opts: {
   sessions?: ArchivedAgentNode[];
   defaultProvider?: string;
   providers?: typeof PROVIDERS;
+  refreshError?: Error;
+  backgroundRefresh?: Promise<typeof RESUMED_NODE[]>;
 } = {}) {
+  let imported = false;
+  let listReads = 0;
   vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
     switch (cmd) {
       case 'discover_agent_nodes':
@@ -138,11 +142,14 @@ function mockBackend(opts: {
       case 'get_default_provider':
         return Promise.resolve(opts.defaultProvider ?? 'anthropic');
       case 'import_discovered_agent_node':
+        imported = true;
         return Promise.resolve(RESUMED_NODE);
       case 'spawn_agent':
         return Promise.resolve(undefined);
       case 'list_agent_nodes':
-        return Promise.resolve([]);
+        if (++listReads === 1 && opts.backgroundRefresh) return opts.backgroundRefresh;
+        if (imported && opts.refreshError) return Promise.reject(opts.refreshError);
+        return Promise.resolve(imported ? [RESUMED_NODE] : []);
       default:
         return Promise.resolve({});
     }
@@ -261,6 +268,48 @@ describe('ArchivedNodesTab (#378)', () => {
     // The probe should hide so the user lands on the terminal — mirrors
     // the legacy modal's `onClose()` behaviour.
     await waitFor(() => {
+      expect(useUIStore.getState().probeOpen).toBe(false);
+    });
+  });
+
+  it('resumes a successfully imported node when the list refresh fails', async () => {
+    mockBackend({ refreshError: new Error('list unavailable') });
+    render(<ArchivedNodesTab meshId={MESH.id} meshPath={MESH.path} />);
+
+    const resumes = await screen.findAllByText('Resume');
+    await userEvent.click(resumes[0]);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('spawn_agent', expect.objectContaining({
+        request: expect.objectContaining({ sessionId: RESUMED_NODE.id, provider: 'anthropic' }),
+      }));
+      expect(useAgentNodeStore.getState().findAgentNode(RESUMED_NODE.id)?.name).toBe(RESUMED_NODE.name);
+      expect(useUIStore.getState().probeOpen).toBe(false);
+    });
+  });
+
+  it('preserves an imported node across an older list response and a failed trailing refresh', async () => {
+    let resolveOld!: (nodes: typeof RESUMED_NODE[]) => void;
+    mockBackend({
+      backgroundRefresh: new Promise(resolve => { resolveOld = resolve; }),
+      refreshError: new Error('trailing list unavailable'),
+    });
+    const oldRefresh = useAgentNodeStore.getState().fetchAgentNodes();
+    render(<ArchivedNodesTab meshId={MESH.id} meshPath={MESH.path} />);
+    const resumes = await screen.findAllByText('Resume');
+    await userEvent.click(resumes[0]);
+    await waitFor(() => {
+      expect(useAgentNodeStore.getState().findAgentNode(RESUMED_NODE.id)?.name).toBe(RESUMED_NODE.name);
+    });
+
+    resolveOld([]);
+    await oldRefresh;
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('spawn_agent', expect.objectContaining({
+        request: expect.objectContaining({ sessionId: RESUMED_NODE.id }),
+      }));
+      expect(useAgentNodeStore.getState().findAgentNode(RESUMED_NODE.id)?.name).toBe(RESUMED_NODE.name);
       expect(useUIStore.getState().probeOpen).toBe(false);
     });
   });

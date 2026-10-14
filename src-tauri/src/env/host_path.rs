@@ -870,31 +870,21 @@ pub(crate) fn worktree_segment(node: &AgentNode) -> Option<&str> {
         .filter(|n| !n.is_empty())
 }
 
-/// The [Node Working Directory](../../CONTEXT.md): the directory an Agent Node's
-/// work physically lives in — its Worktree Node dir for a worktree node, or the
-/// Mesh root for a Root Node. This is the one canonical home of the
-/// `use_worktree` + (trimmed, non-empty) `worktree_name` rule; diff, PR,
-/// close-safety, removal, and the coordinator transcript reader all resolve
-/// through here so every layer agrees on a node's directory. Callers pick the
-/// `host_path` (Windows git2 / file ops), the `spawn_path` (the path as the
-/// agent saw it — the form Claude Code encodes for its on-disk transcript
-/// dir), or the `raw_path` (the POSIX-style effective path; the string the
-/// GIT_CHANGED payload carries to the frontend's `getNodeGitPath()` for
-/// subscription matching, issue #409).
-///
-/// Mirrors the frontend's `getNodeGitPath` in `src/lib/paths.ts` — keep the two
-/// in sync if the worktree layout ever changes (paired cross-language defaults,
-/// not a single source; see [[buildmesh-use-worktree-derivation]] and
-/// [[feedback_cross-language-default-coupling]]).
-///
-/// Issue #1519: Worktree Nodes created after the configurable directory
-/// landed carry the exact resolved dir in `node.worktree_path` (immutable —
-/// changing a setting affects future nodes without moving live worktrees).
-/// When present (trimmed, non-empty) it wins over recomputation; `None`
-/// (Root Nodes + pre-#1519 rows) falls back to the legacy
-/// `<mesh>/.claude/worktrees/<name>` layout byte-for-byte.
+/// Saved launch cwd: owned checkout plus project scope, or selected folder for
+/// a non-worktree node. Mirrors `getNodeWorkingPath` in `src/lib/paths.ts`.
+/// No Git discovery is needed, so saved scope survives a missing source folder.
+/// Use `node_git_path` for repository queries/watcher identity and
+/// `node_worktree_path` for checkout ownership/removal.
 pub fn node_working_path(node: &AgentNode) -> ResolvedPath {
     let mut resolved = node_filesystem_path(node);
+    if worktree_segment(node).is_some() {
+        if let Some(scope) = node.project_scope.as_deref().filter(|s| !s.is_empty()) {
+            resolved = resolve_raw_path(&format!(
+                "{}/{scope}",
+                resolved.raw_path.trim_end_matches(['/', '\\'])
+            ));
+        }
+    }
     apply_harness_runtime(&mut resolved, node.env);
     resolved
 }
@@ -913,6 +903,50 @@ pub(crate) fn apply_harness_runtime(resolved: &mut ResolvedPath, runtime: EnvTyp
 #[cfg(test)]
 mod harness_runtime_tests {
     use super::*;
+    #[test]
+    fn saved_scope_changes_only_cwd_across_runtime_path_shapes() {
+        for (root, runtime, spawn) in [
+            (
+                "F:/Code/owned",
+                EnvType::Windows,
+                "F:/Code/owned/family/parents",
+            ),
+            (
+                "F:/Code/owned",
+                EnvType::Wsl,
+                "/mnt/f/Code/owned/family/parents",
+            ),
+            (
+                "/home/user/owned",
+                EnvType::Wsl,
+                "/home/user/owned/family/parents",
+            ),
+            (
+                "/mnt/f/owned",
+                EnvType::WindowsInterop,
+                "F:\\owned\\family\\parents",
+            ),
+        ] {
+            let node = AgentNode {
+                path: "/missing/source".into(),
+                use_worktree: true,
+                worktree_name: Some("owned".into()),
+                worktree_path: Some(root.into()),
+                project_scope: Some("family/parents".into()),
+                env: runtime,
+                ..Default::default()
+            };
+            assert_eq!(
+                node_working_path(&node).spawn_path.replace('\\', "/"),
+                spawn.replace('\\', "/")
+            );
+            assert_eq!(node_worktree_path(&node).unwrap().raw_path, root);
+            assert_eq!(node_git_path(&node).raw_path, root);
+        }
+        for invalid in ["../escape", "/absolute", "F:/absolute", "a\\b", "a//b"] {
+            assert!(validate_project_scope(invalid).is_err(), "{invalid}");
+        }
+    }
     #[test]
     fn runtime_changes_execution_paths_without_moving_the_mesh() {
         let mut path = ResolvedPath {
@@ -950,7 +984,40 @@ fn node_filesystem_path(node: &AgentNode) -> ResolvedPath {
 /// Root Node. The `None` is load-bearing: close-safety and worktree removal skip
 /// Root Nodes through it (a Root Node has no worktree to inspect or delete).
 pub fn node_worktree_path(node: &AgentNode) -> Option<ResolvedPath> {
-    worktree_segment(node).map(|_| node_working_path(node))
+    worktree_segment(node).map(|_| {
+        let mut resolved = node_filesystem_path(node);
+        apply_harness_runtime(&mut resolved, node.env);
+        resolved
+    })
+}
+
+/// Repository/query/watcher identity, distinct from the scoped launch cwd.
+pub fn node_git_path(node: &AgentNode) -> ResolvedPath {
+    node_worktree_path(node).unwrap_or_else(|| node_working_path(node))
+}
+
+pub fn validate_project_scope(scope: &str) -> Result<(), String> {
+    if scope.is_empty() {
+        return Ok(());
+    }
+    if scope.contains(['\\', ':'])
+        || scope
+            .split('/')
+            .any(|s| s.is_empty() || s == "." || s == "..")
+    {
+        return Err(format!("Invalid relative project folder: {scope}"));
+    }
+    Ok(())
+}
+
+pub fn canonical_host_path_string(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    #[cfg(windows)]
+    let value = value
+        .strip_prefix("\\\\?\\UNC\\")
+        .map(|s| format!("\\\\{s}"))
+        .unwrap_or_else(|| value.strip_prefix("\\\\?\\").unwrap_or(&value).to_string());
+    value.replace('\\', "/")
 }
 
 /// The paths a node "owns" — its mesh root plus the resolved Worktree Node

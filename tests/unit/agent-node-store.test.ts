@@ -935,6 +935,77 @@ describe('useAgentNodeStore', () => {
   });
 
   describe('spawnAgent intent (issue #1413)', () => {
+    it('fences an older rejection after a newer successful spawn (#2295)', async () => {
+      const node = makeNode({ id: 2295 });
+      seedAgentNodes([node]);
+      let reject!: (e: Error) => void;
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'spawn_agent') return new Promise<void>((_resolve, fail) => { reject = fail; });
+        if (cmd === 'list_agent_nodes') return Promise.resolve([{ ...node, status: 'running', cli_session_id: 'new-session' }]);
+        return Promise.resolve([]);
+      });
+      const old = useAgentNodeStore.getState().spawnAgent(node.id, 'anthropic');
+      const oldResult = expect(old).rejects.toThrow('old failure');
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'list_agent_nodes') return Promise.resolve([{ ...node, status: 'running', cli_session_id: 'new-session' }]);
+        return Promise.resolve([]);
+      });
+      await useAgentNodeStore.getState().restartFreshAgent(node.id);
+      reject(new Error('old failure'));
+      await oldResult;
+      expect(useAgentNodeStore.getState().nodesById[node.id]?.status).toBe('running');
+      expect(useAgentNodeStore.getState().nodesById[node.id]?.cli_session_id).toBe('new-session');
+    });
+
+    it.each(['deleted', 'archived'] as const)('a late rejection preserves a %s node (#2295)', async (state) => {
+      const node = makeNode({ id: 2296 });
+      seedAgentNodes([node]);
+      let reject!: (e: Error) => void;
+      mockInvoke.mockImplementation((cmd: string) => cmd === 'spawn_agent'
+        ? new Promise<void>((_resolve, fail) => { reject = fail; }) : Promise.resolve([]));
+      const pending = useAgentNodeStore.getState().spawnAgent(node.id, 'anthropic');
+      const result = expect(pending).rejects.toThrow('late failure');
+      if (state === 'deleted') useAgentNodeStore.getState().removeAgentNode(node.id);
+      else useAgentNodeStore.getState().patchAgentNode(node.id, { status: 'archived' });
+      reject(new Error('late failure'));
+      await result;
+      expect(useAgentNodeStore.getState().nodesById[node.id]?.status).toBe(state === 'deleted' ? undefined : 'archived');
+    });
+
+    it('a failed refresh after launch leaves the live node running (#2295)', async () => {
+      const node = makeNode({ id: 2297, status: 'running' });
+      seedAgentNodes([node]);
+      mockInvoke.mockImplementation((cmd: string) => cmd === 'list_agent_nodes'
+        ? Promise.reject(new Error('list unavailable')) : Promise.resolve([]));
+      await useAgentNodeStore.getState().spawnAgent(node.id, 'anthropic');
+      expect(useAgentNodeStore.getState().nodesById[node.id]?.status).toBe('running');
+      expect(useAgentNodeStore.getState().error).toContain('list unavailable');
+    });
+
+    it('a skipped IPC acknowledgement cannot establish a running provider (#2295)', async () => {
+      const node = makeNode({ id: 2299, status: 'idle' });
+      seedAgentNodes([node]);
+      mockInvoke.mockImplementation((cmd: string) => cmd === 'list_agent_nodes'
+        ? Promise.reject(new Error('list unavailable')) : Promise.resolve([]));
+      await useAgentNodeStore.getState().spawnAgent(node.id, 'anthropic');
+      expect(useAgentNodeStore.getState().nodesById[node.id]?.status).toBe('spawning');
+    });
+
+    it('an idle poll cannot re-arm a pending launch (#2295)', async () => {
+      const node = makeNode({ id: 2298 });
+      seedAgentNodes([node]);
+      let resolve!: () => void;
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'spawn_agent') return new Promise<void>(done => { resolve = done; });
+        if (cmd === 'list_agent_nodes') return Promise.resolve([node]);
+        return Promise.resolve([]);
+      });
+      const pending = useAgentNodeStore.getState().spawnAgent(node.id, 'anthropic');
+      await useAgentNodeStore.getState().fetchAgentNodes();
+      expect(useAgentNodeStore.getState().nodesById[node.id]?.status).toBe('spawning');
+      resolve();
+      await pending;
+    });
     it('forwards a prefill option as a Loop intent', async () => {
       const existing = makeNode({ id: 42, provider: 'anthropic', status: 'idle' });
       useAgentNodeStore.setState({
@@ -984,7 +1055,7 @@ describe('useAgentNodeStore', () => {
       await pending;
     });
 
-    it('reverts idle status when spawn_agent rejects', async () => {
+    it('retains error status when spawn_agent rejects', async () => {
       const existing = makeNode({ id: 42, provider: 'anthropic', status: 'idle' });
       useAgentNodeStore.setState({ nodesById: { [existing.id]: existing }, nodeIds: [existing.id] });
       mockInvoke.mockRejectedValueOnce(new Error('pty failed'));
@@ -993,7 +1064,7 @@ describe('useAgentNodeStore', () => {
         useAgentNodeStore.getState().spawnAgent(42, 'anthropic', { prefill: 'go' }),
       ).rejects.toThrow('pty failed');
 
-      expect(useAgentNodeStore.getState().nodesById[42]?.status).toBe('idle');
+      expect(useAgentNodeStore.getState().nodesById[42]?.status).toBe('error');
       expect(useAgentNodeStore.getState().error).toContain('pty failed');
     });
   });

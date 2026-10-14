@@ -85,7 +85,7 @@ _Avoid_: active context, Probe scope (both are too vague about ownership).
 
 
 **Mesh**:
-A project workspace associated with a local Git repository root path.
+A project workspace scoped to a selected local folder. That folder may be a Git repository root, a subfolder of its nearest containing repository, or a filesystem-only folder for agents without worktree isolation. Different folder scopes can share one repository while remaining separate Meshes.
 _Avoid_: Project, repo, folder
 
 **View Mode**:
@@ -93,11 +93,11 @@ The canvas's five-valued scope switch (`single` | `mesh` | `pinned` | `all` | `f
 _Avoid_: layout mode, scope mode, canvas mode (the term is View Mode); "grid" alone (ambiguous with the underlying split-pane renderer).
 
 **Agent Node**:
-An interactive panel running a single agent execution process within a dedicated directory (either a worktree or the mesh root).
+An interactive panel running a single agent execution process within its Node Working Directory.
 _Avoid_: Session, pane, terminal node
 
 **Worktree Node**:
-An Agent Node operating on an isolated Git worktree branch of its parent Mesh. (Used when the Mesh property use_worktree is true, unless overridden).
+An Agent Node owning an isolated checkout of its Mesh's containing Git repository. Its starting directory follows the Mesh's folder scope inside that checkout. The whole checkout is owned and removed together.
 
 **Node Activity**:
 A selectable part of an Agent Node's view: its primary agent, a related review agent, or a build, run, or terminal activity. Related agents remain independent Agent Nodes with their own working directories and lifecycles.
@@ -112,10 +112,10 @@ A persistent set of **Pre-spawn Worktrees** maintained on disk and tracked in SQ
 _Avoid_: Warm pool, worktree cache.
 
 **Root Node**:
-An Agent Node operating directly on the parent Mesh's root directory, bypassing worktree isolation. (Used when the Mesh property use_worktree is false, or when overridden via Alt-click).
+An Agent Node operating directly in its Mesh's selected folder, bypassing worktree isolation.
 
 **Node Working Directory**:
-The directory an Agent Node's work physically lives in: its Worktree Node dir (`.claude/worktrees/<name>`) for a Worktree Node, or the Mesh root for a Root Node. The canonical "where is this node's stuff" rule (resolve `use_worktree` + a trimmed, non-empty `worktree_name`) lives in one place; callers pick the host form (Windows git2) or the spawn form (the path as the agent saw it — Linux for a WSL node, which is the form Claude Code encodes for its on-disk transcript directory).
+The directory where an Agent Node starts and loads its scoped project instructions. For a Worktree Node it is the saved project folder inside the owned checkout; for a Root Node it is the Mesh's selected folder. A root-scoped project starts at the checkout root. The working directory can differ from the complete checkout used for repository-wide Git operations and cleanup.
 _Avoid_: working path, repo path, node dir
 
 **Node Turn**:

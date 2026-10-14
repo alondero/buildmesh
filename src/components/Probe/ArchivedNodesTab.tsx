@@ -102,6 +102,7 @@ export function ArchivedNodesTab({ meshId, meshPath }: { meshId?: number; meshPa
   // owns this derivation.
   const getDefaultProvider = useMeshStore((s) => s.getDefaultProvider);
   const fetchAgentNodes = useAgentNodeStore((s) => s.fetchAgentNodes);
+  const adoptAgentNode = useAgentNodeStore((s) => s.adoptAgentNode);
   const spawnAgent = useAgentNodeStore((s) => s.spawnAgent);
   const toggleProbe = useUIStore((s) => s.toggleProbe);
 
@@ -214,6 +215,9 @@ export function ArchivedNodesTab({ meshId, meshPath }: { meshId?: number; meshPa
         session.worktree_name,
         providerId,
       );
+      // Import already returned the durable row; a failed refresh must not
+      // prevent the explicit resume from acting on that successful result.
+      adoptAgentNode(node);
       await fetchAgentNodes();
       enterMesh(node.mesh_id, { nodeId: node.id });
       // Spawn the slow PTY-bound work first, then hide the dock. If we

@@ -17,7 +17,7 @@ import { isWindows } from './platform';
 // When present (trimmed, non-empty) it wins; `None` (Root Nodes +
 // pre-#1519 rows) falls back to the legacy
 // `<mesh>/.claude/worktrees/<name>` layout byte-for-byte. Mirrors
-// `env::node_working_path` — keep the two in sync.
+// `env::node_git_path` — keep the two in sync.
 export function getNodeGitPath(node: {
   path: string;
   worktree_name?: string | null;
@@ -33,6 +33,15 @@ export function getNodeGitPath(node: {
     }
   }
   return node.path;
+}
+
+/** Folder scope for launch, file browsing and other directory consumers. */
+export function getNodeWorkingPath(node: Parameters<typeof getNodeGitPath>[0] & {
+  project_scope?: string | null;
+}): string {
+  const root = getNodeGitPath(node);
+  return node.use_worktree !== false && node.worktree_name?.trim() && node.project_scope
+    ? `${root.replace(/[/\\]+$/, '')}/${node.project_scope}` : root;
 }
 
 /**

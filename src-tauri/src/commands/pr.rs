@@ -680,7 +680,7 @@ pub(crate) fn create_pr_blocking_with_client(
 
     // Read the branch from the worktree (if any) — the mesh root is on the
     // Base Ref for worktree nodes, which would create a "main → main" PR.
-    let info = repo_info(&env::node_working_path(&node).host_path)?;
+    let info = repo_info(&env::node_git_path(&node).host_path)?;
     if info.branch.is_empty() {
         return Err("Could not determine current branch".to_string());
     }
@@ -760,7 +760,7 @@ pub(crate) fn create_pr_for_mesh_blocking_with_client(
 // PR it produced disagreed.
 //
 // The fix resolves the source from the NODE's worktree
-// (`env::node_working_path`) and derives the base from the mesh's own
+// (`env::node_git_path`) and derives the base from the mesh's own
 // `base_ref` rather than assuming `main`.
 
 /// The source/target branch pair a create-PR request resolved to.
@@ -917,7 +917,7 @@ pub(crate) fn resolve_pr_source_for_node(
     // The node's worktree, never `mesh.path`. `host_path` is the
     // Windows-side view; git operations must never see a WSL path
     // (see `env::host_path`).
-    let info = repo_info(&env::node_working_path(&node).host_path)?;
+    let info = repo_info(&env::node_git_path(&node).host_path)?;
     if info.branch.is_empty() {
         return Err(PrSourceError::BranchUnknown);
     }
@@ -1112,8 +1112,8 @@ pub(crate) fn get_current_branch_blocking(session_id: i64) -> Result<String, Str
     let node = db::get_agent_node_by_id(session_id).map_err(|e| e.to_string())?;
 
     // Route through the worktree (if any) — the mesh root is on the base
-    // branch for worktree nodes. See `node_working_path` for the rationale.
-    Ok(repo_info(&env::node_working_path(&node).host_path)?.branch)
+    // branch for worktree nodes. See `node_git_path` for the rationale.
+    Ok(repo_info(&env::node_git_path(&node).host_path)?.branch)
 }
 
 /// Open PR summary for an agent node — shape matches the TS `OpenPr` type.
@@ -1178,9 +1178,9 @@ pub(crate) fn get_open_pr_for_node_blocking(node_id: i64) -> Result<Option<OpenP
 
     // Worktree nodes: open the worktree directory, not the mesh root.
     // The mesh root is on the base branch while the agent's HEAD is on the
-    // worktree's branch — see `node_working_path` for the rationale and the
+    // worktree's branch — see `node_git_path` for the rationale and the
     // matching frontend helper (`getNodeGitPath`).
-    let info = match repo_info(&env::node_working_path(&node).host_path) {
+    let info = match repo_info(&env::node_git_path(&node).host_path) {
         Ok(i) => i,
         Err(_) => return Ok(None),
     };
@@ -2312,12 +2312,12 @@ mod tests {
     /// The agent's HEAD is on the worktree's branch (NOT the mesh root's branch).
     /// `repo_info` previously opened `node.path` (= mesh root) and got `main`,
     /// so the PR chip was looking for `head=alondero:main` instead of the
-    /// agent's actual branch. The `node_working_path` helper routes to the
+    /// agent's actual branch. The `node_git_path` helper routes to the
     /// worktree directory; the chip then resolves the right branch.
     #[test]
-    fn node_working_path_resolves_to_worktree_dir_for_worktree_nodes() {
+    fn node_git_path_resolves_to_worktree_dir_for_worktree_nodes() {
         let (_guard, _wt_path, node) = make_worktree_node();
-        let resolved = env::node_working_path(&node).host_path;
+        let resolved = env::node_git_path(&node).host_path;
         // `resolve_agent_path` builds the path with `/` separators, so on
         // Windows we may see mixed slashes — git2 handles that fine, so we
         // assert on the canonical path components rather than the raw string.
@@ -2335,9 +2335,9 @@ mod tests {
     /// Non-worktree nodes have no worktree subdirectory — the agent works in
     /// the mesh root itself, so the helper should return `node.path` unchanged.
     #[test]
-    fn node_working_path_resolves_to_mesh_path_for_root_nodes() {
+    fn node_git_path_resolves_to_mesh_path_for_root_nodes() {
         let (_guard, _root_path, node) = make_root_node();
-        let resolved = env::node_working_path(&node).host_path;
+        let resolved = env::node_git_path(&node).host_path;
         assert_eq!(
             resolved, node.path,
             "non-worktree node must resolve to its own path"
@@ -2354,7 +2354,7 @@ mod tests {
     #[test]
     fn repo_info_via_working_path_returns_worktree_branch_not_root_branch() {
         let (_guard, _wt_path, node) = make_worktree_node();
-        let resolved = env::node_working_path(&node).host_path;
+        let resolved = env::node_git_path(&node).host_path;
         let info = repo_info(&resolved).expect("worktree repo must open");
         assert_eq!(
             info.branch, "agent-1",
@@ -2376,7 +2376,7 @@ mod tests {
     #[test]
     fn get_current_branch_via_working_path_returns_worktree_branch() {
         let (_guard, _wt_path, node) = make_worktree_node();
-        let branch = repo_info(&env::node_working_path(&node).host_path)
+        let branch = repo_info(&env::node_git_path(&node).host_path)
             .expect("worktree repo must open")
             .branch;
         assert_eq!(

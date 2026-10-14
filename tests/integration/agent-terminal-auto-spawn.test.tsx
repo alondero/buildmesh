@@ -176,6 +176,7 @@ vi.mock('@xterm/addon-unicode11', () => ({
 
 import { AgentTerminal, terminalManager } from '../../src/components/Terminal/Terminal';
 import { seedAgentNodes } from '../unit/helpers/seedAgentNodes';
+import { attachAgentNodeListeners } from '../../src/stores/agentNodeListeners';
 
 const IDLE_NODE: AgentNode = {
   id: 1,
@@ -224,6 +225,53 @@ describe('AgentTerminal auto-spawn (issue #302)', () => {
     terminalManager.dispose(IDLE_NODE.id);
     vi.restoreAllMocks();
   });
+
+  it.each(['before', 'after', 'absent'] as const)(
+    'contains a failed automatic spawn when the failure event is %s rejection (#2295)',
+    async (order) => {
+      const store = useAgentNodeStore.getState();
+      const unlisten = await attachAgentNodeListeners(store);
+      const attempts: Array<{ resolve: () => void; reject: (e: Error) => void }> = [];
+      vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+        if (cmd === 'spawn_agent') return new Promise<void>((resolve, reject) => {
+          attempts.push({ resolve, reject });
+        });
+        if (cmd === 'list_agent_nodes') return [IDLE_NODE];
+        if (cmd === 'list_providers') return [{ id: 'anthropic', label: 'Claude' }];
+        if (cmd === 'get_default_provider') return 'anthropic';
+        return [];
+      });
+      const failure = () => mockListeners.get('node-spawn-failed')?.forEach(cb => cb({
+        payload: { node_id: IDLE_NODE.id, error: 'Scoped folder missing' },
+      }));
+      const first = render(<AgentTerminal nodeId={IDLE_NODE.id} />);
+      await waitFor(() => expect(attempts).toHaveLength(1));
+      await act(async () => {
+        if (order === 'before') failure();
+        attempts[0].reject(new Error('Scoped folder missing'));
+      });
+      if (order === 'after') await act(async () => { failure(); });
+      expect(useAgentNodeStore.getState().nodesById[IDLE_NODE.id]?.status).toBe('error');
+      await act(async () => { await store.fetchAgentNodes(); });
+      first.unmount();
+      const second = render(<AgentTerminal nodeId={IDLE_NODE.id} />);
+      await act(async () => { await terminalManager.attach(IDLE_NODE.id, second.container); });
+      expect(attempts).toHaveLength(1);
+      expect(useAgentNodeStore.getState().nodesById[IDLE_NODE.id]?.status).toBe('error');
+      let retry!: Promise<void>;
+      await act(async () => { retry = store.restartFreshAgent(IDLE_NODE.id); });
+      expect(attempts).toHaveLength(2);
+      vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+        if (cmd === 'list_agent_nodes') return [{ ...IDLE_NODE, status: 'running' }];
+        return [];
+      });
+      await act(async () => { attempts[1].resolve(); await retry; });
+      expect(useAgentNodeStore.getState().nodesById[IDLE_NODE.id]?.status).toBe('running');
+      expect(attempts).toHaveLength(2);
+      second.unmount();
+      unlisten();
+    },
+  );
 
   it('preserves keyboard tab focus after an asynchronous terminal attachment', async () => {
     seedAgentNodes([{ ...IDLE_NODE, status: 'running' }], IDLE_NODE.id);
