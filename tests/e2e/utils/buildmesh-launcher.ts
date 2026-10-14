@@ -15,9 +15,12 @@
  */
 
 import { spawn, type ChildProcess } from 'child_process';
+import { randomBytes } from 'crypto';
+import { mkdtempSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { BRIDGE_ENABLE_ENV, BRIDGE_TOKEN_ENV } from '../../../scripts/test-bridge-auth.mjs';
 import { waitForPortClosed } from './tauri-http';
 
 // The repo is ESM (`"type": "module"`), so `__dirname` is undefined at
@@ -31,12 +34,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * segments and produced `tests/src-tauri/...` (no such directory) — silent
  * ENOENT at spawn() that was masked by the spec's pre-flight gate.
  *
- * Override with `BUILDMESH_EXE` for a sideloaded build. NOTE: this point
- * at the BASE profile's ports (1991/1992-1994); a dev-profile exe writes
- * to a different AppData dir AND binds 2991/2992-2994, which the rest of
- * the spec infrastructure (tauri-http.ts:13's hardcoded `1991`) does NOT
- * understand. Don't override `BUILDMESH_EXE` to a dev-profile exe and
- * expect the spec to find the test server.
+ * Override with `BUILDMESH_EXE` for a sideloaded build. The stable-profile
+ * ports are 1991 (test bridge) and 1992–1994 (phone/Android). A plain
+ * `tauri build` does not include the bridge. E2E needs
+ * `npx tauri build --features dev-tools` with the stable identifier so
+ * those ports stay put. A dev-profile exe (`*.dev`) binds 2991/2992–2994
+ * and this helper will not find it.
  */
 export const EXE_PATH =
   process.env.BUILDMESH_EXE ??
@@ -99,6 +102,28 @@ export interface BuildmeshProcess {
   readonly child: ChildProcess;
   /** Pre-captured so callers don't need to re-check `child.pid`. */
   readonly pid: number;
+  /** Bearer for this child. Also copied onto `process.env` for `invokeViaHttp`. */
+  readonly bridgeToken: string;
+  /** Log file inside the isolated profile, which may not exist until the app writes it. */
+  readonly logPath: string;
+  /** Temp root passed to the child as its application-data directory. */
+  readonly dataRoot: string;
+}
+
+const STABLE_APP_NAME = 'com.alond.buildmesh';
+
+function isolatedLogPath(dataRoot: string): string {
+  if (process.platform === 'darwin') {
+    return path.join(
+      dataRoot,
+      'Library',
+      'Application Support',
+      STABLE_APP_NAME,
+      'logs',
+      'buildmesh.log',
+    );
+  }
+  return path.join(dataRoot, STABLE_APP_NAME, 'logs', 'buildmesh.log');
 }
 
 /**
@@ -110,9 +135,26 @@ export interface BuildmeshProcess {
  * caller can decide to wait it out or bail.
  */
 export function spawnBuildmesh(): BuildmeshProcess {
+  const dataRoot = mkdtempSync(path.join(os.tmpdir(), `buildmesh-e2e-${process.pid}-`));
+  const bridgeToken = randomBytes(32).toString('hex');
+  // Same-process callers (`invokeViaHttp`) read this. The child gets its own
+  // copy below. Two overlapping spawns would clobber it; specs spawn one.
+  process.env[BRIDGE_TOKEN_ENV] = bridgeToken;
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    [BRIDGE_ENABLE_ENV]: '1',
+    [BRIDGE_TOKEN_ENV]: bridgeToken,
+  };
+  // Isolate the profile on the child only. macOS Tauri follows HOME; changing
+  // the parent HOME would hide the agent's own credentials.
+  if (process.platform === 'win32') env.APPDATA = dataRoot;
+  else if (process.platform === 'darwin') env.HOME = dataRoot;
+  else env.XDG_DATA_HOME = dataRoot;
+
   const child = spawn(EXE_PATH, [], {
     stdio: 'ignore',
     windowsHide: true,
+    env,
   });
   if (child.pid === undefined) {
     throw new Error(`spawn() returned no PID for ${EXE_PATH}`);
@@ -126,7 +168,13 @@ export function spawnBuildmesh(): BuildmeshProcess {
   // Stash on the child so callers can read it after wait/terminate.
   (child as ChildProcess & { __spawnError?: Error | null }).__spawnError =
     spawnError;
-  return { child, pid: child.pid };
+  return {
+    child,
+    pid: child.pid,
+    bridgeToken,
+    logPath: isolatedLogPath(dataRoot),
+    dataRoot,
+  };
 }
 
 /**
@@ -198,10 +246,9 @@ export async function isPortBound(
  * SPA shell. Replaces the old single-pass loop that could race the test
  * server's bind by tens of milliseconds and bail.
  *
- * The mobile server doesn't expose `/health` (only the test server on
- * 1991 does — see commands/test.rs:195), so we hit `/` and look for any
- * HTTP status (including 401 for an unauth'd route) as evidence the
- * socket is bound.
+ * The phone/Android server doesn't expose `/health` (only the development
+ * test bridge does), so we hit `/` and look for any HTTP status, including
+ * 401, as evidence the socket is bound.
  */
 export async function findMobilePort(timeoutMs = 10000): Promise<number | null> {
   const deadline = Date.now() + timeoutMs;

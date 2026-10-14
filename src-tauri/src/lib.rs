@@ -946,7 +946,10 @@ fn run_profile_startup(
 
     crate::agent::provider::muse::telemetry::bind_app(app.handle().clone());
 
-    // Start HTTP test server (1991, or 2991 for the dev profile) for Playwright E2E tests
+    // Development test bridge (loopback 1991, or 2991 for the dev profile).
+    // Release builds omit the module. Debug and dev-tools builds stay closed
+    // until the process opts in with a per-launch credential.
+    #[cfg(any(debug_assertions, feature = "dev-tools"))]
     commands::test::start_test_server(app.handle().clone(), port_offset);
 
     // Start embedded HTTP/WebSocket server for mobile remote access

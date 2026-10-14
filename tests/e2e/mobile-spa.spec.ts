@@ -21,7 +21,8 @@
  *
  * Prereqs:
  *   - npm run build          (produces dist/ AND dist/mobile/)
- *   - npm run tauri build    (produces the release exe with assets embedded)
+ *   - npx tauri build --features dev-tools
+ *     (stable identifier, embedded assets, test bridge compiled in)
  *
  * Override the exe path if the build isn't at the default location:
  *   BUILDMESH_EXE=/abs/path/to/buildmesh.exe npx playwright test …
@@ -29,7 +30,7 @@
  * Run: npx playwright test tests/e2e/mobile-spa.spec.ts
  */
 import { test, expect } from '@playwright/test';
-import { invokeViaHttp, waitForPort } from './utils/tauri-http';
+import { BRIDGE_MISSING_HINT, invokeViaHttp, waitForPort } from './utils/tauri-http';
 import {
   spawnBuildmesh,
   terminate,
@@ -64,7 +65,7 @@ test.describe('mobile /v2 SPA', () => {
 
     expect(
       await waitForPort('127.0.0.1', TEST_SERVER_PORT, 15000),
-      'test server ready',
+      BRIDGE_MISSING_HINT,
     ).toBe(true);
     mobilePort = await findMobilePort();
     expect(mobilePort, 'one of 1992-1994 should be bound').not.toBeNull();

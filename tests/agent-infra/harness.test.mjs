@@ -1652,7 +1652,7 @@ test('the real plan reuses frontend gates after a Rust-only edit and docs-only e
 test('Vitest keeps re-running for the src-tauri files it reads, and every Rust gate shares one input list', () => {
   const plan = planGates(['src/owner.ts', 'src-tauri/src/lib.rs']);
   const byId = Object.fromEntries(plan.map(row => [row.id, row]));
-  for (const path of ['src-tauri/Cargo.toml', 'src-tauri/Cargo.lock', 'src-tauri/tauri.conf.json', 'src-tauri/tauri.dev.conf.json', 'src-tauri/tauri.windows.conf.json', 'src-tauri/capabilities/default.json', 'src-tauri/src/lib.rs', 'src-tauri/src/commands/file_tree.rs', 'src-tauri/src/http/routes/issues.rs', 'src-tauri/src/agent/provider/adapters/opencode_attention_plugin.js', 'docs/brand/b3-relay-icon.svg', 'src/types/generated/Example.ts']) {
+  for (const path of ['src-tauri/Cargo.toml', 'src-tauri/Cargo.lock', 'src-tauri/tauri.conf.json', 'src-tauri/tauri.dev.conf.json', 'src-tauri/tauri.windows.conf.json', 'src-tauri/capabilities/default.json', 'src-tauri/src/lib.rs', 'src-tauri/src/commands/file_tree.rs', 'src-tauri/src/services/mod.rs', 'src-tauri/src/http/routes/issues.rs', 'src-tauri/src/agent/provider/adapters/opencode_attention_plugin.js', 'docs/brand/b3-relay-icon.svg', 'src/types/generated/Example.ts']) {
     assert.ok(gateReads(byId['frontend-tests'], path), path);
   }
   for (const path of ['src-tauri/src/secret_scrubber.rs', 'src-tauri/src/db/mod.rs', 'src-tauri/tests/fixtures/transcripts/muse/muse_transcript.jsonl', 'docs/page.md']) {
@@ -1855,7 +1855,7 @@ test('new Vitest references to src-tauri are audited against the frontend-tests 
   // We pin a snapshot of every referencing line so that any new or modified reference across any
   // test file (including files already referencing src-tauri) forces re-audit against
   // VITEST_READS_FROM_SRC_TAURI in scripts/harness-plan.mjs.
-  const files = execFileSync('git', ['ls-files', 'tests/unit', 'tests/integration', 'tests/e2e', 'tests/setup'], { cwd: root, encoding: 'utf8' })
+  const files = execFileSync('git', ['ls-files', '-co', '--exclude-standard', '--', 'tests/unit', 'tests/integration', 'tests/e2e', 'tests/setup'], { cwd: root, encoding: 'utf8' })
     .split('\n').filter(file => /\.(?:tsx?|mjs)$/.test(file));
   const referencingLines = files.flatMap(file =>
     readFileSync(join(root, file), 'utf8')
@@ -1865,8 +1865,7 @@ test('new Vitest references to src-tauri are audited against the frontend-tests 
       .map(line => `${file}: ${line}`)
   ).sort();
   assert.deepEqual(referencingLines, [
-    "tests/e2e/app-launch.spec.ts: const EXE_PATH = 'X:/src/buildmesh/src-tauri/target/release/buildmesh.exe';",
-    "tests/e2e/app-launch.spec.ts: const debugExe = 'X:/src/buildmesh/src-tauri/target/debug/buildmesh.exe';",
+    "tests/e2e/app-launch.spec.ts: const DEBUG_EXE = path.join(repoRoot, 'src-tauri', 'target', 'debug', 'buildmesh.exe');",
     "tests/e2e/utils/buildmesh-launcher.ts: 'src-tauri', 'target', 'release', 'buildmesh.exe',",
     'tests/unit/app-version.test.ts: ["src-tauri", "Cargo.lock"],',
     'tests/unit/app-version.test.ts: ["src-tauri", "Cargo.toml"],',
@@ -1898,11 +1897,14 @@ test('new Vitest references to src-tauri are audited against the frontend-tests 
     'tests/unit/guard-antipatterns.test.ts: it("allows \\\\\\\\wsl$ inside src-tauri/src/env/", () => {',
     'tests/unit/ipc-contract.test.ts: `\\n  1. Add the command to tauri::generate_handler![ ... ] in src-tauri/src/lib.rs` +',
     "tests/unit/ipc-contract.test.ts: const LIB_RS = join(REPO_ROOT, 'src-tauri', 'src', 'lib.rs');",
+    "tests/unit/ipc-contract.test.ts: const commands = normalize(readFileSync(join(REPO_ROOT, 'src-tauri', 'src', 'commands', 'mod.rs'), 'utf8'));",
+    "tests/unit/ipc-contract.test.ts: const services = normalize(readFileSync(join(REPO_ROOT, 'src-tauri', 'src', 'services', 'mod.rs'), 'utf8'));",
     'tests/unit/opencode-attention-plugin.test.ts: const source = readFileSync(resolve("src-tauri/src/agent/provider/adapters/opencode_attention_plugin.js"), "utf8");',
     "tests/unit/tauri-capabilities.test.ts: describe('src-tauri/capabilities/default.json', () => {",
     "tests/unit/tauri-capabilities.test.ts: readFileSync(resolve(process.cwd(), 'src-tauri/capabilities/default.json'), 'utf8'),",
     "tests/unit/tauri-dev-config.test.ts: readFileSync(resolve(process.cwd(), 'src-tauri/tauri.conf.json'), 'utf8'),",
     "tests/unit/tauri-dev-config.test.ts: readFileSync(resolve(process.cwd(), 'src-tauri/tauri.dev.conf.json'), 'utf8'),",
+    "tests/unit/test-bridge-auth.test.ts: path.resolve(__dirname, '..', '..', 'src-tauri', 'src', 'commands', 'test.rs'),",
   ]);
 
   // Every actual read of a src-tauri file/subpath identified across those lines must be covered by frontend-tests:
@@ -1917,6 +1919,7 @@ test('new Vitest references to src-tauri are audited against the frontend-tests 
     'src-tauri/capabilities/default.json',
     'src-tauri/src/lib.rs',
     'src-tauri/src/commands/file_tree.rs',
+    'src-tauri/src/services/mod.rs',
     'src-tauri/src/http/routes/issues.rs',
     'src-tauri/src/agent/provider/adapters/opencode_attention_plugin.js',
   ]) {

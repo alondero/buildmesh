@@ -5,10 +5,12 @@
 set -euo pipefail
 
 DETACH=false
+TEST_BRIDGE=false
 READINESS_TIMEOUT_SECONDS=30
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --detach) DETACH=true; shift ;;
+    --test-bridge) TEST_BRIDGE=true; shift ;;
     --readiness-timeout-seconds)
       READINESS_TIMEOUT_SECONDS="${2:-}"
       if ! [[ "$READINESS_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] || [ "$READINESS_TIMEOUT_SECONDS" -lt 1 ] || [ "$READINESS_TIMEOUT_SECONDS" -gt 300 ]; then
@@ -102,6 +104,20 @@ echo "Buildmesh Dev pre-launch line count (panic_early.log): $BEFORE_PANIC_EARLY
 # hook (lib.rs setup()) so the dev profile's panic.log gets real frames
 # instead of the "disabled backtrace" placeholder. Issue #152.
 export RUST_BACKTRACE=1
+# Opt-in development test bridge. Keep in sync with run-dev.ps1 -TestBridge.
+# The token is not printed. Without --test-bridge a stale token file is removed
+# so another process cannot authenticate against an app that is not listening.
+TOKEN_FILE=".tmp/test-bridge-token"
+if "$TEST_BRIDGE"; then
+  TOKEN=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+  mkdir -p .tmp
+  printf '%s' "$TOKEN" > "$TOKEN_FILE"
+  export BUILDMESH_TEST_BRIDGE=1
+  export BUILDMESH_TEST_BRIDGE_TOKEN="$TOKEN"
+  echo "Test bridge enabled; credential written to .tmp/test-bridge-token"
+else
+  rm -f "$TOKEN_FILE"
+fi
 # Issue #2136: /use and /verify launch the dev profile from inside an agent's
 # Claude Code session, and that session exports its own markers into every
 # process it spawns. Handed on to an agent Buildmesh spawns,
@@ -149,6 +165,8 @@ else
   "$BINARY" &
 fi
 PID=$!
+unset BUILDMESH_TEST_BRIDGE
+unset BUILDMESH_TEST_BRIDGE_TOKEN
 echo "Launched PID: $PID"
 echo "Log: $LOG_PATH"
 

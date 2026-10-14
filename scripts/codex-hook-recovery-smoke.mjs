@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { mkdirSync, existsSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import os from 'node:os';
@@ -8,6 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { createCodexHookRelay } from './codex-hook-relay.mjs';
+import { BRIDGE_ENABLE_ENV, BRIDGE_TOKEN_ENV, bridgeHeaders } from './test-bridge-auth.mjs';
 
 const [nodeMajor, nodeMinor] = process.versions.node.split('.').map(Number);
 const hasUnflaggedSqlite = nodeMajor > 23
@@ -25,6 +27,8 @@ const appIdentifier = 'com.alond.buildmesh.issue1905.dev';
 const cdpPort = Number(process.env.BUILDMESH_1905_CDP_PORT ?? 9224);
 const appHttpPort = 2992;
 const testBridgePort = 2991;
+const bridgeCredential = randomBytes(32).toString('hex');
+const bridgeEnv = { [BRIDGE_TOKEN_ENV]: bridgeCredential };
 const appBinary = path.join(root, 'src-tauri', 'target', 'release', 'buildmesh-dev.exe');
 const appDataRoot = process.platform === 'win32'
   ? runText('powershell.exe', [
@@ -120,7 +124,7 @@ async function waitFor(description, probe, timeoutMs = 120_000) {
 async function testBridge(command, args = {}) {
   const response = await fetch(`http://127.0.0.1:${testBridgePort}/invoke`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: bridgeHeaders({ 'content-type': 'application/json' }, bridgeEnv, null),
     body: JSON.stringify({ cmd: command, args }),
     signal: AbortSignal.timeout(15_000),
   });
@@ -474,6 +478,8 @@ async function main() {
     env: {
       ...process.env,
       APPDATA: scratchAppData,
+      [BRIDGE_ENABLE_ENV]: '1',
+      [BRIDGE_TOKEN_ENV]: bridgeCredential,
       BUILDMESH_CODEX_HOOK_RELAY_URL: relay.baseUrl,
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${cdpPort}`,
       RUST_BACKTRACE: '1',
@@ -484,8 +490,11 @@ async function main() {
     app.once('exit', (code, signal) => resolve({ code, signal }));
   });
 
-  await waitFor('isolated dev app test bridge', async () => {
-    const response = await fetch(`http://127.0.0.1:${testBridgePort}/health`, { signal: AbortSignal.timeout(1_000) });
+  await waitFor('authenticated dev-tools test bridge', async () => {
+    const response = await fetch(`http://127.0.0.1:${testBridgePort}/health`, {
+      headers: bridgeHeaders({}, bridgeEnv, null),
+      signal: AbortSignal.timeout(1_000),
+    });
     return response.ok;
   });
   browser = await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`);

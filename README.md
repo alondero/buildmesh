@@ -279,19 +279,21 @@ This launches the Tauri shell + Vite dev server. First run takes a few minutes w
 ### Build a release binary
 
 ```bash
-# Stable profile (com.alond.buildmesh, port 1991)
+# Stable profile (com.alond.buildmesh). Phone and Android use port 1992.
 npm run tauri build
 
-# Dev profile (com.alond.buildmesh.dev, port 2991) — runs side-by-side with stable
+# Dev profile (com.alond.buildmesh.dev, phone and Android on port 2992) — runs side-by-side with stable
 npm run tauri:build:dev
 ```
 
 Binaries land in `src-tauri/target/release/`:
 
-| Profile | Binary | Port |
+| Profile | Binary | Phone / Android HTTP |
 |---|---|---|
-| Stable | `buildmesh.exe` | 1991 (HTTP fallback 1992→1993→1994) |
-| Dev | `buildmesh-dev.exe` | 2991 (HTTP fallback 2992→2993→2994) |
+| Stable | `buildmesh.exe` | 1992 (fallback 1993→1994) |
+| Dev | `buildmesh-dev.exe` | 2992 (fallback 2993→2994) |
+
+The development test bridge is a separate loopback listener on port 1991 (2991 for the dev profile). Release builds do not include it. A debug or dev-tools build listens only when started with `BUILDMESH_TEST_BRIDGE=1` and a per-launch token (`scripts/run-dev.ps1 -TestBridge` or `scripts/run-dev.sh --test-bridge`).
 
 The dev profile is what `/use` and `/verify` use — it never touches the stable hub.
 
@@ -301,7 +303,7 @@ The dev profile is what `/use` and `/verify` use — it never touches the stable
 npm test                 # unit + integration
 npm run test:docs        # documentation contract tests
 npm run check:docs       # local links, anchors, required docs, source drift
-npm run test:e2e         # Playwright e2e (requires the app running on :1991)
+npm run test:e2e         # Playwright e2e (dev-tools build, authenticated bridge on :1991)
 npm run test:ci          # all three in one go
 cargo test               # Rust unit tests (run inside src-tauri/)
 ```

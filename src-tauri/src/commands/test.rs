@@ -1,39 +1,90 @@
-//! HTTP test server for Playwright E2E tests
+//! Development HTTP bridge for Playwright and screenshot fixtures.
 //!
-//! Problem: Playwright connects via HTTP to the Vite dev server, but `invoke()`
-//! from `@tauri-apps/api/core` requires `window.__TAURI_INTERNALS__` which is only
-//! set in a Tauri webview. HTTP requests never get this global.
-//!
-//! Solution: This module spawns a minimal tokio TCP server on port 1991 that
-//! receives JSON-RPC-like calls and directly calls the underlying db/command
-//! functions. Playwright tests use `fetch('http://localhost:1991/invoke', ...)`
-//! to exercise the real Rust backend without needing Tauri APIs in the browser.
+//! Playwright reaches the Vite server, where Tauri `invoke()` is absent, so
+//! this module can expose the same command bodies over a loopback socket.
+//! It is compiled only for debug and `dev-tools` builds, and it listens only
+//! when the process sets `BUILDMESH_TEST_BRIDGE=1` plus a per-launch token.
+//! A release build does not include the listener.
 
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use subtle::ConstantTimeEq;
 use tauri::AppHandle;
 use tauri::Emitter;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
-use ts_rs::TS;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufStream};
+use tokio::net::{TcpListener, TcpStream};
 
-/// Payload of the `node-activated` Tauri event. Emitted only by the
-/// HTTP-based E2E test server (`handle_set_active_node`) — production never
-/// broadcasts it; the active-node state is read via the IPC refetch.
-///
-/// Generated to `src/types/generated/NodeActivatedPayload.ts`; the TS half
-/// is imported by `src/stores/agentNodeStore.ts`.
-#[derive(Debug, Clone, Serialize, TS)]
-#[ts(export, export_to = "NodeActivatedPayload.ts")]
-pub struct NodeActivatedPayload {
-    #[ts(as = "i32")]
-    pub node_id: i64,
-}
+use crate::commands::node_activated::NodeActivatedPayload;
+use crate::http::request::{bearer_token, extract_header_value, read_body_with_cap, ReadBodyError};
+use crate::http::router::content_length;
+use crate::http::server::read_request_head;
 
 const TEST_SERVER_PORT: u16 = 1991;
+const BRIDGE_ENABLE_ENV: &str = "BUILDMESH_TEST_BRIDGE";
+const BRIDGE_TOKEN_ENV: &str = "BUILDMESH_TEST_BRIDGE_TOKEN";
+const BRIDGE_ORIGINS_ENV: &str = "BUILDMESH_TEST_BRIDGE_ORIGINS";
+const MIN_BRIDGE_TOKEN_LEN: usize = 32;
+const BRIDGE_MAX_BODY: usize = 64 * 1024;
 
-static TEST_SERVER_RUNNING: AtomicBool = AtomicBool::new(false);
+/// Per-launch admission policy. No `Debug`: the token must not land in a log.
+#[derive(Clone)]
+struct BridgeConfig {
+    token: String,
+    port: u16,
+    origins: Vec<String>,
+}
+
+impl BridgeConfig {
+    /// `None` means "do not bind". The enable flag without a usable token is a
+    /// misconfiguration and is logged; the token value itself is never logged.
+    fn from_env(port: u16) -> Option<Self> {
+        let enabled = std::env::var(BRIDGE_ENABLE_ENV).ok().as_deref() == Some("1");
+        if !enabled {
+            tracing::info!(
+                "[test_server] HTTP test bridge is off. Set {BRIDGE_ENABLE_ENV}=1 and {BRIDGE_TOKEN_ENV} to listen"
+            );
+            return None;
+        }
+        let token = std::env::var(BRIDGE_TOKEN_ENV).unwrap_or_default();
+        if !token_is_acceptable(&token) {
+            tracing::error!(
+                "[test_server] {BRIDGE_ENABLE_ENV}=1 but {BRIDGE_TOKEN_ENV} must be at least {MIN_BRIDGE_TOKEN_LEN} non-whitespace characters; not binding"
+            );
+            return None;
+        }
+        let origins = std::env::var(BRIDGE_ORIGINS_ENV)
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|origin| !origin.is_empty())
+            .map(str::to_owned)
+            .collect();
+        Some(Self {
+            token,
+            port,
+            origins,
+        })
+    }
+
+    #[cfg(test)]
+    fn for_test(token: &str, port: u16, origins: &[&str]) -> Self {
+        Self {
+            token: token.to_string(),
+            port,
+            origins: origins.iter().map(|origin| (*origin).to_string()).collect(),
+        }
+    }
+}
+
+fn token_is_acceptable(token: &str) -> bool {
+    token.len() >= MIN_BRIDGE_TOKEN_LEN && !token.chars().any(char::is_whitespace)
+}
+
+#[derive(Debug)]
+enum Admission {
+    Unauthorized,
+    Forbidden,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct JsonRpcRequest {
@@ -69,12 +120,74 @@ impl JsonRpcResponse {
     }
 }
 
-/// Listen addresses for the test server: one IPv4, one IPv6 (Windows requires
-/// explicit binding to each address family). Loopback ONLY — the bridge
-/// executes real backend commands with no auth, and a wildcard bind would
-/// both expose it to the LAN and trigger a Windows Firewall consent prompt
-/// on every freshly-built exe path (one per worktree). See
-/// `tests::test_server_binds_loopback_only`.
+struct HttpReply {
+    status: u16,
+    reason: &'static str,
+    content_type: &'static str,
+    body: String,
+}
+
+impl HttpReply {
+    fn new(
+        status: u16,
+        reason: &'static str,
+        content_type: &'static str,
+        body: impl Into<String>,
+    ) -> Self {
+        Self {
+            status,
+            reason,
+            content_type,
+            body: body.into(),
+        }
+    }
+
+    fn json(status: u16, body: &str) -> Self {
+        let reason = match status {
+            200 => "OK",
+            400 => "Bad Request",
+            401 => "Unauthorized",
+            403 => "Forbidden",
+            _ => "OK",
+        };
+        Self::new(status, reason, "application/json", body)
+    }
+
+    fn empty(status: u16, reason: &'static str) -> Self {
+        Self::new(status, reason, "text/plain", "")
+    }
+
+    fn encode(&self) -> String {
+        format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+            status = self.status,
+            reason = self.reason,
+            content_type = self.content_type,
+            len = self.body.len(),
+            body = self.body,
+        )
+    }
+}
+
+fn rejection(reason: Admission) -> HttpReply {
+    match reason {
+        Admission::Unauthorized => HttpReply::json(401, r#"{"ok":false,"error":"unauthorized"}"#),
+        Admission::Forbidden => HttpReply::json(403, r#"{"ok":false,"error":"forbidden"}"#),
+    }
+}
+
+fn body_failure(error: ReadBodyError) -> HttpReply {
+    match error {
+        ReadBodyError::TooLarge => HttpReply::empty(413, "Content Too Large"),
+        ReadBodyError::TimedOut => HttpReply::empty(408, "Request Timeout"),
+        ReadBodyError::ReadFailed => HttpReply::empty(400, "Bad Request"),
+    }
+}
+
+/// Listen addresses for the test bridge: one IPv4, one IPv6 (Windows requires
+/// an explicit bind per address family). Loopback only — a wildcard bind would
+/// expose the bridge beyond this machine and trigger a Windows Firewall
+/// consent prompt for every freshly built executable path.
 fn listen_addrs(port: u16) -> (SocketAddr, SocketAddr) {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     (
@@ -83,177 +196,284 @@ fn listen_addrs(port: u16) -> (SocketAddr, SocketAddr) {
     )
 }
 
-/// Start the HTTP test server. Uses `tauri::async_runtime::spawn` so the task
-/// runs on the Tauri-managed tokio runtime, not the global one.
+/// Host must name this loopback listener, including the bound port.
+/// `host_is_allowed` is the wrong helper: it accepts the machine's LAN
+/// addresses and does not check the port.
+fn host_is_this_listener(host_header: &str, port: u16) -> bool {
+    let host = host_header.trim();
+    let (name, seen_port) = if let Some(rest) = host.strip_prefix('[') {
+        let Some((name, after)) = rest.split_once(']') else {
+            return false;
+        };
+        let seen = after
+            .strip_prefix(':')
+            .and_then(|value| value.parse::<u16>().ok());
+        (name, seen)
+    } else if let Some((name, port_text)) = host.rsplit_once(':') {
+        (name, port_text.parse::<u16>().ok())
+    } else {
+        return false;
+    };
+    if seen_port != Some(port) {
+        return false;
+    }
+    if name.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    matches!(name.parse::<std::net::IpAddr>(), Ok(ip) if ip.is_loopback())
+}
+
+/// A missing `Origin` is the Node harness. Any present `Origin` must be on
+/// the explicit allow-list; an empty list rejects every browser caller.
+fn origin_is_allowed(headers: &str, allowed: &[String]) -> bool {
+    match extract_header_value(headers, "Origin") {
+        None => true,
+        Some(origin) => allowed.iter().any(|candidate| candidate == origin),
+    }
+}
+
+fn bearer_matches(expected: &str, headers: &str) -> bool {
+    let Some(presented) = bearer_token(headers) else {
+        return false;
+    };
+    bool::from(expected.as_bytes().ct_eq(presented.as_bytes()))
+}
+
+/// Host, then origin, then bearer. A failure here must not read the body or
+/// dispatch a command. Query-string credentials are ignored.
+fn admit(config: &BridgeConfig, headers: &str) -> Result<(), Admission> {
+    let host = extract_header_value(headers, "Host").unwrap_or("");
+    if !host_is_this_listener(host, config.port) {
+        return Err(Admission::Forbidden);
+    }
+    if !origin_is_allowed(headers, &config.origins) {
+        return Err(Admission::Forbidden);
+    }
+    if !bearer_matches(&config.token, headers) {
+        return Err(Admission::Unauthorized);
+    }
+    Ok(())
+}
+
+fn act(request_line: &str, body: &[u8], app: Option<&AppHandle>) -> HttpReply {
+    if request_line.starts_with("GET /health") {
+        return HttpReply::new(200, "OK", "text/plain", "OK");
+    }
+    if request_line.starts_with("POST /invoke") {
+        let text = String::from_utf8_lossy(body);
+        let json = dispatch_invoke(text.trim(), app);
+        return HttpReply::json(200, &json);
+    }
+    HttpReply::empty(404, "Not Found")
+}
+
+/// Admit, then dispatch. Tests use this so a rejected caller never reaches a
+/// command. The socket path reads the body only after `admit` succeeds.
+#[cfg(test)]
+fn answer(config: &BridgeConfig, request_line: &str, headers: &str, body: &str) -> HttpReply {
+    if let Err(reason) = admit(config, headers) {
+        return rejection(reason);
+    }
+    act(request_line, body.as_bytes(), None)
+}
+
+fn dispatch_invoke(body: &str, app: Option<&AppHandle>) -> String {
+    let rpc_req: JsonRpcRequest = match serde_json::from_str(body) {
+        Ok(request) => request,
+        Err(error) => return JsonRpcResponse::error(&format!("Invalid JSON: {error}")),
+    };
+
+    tracing::debug!("[test_server] Handling: cmd={}", rpc_req.cmd);
+
+    let owned_app = |app: Option<&AppHandle>| -> Result<AppHandle, String> {
+        app.cloned()
+            .ok_or_else(|| "test bridge has no application handle".to_string())
+    };
+
+    match rpc_req.cmd.as_str() {
+        "create_test_mesh" => handle_create_test_mesh(&rpc_req.args),
+        "create_test_review_fixture" => handle_create_test_review_fixture(&rpc_req.args),
+        "create_attention_backlog_fixture" => {
+            handle_create_attention_backlog_fixture(&rpc_req.args)
+        }
+        "delete_test_review_fixture" => handle_delete_test_review_fixture(&rpc_req.args),
+        "create_test_review_continuation_fixture" => {
+            handle_create_test_review_continuation_fixture(&rpc_req.args)
+        }
+        "concurrent_continue_review" => match owned_app(app) {
+            Ok(app) => handle_concurrent_continue_review(&rpc_req.args, app),
+            Err(error) => JsonRpcResponse::error(&error),
+        },
+        "create_agent_node" => match owned_app(app) {
+            Ok(app) => handle_create_agent_node(&rpc_req.args, app),
+            Err(error) => JsonRpcResponse::error(&error),
+        },
+        "list_meshes" => handle_list_meshes(),
+        "list_agent_nodes" => handle_list_agent_nodes(),
+        "get_agent_node" => handle_get_agent_node(&rpc_req.args),
+        "spawn_agent" => match app {
+            Some(app) => handle_spawn_agent(&rpc_req.args, app),
+            None => JsonRpcResponse::error("test bridge has no application handle"),
+        },
+        "write_to_agent" => match owned_app(app) {
+            Ok(app) => handle_write_to_agent(&rpc_req.args, app),
+            Err(error) => JsonRpcResponse::error(&error),
+        },
+        "kill_agent" => handle_kill_agent(&rpc_req.args),
+        "delete_mesh" => handle_delete_mesh(&rpc_req.args),
+        "delete_agent_node" => handle_delete_agent_node(&rpc_req.args),
+        "get_worktree_close_safety" => handle_get_worktree_close_safety(&rpc_req.args),
+        "archive_agent_node" => handle_archive_agent_node(&rpc_req.args),
+        "inject_test_output" => match owned_app(app) {
+            Ok(app) => handle_inject_test_output(&rpc_req.args, app),
+            Err(error) => JsonRpcResponse::error(&error),
+        },
+        "set_active_node" => match owned_app(app) {
+            Ok(app) => handle_set_active_node(&rpc_req.args, app),
+            Err(error) => JsonRpcResponse::error(&error),
+        },
+        "get_mesh_properties" => handle_get_mesh_properties(&rpc_req.args),
+        "update_mesh_column" => handle_update_mesh_column(&rpc_req.args),
+        "update_worktree_base_ref" => handle_update_worktree_base_ref(&rpc_req.args),
+        "remove_worktree_base_ref" => handle_remove_worktree_base_ref(&rpc_req.args),
+        "update_mesh_use_worktree" => handle_update_mesh_use_worktree(&rpc_req.args),
+        "get_root_token" => handle_get_root_token(),
+        "create_pairing_ticket" => {
+            JsonRpcResponse::success(&serde_json::json!({ "ticket": crate::http::pairing::mint() }))
+        }
+        "spawn_handover_agent" => match owned_app(app) {
+            Ok(app) => handle_spawn_handover_agent(&rpc_req.args, app),
+            Err(error) => JsonRpcResponse::error(&error),
+        },
+        _ => JsonRpcResponse::error(&format!("Unknown command: {}", rpc_req.cmd)),
+    }
+}
+
+/// Start the HTTP test bridge on the Tauri runtime. Returns without binding
+/// when the process has not opted in.
 pub fn start_test_server(app_handle: AppHandle, port_offset: u16) {
-    // Dev profile binds 2991 so it never contends with the stable hub's 1991.
     let port = TEST_SERVER_PORT + port_offset;
+    let Some(config) = BridgeConfig::from_env(port) else {
+        return;
+    };
     let (addr_ipv4, addr_ipv6) = listen_addrs(port);
 
     tauri::async_runtime::spawn(async move {
-        // Primary: IPv4 listener (required for 127.0.0.1 access)
         let listener_ipv4 = match TcpListener::bind(addr_ipv4).await {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::error!("[test_server] Failed to bind IPv4 on port {}: {}", port, e);
-                TEST_SERVER_RUNNING.store(false, Ordering::SeqCst);
+            Ok(listener) => listener,
+            Err(error) => {
+                tracing::error!("[test_server] Failed to bind IPv4 on port {port}: {error}");
                 return;
             }
         };
 
-        TEST_SERVER_RUNNING.store(true, Ordering::SeqCst);
         tracing::info!(
-            "[test_server] HTTP test server listening on http://127.0.0.1:{} (IPv4)",
-            port
+            "[test_server] HTTP test bridge listening on http://127.0.0.1:{port} (IPv4)"
         );
 
-        // Optional: also listen on IPv6 for localhost over IPv6
         let app_ipv6 = app_handle.clone();
+        let config_ipv6 = config.clone();
         let _ = TcpListener::bind(addr_ipv6).await.map(|listener_ipv6| {
             tracing::info!(
-                "[test_server] HTTP test server also listening on http://[::1]:{} (IPv6)",
-                port
+                "[test_server] HTTP test bridge also listening on http://[::1]:{port} (IPv6)"
             );
             tauri::async_runtime::spawn(async move {
                 loop {
                     match listener_ipv6.accept().await {
-                        Ok((mut stream, client_addr)) => {
+                        Ok((stream, _client_addr)) => {
                             let app = app_ipv6.clone();
+                            let config = config_ipv6.clone();
                             tauri::async_runtime::spawn(async move {
-                                handle_connection(&mut stream, client_addr, &app).await;
+                                handle_connection(stream, config, app).await;
                             });
                         }
-                        Err(e) => tracing::warn!("[test_server] IPv6 accept error: {}", e),
+                        Err(error) => tracing::warn!("[test_server] IPv6 accept error: {error}"),
                     }
                 }
             });
         });
 
-        // Main loop: serve IPv4 connections
         loop {
             match listener_ipv4.accept().await {
-                Ok((mut stream, client_addr)) => {
+                Ok((stream, _client_addr)) => {
                     let app = app_handle.clone();
+                    let config = config.clone();
                     tauri::async_runtime::spawn(async move {
-                        handle_connection(&mut stream, client_addr, &app).await;
+                        handle_connection(stream, config, app).await;
                     });
                 }
-                Err(e) => tracing::warn!("[test_server] IPv4 accept error: {}", e),
+                Err(error) => tracing::warn!("[test_server] IPv4 accept error: {error}"),
             }
         }
     });
 }
 
-async fn handle_connection(
-    stream: &mut tokio::net::TcpStream,
-    client_addr: SocketAddr,
-    app: &AppHandle,
-) {
-    let mut buf = vec![0u8; 16384];
-    let n = match stream.read(&mut buf).await {
-        Ok(n) if n > 0 => n,
-        _ => return,
-    };
-
-    // The test bridge deliberately exercises real synchronous command/service
-    // seams. Keep SQLite, filesystem cleanup, and any other blocking work off
-    // the Tauri async worker while retaining async socket I/O here.
-    let request = String::from_utf8_lossy(&buf[..n]).into_owned();
-    let app = app.clone();
-    let response = crate::commands::run_blocking("test_server_request", move || {
-        Ok(process_request(&request, &app))
-    })
-    .await
-    .unwrap_or_else(|error| JsonRpcResponse::error(&error));
-
-    let resp = format!(
-        "HTTP/1.1 200 OK\r\n\
-         Content-Type: application/json\r\n\
-         Content-Length: {}\r\n\
-         Access-Control-Allow-Origin: *\r\n\
-         Connection: close\r\n\
-         \r\n{}",
-        response.len(),
-        response
-    );
-
-    if let Err(e) = stream.write_all(resp.as_bytes()).await {
-        tracing::warn!(
-            "[test_server] Failed to send response to {}: {}",
-            client_addr,
-            e
-        );
-    }
+async fn handle_connection(stream: TcpStream, config: BridgeConfig, app: AppHandle) {
+    let mut lines = BufStream::new(stream);
+    serve_connection(&mut lines, &config, Some(app)).await;
 }
 
-fn process_request(request: &str, app: &AppHandle) -> String {
-    // Route based on request line
-    if request.starts_with("POST /invoke") {
-        let body = match request.find("\r\n\r\n") {
-            Some(pos) => request[pos + 4..].trim(),
-            None => return JsonRpcResponse::error("No request body"),
+async fn serve_connection<R>(
+    lines: &mut BufStream<R>,
+    config: &BridgeConfig,
+    app: Option<AppHandle>,
+) where
+    R: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some((request_line, headers, overflow)) = read_request_head(lines).await else {
+        return;
+    };
+    if overflow {
+        write_reply(
+            lines,
+            &HttpReply::empty(431, "Request Header Fields Too Large"),
+        )
+        .await;
+        return;
+    }
+    if let Err(reason) = admit(config, &headers) {
+        tracing::debug!("[test_server] rejected request: {reason:?}");
+        write_reply(lines, &rejection(reason)).await;
+        return;
+    }
+
+    let request_line = request_line.trim().to_string();
+    let reply = if request_line.starts_with("POST /invoke") {
+        let claimed = content_length(&headers);
+        let body = match read_body_with_cap(lines, claimed, BRIDGE_MAX_BODY).await {
+            Ok(body) => body,
+            Err(error) => {
+                write_reply(lines, &body_failure(error)).await;
+                return;
+            }
         };
-
-        let rpc_req: JsonRpcRequest = match serde_json::from_str(body) {
-            Ok(r) => r,
-            Err(e) => return JsonRpcResponse::error(&format!("Invalid JSON: {}", e)),
-        };
-
-        tracing::debug!("[test_server] Handling: cmd={}", rpc_req.cmd);
-
-        match rpc_req.cmd.as_str() {
-            "create_test_mesh" => handle_create_test_mesh(&rpc_req.args),
-            "create_test_review_fixture" => handle_create_test_review_fixture(&rpc_req.args),
-            "create_attention_backlog_fixture" => {
-                handle_create_attention_backlog_fixture(&rpc_req.args)
-            }
-            "delete_test_review_fixture" => handle_delete_test_review_fixture(&rpc_req.args),
-            "create_test_review_continuation_fixture" => {
-                handle_create_test_review_continuation_fixture(&rpc_req.args)
-            }
-            "concurrent_continue_review" => {
-                handle_concurrent_continue_review(&rpc_req.args, app.clone())
-            }
-            "create_agent_node" => handle_create_agent_node(&rpc_req.args, app.clone()),
-            "list_meshes" => handle_list_meshes(),
-            "list_agent_nodes" => handle_list_agent_nodes(),
-            "get_agent_node" => handle_get_agent_node(&rpc_req.args),
-            "spawn_agent" => handle_spawn_agent(&rpc_req.args, app),
-            "write_to_agent" => handle_write_to_agent(&rpc_req.args, app.clone()),
-            "kill_agent" => handle_kill_agent(&rpc_req.args),
-            "delete_mesh" => handle_delete_mesh(&rpc_req.args),
-            "delete_agent_node" => handle_delete_agent_node(&rpc_req.args),
-            "get_worktree_close_safety" => handle_get_worktree_close_safety(&rpc_req.args),
-            "archive_agent_node" => handle_archive_agent_node(&rpc_req.args),
-            "inject_test_output" => handle_inject_test_output(&rpc_req.args, app.clone()),
-            "set_active_node" => handle_set_active_node(&rpc_req.args, app.clone()),
-            "get_mesh_properties" => handle_get_mesh_properties(&rpc_req.args),
-            "update_mesh_column" => handle_update_mesh_column(&rpc_req.args),
-            "update_worktree_base_ref" => handle_update_worktree_base_ref(&rpc_req.args),
-            "remove_worktree_base_ref" => handle_remove_worktree_base_ref(&rpc_req.args),
-            "update_mesh_use_worktree" => handle_update_mesh_use_worktree(&rpc_req.args),
-            "get_root_token" => handle_get_root_token(),
-            "create_pairing_ticket" => JsonRpcResponse::success(
-                &serde_json::json!({ "ticket": crate::http::pairing::mint() }),
-            ),
-            "spawn_handover_agent" => handle_spawn_handover_agent(&rpc_req.args, app.clone()),
-            _ => JsonRpcResponse::error(&format!("Unknown command: {}", rpc_req.cmd)),
+        let app = app.clone();
+        match crate::commands::run_blocking("test_server_request", move || {
+            Ok(act(&request_line, &body, app.as_ref()))
+        })
+        .await
+        {
+            Ok(reply) => reply,
+            Err(error) => HttpReply::json(200, &JsonRpcResponse::error(&error)),
         }
-    } else if request.starts_with("GET /health") {
-        let body = "OK";
-        let resp = format!(
-            "HTTP/1.1 200 OK\r\n\
-             Content-Type: text/plain\r\n\
-             Content-Length: {}\r\n\
-             Access-Control-Allow-Origin: *\r\n\
-             Connection: close\r\n\
-             \r\n{}",
-            body.len(),
-            body
-        );
-        resp
     } else {
-        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string()
+        act(&request_line, &[], app.as_ref())
+    };
+    write_reply(lines, &reply).await;
+}
+
+async fn write_reply<R>(lines: &mut BufStream<R>, reply: &HttpReply)
+where
+    R: AsyncRead + AsyncWrite + Unpin,
+{
+    let bytes = reply.encode();
+    let writer = lines.get_mut();
+    if let Err(error) = writer.write_all(bytes.as_bytes()).await {
+        tracing::warn!("[test_server] Failed to send response: {error}");
+        return;
+    }
+    if let Err(error) = writer.flush().await {
+        tracing::warn!("[test_server] Failed to flush response: {error}");
     }
 }
 
@@ -747,27 +967,394 @@ fn handle_get_root_token() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncWriteExt;
 
-    /// The test bridge exposes real backend commands with no auth. It must
-    /// never listen on a routable interface: a wildcard bind (0.0.0.0 / ::)
-    /// lets anyone on the LAN invoke commands, and on Windows it triggers a
-    /// firewall consent prompt for every freshly-built exe path (one per
-    /// worktree). Every local consumer (Playwright's tauri-http.ts,
-    /// scripts/ui-shot.mjs) connects via 127.0.0.1.
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+    fn sample() -> BridgeConfig {
+        BridgeConfig::for_test(TOKEN, 1991, &[])
+    }
+
+    fn headers(token: Option<&str>, host: &str, origin: Option<&str>) -> String {
+        let mut out = format!("Host: {host}\r\n");
+        if let Some(origin) = origin {
+            out.push_str(&format!("Origin: {origin}\r\n"));
+        }
+        if let Some(token) = token {
+            out.push_str(&format!("Authorization: Bearer {token}\r\n"));
+        }
+        out
+    }
+
+    fn invoke(cmd: &str, args: &str) -> String {
+        format!(r#"{{"cmd":"{cmd}","args":{args}}}"#)
+    }
+
+    fn with_bridge_env(pairs: &[(&str, Option<&str>)], check: impl FnOnce()) {
+        let owned: Vec<(&str, Option<std::ffi::OsString>)> = pairs
+            .iter()
+            .map(|(key, value)| (*key, value.map(std::ffi::OsString::from)))
+            .collect();
+        let view: Vec<(&str, Option<&std::ffi::OsStr>)> = owned
+            .iter()
+            .map(|(key, value)| (*key, value.as_deref()))
+            .collect();
+        let _guard = crate::env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        crate::env::with_env_vars(&view, check);
+    }
+
+    fn stored_root_token() -> Option<String> {
+        let conn = crate::db::read_conn();
+        conn.query_row(
+            "SELECT value FROM app_settings WHERE key = 'remote_access_token'",
+            [],
+            |row| row.get(0),
+        )
+        .ok()
+    }
+
+    /// The bridge executes real backend commands. It must never listen on a
+    /// routable interface: a wildcard bind lets anyone on the LAN invoke
+    /// commands, and on Windows it triggers a firewall consent prompt for
+    /// every freshly built executable path.
     #[test]
     fn test_server_binds_loopback_only() {
         let (v4, v6) = listen_addrs(1991);
         assert!(
             v4.ip().is_loopback(),
-            "IPv4 test-server bind must be loopback, got {}",
+            "IPv4 bind must be loopback, got {}",
             v4.ip()
         );
         assert!(
             v6.ip().is_loopback(),
-            "IPv6 test-server bind must be loopback, got {}",
+            "IPv6 bind must be loopback, got {}",
             v6.ip()
         );
         assert_eq!(v4.port(), 1991);
         assert_eq!(v6.port(), 1991);
+    }
+
+    #[test]
+    fn bridge_stays_closed_without_the_enable_flag() {
+        with_bridge_env(
+            &[(BRIDGE_ENABLE_ENV, None), (BRIDGE_TOKEN_ENV, Some(TOKEN))],
+            || assert!(BridgeConfig::from_env(1991).is_none()),
+        );
+    }
+
+    #[test]
+    fn bridge_stays_closed_when_the_token_is_too_short() {
+        with_bridge_env(
+            &[
+                (BRIDGE_ENABLE_ENV, Some("1")),
+                (BRIDGE_TOKEN_ENV, Some("short-token")),
+            ],
+            || assert!(BridgeConfig::from_env(1991).is_none()),
+        );
+    }
+
+    #[test]
+    fn bridge_stays_closed_when_the_token_contains_whitespace() {
+        with_bridge_env(
+            &[
+                (BRIDGE_ENABLE_ENV, Some("1")),
+                (BRIDGE_TOKEN_ENV, Some("0123456789abcdef 0123456789abcde")),
+            ],
+            || assert!(BridgeConfig::from_env(1991).is_none()),
+        );
+    }
+
+    #[test]
+    fn bridge_opens_only_with_the_flag_and_a_long_token() {
+        with_bridge_env(
+            &[
+                (BRIDGE_ENABLE_ENV, Some("1")),
+                (BRIDGE_TOKEN_ENV, Some(TOKEN)),
+                (
+                    BRIDGE_ORIGINS_ENV,
+                    Some("http://localhost:1420, http://127.0.0.1:1420"),
+                ),
+            ],
+            || {
+                let config = BridgeConfig::from_env(2991).expect("bridge should be configured");
+                assert_eq!(config.token, TOKEN);
+                assert_eq!(config.port, 2991);
+                assert_eq!(
+                    config.origins,
+                    vec![
+                        "http://localhost:1420".to_string(),
+                        "http://127.0.0.1:1420".to_string()
+                    ]
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn body_read_errors_map_to_client_statuses_without_cors() {
+        for (error, status) in [
+            (ReadBodyError::TooLarge, 413),
+            (ReadBodyError::TimedOut, 408),
+            (ReadBodyError::ReadFailed, 400),
+        ] {
+            let reply = body_failure(error);
+            assert_eq!(reply.status, status);
+            assert!(!reply.encode().contains("Access-Control-Allow-Origin"));
+        }
+    }
+
+    #[test]
+    fn missing_token_does_not_create_a_mesh() {
+        let _db = crate::db::test_support::isolated();
+        let reply = answer(
+            &sample(),
+            "POST /invoke HTTP/1.1",
+            &headers(None, "127.0.0.1:1991", None),
+            &invoke("create_test_mesh", r#"{"name":"should-not-exist"}"#),
+        );
+        assert_eq!(reply.status, 401);
+        assert_eq!(reply.body, r#"{"ok":false,"error":"unauthorized"}"#);
+        assert!(!reply.encode().contains("Access-Control-Allow-Origin"));
+        assert!(crate::db::list_meshes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn wrong_token_does_not_create_a_mesh() {
+        let _db = crate::db::test_support::isolated();
+        let reply = answer(
+            &sample(),
+            "POST /invoke HTTP/1.1",
+            &headers(Some(&"f".repeat(32)), "127.0.0.1:1991", None),
+            &invoke("create_test_mesh", r#"{"name":"should-not-exist"}"#),
+        );
+        assert_eq!(reply.status, 401);
+        assert!(crate::db::list_meshes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn query_token_is_not_a_credential() {
+        let _db = crate::db::test_support::isolated();
+        let reply = answer(
+            &sample(),
+            &format!("POST /invoke?token={TOKEN} HTTP/1.1"),
+            &headers(None, "127.0.0.1:1991", None),
+            &invoke("create_test_mesh", r#"{"name":"should-not-exist"}"#),
+        );
+        assert_eq!(reply.status, 401);
+        assert!(crate::db::list_meshes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejected_host_does_not_create_a_mesh() {
+        let _db = crate::db::test_support::isolated();
+        for host in [
+            "evil.com:1991",
+            "127.0.0.1:1992",
+            "192.168.1.20:1991",
+            "127.0.0.1",
+        ] {
+            let reply = answer(
+                &sample(),
+                "POST /invoke HTTP/1.1",
+                &headers(Some(TOKEN), host, None),
+                &invoke("create_test_mesh", r#"{"name":"should-not-exist"}"#),
+            );
+            assert_eq!(reply.status, 403, "host {host}");
+            assert_eq!(reply.body, r#"{"ok":false,"error":"forbidden"}"#);
+        }
+        assert!(crate::db::list_meshes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejected_origin_does_not_create_a_mesh() {
+        let _db = crate::db::test_support::isolated();
+        let config = BridgeConfig::for_test(TOKEN, 1991, &["http://localhost:1420"]);
+        let reply = answer(
+            &config,
+            "POST /invoke HTTP/1.1",
+            &headers(Some(TOKEN), "127.0.0.1:1991", Some("http://evil.example")),
+            &invoke("create_test_mesh", r#"{"name":"should-not-exist"}"#),
+        );
+        assert_eq!(reply.status, 403);
+        assert!(crate::db::list_meshes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejected_get_root_token_does_not_store_one() {
+        let _db = crate::db::test_support::isolated();
+        let reply = answer(
+            &sample(),
+            "POST /invoke HTTP/1.1",
+            &headers(None, "127.0.0.1:1991", None),
+            &invoke("get_root_token", "{}"),
+        );
+        assert_eq!(reply.status, 401);
+        assert!(stored_root_token().is_none());
+    }
+
+    #[test]
+    fn rejected_pairing_ticket_is_unauthorized() {
+        let reply = answer(
+            &sample(),
+            "POST /invoke HTTP/1.1",
+            &headers(None, "localhost:1991", None),
+            &invoke("create_pairing_ticket", "{}"),
+        );
+        assert_eq!(reply.status, 401);
+        assert!(!reply.body.contains("ticket"));
+        assert!(!reply.encode().contains("Access-Control-Allow-Origin"));
+    }
+
+    #[test]
+    fn health_requires_the_same_bearer() {
+        let denied = answer(
+            &sample(),
+            "GET /health HTTP/1.1",
+            &headers(None, "127.0.0.1:1991", None),
+            "",
+        );
+        assert_eq!(denied.status, 401);
+
+        let allowed = answer(
+            &sample(),
+            "GET /health HTTP/1.1",
+            &headers(Some(TOKEN), "[::1]:1991", None),
+            "",
+        );
+        assert_eq!(allowed.status, 200);
+        assert_eq!(allowed.body, "OK");
+        let encoded = allowed.encode();
+        assert_eq!(encoded.matches("HTTP/1.1").count(), 1);
+        assert!(!encoded.contains("Access-Control-Allow-Origin"));
+    }
+
+    #[test]
+    fn authenticated_request_creates_a_mesh() {
+        let _db = crate::db::test_support::isolated();
+        let reply = answer(
+            &sample(),
+            "POST /invoke HTTP/1.1",
+            &headers(Some(TOKEN), "127.0.0.1:1991", None),
+            &invoke("create_test_mesh", r#"{"name":"bridge-auth-mesh"}"#),
+        );
+        assert_eq!(reply.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&reply.body).unwrap();
+        assert_eq!(parsed["ok"], true);
+        assert_eq!(parsed["data"]["name"], "bridge-auth-mesh");
+        assert!(!reply.encode().contains("Access-Control-Allow-Origin"));
+        let meshes = crate::db::list_meshes().unwrap();
+        assert_eq!(meshes.len(), 1);
+        assert_eq!(meshes[0].name, "bridge-auth-mesh");
+    }
+
+    #[test]
+    fn allowlisted_origin_can_create_a_mesh() {
+        let _db = crate::db::test_support::isolated();
+        let config = BridgeConfig::for_test(TOKEN, 1991, &["http://localhost:1420"]);
+        let reply = answer(
+            &config,
+            "POST /invoke HTTP/1.1",
+            &headers(Some(TOKEN), "localhost:1991", Some("http://localhost:1420")),
+            &invoke("create_test_mesh", r#"{"name":"origin-mesh"}"#),
+        );
+        assert_eq!(reply.status, 200);
+        assert_eq!(crate::db::list_meshes().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn authenticated_introspection_still_dispatches() {
+        let _db = crate::db::test_support::isolated();
+        let token_reply = answer(
+            &sample(),
+            "POST /invoke HTTP/1.1",
+            &headers(Some(TOKEN), "127.0.0.1:1991", None),
+            &invoke("get_root_token", "{}"),
+        );
+        assert_eq!(token_reply.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&token_reply.body).unwrap();
+        assert_eq!(parsed["ok"], true);
+        assert!(parsed["data"]["token"].as_str().unwrap().len() >= 32);
+        assert!(stored_root_token().is_some());
+
+        let ticket_reply = answer(
+            &sample(),
+            "POST /invoke HTTP/1.1",
+            &headers(Some(TOKEN), "127.0.0.1:1991", None),
+            &invoke("create_pairing_ticket", "{}"),
+        );
+        assert_eq!(ticket_reply.status, 200);
+        let ticket: serde_json::Value = serde_json::from_str(&ticket_reply.body).unwrap();
+        assert_eq!(ticket["ok"], true);
+        assert!(!ticket["data"]["ticket"].as_str().unwrap().is_empty());
+    }
+
+    async fn exchange(raw: &[u8], config: BridgeConfig) -> String {
+        let (client, server) = tokio::io::duplex(256 * 1024);
+        let task = tokio::spawn(async move {
+            let mut lines = BufStream::new(server);
+            serve_connection(&mut lines, &config, None).await;
+        });
+        let (mut reader, mut writer) = tokio::io::split(client);
+        writer.write_all(raw).await.unwrap();
+        // Dropping the write half does not close it. Shutdown delivers EOF so
+        // a short body is a failed read rather than a 60s wait.
+        writer.shutdown().await.unwrap();
+        drop(writer);
+        let mut buf = Vec::new();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut buf),
+        )
+        .await;
+        task.abort();
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    #[tokio::test]
+    async fn rejected_caller_is_answered_before_the_body_is_read() {
+        let raw = b"POST /invoke HTTP/1.1\r\nHost: 127.0.0.1:1991\r\nContent-Length: 100\r\n\r\n";
+        let response = exchange(raw, sample()).await;
+        assert!(
+            response.starts_with("HTTP/1.1 401"),
+            "expected 401 before the body, got {response:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_header_is_rejected_before_admission() {
+        let pad = "a".repeat(70 * 1024);
+        let raw = format!("POST /invoke HTTP/1.1\r\nHost: 127.0.0.1:1991\r\nX-Pad: {pad}\r\n\r\n");
+        let response = exchange(raw.as_bytes(), sample()).await;
+        assert!(
+            response.starts_with("HTTP/1.1 431"),
+            "expected 431, got {response:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_body_is_rejected_after_admission_and_before_dispatch() {
+        let raw = format!(
+            "POST /invoke HTTP/1.1\r\nHost: 127.0.0.1:1991\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: 70000\r\n\r\n"
+        );
+        let response = exchange(raw.as_bytes(), sample()).await;
+        assert!(
+            response.starts_with("HTTP/1.1 413"),
+            "expected 413, got {response:?}"
+        );
+        assert!(!response.contains("Access-Control-Allow-Origin"));
+    }
+
+    #[tokio::test]
+    async fn truncated_body_is_a_bad_request_after_admission() {
+        let raw = format!(
+            "POST /invoke HTTP/1.1\r\nHost: 127.0.0.1:1991\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: 8\r\n\r\n"
+        );
+        let response = exchange(raw.as_bytes(), sample()).await;
+        assert!(
+            response.starts_with("HTTP/1.1 400"),
+            "expected 400, got {response:?}"
+        );
     }
 }

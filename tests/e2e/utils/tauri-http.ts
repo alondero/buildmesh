@@ -5,12 +5,26 @@
  * which is only available inside a Tauri webview. Playwright navigates to
  * http://localhost:1420 (Vite dev server) via HTTP, never getting Tauri globals.
  *
- * Solution: The Rust `test` module spawns an HTTP server on port 1991 that
- * forwards JSON-RPC calls to `app.invoke()`. Use `invokeViaHttp()` instead of
- * `invoke()` in Playwright tests.
+ * Solution: a dev-tools build can expose the same command bodies on port 1991.
+ * A production build does not. `invokeViaHttp()` sends the bearer from
+ * `BUILDMESH_TEST_BRIDGE_TOKEN` in this process. It does not read
+ * `.tmp/test-bridge-token`, so a previous `run-dev -TestBridge` cannot
+ * authenticate against a child that was given a different token.
  */
 
+import { bridgeHeaders } from '../../../scripts/test-bridge-auth.mjs';
+
 const TEST_SERVER_URL = 'http://127.0.0.1:1991';
+
+export const BRIDGE_MISSING_HINT =
+  'The test bridge did not answer. A production build does not include it. ' +
+  'Build the stable profile with `npx tauri build --features dev-tools` and launch it with ' +
+  'BUILDMESH_TEST_BRIDGE=1 plus BUILDMESH_TEST_BRIDGE_TOKEN (at least 32 characters). ' +
+  'scripts/run-dev.ps1 -TestBridge enables it on the dev profile (port 2991).';
+
+function bridgeAuthHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  return bridgeHeaders(extra, process.env, null);
+}
 
 // Track created test projects for cleanup
 const createdProjects: number[] = [];
@@ -26,9 +40,7 @@ export interface InvokeOptions {
 export async function invokeViaHttp<T = unknown>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
   const response = await fetch(`${TEST_SERVER_URL}/invoke`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: bridgeAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ cmd, args }),
   });
 
@@ -47,17 +59,17 @@ export async function invokeViaHttp<T = unknown>(cmd: string, args: Record<strin
 }
 
 /**
- * Check if the HTTP test server is running and responding.
- * Handles BOTH pure "OK" (correct) and raw HTTP response (legacy).
+ * Check if the development test bridge is up. The body is the plain text
+ * `OK`. A 401 means the process is listening but this caller has no credential.
  */
 export async function isTestServerReady(): Promise<boolean> {
   try {
-    const response = await fetch(`${TEST_SERVER_URL}/health`, { method: 'GET' });
+    const response = await fetch(`${TEST_SERVER_URL}/health`, {
+      method: 'GET',
+      headers: bridgeAuthHeaders(),
+    });
     if (!response.ok) return false;
-    const text = await response.text();
-    // The body should be "OK" or "OK\r\n" etc (pure body), but if it contains
-    // the full HTTP response, we check for "OK" substring anywhere
-    return text.trim() === 'OK' || text.includes('HTTP/1.1 200 OK');
+    return (await response.text()).trim() === 'OK';
   } catch {
     return false;
   }
@@ -72,7 +84,10 @@ export async function waitForTestServer(timeout = 15000): Promise<boolean> {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     try {
-      const res = await fetch(`${TEST_SERVER_URL}/health`, { signal: AbortSignal.timeout(1000) });
+      const res = await fetch(`${TEST_SERVER_URL}/health`, {
+        headers: bridgeAuthHeaders(),
+        signal: AbortSignal.timeout(1000),
+      });
       if (res.ok && (await res.text()).trim().startsWith('OK')) return true;
     } catch {
       // not ready
@@ -101,7 +116,10 @@ export async function waitForPort(host: string, port: number, timeoutMs: number)
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const res = await fetch(`http://${host}:${port}/health`, { signal: AbortSignal.timeout(1000) });
+      const res = await fetch(`http://${host}:${port}/health`, {
+        headers: bridgeAuthHeaders(),
+        signal: AbortSignal.timeout(1000),
+      });
       if (res.ok) return true;
     } catch {
       // not ready
@@ -136,7 +154,7 @@ export async function waitForPortClosed(host: string, port: number, timeoutMs: n
 export async function createTestSessionViaHttp(index: number): Promise<void> {
   const tauriReady = await waitForTauriReady(5000);
   if (!tauriReady) {
-    throw new Error('Tauri backend not ready - ensure `npm run tauri dev` is running');
+    throw new Error(`Tauri test bridge not ready. ${BRIDGE_MISSING_HINT}`);
   }
 
   // Create a test project first (uses temp directory)

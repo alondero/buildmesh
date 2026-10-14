@@ -10,12 +10,11 @@
  */
 import { test, expect } from '@playwright/test';
 import fs from 'fs';
-import { invokeViaHttp, waitForPort, waitForPortClosed } from './utils/tauri-http';
+import { BRIDGE_MISSING_HINT, invokeViaHttp, waitForPort, waitForPortClosed } from './utils/tauri-http';
 import {
   spawnBuildmesh,
   terminate,
-  LOG_PATH,
-  hasLogPath,
+  isPortBound,
   TEST_SERVER_PORT,
   type BuildmeshProcess,
 } from './utils/buildmesh-launcher';
@@ -26,16 +25,21 @@ import {
 // hub — see `terminate()` for the deterministic shutdown handshake).
 let proc: BuildmeshProcess | null = null;
 
+function activeLogPath(): string | null {
+  return proc?.logPath ?? null;
+}
+
 async function readNewLogLines(fromByte: number): Promise<string[]> {
-  if (!LOG_PATH) return [];
+  const logPath = activeLogPath();
+  if (!logPath) return [];
   let stat: fs.Stats;
   try {
-    stat = await fs.promises.stat(LOG_PATH);
+    stat = await fs.promises.stat(logPath);
   } catch {
     return [];
   }
   if (fromByte >= stat.size) return [];
-  const fd = await fs.promises.open(LOG_PATH, 'r');
+  const fd = await fs.promises.open(logPath, 'r');
   try {
     const length = stat.size - fromByte;
     const buf = Buffer.alloc(length);
@@ -47,9 +51,10 @@ async function readNewLogLines(fromByte: number): Promise<string[]> {
 }
 
 async function logSize(): Promise<number> {
-  if (!LOG_PATH) return 0;
+  const logPath = activeLogPath();
+  if (!logPath) return 0;
   try {
-    return (await fs.promises.stat(LOG_PATH)).size;
+    return (await fs.promises.stat(logPath)).size;
   } catch {
     return 0;
   }
@@ -65,11 +70,6 @@ function getLogTimestamp(line: string): string | null {
 }
 
 test.describe('agent output', () => {
-  // The agent-output tests assert against `buildmesh.log` content. Without
-  // an env hint or platform-appropriate default we can't find it — skip the
-  // whole suite rather than pretending the asserts are conditional.
-  test.skip(!hasLogPath(), 'LOG_PATH unresolvable: set BUILDMESH_LOG_DIR (Windows needs %APPDATA%)');
-
   test.beforeEach(async () => {
     // Same pre-flight as mobile-spa.spec.ts: skip cleanly when 1991 is
     // bound (the stable hub is up). Per CLAUDE.local.md, this spec needs
@@ -119,7 +119,7 @@ test.describe('agent output', () => {
     proc = spawnBuildmesh();
 
     const serverReady = await waitForPort('127.0.0.1', TEST_SERVER_PORT, 15000);
-    expect(serverReady, 'HTTP test server should be ready').toBe(true);
+    expect(serverReady, BRIDGE_MISSING_HINT).toBe(true);
 
     const offsetBefore = await logSize();
 
@@ -193,7 +193,7 @@ test.describe('agent output', () => {
     proc = spawnBuildmesh();
 
     const serverReady = await waitForPort('127.0.0.1', TEST_SERVER_PORT, 15000);
-    expect(serverReady).toBe(true);
+    expect(serverReady, BRIDGE_MISSING_HINT).toBe(true);
 
     const offsetBefore = await logSize();
 

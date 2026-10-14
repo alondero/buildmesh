@@ -9,7 +9,7 @@ import { stripVTControlCharacters } from 'node:util';
 // These lists come from auditing what each gate really reads, and several reads
 // cross the obvious Rust/frontend boundary:
 //  - Vitest reads a handful of src-tauri files (config JSON, Cargo.*, lib.rs,
-//    the command and route sources, the opencode plugin) and docs/brand.
+//    the command and route sources, services/mod.rs, the opencode plugin) and docs/brand.
 //  - Rust tests read src/ (generated bindings, vocabulary) and embed the built
 //    dist/mobile, so frontend edits must re-run Rust. Rust never reads docs/,
 //    android/ or the repo-root tests/ (its fixtures live in src-tauri/tests/).
@@ -19,7 +19,7 @@ const DOCS = '^docs/';
 const FRONTEND_BUILD_IGNORES = [DOCS, '^src-tauri/'];
 // A Vitest file that starts reading another src-tauri file must add it here
 // (the drift guard in tests/agent-infra/harness.test.mjs flags new references).
-export const VITEST_READS_FROM_SRC_TAURI = ['capabilities/', 'Cargo\\.', 'tauri[^/]*\\.json$', 'src/(?:commands/|http/routes/|lib\\.rs$|agent/provider/adapters/opencode_attention_plugin\\.js$)'];
+export const VITEST_READS_FROM_SRC_TAURI = ['capabilities/', 'Cargo\\.', 'tauri[^/]*\\.json$', 'src/(?:commands/|services/mod\\.rs$|http/routes/|lib\\.rs$|agent/provider/adapters/opencode_attention_plugin\\.js$)'];
 const FRONTEND_TEST_IGNORES = ['^docs/(?!brand/)', `^src-tauri/(?!(?:${VITEST_READS_FROM_SRC_TAURI.join('|')}))`];
 const RUST_IGNORES = [DOCS, '^android/', '^tests/'];
 

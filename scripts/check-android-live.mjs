@@ -5,6 +5,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runGuarded } from './ci/run-guarded.mjs';
+import { bridgeHeaders } from './test-bridge-auth.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const appId = 'dev.buildmesh.remote.live';
@@ -48,7 +49,7 @@ async function main() {
   const adb = (...args) => execFileSync('adb', ['-s', options.device, ...args], { cwd: root, encoding: 'utf8', timeout: 30000, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
   const git = (...args) => execFileSync('git', args, { cwd: repo, timeout: 30000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   const invoke = async (cmd, args = {}) => {
-    const response = await fetch(`${options.bridge}/invoke`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cmd, args }), signal: AbortSignal.timeout(30000) });
+    const response = await fetch(`${options.bridge}/invoke`, { method: 'POST', headers: bridgeHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ cmd, args }), signal: AbortSignal.timeout(30000) });
     const result = await response.json();
     if (!response.ok || result.error || result.success === false) throw new Error(`Desktop bridge ${cmd} failed: ${result.error || response.status}`);
     return result.data;

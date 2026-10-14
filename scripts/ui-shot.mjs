@@ -49,11 +49,15 @@
  *   --invoke-port <n>    HTTP test-bridge port for the `invoke` helper
  *                        (default 2991 — the dev profile's test server)
  *
- * The `invoke` helper POSTs to the backend's HTTP test bridge, e.g.
+ * The `invoke` helper POSTs to the development test bridge, e.g.
  *   await invoke('create_test_mesh', { name: 'Shot fixture' })
- * Only commands routed in src-tauri/src/commands/test.rs are available there;
- * everything else should be driven through the UI via `page`. In --mock mode
- * there is no bridge — steps get a `mock` helper instead:
+ * The bridge is off unless that app was launched with the test-bridge
+ * switch (`scripts/run-dev.ps1 -TestBridge` or `scripts/run-dev.sh
+ * --test-bridge`), which writes `.tmp/test-bridge-token`. A production
+ * build does not expose the bridge. Only commands routed in
+ * src-tauri/src/commands/test.rs are available there; everything else
+ * should be driven through the UI via `page`. In --mock mode there is no
+ * bridge — steps get a `mock` helper instead:
  *   await mock.on('list_meshes', [...]);      // override an IPC response
  *   await mock.emit('node-status-changed', { nodeId: 1 });  // push a backend event
  *
@@ -63,6 +67,7 @@
 import { chromium } from 'playwright';
 import { mkdirSync, existsSync } from 'fs';
 import { dirname, resolve, join } from 'path';
+import { bridgeHeaders } from './test-bridge-auth.mjs';
 import { buildInitScript, loadFixtures } from './ui-mock/tauri-mock.mjs';
 import { startDevServer, stopDevServer } from './ui-shot-server.mjs';
 import { runSteps } from './ui-shot-steps.mjs';
@@ -150,7 +155,7 @@ if (!out) {
 async function invoke(cmd, args = {}) {
   const res = await fetch(`http://127.0.0.1:${invokePort}/invoke`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: bridgeHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ cmd, args }),
   });
   if (!res.ok) throw new Error(`invoke ${cmd}: HTTP ${res.status}: ${await res.text()}`);
