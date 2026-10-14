@@ -727,9 +727,9 @@ mod tests {
         //
         // `freebuff_credential_paths` reads the ambient environment, and the
         // process environment is shared state: the sibling override test
-        // below exports `XDG_CONFIG_HOME` while holding `ENV_LOCK`. A reader
-        // that skipped the lock therefore saw that test's tempdir as candidate
-        // #0, and failed only under parallel libtest (issue #2285). Hold the
+        // exports `XDG_CONFIG_HOME` while holding `ENV_LOCK`. A reader that
+        // skipped the lock therefore saw that test's tempdir as candidate #0,
+        // and failed only under parallel libtest (issue #2285). Hold the
         // crate-wide lock and pin the variable to "unset" for the read, so the
         // assertion sees the default rather than whichever writer happened to
         // run alongside it.
