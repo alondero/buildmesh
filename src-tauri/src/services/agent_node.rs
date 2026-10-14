@@ -92,6 +92,12 @@ pub enum AgentNodeError {
     /// underlying error message verbatim, so the frontend's toast
     /// surfaces the same text the Tauri command returns.
     Backend(String),
+    /// A discovery-based resume named no harness, or one this build
+    /// cannot resume. Import refuses to guess: a wrong executor turns a
+    /// conversation from another harness into an empty or brand-new
+    /// session (issue #2332). The wrapped string is the user-facing
+    /// reason, and no row is inserted.
+    UnresumableHarness(String),
 }
 
 impl std::fmt::Display for AgentNodeError {
@@ -103,6 +109,7 @@ impl std::fmt::Display for AgentNodeError {
             AgentNodeError::InvalidConfiguration(e) => write!(f, "{}", e),
             AgentNodeError::InitialPromptUnsupported => write!(f, "{INITIAL_PROMPT_UNSUPPORTED}"),
             AgentNodeError::Backend(e) => write!(f, "{}", e),
+            AgentNodeError::UnresumableHarness(e) => write!(f, "{}", e),
         }
     }
 }
@@ -737,18 +744,30 @@ fn create_pending_with_source_pr_fork_and_worktree(
 
 /// Import a discovered CLI session as a node and store its session id.
 ///
-/// The provider is kept verbatim (`anthropic` when absent). This path does
-/// not resolve a launch configuration: an import is a resume of an existing
-/// conversation, not a new launch. The mesh path comes from the mesh row.
-/// `use_worktree` follows whether a name was supplied, including an empty
-/// one; the stored path is set only when that name trims to something.
+/// `provider` is the conversation's originating harness, carried from
+/// `ArchivedAgentNode::provider` (issue #2332). It is required: the archived
+/// conversation only exists inside that harness, so an absent or unusable
+/// value is refused with [`AgentNodeError::UnresumableHarness`] rather than
+/// defaulted to `anthropic`, which used to launch a Cursor/AGY/Command Code
+/// conversation through Claude Code.
+///
+/// The id is stored verbatim once validated, so a Proxied Provider row
+/// (`claude:minimax`) keeps working. This path does not resolve a launch
+/// configuration: an import is a resume of an existing conversation, not a new
+/// launch. The mesh path comes from the mesh row. `use_worktree` follows
+/// whether a name was supplied, including an empty one; the stored path is set
+/// only when that name trims to something.
 pub fn import_discovered_session(
     mesh_id: i64,
     cli_session_id: &str,
     branch: &str,
     worktree_name: Option<&str>,
-    provider: Option<&str>,
+    provider: &str,
 ) -> Result<AgentNode, AgentNodeError> {
+    // Validate before the first DB call: an unknown executor must leave no row
+    // behind at all, and this reads preferences rather than holding a
+    // connection.
+    resolve_resumable_harness(provider)?;
     let mesh = match db::get_mesh_by_id(mesh_id) {
         Ok(mesh) => mesh,
         Err(rusqlite::Error::QueryReturnedNoRows) => {
@@ -784,7 +803,7 @@ pub fn import_discovered_session(
             }
         }
     }
-    let provider_id = provider.unwrap_or("anthropic");
+    let provider_id = provider;
     let node = db::create_agent_node(
         mesh_id,
         &session_name,
@@ -803,6 +822,58 @@ pub fn import_discovered_session(
     )?;
     db::update_cli_session_id(node.id, cli_session_id)?;
     db::get_agent_node_by_id(node.id).map_err(AgentNodeError::from)
+}
+
+/// Sentence returned when a discovery-based resume names no harness, or a
+/// harness that cannot resume. Both the mobile route and the desktop command
+/// surface it verbatim (issue #2332).
+pub const UNRESUMABLE_HARNESS: &str =
+    "Buildmesh does not know which agent harness created this conversation, so it cannot resume it. \
+Update Buildmesh to scan this harness, or start a new session instead.";
+
+/// Refuse a discovery-based resume whose executor is missing or unusable, and
+/// otherwise hand back the executor that will run it.
+///
+/// The value may be an adapter id (`cursor`) *or* a Spawn Option id
+/// (`claude:minimax`) — a Proxied Provider row is stored verbatim on the node,
+/// so import keeps accepting both. Only the harness half decides anything, so
+/// the id is split with the existing [`crate::agent::provider::SpawnOptionId`]
+/// parser and the harness half is validated with `harness_capabilities_for`,
+/// the existing known-harness check (issue #1148): `None` for an unknown id,
+/// which is what keeps an absent or unrecognised value from falling through to
+/// `Provider::from_db_str`'s Anthropic default. A plain Terminal or a
+/// non-resumable harness (DSH) passes the known-id question and fails the
+/// second: there is a CLI session id to resume, but nothing to resume it with.
+///
+/// The typed [`crate::models::Provider`] is what the HTTP route needs to pick
+/// the provider-specific session-id gate
+/// (`http::request::parse_session_id_for_provider`), so this is the one place
+/// that answers "which executor, and can it resume at all".
+pub fn resolve_resumable_harness(
+    provider: &str,
+) -> Result<crate::models::Provider, AgentNodeError> {
+    let trimmed = provider.trim();
+    if trimmed.is_empty() {
+        return Err(AgentNodeError::UnresumableHarness(
+            UNRESUMABLE_HARNESS.to_string(),
+        ));
+    }
+    let harness_id = crate::agent::provider::SpawnOptionId::from(trimmed)
+        .harness_id()
+        .to_string();
+    let Some(capabilities) = crate::preferences::harness_capabilities_for(&harness_id) else {
+        return Err(AgentNodeError::UnresumableHarness(
+            UNRESUMABLE_HARNESS.to_string(),
+        ));
+    };
+    if !capabilities.supports_resume {
+        let label = crate::agent::harness_catalog::inspector_label_for_adapter(&harness_id)
+            .unwrap_or(harness_id.as_str());
+        return Err(AgentNodeError::UnresumableHarness(format!(
+            "{label} cannot resume an archived conversation."
+        )));
+    }
+    Ok(crate::preferences::resolve_harness_provider(trimmed))
 }
 
 /// Load a node row for the close path, treating an already-removed row as
@@ -3150,7 +3221,7 @@ mod tests {
             "22222222-2222-2222-2222-222222222222",
             "main",
             Some("default-node"),
-            Some("codex"),
+            "codex",
         )
         .unwrap();
         assert_eq!(node.worktree_path.as_deref(), Some(path.as_str()));
@@ -3170,7 +3241,7 @@ mod tests {
             "11111111-1111-1111-1111-111111111111",
             "legacy-node",
             Some("legacy-node"),
-            Some("codex"),
+            "codex",
         )
         .unwrap();
         let expected = env::resolve_agent_path(&mesh.path, Some("legacy-node"));
@@ -3190,14 +3261,9 @@ mod tests {
         db::set_mesh_worktree_directory(mesh_id, Some("wt")).unwrap();
         let mesh = db::get_mesh_by_id(mesh_id).unwrap();
         let session_id = "11111111-1111-1111-1111-111111111111";
-        let node = import_discovered_session(
-            mesh_id,
-            session_id,
-            "feature",
-            Some("feature"),
-            Some("codex"),
-        )
-        .expect("import with a worktree name");
+        let node =
+            import_discovered_session(mesh_id, session_id, "feature", Some("feature"), "codex")
+                .expect("import with a worktree name");
         assert!(node.use_worktree);
         assert_eq!(node.worktree_name.as_deref(), Some("feature"));
         let expected_path = format!("{}/wt/feature", mesh.path);
@@ -3213,7 +3279,7 @@ mod tests {
         let mesh_id = fresh_mesh();
         let mesh = db::get_mesh_by_id(mesh_id).unwrap();
         let session_id = "22222222-2222-2222-2222-222222222222";
-        let node = import_discovered_session(mesh_id, session_id, "main", None, None)
+        let node = import_discovered_session(mesh_id, session_id, "main", None, "anthropic")
             .expect("import without a worktree");
         assert!(!node.use_worktree);
         assert_eq!(node.worktree_name, None);
@@ -3252,7 +3318,7 @@ mod tests {
             "33333333-3333-3333-3333-333333333333",
             "main",
             Some(""),
-            None,
+            "cursor",
         )
         .expect("an empty discovered name is still a worktree flag");
         assert!(node.use_worktree);
@@ -3268,10 +3334,165 @@ mod tests {
             "11111111-1111-1111-1111-111111111111",
             "main",
             None,
-            None,
+            "anthropic",
         )
         .expect_err("unknown mesh");
         assert!(matches!(err, AgentNodeError::MeshNotFound(-1)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Harness provenance (issue #2332) — the archive entry's originating
+    // harness is the executor, and an unknown one is refused rather than
+    // guessed. These pin the whole import boundary: the stored row, the
+    // executor the spawn pipeline will resolve from it, and the argv that
+    // executor composes.
+    // -----------------------------------------------------------------------
+
+    /// The regression this issue filed: a Cursor conversation discovered on
+    /// disk used to be imported with no provider, defaulted to `anthropic`,
+    /// and launched through Claude Code. The stored row must carry the
+    /// originating harness, and the spawn pipeline must resolve it.
+    #[test]
+    fn import_stores_the_originating_harness_not_anthropic() {
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
+        let session_id = "44444444-4444-4444-4444-444444444444";
+        let node = import_discovered_session(mesh_id, session_id, "main", None, "cursor")
+            .expect("import a Cursor conversation");
+        assert_eq!(node.provider, "cursor");
+        assert_eq!(node.cli_session_id.as_deref(), Some(session_id));
+
+        let provider = crate::agent::provider::resolve_node_provider(&node);
+        assert_eq!(provider, crate::models::Provider::Cursor);
+        assert_eq!(
+            provider.adapter().resume_args(session_id),
+            vec!["--resume".to_string(), session_id.to_string()]
+        );
+    }
+
+    /// Antigravity is the case where guessing does not even fail cleanly: its
+    /// resume flag is `--conversation`, so a wrong executor's argv has no way
+    /// to name the conversation at all.
+    #[test]
+    fn import_stores_agy_so_the_conversation_flag_is_composed() {
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
+        let session_id = "55555555-5555-5555-5555-555555555555";
+        let node = import_discovered_session(mesh_id, session_id, "main", None, "agy")
+            .expect("import an Antigravity conversation");
+        let provider = crate::agent::provider::resolve_node_provider(&node);
+        assert_eq!(provider, crate::models::Provider::Agy);
+        assert_eq!(
+            provider.adapter().resume_args(session_id),
+            vec!["--conversation".to_string(), session_id.to_string()]
+        );
+    }
+
+    /// A Proxied Provider row (`claude:minimax`) is not an adapter id, but it
+    /// is what the desktop picker submits and what the row must keep storing
+    /// verbatim. Validation follows it to the Claude executor.
+    #[test]
+    fn import_accepts_a_proxied_spawn_option_id_verbatim() {
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
+        let node = import_discovered_session(
+            mesh_id,
+            "66666666-6666-6666-6666-666666666666",
+            "main",
+            None,
+            "claude:minimax",
+        )
+        .expect("a proxied Claude profile still resumes");
+        assert_eq!(node.provider, "claude:minimax");
+        assert_eq!(
+            crate::agent::provider::resolve_node_provider(&node),
+            crate::models::Provider::Anthropic
+        );
+    }
+
+    /// No provenance at all is the mobile client's old request shape. It must
+    /// be refused with the actionable message and leave no row behind — the
+    /// old `unwrap_or("anthropic")` created one.
+    #[test]
+    fn import_without_provenance_is_refused_and_creates_no_node() {
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
+        let err = import_discovered_session(
+            mesh_id,
+            "77777777-7777-7777-7777-777777777777",
+            "main",
+            None,
+            "",
+        )
+        .expect_err("absent provenance is not a license to guess Anthropic");
+        assert!(matches!(err, AgentNodeError::UnresumableHarness(_)));
+        assert_eq!(err.to_string(), UNRESUMABLE_HARNESS);
+        assert!(
+            db::list_agent_nodes_by_mesh(mesh_id).unwrap().is_empty(),
+            "a refused import must not leave a node row behind"
+        );
+    }
+
+    /// A scanner this build cannot name is the same refusal: Buildmesh knows
+    /// the conversation exists but not which CLI wrote it.
+    #[test]
+    fn import_of_an_unknown_harness_is_refused() {
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
+        let err = import_discovered_session(
+            mesh_id,
+            "88888888-8888-8888-8888-888888888888",
+            "main",
+            None,
+            "harness-from-the-future",
+        )
+        .expect_err("an unknown harness cannot be resumed");
+        assert!(matches!(err, AgentNodeError::UnresumableHarness(_)));
+        assert!(
+            db::list_agent_nodes_by_mesh(mesh_id).unwrap().is_empty(),
+            "an unknown harness must not become an Anthropic node"
+        );
+    }
+
+    /// A known harness that cannot resume (Terminal, DSH) is refused by name
+    /// instead of being accepted and quietly producing an unusable node.
+    #[test]
+    fn import_of_a_non_resumable_harness_is_refused_by_name() {
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
+        let err = import_discovered_session(
+            mesh_id,
+            "99999999-9999-9999-9999-999999999999",
+            "main",
+            None,
+            "terminal",
+        )
+        .expect_err("Terminal cannot resume a conversation");
+        assert_eq!(
+            err.to_string(),
+            "Terminal cannot resume an archived conversation."
+        );
+    }
+
+    /// `resolve_resumable_harness` is what the HTTP route consults before it
+    /// picks a session-id gate, so it has to hand back the typed executor and
+    /// refuse the same cases the service does.
+    #[test]
+    fn resolve_resumable_harness_returns_the_executor_and_refuses_the_rest() {
+        assert_eq!(
+            resolve_resumable_harness("commandcode").unwrap(),
+            crate::models::Provider::CommandCode
+        );
+        // The Harness Profile alias `claude` and the adapter id `anthropic`
+        // are the same executor.
+        assert_eq!(
+            resolve_resumable_harness("claude").unwrap(),
+            crate::models::Provider::Anthropic
+        );
+        assert!(resolve_resumable_harness("").is_err());
+        assert!(resolve_resumable_harness("   ").is_err());
+        assert!(resolve_resumable_harness("nope").is_err());
+        assert!(resolve_resumable_harness("dsh").is_err());
     }
 
     // -----------------------------------------------------------------------

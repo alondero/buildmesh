@@ -42,6 +42,9 @@ const ARCHIVE: ArchivedAgentNode[] = [
     timestamp: "2026-08-25T12:00:00Z",
     worktree_name: "wt-flaky",
     resumable: true,
+    // Issue #2332 — discovery stamps the originating harness on every entry.
+    provider: "anthropic",
+    node_id: null,
   },
   {
     session_id: "abc-002",
@@ -51,8 +54,20 @@ const ARCHIVE: ArchivedAgentNode[] = [
     timestamp: "2026-08-20T12:00:00Z",
     worktree_name: null,
     resumable: true,
+    provider: "cursor",
+    node_id: null,
   },
 ];
+
+// Issue #2332 — a resumable entry whose harness Buildmesh cannot name. It has
+// a transcript, so the reason Resume is unavailable is the missing provenance,
+// not a missing conversation.
+const UNKNOWN_PROVENANCE: ArchivedAgentNode = {
+  ...ARCHIVE[0],
+  session_id: "abc-003",
+  first_message: "Conversation from an unnamed harness",
+  provider: null,
+};
 
 // Issue #1065 — a durable archived row (DB row still present, transcript gone)
 // arrives with `resumable: false`. It must still be listed, and its expanded
@@ -66,6 +81,9 @@ const DURABLE: ArchivedAgentNode = {
   timestamp: "2026-08-15T12:00:00Z",
   worktree_name: "brave-fox",
   resumable: false,
+  // The row's own recorded executor, which is why it has nothing to resume.
+  provider: "terminal",
+  node_id: 77,
 };
 
 function mockDiscoverNodes(nodes: ArchivedAgentNode[]) {
@@ -205,6 +223,95 @@ describe("ArchivedNodesScreen", () => {
         ),
       ).toBe(true);
     });
+  });
+
+  // --- Harness provenance (issue #2332) -----------------------------------
+
+  it("shows the originating harness on each card", async () => {
+    mockDiscoverNodes(ARCHIVE);
+
+    render(
+      <ArchivedNodesScreen
+        mesh={mesh}
+        onBack={noop}
+        onResumed={noop}
+      />,
+    );
+
+    // Visible without expanding: the origin decides the executor, so the
+    // user needs it before committing to a resume.
+    expect((await screen.findByTestId("harness-abc-001")).textContent).toBe("Claude Code");
+    expect(screen.getByTestId("harness-abc-002").textContent).toBe("Cursor");
+  });
+
+  it("resumes through the conversation's own harness", async () => {
+    const fetchMock = mockDiscoverNodes([ARCHIVE[1]]);
+
+    render(
+      <ArchivedNodesScreen
+        mesh={mesh}
+        onBack={noop}
+        onResumed={noop}
+      />,
+    );
+
+    await userEvent.click(await screen.findByTestId("node-abc-002"));
+    await userEvent.click(screen.getByTestId("node-resume-abc-002"));
+
+    await waitFor(() => {
+      const resume = fetchMock.mock.calls.find(([url]) =>
+        String(url).includes("/api/meshes/1/agent-nodes/import-and-resume"),
+      );
+      expect(resume).toBeDefined();
+      const body = JSON.parse((resume![1] as RequestInit).body as string);
+      // Pre-fix this body carried no provider, so the backend read the
+      // omission as "Anthropic" and launched a Cursor conversation through
+      // Claude Code.
+      expect(body.provider).toBe("cursor");
+      expect(body.cli_session_id).toBe("abc-002");
+    });
+  });
+
+  it("names the harness in the resume button", async () => {
+    mockDiscoverNodes(ARCHIVE);
+
+    render(
+      <ArchivedNodesScreen
+        mesh={mesh}
+        onBack={noop}
+        onResumed={noop}
+      />,
+    );
+
+    await userEvent.click(await screen.findByTestId("node-abc-002"));
+    expect(screen.getByTestId("node-resume-abc-002").textContent).toBe(
+      "Resume node in Cursor",
+    );
+  });
+
+  it("explains unknown provenance instead of reporting a missing transcript", async () => {
+    mockDiscoverNodes([UNKNOWN_PROVENANCE]);
+
+    render(
+      <ArchivedNodesScreen
+        mesh={mesh}
+        onBack={noop}
+        onResumed={noop}
+      />,
+    );
+
+    const card = await screen.findByTestId("node-abc-003");
+    await userEvent.click(card);
+
+    // No button: there is no executor the backend would accept.
+    expect(screen.queryByTestId("node-resume-abc-003")).toBeNull();
+    const explanation = screen.getByTestId("node-unresumable-abc-003").textContent ?? "";
+    expect(explanation).toContain("does not know which agent harness");
+    // The #1065 wording is about a different cause and must not be reused
+    // here — it sends the user hunting for a transcript that exists.
+    expect(explanation).not.toContain("no transcript on disk");
+    // The origin is unknown, so no harness is claimed for it.
+    expect(screen.queryByTestId("harness-abc-003")).toBeNull();
   });
 
   // Issue #1259 — mirrors the IssuesScreen tests above.

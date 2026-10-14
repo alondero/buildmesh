@@ -76,6 +76,10 @@ const archived: ArchivedAgentNode = {
   // Issue #1065 — a discovered session: its transcript is on disk, so it
   // keeps the Resume affordance.
   resumable: true,
+  // Issue #2332 — a Resume affordance also needs the originating harness; an
+  // entry without one has no executor the backend will accept.
+  provider: "anthropic",
+  node_id: null,
 };
 
 function jsonResponse(status: number, body: unknown): Response {

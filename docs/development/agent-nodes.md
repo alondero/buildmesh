@@ -35,11 +35,11 @@ attempt or discarding the buffer, so repaired settings can retry on a later turn
 
 `services::agent_node` owns both creating a node from a desktop or HTTP request and importing a discovered session. Commands and HTTP routes parse the request and map `AgentNodeError`. New worktree placement is one helper: mesh override, then the application worktree directory, then `.worktrees`, then the node segment. `env::resolve_worktree_node_raw` stays in `env` because path joining belongs with `HostPath`. Its definition and the call inside `resolve_agent_path_in_dir` remain in `env/host_path.rs`. The only production caller outside that module is the placement helper.
 
-Import keeps the discovered provider verbatim (absent means `anthropic`), names the node with `session_naming::on_spawn`, and does not snapshot a launch configuration. `use_worktree` is true whenever a worktree name was supplied, including an empty one. The stored path is resolved only for a non-empty trimmed name, from the path on the mesh row. Discovery recognizes `.worktrees` and legacy `.claude/worktrees` even after a directory-setting change. If the current container has no materialized checkout, import checks these built-in locations before placing a new path. The desktop import command still accepts a mesh path on the IPC surface and does not use it.
+Import stores the conversation's originating harness verbatim and **requires** it: `import_discovered_session` resolves the id through `resolve_resumable_harness` and refuses an absent, unknown or non-resumable value with `AgentNodeError::UnresumableHarness` before the first DB call, so a refusal leaves no row (see "Harness provenance travels with the archive entry" below). Import names the node with `session_naming::on_spawn` and does not snapshot a launch configuration. `use_worktree` is true whenever a worktree name was supplied, including an empty one. The stored path is resolved only for a non-empty trimmed name, from the path on the mesh row. Discovery recognizes `.worktrees` and legacy `.claude/worktrees` even after a directory-setting change. If the current container has no materialized checkout, import checks these built-in locations before placing a new path. The desktop import command still accepts a mesh path on the IPC surface and does not use it.
 
 An initial prompt is a non-empty string after trim. When a create carries one, the runner checks `supports_prefill` on the harness the launch plan will actually start, after the saved configuration and the plan have resolved, and before any row is inserted. A harness that does not accept a prompt returns `AgentNodeError::InitialPromptUnsupported` with the sentence `Choose an agent that supports an initial prompt`. HTTP maps that to 400. Desktop commands return the same sentence. No row is written. The check is the adapter capability, not `available_providers()`. Install detection stays on spawn preflight, so a missing binary is not reported as a prompt error. A prompted create of a prefill-capable harness that is not currently in the available menu creates the node and lets spawn preflight fail. Terminal, Kimi, and DSH prompted creates are rejected on both surfaces. Issue spawn, pull-request spawn, handover, the desktop omnibar, and mobile idea capture all pass their prompt through this rule. Circuit creates pass no prompt, so they keep the spawn pipeline's warn-and-skip for a harness that cannot take one. That spawn-time drop remains for a node that already exists. It is not a second create policy.
 
-An unknown mesh is `MeshNotFound` for both create and import, including when the request also carries a prompt. HTTP create maps that to 400 "Mesh not found". HTTP import maps it to 404, and any other import failure to 500.
+An unknown mesh is `MeshNotFound` for both create and import, including when the request also carries a prompt. HTTP create maps that to 400 "Mesh not found". HTTP import maps it to 404, and any other import failure to 500 — except `UnresumableHarness`, which is a 400 because the request named an executor this build will not resume, and no row was written.
 
 ### Archive list — durable identity and resumability are separate (issue #1065)
 
@@ -68,6 +68,70 @@ would create a node whose session id points at a conversation that is not
 there. The resume path itself is unchanged, and `agent::spawn::resume_guard`
 remains the one place that decides whether a stored `cli_session_id` is a live
 resume target (see the anti-pattern in `docs/knowledge-primer.md`).
+
+### Harness provenance travels with the archive entry (issue #2332)
+
+A `session_id` and a readable transcript do not say which CLI wrote them. The
+four harnesses with an archive scanner all write UUID session ids, so an entry
+with no recorded origin is genuinely ambiguous — and the old import read the
+ambiguity as `anthropic`, which is how a Cursor, Command Code or Antigravity
+conversation was launched through Claude Code. AGY is the loudest case: it
+resumes with `--conversation <id>`, a flag shape no other executor in the
+catalogue speaks, so a misrouted AGY conversation has no argv that can express
+the resume at all.
+
+`ArchivedAgentNode::provider` is that record. Each scanner stamps its own
+adapter id at the point it builds the entry (`anthropic`, `cursor`,
+`commandcode`, `agy`), a durable entry carries its row's own `agent_nodes.provider`
+verbatim — including a non-resumable one like `terminal`, which is what
+explains *why* that entry has nothing to resume — and `None` means **unknown**,
+never "assume Claude Code". `node_id` rides along for the same reason: an entry
+that reconciles to an archived row with the same `cli_session_id` keeps that
+row's reference, so a caller can tell reopening known work from importing
+external work. When a disk entry and an archived row describe the same
+conversation, the scanner's provenance wins (it just read the transcript) and the
+row contributes `node_id`; the row's `provider` is not allowed to overwrite it,
+because it can be a stale executor from an older session.
+
+Import is where the value is enforced. `resolve_resumable_harness` splits a Spawn
+Option id (`claude:minimax` → `claude`), validates the harness half with
+`preferences::harness_capabilities_for` — the known-harness check from #1148,
+whose `None` is what keeps an unknown value out of `Provider::from_db_str`'s
+Anthropic fallback — and rejects a harness whose capabilities do not include
+`supports_resume` (Terminal, DSH). It runs before the first DB call, so a
+refused import writes nothing. The id is stored **verbatim** once validated:
+a Proxied Provider row keeps its Model Provider choice.
+
+The HTTP route resolves provenance *before* it gates the session id, because the
+gate belongs to the harness: `parse_session_id_for_provider` is the shared
+dispatcher, so a `ses_…` OpenCode id or an `mvs_…` mcode id is accepted from a
+harness that uses that shape while a UUID harness is still refused on anything
+else. This keeps the `--dangerously-skip-permissions` argv-injection guard from
+#1237 intact, now per harness.
+
+**Compatibility.** A mobile client from before this change sends no `provider`,
+and there is no server-side guess that repairs it: only the client that scanned
+the transcript knows which harness wrote it. Omission is therefore a 400 with an
+explicit "this client is out of date" message, not a silent default. An
+installed older APK therefore resumes nothing from the archive — a visible
+failure it can be upgraded out of, which is the correct trade against resuming
+conversations in the wrong harness. Desktop is unaffected: the probe tab always
+had an executor to send.
+
+**Desktop default versus explicit change.** The primary Resume button uses the
+entry's own harness. A mesh default provider is kept only when it already belongs
+to that same harness — that is how a Proxied Provider user (`claude:minimax`)
+keeps running Claude Code through their chosen account. A default pointing at a
+*different* harness is replaced, because that is the bug. The `▾` picker stays,
+so deliberately launching a conversation under another executor remains an
+explicit choice. An entry with no known harness, or one whose harness has no
+option here (not installed), shows "Resume unavailable" with the reason in its
+tooltip instead of a button the backend would refuse.
+
+**Lifecycle is unchanged.** `node_id` is a reference, not an action: import
+still creates a new row, and an entry that happens to match an archived row is
+still resumed by importing. Reopening the existing row instead is a separate
+decision about node identity and configuration, deliberately not taken here.
 
 ### Profile ownership — one process per app-data profile (issue #1521)
 

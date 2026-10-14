@@ -19,6 +19,7 @@
 use crate::db;
 use crate::env;
 use crate::models::EnvType;
+use crate::models::Provider;
 use crate::services::commandcode_session;
 use crate::services::transcript_paths::{encode_path, first_text_block, is_synthetic_message};
 use crate::services::transcript_reader::adapters::commandcode::commandcode_project_slug;
@@ -48,6 +49,29 @@ pub struct ArchivedAgentNode {
     /// `cli_session_id`, or one whose transcript was deleted (issue #1065).
     /// The surfaces must not offer Resume on a `false` entry.
     pub resumable: bool,
+    /// The harness that owns this conversation — an adapter id from
+    /// [`Provider`] (`anthropic`, `cursor`, `commandcode`, `agy`, …), stamped
+    /// by the scanner that read the transcript, or carried over from the
+    /// durable row's own `agent_nodes.provider` (issue #2332).
+    ///
+    /// This is provenance, not a preference: it is what the executor must be
+    /// for Resume to land in the right conversation. A UUID and a readable
+    /// transcript cannot tell a consumer which harness wrote them, so the
+    /// importer must never guess one. `None` means *unknown* — a durable row
+    /// with no recorded provider, or a scanner that does not yet stamp one —
+    /// and the import boundary rejects it instead of defaulting to Anthropic.
+    pub provider: Option<String>,
+    /// The durable `agent_nodes.id` behind this entry when there is one: an
+    /// archived row the list is keeping visible. Present on durable entries
+    /// and on a discovered entry that reconciles to an archived row with the
+    /// same `cli_session_id`, so a caller can tell reopening known work from
+    /// importing external work (issue #2332). Reopen itself is a later
+    /// lifecycle step; today this is the reference, not an action.
+    // A plain `#[ts(as = "i32")]` would emit `number` and drop the null case:
+    // `as` replaces the whole field type, and this field is an `Option` that
+    // serde sends as `null`. `type` takes the union directly.
+    #[ts(type = "number | null")]
+    pub node_id: Option<i64>,
 }
 
 /// Extract the worktree name from a Claude-Code encoded project directory
@@ -236,78 +260,10 @@ pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<ArchivedAgentNode>,
 
     let mut sessions: Vec<ArchivedAgentNode> = Vec::new();
 
-    if projects_dir.exists() {
-        let encoded_prefix = encode_path(mesh_path);
-        let encoded_effective = encode_path(&effective);
-        let effective_prefix = format!("{encoded_effective}-");
-        let entries = fs::read_dir(&projects_dir).map_err(|e| e.to_string())?;
-        for entry in entries.flatten() {
-            let dir_name = entry.file_name().to_string_lossy().to_string();
-            if !dir_name.starts_with(&encoded_prefix) && !dir_name.starts_with(&effective_prefix) {
-                continue;
-            }
-
-            let worktree_name =
-                extract_worktree_name(&dir_name, &encoded_prefix, &encoded_effective);
-
-            let dir_path = entry.path();
-            if !dir_path.is_dir() {
-                continue;
-            }
-
-            let jsonl_files = fs::read_dir(&dir_path)
-                .map_err(|e| e.to_string())?
-                .flatten()
-                .filter(|e| {
-                    e.path()
-                        .extension()
-                        .map(|ext| ext == "jsonl")
-                        .unwrap_or(false)
-                });
-
-            for jsonl_entry in jsonl_files {
-                let jsonl_path = jsonl_entry.path();
-                let session_id = jsonl_path
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_default();
-
-                if session_id.is_empty() || tracked_ids.contains(&session_id) {
-                    continue;
-                }
-
-                if let Some((first_message, branch, cwd, timestamp)) =
-                    parse_session_file(&jsonl_path)
-                {
-                    if first_message.is_empty() {
-                        continue;
-                    }
-
-                    // Use file mtime as fallback timestamp
-                    let ts = timestamp.or_else(|| {
-                        jsonl_entry
-                            .metadata()
-                            .ok()
-                            .and_then(|m| m.modified().ok())
-                            .map(|t| {
-                                let dt: chrono::DateTime<chrono::Utc> = t.into();
-                                dt.to_rfc3339()
-                            })
-                    });
-
-                    sessions.push(ArchivedAgentNode {
-                        session_id,
-                        first_message,
-                        branch,
-                        cwd,
-                        timestamp: ts,
-                        worktree_name: worktree_name.clone(),
-                        resumable: true,
-                    });
-                }
-            }
-        }
-    }
+    sessions.extend(
+        discover_claude_sessions_in(&projects_dir, mesh_path, &effective, &tracked_ids)
+            .map_err(|e| e.to_string())?,
+    );
 
     // Cursor keeps the same user/assistant JSONL shape but nests each session
     // below a workspace slug and an id directory. Its project slug is based on
@@ -388,7 +344,12 @@ pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<ArchivedAgentNode>,
 
     // Durable archived rows the disk scan found nothing for. Sorting below
     // interleaves them with the discovered sessions by timestamp.
-    let durable = durable_archived_entries(&sessions, &mesh_nodes);
+    //
+    // Issue #2332 — the same pass attaches each archived row's durable
+    // reference to the disk entry that supersedes it, so a merged entry keeps
+    // the identity it already had in the DB instead of being flattened down to
+    // a bare transcript.
+    let durable = durable_archived_entries(&mut sessions, &mesh_nodes);
     sessions.extend(durable);
 
     // Sort by timestamp descending (most recent first)
@@ -411,11 +372,14 @@ pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<ArchivedAgentNode>,
 /// with `resumable: false` and the surfaces say Resume is unavailable.
 ///
 /// An archived node whose transcript *is* on disk already appears in
-/// `discovered` (archived ids are excluded from `tracked_ids`), so it is left
-/// alone here: the discovered entry is the resumable one and must not be
-/// duplicated or downgraded.
+/// `discovered` (archived ids are excluded from `tracked_ids`), so it is not
+/// duplicated or downgraded here — the discovered entry is the resumable one.
+/// It is not dropped, though: `discovered` is mutated so the surviving entry
+/// carries `node_id` (issue #2332). Without that the row's own identity was
+/// lost the moment a transcript reappeared, and the list could no longer tell
+/// reopening known work from importing external work.
 fn durable_archived_entries(
-    discovered: &[ArchivedAgentNode],
+    discovered: &mut [ArchivedAgentNode],
     mesh_nodes: &[crate::models::AgentNode],
 ) -> Vec<ArchivedAgentNode> {
     let on_disk: std::collections::HashSet<&str> = discovered
@@ -424,7 +388,7 @@ fn durable_archived_entries(
         .collect();
 
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    mesh_nodes
+    let durable: Vec<ArchivedAgentNode> = mesh_nodes
         .iter()
         .filter(|node| node.status == crate::models::SessionStatus::Archived)
         .filter_map(|node| {
@@ -455,9 +419,44 @@ fn durable_archived_entries(
                 timestamp: Some(node.created_at.to_rfc3339()),
                 worktree_name: node.worktree_name.clone(),
                 resumable: false,
+                // The row's own recorded executor (issue #2332). Kept verbatim
+                // — including a non-resumable one like `terminal`, which is
+                // honest here: it explains *why* the entry cannot be resumed,
+                // and `resumable: false` is what stops a surface offering it.
+                provider: Some(node.provider.clone())
+                    .filter(|provider| !provider.trim().is_empty()),
+                node_id: Some(node.id),
             })
         })
-        .collect()
+        .collect();
+
+    // An archived row whose transcript is on disk was skipped above so it is
+    // not listed twice — but its identity still belongs on the surviving disk
+    // entry (issue #2332). `node_id` is the row's own record, so attaching it
+    // is always safe; the scanner's `provider` stays authoritative for a
+    // transcript it just read, because the row's value can be a stale executor
+    // from an older session.
+    for node in mesh_nodes
+        .iter()
+        .filter(|node| node.status == crate::models::SessionStatus::Archived)
+    {
+        let Some(session_id) = node
+            .cli_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            continue;
+        };
+        if let Some(entry) = discovered
+            .iter_mut()
+            .find(|entry| entry.session_id == session_id)
+        {
+            entry.node_id = Some(node.id);
+        }
+    }
+
+    durable
 }
 
 /// Extract the Buildmesh worktree name from a Cursor project slug (issue
@@ -472,6 +471,98 @@ fn extract_cursor_worktree_name(
     effective_slug: &str,
 ) -> Option<String> {
     extract_worktree_name(dir_name, base_slug, effective_slug)
+}
+
+/// Discover Claude Code sessions below `<claude_dir>/projects` — one JSONL
+/// transcript per session id, grouped by encoded project directory.
+///
+/// Takes the projects root explicitly, like the Cursor, Command Code and AGY
+/// scanners, so all four harnesses are testable against a fixture directory
+/// and none of them needs the developer's real `~/.claude`.
+fn discover_claude_sessions_in(
+    projects_dir: &std::path::Path,
+    mesh_path: &str,
+    effective_dir_raw: &str,
+    tracked_ids: &std::collections::HashSet<String>,
+) -> Result<Vec<ArchivedAgentNode>, String> {
+    if !projects_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let encoded_prefix = encode_path(mesh_path);
+    let encoded_effective = encode_path(effective_dir_raw);
+    let effective_prefix = format!("{encoded_effective}-");
+    let entries = fs::read_dir(projects_dir).map_err(|e| e.to_string())?;
+    let mut sessions = Vec::new();
+    for entry in entries.flatten() {
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        if !dir_name.starts_with(&encoded_prefix) && !dir_name.starts_with(&effective_prefix) {
+            continue;
+        }
+
+        let worktree_name = extract_worktree_name(&dir_name, &encoded_prefix, &encoded_effective);
+
+        let dir_path = entry.path();
+        if !dir_path.is_dir() {
+            continue;
+        }
+
+        let jsonl_files = fs::read_dir(&dir_path)
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "jsonl")
+                    .unwrap_or(false)
+            });
+
+        for jsonl_entry in jsonl_files {
+            let jsonl_path = jsonl_entry.path();
+            let session_id = jsonl_path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            if session_id.is_empty() || tracked_ids.contains(&session_id) {
+                continue;
+            }
+
+            if let Some((first_message, branch, cwd, timestamp)) = parse_session_file(&jsonl_path) {
+                if first_message.is_empty() {
+                    continue;
+                }
+
+                // Use file mtime as fallback timestamp
+                let ts = timestamp.or_else(|| {
+                    jsonl_entry
+                        .metadata()
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .map(|t| {
+                            let dt: chrono::DateTime<chrono::Utc> = t.into();
+                            dt.to_rfc3339()
+                        })
+                });
+
+                sessions.push(ArchivedAgentNode {
+                    session_id,
+                    first_message,
+                    branch,
+                    cwd,
+                    timestamp: ts,
+                    worktree_name: worktree_name.clone(),
+                    resumable: true,
+                    // This scan read `~/.claude/projects`, so Claude Code owns
+                    // the conversation — the scanner states its own harness
+                    // rather than letting a consumer infer it from the session
+                    // id (issue #2332).
+                    provider: Some(Provider::Anthropic.to_string()),
+                    node_id: None,
+                });
+            }
+        }
+    }
+    Ok(sessions)
 }
 
 /// Discover Cursor's primary workspace transcripts below an explicit projects
@@ -570,6 +661,8 @@ fn discover_cursor_sessions_in(
                 timestamp,
                 worktree_name: worktree_name.clone(),
                 resumable: true,
+                provider: Some(Provider::Cursor.to_string()),
+                node_id: None,
             });
         }
     }
@@ -660,6 +753,8 @@ fn discover_commandcode_sessions_in(
             timestamp,
             worktree_name,
             resumable: true,
+            provider: Some(Provider::CommandCode.to_string()),
+            node_id: None,
         });
     }
     sessions
@@ -778,6 +873,12 @@ fn discover_agy_sessions_in(
             timestamp,
             worktree_name,
             resumable: true,
+            // AGY resumes with `--conversation <id>`, not `--resume`, so an
+            // entry that lost this stamp would be handed to a harness whose
+            // CLI has no such flag — or to one that silently starts a new
+            // conversation (issue #2332).
+            provider: Some(Provider::Agy.to_string()),
+            node_id: None,
         });
     }
     sessions
@@ -2156,7 +2257,8 @@ mod tests {
         let (mesh, node) = seed_archived_node("brave-fox", None);
         assert!(node.cli_session_id.is_none());
 
-        let listed = durable_archived_entries(&[], &db::list_agent_nodes_by_mesh(mesh.id).unwrap());
+        let listed =
+            durable_archived_entries(&mut [], &db::list_agent_nodes_by_mesh(mesh.id).unwrap());
 
         assert_eq!(listed.len(), 1, "the durable row must still be listed");
         let entry = &listed[0];
@@ -2197,7 +2299,8 @@ mod tests {
             "the row keeps the id whose transcript is gone"
         );
 
-        let listed = durable_archived_entries(&[], &db::list_agent_nodes_by_mesh(mesh.id).unwrap());
+        let listed =
+            durable_archived_entries(&mut [], &db::list_agent_nodes_by_mesh(mesh.id).unwrap());
 
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].session_id, "c0ffee00-1111-2222-3333-444455556666");
@@ -2218,7 +2321,7 @@ mod tests {
             "still-resumable",
             Some("a1b2c3d4-1111-2222-3333-444455556666"),
         );
-        let discovered = vec![ArchivedAgentNode {
+        let mut discovered = vec![ArchivedAgentNode {
             session_id: "a1b2c3d4-1111-2222-3333-444455556666".to_string(),
             first_message: "Fix the archive list".to_string(),
             branch: Some("feat/1065".to_string()),
@@ -2226,10 +2329,14 @@ mod tests {
             timestamp: Some("2026-10-01T09:00:00Z".to_string()),
             worktree_name: Some("brave-fox".to_string()),
             resumable: true,
+            provider: Some(Provider::Anthropic.to_string()),
+            node_id: None,
         }];
 
-        let durable =
-            durable_archived_entries(&discovered, &db::list_agent_nodes_by_mesh(mesh.id).unwrap());
+        let durable = durable_archived_entries(
+            &mut discovered,
+            &db::list_agent_nodes_by_mesh(mesh.id).unwrap(),
+        );
 
         assert!(
             durable.is_empty(),
@@ -2240,6 +2347,242 @@ mod tests {
             "the discovered entry stays resumable"
         );
         assert_eq!(node.status, crate::models::SessionStatus::Archived);
+    }
+
+    // --- Harness provenance (issue #2332) ---------------------------------
+    //
+    // The archive entry must say which harness owns the conversation, from
+    // the scanner that read it and from the durable row that recorded it.
+
+    /// Each scanner knows its own harness statically, so the provenance is
+    /// known at the moment the entry is built — never guessed from the session
+    /// id or the path shape later. This is the discovery-side half of "a
+    /// Cursor/AGY/Command Code entry defaults to its own executor", and it runs
+    /// the real scanners against fixture directories.
+    #[test]
+    fn every_scanner_stamps_its_own_harness_on_its_entries() {
+        let mesh_path = "/Users/adam/src/buildmesh";
+        let stamp = format!("buildmesh_provenance_{}", std::process::id());
+        let root = std::env::temp_dir().join(&stamp);
+
+        // Claude Code: `<projects>/<encoded mesh path>/<session>.jsonl`.
+        let claude_dir = root.join("claude_projects").join(encode_path(mesh_path));
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(
+            claude_dir.join("11111111-1111-1111-1111-111111111111.jsonl"),
+            r#"{"type":"user","message":{"role":"user","content":"Claude work"},"gitBranch":"feat/2332"}
+"#,
+        )
+        .unwrap();
+        let claude = discover_claude_sessions_in(
+            &root.join("claude_projects"),
+            mesh_path,
+            mesh_path,
+            &std::collections::HashSet::new(),
+        )
+        .unwrap();
+
+        // Cursor: `<projects>/<workspace slug>/agent-transcripts/<id>/<id>.jsonl`.
+        let cursor_id = "22222222-2222-2222-2222-222222222222";
+        let cursor_transcripts = root
+            .join("cursor_projects")
+            .join(cursor_workspace_slug(mesh_path))
+            .join("agent-transcripts")
+            .join(cursor_id);
+        std::fs::create_dir_all(&cursor_transcripts).unwrap();
+        std::fs::write(
+            cursor_transcripts.join(format!("{cursor_id}.jsonl")),
+            r#"{"type":"user","message":{"role":"user","content":"Cursor work"}}
+"#,
+        )
+        .unwrap();
+        let cursor = discover_cursor_sessions_in(
+            &root.join("cursor_projects"),
+            mesh_path,
+            &std::collections::HashSet::new(),
+            None,
+        );
+
+        // Command Code: `<projects>/<slug>/<id>.jsonl`, one file per session.
+        let commandcode_id = "33333333-3333-3333-3333-333333333333";
+        let commandcode_dir = root
+            .join("commandcode_projects")
+            .join(commandcode_project_slug(mesh_path));
+        std::fs::create_dir_all(&commandcode_dir).unwrap();
+        std::fs::write(
+            commandcode_dir.join(format!("{commandcode_id}.jsonl")),
+            format!(
+                r#"{{"type":"session","id":"{commandcode_id}","cwd":"{mesh_path}","timestamp":"2026-07-10T09:00:00Z"}}
+{{"type":"message","id":"user-1","message":{{"role":"user","content":"Command Code work"}}}}
+"#
+            ),
+        )
+        .unwrap();
+        let commandcode = discover_commandcode_sessions_in(
+            Some(
+                &root
+                    .join("commandcode_projects")
+                    .join(commandcode_project_slug(mesh_path)),
+            ),
+            mesh_path,
+            &std::collections::HashSet::new(),
+            None,
+        );
+
+        // Antigravity: `<brain>/<conversation>/.system_generated/logs/transcript.jsonl`.
+        write_agy_conv(
+            &root.join("agy_brain"),
+            "44444444-4444-4444-4444-444444444444",
+            r#"{"step_type":"USER_INPUT","text":"AGY work","workspace_path":"/Users/adam/src/buildmesh","created_at":"2026-07-10T09:00:00Z"}
+"#,
+        );
+        let agy = discover_agy_sessions_in(
+            &root.join("agy_brain"),
+            mesh_path,
+            &std::collections::HashSet::new(),
+            None,
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+
+        for (scanner, entries, session_id) in [
+            ("claude", &claude, "11111111-1111-1111-1111-111111111111"),
+            ("cursor", &cursor, "22222222-2222-2222-2222-222222222222"),
+            (
+                "commandcode",
+                &commandcode,
+                "33333333-3333-3333-3333-333333333333",
+            ),
+            ("agy", &agy, "44444444-4444-4444-4444-444444444444"),
+        ] {
+            let entry = entries
+                .iter()
+                .find(|entry| entry.session_id == session_id)
+                .unwrap_or_else(|| panic!("{scanner} fixture produced no entry for {session_id}"));
+            // The expected id is the enum's own rendering, so an adapter-id
+            // rename is caught here rather than at resume time.
+            let expected = match scanner {
+                "claude" => Provider::Anthropic.to_string(),
+                "cursor" => Provider::Cursor.to_string(),
+                "commandcode" => Provider::CommandCode.to_string(),
+                "agy" => Provider::Agy.to_string(),
+                other => unreachable!("no provenance case for {other}"),
+            };
+            assert_eq!(
+                entry.provider.as_deref(),
+                Some(expected.as_str()),
+                "the {scanner} scanner must stamp its own harness id"
+            );
+            assert!(
+                entry.resumable,
+                "a transcript-backed {scanner} entry is resumable"
+            );
+            assert_eq!(entry.node_id, None, "{scanner} has no durable row yet");
+        }
+    }
+
+    /// A durable archived row carries its own recorded executor, including one
+    /// that cannot resume — that is honest about *why* the entry has no
+    /// transcript to offer.
+    #[test]
+    fn durable_entries_carry_the_rows_own_provider_and_node_id() {
+        let _db = db::test_support::isolated();
+        let (mesh, node) = seed_archived_node(
+            "resumable-harness-no-transcript",
+            Some("beef0000-1111-2222-3333-444455556666"),
+        );
+
+        let listed =
+            durable_archived_entries(&mut [], &db::list_agent_nodes_by_mesh(mesh.id).unwrap());
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].provider.as_deref(),
+            Some("terminal"),
+            "the row's recorded executor must survive into the archive entry"
+        );
+        assert_eq!(
+            listed[0].node_id,
+            Some(node.id),
+            "the durable row reference must survive so a caller can tell reopening known work from importing external work"
+        );
+    }
+
+    /// The merge case from the issue: a readable disk transcript used to
+    /// suppress its archived row and with it every trace of the row's
+    /// identity. The entry keeps its scanner provenance and gains the durable
+    /// reference.
+    #[test]
+    fn a_merged_disk_entry_keeps_its_harness_and_gains_the_node_reference() {
+        let _db = db::test_support::isolated();
+        let (mesh, node) =
+            seed_archived_node("reopened", Some("beef0001-1111-2222-3333-444455556666"));
+        let mut discovered = vec![ArchivedAgentNode {
+            session_id: "beef0001-1111-2222-3333-444455556666".to_string(),
+            first_message: "Reopened work".to_string(),
+            branch: Some("feat/1065".to_string()),
+            cwd: Some("/repos/demo".to_string()),
+            timestamp: Some("2026-10-02T09:00:00Z".to_string()),
+            worktree_name: Some("brave-fox".to_string()),
+            resumable: true,
+            // A Cursor scanner found this transcript, so Cursor owns it even
+            // though the archived row was created through Claude Code.
+            provider: Some(Provider::Cursor.to_string()),
+            node_id: None,
+        }];
+
+        let durable = durable_archived_entries(
+            &mut discovered,
+            &db::list_agent_nodes_by_mesh(mesh.id).unwrap(),
+        );
+
+        assert!(durable.is_empty(), "the disk entry is the resumable one");
+        assert_eq!(
+            discovered[0].provider.as_deref(),
+            Some("cursor"),
+            "the scanner that read the transcript owns its provenance"
+        );
+        assert_eq!(
+            discovered[0].node_id,
+            Some(node.id),
+            "the archived row's reference must not be lost in the merge"
+        );
+    }
+
+    /// A row with no recorded provider is genuinely unknown, and says so with
+    /// `None` rather than borrowing Claude Code's id.
+    #[test]
+    fn a_durable_row_without_a_provider_reports_unknown_provenance() {
+        let _db = db::test_support::isolated();
+        let mesh = db::create_mesh("demo", "/repos/demo").unwrap();
+        let node = db::create_agent_node(
+            mesh.id,
+            "no-provider",
+            "/repos/demo",
+            "main",
+            EnvType::Windows,
+            "",
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        db::archive_agent_node(node.id).unwrap();
+
+        let listed =
+            durable_archived_entries(&mut [], &db::list_agent_nodes_by_mesh(mesh.id).unwrap());
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].provider, None,
+            "an empty provider column is unknown, not Anthropic"
+        );
+        assert_eq!(listed[0].node_id, Some(node.id));
     }
 
     #[test]
@@ -2266,7 +2609,8 @@ mod tests {
         )
         .unwrap();
 
-        let listed = durable_archived_entries(&[], &db::list_agent_nodes_by_mesh(mesh.id).unwrap());
+        let listed =
+            durable_archived_entries(&mut [], &db::list_agent_nodes_by_mesh(mesh.id).unwrap());
 
         assert!(listed.is_empty());
     }

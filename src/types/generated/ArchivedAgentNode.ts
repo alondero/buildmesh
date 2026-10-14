@@ -13,4 +13,27 @@ export type ArchivedAgentNode = { session_id: string, first_message: string, bra
  * `cli_session_id`, or one whose transcript was deleted (issue #1065).
  * The surfaces must not offer Resume on a `false` entry.
  */
-resumable: boolean, };
+resumable: boolean, 
+/**
+ * The harness that owns this conversation — an adapter id from
+ * [`Provider`] (`anthropic`, `cursor`, `commandcode`, `agy`, …), stamped
+ * by the scanner that read the transcript, or carried over from the
+ * durable row's own `agent_nodes.provider` (issue #2332).
+ *
+ * This is provenance, not a preference: it is what the executor must be
+ * for Resume to land in the right conversation. A UUID and a readable
+ * transcript cannot tell a consumer which harness wrote them, so the
+ * importer must never guess one. `None` means *unknown* — a durable row
+ * with no recorded provider, or a scanner that does not yet stamp one —
+ * and the import boundary rejects it instead of defaulting to Anthropic.
+ */
+provider: string | null, 
+/**
+ * The durable `agent_nodes.id` behind this entry when there is one: an
+ * archived row the list is keeping visible. Present on durable entries
+ * and on a discovered entry that reconciles to an archived row with the
+ * same `cli_session_id`, so a caller can tell reopening known work from
+ * importing external work (issue #2332). Reopen itself is a later
+ * lifecycle step; today this is the reference, not an action.
+ */
+node_id: number | null, };

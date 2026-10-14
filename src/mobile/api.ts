@@ -384,10 +384,11 @@ export async function createPr(
 // Generated from the Rust `ArchivedAgentNode` struct (issue #359 + #490;
 // renamed to `ArchivedAgentNode` after PR #523 set the visible label to
 // "Archive"). The mobile SPA previously hand-declared `cli_session_id`/
-// `last_active_at`/`provider` — none of which the wire sends (it sends
+// `last_active_at`/`provider` — none of which the wire used to send (it sends
 // `session_id` and `timestamp`, and no provider field at all), so those
-// reads were always `undefined`. The generated type is the real wire
-// shape. Renamed from `DiscoveredAgentNode` in issue #490: the public
+// reads were always `undefined`. The generated type is the real wire shape;
+// issue #2332 added `provider` for real, and it is what the resume request
+// now carries. Renamed from `DiscoveredAgentNode` in issue #490: the public
 // surface uses "Agent Node"; the on-disk Claude Code session id
 // (`session_id`) stays as-is.
 import type { ArchivedAgentNode } from "../types/generated/ArchivedAgentNode";
@@ -425,7 +426,12 @@ export async function importAndResume(
         cli_session_id: session.session_id,
         branch: session.branch ?? "main",
         worktree_name: session.worktree_name ?? undefined,
-        provider,
+        // Issue #2332 — the harness that created this conversation decides
+        // which one resumes it, and `session.provider` is where discovery
+        // stamped it. The optional argument remains for a caller that is
+        // deliberately choosing a different executor (the desktop picker);
+        // with neither, the backend refuses rather than guessing Anthropic.
+        provider: provider ?? session.provider ?? undefined,
       }),
     },
   );

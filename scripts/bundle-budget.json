@@ -16,13 +16,17 @@
     {
       "value": 1140000,
       "reason": "PR #2249 bumped @tauri-apps/api from 2.11.x to 2.12.x (and aligned the four @tauri-apps/plugin-* JS packages with their resolved Rust crate versions from #2211) so `tauri-build`'s preflight would accept the tauri 2.12.x / plugin 2.4.x / 2.7.x / 2.13.x Cargo resolved minors. The 2.12.x JS API surface added +450 B minified raw (measured 1,130,450 B vs the 1,130,000 B cap) to the entry chunk. Aligning the JS floor to the exact Rust resolved versions (instead of the latest patch) keeps the lockfile and `Cargo.lock` on the same point-release, which avoids further per-patch churn on the next dependabot run. Bumping the raw cap by 10 kB absorbs the bump plus a small margin; the gzip cap stays unchanged at 360 kB (transfer axis retains ~22 kB of headroom) and the entry CSS cap is unaffected."
+    },
+    {
+      "value": 1150000,
+      "reason": "Issue #2332 (harness provenance for archive resume) added `src/lib/archiveProvenance.ts` and the originating-harness wiring in `src/components/Probe/ArchivedNodesTab.tsx` to the entry chunk: +18 B minified raw (measured 1,140,013 B vs the 1,140,000 B cap; the pre-change baseline measured 1,139,995 B, so the cap had 5 B of headroom and this feature tripped it rather than regressed it). The archive label, executor resolution and unavailable-reason text are the whole cost. Bumping the raw cap by 10 kB matches the four prior entries and absorbs the feature plus the Windows-vs-Linux build variance they document; the gzip cap stays unchanged at 360 kB (transfer axis retains ~19 kB of headroom, unchanged by 18 B) and the entry CSS cap is unaffected (no new styles)."
     }
   ],
   "checks": [
     {
       "label": "Desktop entry JS (dist/assets/index-*.js)",
       "pattern": "index-*.js",
-      "maxRaw": 1140000,
+      "maxRaw": 1150000,
       "maxGzip": 360000
     },
     {

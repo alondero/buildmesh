@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Tests for the Archive probe tab (issue #378; component renamed from
  * ArchivedNodesTab â†’ ArchivedNodesTab after PR #523 set the visible
  * label to "Archive").
@@ -18,7 +18,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { ArchivedNodesTab } from '../../src/components/Probe/ArchivedNodesTab';
@@ -49,6 +49,9 @@ const SESSIONS: ArchivedAgentNode[] = [
     timestamp: new Date(Date.now() - 5 * 60_000).toISOString(),
     worktree_name: 'agent-v2',
     resumable: true,
+    // Issue #2332 — Claude Code's own entry, stamped by its scanner.
+    provider: 'anthropic',
+    node_id: null,
   },
   {
     session_id: 's-abc-2',
@@ -58,8 +61,34 @@ const SESSIONS: ArchivedAgentNode[] = [
     timestamp: new Date(Date.now() - 2 * 86_400_000).toISOString(),
     worktree_name: null,
     resumable: true,
+    provider: 'anthropic',
+    node_id: null,
   },
 ];
+
+// Issue #2332 — the case the issue filed: a Cursor conversation sitting next
+// to a mesh whose default provider is Claude Code. Clicking Resume must not
+// hand it to Claude Code.
+const CURSOR_SESSION: ArchivedAgentNode = {
+  session_id: 's-cursor-1',
+  first_message: 'Refactor the scanner',
+  branch: 'feat/2332',
+  cwd: '/repos/demo',
+  timestamp: new Date(Date.now() - 60_000).toISOString(),
+  worktree_name: null,
+  resumable: true,
+  provider: 'cursor',
+  node_id: null,
+};
+
+// Issue #2332 — an entry with a transcript but no known harness. There is no
+// executor to offer, and the backend refuses to guess one.
+const UNKNOWN_PROVENANCE_SESSION: ArchivedAgentNode = {
+  ...SESSIONS[0],
+  session_id: 's-unknown-1',
+  first_message: 'From a harness we cannot name',
+  provider: null,
+};
 
 // Issue #1065 — a durable archived row whose transcript is gone (or was
 // never written, e.g. an archived Terminal node). The backend lists it with
@@ -72,6 +101,9 @@ const DURABLE_ROW: ArchivedAgentNode = {
   timestamp: new Date(Date.now() - 3 * 86_400_000).toISOString(),
   worktree_name: 'brave-fox',
   resumable: false,
+  // The row's own recorded executor, carried through from the DB (#2332).
+  provider: 'terminal',
+  node_id: 77,
 };
 
 // Issue #575 / ADR-0016 — Spawn Options carry the full wire shape
@@ -100,6 +132,15 @@ const PROVIDERS: ProviderFixture[] = [
   // `resumable: false` and the picker hides them.
   { id: 'opencode', label: 'OpenCode', color: '#000', icon: '', resumable: false, harness_id: 'opencode', provider_id: null, is_proxied: false, group_key: 'opencode' },
   { id: 'antigravity', label: 'Antigravity', color: '#000', icon: '', resumable: false, harness_id: 'agy', provider_id: null, is_proxied: false, group_key: 'agy' },
+];
+
+// Issue #2332 — a second resumable harness alongside Claude Code, so a test
+// can show the entry's own harness winning over the mesh default. `resumable`
+// is the backend's derivation; Cursor reads a plain JSONL transcript, so it is
+// true here.
+const PROVIDERS_WITH_CURSOR: ProviderFixture[] = [
+  ...PROVIDERS,
+  { id: 'cursor', label: 'Cursor', color: '#000', icon: '', resumable: true, harness_id: 'cursor', provider_id: null, is_proxied: false, group_key: 'cursor' },
 ];
 
 // Custom Claude-compatible profile — the exact case the old id allow-list
@@ -334,6 +375,98 @@ describe('ArchivedNodesTab (#378)', () => {
     });
   });
 
+  // --- Harness provenance (issue #2332) -----------------------------------
+
+  it('names the originating harness on each row', async () => {
+    mockBackend({ sessions: [CURSOR_SESSION, ...SESSIONS] });
+    render(<ArchivedNodesTab meshId={MESH.id} meshPath={MESH.path} />);
+
+    expect((await screen.findByTestId('archive-harness-s-cursor-1')).textContent).toBe('Cursor');
+    expect(screen.getByTestId('archive-harness-s-abc-1').textContent).toBe('Claude Code');
+  });
+
+  it('resumes a Cursor conversation through Cursor, not the mesh default provider', async () => {
+    // The regression from the issue: `get_default_provider` answers
+    // `anthropic` here, and pre-fix that id went straight to the import.
+    mockBackend({ sessions: [CURSOR_SESSION], providers: PROVIDERS_WITH_CURSOR });
+    render(<ArchivedNodesTab meshId={MESH.id} meshPath={MESH.path} />);
+
+    const resumes = await screen.findAllByText('Resume');
+    await userEvent.click(resumes[0]);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('import_discovered_agent_node', expect.objectContaining({
+        cliSessionId: 's-cursor-1',
+        provider: 'cursor',
+      }));
+    });
+    // The spawn must use the same executor, or the node resumes as an empty
+    // Claude Code session.
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('spawn_agent', expect.objectContaining({
+        request: expect.objectContaining({ provider: 'cursor' }),
+      }));
+    });
+  });
+
+  it('keeps a mesh default that already belongs to the conversation harness', async () => {
+    // A Proxied Provider row (`claude:minimax`) is how this user runs Claude
+    // Code. The default Resume used to honour it and still must — only a
+    // default pointing at a *different* harness gets replaced.
+    mockBackend({ sessions: [SESSIONS[0]], defaultProvider: 'claude:minimax' });
+    render(<ArchivedNodesTab meshId={MESH.id} meshPath={MESH.path} />);
+
+    const resumes = await screen.findAllByText('Resume');
+    await userEvent.click(resumes[0]);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('import_discovered_agent_node', expect.objectContaining({
+        cliSessionId: 's-abc-1',
+        provider: 'claude:minimax',
+      }));
+    });
+  });
+
+  it('offers no Resume for an entry with no known harness', async () => {
+    mockBackend({ sessions: [UNKNOWN_PROVENANCE_SESSION] });
+    render(<ArchivedNodesTab meshId={MESH.id} meshPath={MESH.path} />);
+
+    await screen.findByText('From a harness we cannot name');
+    expect(screen.queryAllByText('Resume')).toHaveLength(0);
+    expect(
+      screen.getByTitle(/does not know which agent harness/i).textContent,
+    ).toBe('Resume unavailable');
+    // Nothing was imported, so nothing was guessed.
+    expect(invoke).not.toHaveBeenCalledWith(
+      'import_discovered_agent_node',
+      expect.anything(),
+    );
+  });
+
+  it('offers no Resume for a Cursor conversation when Cursor is not installed', async () => {
+    mockBackend({ sessions: [CURSOR_SESSION] });
+    render(<ArchivedNodesTab meshId={MESH.id} meshPath={MESH.path} />);
+
+    await screen.findByText('Refactor the scanner');
+    expect(screen.queryAllByText('Resume')).toHaveLength(0);
+    // The reason is the harness, not a missing transcript.
+    expect(screen.getByTitle(/Cursor is not installed/i).textContent).toBe('Resume unavailable');
+  });
+
+  it('still lists a non-resumable durable row without a Resume button', async () => {
+    mockBackend({ sessions: [DURABLE_ROW] });
+    render(<ArchivedNodesTab meshId={MESH.id} meshPath={MESH.path} />);
+
+    // The name is both the row's label and its worktree, so either match is
+    // the row being listed.
+    expect((await screen.findAllByText('brave-fox')).length).toBeGreaterThan(0);
+    expect(screen.queryAllByText('Resume')).toHaveLength(0);
+    expect(screen.getByTitle(/no transcript on disk/i)).toBeTruthy();
+    // Issue #2332 — the row's recorded executor is still shown, which is what
+    // explains why this row has nothing to resume.
+    expect(screen.getByTestId('archive-harness-node-77').textContent).toBe('Terminal');
+  });
+
   it('uses the explicit provider from the `â–¾` picker for the resume', async () => {
     mockBackend();
     render(<ArchivedNodesTab meshId={MESH.id} meshPath={MESH.path} />);
@@ -365,9 +498,12 @@ describe('ArchivedNodesTab (#378)', () => {
     const carets = await screen.findAllByTitle('Choose provider');
     fireEvent.click(carets[0]);
 
-    expect(await screen.findByText('Claude Code')).toBeTruthy();
-    expect(screen.getByText('Minimax')).toBeTruthy();
-    expect(screen.getByText('Kimi')).toBeTruthy();
+    // Scoped to the dropdown: a row now shows its own harness label too (#2332),
+    // so the bare name appears in the list as well.
+    const menu = await screen.findByRole('menu');
+    expect(within(menu).getByText('Claude Code')).toBeTruthy();
+    expect(within(menu).getByText('Minimax')).toBeTruthy();
+    expect(within(menu).getByText('Kimi')).toBeTruthy();
     expect(screen.queryByText('OpenCode')).toBeNull();
     expect(screen.queryByText('Antigravity')).toBeNull();
   });
@@ -390,7 +526,8 @@ describe('ArchivedNodesTab (#378)', () => {
 
     const carets = await screen.findAllByTitle('Choose provider');
     fireEvent.click(carets[0]);
-    await screen.findByText('Claude Code');
+    // Scoped to the dropdown; a row shows its own harness label too (#2332).
+    await within(await screen.findByRole('menu')).findByText('Claude Code');
 
     // The user-chosen label must appear — the picker no longer cares
     // about the underlying id, only the `resumable` flag.

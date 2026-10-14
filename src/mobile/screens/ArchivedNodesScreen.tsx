@@ -9,6 +9,7 @@ import {
 } from "../api";
 import { AppBar, CenterNote, PulseDots } from "../ui";
 import { useAsyncEffect } from "../../hooks/useAsyncEffect";
+import { archiveHarnessLabel } from "../../lib/archiveProvenance";
 import { formatRelativeAge } from "../../lib/time";
 
 type Props = {
@@ -116,6 +117,10 @@ export default function ArchivedNodesScreen({
         {filtered.map((s) => {
           const open = selectedId === s.session_id;
           const busy = busyId === s.session_id;
+          // Issue #2332 — provenance is what decides the executor, so it is
+          // read once here and drives both the label and whether Resume is
+          // offered at all.
+          const harnessLabel = archiveHarnessLabel(s.provider);
           return (
             <div
               key={s.session_id}
@@ -170,6 +175,10 @@ export default function ArchivedNodesScreen({
               >
                 {s.branch && <span>⎇ {s.branch}</span>}
                 {s.worktree_name && <span>wt: {s.worktree_name}</span>}
+                {/* Issue #2332 — which harness owns the conversation. Shown
+                    collapsed so the origin is visible before expanding, and
+                    omitted entirely when it is genuinely unknown. */}
+                {harnessLabel && <span data-testid={`harness-${s.session_id}`}>{harnessLabel}</span>}
                 {s.timestamp && (
                   <span style={{ marginLeft: "auto" }}>
                     {timeAgo(s.timestamp)}
@@ -186,7 +195,11 @@ export default function ArchivedNodesScreen({
                       Importing it would spawn a harness against a
                       conversation that isn't there, so explain instead of
                       offering a Resume that cannot work. */}
-                  {s.resumable ? (
+                  {s.resumable && harnessLabel ? (
+                    /* Issue #2332 — the harness that created the conversation
+                       resumes it; `importAndResume` sends `session.provider`
+                       so the backend is never asked to guess. The label is
+                       the check that they agree. */
                     <button
                       className="btn-primary"
                       style={{ width: "100%" }}
@@ -194,15 +207,20 @@ export default function ArchivedNodesScreen({
                       data-testid={`node-resume-${s.session_id}`}
                       onClick={() => resume(s)}
                     >
-                      {busy ? "Resuming…" : "Resume node"}
+                      {busy ? "Resuming…" : `Resume node in ${harnessLabel}`}
                     </button>
                   ) : (
                     <div
                       data-testid={`node-unresumable-${s.session_id}`}
                       style={{ fontSize: 12, color: "var(--text-faint)" }}
                     >
-                      Resume unavailable — this archived node has no
-                      transcript on disk.
+                      {/* Issue #2332 — an entry with a transcript but no known
+                          harness cannot be resumed either. One missing fact
+                          would otherwise be reported as a missing transcript,
+                          which sends the user hunting for the wrong thing. */}
+                      {s.resumable
+                        ? "Resume unavailable — Buildmesh does not know which agent harness created this conversation."
+                        : "Resume unavailable — this archived node has no transcript on disk."}
                     </div>
                   )}
                 </div>

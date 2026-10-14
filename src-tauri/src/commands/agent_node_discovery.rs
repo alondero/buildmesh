@@ -28,6 +28,11 @@ pub async fn discover_agent_nodes(
 
 /// Import a discovered session as a new agent node with the correct worktree/path settings,
 /// then set its cli_session_id so it's ready for resume.
+///
+/// `provider` is the originating harness from the archive entry (issue #2332).
+/// It stays `Option` on the IPC surface so a caller that omits it gets the
+/// service's actionable "unknown harness" refusal instead of an Anthropic
+/// node built from a guess.
 #[command]
 pub async fn import_discovered_agent_node(
     mesh_id: i64,
@@ -45,7 +50,7 @@ pub async fn import_discovered_agent_node(
             &cli_session_id,
             &branch,
             worktree_name.as_deref(),
-            provider.as_deref(),
+            provider.as_deref().unwrap_or_default(),
         )
         .map_err(|error| error.to_string())
     })

@@ -18,16 +18,26 @@
  *
  * Resume flow
  * -----------
- * The primary "Resume" button uses the mesh's resolved default provider
- * (explicit > per-mesh > app-wide > "anthropic" fallback, enforced
- * server-side). The `▾` half of the split button opens a provider
- * picker filtered to providers that advertise `resumable: true` on
- * their backend-supplied `ProviderInfo` row. The backend derives the
- * flag from the resolved adapter's `supports_resume() && produces_readable_transcript()`,
- * so every Claude-compatible profile (custom ids like "DeepSeek via
- * Claude", "Kimi via Claude" included) advertises itself correctly
- * — the picker no longer hides them behind a hardcoded id allow-list
- * (#550 follow-up; see also buildmesh-gh538-unified-claude-harness).
+ * The primary "Resume" button resumes through the harness that created the
+ * conversation (issue #2332). A resumable discovery entry carries the harness
+ * that owns it; a durable row carries the executor it was recorded with. The
+ * default button is that harness's own Spawn Option rather than the mesh's
+ * resolved default provider — resuming a Cursor or Antigravity conversation
+ * through Claude Code lands in an empty session. The `▾` half of the split
+ * button opens a provider picker filtered to providers that advertise
+ * `resumable: true` on their backend-supplied `ProviderInfo` row, so picking
+ * another executor stays available as an explicit choice. The
+ * backend derives that flag from the resolved adapter's `supports_resume()
+ * && produces_readable_transcript()`, so every Claude-compatible profile
+ * (custom ids like "DeepSeek via Claude", "Kimi via Claude" included)
+ * advertises itself correctly — the picker no longer hides them behind a
+ * hardcoded id allow-list (#550 follow-up; see also
+ * buildmesh-gh538-unified-claude-harness).
+ *
+ * An entry whose harness is unknown, or whose harness has no option here
+ * (not installed), shows "Resume unavailable" with the reason in its tooltip:
+ * there is no honest executor to offer, and the backend would refuse the
+ * import anyway (#2332).
  *
  * After import, navigation focuses the card and enters its mesh. The
  * agent process starts before the dock closes so the terminal is ready.
@@ -71,6 +81,7 @@ import { ProbeToolbar } from './ProbeToolbar';
 import { mapBackendProviders, type SpawnOption } from '../../lib/groups';
 import { dropdownId } from '../../lib/dropdownId';
 import { formatRelativeAge } from '../../lib/time';
+import { adapterIdFromProvider, archiveHarnessLabel, resumeOptionForHarness } from '../../lib/archiveProvenance';
 
 // The Archive tab renders a `date` fallback for items older than 30
 // days (the historical "days never reset" convention). The shared
@@ -90,6 +101,23 @@ function timeAgo(isoString: string): string {
 // Express the relationship directly: a resumable provider IS a
 // `SpawnOption` with the resume flag tacked on.
 type ResumableProvider = SpawnOption & { resumable: boolean };
+
+// Issue #2332 — why a row offers no Resume. Three dead ends with three
+// different causes, and collapsing them into one message sends the user
+// after the wrong thing: a missing transcript, a harness this build cannot
+// name, or a harness that is simply not installed. One function so the row
+// tooltip and the resume path's error cannot drift apart. The sentences are
+// the *reason*; the control next to them already says "Resume unavailable".
+function resumeUnavailableReason(session: ArchivedAgentNode): string {
+  if (!session.resumable) {
+    return 'This archived node has no transcript on disk, so there is nothing to resume.';
+  }
+  const label = archiveHarnessLabel(session.provider);
+  if (!label) {
+    return 'Buildmesh does not know which agent harness created this conversation.';
+  }
+  return `${label} is not installed.`;
+}
 
 export function ArchivedNodesTab({ meshId, meshPath }: { meshId?: number; meshPath?: string } = {}) {
   const context = useProbeContext();
@@ -233,10 +261,45 @@ export function ArchivedNodesTab({ meshId, meshPath }: { meshId?: number; meshPa
     }
   };
 
-  const handleDefaultResume = async (session: ArchivedAgentNode) => {
-    if (activeMeshId === null) return;
-    const defaultProvider = await getDefaultProvider(activeMeshId);
-    await handleResume(session, defaultProvider);
+  // Issue #2332 — Resume runs through the harness that owns the conversation.
+  // The dropdown stays an explicit executor choice. Nothing here falls back to
+  // the mesh default provider when it points at a *different* harness: a Cursor
+  // conversation launched through Claude Code resumes nothing, so an
+  // unresolvable harness has to surface instead of guess.
+  const ownHarnessOption = (session: ArchivedAgentNode) =>
+    resumeOptionForHarness(resumableProviders, session.provider);
+
+  /**
+   * The executor the primary Resume button uses, and the one its tooltip
+   * names.
+   *
+   * A mesh default that already belongs to this conversation's harness keeps
+   * its Model Provider choice — a Proxied Provider row like `claude:minimax`
+   * is how that user runs Claude Code, and dropping it would silently switch
+   * them to the self-auth account. Only a default pointing at a *different*
+   * harness is replaced by the conversation's own one, which is the case the
+   * issue filed.
+   *
+   * Takes the conversation's own option as an argument rather than looking it
+   * up again: the row already resolved it to decide whether to render the
+   * button at all, and passing it makes "there is an executor" total instead
+   * of a `null` the caller has to re-check.
+   */
+  const defaultResumeId = async (
+    session: ArchivedAgentNode,
+    own: ResumableProvider,
+  ): Promise<string> => {
+    if (activeMeshId === null) return own.id;
+    const meshDefault = await getDefaultProvider(activeMeshId);
+    const sessionHarness = adapterIdFromProvider(session.provider ?? '');
+    return adapterIdFromProvider(meshDefault) === sessionHarness ? meshDefault : own.id;
+  };
+
+  const handleDefaultResume = async (
+    session: ArchivedAgentNode,
+    own: ResumableProvider,
+  ) => {
+    await handleResume(session, await defaultResumeId(session, own));
   };
 
   // Filter providers to only those that support resume. The backend
@@ -283,83 +346,102 @@ export function ArchivedNodesTab({ meshId, meshPath }: { meshId?: number; meshPa
           />
         ) : (
           <div className="space-y-1">
-            {filtered.map(session => (
-              <div
-                key={session.session_id}
-                className="flex items-center gap-2 px-2 py-2 rounded-md hover:bg-bg-card transition-colors"
-              >
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm text-text-primary truncate">{session.first_message}</div>
-                  <div className="flex items-center gap-2 mt-0.5">
-                    {session.branch && (
-                      <span className="text-2xs text-text-secondary font-mono">{session.branch}</span>
-                    )}
-                    {session.worktree_name && (
-                      <span className="text-2xs text-accent-violet font-mono">{session.worktree_name}</span>
-                    )}
-                    {session.timestamp && (
-                      <span className="text-2xs text-text-secondary tabular-nums">{timeAgo(session.timestamp)}</span>
+            {filtered.map(session => {
+              // Issue #2332 — resolved once per row; `ownOption` is also what
+              // decides whether the Resume control is rendered at all, so the
+              // two cannot disagree about whether this entry is resumable.
+              const harnessLabel = archiveHarnessLabel(session.provider);
+              const ownOption = ownHarnessOption(session);
+              return (
+                <div
+                  key={session.session_id}
+                  className="flex items-center gap-2 px-2 py-2 rounded-md hover:bg-bg-card transition-colors"
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm text-text-primary truncate">{session.first_message}</div>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      {session.branch && (
+                        <span className="text-2xs text-text-secondary font-mono">{session.branch}</span>
+                      )}
+                      {session.worktree_name && (
+                        <span className="text-2xs text-accent-violet font-mono">{session.worktree_name}</span>
+                      )}
+                      {/* Issue #2332 — which harness owns the conversation,
+                          stated before the user opens the picker. */}
+                      {harnessLabel && (
+                        <span
+                          className="text-2xs text-text-secondary"
+                          data-testid={`archive-harness-${session.session_id}`}
+                        >
+                          {harnessLabel}
+                        </span>
+                      )}
+                      {session.timestamp && (
+                        <span className="text-2xs text-text-secondary tabular-nums">{timeAgo(session.timestamp)}</span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Split Resume Menu cluster — ADR-0016 §2 / issue #813.
+                      Primary label "Resume" + session-id key land the
+                      archived-resume flow on the same `<SpawnButtonCluster>`
+                      as Issues/PRs/Sidebar.
+
+                      Issue #1065 — a durable archived row with no discoverable
+                      transcript (`resumable: false`) has no resume target at
+                      all: importing it would create a node whose session id
+                      points at a conversation the harness cannot find. Show
+                      the reason instead of a button that cannot work.
+
+                      Issue #2332 — an entry with a transcript but no known
+                      harness is the same shape of dead end, for the same
+                      reason: the backend refuses to guess an executor, so the
+                      button is withheld rather than offered and refused. */}
+                  <div
+                    className="shrink-0"
+                    onMouseDown={e => e.stopPropagation()}
+                  >
+                    {session.resumable && ownOption ? (
+                      <SpawnButtonCluster
+                        providers={resumableProviders}
+                        // Issue #1264 — surface prefix keeps this menu's
+                        // `data-dropdown-for` from colliding with a
+                        // node- or mesh-keyed menu on the same id
+                        // (session ids are stringly-typed but the
+                        // collision risk is the same shape).
+                        dropdownKey={dropdownId('session', session.session_id)}
+                        isOpen={openDropdown === session.session_id}
+                        primaryLabel="Resume"
+                        configurationsEnabled={false}
+                        busyLabel="Resuming…"
+                        primaryAriaLabel="Resume session"
+                        onToggleDropdown={() =>
+                          setOpenDropdown(openDropdown === session.session_id ? null : session.session_id)
+                        }
+                        onSpawnDefault={() => handleDefaultResume(session, ownOption)}
+                        onSelectProvider={(providerId) => handleResume(session, providerId)}
+                        disabled={resuming !== null}
+                        isSpawning={resuming === session.session_id}
+                        // Issue #2332 — the tooltip has to name the executor
+                        // this button will actually use, which is the
+                        // conversation's own harness (or the mesh default
+                        // when that default already belongs to that harness).
+                        getDefaultProvider={async () =>
+                          await defaultResumeId(session, ownOption)
+                        }
+                      />
+                    ) : (
+                      <span
+                        className="text-2xs text-text-secondary"
+                        title={resumeUnavailableReason(session)}
+                      >
+                        Resume unavailable
+                      </span>
                     )}
                   </div>
                 </div>
-
-                {/* Split Resume Menu cluster — ADR-0016 §2 / issue #813.
-                    Primary label "Resume" + session-id key land the
-                    archived-resume flow on the same `<SpawnButtonCluster>`
-                    as Issues/PRs/Sidebar. `getDefaultProvider` is
-                    undefined when `activeMeshId === null` so the cluster
-                    skips its tooltip fetch (the click path still works
-                    via `handleDefaultResume`'s own null guard).
-
-                    Issue #1065 — a durable archived row with no discoverable
-                    transcript (`resumable: false`) has no resume target at
-                    all: importing it would create a node whose session id
-                    points at a conversation the harness cannot find. Show
-                    the reason instead of a button that cannot work. */}
-                <div
-                  className="shrink-0"
-                  onMouseDown={e => e.stopPropagation()}
-                >
-                  {session.resumable ? (
-                    <SpawnButtonCluster
-                      providers={resumableProviders}
-                      // Issue #1264 — surface prefix keeps this menu's
-                      // `data-dropdown-for` from colliding with a
-                      // node- or mesh-keyed menu on the same id
-                      // (session ids are stringly-typed but the
-                      // collision risk is the same shape).
-                      dropdownKey={dropdownId('session', session.session_id)}
-                      isOpen={openDropdown === session.session_id}
-                      primaryLabel="Resume"
-                      configurationsEnabled={false}
-                      busyLabel="Resuming…"
-                      primaryAriaLabel="Resume session"
-                      onToggleDropdown={() =>
-                        setOpenDropdown(openDropdown === session.session_id ? null : session.session_id)
-                      }
-                      onSpawnDefault={() => handleDefaultResume(session)}
-                      onSelectProvider={(providerId) => handleResume(session, providerId)}
-                      disabled={resuming !== null}
-                      isSpawning={resuming === session.session_id}
-                      // The store's `getDefaultProvider` requires a
-                      // non-null mesh id; the cluster calls this from
-                      // hover/focus to populate its tooltip. Drop the
-                      // tooltip affordance when the probe hasn't focused
-                      // a mesh yet (the Resume buttons stay clickable —
-                      // `handleDefaultResume` has its own null guard).
-                      getDefaultProvider={activeMeshId !== null ? () => getDefaultProvider(activeMeshId) : undefined}
-                    />
-                  ) : (
-                    <span
-                      className="text-2xs text-text-secondary"
-                      title="This archived node has no transcript on disk, so there is nothing to resume."
-                    >
-                      Resume unavailable
-                    </span>
-                  )}
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </ProbeTabBody>

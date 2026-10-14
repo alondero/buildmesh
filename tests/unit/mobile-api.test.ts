@@ -43,6 +43,10 @@ const archived: ArchivedAgentNode = {
   cwd: "/tmp/repo",
   timestamp: "2026-06-11T00:00:00Z",
   worktree_name: "fix-auth-flow",
+  // Issue #2332 — discovery stamps the originating harness on every entry.
+  resumable: true,
+  provider: "anthropic",
+  node_id: null,
 };
 
 const issue: GitHubIssue = {
@@ -197,13 +201,34 @@ describe("mobile api wire shape (issue #1262)", () => {
       expect(body.branch).toBe("main");
     });
 
-    it("drops provider when undefined so the backend uses its default", async () => {
+    it("sends the entry's own harness as the resume executor (issue #2332)", async () => {
       fetchMock.mockResolvedValue(okJson(node));
-      await importAndResume(1, archived);
+      // A Cursor conversation, resumed with no explicit override. The caller
+      // is the mobile archive list, which cannot know anything the entry does
+      // not say — before #2332 this request omitted `provider` and the backend
+      // read the omission as "Anthropic", launching Cursor's conversation
+      // through Claude Code.
+      await importAndResume(1, { ...archived, provider: "cursor" });
       const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
-      // `provider` is intentionally undefined → JSON.stringify omits the key
-      // so the backend sees a "no override" body rather than
-      // `{provider: null}` and falls back to its default harness.
+      expect(body.provider).toBe("cursor");
+    });
+
+    it("lets an explicit provider argument override the entry's harness", async () => {
+      fetchMock.mockResolvedValue(okJson(node));
+      // The desktop picker's deliberate executor change reaches the same
+      // helper, so the override has to keep winning.
+      await importAndResume(1, { ...archived, provider: "cursor" }, "agy");
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+      expect(body.provider).toBe("agy");
+    });
+
+    it("omits provider only when the entry itself has no harness", async () => {
+      fetchMock.mockResolvedValue(okJson(node));
+      await importAndResume(1, { ...archived, provider: null });
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+      // `undefined` → `JSON.stringify` omits the key. The backend refuses an
+      // absent provider with an actionable 400 rather than defaulting to
+      // Anthropic, so omission is honest here, not a silent guess (#2332).
       expect("provider" in body).toBe(false);
     });
 
