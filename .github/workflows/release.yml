@@ -233,8 +233,14 @@ jobs:
             echo "::warning title=Android APK not published::ANDROID_KEYSTORE_BASE64 / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD are not configured, so this release ships Windows-only. See docs/development/android.md."
             exit 0
           fi
+          # A secret set from Windows PowerShell 5.1 (`$s | gh secret set`) gains a
+          # trailing CRLF, which `base64 --decode` rejects. Strip it rather than
+          # fail after the Windows release is already in draft.
+          ANDROID_KEY_ALIAS="${ANDROID_KEY_ALIAS%$'\n'}"; ANDROID_KEY_ALIAS="${ANDROID_KEY_ALIAS%$'\r'}"
+          ANDROID_KEY_PASSWORD="${ANDROID_KEY_PASSWORD%$'\n'}"; ANDROID_KEY_PASSWORD="${ANDROID_KEY_PASSWORD%$'\r'}"
+          export ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD
           KEYSTORE="$RUNNER_TEMP/buildmesh-release.jks"
-          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | tr -d '[:space:]' | base64 --decode > "$KEYSTORE"
           export ANDROID_KEYSTORE_PATH="$KEYSTORE"
           bash android/gradlew -p android assembleRelease --console=plain
           APK="$(ls android/app/build/outputs/apk/release/*.apk)"

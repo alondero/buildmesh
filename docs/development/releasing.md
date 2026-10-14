@@ -7,6 +7,9 @@ cut a release and the one-time setup behind it.
 
 ## Cutting a release
 
+The `/release` skill (`.claude/skills/release/SKILL.md`) runs the sequence below
+end to end, including verifying the Android APK before the draft is published.
+
 ### Versioning scheme: `-0` between releases
 
 The version in the manifests carries a `-0` suffix between releases, always

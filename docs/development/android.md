@@ -50,6 +50,18 @@ keytool -genkeypair -v -keystore buildmesh-release.jks -alias buildmesh \
   -keyalg RSA -keysize 2048 -validity 10000
 ```
 
+Set each secret from a shell that stores the exact bytes, for example
+`base64 -w0 < release.jks | gh secret set ANDROID_KEYSTORE_BASE64` in Git Bash
+(piping avoids leaving a base64 copy of the key in the working tree). Do not
+pipe a string from Windows PowerShell 5.1 (`$s | gh secret set ...`): it
+appends `\r\n`. That broke the first v1.4.1 run, where the job failed with
+`base64: invalid input` after the Windows release was already in draft. The job
+now strips trailing whitespace from the keystore secret and trailing newlines
+from the alias and password before using them, so a secret stored that way no
+longer fails the job, but set them cleanly anyway. If a run does fail, re-set
+the secrets and run `gh run rerun <run-id> --failed`; the run id is required in
+a non-interactive shell.
+
 Until those secrets exist the Android job emits a visible warning and the
 release ships Windows-only; it does not fail the release, because by that
 point the Windows build has already been published and failing would strand
