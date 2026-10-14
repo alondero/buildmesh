@@ -46,6 +46,7 @@ use reqwest::blocking::Client;
 use serde::Deserialize;
 // Internal fetcher-only helpers: imported by their defining module so the
 // `usage::` namespace stays clean for the seam surface (issue #1657).
+use crate::services::http_client::blocking_client_builder;
 use crate::services::usage::adapter::{fetch_usage, shared_client};
 use crate::services::usage::cache::cached_age;
 use crate::services::usage::types::home_dir;
@@ -380,7 +381,10 @@ fn commandcode_usage_with_path(auth_path: &Path, live_url: &str) -> UsageOutcome
             }
         }
     };
-    let client = match Client::builder().timeout(Duration::from_secs(15)).build() {
+    let client = match blocking_client_builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+    {
         Ok(client) => client,
         Err(error) => {
             return UsageOutcome::Unavailable {
@@ -1638,7 +1642,10 @@ pub fn agy_usage() -> UsageOutcome {
             }
         }
     };
-    let client = match Client::builder().timeout(Duration::from_secs(15)).build() {
+    let client = match blocking_client_builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+    {
         Ok(c) => c,
         Err(e) => {
             return UsageOutcome::Unavailable {

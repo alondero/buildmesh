@@ -327,6 +327,7 @@ fn resolve_base_ref_detects_master_via_origin_head() {
         .unwrap()
         .symbolic_target()
         .unwrap()
+        .expect("origin/HEAD must point to a symbolic reference")
         .to_string();
     assert_eq!(
         head_ref, "refs/remotes/origin/master",

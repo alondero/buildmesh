@@ -274,7 +274,7 @@ fn normalize(
         },
     ];
     if let Some(text) = final_report {
-        let revision = format!("{:x}", Sha256::digest(text.as_bytes()));
+        let revision = hex::encode(Sha256::digest(text.as_bytes()));
         facts.push(ObservedWorkFact::AssistantReport { text, revision });
     }
     let observations = facts

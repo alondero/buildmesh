@@ -282,7 +282,7 @@ fn create_ai_context_portability_pr_blocking(mesh_id: i64) -> Result<String, Str
     let remote_url = repo
         .find_remote("origin")
         .ok()
-        .and_then(|r| r.url().map(|u| u.to_string()));
+        .and_then(|r| r.url().ok().map(str::to_string));
     let (owner, repo_name) = remote_url
         .as_deref()
         .and_then(github::parse_owner_repo)

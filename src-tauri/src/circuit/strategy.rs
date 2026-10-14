@@ -71,7 +71,7 @@ pub struct NativeHook {
 /// rather than two independently defined fingerprints.
 pub(crate) fn submission_digest(text: &str) -> String {
     use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(text.as_bytes()))
+    hex::encode(Sha256::digest(text.as_bytes()))
 }
 
 /// Vendor payload → [`NativeHook`]. `None` means the payload is malformed or

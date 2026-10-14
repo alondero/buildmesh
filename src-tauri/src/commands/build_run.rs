@@ -81,7 +81,7 @@ fn validate_worktree_exists(
 
     // Check if our worktree name is in the list
     for i in 0..worktrees.len() {
-        if let Some(name) = worktrees.get(i) {
+        if let Ok(Some(name)) = worktrees.get(i) {
             if name == wt_name {
                 return Ok(());
             }

@@ -162,8 +162,8 @@ pub(crate) fn get_git_branch_status_blocking(
     // shorthand() yields the branch name, "HEAD" when detached, and None only
     // for a non-UTF8 ref name (which we can't represent, so treat as no branch).
     let name = match head.shorthand() {
-        Some(n) => n.to_string(),
-        None => return Ok(None),
+        Ok(n) => n.to_string(),
+        Err(_) => return Ok(None),
     };
 
     let local_oid = head.target();
@@ -312,7 +312,7 @@ pub(crate) fn get_git_summary_blocking(path: String) -> Result<GitSummary, Strin
 /// with only a path still go through [`get_default_branch`].
 pub(crate) fn default_branch_from_repo(repo: &Repository) -> String {
     if let Ok(reference) = repo.find_reference("refs/remotes/origin/HEAD") {
-        if let Some(target) = reference.symbolic_target() {
+        if let Ok(Some(target)) = reference.symbolic_target() {
             if let Some(branch) = target.strip_prefix("refs/remotes/origin/") {
                 return branch.to_string();
             }

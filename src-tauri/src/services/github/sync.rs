@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::process_util::command_no_window;
+use crate::services::http_client::blocking_client_builder;
 
 /// Error type for GitHub API operations
 #[derive(Debug)]
@@ -119,7 +120,7 @@ fn build_http_client(
     connect_timeout: Duration,
     request_timeout: Duration,
 ) -> Result<Client, reqwest::Error> {
-    Client::builder()
+    blocking_client_builder()
         .connect_timeout(connect_timeout)
         .timeout(request_timeout)
         .build()

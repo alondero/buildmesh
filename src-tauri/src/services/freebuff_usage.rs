@@ -22,13 +22,13 @@
 //! `commands/usage.rs` makes the meter card detection-gated: it appears
 //! only when the freebuff binary is installed.
 
-use reqwest::blocking::Client;
 use serde::Deserialize;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::services::http_client::blocking_client_builder;
 use crate::services::usage::outcome::UsageOutcome;
 use crate::services::usage::types::{BillingBalance, UsageError, UsageWindow};
 
@@ -339,7 +339,10 @@ pub(crate) fn freebuff_usage_with(candidates: &[PathBuf], live_url: &str) -> Usa
             }
         }
     };
-    let client = match Client::builder().timeout(Duration::from_secs(15)).build() {
+    let client = match blocking_client_builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+    {
         Ok(client) => client,
         Err(error) => {
             return UsageOutcome::Unavailable {

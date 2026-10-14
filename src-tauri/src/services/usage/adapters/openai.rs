@@ -7,12 +7,12 @@
 //! orchestration only.
 
 use crate::preferences::ProviderAccount;
+use crate::services::http_client::blocking_client_builder;
 use crate::services::usage::adapter::{api_key_for, UsageAdapter};
 use crate::services::usage::outcome::UsageOutcome;
 use crate::services::usage::types::UsagePage;
 use crate::services::usage::types::{BillingBalance, UsageError};
 use chrono::Datelike;
-use reqwest::blocking::Client;
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -167,7 +167,10 @@ fn openai_usage_with_base_url(api_key: &str, base_url: &str) -> UsageOutcome {
         };
     }
 
-    let client = match Client::builder().timeout(Duration::from_secs(15)).build() {
+    let client = match blocking_client_builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+    {
         Ok(c) => c,
         Err(e) => {
             return UsageOutcome::Unavailable {

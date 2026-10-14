@@ -5,11 +5,11 @@
 //! response parsing. `usage.rs` keeps orchestration only.
 
 use crate::preferences::ProviderAccount;
+use crate::services::http_client::blocking_client_builder;
 use crate::services::usage::adapter::{api_key_for, UsageAdapter};
 use crate::services::usage::outcome::UsageOutcome;
 use crate::services::usage::types::UsagePage;
 use crate::services::usage::types::{BillingBalance, UsageError};
-use reqwest::blocking::Client;
 use serde::Deserialize;
 
 /// Drop-in [`UsageAdapter`] for `kimi`.
@@ -107,7 +107,7 @@ pub(crate) fn kimi_usage(api_key: &str) -> UsageOutcome {
         };
     }
 
-    let client = match Client::builder().build() {
+    let client = match blocking_client_builder().build() {
         Ok(c) => c,
         Err(e) => {
             return UsageOutcome::Unavailable {

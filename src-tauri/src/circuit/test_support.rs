@@ -42,7 +42,7 @@ pub(crate) fn record_report_evidence(
         run,
         owner,
         text,
-        &format!("turn-{:x}", Sha256::digest(text.as_bytes())),
+        &format!("turn-{}", hex::encode(Sha256::digest(text.as_bytes()))),
     )
 }
 
@@ -59,7 +59,7 @@ pub(crate) fn record_report_evidence_for_turn(
         .or_else(|| run.resolve_target_agent(owner))
         .expect("native evidence fixture target");
     let attempt = step.attempt;
-    let revision = format!("{:x}", Sha256::digest(text.as_bytes()));
+    let revision = hex::encode(Sha256::digest(text.as_bytes()));
     let identity = ObservationIdentity {
         run_id: run.run_id,
         step_id: owner.into(),

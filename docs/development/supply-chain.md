@@ -66,6 +66,10 @@ ecosystem while the gates keep the safety. Cargo is split by semver level so a
 major bump — the kind that changes an API — arrives alone rather than hidden in
 a batch.
 
+Dependabot label assignment is omitted because the repository does not define
+the `dependencies` or `security` labels; a configured missing label makes the
+bot reject the update configuration.
+
 The Actions group matters most for this policy: Dependabot rewrites a
 SHA-pinned `uses:` **and** the `# vX.Y.Z` comment beside it, so pinning does not
 mean updates become manual.

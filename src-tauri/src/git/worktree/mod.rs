@@ -293,7 +293,7 @@ fn classify_worktree_add_failure(stderr: &str) -> AddWorktreeFailureKind {
 fn prune_stale_worktrees(repo: &git2::Repository) {
     if let Ok(worktree_names) = repo.worktrees() {
         for i in 0..worktree_names.len() {
-            if let Some(name) = worktree_names.get(i) {
+            if let Ok(Some(name)) = worktree_names.get(i) {
                 if let Ok(wt) = repo.find_worktree(name) {
                     if wt.validate().is_err() {
                         let mut prune_opts = git2::WorktreePruneOptions::new();
@@ -478,7 +478,7 @@ fn is_valid_linked_worktree(project_root: &str, host_path: &std::path::Path) -> 
         return false;
     };
     for i in 0..names.len() {
-        let Some(name) = names.get(i) else {
+        let Ok(Some(name)) = names.get(i) else {
             continue;
         };
         if let Ok(wt) = parent_repo.find_worktree(name) {
@@ -1027,7 +1027,7 @@ fn head_has_unpushed_or_unmerged_commits(
     head_oid: Oid,
     is_detached: bool,
 ) -> bool {
-    let current_refname = head.name();
+    let current_refname = head.name().ok();
 
     if !is_detached {
         if let Some(refname) = current_refname {
@@ -1038,7 +1038,7 @@ fn head_has_unpushed_or_unmerged_commits(
                 // auto-delete); the reachability walk below is the better
                 // safety net there, so we fall through instead of warning
                 // unconditionally (#252).
-                if let Some(upstream_refname) = upstream_buf.as_str() {
+                if let Ok(upstream_refname) = upstream_buf.as_str() {
                     if let Ok(upstream_ref) = repo.find_reference(upstream_refname) {
                         if let Some(upstream_oid) = upstream_ref.target() {
                             return primitives::ahead_behind(repo, head_oid, upstream_oid)
@@ -1064,7 +1064,7 @@ fn head_is_reachable_from_another_branch_or_remote(
     };
 
     for reference in references.flatten() {
-        let Some(name) = reference.name() else {
+        let Ok(name) = reference.name() else {
             continue;
         };
         if Some(name) == current_refname || name.ends_with("/HEAD") {
@@ -1411,7 +1411,15 @@ fn prune_orphaned_worktree_entry_with(
         )
     })?;
     for i in 0..names.len() {
-        let Some(name) = names.get(i) else { continue };
+        let Some(name) = names.get(i).map_err(|error| {
+            WorktreeRemovalFailure::new(
+                OP_PRUNE_ADMIN_ENTRY,
+                format!("could not read a registered worktree name for {host_path}: {error}"),
+            )
+        })?
+        else {
+            continue;
+        };
         let Ok(worktree) = repo.find_worktree(name) else {
             continue;
         };
@@ -2025,7 +2033,7 @@ mod tests {
             .worktrees()
             .unwrap()
             .iter()
-            .flatten()
+            .filter_map(|name| name.ok().flatten())
             .filter_map(|n| root_repo.find_worktree(n).ok())
             .any(|w| w.path() == wt.as_path());
         assert!(
@@ -2120,7 +2128,7 @@ mod tests {
         let repo = git2::Repository::open(root).expect("repo must open");
         let names = repo.worktrees().expect("worktrees must list");
         (0..names.len())
-            .filter_map(|i| names.get(i))
+            .filter_map(|i| names.get(i).ok().flatten())
             .filter_map(|n| repo.find_worktree(n).ok())
             .map(|w| w.path().to_path_buf())
             .collect()
@@ -2470,7 +2478,7 @@ mod tests {
             .worktrees()
             .unwrap()
             .iter()
-            .flatten()
+            .filter_map(|name| name.ok().flatten())
             .filter_map(|n| root.find_worktree(n).ok())
             .any(|wt| wt.path() == dst.as_path());
         assert!(

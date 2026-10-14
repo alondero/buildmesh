@@ -115,17 +115,19 @@ pub(crate) fn compute_mesh_health(repo: &Repository, base_ref: &str) -> Result<M
 
     // Read HEAD state. `head()` errors on an unborn HEAD (no commits yet).
     let (current_branch, current_short_sha, is_detached) = match repo.head() {
-        Ok(_) => {
+        Ok(head) => {
             let detached = repo.head_detached().unwrap_or(false);
             let name = if detached {
                 Some("HEAD".to_string())
             } else {
-                repo.head()
-                    .ok()
-                    .and_then(|h| h.shorthand().map(|s| s.to_string()))
+                Some(
+                    head.shorthand()
+                        .map(str::to_string)
+                        .map_err(|error| format!("failed to read current branch name: {error}"))?,
+                )
             };
-            let oid = repo.head().ok().and_then(|h| h.target());
-            let short_sha = oid
+            let short_sha = head
+                .target()
                 .map(|o| primitives::short_sha(repo, o))
                 .unwrap_or_default();
             (name, short_sha, detached)
@@ -189,7 +191,7 @@ fn compute_unpushed(
     // *configured* (distinct from resolvable), so we keep that check here for
     // the `has_upstream` flag and use the primitive only for the count.
     if let Ok(upstream_buf) = repo.branch_upstream_name(&refname) {
-        if let Some(upstream_ref) = upstream_buf.as_str() {
+        if let Ok(upstream_ref) = upstream_buf.as_str() {
             if let Ok(up_ref) = repo.find_reference(upstream_ref) {
                 if let (Some(head_oid), Some(up_oid)) =
                     (repo.head().ok().and_then(|h| h.target()), up_ref.target())
@@ -311,7 +313,7 @@ pub(crate) fn find_base_branch_holder(
 ) -> Option<HoldingWorktree> {
     // Linked worktrees only — the main worktree (root) is never a hostage.
     if let Ok(names) = repo.worktrees() {
-        for wt_name in names.iter().flatten() {
+        for wt_name in names.iter().filter_map(|name| name.ok().flatten()) {
             if let Ok(wt) = repo.find_worktree(wt_name) {
                 let path = wt.path();
                 if let Ok(wt_repo) = Repository::open(path) {

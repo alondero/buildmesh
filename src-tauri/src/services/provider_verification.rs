@@ -6,6 +6,7 @@ use crate::models::EnvType;
 use crate::preferences::{
     self, PairingVerification, PairingVerificationStatus, ProviderAccount, ProviderPairing,
 };
+use crate::services::http_client::blocking_client_builder;
 use chrono::Utc;
 use std::io::BufRead;
 
@@ -81,7 +82,7 @@ fn verify_responses_agent_loop(
         .ok()
         .and_then(|u| u.host_str().map(str::to_string))
         .unwrap_or_else(|| "provider".into());
-    let client = reqwest::blocking::Client::builder()
+    let client = blocking_client_builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| format!("could not initialize verification client: {e}"))?;
