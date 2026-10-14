@@ -155,7 +155,7 @@ export function checkContentViolations(filePath, newText) {
 
 export function checkWorktreeEscape(filePath, cwd) {
   // Catches the #1 recurring Windows trap: a session running inside a git worktree
-  // (…/.claude/worktrees/<name>/) editing an ABSOLUTE path that lands in the main
+  // (…/.worktrees/<name>/ or the legacy layout) editing an ABSOLUTE path in the main
   // checkout instead. The edit silently goes to the wrong branch and `cargo test`
   // greens against the unchanged tree. Returns a message string, or null if safe.
   // Set BUILDMESH_ALLOW_WORKTREE_ESCAPE=1 to deliberately edit outside the worktree.
@@ -169,7 +169,7 @@ export function checkWorktreeEscape(filePath, cwd) {
   if (!isAbsolute) return null;
 
   const normCwd = cwd.replace(/\\/g, "/");
-  const wt = normCwd.match(/^(.*?)([/\\]?\.claude\/worktrees\/[^/]+)/i);
+  const wt = normCwd.match(/^(.*?)([/\\]?(?:\.worktrees|\.claude\/worktrees)\/[^/]+)/i);
   if (!wt) return null; // not inside a worktree — nothing to check
 
   const mainRoot = wt[1]; // e.g. X:/src/buildmesh

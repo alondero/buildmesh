@@ -341,7 +341,7 @@ pub fn create_with_source_pr_fork_configured(
     };
 
     // Issue #1519: persist the exact resolved `worktree_path` at creation
-    // (Mesh override → app default → `.claude/worktrees`). `None` for Root
+    // (Mesh override → app default → `.worktrees`). `None` for Root
     // Nodes. Existing rows without it retain the legacy fallback via
     // `env::node_working_path`, so changing a setting affects future nodes
     // without moving live worktrees.
@@ -758,11 +758,32 @@ pub fn import_discovered_session(
     };
     let session_name = crate::session_naming::on_spawn();
     let use_worktree = worktree_name.is_some();
-    let (worktree_path, env_type) = place_worktree(
+    let (mut worktree_path, mut env_type) = place_worktree(
         &mesh.path,
         mesh.worktree_directory.as_deref(),
         worktree_name,
     );
+    // Import resumes an existing checkout. Built-in layouts remain valid
+    // discovery locations even after the user changes the configured dir.
+    if let Some(name) = worktree_name.map(str::trim).filter(|name| !name.is_empty()) {
+        let current_exists = worktree_path
+            .as_deref()
+            .is_some_and(crate::git::project::is_materialized_checkout);
+        if !current_exists {
+            let default_dir = env::effective_worktree_dir_raw(&mesh.path, None, None);
+            let built_in_paths = [
+                env::resolve_agent_path_in_dir(&mesh.path, &default_dir, Some(name)),
+                env::resolve_agent_path(&mesh.path, Some(name)),
+            ];
+            if let Some(existing) = built_in_paths
+                .into_iter()
+                .find(|path| crate::git::project::is_materialized_checkout(&path.host_path))
+            {
+                worktree_path = Some(existing.raw_path);
+                env_type = existing.env_type;
+            }
+        }
+    }
     let provider_id = provider.unwrap_or("anthropic");
     let node = db::create_agent_node(
         mesh_id,
@@ -3083,6 +3104,83 @@ mod tests {
         )
         .expect_err("unknown mesh wins over the prompt rule");
         assert!(matches!(err, AgentNodeError::MeshNotFound(-1)));
+    }
+
+    #[test]
+    fn create_persists_default_worktree_path() {
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
+        let mesh = db::get_mesh_by_id(mesh_id).unwrap();
+        let node = create_blocking(
+            mesh_id,
+            Some("codex"),
+            Some("main"),
+            None,
+            Some("new-node"),
+            Some(true),
+            false,
+            None,
+        )
+        .expect("create a default worktree node");
+        let expected = format!("{}/.worktrees/new-node", mesh.path);
+        assert_eq!(node.worktree_path.as_deref(), Some(expected.as_str()));
+        assert_eq!(env::node_git_path(&node).raw_path, expected);
+        let saved = db::get_agent_node_by_id(node.id).unwrap();
+        assert_eq!(saved.worktree_path, node.worktree_path);
+    }
+
+    #[test]
+    fn import_preserves_default_checkout_after_directory_override() {
+        let root = TempDir::new();
+        let _repo = init_repo(root.path());
+        let _db = crate::db::test_support::isolated();
+        let mesh = db::create_mesh("default-import", root.path().to_str().unwrap()).unwrap();
+        let path = format!("{}/.worktrees/default-node", mesh.path);
+        crate::git::worktree::create_git_worktree(
+            &mesh.path,
+            &path,
+            "default-node",
+            "detached",
+            "HEAD",
+        )
+        .unwrap();
+        db::set_mesh_worktree_directory(mesh.id, Some("custom-wt")).unwrap();
+        let node = import_discovered_session(
+            mesh.id,
+            "22222222-2222-2222-2222-222222222222",
+            "main",
+            Some("default-node"),
+            Some("codex"),
+        )
+        .unwrap();
+        assert_eq!(node.worktree_path.as_deref(), Some(path.as_str()));
+        assert_eq!(env::node_git_path(&node).raw_path, path);
+        assert!(!root.path().join("custom-wt/default-node").exists());
+    }
+
+    #[test]
+    fn import_preserves_existing_legacy_checkout_after_default_changes() {
+        let root = TempDir::new();
+        let repo = init_repo(root.path());
+        let legacy_path = add_worktree(&repo, &root, "legacy-node");
+        let _db = crate::db::test_support::isolated();
+        let mesh = db::create_mesh("legacy-import", root.path().to_str().unwrap()).unwrap();
+        let node = import_discovered_session(
+            mesh.id,
+            "11111111-1111-1111-1111-111111111111",
+            "legacy-node",
+            Some("legacy-node"),
+            Some("codex"),
+        )
+        .unwrap();
+        let expected = env::resolve_agent_path(&mesh.path, Some("legacy-node"));
+        assert_eq!(
+            node.worktree_path.as_deref(),
+            Some(expected.raw_path.as_str())
+        );
+        assert_eq!(env::node_git_path(&node).raw_path, expected.raw_path);
+        assert!(legacy_path.join("file.txt").is_file());
+        assert!(!root.path().join(".worktrees/legacy-node").exists());
     }
 
     #[test]

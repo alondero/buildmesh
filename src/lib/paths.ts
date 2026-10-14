@@ -46,7 +46,7 @@ export function getNodeWorkingPath(node: Parameters<typeof getNodeGitPath>[0] & 
 
 /**
  * Effective worktree container dir (raw form) for a Mesh.
- * Precedence: Mesh override → app default → `.claude/worktrees` under root.
+ * Precedence: Mesh override → app default → `.worktrees` under root.
  * Relative values join from `meshPath` with `/`; absolute used verbatim.
  * Trimmed; blank collapses to inherit/default. No shell/`~` expansion.
  * Mirrors `env::effective_worktree_dir_raw` — keep the two in sync.
@@ -62,18 +62,18 @@ export function getEffectiveWorktreeDir(
   };
   const chosen = clean(meshDirectory) ?? clean(appDirectory);
   const root = meshPath.replace(/[/\\]+$/, '');
-  if (!chosen) return `${root}/.claude/worktrees`;
+  if (!chosen) return `${root}/.worktrees`;
   // Mirrors the backend normalization (issue #1519): trailing separators
   // trimmed on absolute values; leading/trailing stripped on relative ones
   // (the backend additionally rejects `.`/`..`/forbidden segments at the
   // write boundary — this helper is display-only).
   if (isAbsoluteWorktreePath(chosen)) {
     const dir = chosen.replace(/[/\\]+$/, '');
-    if (!dir) return `${root}/.claude/worktrees`;
+    if (!dir) return `${root}/.worktrees`;
     return dir;
   }
   const dir = chosen.replace(/^[/\\]+/, '').replace(/[/\\]+$/, '');
-  if (!dir) return `${root}/.claude/worktrees`;
+  if (!dir) return `${root}/.worktrees`;
   return `${root}/${dir}`;
 }
 
@@ -134,15 +134,12 @@ export function pathMatchesGitEvent(
   if (!watchedPath) return false;
 
   const watched = normalizePath(watchedPath);
-  // The worktree-prefix form is what makes a mesh-root subscription catch
-  // edits inside any of its worktree subdirs. It's a no-op for worktree
-  // paths (a worktree is already `<root>/.claude/worktrees/<name>`, so a path
-  // starting with `<worktree>/.claude/worktrees/` would only ever match a
-  // *nested* worktree, which buildmesh never creates).
-  // Issue #1519: also match any subdir under the mesh root (covers relative
-  // custom dirs inside the mesh) plus the configured effective dirs
-  // (covers absolute locations outside the root).
-  const legacyPrefix = `${watched}/.claude/worktrees/`;
+  // Match both built-in layouts even while the effective-dir query is
+  // loading. Custom containers arrive through the explicit extra dirs.
+  const defaultPrefixes = [
+    `${watched}/.worktrees/`,
+    `${watched}/.claude/worktrees/`,
+  ];
   const extraPrefixes = (effectiveDirs ?? [])
     .filter((d): d is string => typeof d === 'string' && d.trim().length > 0)
     .map((d) => `${normalizePath(d)}/`);
@@ -153,7 +150,7 @@ export function pathMatchesGitEvent(
   for (const candidate of candidates) {
     const norm = normalizePath(candidate);
     if (norm === watched) return true;
-    if (norm.startsWith(legacyPrefix)) return true;
+    if (defaultPrefixes.some((prefix) => norm.startsWith(prefix))) return true;
     for (const prefix of extraPrefixes) {
       if (norm === normalizePath(prefix.slice(0, -1))) return true;
       if (norm.startsWith(prefix)) return true;

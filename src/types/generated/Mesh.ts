@@ -90,7 +90,7 @@ circuit_run_capacity: number,
  * relative resolves from the Mesh root, absolute must match the
  * Mesh's host environment, blank collapses to `None` (inherit).
  * Precedence: Mesh override → application default →
- * `.claude/worktrees` under the Mesh root. Changing it affects
+ * `.worktrees` under the Mesh root. Changing it affects
  * future nodes only — live nodes keep their persisted
  * [`AgentNode::worktree_path`]. Persisted as
  * `meshes.worktree_directory TEXT` (schema v37); empty/absent

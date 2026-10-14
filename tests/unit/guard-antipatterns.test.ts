@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { spawnSync } from "node:child_process";
 import {
   checkContentViolations,
   checkWorktreeEscape,
@@ -10,6 +11,25 @@ const CWD_WORKTREE = "X:\\src\\buildmesh\\.claude\\worktrees\\red-rare-hedge";
 const CWD_MAIN = "X:\\src\\buildmesh";
 
 describe("checkWorktreeEscape", () => {
+  it("protects the provider-neutral layout through the hook entrypoint", () => {
+    for (const [filePath, expectedStatus] of [
+      ["X:/src/buildmesh/CLAUDE.md", 2],
+      ["X:/src/buildmesh/.worktrees/other/CLAUDE.md", 2],
+      ["X:/src/buildmesh/.worktrees/current/CLAUDE.md", 0],
+    ] as const) {
+      const result = spawnSync(process.execPath, [".claude/hooks/guard-antipatterns.mjs"], {
+        encoding: "utf8",
+        input: JSON.stringify({
+          tool_name: "Edit",
+          cwd: "X:/src/buildmesh/.worktrees/current/src",
+          tool_input: { file_path: filePath, new_string: "context" },
+        }),
+      });
+      expect(result.status).toBe(expectedStatus);
+      if (expectedStatus === 2) expect(result.stderr).toContain("[worktree-escape]");
+    }
+  });
+
   it("blocks an absolute edit into the main checkout while cwd is a worktree", () => {
     const msg = checkWorktreeEscape(
       "X:\\src\\buildmesh\\src-tauri\\src\\db\\mod.rs",
