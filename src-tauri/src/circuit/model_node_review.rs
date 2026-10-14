@@ -1,6 +1,6 @@
-use super::model::{CircuitGraph, CircuitNodeKind as K};
 #[cfg(test)]
-use super::model::{CircuitNode, EdgeCondition};
+use super::model::CircuitNode;
+use super::model::{CircuitEdge, CircuitGraph, CircuitNodeKind as K, EdgeCondition, StepOutcome};
 
 pub(crate) const LOCAL_APPROVED_MESSAGE: &str = "Review approved for {{source.name}} (agent {{source.agent_id}}). It was asked to squash-merge its pull request and has been handed back to you.";
 pub(crate) const LOCAL_REVIEW_INCONCLUSIVE_MESSAGE: &str = "Review needs attention for {{source.name}}: the reviewer could not give a verdict. See the review report in the run context.";
@@ -23,6 +23,45 @@ impl CircuitGraph {
             return true;
         }
         let mut upgraded = self.clone();
+        // Pinned stock graphs retain the old inconclusive-review branch.
+        // ReviewVerdict now parks that outcome as Unverified. Normalize only
+        // its exact former route in this comparison copy, keeping the ledger intact.
+        if matches!(self.node("close_blocked").map(|node| &node.kind),
+            Some(K::CloseAgentNode { target_node_id }) if target_node_id.as_deref() == Some("reviewer"))
+            && matches!(
+                self.node("blocked").map(|node| &node.kind),
+                Some(K::Notify { .. })
+            )
+        {
+            for edge in [
+                CircuitEdge {
+                    from: "verdict".into(),
+                    to: "close_blocked".into(),
+                    condition: EdgeCondition::OnOutcome(StepOutcome::Blocked),
+                },
+                CircuitEdge {
+                    from: "close_blocked".into(),
+                    to: "blocked".into(),
+                    condition: EdgeCondition::Always,
+                },
+            ] {
+                let Some(index) = upgraded.edges.iter().position(|actual| actual == &edge) else {
+                    return false;
+                };
+                upgraded.edges.remove(index);
+            }
+            for id in ["close_blocked", "blocked"] {
+                let index = upgraded
+                    .nodes
+                    .iter()
+                    .position(|node| node.id == id)
+                    .unwrap();
+                upgraded.nodes.remove(index);
+            }
+            if upgraded.has_review_topology_of(&expected) {
+                return true;
+            }
+        }
         super::stored_graph::upgrade(&mut upgraded, super::stored_graph::UpgradeTarget::Preset)
             && upgraded.has_review_topology_of(&expected)
     }
@@ -504,6 +543,66 @@ mod continuation_contract_tests {
             !graph.has_local_review_contract(),
             "continuation must not inherit extra actions"
         );
+    }
+
+    #[test]
+    fn historical_inconclusive_branch_keeps_the_review_contract_strict() {
+        let graph = CircuitGraph::from_json(include_str!(
+            "../../tests/fixtures/legacy-local-review-circuit.json"
+        ))
+        .unwrap();
+        assert!(graph.has_local_review_contract());
+
+        let mut wrong_target = graph.clone();
+        wrong_target
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "close_blocked")
+            .unwrap()
+            .kind = K::CloseAgentNode {
+            target_node_id: Some("$source".into()),
+        };
+        assert!(!wrong_target.has_local_review_contract());
+
+        let mut wrong_outcome = graph.clone();
+        wrong_outcome
+            .edges
+            .iter_mut()
+            .find(|edge| edge.to == "close_blocked")
+            .unwrap()
+            .condition = EdgeCondition::Always;
+        assert!(!wrong_outcome.has_local_review_contract());
+
+        let mut extra_route = graph.clone();
+        let route = extra_route
+            .edges
+            .iter()
+            .find(|edge| edge.to == "close_blocked")
+            .unwrap()
+            .clone();
+        extra_route.edges.push(route);
+        assert!(!extra_route.has_local_review_contract());
+
+        let mut extra_action = graph.clone();
+        extra_action.edges.push(CircuitEdge {
+            from: "blocked".into(),
+            to: "merge".into(),
+            condition: EdgeCondition::Always,
+        });
+        assert!(!extra_action.has_local_review_contract());
+
+        let mut legacy = crate::circuit::test_support::pre_publication_local_review(3);
+        for id in ["close_blocked", "blocked"] {
+            legacy.nodes.push(graph.node(id).unwrap().clone());
+        }
+        legacy.edges.extend(
+            graph
+                .edges
+                .iter()
+                .filter(|edge| edge.to == "close_blocked" || edge.from == "close_blocked")
+                .cloned(),
+        );
+        assert!(legacy.has_local_review_contract());
     }
 
     #[test]

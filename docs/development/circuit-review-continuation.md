@@ -21,6 +21,13 @@ as reviewer approval.
 
 Review extension supports the stock node review and issue-driven review blueprint. It keeps the Circuit and Run IDs, increases the run's round limit, and pins a review-only graph with the original reviewer prompt, overrides and feedback instructions. Each replaced graph is retained in the run's snapshot history, so the original immutable run snapshot remains recoverable. This archive is preservation-only for manual/offline recovery; the Probe does not currently expose replaced graphs. PR review scope and instructions to update the PR survive. The next attempt gets fresh observer state and a fresh reviewer; implementation and publication steps are not replayed. Previous step transitions and findings remain in Run History. Existing automatically created Continued Review circuits are consolidated under their original Circuit on upgrade, with each historic run and its pinned snapshot preserved.
 
+Historical local review snapshots may retain the former inconclusive-review
+branch that closed the reviewer and notified the user. Review again recognizes
+that stock branch when checking compatibility, including snapshots from before
+the publication flow. Changed targets, routing conditions or additional actions
+still require manual recovery. Compatibility checking leaves the saved graph
+intact; an extension archives it before queuing the next review attempt.
+
 An explicit extension admits even if the issue review Circuit was disabled after its original run; disabling still parks new background triggers. An implementation agent originally owned by that Circuit remains counted against the optional global agent pool while the extended review borrows it.
 
 The review handoff accepts a clean finished turn even when the overall task is unfinished. Ambiguous permission/input waits still require inspection; clicking Start Review does not answer a question in the implementation terminal.

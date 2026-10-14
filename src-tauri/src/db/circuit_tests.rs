@@ -1502,6 +1502,125 @@ fn failed_review_continuation_keeps_history_and_borrows_the_same_worktree() {
 }
 
 #[test]
+fn extending_legacy_local_review_accepts_the_run_482_topology() {
+    use super::circuit::recovery::{extend_failed_review_locked, review_recovery_inner};
+    use crate::circuit::context::CircuitContext;
+    use crate::circuit::model::EdgeCondition;
+    let mut conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "legacy review", "/tmp/legacy-review").unwrap();
+    let source = create_agent_node_inner(
+        &conn,
+        mesh.id,
+        "Review source",
+        &mesh.path,
+        "work",
+        EnvType::Windows,
+        "codex",
+        None,
+        None,
+        None,
+        None,
+        true,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
+    let run_id = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None).unwrap();
+    let graph_json = include_str!("../../tests/fixtures/legacy-local-review-circuit.json");
+    conn.execute(
+        "UPDATE circuit_run_snapshots SET graph_json=?2 WHERE run_id=?1",
+        params![run_id, graph_json],
+    )
+    .unwrap();
+    commit_circuit_advance_locked(
+        &mut conn,
+        run_id,
+        Some("failed"),
+        None,
+        &[CircuitStepOp {
+            node_id: "verdict".into(),
+            status: "completed".into(),
+            outcome: Some(Some("working".into())),
+            error: None,
+            agent_node_id: None,
+            attempt: 3,
+            fresh_attempt: false,
+        }],
+    )
+    .unwrap();
+    let original = get_circuit_run_inner(&conn, run_id).unwrap().unwrap();
+    let history_before: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM circuit_run_history WHERE run_id=?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    assert_eq!(
+        extend_failed_review_locked(&mut conn, run_id, 1).unwrap(),
+        run_id
+    );
+    let extended = get_circuit_run_inner(&conn, run_id).unwrap().unwrap();
+    assert_eq!(extended.circuit_id, original.circuit_id);
+    assert_eq!(extended.source_agent_node_id, Some(source.id));
+    assert_eq!(extended.state, "pending");
+    let context = CircuitContext::from_json(&extended.context_json).unwrap();
+    assert_eq!(context.get("retry.max_retries"), Some("4"));
+    assert_eq!(context.get("retry.attempt"), Some("4"));
+    let archived: String = conn
+        .query_row(
+            "SELECT graph_json FROM circuit_run_snapshot_history WHERE run_id=?1 AND attempt=4",
+            [run_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(archived, graph_json);
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM circuit_run_history WHERE run_id=?1",
+            [run_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        history_before + 1
+    );
+    let steps = list_circuit_run_steps_inner(&conn, run_id).unwrap();
+    assert_eq!(
+        steps
+            .iter()
+            .find(|step| step.node_id == "reviewer")
+            .unwrap()
+            .status,
+        "pending_slot"
+    );
+    assert!(steps
+        .iter()
+        .filter(|step| step.node_id != "reviewer")
+        .all(|step| step.status == "completed"));
+
+    // A near-stock graph must still be rejected if approval can be bypassed.
+    set_circuit_run_state_inner(&conn, run_id, "failed").unwrap();
+    let mut bypassed = CircuitGraph::from_json(graph_json).unwrap();
+    bypassed
+        .edges
+        .iter_mut()
+        .find(|edge| edge.to == "close_approved")
+        .unwrap()
+        .condition = EdgeCondition::Always;
+    conn.execute(
+        "UPDATE circuit_run_snapshots SET graph_json=?2 WHERE run_id=?1",
+        params![run_id, bypassed.to_json().unwrap()],
+    )
+    .unwrap();
+    assert!(review_recovery_inner(&conn, run_id, 5)
+        .unwrap_err()
+        .contains("custom circuit needs manual recovery"));
+}
+
+#[test]
 fn extending_failed_review_reuses_its_run_and_circuit_with_a_fresh_attempt() {
     use super::circuit::recovery::extend_failed_review_locked;
     use crate::circuit::context::CircuitContext;

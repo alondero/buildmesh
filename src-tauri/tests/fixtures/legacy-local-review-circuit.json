@@ -1,0 +1,295 @@
+{
+  "version": 2,
+  "nodes": [
+    {
+      "id": "trigger",
+      "type": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "await_source",
+      "type": {
+        "type": "await_agent_turn",
+        "target_node_id": "$source"
+      }
+    },
+    {
+      "id": "confirm_source",
+      "type": {
+        "type": "collaborator_check",
+        "require_approval": true
+      }
+    },
+    {
+      "id": "source_ready",
+      "type": {
+        "type": "any_completed"
+      }
+    },
+    {
+      "id": "reviewer",
+      "type": {
+        "type": "spawn_agent_node",
+        "prompt": "Review {{source.name}} against {{source.base_ref}}. Latest report: {{source.output}}. Round {{retry.attempt}} of {{retry.max_retries}}.",
+        "name": "Code reviewer",
+        "provider": "launch/codex",
+        "model": null,
+        "effort": null,
+        "extra_args": null,
+        "timeout_seconds": null
+      }
+    },
+    {
+      "id": "verdict",
+      "type": {
+        "type": "review_verdict",
+        "target_node_id": "reviewer"
+      }
+    },
+    {
+      "id": "feedback",
+      "type": {
+        "type": "inject_pty",
+        "prompt": "Fix the findings and update the PR: {{node.reviewer.output}}.",
+        "target_node_id": "$source"
+      }
+    },
+    {
+      "id": "await_fixes",
+      "type": {
+        "type": "llm_turn_classifier",
+        "target_node_id": "$source"
+      }
+    },
+    {
+      "id": "retry",
+      "type": {
+        "type": "retry_limit",
+        "max_retries": 3
+      }
+    },
+    {
+      "id": "close_approved",
+      "type": {
+        "type": "close_agent_node",
+        "target_node_id": "reviewer"
+      }
+    },
+    {
+      "id": "approved",
+      "type": {
+        "type": "notify",
+        "message": "Stock approved notification."
+      }
+    },
+    {
+      "id": "close_blocked",
+      "type": {
+        "type": "close_agent_node",
+        "target_node_id": "reviewer"
+      }
+    },
+    {
+      "id": "blocked",
+      "type": {
+        "type": "notify",
+        "message": "Stock blocked notification."
+      }
+    },
+    {
+      "id": "exhausted",
+      "type": {
+        "type": "notify",
+        "message": "Stock exhausted notification."
+      }
+    },
+    {
+      "id": "publish",
+      "type": {
+        "type": "inject_pty",
+        "prompt": "Stock publish instructions.",
+        "target_node_id": "$source"
+      }
+    },
+    {
+      "id": "await_publish",
+      "type": {
+        "type": "await_agent_turn",
+        "target_node_id": "$source"
+      }
+    },
+    {
+      "id": "confirm_publish",
+      "type": {
+        "type": "collaborator_check",
+        "require_approval": true
+      }
+    },
+    {
+      "id": "publish_ready",
+      "type": {
+        "type": "any_completed"
+      }
+    },
+    {
+      "id": "review_round",
+      "type": {
+        "type": "any_completed"
+      }
+    },
+    {
+      "id": "re_review",
+      "type": {
+        "type": "inject_pty",
+        "prompt": "Stock re_review instructions.",
+        "target_node_id": "reviewer"
+      }
+    },
+    {
+      "id": "merge",
+      "type": {
+        "type": "inject_pty",
+        "prompt": "Stock merge instructions.",
+        "target_node_id": "$source"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "await_source",
+      "condition": "always"
+    },
+    {
+      "from": "await_source",
+      "to": "source_ready",
+      "condition": {
+        "on_outcome": "completed"
+      }
+    },
+    {
+      "from": "await_source",
+      "to": "confirm_source",
+      "condition": {
+        "on_outcome": "blocked"
+      }
+    },
+    {
+      "from": "confirm_source",
+      "to": "source_ready",
+      "condition": "always"
+    },
+    {
+      "from": "source_ready",
+      "to": "publish",
+      "condition": "always"
+    },
+    {
+      "from": "reviewer",
+      "to": "review_round",
+      "condition": "always"
+    },
+    {
+      "from": "verdict",
+      "to": "feedback",
+      "condition": {
+        "on_outcome": "working"
+      }
+    },
+    {
+      "from": "feedback",
+      "to": "await_fixes",
+      "condition": "always"
+    },
+    {
+      "from": "await_fixes",
+      "to": "retry",
+      "condition": {
+        "on_outcome": "completed"
+      }
+    },
+    {
+      "from": "retry",
+      "to": "re_review",
+      "condition": {
+        "on_outcome": "completed"
+      }
+    },
+    {
+      "from": "retry",
+      "to": "exhausted",
+      "condition": {
+        "on_outcome": "failed"
+      }
+    },
+    {
+      "from": "verdict",
+      "to": "close_approved",
+      "condition": {
+        "on_outcome": "completed"
+      }
+    },
+    {
+      "from": "close_approved",
+      "to": "merge",
+      "condition": "always"
+    },
+    {
+      "from": "verdict",
+      "to": "close_blocked",
+      "condition": {
+        "on_outcome": "blocked"
+      }
+    },
+    {
+      "from": "close_blocked",
+      "to": "blocked",
+      "condition": "always"
+    },
+    {
+      "from": "publish",
+      "to": "await_publish",
+      "condition": "always"
+    },
+    {
+      "from": "await_publish",
+      "to": "publish_ready",
+      "condition": {
+        "on_outcome": "completed"
+      }
+    },
+    {
+      "from": "await_publish",
+      "to": "confirm_publish",
+      "condition": {
+        "on_outcome": "blocked"
+      }
+    },
+    {
+      "from": "confirm_publish",
+      "to": "publish_ready",
+      "condition": "always"
+    },
+    {
+      "from": "publish_ready",
+      "to": "reviewer",
+      "condition": "always"
+    },
+    {
+      "from": "review_round",
+      "to": "verdict",
+      "condition": "always"
+    },
+    {
+      "from": "re_review",
+      "to": "review_round",
+      "condition": "always"
+    },
+    {
+      "from": "merge",
+      "to": "approved",
+      "condition": "always"
+    }
+  ]
+}
