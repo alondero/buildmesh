@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { changedPaths, completion, fingerprint, runGate, scopePaths, verify, waitForVerify } from '../../scripts/harness.mjs';
-import { executedTests, gateReads, planGates, touchedFormatDiffs } from '../../scripts/harness-plan.mjs';
+import { executedTests, formatDiffPaths, gateReads, planGates } from '../../scripts/harness-plan.mjs';
 import { acquireSlot, heavyGateEnv, heavyGateLimit, runPlan, slotHolders } from '../../scripts/harness-lanes.mjs';
 import { RUST_PATH_INCLUDES, fastGates, frontendInScope, lintablePaths, pathIncludeDrift, planChecks, rustModule, rustScope } from '../../scripts/harness-check.mjs';
 import { conptyPrerequisite, gatePassed, isolatedCommand, isolateTests, knownFlakes, readTestReport, reportsRuntimeError, rustFailures, validateFlakeIssues, vitestReport } from '../../scripts/harness-test-failures.mjs';
@@ -511,21 +511,25 @@ test('Rust tests run as the CI shards in concurrent processes and still count ex
   // The runner prints each passing process's summary lines; they still sum.
   assert.equal(executedTests('rust', '[db] passed in 27s\ntest result: ok. 300 passed; 0 failed;\n[agent] passed in 47s\ntest result: ok. 764 passed; 0 failed;'), 1064);
 });
-test('rustfmt baseline debt fails only touched files, like the Clippy gate', () => {
+test('the rustfmt gate checks the whole crate, so any diff fails', () => {
   const output = [
     'Diff in \\\\?\\F:\\repo\\src-tauri\\src\\agent\\background.rs:104:',
     ' fn untouched() {}',
     'Diff in /home/runner/work/repo/src-tauri/src/db/mod.rs:12:',
     'Diff in F:\\repo\\src-tauri\\src\\db\\mod.rs:40:',
   ].join('\n');
-  assert.deepEqual(touchedFormatDiffs(output, ['src-tauri/src/lib.rs']), { touched: [], total: 3 });
-  assert.deepEqual(touchedFormatDiffs(output, ['src-tauri/src/db/mod.rs', 'docs/page.md']), { touched: ['src-tauri/src/db/mod.rs'], total: 3 });
-  // A path that merely ends with a touched file name is a different file.
-  assert.deepEqual(touchedFormatDiffs('Diff in /r/src-tauri/src/xmod.rs:1:', ['src-tauri/src/mod.rs']).touched, []);
+  // Repo-relative, and each file named once however many hunks it has.
+  assert.deepEqual(formatDiffPaths(output), [
+    'src-tauri/src/agent/background.rs',
+    'src-tauri/src/db/mod.rs',
+  ]);
   // No recognisable diff means rustfmt failed some other way: never a pass.
-  assert.equal(touchedFormatDiffs('error: expected item, found `}`', ['src-tauri/src/lib.rs']).total, 0);
+  assert.deepEqual(formatDiffPaths('error: expected item, found `}`'), []);
   const format = planGates(['src-tauri/src/lib.rs']).find(row => row.id === 'rust-format');
-  assert.equal(format.touchedFormat, true);
+  // The crate is rustfmt-clean (#2022), so the gate carries no touched-only
+  // exemption: dropping `touchedFormat` is what restores whole-crate checking.
+  assert.deepEqual(format.command, ['cargo', 'fmt', '--all', '--check', '--manifest-path', 'Cargo.toml']);
+  assert.equal(format.touchedFormat, undefined);
 });
 test('opposite staged and working edits cannot disappear or reuse prior evidence', t => {
   const fixture = repo(t);
@@ -721,25 +725,25 @@ test('real gate execution separates assertion failure, unavailable tool and time
   assert.equal((await gate('missing', ['buildmesh-tool-does-not-exist'])).outcome, 'BLOCKED');
   assert.equal((await gate('timeout', ['node', '-e', 'setInterval(() => {}, 1000)'], 0.01)).outcome, 'TIMEOUT');
 });
-test('the format gate passes baseline rustfmt debt and fails touched or unexplained failures', async t => {
+test('the format gate fails on any rustfmt diff and names the files', async t => {
   const fixture = repo(t);
   const formatter = output => ['node', '-e', `console.log(${JSON.stringify(output)}); process.exit(1)`];
-  const gate = (output, paths) => runGate(fixture.cwd, { id: 'rust-format', command: formatter(output), minutes: 1, touchedFormat: true }, fixture.base, paths);
-  const debt = await gate('Diff in /r/src-tauri/src/old.rs:3:', ['src-tauri/src/new.rs']);
-  assert.equal(debt.outcome, 'PASS');
-  assert.equal(debt.formatDiffCount, 1);
-  const touched = await gate('Diff in /r/src-tauri/src/new.rs:3:', ['src-tauri/src/new.rs']);
-  assert.equal(touched.outcome, 'FAIL');
-  assert.match(touched.reason, /src-tauri\/src\/new\.rs/);
-  // Bare `rustfmt <file>` also rewrites child modules, so the gate must not recommend it.
-  assert.match(touched.reason, /node scripts\/rustfmt-touched\.mjs "src-tauri\/src\/new\.rs"/);
-  assert.doesNotMatch(touched.reason, /rustfmt --edition 2021/);
+  const gate = output => runGate(fixture.cwd, { id: 'rust-format', command: formatter(output), minutes: 1 }, fixture.base);
+  const diff = await gate([
+    'Diff in \\\\?\\F:\\repo\\src-tauri\\src\\agent\\background.rs:104:',
+    'Diff in F:\\repo\\src-tauri\\src\\db\\mod.rs:40:',
+  ].join('\n'));
+  assert.equal(diff.outcome, 'FAIL');
+  assert.match(diff.reason, /src-tauri\/src\/agent\/background\.rs, src-tauri\/src\/db\/mod\.rs/);
+  // The crate is rustfmt-clean, so `cargo fmt --all` no longer carries the
+  // whole-crate blast radius that used to make it the wrong advice.
+  assert.match(diff.reason, /cargo fmt --all/);
+  assert.doesNotMatch(diff.reason, /rustfmt-touched\.mjs/);
   // The gate checks the final tree, so formatting goes in its own commit after the behaviour change.
-  assert.match(touched.reason, /commit your behaviour change first.*`style\(rust\)/);
-  // A worktree path can contain spaces; the suggested command must stay copy-pasteable.
-  const spaced = await gate('Diff in /r/src-tauri/src/new module.rs:3:', ['src-tauri/src/new module.rs']);
-  assert.match(spaced.reason, /node scripts\/rustfmt-touched\.mjs "src-tauri\/src\/new module\.rs"/);
-  assert.equal((await gate('error: unexpected token', ['src-tauri/src/new.rs'])).outcome, 'FAIL');
+  assert.match(diff.reason, /commit the result alone as `style\(rust\)/);
+  // A rustfmt failure that reports no diff is never a pass.
+  assert.equal((await gate('error: unexpected token')).outcome, 'FAIL');
+  assert.match((await gate('error: unexpected token')).reason, /without reporting a formatting diff/);
 });
 test('behavior gates reject zero tests and preserve executed counts', async t => {
   const fixture = repo(t);

@@ -138,9 +138,9 @@ export function planGates(paths, { full = false } = {}) {
     // embeds, so compiling must not overlap the build. rust-format only parses.
     const built = frontend ? ['frontend-build'] : [];
     const cargo = (id, args, options = {}) => gates.push({ id, command: ['cargo', ...args, '--manifest-path', 'Cargo.toml'], cwd: 'src-tauri', minutes: 30, rust: true, ignores: RUST_IGNORES, lane: 'rust', ...options });
-    // The crate has a formatting backlog (#2022); like Clippy, only diffs in
-    // touched files fail, and the remaining count stays visible.
-    cargo('rust-format', ['fmt', '--all', '--check'], { touchedFormat: true });
+    // The crate is rustfmt-clean (#2022), so any diff here is a regression the
+    // change under review introduced, not inherited debt.
+    cargo('rust-format', ['fmt', '--all', '--check']);
     cargo('rust-clippy', ['clippy', '--locked', '--all-targets', '--message-format=json'], { warnings: true, after: built });
     // All targets include the desktop binary (compile smoke); isolated failures
     // are rerun after both lanes drain.
@@ -151,13 +151,18 @@ export function planGates(paths, { full = false } = {}) {
 }
 
 // `cargo fmt --check` prints `Diff in <absolute path>:<line>:` per hunk, with a
-// `\\?\` prefix on Windows. Returns the touched paths that have a diff and the
-// total hunk count; a total of 0 means rustfmt failed for another reason.
-export function touchedFormatDiffs(output, paths) {
-  const files = [...stripVTControlCharacters(output).matchAll(/^Diff in (.+?):\d+:\s*$/gm)]
-    .map(match => match[1].replace(/^\\\\\?\\/, '').replaceAll('\\', '/').toLowerCase());
-  const touched = paths.filter(path => files.some(file => file.endsWith(`/${path.toLowerCase()}`)));
-  return { touched, total: files.length };
+// `\\?\` prefix on Windows. Returns the distinct repo-relative files rustfmt
+// would rewrite, so a failure can name them; an empty list means rustfmt failed
+// for some other reason and the log is the only evidence.
+export function formatDiffPaths(output) {
+  const relative = [...stripVTControlCharacters(output).matchAll(/^Diff in (.+?):\d+:\s*$/gm)]
+    .map(match => {
+      const absolute = match[1].replace(/^\\\\\?\\/, '').replaceAll('\\', '/');
+      const at = absolute.lastIndexOf('src-tauri/');
+      return at === -1 ? absolute : absolute.slice(at);
+    });
+  // One file usually produces many hunks; naming it once per hunk buries the rest.
+  return [...new Set(relative)];
 }
 
 export function isHarnessPath(path) {
