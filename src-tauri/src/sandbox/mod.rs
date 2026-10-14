@@ -93,15 +93,11 @@ pub(crate) mod test_support {
     /// wraps the body in `catch_unwind` and restores before re-panicking, and
     /// `ENV_LOCK` is held across that whole window, so restoration cannot race a
     /// sibling test. The lock is released only after `with_env_vars` returns.
-    pub(crate) fn with_dev_gate_result<T>(
-        value: Option<&str>,
-        body: impl FnOnce() -> T,
-    ) -> T {
-        let _env = crate::env::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        crate::env::with_env_vars(
-            &[(DEV_SANDBOX_ENV, value.map(std::ffi::OsStr::new))],
-            body,
-        )
+    pub(crate) fn with_dev_gate_result<T>(value: Option<&str>, body: impl FnOnce() -> T) -> T {
+        let _env = crate::env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::env::with_env_vars(&[(DEV_SANDBOX_ENV, value.map(std::ffi::OsStr::new))], body)
     }
 
     /// Unit variant of [`with_dev_gate_result`].
@@ -168,7 +164,10 @@ mod tests {
         for value in ["true", "0", "", "yes"] {
             with_dev_gate(Some(value), || {
                 assert!(!dev_sandbox_enabled(), "{value:?} must not open the gate");
-                assert!(!sandbox_requested(true), "{value:?} must not request a sandbox");
+                assert!(
+                    !sandbox_requested(true),
+                    "{value:?} must not request a sandbox"
+                );
             });
         }
     }

@@ -35,7 +35,10 @@ impl TempDir {
         let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
         let pid = std::process::id();
         let tmp = std::env::temp_dir().join(format!("buildmesh_mesh_health_test_{}_{}", pid, id));
-        Self { root: tmp, outer: Vec::new() }
+        Self {
+            root: tmp,
+            outer: Vec::new(),
+        }
     }
     fn path(&self) -> &Path {
         &self.root
@@ -46,10 +49,7 @@ impl TempDir {
         let parent = self.root.parent().unwrap_or(Path::new("."));
         let pid = std::process::id();
         let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
-        let p = parent.join(format!(
-            "buildmesh_mesh_health_wt_{}_{}_{}",
-            pid, id, name
-        ));
+        let p = parent.join(format!("buildmesh_mesh_health_wt_{}_{}_{}", pid, id, name));
         self.outer.push(p.clone());
         p
     }
@@ -132,7 +132,13 @@ fn create_branch_at_head(repo: &Repository, name: &str) {
 
 /// Check out an existing branch (the working tree must be clean).
 fn checkout_branch(repo: &Repository, name: &str) {
-    let tree = repo.head().unwrap().peel_to_commit().unwrap().tree().unwrap();
+    let tree = repo
+        .head()
+        .unwrap()
+        .peel_to_commit()
+        .unwrap()
+        .tree()
+        .unwrap();
     let tree_obj = tree.into_object();
     repo.checkout_tree(&tree_obj, None).unwrap();
     repo.set_head(&format!("refs/heads/{}", name)).unwrap();
@@ -195,8 +201,14 @@ fn parse_local_branch_accepts_refs_heads_form() {
 
 #[test]
 fn parse_local_branch_accepts_master_and_develop() {
-    assert_eq!(parse_local_branch("origin/master"), Some("master".to_string()));
-    assert_eq!(parse_local_branch("origin/develop"), Some("develop".to_string()));
+    assert_eq!(
+        parse_local_branch("origin/master"),
+        Some("master".to_string())
+    );
+    assert_eq!(
+        parse_local_branch("origin/develop"),
+        Some("develop".to_string())
+    );
 }
 
 #[test]
@@ -294,7 +306,10 @@ fn drift_detected_when_detached_on_non_base_commit() {
 
     let health = compute_mesh_health(&repo, "origin/main").unwrap();
     assert!(health.is_detached);
-    assert!(health.is_drifted, "detached on a non-base commit is drifted");
+    assert!(
+        health.is_drifted,
+        "detached on a non-base commit is drifted"
+    );
 }
 
 #[test]
@@ -404,17 +419,22 @@ fn unpushed_ahead_reported_for_local_commits() {
     let repo = init_repo(td.path());
     // Add the "origin" remote so `branch_upstream_name` can resolve
     // `branch.<name>.remote = origin` → `refs/remotes/origin/<name>`.
-    repo.remote("origin", "https://example.com/test.git").unwrap();
+    repo.remote("origin", "https://example.com/test.git")
+        .unwrap();
     // Add a second commit on main, then point origin/main at the first commit.
     let first_oid = repo.head().unwrap().peel_to_commit().unwrap().id();
     commit_file(&repo, "f.txt", "second\n");
     let second_oid = repo.head().unwrap().peel_to_commit().unwrap().id();
     assert_ne!(first_oid, second_oid);
-    repo.reference("refs/remotes/origin/main", first_oid, true, "test").unwrap();
+    repo.reference("refs/remotes/origin/main", first_oid, true, "test")
+        .unwrap();
     set_branch_upstream(&repo, "main", "refs/heads/main");
 
     let health = compute_mesh_health(&repo, "origin/main").unwrap();
-    assert!(health.has_upstream, "branch.main has remote 'origin' configured");
+    assert!(
+        health.has_upstream,
+        "branch.main has remote 'origin' configured"
+    );
     assert_eq!(
         health.unpushed_ahead, 1,
         "one commit on main is not on the remote-tracking ref"
@@ -466,7 +486,10 @@ fn hostage_detected_when_linked_worktree_holds_base_branch() {
     add_worktree_on_branch(&repo, &wt_path, "main");
 
     let holder = find_base_branch_holder(&repo, "main", &[]);
-    assert!(holder.is_some(), "main is checked out in the linked worktree");
+    assert!(
+        holder.is_some(),
+        "main is checked out in the linked worktree"
+    );
     let h = holder.unwrap();
     assert!(h.path.contains("wt-main"));
     assert!(!h.is_active);
@@ -519,7 +542,10 @@ fn hostage_marks_active_when_path_matches_an_agent_node() {
     let holder = find_base_branch_holder(&repo, "main", std::slice::from_ref(&wt_str));
     assert!(holder.is_some());
     let h = holder.unwrap();
-    assert!(h.is_active, "path matches an active node → is_active = true");
+    assert!(
+        h.is_active,
+        "path matches an active node → is_active = true"
+    );
 }
 
 #[test]
@@ -560,7 +586,10 @@ fn hostage_marks_active_when_worktree_node_holds_base_branch() {
     let active_paths = active_node_paths(&[node]);
 
     let holder = find_base_branch_holder(&repo, "main", &active_paths);
-    assert!(holder.is_some(), "main is checked out in the linked worktree");
+    assert!(
+        holder.is_some(),
+        "main is checked out in the linked worktree"
+    );
     let h = holder.unwrap();
     assert!(
         h.is_active,
@@ -588,12 +617,7 @@ fn restore_succeeds_on_clean_root_with_no_unpushed() {
     assert!(moved, "HEAD moved from feat/clean to main");
 
     // Verify HEAD is now on main.
-    let head_branch = repo
-        .head()
-        .unwrap()
-        .shorthand()
-        .unwrap()
-        .to_string();
+    let head_branch = repo.head().unwrap().shorthand().unwrap().to_string();
     assert_eq!(head_branch, "main");
 }
 
@@ -606,7 +630,11 @@ fn restore_blocked_with_dirty_root() {
     fs::write(td.path().join("scratch.txt"), "untracked").unwrap();
 
     let err = restore_to_base_impl(&repo, "main").unwrap_err();
-    assert!(err.contains("uncommitted"), "error must name the guard: {}", err);
+    assert!(
+        err.contains("uncommitted"),
+        "error must name the guard: {}",
+        err
+    );
 }
 
 #[test]
@@ -618,8 +646,11 @@ fn restore_blocked_with_unpushed_commits() {
     commit_file(&repo, "wip.txt", "work\n");
 
     let err = restore_to_base_impl(&repo, "main").unwrap_err();
-    assert!(err.contains("unpushed") || err.contains("no upstream"),
-            "error must name the unpushed guard: {}", err);
+    assert!(
+        err.contains("unpushed") || err.contains("no upstream"),
+        "error must name the unpushed guard: {}",
+        err
+    );
 }
 
 #[test]
@@ -635,8 +666,11 @@ fn restore_blocked_when_base_branch_hostage() {
     checkout_branch(&repo, "feat/x");
 
     let err = restore_to_base_impl(&repo, "main").unwrap_err();
-    assert!(err.contains("held by") || err.contains("hostage"),
-            "error must name the hostage guard: {}", err);
+    assert!(
+        err.contains("held by") || err.contains("hostage"),
+        "error must name the hostage guard: {}",
+        err
+    );
 }
 
 #[test]
@@ -654,8 +688,11 @@ fn restore_blocked_when_detached_on_wrong_commit() {
     repo.set_head_detached(head_oid).unwrap();
 
     let err = restore_to_base_impl(&repo, "main").unwrap_err();
-    assert!(err.contains("unpushed") || err.contains("no upstream"),
-            "detached on a non-base commit is blocked by the unpushed guard: {}", err);
+    assert!(
+        err.contains("unpushed") || err.contains("no upstream"),
+        "detached on a non-base commit is blocked by the unpushed guard: {}",
+        err
+    );
 }
 
 #[test]
@@ -679,11 +716,7 @@ fn restore_rejects_adversarial_dash_branch() {
     let repo = init_repo(td.path());
 
     // Snapshot HEAD so we can assert it didn't move.
-    let head_before = repo
-        .head()
-        .unwrap()
-        .target()
-        .expect("repo has a commit");
+    let head_before = repo.head().unwrap().target().expect("repo has a commit");
 
     let err = restore_to_base_impl(&repo, "-x").unwrap_err();
     assert!(
@@ -752,14 +785,20 @@ fn free_detaches_at_current_commit_preserves_files() {
 
     // Reopen and verify the worktree is detached at the same commit, files intact.
     let wt_repo_after = Repository::open(&wt_path).unwrap();
-    assert!(wt_repo_after.head_detached().unwrap_or(false),
-            "worktree should now have a detached HEAD");
+    assert!(
+        wt_repo_after.head_detached().unwrap_or(false),
+        "worktree should now have a detached HEAD"
+    );
     let new_head_oid = wt_repo_after.head().unwrap().peel_to_commit().unwrap().id();
-    assert_eq!(new_head_oid, commit_oid,
-               "detached HEAD must point at the same commit");
+    assert_eq!(
+        new_head_oid, commit_oid,
+        "detached HEAD must point at the same commit"
+    );
     let content = fs::read_to_string(wt_path.join("inside.txt")).unwrap();
-    assert_eq!(content, "worktree content\n",
-               "free_base_branch must not touch working tree files");
+    assert_eq!(
+        content, "worktree content\n",
+        "free_base_branch must not touch working tree files"
+    );
     assert!(!detached_sha.is_empty(), "returns a short SHA");
 }
 
@@ -772,8 +811,8 @@ fn free_idempotent_on_already_detached_worktree() {
     add_worktree_on_branch(&repo, &wt_path, "main");
 
     // First call detaches.
-    let first = free_base_branch_impl(wt_path.to_str().unwrap(), "main")
-        .expect("first call succeeds");
+    let first =
+        free_base_branch_impl(wt_path.to_str().unwrap(), "main").expect("first call succeeds");
     // Second call on the same path is a no-op (the worktree is already
     // detached, so it no longer holds `main`).
     let second = free_base_branch_impl(wt_path.to_str().unwrap(), "main")
@@ -791,6 +830,9 @@ fn free_refuses_when_worktree_does_not_hold_base_branch() {
     add_worktree_on_branch(&repo, &wt_path, "feat-y");
 
     let err = free_base_branch_impl(wt_path.to_str().unwrap(), "main").unwrap_err();
-    assert!(err.contains("does not hold") || err.contains("not the base"),
-            "error must say the worktree is not the holder: {}", err);
+    assert!(
+        err.contains("does not hold") || err.contains("not the base"),
+        "error must say the worktree is not the holder: {}",
+        err
+    );
 }

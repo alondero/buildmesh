@@ -17,20 +17,18 @@
 //! - [`adapters`] — per-provider drop-in adapters.
 //! - [`catalog`] — registry + dispatch + cache lookup.
 
-pub mod types;
-pub(crate) mod cache;
 pub(crate) mod adapter;
 pub(crate) mod adapters;
+pub(crate) mod cache;
 pub(crate) mod catalog;
 pub(crate) mod last_known;
 pub(crate) mod outcome;
+pub mod types;
 
 // Re-export the wire types so existing `crate::services::usage::{...}`
 // paths keep working while adapters import from `usage::types` directly.
-pub use types::{
-    BillingBalance, ProviderMeters, ProviderUsage, UsageError, UsageWindow,
-};
 pub(crate) use outcome::UsageOutcome;
+pub use types::{BillingBalance, ProviderMeters, ProviderUsage, UsageError, UsageWindow};
 // Cache stays behind the same `usage::` paths callers already use.
 pub use cache::{invalidate_cache, invalidate_provider_cache};
 // `fetch_usage` is a fetcher-only driver: internal call sites in this
@@ -73,14 +71,13 @@ use crate::services::windows_cred;
 // it; the parser stays qualified (call sites read
 // `opencode_oauth::parse_opencode_console_credential(...)`) to make the
 // module boundary obvious at every read site.
+use crate::services::opencode_oauth::device_flow;
 use crate::services::opencode_oauth::OpenCodeConsoleCred;
 use crate::services::opencode_oauth::OPENCODE_CONSOLE_CRED_TARGET;
 use crate::services::opencode_oauth::OPENCODE_CONSOLE_HOST;
-use crate::services::opencode_oauth::device_flow;
 
 // Wire types + envelope helpers moved to `usage::types` (issue #1657).
 // Re-exported at the top of this file so existing paths keep working.
-
 
 #[derive(Deserialize)]
 struct OpenCodeAuthEntry {
@@ -88,9 +85,10 @@ struct OpenCodeAuthEntry {
 }
 
 fn read_opencode_token(path: PathBuf) -> Result<String, UsageError> {
-    let content = fs::read_to_string(&path).map_err(|_| UsageError::NoCredential(path.clone().to_string_lossy().to_string()))?;
-    let entries: HashMap<String, OpenCodeAuthEntry> = serde_json::from_str(&content)
-        .map_err(|e| UsageError::Shape(e.to_string()))?;
+    let content = fs::read_to_string(&path)
+        .map_err(|_| UsageError::NoCredential(path.clone().to_string_lossy().to_string()))?;
+    let entries: HashMap<String, OpenCodeAuthEntry> =
+        serde_json::from_str(&content).map_err(|e| UsageError::Shape(e.to_string()))?;
     if let Some(entry) = entries.get("opencode-go") {
         if let Some(ref key) = entry.key {
             if !key.is_empty() {
@@ -109,18 +107,13 @@ fn read_opencode_token(path: PathBuf) -> Result<String, UsageError> {
 
 // MiniMax lives in `services/usage/adapters/minimax` (ARCH-1).
 
-
 // Kimi lives in `services/usage/adapters/kimi` (ARCH-1).
-
 
 // OpenAI lives in `services/usage/adapters/openai` (ARCH-1).
 
-
 // OpenRouter lives in `services/usage/adapters/openrouter` (ARCH-1).
 
-
 // DeepSeek lives in `services/usage/adapters/deepseek` (ARCH-1).
-
 
 // Command Code stores its CLI-owned credential in `~/.commandcode/auth.json`.
 // Credits supply rolling windows; subscription enrichment adds the monthly meter.
@@ -178,7 +171,11 @@ struct CommandCodeCredits {
     #[serde(rename = "freeCredits", alias = "free_credits", default)]
     free_credits: f64,
     // Studio treats non-numeric grants as absent, preserving its tier fallback.
-    #[serde(rename = "monthlyCreditsGranted", alias = "monthly_credits_granted", default)]
+    #[serde(
+        rename = "monthlyCreditsGranted",
+        alias = "monthly_credits_granted",
+        default
+    )]
     monthly_credits_granted: serde_json::Value,
 }
 
@@ -238,7 +235,11 @@ fn commandcode_monthly_window(
     // positive fractional quantity below one therefore falls back to one
     // base allowance, rather than becoming a zero-credit organization plan.
     let seats = subscription.quantity.map(f64::floor).unwrap_or(1.0);
-    let seats = if seats.is_finite() && seats >= 1.0 { seats } else { 1.0 };
+    let seats = if seats.is_finite() && seats >= 1.0 {
+        seats
+    } else {
+        1.0
+    };
     let total = match grant {
         Some(grant) => grant.max(base),
         None if subscription.plan_id == "teams-pro" => base * seats,
@@ -247,12 +248,15 @@ fn commandcode_monthly_window(
     if !total.is_finite() || total <= 0.0 {
         return None;
     }
-    let resets_at = subscription.current_period_end
+    let resets_at = subscription
+        .current_period_end
         .and_then(|date| chrono::DateTime::parse_from_rfc3339(&date).ok())
         .map(|date| date.to_rfc3339());
     Some(UsageWindow {
         label: "Monthly".to_string(),
-        used_percent: Some(((total - credits.monthly_credits.max(0.0)) / total * 100.0).clamp(0.0, 100.0)),
+        used_percent: Some(
+            ((total - credits.monthly_credits.max(0.0)) / total * 100.0).clamp(0.0, 100.0),
+        ),
         resets_at,
     })
 }
@@ -434,7 +438,11 @@ fn commandcode_usage_with_path(auth_path: &Path, live_url: &str) -> UsageOutcome
             // successfully fetched windows or credits. Keep the extra wait bounded.
             let reported_monthly = windows.iter().any(|window| {
                 window.used_percent.is_some()
-                    && window.label.trim().to_ascii_lowercase().starts_with("monthly")
+                    && window
+                        .label
+                        .trim()
+                        .to_ascii_lowercase()
+                        .starts_with("monthly")
             });
             if reported_monthly {
                 balance = None;
@@ -480,8 +488,7 @@ fn commandcode_usage_with_path(auth_path: &Path, live_url: &str) -> UsageOutcome
 
 fn commandcode_extra_credits_detail(credits: &CommandCodeCredits) -> Option<String> {
     let extra = credits.purchased_credits + credits.free_credits;
-    (extra.is_finite() && extra != 0.0)
-        .then(|| format!("Additional credits: USD {extra:.2}"))
+    (extra.is_finite() && extra != 0.0).then(|| format!("Additional credits: USD {extra:.2}"))
 }
 
 fn commandcode_fetch_monthly_window(
@@ -513,7 +520,6 @@ fn commandcode_fetch_monthly_window(
     Ok(commandcode_monthly_window(credits, subscription))
 }
 
-
 // ─── xAI / Grok (`grok`) ───────────────────────────────────────────────────
 //
 // The Grok Build CLI (`grok`) stores OIDC session credentials in
@@ -538,8 +544,8 @@ struct GrokAuthEntry {
 fn read_grok_token(path: PathBuf) -> Result<(String, String), UsageError> {
     let content = fs::read_to_string(&path)
         .map_err(|_| UsageError::NoCredential(path.clone().to_string_lossy().to_string()))?;
-    let entries: HashMap<String, GrokAuthEntry> = serde_json::from_str(&content)
-        .map_err(|e| UsageError::Shape(e.to_string()))?;
+    let entries: HashMap<String, GrokAuthEntry> =
+        serde_json::from_str(&content).map_err(|e| UsageError::Shape(e.to_string()))?;
     for (k, v) in entries {
         if k.starts_with("https://auth.x.ai::") {
             if let (Some(key), Some(user_id)) = (v.key, v.user_id) {
@@ -598,8 +604,8 @@ struct GrokBillingResp {
 fn parse_grok_response(
     body: &str,
 ) -> Result<(Vec<UsageWindow>, Option<BillingBalance>), UsageError> {
-    let resp: GrokBillingResp = serde_json::from_str(body)
-        .map_err(|e| UsageError::Shape(e.to_string()))?;
+    let resp: GrokBillingResp =
+        serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
     let config = resp.config;
 
     let mut windows = Vec::new();
@@ -620,20 +626,27 @@ fn parse_grok_response(
     };
 
     if is_unified {
-        let used_percent = config.credit_usage_percent
+        let used_percent = config
+            .credit_usage_percent
             .map(|percent| percent.clamp(0.0, 100.0))
-            .or_else(|| config.on_demand_cap.as_ref().map(|cap| {
-                if cap.val > 0.0 {
-                    config.on_demand_used.as_ref()
-                        .map(|used| ((used.val / cap.val) * 100.0).clamp(0.0, 100.0))
-                        .unwrap_or(0.0)
-                } else {
-                    0.0
-                }
-            }));
+            .or_else(|| {
+                config.on_demand_cap.as_ref().map(|cap| {
+                    if cap.val > 0.0 {
+                        config
+                            .on_demand_used
+                            .as_ref()
+                            .map(|used| ((used.val / cap.val) * 100.0).clamp(0.0, 100.0))
+                            .unwrap_or(0.0)
+                    } else {
+                        0.0
+                    }
+                })
+            });
 
         if let Some(used_percent) = used_percent {
-            let label = config.current_period.as_ref()
+            let label = config
+                .current_period
+                .as_ref()
                 .and_then(|p| p.period_type.as_ref())
                 .map(|t| {
                     if t.contains("WEEKLY") {
@@ -758,9 +771,11 @@ fn grok_usage_with(auth_path: &Path, base_url: &str) -> UsageOutcome {
     }
 }
 
-fn calculate_opencode_windows_impl(conn: &rusqlite::Connection) -> Result<Vec<UsageWindow>, String> {
+fn calculate_opencode_windows_impl(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<UsageWindow>, String> {
     let now_ms = chrono::Utc::now().timestamp_millis();
-    
+
     let sum_cost_since = |since_ms: i64| -> Result<f64, rusqlite::Error> {
         let mut stmt = conn.prepare("SELECT SUM(cost) FROM session WHERE time_created >= ?")?;
         let cost: Option<f64> = stmt.query_row([since_ms], |row| row.get(0))?;
@@ -827,8 +842,8 @@ fn calculate_opencode_windows(db_path: &std::path::Path) -> Result<Vec<UsageWind
         ]);
     }
 
-    let conn = rusqlite::Connection::open(db_path)
-        .map_err(|e| format!("Failed to open DB: {}", e))?;
+    let conn =
+        rusqlite::Connection::open(db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
 
     calculate_opencode_windows_impl(&conn)
 }
@@ -1022,11 +1037,8 @@ fn opencode_usage_impl_with_hosts(
                     refresh_url,
                     &refresh_token,
                 ) {
-                    let new_cred = cred_from_token(
-                        &token,
-                        c.workspace_id.as_deref(),
-                        c.server_id.as_deref(),
-                    );
+                    let new_cred =
+                        cred_from_token(&token, c.workspace_id.as_deref(), c.server_id.as_deref());
                     live = opencode_live_request_at(live_url, &new_cred);
                 }
             }
@@ -1069,10 +1081,7 @@ fn opencode_usage_impl_with_hosts(
 /// pre-emptive + reactive retry paths share the same wire-binding
 /// closure (header set, JSON body, parser) without duplicating the
 /// `opencode_live_request_parts` + `fetch_usage` composition.
-fn opencode_live_request_at(
-    live_url: &str,
-    cred: &OpenCodeConsoleCred,
-) -> Option<UsageOutcome> {
+fn opencode_live_request_at(live_url: &str, cred: &OpenCodeConsoleCred) -> Option<UsageOutcome> {
     let (token, workspace_id, server_id) = opencode_live_request_parts(cred)?;
     let live_url_owned = live_url.to_string();
     Some(fetch_usage(
@@ -1192,8 +1201,7 @@ const AGY_USER_AGENT: &str = "antigravity/cli/1.0.3 windows/amd64";
 /// constant stays as the documented legacy default for at least one
 /// release (#963/#972); remove it after re-authentication has rolled out
 /// everywhere.
-const OPENCODE_SERVER_ID: &str =
-    "c83b78a614689c38ebee981f9b39a8b377716db85c1fd7dbab604adc02d3313d";
+const OPENCODE_SERVER_ID: &str = "c83b78a614689c38ebee981f9b39a8b377716db85c1fd7dbab604adc02d3313d";
 
 /// Reads the Buildmesh-owned OpenCode Console credential as the full DTO so
 /// callers can consume the optional `server_id` (issue #972) — and so the
@@ -1421,9 +1429,7 @@ fn agy_window_rank(window: &str) -> u8 {
     }
 }
 
-fn parse_agy_quota_summary(
-    body: &str,
-) -> Result<(Vec<UsageWindow>, Option<String>), UsageError> {
+fn parse_agy_quota_summary(body: &str) -> Result<(Vec<UsageWindow>, Option<String>), UsageError> {
     let resp: AgyQuotaSummaryResp =
         serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
 
@@ -1517,7 +1523,12 @@ fn parse_agy_models(body: &str) -> Result<(Vec<UsageWindow>, Option<String>), Us
     let ordered_ids: Vec<&String> = resp
         .agent_model_sorts
         .first()
-        .map(|sort| sort.groups.iter().flat_map(|g| g.model_ids.iter()).collect())
+        .map(|sort| {
+            sort.groups
+                .iter()
+                .flat_map(|g| g.model_ids.iter())
+                .collect()
+        })
         .unwrap_or_default();
 
     let mut windows = vec![];
@@ -1627,10 +1638,7 @@ pub fn agy_usage() -> UsageOutcome {
             }
         }
     };
-    let client = match Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-    {
+    let client = match Client::builder().timeout(Duration::from_secs(15)).build() {
         Ok(c) => c,
         Err(e) => {
             return UsageOutcome::Unavailable {
@@ -1697,7 +1705,6 @@ pub(crate) mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
-
     #[test]
     fn agy_http_auth_failure_detects_401_and_403() {
         assert!(agy_http_auth_failure(&UsageError::Shape(
@@ -1723,7 +1730,10 @@ pub(crate) mod tests {
             "retrieveUserQuotaSummary HTTP 401".into(),
         )) {
             UsageOutcome::Rejected { hint } => {
-                assert!(hint.contains("401"), "hint must carry the status, got: {hint:?}");
+                assert!(
+                    hint.contains("401"),
+                    "hint must carry the status, got: {hint:?}"
+                );
             }
             other => panic!("expected Rejected outcome, got: {other:?}"),
         }
@@ -1776,10 +1786,16 @@ pub(crate) mod tests {
         assert_eq!(windows.len(), 4);
         assert_eq!(windows[0].label, "Gemini Models — 5-hour");
         assert_eq!(windows[0].used_percent, Some(25.0));
-        assert_eq!(windows[0].resets_at.as_deref(), Some("2026-08-28T00:03:11Z"));
+        assert_eq!(
+            windows[0].resets_at.as_deref(),
+            Some("2026-08-28T00:03:11Z")
+        );
         assert_eq!(windows[1].label, "Gemini Models — Weekly");
         assert_eq!(windows[1].used_percent, Some(50.0));
-        assert_eq!(windows[1].resets_at.as_deref(), Some("2026-08-29T17:48:59Z"));
+        assert_eq!(
+            windows[1].resets_at.as_deref(),
+            Some("2026-08-29T17:48:59Z")
+        );
         assert_eq!(windows[2].label, "Claude and GPT models — 5-hour");
         // remainingFraction 0 is a real exhausted window, not "missing".
         assert_eq!(windows[2].used_percent, Some(100.0));
@@ -1841,13 +1857,17 @@ pub(crate) mod tests {
         assert_eq!(windows[1].label, "Gemini (all models)");
         // Same float expression the parser uses (0.8 remaining → ~20% used).
         assert_eq!(windows[1].used_percent, Some((1.0 - 0.8) * 100.0));
-        assert_eq!(windows[1].resets_at.as_deref(), Some("2026-05-31T12:22:46Z"));
+        assert_eq!(
+            windows[1].resets_at.as_deref(),
+            Some("2026-05-31T12:22:46Z")
+        );
         assert_eq!(detail, None);
     }
 
     #[test]
     fn parse_agy_models_falls_back_to_all_when_no_sorts() {
-        let json = r#"{"models":{"a":{"displayName":"Model A","quotaInfo":{"remainingFraction":0.5}}}}"#;
+        let json =
+            r#"{"models":{"a":{"displayName":"Model A","quotaInfo":{"remainingFraction":0.5}}}}"#;
         let (windows, _) = parse_agy_models(json).unwrap();
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].used_percent, Some(50.0));
@@ -1880,12 +1900,19 @@ pub(crate) mod tests {
         }"#;
         let (windows, detail) = parse_agy_models(json).unwrap();
         // 5 input models → 3 windows out (the 3 Gemini rows collapse to 1).
-        assert_eq!(windows.len(), 3, "Gemini effort levels should collapse to a single row");
+        assert_eq!(
+            windows.len(),
+            3,
+            "Gemini effort levels should collapse to a single row"
+        );
         // Sort order preserved: claude → (collapsed gemini at first gemini's slot) → gpt.
         assert_eq!(windows[0].label, "Claude Sonnet 4.6 (Thinking)");
         assert_eq!(windows[1].label, "Gemini (all models)");
         assert_eq!(windows[1].used_percent, Some((1.0 - 0.7) * 100.0));
-        assert_eq!(windows[1].resets_at.as_deref(), Some("2026-06-04T12:00:00Z"));
+        assert_eq!(
+            windows[1].resets_at.as_deref(),
+            Some("2026-06-04T12:00:00Z")
+        );
         assert_eq!(windows[2].label, "GPT-OSS 120B");
         assert_eq!(detail, None);
     }
@@ -1896,7 +1923,10 @@ pub(crate) mod tests {
             r#"{"currentTier":{"id":"standard-tier"},"cloudaicompanionProject":"sinuous-strategy-j3z18"}"#,
         )
         .unwrap();
-        assert_eq!(resp.cloudaicompanion_project.as_deref(), Some("sinuous-strategy-j3z18"));
+        assert_eq!(
+            resp.cloudaicompanion_project.as_deref(),
+            Some("sinuous-strategy-j3z18")
+        );
     }
 
     // ─── Grok ─────────────────────────────────────────────────────────────
@@ -1921,7 +1951,10 @@ pub(crate) mod tests {
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].label, "Weekly Pool");
         assert_eq!(windows[0].used_percent, Some(25.0));
-        assert_eq!(windows[0].resets_at.as_deref(), Some("2026-07-22T00:00:00+00:00"));
+        assert_eq!(
+            windows[0].resets_at.as_deref(),
+            Some("2026-07-22T00:00:00+00:00")
+        );
         assert!(balance.is_none());
     }
 
@@ -1965,7 +1998,10 @@ pub(crate) mod tests {
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].label, "Monthly Limit");
         assert_eq!(windows[0].used_percent, Some(20.0));
-        assert_eq!(windows[0].resets_at.as_deref(), Some("2026-08-01T00:00:00+00:00"));
+        assert_eq!(
+            windows[0].resets_at.as_deref(),
+            Some("2026-08-01T00:00:00+00:00")
+        );
     }
 
     #[test]
@@ -1986,7 +2022,9 @@ pub(crate) mod tests {
     #[test]
     fn grok_usage_with_empty_key_returns_logged_out() {
         // Force an empty path to trigger logged_out path
-        let usage = read_grok_token(PathBuf::from("")).map(|(t, _u)| t).unwrap_or_else(|e| e.to_string());
+        let usage = read_grok_token(PathBuf::from(""))
+            .map(|(t, _u)| t)
+            .unwrap_or_else(|e| e.to_string());
         assert!(usage.contains("No credential found"));
     }
 
@@ -2208,7 +2246,10 @@ pub(crate) mod tests {
         assert_eq!(windows.len(), 3);
         assert_eq!(windows[0].label, "5-hour");
         assert_eq!(windows[0].used_percent, Some(25.0));
-        assert_eq!(windows[0].resets_at.as_deref(), Some("2026-07-20T22:00:00Z"));
+        assert_eq!(
+            windows[0].resets_at.as_deref(),
+            Some("2026-07-20T22:00:00Z")
+        );
         assert_eq!(windows[1].label, "Weekly");
         assert_eq!(windows[1].used_percent, Some(12.0));
         assert_eq!(windows[2].label, "Monthly");
@@ -2231,7 +2272,10 @@ pub(crate) mod tests {
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].label, "5-hour");
         assert_eq!(windows[0].used_percent, Some(80.0));
-        assert_eq!(windows[0].resets_at.as_deref(), Some("2026-07-20T22:00:00Z"));
+        assert_eq!(
+            windows[0].resets_at.as_deref(),
+            Some("2026-07-20T22:00:00Z")
+        );
         assert_eq!(detail, None);
     }
 
@@ -2243,7 +2287,10 @@ pub(crate) mod tests {
         // and the degradation chain falls through to SQLite.
         let json = r#"{"foo": "bar"}"#;
         let err = parse_opencode_billing_response(json).unwrap_err();
-        assert!(matches!(err, UsageError::Shape(_)), "expected Shape error, got {err:?}");
+        assert!(
+            matches!(err, UsageError::Shape(_)),
+            "expected Shape error, got {err:?}"
+        );
     }
 
     #[test]
@@ -2255,7 +2302,10 @@ pub(crate) mod tests {
         let json = r#"{"windows": []}"#;
         let (windows, detail) = parse_opencode_billing_response(json).unwrap();
         assert!(windows.is_empty());
-        assert_eq!(detail.as_deref(), Some("No active OpenCode Go quotas found"));
+        assert_eq!(
+            detail.as_deref(),
+            Some("No active OpenCode Go quotas found")
+        );
     }
 
     #[test]
@@ -2291,7 +2341,10 @@ pub(crate) mod tests {
         let json = r#"{"windows": [{"label": "junk"}, {"usedPercent": null}]}"#;
         let (windows, detail) = parse_opencode_billing_response(json).unwrap();
         assert!(windows.is_empty());
-        assert_eq!(detail.as_deref(), Some("No active OpenCode Go quotas found"));
+        assert_eq!(
+            detail.as_deref(),
+            Some("No active OpenCode Go quotas found")
+        );
     }
 
     // The OpenCode Console credential parser tests (formerly
@@ -2371,16 +2424,12 @@ pub(crate) mod tests {
         // outcome. A `Rejected` 403 (revocation by another name) retries;
         // an `Unavailable` whose body merely mentions "401" does not —
         // the old substring match fired a spurious refresh there.
-        assert!(needs_retry_on_401(Some(
-            &UsageOutcome::Rejected {
-                hint: "API error 401: Unauthorized".to_string(),
-            }
-        )));
-        assert!(needs_retry_on_401(Some(
-            &UsageOutcome::Rejected {
-                hint: "API error 403: Forbidden".to_string(),
-            }
-        )));
+        assert!(needs_retry_on_401(Some(&UsageOutcome::Rejected {
+            hint: "API error 401: Unauthorized".to_string(),
+        })));
+        assert!(needs_retry_on_401(Some(&UsageOutcome::Rejected {
+            hint: "API error 403: Forbidden".to_string(),
+        })));
         assert!(!needs_retry_on_401(Some(&fake_unavailable(
             "API error 500: error 401 in body"
         ))));
@@ -2583,7 +2632,11 @@ pub(crate) mod tests {
             ..Default::default()
         };
         assert!(opencode_needs_refresh(&cred, None, 1_700_000_000));
-        assert!(opencode_needs_refresh(&cred, Some(Duration::from_secs(0)), 1_700_000_000));
+        assert!(opencode_needs_refresh(
+            &cred,
+            Some(Duration::from_secs(0)),
+            1_700_000_000
+        ));
     }
 
     #[test]
@@ -2619,8 +2672,16 @@ pub(crate) mod tests {
             ..Default::default()
         };
         assert!(!opencode_needs_refresh(&cred, None, 1_700_000_000));
-        assert!(!opencode_needs_refresh(&cred, Some(Duration::from_secs(0)), 1_700_000_000));
-        assert!(!opencode_needs_refresh(&cred, Some(Duration::from_secs(300)), 1_700_000_000));
+        assert!(!opencode_needs_refresh(
+            &cred,
+            Some(Duration::from_secs(0)),
+            1_700_000_000
+        ));
+        assert!(!opencode_needs_refresh(
+            &cred,
+            Some(Duration::from_secs(300)),
+            1_700_000_000
+        ));
     }
 
     #[test]
@@ -2639,7 +2700,11 @@ pub(crate) mod tests {
         // Missing expires_at + no cache → no refresh (let the live fetch try).
         assert!(!opencode_needs_refresh(&missing, None, now));
         // Missing expires_at + stale cache → refresh (cache age wins).
-        assert!(opencode_needs_refresh(&missing, Some(Duration::from_secs(600)), now));
+        assert!(opencode_needs_refresh(
+            &missing,
+            Some(Duration::from_secs(600)),
+            now
+        ));
         // Malformed expires_at + no cache → no refresh.
         assert!(!opencode_needs_refresh(&malformed, None, now));
     }
@@ -2663,7 +2728,6 @@ pub(crate) mod tests {
     // Pattern lifted from `services::opencode_oauth::tests::spawn_loopback`
     // (issue #967) — the `tiny_http` crate is already a regular
     // `[dependencies]` entry, so this adds no new crate.
-
 
     /// Builds a temp home with a `auth.json` + `opencode.db` so the
     /// SQLite fallback has something to render. The session row seeds
@@ -2782,9 +2846,8 @@ pub(crate) mod tests {
                 let _ = req.respond(tiny_http::Response::from_string(LIVE_BODY_OK));
             }
             _ => {
-                let _ = req.respond(
-                    tiny_http::Response::from_string("not found").with_status_code(404),
-                );
+                let _ = req
+                    .respond(tiny_http::Response::from_string("not found").with_status_code(404));
             }
         });
         let live_url = format!("http://127.0.0.1:{port}/_server");
@@ -2797,12 +2860,7 @@ pub(crate) mod tests {
             "wrk_q",
             "srv_v1",
         );
-        let outcome = opencode_usage_impl_with_hosts(
-            &temp,
-            &live_url,
-            &refresh_url,
-            Some(&cred),
-        );
+        let outcome = opencode_usage_impl_with_hosts(&temp, &live_url, &refresh_url, Some(&cred));
 
         assert_eq!(
             refresh_count.load(Ordering::SeqCst),
@@ -2862,9 +2920,8 @@ pub(crate) mod tests {
                 );
             }
             _ => {
-                let _ = req.respond(
-                    tiny_http::Response::from_string("not found").with_status_code(404),
-                );
+                let _ = req
+                    .respond(tiny_http::Response::from_string("not found").with_status_code(404));
             }
         });
         let live_url = format!("http://127.0.0.1:{port}/_server");
@@ -2877,12 +2934,7 @@ pub(crate) mod tests {
             "wrk_q",
             "srv_v1",
         );
-        let usage = opencode_usage_impl_with_hosts(
-            &temp,
-            &live_url,
-            &refresh_url,
-            Some(&cred),
-        );
+        let usage = opencode_usage_impl_with_hosts(&temp, &live_url, &refresh_url, Some(&cred));
 
         assert_eq!(
             refresh_count.load(Ordering::SeqCst),
@@ -2941,9 +2993,8 @@ pub(crate) mod tests {
                 let _ = req.respond(tiny_http::Response::from_string(LIVE_BODY_OK));
             }
             _ => {
-                let _ = req.respond(
-                    tiny_http::Response::from_string("not found").with_status_code(404),
-                );
+                let _ = req
+                    .respond(tiny_http::Response::from_string("not found").with_status_code(404));
             }
         });
         let live_url = format!("http://127.0.0.1:{port}/_server");
@@ -2956,12 +3007,7 @@ pub(crate) mod tests {
             "wrk_q",
             "srv_v1",
         );
-        let usage = opencode_usage_impl_with_hosts(
-            &temp,
-            &live_url,
-            &refresh_url,
-            Some(&cred),
-        );
+        let usage = opencode_usage_impl_with_hosts(&temp, &live_url, &refresh_url, Some(&cred));
 
         assert_eq!(
             refresh_count.load(Ordering::SeqCst),
@@ -3025,9 +3071,8 @@ pub(crate) mod tests {
                 }
             }
             _ => {
-                let _ = req.respond(
-                    tiny_http::Response::from_string("not found").with_status_code(404),
-                );
+                let _ = req
+                    .respond(tiny_http::Response::from_string("not found").with_status_code(404));
             }
         });
         let live_url = format!("http://127.0.0.1:{port}/_server");
@@ -3040,12 +3085,7 @@ pub(crate) mod tests {
             "wrk_q",
             "srv_v1",
         );
-        let usage = opencode_usage_impl_with_hosts(
-            &temp,
-            &live_url,
-            &refresh_url,
-            Some(&cred),
-        );
+        let usage = opencode_usage_impl_with_hosts(&temp, &live_url, &refresh_url, Some(&cred));
 
         assert_eq!(
             refresh_count.load(Ordering::SeqCst),
@@ -3071,7 +3111,6 @@ pub(crate) mod tests {
 
         let _ = fs::remove_dir_all(&temp);
     }
-
 
     #[test]
     fn commandcode_usage_reads_auth_file_and_maps_credit_windows_and_balance() {
@@ -3139,7 +3178,10 @@ pub(crate) mod tests {
         assert_eq!(windows.len(), 2);
         assert_eq!(windows[0].label, "5-hour");
         assert_eq!(windows[0].used_percent, Some(25.0));
-        assert_eq!(windows[0].resets_at.as_deref(), Some("2026-01-01T00:00:00+00:00"));
+        assert_eq!(
+            windows[0].resets_at.as_deref(),
+            Some("2026-01-01T00:00:00+00:00")
+        );
         assert_eq!(windows[1].label, "Weekly");
         assert_eq!(windows[1].used_percent, Some(20.0));
         assert_eq!(credits.balance().remaining, 15.0);
@@ -3157,28 +3199,40 @@ pub(crate) mod tests {
 
         let (windows, credits) = parse_commandcode_credits_response(body).unwrap();
         assert_eq!(windows[0].used_percent, Some(12.5));
-        assert_eq!(windows[0].resets_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+        assert_eq!(
+            windows[0].resets_at.as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
         assert_eq!(credits.balance().remaining, 10.0);
     }
 
     #[test]
     fn commandcode_monthly_matches_studio_tiers_grants_and_seats() {
         for (plan, allowance) in [
-            ("individual-go", 10.0), ("individual-goat", 70.0),
-            ("individual-pro", 30.0), ("individual-pro-v1", 80.0),
-            ("individual-provider", 15.0), ("individual-max", 150.0),
-            ("individual-ultra", 300.0), ("teams-pro", 40.0),
+            ("individual-go", 10.0),
+            ("individual-goat", 70.0),
+            ("individual-pro", 30.0),
+            ("individual-pro-v1", 80.0),
+            ("individual-provider", 15.0),
+            ("individual-max", 150.0),
+            ("individual-ultra", 300.0),
+            ("teams-pro", 40.0),
         ] {
             let credits: CommandCodeCredits = serde_json::from_value(serde_json::json!({
                 "monthlyCredits": allowance / 2.0, "purchasedCredits": 100, "freeCredits": 50
-            })).unwrap();
+            }))
+            .unwrap();
             let subscription = serde_json::from_value(serde_json::json!({
                 "success": true, "data": {"planId": plan, "status": "active",
                 "currentPeriodEnd": "2026-09-30T13:13:19.000Z"}
-            })).unwrap();
+            }))
+            .unwrap();
             let monthly = commandcode_monthly_window(&credits, subscription).unwrap();
             assert_eq!(monthly.used_percent, Some(50.0), "{plan}");
-            assert_eq!(monthly.resets_at.as_deref(), Some("2026-09-30T13:13:19+00:00"));
+            assert_eq!(
+                monthly.resets_at.as_deref(),
+                Some("2026-09-30T13:13:19+00:00")
+            );
         }
         for (plan, grant, seats, remaining, expected) in [
             ("individual-goat", serde_json::json!(100), 1.0, 25.0, 75.0),
@@ -3187,7 +3241,13 @@ pub(crate) mod tests {
             ("teams-pro", serde_json::Value::Null, 3.9, 60.0, 50.0),
             ("teams-pro", serde_json::json!(80), 3.0, 60.0, 25.0),
             ("teams-pro", serde_json::json!(0), 0.0, 20.0, 50.0),
-            ("individual-goat", serde_json::json!("unknown"), 1.0, 35.0, 50.0),
+            (
+                "individual-goat",
+                serde_json::json!("unknown"),
+                1.0,
+                35.0,
+                50.0,
+            ),
             ("individual-goat", serde_json::json!(-10), 1.0, 70.0, 0.0),
             ("individual-goat", serde_json::Value::Null, 1.0, 80.0, 0.0),
             ("individual-goat", serde_json::Value::Null, 1.0, 0.0, 100.0),
@@ -3195,12 +3255,18 @@ pub(crate) mod tests {
         ] {
             let credits = serde_json::from_value(serde_json::json!({
                 "monthlyCredits": remaining, "monthlyCreditsGranted": grant
-            })).unwrap();
+            }))
+            .unwrap();
             let subscription = serde_json::from_value(serde_json::json!({
                 "success": true, "data": {"planId": plan, "status": "active", "quantity": seats}
-            })).unwrap();
+            }))
+            .unwrap();
             let monthly = commandcode_monthly_window(&credits, subscription).unwrap();
-            assert_eq!(monthly.used_percent, Some(expected), "{plan}, {grant}, {seats}, {remaining}");
+            assert_eq!(
+                monthly.used_percent,
+                Some(expected),
+                "{plan}, {grant}, {seats}, {remaining}"
+            );
             assert!(monthly.resets_at.is_none());
         }
         assert_eq!(commandcode_positive_finite(Some(0.25)), Some(0.25));
@@ -3217,11 +3283,17 @@ pub(crate) mod tests {
             r#"{"success":true,"data":{"planId":"new-plan","status":"active"}}"#,
             r#"{"success":true,"data":{"planId":"individual-goat","status":"past_due"}}"#,
         ] {
-            assert!(commandcode_monthly_window(&credits, serde_json::from_str(body).unwrap()).is_none(), "{body}");
+            assert!(
+                commandcode_monthly_window(&credits, serde_json::from_str(body).unwrap()).is_none(),
+                "{body}"
+            );
         }
-        let subscription = serde_json::from_str(r#"{"success":true,"data":{
+        let subscription = serde_json::from_str(
+            r#"{"success":true,"data":{
             "planId":"individual-goat","status":"active","currentPeriodEnd":"not-a-date"
-        }}"#).unwrap();
+        }}"#,
+        )
+        .unwrap();
         let monthly = commandcode_monthly_window(&credits, subscription).unwrap();
         assert_eq!(monthly.used_percent, Some(50.0));
         assert!(monthly.resets_at.is_none());
@@ -3241,9 +3313,16 @@ pub(crate) mod tests {
         let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
         let observed_t = observed.clone();
         let port = spawn_loopback(2, move |req| {
-            let auth = req.headers().iter().find(|h| h.field.equiv("Authorization"))
-                .map(|h| h.value.as_str().to_string()).unwrap_or_default();
-            observed_t.lock().unwrap().push((req.url().to_string(), auth));
+            let auth = req
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Authorization"))
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_default();
+            observed_t
+                .lock()
+                .unwrap()
+                .push((req.url().to_string(), auth));
             let body = if req.url() == "/alpha/billing/credits" {
                 COMMANDCODE_MONTHLY_CREDITS
             } else {
@@ -3252,20 +3331,41 @@ pub(crate) mod tests {
             };
             req.respond(tiny_http::Response::from_string(body)).unwrap();
         });
-        let outcome = commandcode_usage_with_path(&auth_path, &format!("http://127.0.0.1:{port}/alpha/billing/credits"));
-        assert_eq!(*observed.lock().unwrap(), vec![
-            ("/alpha/billing/credits".to_string(), "Bearer cmd_live_test".to_string()),
-            ("/alpha/billing/subscriptions?withPending=true".to_string(), "Bearer cmd_live_test".to_string()),
-        ]);
+        let outcome = commandcode_usage_with_path(
+            &auth_path,
+            &format!("http://127.0.0.1:{port}/alpha/billing/credits"),
+        );
+        assert_eq!(
+            *observed.lock().unwrap(),
+            vec![
+                (
+                    "/alpha/billing/credits".to_string(),
+                    "Bearer cmd_live_test".to_string()
+                ),
+                (
+                    "/alpha/billing/subscriptions?withPending=true".to_string(),
+                    "Bearer cmd_live_test".to_string()
+                ),
+            ]
+        );
         match outcome {
             UsageOutcome::Reading {
-                windows, balance, detail, ..
+                windows,
+                balance,
+                detail,
+                ..
             } => {
-                assert_eq!(windows.iter().map(|w| w.label.as_str()).collect::<Vec<_>>(), vec!["5-hour", "Weekly", "Monthly"]);
+                assert_eq!(
+                    windows.iter().map(|w| w.label.as_str()).collect::<Vec<_>>(),
+                    vec!["5-hour", "Weekly", "Monthly"]
+                );
                 assert_eq!(windows[0].used_percent, Some(0.0));
                 assert_eq!(windows[1].used_percent, Some(20.0));
                 assert_eq!(windows[2].used_percent, Some(50.0));
-                assert_eq!(windows[2].resets_at.as_deref(), Some("2026-09-30T13:13:19+00:00"));
+                assert_eq!(
+                    windows[2].resets_at.as_deref(),
+                    Some("2026-09-30T13:13:19+00:00")
+                );
                 assert!(balance.is_none());
                 assert_eq!(detail.as_deref(), Some("Additional credits: USD 5.00"));
             }
@@ -3282,18 +3382,25 @@ pub(crate) mod tests {
         let observed_t = observed.clone();
         let port = spawn_loopback(1, move |req| {
             observed_t.lock().unwrap().push(req.url().to_string());
-            req.respond(tiny_http::Response::from_string(r#"{
+            req.respond(tiny_http::Response::from_string(
+                r#"{
                 "windows":[{"label":"Monthly Limit","used_percent":39,
                 "resets_at":"2026-09-30T13:13:19+00:00"}],
                 "monthly_credits":42.7,"extra_credits":5
-            }"#)).unwrap();
+            }"#,
+            ))
+            .unwrap();
         });
 
-        let outcome = commandcode_usage_with_path(&auth_path, &format!("http://127.0.0.1:{port}/credits"));
+        let outcome =
+            commandcode_usage_with_path(&auth_path, &format!("http://127.0.0.1:{port}/credits"));
         assert_eq!(*observed.lock().unwrap(), vec!["/credits"]);
         match outcome {
             UsageOutcome::Reading {
-                windows, balance, detail, ..
+                windows,
+                balance,
+                detail,
+                ..
             } => {
                 assert_eq!(windows.len(), 1);
                 assert_eq!(windows[0].label, "Monthly Limit");
@@ -3310,10 +3417,20 @@ pub(crate) mod tests {
         let auth_path = auth_dir.path().join("auth.json");
         fs::write(&auth_path, r#"{"apiKey":"cmd_live_test"}"#).unwrap();
         for (status, body) in [
-            (401, ""), (403, ""), (429, ""), (500, ""), (200, "not-json"),
+            (401, ""),
+            (403, ""),
+            (429, ""),
+            (500, ""),
+            (200, "not-json"),
             (200, r#"{"success":true,"data":null}"#),
-            (200, r#"{"success":true,"data":{"planId":"unknown","status":"active"}}"#),
-            (200, r#"{"success":true,"data":{"planId":"individual-goat","status":"past_due"}}"#),
+            (
+                200,
+                r#"{"success":true,"data":{"planId":"unknown","status":"active"}}"#,
+            ),
+            (
+                200,
+                r#"{"success":true,"data":{"planId":"individual-goat","status":"past_due"}}"#,
+            ),
         ] {
             let port = spawn_loopback(2, move |req| {
                 let response = if req.url() == "/credits" {
@@ -3323,10 +3440,16 @@ pub(crate) mod tests {
                 };
                 req.respond(response).unwrap();
             });
-            let outcome = commandcode_usage_with_path(&auth_path, &format!("http://127.0.0.1:{port}/credits"));
+            let outcome = commandcode_usage_with_path(
+                &auth_path,
+                &format!("http://127.0.0.1:{port}/credits"),
+            );
             match outcome {
                 UsageOutcome::Reading {
-                    windows, balance, detail, ..
+                    windows,
+                    balance,
+                    detail,
+                    ..
                 } => {
                     assert_eq!(windows.len(), 2, "{status}: {body}");
                     assert_eq!(windows[1].used_percent, Some(20.0), "{status}: {body}");
@@ -3407,11 +3530,7 @@ pub(crate) mod tests {
             Err(UsageError::Shape(_))
         ));
 
-        fs::write(
-            &auth_path,
-            r#"{"apiKey":"  ","access_token":"\t"}"#,
-        )
-        .unwrap();
+        fs::write(&auth_path, r#"{"apiKey":"  ","access_token":"\t"}"#).unwrap();
         assert!(matches!(
             read_commandcode_token(&auth_path),
             Err(UsageError::NoCredential(_))
@@ -3462,10 +3581,9 @@ pub(crate) mod tests {
             &format!("http://127.0.0.1:{port_429}/credits"),
         );
         match outcome_429 {
-            UsageOutcome::RateLimited { reason } => assert_eq!(
-                reason,
-                "Rate limited — usage data temporarily unavailable"
-            ),
+            UsageOutcome::RateLimited { reason } => {
+                assert_eq!(reason, "Rate limited — usage data temporarily unavailable")
+            }
             other => panic!("expected RateLimited outcome, got: {other:?}"),
         }
 
@@ -3479,10 +3597,9 @@ pub(crate) mod tests {
             &format!("http://127.0.0.1:{port_500}/credits"),
         );
         match outcome_500 {
-            UsageOutcome::Unavailable { reason } => assert_eq!(
-                reason,
-                "API error 500: backend unavailable"
-            ),
+            UsageOutcome::Unavailable { reason } => {
+                assert_eq!(reason, "API error 500: backend unavailable")
+            }
             other => panic!("expected Unavailable outcome, got: {other:?}"),
         }
 

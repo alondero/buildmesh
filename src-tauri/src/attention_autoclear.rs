@@ -83,9 +83,13 @@ pub fn on_signal_marked(
     semantic: Option<crate::agent::session_lifecycle::SemanticTurnKind>,
 ) {
     use crate::agent::session_lifecycle::{LifecycleKind, SemanticTurnKind};
-    if matches!(kind, Some(LifecycleKind::QuestionRequested | LifecycleKind::PermissionRequested))
-        || matches!(semantic, Some(SemanticTurnKind::PermissionRequest | SemanticTurnKind::CommandConfirmation))
-    {
+    if matches!(
+        kind,
+        Some(LifecycleKind::QuestionRequested | LifecycleKind::PermissionRequested)
+    ) || matches!(
+        semantic,
+        Some(SemanticTurnKind::PermissionRequest | SemanticTurnKind::CommandConfirmation)
+    ) {
         // Background output and terminal redraws cannot answer a question.
         disarm(node_id);
     } else {
@@ -232,7 +236,11 @@ mod tests {
         ] {
             on_marked(node);
             on_signal_marked(node, kind, semantic);
-            assert!(!take_crossed(node, BURST_BYTES * 10, Instant::now() + std::time::Duration::from_secs(10)));
+            assert!(!take_crossed(
+                node,
+                BURST_BYTES * 10,
+                Instant::now() + std::time::Duration::from_secs(10)
+            ));
             assert!(!ARMED.lock().unwrap().contains_key(&node));
         }
         on_signal_marked(node, None, None);
@@ -310,7 +318,10 @@ mod tests {
         assert_eq!(bytes, 160, "tied chunks within window accumulate");
         // Now a gap wider than the reset window: the next chunk starts fresh.
         assert!(!accumulate(&mut bytes, GRACE_MS + 12_000, 12_000, 80));
-        assert_eq!(bytes, 80, "stale gap → accumulator reset to just the new chunk");
+        assert_eq!(
+            bytes, 80,
+            "stale gap → accumulator reset to just the new chunk"
+        );
     }
 
     #[test]
@@ -359,11 +370,29 @@ mod tests {
         // does NOT reset. Useful so a slow continuous producer (with gaps
         // hovering at the boundary) still accumulates.
         let mut bytes = 0;
-        assert!(!accumulate(&mut bytes, GRACE_MS + BURST_GAP_RESET_MS, BURST_GAP_RESET_MS, 100));
-        assert!(!accumulate(&mut bytes, GRACE_MS + 2 * BURST_GAP_RESET_MS, BURST_GAP_RESET_MS, 100));
-        assert_eq!(bytes, 200, "boundary gap == reset window keeps accumulating");
+        assert!(!accumulate(
+            &mut bytes,
+            GRACE_MS + BURST_GAP_RESET_MS,
+            BURST_GAP_RESET_MS,
+            100
+        ));
+        assert!(!accumulate(
+            &mut bytes,
+            GRACE_MS + 2 * BURST_GAP_RESET_MS,
+            BURST_GAP_RESET_MS,
+            100
+        ));
+        assert_eq!(
+            bytes, 200,
+            "boundary gap == reset window keeps accumulating"
+        );
         // A gap strictly larger: resets.
-        assert!(!accumulate(&mut bytes, GRACE_MS + 2 * BURST_GAP_RESET_MS + 1, BURST_GAP_RESET_MS + 1, 100));
+        assert!(!accumulate(
+            &mut bytes,
+            GRACE_MS + 2 * BURST_GAP_RESET_MS + 1,
+            BURST_GAP_RESET_MS + 1,
+            100
+        ));
         assert_eq!(bytes, 100, "gap strictly > reset window starts fresh");
     }
 }

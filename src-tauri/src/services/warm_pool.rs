@@ -169,10 +169,7 @@ pub struct ClaimedWarmEntry {
 /// is the load-bearing emit for the spawn-failure gap: if the spawn dies
 /// between claim and `post_spawn_maintenance`, the badge still sees the
 /// count drop because this emit fired before the spawn could fail.
-pub fn try_claim(
-    app: &tauri::AppHandle,
-    mesh_id: i64,
-) -> Result<Option<ClaimedWarmEntry>, String> {
+pub fn try_claim(app: &tauri::AppHandle, mesh_id: i64) -> Result<Option<ClaimedWarmEntry>, String> {
     let claimed = match db::claim_warm_entry_for_mesh(mesh_id) {
         Ok(Some(row)) => row,
         Ok(None) => return Ok(None),
@@ -254,11 +251,7 @@ pub fn recheck_after_claim(id: i64, path: &str) -> bool {
 /// functions as injected dependencies so a test can run against an in-memory
 /// `Connection` without touching the global DB writer.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn recheck_after_claim_inner(
-    conn: &Connection,
-    id: i64,
-    path: &str,
-) -> bool {
+pub(crate) fn recheck_after_claim_inner(conn: &Connection, id: i64, path: &str) -> bool {
     let delete_row = |row_id: i64| db::delete_warm_worktree_inner(conn, row_id);
     let cancel_tombstone = |p: &str| db::delete_pending_worktree_removal_inner(conn, p);
     recheck_after_claim_id(delete_row, cancel_tombstone, id, path)
@@ -399,7 +392,10 @@ fn normalize_host_for_prefix(p: &str) -> String {
 /// (i.e. `<effective>/<slug>`). Used to detect stale-location pool
 /// inventory after a directory setting changes — entries outside the
 /// current effective dir must be rebuilt, never reused.
-pub(crate) fn warm_path_under_effective_dir(warm_host_path: &str, effective_host_dir: &str) -> bool {
+pub(crate) fn warm_path_under_effective_dir(
+    warm_host_path: &str,
+    effective_host_dir: &str,
+) -> bool {
     let warm = normalize_host_for_prefix(warm_host_path);
     let dir = normalize_host_for_prefix(effective_host_dir);
     warm.len() > dir.len()
@@ -486,8 +482,7 @@ fn merge_rebuild_request(pending: &mut RebuildPending, mesh_id: Option<i64>) {
 
 static REBUILD_PENDING: once_cell::sync::Lazy<parking_lot::Mutex<RebuildPending>> =
     once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(RebuildPending::default()));
-static REBUILD_RUNNING: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static REBUILD_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Rebuild idle warm-pool inventory after a `worktree_directory` setting
 /// changes (issue #1519). `mesh_id = Some(id)` rebuilds one Mesh (per-Mesh
@@ -531,9 +526,7 @@ fn rebuild_runner(app: tauri::AppHandle) {
         };
         if !req.all && req.meshes.is_empty() {
             REBUILD_RUNNING.store(false, Ordering::SeqCst);
-            if !REBUILD_PENDING.lock().all
-                && REBUILD_PENDING.lock().meshes.is_empty()
-            {
+            if !REBUILD_PENDING.lock().all && REBUILD_PENDING.lock().meshes.is_empty() {
                 return;
             }
             if REBUILD_RUNNING
@@ -1087,7 +1080,12 @@ fn with_warm_mesh(mesh_id: i64, what: &str, f: impl FnOnce(&db::WarmPoolMeshRow)
         let mesh = match db::list_worktree_enabled_meshes_for_warm() {
             Ok(rows) => rows.into_iter().find(|m| m.id == mesh_id),
             Err(e) => {
-                tracing::warn!("warm_pool: {} list failed for mesh {}: {}", what, mesh_id, e);
+                tracing::warn!(
+                    "warm_pool: {} list failed for mesh {}: {}",
+                    what,
+                    mesh_id,
+                    e
+                );
                 return;
             }
         };
@@ -1636,7 +1634,9 @@ mod tests {
                 Ok(())
             },
             |id, sha| {
-                log.lock().unwrap().push(format!("available:{}:{:?}", id, sha));
+                log.lock()
+                    .unwrap()
+                    .push(format!("available:{}:{:?}", id, sha));
                 Ok(())
             },
         );
@@ -1666,7 +1666,9 @@ mod tests {
                 Ok(())
             },
             |id, sha| {
-                log.lock().unwrap().push(format!("available:{}:{:?}", id, sha));
+                log.lock()
+                    .unwrap()
+                    .push(format!("available:{}:{:?}", id, sha));
                 Ok(())
             },
         );
@@ -1695,10 +1697,7 @@ mod tests {
             |_p, _s| Err("reset blew up".to_string()),
             |_id| Ok(()),
             |id, sha| {
-                restored
-                    .lock()
-                    .unwrap()
-                    .push((id, sha.map(str::to_string)));
+                restored.lock().unwrap().push((id, sha.map(str::to_string)));
                 Ok(())
             },
         );
@@ -1720,8 +1719,8 @@ mod tests {
         let n = refresh_warm_entries(
             "newsha",
             vec![warm(5, Some("oldsha"))],
-            |_p, _s| Ok(()),       // reset succeeds
-            |_id| Ok(()),          // mark refreshing succeeds
+            |_p, _s| Ok(()),                                // reset succeeds
+            |_id| Ok(()),                                   // mark refreshing succeeds
             |_id, _sha| Err(rusqlite::Error::InvalidQuery), // flip-back fails
         );
         assert_eq!(
@@ -1966,8 +1965,16 @@ mod tests {
             },
         );
 
-        assert_eq!(*count_calls.borrow(), 1, "the count is sampled exactly once");
-        assert_eq!(*warm_calls.borrow(), 0, "a failed count must not cut a worktree");
+        assert_eq!(
+            *count_calls.borrow(),
+            1,
+            "the count is sampled exactly once"
+        );
+        assert_eq!(
+            *warm_calls.borrow(),
+            0,
+            "a failed count must not cut a worktree"
+        );
         assert_eq!(changes, 2, "the drain's changes must still be reported");
     }
 
@@ -2110,12 +2117,7 @@ mod tests {
     fn fill_mesh_to_target_with_returns_count_of_warmed_entries() {
         let mesh = mesh_row(6, 3);
 
-        let changes = fill_mesh_to_target_with(
-            &mesh,
-            || Ok(0),
-            |_| Ok(0),
-            |_m| Ok(()),
-        );
+        let changes = fill_mesh_to_target_with(&mesh, || Ok(0), |_| Ok(0), |_m| Ok(()));
         assert_eq!(changes, 3, "3 Warmed responses = 3 changes");
     }
 
@@ -2166,12 +2168,7 @@ mod tests {
     #[test]
     fn fill_mesh_to_target_with_returns_zero_when_target_is_zero() {
         let mesh = mesh_row(9, 0);
-        let changes = fill_mesh_to_target_with(
-            &mesh,
-            || Ok(0),
-            |_| Ok(0),
-            |_m| Ok(()),
-        );
+        let changes = fill_mesh_to_target_with(&mesh, || Ok(0), |_| Ok(0), |_m| Ok(()));
         assert_eq!(changes, 0);
     }
 
@@ -2252,8 +2249,7 @@ mod tests {
             .unwrap_or(0);
         let slug = format!("wt-{:x}", nanos);
         // Legacy layout (no custom dir configured in these fixtures).
-        let effective =
-            crate::env::effective_worktree_dir_raw(mesh_path, None, None);
+        let effective = crate::env::effective_worktree_dir_raw(mesh_path, None, None);
         let host_path = warm_worktree_host_path_in_dir(&effective, &slug);
 
         let row_id = db::insert_warm_worktree_inner(

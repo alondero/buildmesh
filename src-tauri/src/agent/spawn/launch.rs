@@ -82,6 +82,7 @@ pub(super) async fn launch_process(
         provider,
         resolved,
         routing,
+        checkout_host_path,
     } = provisioned;
     let LaunchParams {
         rows,
@@ -221,7 +222,7 @@ pub(super) async fn launch_process(
             session_id
         );
         start_resume_services().await;
-        match sandbox_spawn(&cmd, session_id, &resolved.host_path, rows, cols) {
+        match sandbox_spawn(&cmd, session_id, &checkout_host_path, rows, cols) {
             Ok(process) => process,
             Err(error) => {
                 adapter.on_process_terminated(session_id);

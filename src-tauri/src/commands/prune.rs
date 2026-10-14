@@ -8,7 +8,7 @@
 use git2::{BranchType, Oid, Repository};
 
 use crate::db;
-use crate::env::{active_node_branches, active_node_paths, to_host_path};
+use crate::env::{active_node_branches, to_host_path};
 use crate::git::primitives;
 use crate::models::{BranchInfo, GitRepoPruneInfo, WorktreeInfo};
 
@@ -31,25 +31,16 @@ pub async fn get_git_prune_info(mesh_id: i64) -> Result<Vec<GitRepoPruneInfo>, S
 /// Sync core for [`get_git_prune_info`] — plain fn so the command can offload
 /// it to the blocking pool.
 fn get_git_prune_info_blocking(mesh_id: i64) -> Result<Vec<GitRepoPruneInfo>, String> {
-    let mesh = db::get_mesh_by_id(mesh_id)
-        .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+    let mesh =
+        db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
 
-    // Cross-reference worktree paths AND branch names against THIS mesh's
-    // non-archived agent nodes (issue #661 — mesh-scoped symmetry).
-    // Branch names are not filesystem-unique like paths, so a `feature-a`
-    // in `/repo1` would collide with a `feature-a` in `/repo2` if a
-    // Mesh-A agent was on its own `feature-a`, falsely flagging Mesh-B's
-    // branch as `is_active` in the prune UI. Worktree paths happen to be
-    // host-unique on disk, but we still feed them through the same mesh-
-    // scoped query — the boundary is "this mesh's nodes" full stop, so
-    // a future nested-repo setup can't accidentally surface a sibling
-    // mesh's worktree as active. `active_node_branches` further drops any
-    // `Archived` nodes defensively (the SQL query already filters them,
-    // but the helper enforces the contract for any future caller that
-    // passes unfiltered input).
-    let nodes = db::list_agent_nodes_by_mesh(mesh_id)
-        .map_err(|e| format!("failed to list agent nodes: {}", e))?;
-    let active_paths = active_node_paths(&nodes);
+    // Sibling Meshes share ownership within a common Git repository. Branch
+    // names in unrelated repositories remain independent (#661).
+    let nodes = crate::git::project::repository_nodes(
+        &mesh.path,
+        db::list_agent_nodes().map_err(|e| format!("failed to list agent nodes: {e}"))?,
+    )?;
+    let active_paths = crate::git::project::active_paths(&nodes);
     let active_branches = active_node_branches(&nodes);
 
     let repo_path = to_host_path(&mesh.path);
@@ -67,14 +58,8 @@ fn get_git_prune_info_blocking(mesh_id: i64) -> Result<Vec<GitRepoPruneInfo>, St
 /// Batches across all names, continuing past individual failures and
 /// reporting the combined set of errors at the end.
 ///
-/// `mesh_id` is used to scope the "is this branch active" guard: the
-/// mesh's non-archived agent nodes feed `active_branches`, and any
-/// requested branch whose name matches an active node's `branch` is
-/// rejected before we touch git. Mesh-scoping prevents cross-mesh
-/// false positives — a `feature-a` in `/repo2` is not blocked by a
-/// node in `/repo1` that happens to be on its own `feature-a`. The UI
-/// already disables the row's checkbox as the primary defence; this
-/// is belt-and-braces.
+/// Active branch protection includes sibling Meshes sharing the common Git
+/// directory; branch names in unrelated repositories remain independent.
 // Offloaded via `run_blocking`: branch deletion rewrites refs on disk with
 // libgit2 — filesystem work that must not run inline on a Tauri async worker.
 #[tauri::command]
@@ -84,8 +69,11 @@ pub async fn delete_branches(
     branch_names: Vec<String>,
 ) -> Result<(), String> {
     crate::commands::run_blocking("delete_branches", move || {
-        let nodes = db::list_agent_nodes_by_mesh(mesh_id)
-            .map_err(|e| format!("failed to list agent nodes: {}", e))?;
+        let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+        let nodes = crate::git::project::repository_nodes(
+            &mesh.path,
+            db::list_agent_nodes().map_err(|e| format!("failed to list agent nodes: {e}"))?,
+        )?;
         let active_branches = active_node_branches(&nodes);
         delete_branches_in_repo(
             &to_host_path(&worktree_path),
@@ -101,7 +89,7 @@ fn delete_branches_in_repo(
     branch_names: &[String],
     active_branches: &[String],
 ) -> Result<(), String> {
-    let repo = Repository::open(repo_path).map_err(|e| e.to_string())?;
+    let repo = primitives::open_from_host_path(repo_path).map_err(|e| e.to_string())?;
 
     // Partition: active branches are rejected up-front with a single combined
     // error so the user sees the full blocked set in one toast, not multiple
@@ -171,6 +159,19 @@ pub async fn delete_worktrees(worktree_paths: Vec<String>) -> Result<(), String>
 }
 
 fn remove_worktrees(worktree_paths: &[String]) -> Result<(), String> {
+    // Fail closed if ownership cannot be read: a sibling Mesh's live checkout
+    // is just as protected as one visible in the current Mesh.
+    let nodes =
+        db::list_agent_nodes().map_err(|e| format!("cannot read worktree ownership: {e}"))?;
+    let active_paths = crate::git::project::active_paths(&nodes);
+    let owned: Vec<&String> = worktree_paths
+        .iter()
+        .filter(|path| path_is_active(path, &active_paths))
+        .collect();
+    reject_blocked(
+        &owned,
+        "cannot delete worktrees held by an active agent node",
+    )?;
     // Partition: pool paths are rejected up-front with a single combined
     // error so the user sees the full blocked set in one toast, not
     // multiple per-path errors mixed with successful deletes. Mirror of
@@ -262,30 +263,8 @@ pub async fn prune_remote_tracking(worktree_path: String) -> Result<String, Stri
 /// so the worktree prune can't race against itself (issue #709 — the
 /// fourth and final per-Mesh git shell-out to land under the lock).
 ///
-/// **Lock key is the worktree's own path** (`worktree_path`), NOT the
-/// parent mesh's `agent_nodes.path`. Rationale:
-///
-/// The contention scope for `git fetch --prune` from a worktree is the
-/// worktree's remote-tracking refs and the shared parent
-/// `.git/FETCH_HEAD`. Two concurrent prunes on different worktrees of
-/// the same mesh share the parent's `.git` and CAN race on `FETCH_HEAD`;
-/// the parent-mesh key would serialise those, but the per-worktree key
-/// only serialises prunes on the SAME worktree. The issue's author made
-/// this trade-off deliberately: the prune UI fires once per worktree
-/// (the user picks the worktree from a list), so same-worktree
-/// collisions are the realistic case. Cross-worktree collisions on the
-/// parent's `FET_HEAD` are guarded by the much narrower window that
-/// `git fetch --prune` opens (single refspec negotiation) versus the
-/// all-refs auto-sync fetch.
-///
-/// All four lock-wrap sites now use the same shape — `locked_*` helper +
-/// `with_mesh_sync_lock(key, || work())` — so adding a fifth site is
-/// copy-paste trivial rather than a new pattern.
-///
-/// The closure captures `worktree_path` by reference; the host-path
-/// conversion (`to_host_path`) happens once outside the closure so the
-/// closure body is the bare shell-out, mirroring `fetch_single_ref` /
-/// `locked_fetch_pr_head`'s closure shape.
+/// `sync_lock` discovers the supplied path to its common Git directory,
+/// sharing coordination across linked worktrees and sibling Meshes.
 fn locked_prune_remote_tracking(worktree_path: &str) -> Result<String, String> {
     let host_path = to_host_path(worktree_path);
     crate::services::sync_lock::with_mesh_sync_lock(worktree_path, || {
@@ -346,7 +325,11 @@ const SQUASH_SCAN_CAP: usize = 2000;
 /// the same way. False negatives are safe (the branch just isn't recommended);
 /// a patch-id match is strong evidence the identical change is already on main.
 fn branch_is_merged_into_main(repo: &Repository, main_oid: Oid, branch_oid: Oid) -> bool {
-    if main_oid == branch_oid || repo.graph_descendant_of(main_oid, branch_oid).unwrap_or(false) {
+    if main_oid == branch_oid
+        || repo
+            .graph_descendant_of(main_oid, branch_oid)
+            .unwrap_or(false)
+    {
         return true;
     }
 
@@ -368,8 +351,14 @@ fn branch_is_merged_into_main(repo: &Repository, main_oid: Oid, branch_oid: Oid)
 /// Patch-id of the cumulative diff from `from` to `to`. `Ok(None)` = the trees
 /// are identical (empty diff); `Err(())` = it could not be computed.
 fn cumulative_patch_id(repo: &Repository, from: Oid, to: Oid) -> Result<Option<Oid>, ()> {
-    let from_tree = repo.find_commit(from).and_then(|c| c.tree()).map_err(|_| ())?;
-    let to_tree = repo.find_commit(to).and_then(|c| c.tree()).map_err(|_| ())?;
+    let from_tree = repo
+        .find_commit(from)
+        .and_then(|c| c.tree())
+        .map_err(|_| ())?;
+    let to_tree = repo
+        .find_commit(to)
+        .and_then(|c| c.tree())
+        .map_err(|_| ())?;
     let diff = repo
         .diff_tree_to_tree(Some(&from_tree), Some(&to_tree), None)
         .map_err(|_| ())?;
@@ -438,7 +427,7 @@ fn collect_prune_info(
     active_branches: &[String],
     is_pool_path: &dyn Fn(&str) -> bool,
 ) -> Result<GitRepoPruneInfo, String> {
-    let repo = Repository::open(repo_path).map_err(|e| e.to_string())?;
+    let repo = primitives::open_from_host_path(repo_path).map_err(|e| e.to_string())?;
 
     let main_oid = main_branch_oid(&repo);
     let head_dirty = primitives::is_dirty(&repo).unwrap_or(false);
@@ -469,7 +458,10 @@ fn collect_prune_info(
         std::collections::HashMap::new();
 
     if let Some(workdir) = repo.workdir() {
-        let path = workdir.to_string_lossy().trim_end_matches(['/', '\\']).to_string();
+        let path = workdir
+            .to_string_lossy()
+            .trim_end_matches(['/', '\\'])
+            .to_string();
         let branch = primitives::head_branch_name(&repo);
         if let Some(ref b) = branch {
             branch_to_wt_path.insert(b.clone(), path.clone());
@@ -494,7 +486,11 @@ fn collect_prune_info(
                 Ok(w) => w,
                 Err(_) => continue,
             };
-            let path = wt.path().to_string_lossy().trim_end_matches(['/', '\\']).to_string();
+            let path = wt
+                .path()
+                .to_string_lossy()
+                .trim_end_matches(['/', '\\'])
+                .to_string();
             let branch = Repository::open(wt.path())
                 .ok()
                 .and_then(|r| primitives::head_branch_name(&r));
@@ -541,9 +537,7 @@ fn collect_prune_info(
             if let Some(upstream_ref) = upstream_buf.as_str() {
                 match repo.find_reference(upstream_ref) {
                     Ok(up_ref) => {
-                        if let (Some(local), Some(up)) =
-                            (branch_oid, up_ref.target())
-                        {
+                        if let (Some(local), Some(up)) = (branch_oid, up_ref.target()) {
                             if let Ok((a, b)) = primitives::ahead_behind(&repo, local, up) {
                                 ahead = a as u64;
                                 behind = b as u64;
@@ -610,7 +604,9 @@ fn collect_prune_info(
 
 fn path_is_active(path: &str, active_paths: &[String]) -> bool {
     let norm = primitives::normalize_for_compare(path);
-    active_paths.iter().any(|p| primitives::normalize_for_compare(p) == norm)
+    active_paths
+        .iter()
+        .any(|p| primitives::normalize_for_compare(p) == norm)
 }
 
 /// A worktree is stale when it points at a branch that no longer exists

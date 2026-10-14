@@ -1,15 +1,13 @@
 //! Circuit run queue: pending-list, neighbour swaps, and explicit reorder.
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::db::SqlResult;
 use crate::models::AutopilotCircuitRun;
 
 /// Pending Circuit Runs on one mesh in worker-admission order. The circuit
 /// name rides beside the canonical run row for the Probe's global queue.
-pub fn list_queued_circuit_runs(
-    mesh_id: i64,
-) -> SqlResult<Vec<(AutopilotCircuitRun, String)>> {
+pub fn list_queued_circuit_runs(mesh_id: i64) -> SqlResult<Vec<(AutopilotCircuitRun, String)>> {
     let db = crate::db::read_conn();
     list_queued_circuit_runs_inner(&db, mesh_id)
 }
@@ -63,12 +61,15 @@ pub(crate) fn move_queued_circuit_run_locked(
     toward_front: bool,
 ) -> SqlResult<bool> {
     let tx = db.transaction()?;
-    let Some((mesh_id, position)): Option<(i64, i64)> = tx.query_row(
-        "SELECT mesh_id, queue_position FROM autopilot_circuit_runs \
+    let Some((mesh_id, position)): Option<(i64, i64)> = tx
+        .query_row(
+            "SELECT mesh_id, queue_position FROM autopilot_circuit_runs \
          WHERE id = ?1 AND state = 'pending'",
-        params![run_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    ).optional()? else {
+            params![run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+    else {
         // The worker may promote or cancel the row between the UI render and
         // this command. A stale reorder is a harmless no-op, not a raw
         // QueryReturnedNoRows error at the IPC boundary.
@@ -124,32 +125,42 @@ pub(crate) fn move_queued_circuit_run_to_edge_locked(
     to_front: bool,
 ) -> SqlResult<bool> {
     let tx = db.transaction()?;
-    let Some((mesh_id, position)): Option<(i64, i64)> = tx.query_row(
-        "SELECT mesh_id, queue_position FROM autopilot_circuit_runs \
+    let Some((mesh_id, position)): Option<(i64, i64)> = tx
+        .query_row(
+            "SELECT mesh_id, queue_position FROM autopilot_circuit_runs \
          WHERE id = ?1 AND state = 'pending'",
-        params![run_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    ).optional()? else {
+            params![run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+    else {
         return Ok(false);
     };
-    let edge: Option<i64> = tx.query_row(
-        if to_front {
-            "SELECT MIN(queue_position) FROM autopilot_circuit_runs \
+    let edge: Option<i64> = tx
+        .query_row(
+            if to_front {
+                "SELECT MIN(queue_position) FROM autopilot_circuit_runs \
              WHERE mesh_id = ?1 AND state = 'pending'"
-        } else {
-            "SELECT MAX(queue_position) FROM autopilot_circuit_runs \
+            } else {
+                "SELECT MAX(queue_position) FROM autopilot_circuit_runs \
              WHERE mesh_id = ?1 AND state = 'pending'"
-        },
-        params![mesh_id],
-        |row| row.get(0),
-    ).optional()?.flatten();
+            },
+            params![mesh_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
     let Some(edge_position) = edge else {
         return Ok(false);
     };
     if (to_front && position <= edge_position) || (!to_front && position >= edge_position) {
         return Ok(false);
     }
-    let new_position = if to_front { edge_position - 1 } else { edge_position + 1 };
+    let new_position = if to_front {
+        edge_position - 1
+    } else {
+        edge_position + 1
+    };
     tx.execute(
         "UPDATE autopilot_circuit_runs SET queue_position = ?2 WHERE id = ?1",
         params![run_id, new_position],
@@ -187,7 +198,9 @@ pub(crate) fn reorder_queued_circuit_runs_locked(
         let mut seen = std::collections::HashSet::with_capacity(ordered_run_ids.len());
         for id in ordered_run_ids {
             if !seen.insert(id) {
-                return Err("queue order contains a duplicate run id - refresh and retry".to_string());
+                return Err(
+                    "queue order contains a duplicate run id - refresh and retry".to_string(),
+                );
             }
         }
     }
@@ -195,11 +208,14 @@ pub(crate) fn reorder_queued_circuit_runs_locked(
     // The full pending set for this mesh: the payload must match it exactly
     // or positions would collide with rows the caller did not pass.
     let current: Vec<i64> = {
-        let mut stmt = tx.prepare(
-            "SELECT id FROM autopilot_circuit_runs \
+        let mut stmt = tx
+            .prepare(
+                "SELECT id FROM autopilot_circuit_runs \
              WHERE mesh_id = ?1 AND state = 'pending' ORDER BY queue_position, id",
-        ).map_err(|e| e.to_string())?;
-        let rows = stmt.query_map(params![mesh_id], |row| row.get(0))
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![mesh_id], |row| row.get(0))
             .map_err(|e| e.to_string())?;
         let collected: SqlResult<Vec<i64>> = rows.collect();
         collected.map_err(|e| e.to_string())?
@@ -217,23 +233,29 @@ pub(crate) fn reorder_queued_circuit_runs_locked(
         let mut ordered_sorted = ordered_run_ids.to_vec();
         ordered_sorted.sort_unstable();
         if current_sorted != ordered_sorted {
-            return Err("queue changed while reordering (stale or foreign run ids) - refresh and retry".to_string());
+            return Err(
+                "queue changed while reordering (stale or foreign run ids) - refresh and retry"
+                    .to_string(),
+            );
         }
     }
     // Anchor on the current minimum so the rewrite never collides with
     // concurrent MAX+1 mints racing this transaction.
-    let base: i64 = tx.query_row(
-        "SELECT COALESCE(MIN(queue_position), 0) FROM autopilot_circuit_runs \
+    let base: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MIN(queue_position), 0) FROM autopilot_circuit_runs \
          WHERE mesh_id = ?1 AND state = 'pending'",
-        params![mesh_id],
-        |row| row.get(0),
-    ).map_err(|e| e.to_string())?;
+            params![mesh_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
     for (index, run_id) in ordered_run_ids.iter().enumerate() {
         tx.execute(
             "UPDATE autopilot_circuit_runs SET queue_position = ?2 \
              WHERE id = ?1 AND state = 'pending'",
             params![run_id, base + index as i64],
-        ).map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?;
     }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(ordered_run_ids.len())

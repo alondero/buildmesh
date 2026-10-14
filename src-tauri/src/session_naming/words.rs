@@ -1,5 +1,6 @@
 #![allow(clippy::unreadable_literal)]
 
+#[rustfmt::skip]
 pub(crate) static ADJECTIVES: &[&str] = &[
     "bold", "brave", "bright", "calm", "clean", "clear", "cool",
     "crisp", "dark", "deep", "dry", "eager", "early", "easy", "fair",

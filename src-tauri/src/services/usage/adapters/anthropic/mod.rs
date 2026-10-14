@@ -8,9 +8,9 @@ mod auth;
 mod parse;
 
 use crate::preferences::ProviderAccount;
-use crate::services::usage::types::UsagePage;
 use crate::services::usage::adapter::{shared_client, UsageAdapter, UsageIdentityFingerprint};
 use crate::services::usage::outcome::UsageOutcome;
+use crate::services::usage::types::UsagePage;
 
 use auth::{
     active_user_oauth, anthropic_config_dir_for, cache_identity_from, resolve_claude_auth,
@@ -61,7 +61,10 @@ pub(crate) struct AnthropicAdapter;
 
 impl UsageAdapter for AnthropicAdapter {
     fn usage_page(&self) -> Option<UsagePage> {
-        Some(UsagePage::new("https://claude.ai/settings/usage", "View usage"))
+        Some(UsagePage::new(
+            "https://claude.ai/settings/usage",
+            "View usage",
+        ))
     }
 
     fn id(&self) -> &'static str {
@@ -103,9 +106,7 @@ fn anthropic_usage_with_urls(
         ClaudeAuthSource::Missing { error } => UsageOutcome::NoCredential {
             hint: error.to_string(),
         },
-        ClaudeAuthSource::Oauth {
-            token, origin, ..
-        } => {
+        ClaudeAuthSource::Oauth { token, origin, .. } => {
             let outcome = fetch_oauth_usage(usage_url, profile_url, &token, origin.clone());
             if matches!(outcome, UsageOutcome::Rejected { .. }) && origin == OauthOrigin::Login {
                 if let Some(ClaudeAuthSource::Oauth {
@@ -172,7 +173,11 @@ fn fetch_oauth_usage(
         Ok(response) if !response.status().is_success() => {
             let code = response.status().as_u16();
             UsageOutcome::Unavailable {
-                reason: format!("API error {}: {}", code, response.text().unwrap_or_default()),
+                reason: format!(
+                    "API error {}: {}",
+                    code,
+                    response.text().unwrap_or_default()
+                ),
             }
         }
         Ok(response) => match parse_anthropic_usage(&response.text().unwrap_or_default()) {
@@ -330,7 +335,10 @@ mod tests {
         let outcome = anthropic_usage_with(&with_file(OAUTH_JSON), &loopback_url(port));
         match &outcome {
             UsageOutcome::Reading {
-                windows, meters, detail, ..
+                windows,
+                meters,
+                detail,
+                ..
             } => {
                 assert_eq!(windows.len(), 2);
                 assert!(meters.is_empty());
@@ -357,7 +365,10 @@ mod tests {
         let outcome = anthropic_usage_with(&with_file(ENTERPRISE_JSON), &loopback_url(port));
         match &outcome {
             UsageOutcome::Reading {
-                windows, meters, detail, ..
+                windows,
+                meters,
+                detail,
+                ..
             } => {
                 assert!(windows.is_empty());
                 match &meters[..] {
@@ -401,15 +412,13 @@ mod tests {
             .insert("CLAUDE_CODE_OAUTH_TOKEN".into(), "sk-ant-oat01-env".into());
         let outcome = anthropic_usage_with(&lookup, &loopback_url(port));
         match &outcome {
-            UsageOutcome::Reading { meters, .. } => {
-                match &meters[..] {
-                    [UsageMeter::Metered { amount }] => {
-                        assert_eq!(amount.used, 25.0);
-                        assert_eq!(amount.limit, Some(100.0));
-                    }
-                    other => panic!("expected enterprise spend for env token, got {other:?}"),
+            UsageOutcome::Reading { meters, .. } => match &meters[..] {
+                [UsageMeter::Metered { amount }] => {
+                    assert_eq!(amount.used, 25.0);
+                    assert_eq!(amount.limit, Some(100.0));
                 }
-            }
+                other => panic!("expected enterprise spend for env token, got {other:?}"),
+            },
             other => panic!("expected Reading outcome, got: {other:?}"),
         }
     }
@@ -443,13 +452,13 @@ mod tests {
         match &outcome {
             UsageOutcome::Reading { meters, detail, .. } => {
                 assert!(
-                    detail.as_deref().unwrap_or_default().contains("user:profile"),
+                    detail
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("user:profile"),
                     "detail={detail:?}"
                 );
-                assert!(matches!(
-                    meters.first(),
-                    Some(UsageMeter::Metered { .. })
-                ));
+                assert!(matches!(meters.first(), Some(UsageMeter::Metered { .. })));
             }
             other => panic!("expected Reading outcome, got: {other:?}"),
         }
@@ -513,10 +522,7 @@ mod tests {
         let outcome = anthropic_usage_with(&lookup, &loopback_url(port));
         match &outcome {
             UsageOutcome::Reading { meters, .. } => {
-                assert!(matches!(
-                    meters.first(),
-                    Some(UsageMeter::Metered { .. })
-                ));
+                assert!(matches!(meters.first(), Some(UsageMeter::Metered { .. })));
             }
             other => panic!("expected Reading outcome, got: {other:?}"),
         }
@@ -540,14 +546,15 @@ mod tests {
                     .with_status_code(403),
                 );
             } else {
-                let _ = request.respond(
-                    tiny_http::Response::from_string(CONSUMER_BODY).with_status_code(200),
-                );
+                let _ = request
+                    .respond(tiny_http::Response::from_string(CONSUMER_BODY).with_status_code(200));
             }
         });
         let outcome = anthropic_usage_with(&with_file(OAUTH_JSON), &loopback_url(port));
         match &outcome {
-            UsageOutcome::Reading { windows, detail, .. } => {
+            UsageOutcome::Reading {
+                windows, detail, ..
+            } => {
                 let detail = detail.as_deref().unwrap_or_default();
                 assert!(
                     detail.contains("user:profile"),
@@ -574,7 +581,9 @@ mod tests {
         });
         let outcome = anthropic_usage_with(&with_file(OAUTH_JSON), &loopback_url(port));
         match &outcome {
-            UsageOutcome::Reading { windows, detail, .. } => {
+            UsageOutcome::Reading {
+                windows, detail, ..
+            } => {
                 assert!(detail.is_none());
                 assert_eq!(windows.len(), 2);
             }
@@ -601,15 +610,13 @@ mod tests {
         });
         let outcome = anthropic_usage_with(&with_file(ENTERPRISE_JSON), &loopback_url(port));
         match &outcome {
-            UsageOutcome::Reading { meters, .. } => {
-                match &meters[..] {
-                    [UsageMeter::Metered { amount }] => {
-                        assert_eq!(amount.used, 3.25);
-                        assert_eq!(amount.limit, Some(20.5));
-                    }
-                    other => panic!("expected extra_usage fallback, got {other:?}"),
+            UsageOutcome::Reading { meters, .. } => match &meters[..] {
+                [UsageMeter::Metered { amount }] => {
+                    assert_eq!(amount.used, 3.25);
+                    assert_eq!(amount.limit, Some(20.5));
                 }
-            }
+                other => panic!("expected extra_usage fallback, got {other:?}"),
+            },
             other => panic!("expected Reading outcome, got: {other:?}"),
         }
     }
@@ -665,10 +672,7 @@ mod tests {
             let outcome = anthropic_usage_with(&with_file(OAUTH_JSON), &loopback_url(port));
             match &outcome {
                 UsageOutcome::Rejected { hint } => {
-                    assert!(
-                        hint.contains("login expired"),
-                        "{status}: {hint:?}"
-                    );
+                    assert!(hint.contains("login expired"), "{status}: {hint:?}");
                 }
                 other => panic!("status {status}: expected Rejected outcome, got: {other:?}"),
             }
@@ -915,7 +919,10 @@ mod tests {
         match &outcome {
             UsageOutcome::Reading { detail, .. } => {
                 assert!(
-                    !detail.as_deref().unwrap_or_default().contains("user:profile"),
+                    !detail
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("user:profile"),
                     "401-with-scope-text must retry as expired, not surface a scope limitation"
                 );
             }
@@ -969,13 +976,13 @@ mod tests {
         match &outcome {
             UsageOutcome::Reading { meters, detail, .. } => {
                 assert!(
-                    !detail.as_deref().unwrap_or_default().contains("setup-token"),
+                    !detail
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("setup-token"),
                     "generic permission error must not surface a scope limitation"
                 );
-                assert!(matches!(
-                    meters.first(),
-                    Some(UsageMeter::Metered { .. })
-                ));
+                assert!(matches!(meters.first(), Some(UsageMeter::Metered { .. })));
             }
             other => panic!("expected Reading outcome, got: {other:?}"),
         }

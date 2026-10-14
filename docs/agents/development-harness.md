@@ -368,20 +368,19 @@ There is no established frontend formatter, so this harness uses ESLint and
 Git whitespace checks rather than imposing a new formatting policy. Clippy's
 existing warning backlog remains visible as `warningCount`; any warning in a
 touched file fails. This is not a repository-wide zero-warning certificate.
-Rust formatting follows the same rule: `cargo fmt --all --check` runs over
-the crate, a diff in a touched file fails, and the crate's existing
-formatting backlog (#2022) is reported as `formatDiffCount` instead of
-blocking every Rust change. Format touched files with
-`node scripts/rustfmt-touched.mjs <file.rs>...`. Do not run `cargo fmt` (it
-rewrites the whole crate) or bare `rustfmt <file>`: on a module root
-(`lib.rs`, `mod.rs`) rustfmt also formats the child modules. The script
-restores every other Rust file (tracked, or untracked and not ignored) byte
-for byte. The `guard-rustfmt.mjs` hook is an early warning: it denies a
+Rust formatting is stricter, because the crate is rustfmt-clean (#2022):
+`cargo fmt --all --check` runs over the whole crate and **any** diff fails,
+not only one in a touched file. Fix it with `cargo fmt --all`, then commit the
+result alone as `style(rust): format <files>`; reformatting inside the behaviour
+commit buries the change reviewers must read. Bare `rustfmt <file>` is still
+wrong on a module root (`lib.rs`, `mod.rs`), where it also formats the child
+modules; `node scripts/rustfmt-touched.mjs <file.rs>...` formats the named
+files and restores every other Rust file (tracked, or untracked and not ignored)
+byte for byte. The `guard-rustfmt.mjs` hook is an early warning: it denies a
 `rustfmt` or `cargo fmt` command that is not `--check`, but cannot see a
-command built at run time. A
-rustfmt failure that reports no diff (for example a parse error) stays red.
-Any other existing failure stays red too: reproduce at the recorded base
-before attributing it to baseline debt.
+command built at run time. A rustfmt failure that reports no diff (for example
+a parse error) stays red. Any other existing failure stays red too: reproduce
+at the recorded base before attributing it to baseline debt.
 
 Checks run under deadlines using the existing process-tree guard. Output goes
 to `.harness/logs/`; agents receive gate names, results, counts and log paths.

@@ -43,11 +43,17 @@ impl RecordingSink {
     }
 
     pub fn with_status(status: SessionStatus) -> Self {
-        Self { status: RefCell::new(Some(status)), ..Self::default() }
+        Self {
+            status: RefCell::new(Some(status)),
+            ..Self::default()
+        }
     }
 
     pub fn failing_writes() -> Self {
-        Self { fail_writes: true, ..Self::default() }
+        Self {
+            fail_writes: true,
+            ..Self::default()
+        }
     }
 
     pub fn status(&self) -> Option<SessionStatus> {
@@ -74,9 +80,7 @@ impl RecordingSink {
         self.attention_needed.borrow().clone()
     }
 
-    pub fn attention_needed_with_payload(
-        &self,
-    ) -> Vec<(i64, Option<SemanticTurnPayload>)> {
+    pub fn attention_needed_with_payload(&self) -> Vec<(i64, Option<SemanticTurnPayload>)> {
         self.attention_needed_with_payload.borrow().clone()
     }
 
@@ -94,7 +98,11 @@ impl RecordingSink {
 }
 
 impl SessionLifecycleSink for RecordingSink {
-    fn commit_lifecycle(&self, payload: &mut LifecycleChangedPayload, forbidden: &[SessionStatus]) -> Result<bool, String> {
+    fn commit_lifecycle(
+        &self,
+        payload: &mut LifecycleChangedPayload,
+        forbidden: &[SessionStatus],
+    ) -> Result<bool, String> {
         if forbidden.is_empty() {
             self.write_status(payload.session_id, payload.status)?;
             Ok(true)
@@ -102,8 +110,15 @@ impl SessionLifecycleSink for RecordingSink {
             self.write_status_unless_in(payload.session_id, payload.status, forbidden)
         }
     }
-    fn commit_spawn_promotion(&self, payload: &mut LifecycleChangedPayload) -> Result<bool, String> {
-        self.writes_if.borrow_mut().push((payload.session_id, payload.status, SessionStatus::Spawning));
+    fn commit_spawn_promotion(
+        &self,
+        payload: &mut LifecycleChangedPayload,
+    ) -> Result<bool, String> {
+        self.writes_if.borrow_mut().push((
+            payload.session_id,
+            payload.status,
+            SessionStatus::Spawning,
+        ));
         if !matches!(*self.status.borrow(), Some(SessionStatus::Spawning)) {
             return Ok(false);
         }
@@ -122,9 +137,7 @@ impl SessionLifecycleSink for RecordingSink {
         new: SessionStatus,
         expected: SessionStatus,
     ) -> Result<bool, String> {
-        self.writes_if
-            .borrow_mut()
-            .push((node_id, new, expected));
+        self.writes_if.borrow_mut().push((node_id, new, expected));
         Ok(true)
     }
 
@@ -140,7 +153,12 @@ impl SessionLifecycleSink for RecordingSink {
         if self.fail_writes {
             return Err("status write failed".into());
         }
-        if self.status.borrow().as_ref().is_some_and(|status| forbidden.contains(status)) {
+        if self
+            .status
+            .borrow()
+            .as_ref()
+            .is_some_and(|status| forbidden.contains(status))
+        {
             return Ok(false);
         }
         *self.status.borrow_mut() = Some(new);

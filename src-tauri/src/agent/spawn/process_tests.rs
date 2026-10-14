@@ -5,7 +5,17 @@ fn attention_hook_covers_question_lifecycle_and_bounds_delivery_time() {
     let temp = TempDir::new().unwrap();
     inject_attention_hook(temp.path()).unwrap();
     let settings = read_injected_settings(temp.path());
-    for event in ["Elicitation", "ElicitationResult", "StopFailure", "UserPromptSubmit", "SubagentStart", "SubagentStop", "PreToolUse", "PostToolUse", "PostToolUseFailure"] {
+    for event in [
+        "Elicitation",
+        "ElicitationResult",
+        "StopFailure",
+        "UserPromptSubmit",
+        "SubagentStart",
+        "SubagentStop",
+        "PreToolUse",
+        "PostToolUse",
+        "PostToolUseFailure",
+    ] {
         let group = &settings["hooks"][event][0];
         let command = group["hooks"][0]["command"].as_str().unwrap();
         assert!(command.contains("--max-time 2"), "{event}");
@@ -251,13 +261,11 @@ fn attention_hook_preserves_unrelated_events() {
 
     let settings = read_injected_settings(temp.path());
     assert_eq!(
-        settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
-        "echo blocked",
+        settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "echo blocked",
         "user-authored PreToolUse hook must survive"
     );
     assert_eq!(
-        settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
-        "/opt/user-prompt.sh",
+        settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"], "/opt/user-prompt.sh",
         "user-authored UserPromptSubmit hook must survive"
     );
     // Notification / Stop are now populated by the merge.
@@ -481,7 +489,10 @@ fn a_writer_thread_that_errors_releases_the_remaining_queue_accounting() {
     struct FailingWriter;
     impl std::io::Write for FailingWriter {
         fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "conpty gone"))
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "conpty gone",
+            ))
         }
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
@@ -497,9 +508,18 @@ fn a_writer_thread_that_errors_releases_the_remaining_queue_accounting() {
     tx.try_send(vec![2u8; 20]).unwrap();
     queue.reserve(10);
     queue.reserve(20);
-    assert_eq!(queue.snapshot(), (2, 30), "fixture must start fully accounted");
+    assert_eq!(
+        queue.snapshot(),
+        (2, 30),
+        "fixture must start fully accounted"
+    );
 
-    super::process::pty_writer_thread(7_777, Box::new(FailingWriter), rx, std::sync::Arc::clone(&queue));
+    super::process::pty_writer_thread(
+        7_777,
+        Box::new(FailingWriter),
+        rx,
+        std::sync::Arc::clone(&queue),
+    );
 
     assert_eq!(
         queue.snapshot(),
@@ -517,6 +537,11 @@ fn a_writer_thread_that_exits_cleanly_also_zeroes_the_gauge() {
     tx.try_send(vec![3u8; 7]).unwrap();
     queue.reserve(7);
     drop(tx); // the `close_input` shape
-    super::process::pty_writer_thread(7_778, Box::new(std::io::sink()), rx, std::sync::Arc::clone(&queue));
+    super::process::pty_writer_thread(
+        7_778,
+        Box::new(std::io::sink()),
+        rx,
+        std::sync::Arc::clone(&queue),
+    );
     assert_eq!(queue.snapshot(), (0, 0));
 }

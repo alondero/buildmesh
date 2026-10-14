@@ -292,7 +292,10 @@ mod tests {
             .into_iter()
             .map(|e| e.id)
             .collect();
-        let alias_from: HashSet<&str> = HARNESS_PROFILE_ALIASES.iter().map(|(from, _)| *from).collect();
+        let alias_from: HashSet<&str> = HARNESS_PROFILE_ALIASES
+            .iter()
+            .map(|(from, _)| *from)
+            .collect();
 
         for (from, to) in HARNESS_PROFILE_ALIASES {
             assert!(
@@ -310,7 +313,8 @@ mod tests {
 
         let builtin: HashSet<&str> = BUILTIN_HARNESS_IDS.iter().copied().collect();
         assert_eq!(
-            builtin, covered,
+            builtin,
+            covered,
             "BUILTIN_HARNESS_IDS must equal catalog keys ∪ HARNESS_PROFILE_ALIASES.\n\
              only in BUILTIN: {:?}\nonly in catalog/aliases: {:?}",
             builtin.difference(&covered).collect::<Vec<_>>(),
@@ -348,7 +352,10 @@ mod tests {
             serde_json::from_str(&json).expect("exported JSON must parse");
         let expected: serde_json::Value =
             serde_json::from_str(&catalog_json()).expect("in-memory JSON");
-        assert_eq!(parsed, expected, "exported JSON must match the in-memory catalog");
+        assert_eq!(
+            parsed, expected,
+            "exported JSON must match the in-memory catalog"
+        );
 
         for entry in builtin_harness_catalog() {
             assert!(
@@ -370,7 +377,10 @@ mod tests {
             .into_iter()
             .map(serde_json::Value::String)
             .collect();
-        assert_eq!(ids, &expected_ids, "exported ids must follow Provider::all()");
+        assert_eq!(
+            ids, &expected_ids,
+            "exported ids must follow Provider::all()"
+        );
         assert!(
             ts.contains("HARNESS_PROFILE_ALIASES"),
             "generated TS must export the claude → anthropic alias table"

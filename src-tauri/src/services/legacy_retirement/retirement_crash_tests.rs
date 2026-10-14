@@ -51,11 +51,11 @@
 //! crash reach them. That mechanism is Win32-only, which is why the whole module
 //! is Windows-gated rather than the process assertions alone.
 
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 const MESH_ID: i64 = 1;
 const NODE_ID: i64 = 1;
@@ -191,7 +191,11 @@ impl LegacyFixture {
             )
             .expect("legacy autopilot run");
         }
-        Self { _dir: dir, db, worktree }
+        Self {
+            _dir: dir,
+            db,
+            worktree,
+        }
     }
 
     fn open(&self) -> Connection {
@@ -268,10 +272,11 @@ impl LegacyFixture {
     /// so the scenario only counts a boundary as covered when the child says it
     /// got there.
     fn reached(&self, phase: Phase) -> Option<String> {
-        let marker = std::fs::read_to_string(self.side_file(&format!("reached-{}", phase.as_str())))
-            .ok()?
-            .trim()
-            .to_string();
+        let marker =
+            std::fs::read_to_string(self.side_file(&format!("reached-{}", phase.as_str())))
+                .ok()?
+                .trim()
+                .to_string();
         Some(marker)
     }
 
@@ -279,9 +284,10 @@ impl LegacyFixture {
     /// the second process the retirement never touches, so the parent can watch
     /// more than the one entry the sweep knows about.
     fn owned_process_tree(&self) -> Vec<u32> {
-        let recorded = std::fs::read_to_string(self.side_file("owned-pid")).unwrap_or_else(|error| {
-            panic!("the crash child recorded no contained process: {error}")
-        });
+        let recorded =
+            std::fs::read_to_string(self.side_file("owned-pid")).unwrap_or_else(|error| {
+                panic!("the crash child recorded no contained process: {error}")
+            });
         let pids: Vec<u32> = recorded
             .lines()
             .filter_map(|line| line.trim().parse().ok())
@@ -481,7 +487,12 @@ impl Snapshot {
             run_pr_url: run.pr_url.clone(),
             run_identity: format!(
                 "issue={} attempts={} pr_number={:?} pr_url={:?} loop_iteration={:?} created_at={}",
-                run.issue_number, run.attempts, run.pr_number, run.pr_url, run.loop_iteration, run.created_at
+                run.issue_number,
+                run.attempts,
+                run.pr_number,
+                run.pr_url,
+                run.loop_iteration,
+                run.created_at
             ),
             updated_at: run.updated_at,
             autopilot_enabled: mesh.0,
@@ -498,19 +509,48 @@ impl Snapshot {
     /// the fixture as the crash found it, so "unchanged" means unchanged across
     /// the crash and every retry that followed it.
     fn assert_retained(&self, before: &Snapshot, fixture: &LegacyFixture) {
-        assert_eq!(self.prior_state, "finishing", "the retirement keeps the prior legacy state");
-        assert_eq!(self.run_pr_url.as_deref(), Some("https://example.test/pr/18"), "the legacy PR identity is retained");
-        assert_eq!(self.run_state, "cancelled", "the legacy run stays cancelled, never reopened");
+        assert_eq!(
+            self.prior_state, "finishing",
+            "the retirement keeps the prior legacy state"
+        );
+        assert_eq!(
+            self.run_pr_url.as_deref(),
+            Some("https://example.test/pr/18"),
+            "the legacy PR identity is retained"
+        );
+        assert_eq!(
+            self.run_state, "cancelled",
+            "the legacy run stays cancelled, never reopened"
+        );
         assert_eq!(
             self.run_identity, before.run_identity,
             "the retained run's identity survives every retry — only its state and updated_at may move"
         );
-        assert_eq!(self.autopilot_runs, before.autopilot_runs, "a retry never splits or reopens the legacy run");
-        assert_eq!(self.circuit_runs, before.circuit_runs, "no legacy run is converted into a Circuit");
-        assert_eq!(self.agent_nodes, before.agent_nodes, "the Agent Node is retained");
-        assert_eq!((self.legacy_concurrency, self.circuit_capacity), (7, 3), "capacity settings are independent and unchanged");
-        assert_eq!(self.pending_worktree_removals, 0, "retirement never queues a worktree removal");
-        assert!(fixture.worktree_retained(), "the retained worktree stays on disk for inspection");
+        assert_eq!(
+            self.autopilot_runs, before.autopilot_runs,
+            "a retry never splits or reopens the legacy run"
+        );
+        assert_eq!(
+            self.circuit_runs, before.circuit_runs,
+            "no legacy run is converted into a Circuit"
+        );
+        assert_eq!(
+            self.agent_nodes, before.agent_nodes,
+            "the Agent Node is retained"
+        );
+        assert_eq!(
+            (self.legacy_concurrency, self.circuit_capacity),
+            (7, 3),
+            "capacity settings are independent and unchanged"
+        );
+        assert_eq!(
+            self.pending_worktree_removals, 0,
+            "retirement never queues a worktree removal"
+        );
+        assert!(
+            fixture.worktree_retained(),
+            "the retained worktree stays on disk for inspection"
+        );
     }
 
     /// A suspended retired node must stay out of the auto-resume list: Idle and
@@ -608,7 +648,10 @@ fn retirement_crash_child() {
                 vec![node_id],
                 "the intent names the outstanding stop"
             );
-            let process = &owned.as_ref().expect("a live process for this phase").process;
+            let process = &owned
+                .as_ref()
+                .expect("a live process for this phase")
+                .process;
             assert!(
                 !process_has_exited(process),
                 "committing the cleanup intent must not stop the process it is about to"
@@ -620,13 +663,22 @@ fn retirement_crash_child() {
                 "BEFORE UPDATE OF stopped_at ON legacy_autopilot_retirements \
                  BEGIN SELECT RAISE(ABORT,'injected crash before the retirement acknowledgement'); END",
             );
-            crate::services::legacy_retirement::retire_legacy_automation().expect("the sweep still runs");
-            let process = &owned.as_ref().expect("a live process for this phase").process;
+            crate::services::legacy_retirement::retire_legacy_automation()
+                .expect("the sweep still runs");
+            let process = &owned
+                .as_ref()
+                .expect("a live process for this phase")
+                .process;
             assert!(
-                crate::agent::process::PROCESS_REGISTRY.get(&node_id).is_none(),
+                crate::agent::process::PROCESS_REGISTRY
+                    .get(&node_id)
+                    .is_none(),
                 "the owned incarnation is torn down"
             );
-            assert!(process_has_exited(process), "the owned process is really dead");
+            assert!(
+                process_has_exited(process),
+                "the owned process is really dead"
+            );
             assert!(
                 crate::db::legacy_retirement::pending(node_id).expect("pending read"),
                 "the failed acknowledgement leaves the stop outstanding"
@@ -634,8 +686,14 @@ fn retirement_crash_child() {
         }
         Phase::CrashAfterAck => {
             crate::services::legacy_retirement::retire_legacy_automation().expect("the sweep runs");
-            let process = &owned.as_ref().expect("a live process for this phase").process;
-            assert!(process_has_exited(process), "the owned process is really dead");
+            let process = &owned
+                .as_ref()
+                .expect("a live process for this phase")
+                .process;
+            assert!(
+                process_has_exited(process),
+                "the owned process is really dead"
+            );
             assert!(
                 !crate::db::legacy_retirement::pending(node_id).expect("pending read"),
                 "the acknowledgement is durable"
@@ -648,9 +706,14 @@ fn retirement_crash_child() {
         Phase::RetryBesideLiveProcess => {
             crate::services::legacy_retirement::retire_legacy_automation()
                 .expect("the relaunch completes the retirement sweep");
-            let process = &owned.as_ref().expect("a live process for this phase").process;
+            let process = &owned
+                .as_ref()
+                .expect("a live process for this phase")
+                .process;
             assert!(
-                crate::agent::process::PROCESS_REGISTRY.get(&node_id).is_some(),
+                crate::agent::process::PROCESS_REGISTRY
+                    .get(&node_id)
+                    .is_some(),
                 "a stop that is not outstanding is not retried"
             );
             assert!(
@@ -671,7 +734,8 @@ fn retirement_crash_child() {
 /// process that wrote it is gone.
 fn forced_crash(phase: Phase, db: &str) -> ! {
     let marker = format!("{db}.reached-{}", phase.as_str());
-    std::fs::write(&marker, phase.as_str()).expect("record that the child reached the forced abort");
+    std::fs::write(&marker, phase.as_str())
+        .expect("record that the child reached the forced abort");
     std::process::abort();
 }
 
@@ -752,11 +816,7 @@ struct OwnedTree {
 /// real spawn contains it. That matters twice: the sweep's stop reaches what
 /// the job holds, and the app crashing takes it with it instead of orphaning
 /// it for the next launch to find.
-fn register_live_agent(
-    node_id: i64,
-    mesh_id: i64,
-    db: &str,
-) -> OwnedTree {
+fn register_live_agent(node_id: i64, mesh_id: i64, db: &str) -> OwnedTree {
     let pair = portable_pty::native_pty_system()
         .openpty(portable_pty::PtySize {
             rows: 24,
@@ -773,7 +833,10 @@ fn register_live_agent(
         .expect("spawn the retired agent process");
     let pid = child.process_id().expect("the spawned process has a pid");
     let job = crate::process_util::JobHandle::contain(pid);
-    assert!(job.is_some(), "the retired agent process must be job-contained");
+    assert!(
+        job.is_some(),
+        "the retired agent process must be job-contained"
+    );
 
     // A PowerShell sleeper rather than `ping`: a background child of the PTY's
     // shell does not survive on Windows, and this one only has to stay alive,
@@ -788,7 +851,9 @@ fn register_live_agent(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    let sleeper = sleeper_command.spawn().expect("spawn a second contained process");
+    let sleeper = sleeper_command
+        .spawn()
+        .expect("spawn a second contained process");
     let sleeper_pid = sleeper.id();
     // The job owns the sleeper's life: forgetting the child handle stops it from
     // ever reaping the process, and the job is closed by the crash. Without a
@@ -796,13 +861,19 @@ fn register_live_agent(
     // the module is Windows-gated.
     std::mem::forget(sleeper);
     let sleeper_job = crate::process_util::JobHandle::contain(sleeper_pid);
-    assert!(sleeper_job.is_some(), "the second process must be job-contained");
+    assert!(
+        sleeper_job.is_some(),
+        "the second process must be job-contained"
+    );
 
     // A command that rejects its own arguments exits within milliseconds, long
     // before the crash, and would make the exit observation meaningless — so
     // liveness is re-checked after the process has had time to die on its own.
     for pid in [pid, sleeper_pid] {
-        assert!(observe_running(pid), "contained process {pid} must be running when it is registered");
+        assert!(
+            observe_running(pid),
+            "contained process {pid} must be running when it is registered"
+        );
     }
     std::thread::sleep(std::time::Duration::from_millis(300));
     for pid in [pid, sleeper_pid] {
@@ -839,7 +910,10 @@ fn register_live_agent(
     let process = crate::agent::process::PROCESS_REGISTRY
         .get(&node_id)
         .expect("the spawned process is registered");
-    OwnedTree { process, _sleeper_job: sleeper_job }
+    OwnedTree {
+        process,
+        _sleeper_job: sleeper_job,
+    }
 }
 
 /// Whether a pid is still running. An unobservable pid fails rather than
@@ -933,10 +1007,22 @@ fn retirement_crash_before_the_cleanup_intent_recovers_without_partial_retiremen
     fixture.drop_injected_triggers();
     fixture.expect_recovery(Phase::Retry);
     let recovered = fixture.snapshot();
-    assert_eq!(recovered.retirements, 1, "the relaunch records the intent exactly once");
-    assert_eq!(recovered.run_state, "cancelled", "legacy work is cancelled before any stop");
-    assert!(!recovered.autopilot_enabled, "legacy scheduling is disabled");
-    assert!(recovered.stopped_at.is_some(), "the relaunch completes the stop");
+    assert_eq!(
+        recovered.retirements, 1,
+        "the relaunch records the intent exactly once"
+    );
+    assert_eq!(
+        recovered.run_state, "cancelled",
+        "legacy work is cancelled before any stop"
+    );
+    assert!(
+        !recovered.autopilot_enabled,
+        "legacy scheduling is disabled"
+    );
+    assert!(
+        recovered.stopped_at.is_some(),
+        "the relaunch completes the stop"
+    );
     assert_eq!(recovered.node_status, "suspended");
     recovered.assert_retained(&untouched, &fixture);
     recovered.assert_never_auto_resumes(&fixture.open());
@@ -960,8 +1046,14 @@ fn retirement_crash_after_the_cleanup_intent_resumes_the_outstanding_stop() {
 
     let wedged = fixture.snapshot();
     assert_eq!(wedged.retirements, 1, "the cleanup intent is durable");
-    assert_eq!(wedged.run_state, "cancelled", "the legacy run is cancelled before the stop");
-    assert!(!wedged.autopilot_enabled, "legacy scheduling is already disabled");
+    assert_eq!(
+        wedged.run_state, "cancelled",
+        "the legacy run is cancelled before the stop"
+    );
+    assert!(
+        !wedged.autopilot_enabled,
+        "legacy scheduling is already disabled"
+    );
     assert!(
         wedged.stopped_at.is_none(),
         "the process stop is still outstanding when the app dies"
@@ -988,9 +1080,15 @@ fn retirement_crash_after_the_cleanup_intent_resumes_the_outstanding_stop() {
 
     fixture.expect_recovery(Phase::Retry);
     let recovered = fixture.snapshot();
-    assert!(recovered.stopped_at.is_some(), "the retry finishes the stop it inherited");
+    assert!(
+        recovered.stopped_at.is_some(),
+        "the retry finishes the stop it inherited"
+    );
     assert_eq!(recovered.node_status, "suspended");
-    assert_eq!(recovered.retirements, 1, "the retry does not record a second retirement");
+    assert_eq!(
+        recovered.retirements, 1,
+        "the retry does not record a second retirement"
+    );
     recovered.assert_retained(&untouched, &fixture);
     recovered.assert_never_auto_resumes(&fixture.open());
 
@@ -1008,13 +1106,19 @@ fn retirement_crash_between_the_process_kill_and_its_acknowledgement_recovers() 
     fixture.expect_crash(Phase::CrashBeforeAck);
 
     let wedged = fixture.snapshot();
-    assert!(wedged.stopped_at.is_none(), "the kill is not acknowledged when the app dies");
+    assert!(
+        wedged.stopped_at.is_none(),
+        "the kill is not acknowledged when the app dies"
+    );
     assert_eq!(
         wedged.node_status, "running",
         "the rolled-back acknowledgement leaves the node status alone"
     );
     assert_eq!(wedged.retirements, 1, "the intent survives the crash");
-    assert!(fixture.trigger_present(ACK_TRIGGER), "the injected failure is what wedged the stop");
+    assert!(
+        fixture.trigger_present(ACK_TRIGGER),
+        "the injected failure is what wedged the stop"
+    );
     assert_replacement_spawn_refused(&fixture);
     wedged.assert_retained(&untouched, &fixture);
 
@@ -1040,7 +1144,10 @@ fn retirement_crash_after_the_acknowledgement_leaves_nothing_to_retry() {
     fixture.expect_crash(Phase::CrashAfterAck);
 
     let committed = fixture.snapshot();
-    assert!(committed.stopped_at.is_some(), "the acknowledgement is durable");
+    assert!(
+        committed.stopped_at.is_some(),
+        "the acknowledgement is durable"
+    );
     assert_eq!(committed.node_status, "suspended");
     committed.assert_retained(&untouched, &fixture);
     committed.assert_never_auto_resumes(&fixture.open());
@@ -1065,7 +1172,10 @@ fn retirement_retry_protects_a_borrowed_process_and_the_retained_node() {
     // retry added no Circuit run of its own.
     let borrowed = fixture.snapshot();
     assert_eq!(borrowed.circuit_runs, 1);
-    assert_eq!(borrowed.retirements, 1, "the stop is still outstanding when the borrow appears");
+    assert_eq!(
+        borrowed.retirements, 1,
+        "the stop is still outstanding when the borrow appears"
+    );
 
     // The child asserts the live process survived the sweep.
     fixture.expect_recovery(Phase::RetryBesideLiveProcess);
@@ -1106,15 +1216,20 @@ fn retirement_retry_refuses_to_stop_a_new_session_incarnation() {
         after.node_status, "running",
         "the new incarnation keeps running: the retirement stops only the incarnation it journalled"
     );
-    assert!(after.stopped_at.is_some(), "the retirement closes its own intent");
+    assert!(
+        after.stopped_at.is_some(),
+        "the retirement closes its own intent"
+    );
     after.assert_retained(&untouched, &fixture);
 }
 
 fn circuit_run_state(fixture: &LegacyFixture) -> String {
     fixture
         .open()
-        .query_row("SELECT state FROM autopilot_circuit_runs WHERE id=1", [], |row| {
-            row.get::<_, String>(0)
-        })
+        .query_row(
+            "SELECT state FROM autopilot_circuit_runs WHERE id=1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
         .expect("read the borrowing Circuit run")
 }

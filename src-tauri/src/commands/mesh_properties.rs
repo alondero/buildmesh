@@ -88,8 +88,8 @@ fn remove_base_ref(mesh_path: &str) -> Result<(), String> {
 
 #[tauri::command]
 pub fn get_mesh_properties(mesh_id: i64) -> Result<MeshRow, String> {
-    let mesh = db::get_mesh_by_id(mesh_id)
-        .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+    let mesh =
+        db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
     Ok(MeshRow::from(&mesh))
 }
 
@@ -105,11 +105,7 @@ pub fn update_mesh_name(mesh_id: i64, name: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn update_mesh_column(
-    mesh_id: i64,
-    column: String,
-    value: String,
-) -> Result<(), String> {
+pub fn update_mesh_column(mesh_id: i64, column: String, value: String) -> Result<(), String> {
     // Allowlist of user-tunable `meshes` columns this command can write. The
     // `name` column is a dedicated command (`update_mesh_name`), and
     // `base_ref` / `use_worktree` have settings.json or structural side-effects
@@ -181,11 +177,7 @@ pub fn update_mesh_use_worktree(mesh_id: i64, use_worktree: bool) -> Result<(), 
 /// so the typed integer + the `0..=5` invariant are enforced here —
 /// the catch-all is intentionally unvalidated.
 #[tauri::command]
-pub fn update_mesh_pool_size(
-    app: AppHandle,
-    mesh_id: i64,
-    pool_size: i32,
-) -> Result<(), String> {
+pub fn update_mesh_pool_size(app: AppHandle, mesh_id: i64, pool_size: i32) -> Result<(), String> {
     if !(0..=5).contains(&pool_size) {
         return Err(format!(
             "invalid pool size {}: must be 0 (off) or 1..=5",
@@ -206,10 +198,7 @@ pub fn update_mesh_pool_size(
         // the load and the save. Surfaces the same contract as
         // `set_mesh_sandbox_inner`'s zero-rows guard.
         if rows == 0 {
-            return Err(format!(
-                "mesh {} not found (no rows updated)",
-                mesh_id
-            ));
+            return Err(format!("mesh {} not found (no rows updated)", mesh_id));
         }
     }
 
@@ -244,8 +233,7 @@ pub fn get_mesh_pool_count(mesh_id: i64) -> Result<i64, String> {
 /// the zero-rows-is-an-error contract is enforced in `db::set_mesh_sandbox`.
 #[tauri::command]
 pub fn update_mesh_sandbox(mesh_id: i64, sandbox: bool) -> Result<(), String> {
-    db::set_mesh_sandbox(mesh_id, sandbox)
-        .map_err(|e| format!("failed to update sandbox: {}", e))
+    db::set_mesh_sandbox(mesh_id, sandbox).map_err(|e| format!("failed to update sandbox: {}", e))
 }
 
 /// Set the per-Mesh Worktree Node directory override (issue #1519).
@@ -264,8 +252,8 @@ pub fn update_mesh_worktree_directory(
     mesh_id: i64,
     directory: Option<String>,
 ) -> Result<(), String> {
-    let mesh = db::get_mesh_by_id(mesh_id)
-        .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+    let mesh =
+        db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
     let cleaned = crate::env::validate_worktree_directory(&mesh.path, directory.as_deref())?;
     let rows = db::set_mesh_worktree_directory(mesh_id, cleaned.as_deref())
         .map_err(|e| format!("failed to update worktree_directory: {}", e))?;
@@ -314,12 +302,10 @@ pub fn update_mesh_circuit_run_capacity(mesh_id: i64, capacity: i32) -> Result<(
     Ok(())
 }
 
-
-
 #[tauri::command]
 pub fn update_worktree_base_ref(mesh_id: i64, base_ref: String) -> Result<(), String> {
-    let mesh = db::get_mesh_by_id(mesh_id)
-        .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+    let mesh =
+        db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
 
     // Map 'fresh' → origin/main and 'head' → HEAD
     let resolved = match base_ref.as_str() {
@@ -343,8 +329,8 @@ pub fn update_worktree_base_ref(mesh_id: i64, base_ref: String) -> Result<(), St
 
 #[tauri::command]
 pub fn remove_worktree_base_ref(mesh_id: i64) -> Result<(), String> {
-    let mesh = db::get_mesh_by_id(mesh_id)
-        .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+    let mesh =
+        db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
 
     // Write default to DB and remove from settings.json
     {
@@ -358,4 +344,3 @@ pub fn remove_worktree_base_ref(mesh_id: i64) -> Result<(), String> {
 
     remove_base_ref(&mesh.path)
 }
-

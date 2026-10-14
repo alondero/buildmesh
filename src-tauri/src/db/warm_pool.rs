@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 
 use super::{read_conn, write_conn, SqlResult};
 
@@ -76,13 +76,7 @@ pub(crate) fn insert_warm_worktree_inner(
     conn.execute(
         "INSERT INTO warm_worktrees (mesh_id, path, preassigned_name, status, base_sha)
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            mesh_id,
-            path,
-            preassigned_name,
-            status.as_str(),
-            base_sha,
-        ],
+        params![mesh_id, path, preassigned_name, status.as_str(), base_sha,],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -250,7 +244,10 @@ pub(crate) fn delete_warm_worktrees_for_mesh_inner(
     conn: &Connection,
     mesh_id: i64,
 ) -> SqlResult<usize> {
-    let n = conn.execute("DELETE FROM warm_worktrees WHERE mesh_id = ?1", params![mesh_id])?;
+    let n = conn.execute(
+        "DELETE FROM warm_worktrees WHERE mesh_id = ?1",
+        params![mesh_id],
+    )?;
     Ok(n)
 }
 
@@ -302,9 +299,8 @@ pub(crate) fn list_warm_paths_for_mesh_droppable_inner(
     conn: &Connection,
     mesh_id: i64,
 ) -> SqlResult<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT path FROM warm_worktrees WHERE mesh_id = ?1 AND status != 'claimed'",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT path FROM warm_worktrees WHERE mesh_id = ?1 AND status != 'claimed'")?;
     let rows = stmt.query_map(params![mesh_id], |row| row.get::<_, String>(0))?;
     rows.collect()
 }
@@ -548,9 +544,8 @@ fn plan_orphan_cleanup(
     // Read the full set of claimed rows up front, then drop the prepared
     // statement so the loop below doesn't keep a statement handle alive
     // across the FS phase (which runs lock-free after we return).
-    let mut stmt = conn.prepare(
-        "SELECT id, mesh_id, path FROM warm_worktrees WHERE status = 'claimed'",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT id, mesh_id, path FROM warm_worktrees WHERE status = 'claimed'")?;
     let claimed: Vec<(i64, i64, String)> = stmt
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
         .collect::<Result<Vec<_>, _>>()?;
@@ -643,17 +638,17 @@ pub(crate) fn batch_delete_warm_worktrees_by_id(
     conn: &Connection,
     ids: &[i64],
 ) -> SqlResult<usize> {
-    if ids.is_empty() { return Ok(0); }
+    if ids.is_empty() {
+        return Ok(0);
+    }
     const CHUNK_SIZE: usize = 500;
     let tx = conn.unchecked_transaction()?;
     let mut deleted = 0usize;
     for chunk in ids.chunks(CHUNK_SIZE) {
-        let placeholders =
-            std::iter::repeat_n("?", chunk.len()).collect::<Vec<_>>().join(",");
-        let sql = format!(
-            "DELETE FROM warm_worktrees WHERE id IN ({})",
-            placeholders
-        );
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!("DELETE FROM warm_worktrees WHERE id IN ({})", placeholders);
         deleted += tx.execute(&sql, rusqlite::params_from_iter(chunk))?;
     }
     tx.commit()?;
@@ -673,10 +668,7 @@ pub(crate) fn batch_delete_warm_worktrees_by_id(
 /// cap (999 by default) is generous compared to realistic session
 /// counts; a future scale-up switch to a temp-table join would survive
 /// this limit transparently.
-fn live_mesh_ids_for(
-    conn: &Connection,
-    live_session_ids: &[i64],
-) -> Option<HashSet<i64>> {
+fn live_mesh_ids_for(conn: &Connection, live_session_ids: &[i64]) -> Option<HashSet<i64>> {
     if live_session_ids.is_empty() {
         // An empty PROCESS_REGISTRY snapshot IS a known fact (not an
         // error): no agents are currently running. Returning `Some(empty)`
@@ -691,10 +683,9 @@ fn live_mesh_ids_for(
     );
     let mut stmt = conn.prepare(&sql).ok()?;
     let rows = stmt
-        .query_map(
-            rusqlite::params_from_iter(live_session_ids.iter()),
-            |row| row.get::<_, i64>(0),
-        )
+        .query_map(rusqlite::params_from_iter(live_session_ids.iter()), |row| {
+            row.get::<_, i64>(0)
+        })
         .ok()?;
     let mesh_ids: HashSet<i64> = rows.filter_map(Result::ok).collect();
     Some(mesh_ids)
@@ -795,9 +786,7 @@ pub(crate) fn list_oldest_warm_entries_for_mesh_inner(
 /// drains stale-location inventory regardless of count, so it needs the
 /// full droppable set, not just the oldest-N excess window
 /// `list_oldest_warm_entries_for_mesh` serves.
-pub fn list_all_droppable_warm_entries_for_mesh(
-    mesh_id: i64,
-) -> SqlResult<Vec<(i64, String)>> {
+pub fn list_all_droppable_warm_entries_for_mesh(mesh_id: i64) -> SqlResult<Vec<(i64, String)>> {
     let db = read_conn();
     list_all_droppable_warm_entries_for_mesh_inner(&db, mesh_id)
 }
@@ -827,10 +816,7 @@ pub fn is_warm_pool_path(path: &str) -> SqlResult<bool> {
     is_warm_pool_path_inner(&db, path)
 }
 
-pub(crate) fn is_warm_pool_path_inner(
-    conn: &Connection,
-    path: &str,
-) -> SqlResult<bool> {
+pub(crate) fn is_warm_pool_path_inner(conn: &Connection, path: &str) -> SqlResult<bool> {
     let exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM warm_worktrees WHERE path = ?1)",
         params![path],
@@ -870,10 +856,7 @@ pub fn warm_pool_claims_path(path: &str) -> SqlResult<bool> {
     warm_pool_claims_path_inner(&db, path)
 }
 
-pub(crate) fn warm_pool_claims_path_inner(
-    conn: &Connection,
-    path: &str,
-) -> SqlResult<bool> {
+pub(crate) fn warm_pool_claims_path_inner(conn: &Connection, path: &str) -> SqlResult<bool> {
     let exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM warm_worktrees WHERE path = ?1 AND status = 'claimed')",
         params![path],

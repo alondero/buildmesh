@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { runGuarded } from './ci/run-guarded.mjs';
 import { availableParallelism } from 'node:os';
-import { executedTests, gateReads, planGates, touchedFormatDiffs } from './harness-plan.mjs';
+import { executedTests, formatDiffPaths, gateReads, planGates } from './harness-plan.mjs';
 import { acquireSlot, heavyGateEnv, heavyGateLimit, runPlan } from './harness-lanes.mjs';
 import { selfReviewReport } from './self-review.mjs';
 import { conptyPrerequisite, failureLines, gatePassed, isolatedCommand, isolateTests, knownFlakes, readTestReport, validateFlakeIssues } from './harness-test-failures.mjs';
@@ -331,11 +331,11 @@ function classify(gate, code, output, paths) {
     const invalidFlake = gate.id === 'known-flakes' && output.match(/^Known-flake issue #\d+ must be an open issue\.\r?$/m);
     if (invalidFlake) return { outcome: 'FAIL', reason: invalidFlake[0].trim() };
   }
-  if (gate.touchedFormat && code !== 0) {
-    const { touched, total } = touchedFormatDiffs(output, paths);
-    if (!total) return { outcome: 'FAIL', reason: 'rustfmt failed without reporting a formatting diff. See the gate log.' };
-    if (touched.length) return { outcome: 'FAIL', reason: `rustfmt diffs in touched files: ${touched.join(', ')}. Format them with node scripts/rustfmt-touched.mjs ${touched.map(path => `"${path}"`).join(' ')}, which restores every other Rust file; bare "rustfmt <file>" also rewrites child modules and "cargo fmt" rewrites the whole crate (#2022). This gate checks the final tree, so commit your behaviour change first, then format and commit the result alone as \`style(rust): format <files>\`; reformatting inside the behaviour commit buries the change reviewers must read.`, formatDiffCount: total };
-    return { outcome: 'PASS', count: null, formatDiffCount: total };
+  if (gate.id === 'rust-format' && code !== 0) {
+    const files = formatDiffPaths(output);
+    return { outcome: 'FAIL', reason: files.length
+      ? `rustfmt would rewrite: ${files.join(', ')}. Run \`cargo fmt --all\`, then commit the result alone as \`style(rust): format <files>\`; reformatting inside the behaviour commit buries the change reviewers must read.`
+      : 'rustfmt failed without reporting a formatting diff. See the gate log.' };
   }
   if (code !== 0) return { outcome: 'FAIL', reason: 'Command failed. See the gate log; failure attribution is unverified.' };
   const count = gate.tests ? executedTests(gate.tests, output) : null;

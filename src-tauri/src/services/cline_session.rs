@@ -123,7 +123,9 @@ pub fn is_cline_session_id(id: &str) -> bool {
         return false;
     }
     if !matches!(suffix.len(), 5 | 6)
-        || !suffix.chars().all(|c| c.is_ascii_digit() || c.is_ascii_lowercase())
+        || !suffix
+            .chars()
+            .all(|c| c.is_ascii_digit() || c.is_ascii_lowercase())
     {
         return false;
     }
@@ -262,10 +264,10 @@ pub fn list_sessions_in_window(
     not_before: i64,
     not_after: i64,
 ) -> Result<Vec<ListedSession>, String> {
-    let not_before_iso = ms_to_iso8601(not_before)
-        .ok_or_else(|| "not_before ms out of ISO range".to_string())?;
-    let not_after_iso = ms_to_iso8601(not_after)
-        .unwrap_or_else(|| "9999-12-31T23:59:59.999Z".to_string());
+    let not_before_iso =
+        ms_to_iso8601(not_before).ok_or_else(|| "not_before ms out of ISO range".to_string())?;
+    let not_after_iso =
+        ms_to_iso8601(not_after).unwrap_or_else(|| "9999-12-31T23:59:59.999Z".to_string());
     let open_ended = ms_to_iso8601(not_after).is_none();
     let sql = if open_ended {
         "SELECT session_id, cwd, interactive \
@@ -335,12 +337,7 @@ pub(crate) fn find_historic_id_for_directory(
     recorded_start: bool,
 ) -> Option<String> {
     let db_path = crate::env::cline_db_path_for_host(env_type, spawn_path)?;
-    find_historic_id_for_db_path(
-        &db_path,
-        spawn_path,
-        anchor_ms,
-        recorded_start,
-    )
+    find_historic_id_for_db_path(&db_path, spawn_path, anchor_ms, recorded_start)
 }
 
 pub(crate) fn find_historic_id_for_db_path(
@@ -349,8 +346,7 @@ pub(crate) fn find_historic_id_for_db_path(
     anchor_ms: i64,
     recorded_start: bool,
 ) -> Option<String> {
-    let conn =
-        Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
     let cutoff = anchor_ms.saturating_sub(crate::services::session_recovery::CLOCK_SKEW_MS);
     let not_after = if recorded_start {
         anchor_ms.saturating_add(crate::services::session_recovery::INITIAL_SPAWN_WINDOW_MS)
@@ -385,8 +381,7 @@ fn try_capture_from_db_path(
     }
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
     let sessions = list_recent_interactive_sessions(&conn, created_not_before_ms).ok()?;
-    select_id_for_directory(&sessions, spawn_directory, created_not_before_ms)
-        .map(str::to_string)
+    select_id_for_directory(&sessions, spawn_directory, created_not_before_ms).map(str::to_string)
 }
 
 /// Background poller (issue #1774): read Cline's local SQLite until a
@@ -435,7 +430,9 @@ pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: Env
             let captured = match captured {
                 Ok(captured) => captured,
                 Err(error) => {
-                    tracing::warn!("cline session capture: blocking task failed for node {node_id}: {error}");
+                    tracing::warn!(
+                        "cline session capture: blocking task failed for node {node_id}: {error}"
+                    );
                     return;
                 }
             };
@@ -450,9 +447,7 @@ pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: Env
                 return;
             }
         }
-        tracing::warn!(
-            "cline session capture: gave up for node {node_id} in {spawn_directory}"
-        );
+        tracing::warn!("cline session capture: gave up for node {node_id} in {spawn_directory}");
     });
 }
 
@@ -529,13 +524,15 @@ mod tests {
         assert!(!is_cline_session_id(
             "session_1789767699203_rfzyx__agent_1789771309502_ctlfb6"
         ));
-        assert!(!is_cline_session_id("1789757012702_7of3e__agent_1234567890_aaaaa"));
+        assert!(!is_cline_session_id(
+            "1789757012702_7of3e__agent_1234567890_aaaaa"
+        ));
         // The epoch extractor must also refuse them so the freshness
         // gate cannot accidentally bind a subagent.
-        assert!(session_id_epoch_ms(
-            "session_1789767699203_rfzyx__agent_1789771309502_ctlfb6"
-        )
-        .is_none());
+        assert!(
+            session_id_epoch_ms("session_1789767699203_rfzyx__agent_1789771309502_ctlfb6")
+                .is_none()
+        );
     }
 
     #[test]
@@ -547,16 +544,26 @@ mod tests {
         // but semantically invalid id (e.g. wrong suffix length or
         // characters) parsed a phantom epoch. The fix is to gate on
         // the validator; the test pins the predicate.
-        assert!(session_id_epoch_ms("12345_invalid").is_none(),
-                "wrong suffix length must not leak a phantom epoch");
-        assert!(session_id_epoch_ms("12345_INVALID").is_none(),
-                "upper-case suffix must not leak a phantom epoch");
-        assert!(session_id_epoch_ms("12345_").is_none(),
-                "empty suffix must not leak a phantom epoch");
-        assert!(session_id_epoch_ms("").is_none(),
-                "empty input must not leak a phantom epoch");
-        assert!(session_id_epoch_ms("_7of3e").is_none(),
-                "no epoch prefix must not leak a phantom epoch");
+        assert!(
+            session_id_epoch_ms("12345_invalid").is_none(),
+            "wrong suffix length must not leak a phantom epoch"
+        );
+        assert!(
+            session_id_epoch_ms("12345_INVALID").is_none(),
+            "upper-case suffix must not leak a phantom epoch"
+        );
+        assert!(
+            session_id_epoch_ms("12345_").is_none(),
+            "empty suffix must not leak a phantom epoch"
+        );
+        assert!(
+            session_id_epoch_ms("").is_none(),
+            "empty input must not leak a phantom epoch"
+        );
+        assert!(
+            session_id_epoch_ms("_7of3e").is_none(),
+            "no epoch prefix must not leak a phantom epoch"
+        );
         // But a valid Cline id still parses its leading epoch.
         assert_eq!(
             session_id_epoch_ms("1789757012702_7of3e"),
@@ -789,20 +796,8 @@ mod tests {
         // two distinct epoch ms (a 13-digit prefix the validator
         // accepts) and a not-before floor that sits between them so the
         // older row is filtered out.
-        insert_session(
-            &conn,
-            "session_1789757012700_older",
-            "/repo",
-            true,
-            0,
-        );
-        insert_session(
-            &conn,
-            "session_1789757012702_newer",
-            "/repo",
-            true,
-            0,
-        );
+        insert_session(&conn, "session_1789757012700_older", "/repo", true, 0);
+        insert_session(&conn, "session_1789757012702_newer", "/repo", true, 0);
         let sessions = list_recent_interactive_sessions(&conn, 1_789_757_012_701).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "session_1789757012702_newer");
@@ -882,10 +877,30 @@ mod tests {
         // *before* the lower bound (anchor − CLOCK_SKEW_MS); the match
         // row sits inside the window.
         let rows = vec![
-            ("session_1789757010700_oldie".into(), "/repo".into(), 0, true),
-            ("session_1789757012750_match".into(), "/repo".into(), 0, true),
-            ("session_1789757012760_onesh".into(), "/repo".into(), 0, false),
-            ("ses_fc52ccfb9ffek1jl23ZwpRuSP7".into(), "/repo".into(), 0, true),
+            (
+                "session_1789757010700_oldie".into(),
+                "/repo".into(),
+                0,
+                true,
+            ),
+            (
+                "session_1789757012750_match".into(),
+                "/repo".into(),
+                0,
+                true,
+            ),
+            (
+                "session_1789757012760_onesh".into(),
+                "/repo".into(),
+                0,
+                false,
+            ),
+            (
+                "ses_fc52ccfb9ffek1jl23ZwpRuSP7".into(),
+                "/repo".into(),
+                0,
+                true,
+            ),
         ];
         let db_path = write_test_db(temp.path(), &rows);
         let id = find_historic_id_for_db_path(&db_path, "/repo", 1_789_757_012_800, true)
@@ -902,9 +917,24 @@ mod tests {
         // window, the 760-epoch row sits outside (and is non-interactive
         // anyway).
         let rows = vec![
-            ("session_1789757012700_match".into(), "/repo".into(), 0, true),
-            ("session_1789757012760_onesh".into(), "/repo".into(), 0, false),
-            ("ses_fc52ccfb9ffek1jl23ZwpRuSP7".into(), "/repo".into(), 0, true),
+            (
+                "session_1789757012700_match".into(),
+                "/repo".into(),
+                0,
+                true,
+            ),
+            (
+                "session_1789757012760_onesh".into(),
+                "/repo".into(),
+                0,
+                false,
+            ),
+            (
+                "ses_fc52ccfb9ffek1jl23ZwpRuSP7".into(),
+                "/repo".into(),
+                0,
+                true,
+            ),
         ];
         let db_path = write_test_db(temp.path(), &rows);
         let id = find_historic_id_for_db_path(&db_path, "/repo", 1_789_757_012_802, false)
@@ -929,7 +959,9 @@ mod tests {
             true,
         )];
         let db_path = write_test_db(temp.path(), &rows);
-        assert!(find_historic_id_for_db_path(&db_path, "/elsewhere", 1_789_757_012_500, true).is_none());
+        assert!(
+            find_historic_id_for_db_path(&db_path, "/elsewhere", 1_789_757_012_500, true).is_none()
+        );
     }
 
     /// Round 3 review: the opencode sibling hit a real bug where a
@@ -1062,8 +1094,18 @@ mod tests {
         // (issue #1774 acceptance: no cross-binding).
         let temp = crate::env::test_helpers::TestDir::new("cline_session_ambiguous");
         let rows = vec![
-            ("session_1789757012750_a0001".into(), "/repo".into(), 0, true),
-            ("session_1789757012751_a0002".into(), "/repo".into(), 0, true),
+            (
+                "session_1789757012750_a0001".into(),
+                "/repo".into(),
+                0,
+                true,
+            ),
+            (
+                "session_1789757012751_a0002".into(),
+                "/repo".into(),
+                0,
+                true,
+            ),
         ];
         let db_path = write_test_db(temp.path(), &rows);
         assert!(

@@ -278,4 +278,3 @@ mod tests {
         assert_eq!(validate_drive_request("hi", &max).unwrap(), max);
     }
 }
-

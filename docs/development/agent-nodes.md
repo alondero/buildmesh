@@ -165,6 +165,50 @@ The PTY handles are behind `Arc<Mutex<...>>` so the PTY reader thread and Tauri 
 Teardown is centralized (issue #1531): compare-and-remove (or `kill_session`'s take of the current entry) claims exclusive ownership of the `Arc`, then cancel input (`close_input`), close the master, terminate/reap the process tree, join worker threads, and revoke Windows restricted-token grants. Natural PTY EOF goes through `reap_incarnation` with the same compare-and-remove so an idle node does not keep a registry slot, writer thread, child handle, or sandbox ACE. When `insert` overwrites a previous incarnation, it runs the same handle/thread teardown but **skips** sandbox revocation — grants are keyed by `session_id`, and the replacement spawn already registered them before `insert`. `kill_session` is the only public way to drop a live entry; an unconditional `remove` would delete a replacement spawn. Node-scoped output Channels stay registered across process incarnations.
 
 ### Worktree Support (git2-based)
+The Mesh path is the selected project folder. `git::project` discovers its
+nearest containing Git working repository, including nested repositories and
+linked worktrees, and validates the relative folder beneath that working root.
+Discovery and canonicalization run on blocking threads outside DB connections.
+Bare repositories cannot supply a project working directory. Source Git queries,
+worktree creation and `.worktreeinclude` use the discovered repository; Mesh
+settings and grouping continue to use the selected path. Sync locks and fetch
+freshness use the canonical common Git directory, so sibling folder Meshes share
+Git coordination while their pool inventories and base refs remain separate.
+
+`AgentNode.worktree_path` remains the exact owned checkout root.
+`project_scope` persists the relative project folder (schema v49); an empty
+string records a root project and NULL retains legacy root-cwd behavior.
+`env::node_worktree_path` and `node_git_path` resolve checkout ownership and
+repository queries; `node_working_path` adds saved scope for provider launch,
+hooks, transcripts, builds and directory consumers. These helpers perform no
+repository discovery. File-watcher events and `getNodeGitPath` subscribe to the
+checkout identity; Project Files browses `getNodeWorkingPath` while status and
+diff subscriptions retain the Git identity. Cleanup, close-safety
+and sandbox ownership operate on the whole checkout. Non-worktree nodes start
+in the selected folder and continue to work without Git.
+
+Cold and warm manual/Issue/PR provisioning validate scope after checkout and
+`.worktreeinclude`. A folder absent from that ref fails with its name and ref;
+the provider does not silently start at the root. New scoped worktree names
+include the Mesh id to separate sibling branch namespaces. Deterministic
+Issue/PR identities are also reserved against stored worktree names under the
+creation transaction. A warm manual upgrade refuses an existing branch.
+
+Existing materialized nodes retain their saved location and legacy cwd on
+resume. An explicit fresh launch of a node without a materialized checkout can save
+the newly resolved scope. Resume reconstructs a saved cwd without discovering
+the selected source folder; Mesh setting changes do not move the owned checkout
+or replace its saved scope.
+
+Automatic launch rejection stays `error`, including when the failure event is
+missing or arrives before/after the IPC rejection. A frontend failure fence
+keeps idle polling and pane remounts from re-arming it; explicit Retry/Start
+Fresh clears that fence. Request ownership prevents old promise settlements
+from regressing a newer attempt or reviving a deleted/archived row. Refreshing
+the node list after an acknowledged launch is separate from launch failure.
+The unusable-resume recovery guard remains responsible for early process exit
+and conversation-identity exhaustion.
+
 Buildmesh creates a dedicated worktree per agent node **itself**, via `git2` in `git/worktree/mod.rs` (`create_git_worktree` → `add_worktree_impl`) — for **all** providers, not just cwrap. This prevents concurrent agent node conflicts when multiple agent nodes target the same git repository. Two modes: `branched` (default, a real branch per worktree) and `detached` (a throwaway detached HEAD); both are cut from the configured Base Ref (default `origin/main`), resolved via `resolve_base_commit` with a fall-back to local `HEAD` when the ref is unresolvable (#230). See `docs/adr/0003-buildmesh-owns-worktree-creation.md` for why this moved off the agent CLI's old `-w` flag, and `docs/adr/0007-extract-git-module.md` for why the worktree lifecycle now lives in the `git` module.
 
 **Failed-add repair (issue #2195).** `add_worktree_impl` returns `AddWorktreeFailure`, which carries an `AddWorktreeFailureKind` alongside the user-facing text; `create_git_worktree` matches the *kind*, never the wording. `RegisteredWorktree` is the one repairable conflict — the target path is already registered as a worktree whose directory is gone — and it prunes stale worktrees then retries once. Everything else (`Other`: a branch-name clash, an unresolvable base ref, a spawn failure) is returned to the user untouched. The classification lives in `classify_worktree_add_failure`, inside the one function that shells out, because git's prose is not a stable interface: current git reports the stale registration as `'<path>' is a missing but already registered worktree`, which contains neither "already exists" nor "already checked out", so the old call-site substring match never fired and the user got raw git output. The exclusion is load-bearing too — `A branch named '<b>' already exists.` also says "already exists", but pruning removes worktree admin entries and never branches, so the old match pruned unrelated worktrees and then failed with the identical message. Pinned by `classify_worktree_add_failure_recognises_the_registered_worktree_conflict`, `classify_worktree_add_failure_excludes_a_branch_name_clash`, `create_repairs_a_stale_worktree_registration`, and `create_does_not_prune_or_retry_a_branch_name_clash`. Adding a new `git worktree add` call site means reusing this failure type, not re-matching git's stderr.

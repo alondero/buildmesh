@@ -442,6 +442,11 @@ pub struct AgentNode {
     /// setting affects future nodes without moving live worktrees.
     /// Persisted as `agent_nodes.worktree_path TEXT` (schema v37).
     pub worktree_path: Option<String>,
+    /// Saved folder relative to the owned checkout. None retains legacy cwd;
+    /// Some("") explicitly records a repository-root project.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub project_scope: Option<String>,
 }
 
 /// A worktree whose node is already closed but whose on-disk directory still

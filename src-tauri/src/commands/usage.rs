@@ -275,12 +275,9 @@ pub async fn get_provider_meters(
         .map(|id| {
             let accounts = Arc::clone(&accounts);
             tauri::async_runtime::spawn_blocking(move || {
-                let (outcome, usage) = usage::catalog::cached_outcome_and_usage(
-                    &id,
-                    force_refresh,
-                    accounts.as_ref(),
-                )
-                .ok_or_else(|| format!("usage catalog lost registered provider: {id}"))?;
+                let (outcome, usage) =
+                    usage::catalog::cached_outcome_and_usage(&id, force_refresh, accounts.as_ref())
+                        .ok_or_else(|| format!("usage catalog lost registered provider: {id}"))?;
                 Ok::<_, String>((id, outcome, usage))
             })
         })
@@ -354,7 +351,9 @@ mod tests {
             id: id.to_string(),
             name: id.to_string(),
             harness: harness.to_string(),
-            runtime: None, wsl_distro: None, executable: None,
+            runtime: None,
+            wsl_distro: None,
+            executable: None,
         }
     }
 
@@ -390,7 +389,9 @@ mod tests {
         }
     }
 
-    fn outcomes_from_usages(usages: &HashMap<String, ProviderUsage>) -> HashMap<String, UsageOutcome> {
+    fn outcomes_from_usages(
+        usages: &HashMap<String, ProviderUsage>,
+    ) -> HashMap<String, UsageOutcome> {
         // For each cached usage, project the variant the gate expects. The
         // gate's keep() predicate is total on every variant, so a wrong
         // mapping here silently changes keep/drop; tests must use the
@@ -510,7 +511,14 @@ mod tests {
         usages.insert("anthropic".to_string(), usage("anthropic"));
         usages.insert("minimax".to_string(), usage("minimax"));
 
-        let rows = assemble_meters(&accounts, &claude, &usages, &outcomes_from_usages(&usages), &HashSet::new(), &HashMap::new());
+        let rows = assemble_meters(
+            &accounts,
+            &claude,
+            &usages,
+            &outcomes_from_usages(&usages),
+            &HashSet::new(),
+            &HashMap::new(),
+        );
         let ids: Vec<_> = rows.iter().map(|r| r.provider.as_str()).collect();
         assert_eq!(ids, vec!["anthropic", "minimax", "glm"]);
 
@@ -540,7 +548,10 @@ mod tests {
         assert_eq!(rows[0].provider, "anthropic");
         assert!(rows[0].usage_tracked);
         assert!(rows[0].usage.is_none());
-        assert_eq!(rows[0].usage_page.as_ref().unwrap().url, "https://claude.ai/settings/usage");
+        assert_eq!(
+            rows[0].usage_page.as_ref().unwrap().url,
+            "https://claude.ai/settings/usage"
+        );
     }
 
     #[test]
@@ -549,23 +560,49 @@ mod tests {
         let profiles = [profile("codex", "codex")];
         for (outcome, previous) in [
             (reading_outcome("codex"), HashMap::new()),
-            (UsageOutcome::Unavailable { reason: "Offline".to_string() }, HashMap::new()),
+            (
+                UsageOutcome::Unavailable {
+                    reason: "Offline".to_string(),
+                },
+                HashMap::new(),
+            ),
             (
                 no_credential_outcome("codex"),
-                [remembered("codex", 45.0, 1_700_000_000)].into_iter().collect(),
+                [remembered("codex", 45.0, 1_700_000_000)]
+                    .into_iter()
+                    .collect(),
             ),
             (
-                UsageOutcome::Unavailable { reason: "Offline".to_string() },
-                [remembered("codex", 45.0, 1_700_000_000)].into_iter().collect(),
+                UsageOutcome::Unavailable {
+                    reason: "Offline".to_string(),
+                },
+                [remembered("codex", 45.0, 1_700_000_000)]
+                    .into_iter()
+                    .collect(),
             ),
         ] {
-            let usages = [("codex".to_string(), outcome.clone().into_usage("codex"))].into_iter().collect();
+            let usages = [("codex".to_string(), outcome.clone().into_usage("codex"))]
+                .into_iter()
+                .collect();
             let outcomes = [("codex".to_string(), outcome)].into_iter().collect();
-            let rows = assemble_meters(&accounts, &profiles, &usages, &outcomes, &HashSet::new(), &previous);
+            let rows = assemble_meters(
+                &accounts,
+                &profiles,
+                &usages,
+                &outcomes,
+                &HashSet::new(),
+                &previous,
+            );
             assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0].usage_page.as_ref().unwrap().url, "https://chatgpt.com/codex/settings/usage");
+            assert_eq!(
+                rows[0].usage_page.as_ref().unwrap().url,
+                "https://chatgpt.com/codex/settings/usage"
+            );
             let value = serde_json::to_value(&rows).unwrap();
-            assert_eq!(value[0]["usagePage"]["url"], "https://chatgpt.com/codex/settings/usage");
+            assert_eq!(
+                value[0]["usagePage"]["url"],
+                "https://chatgpt.com/codex/settings/usage"
+            );
         }
     }
 
@@ -584,7 +621,14 @@ mod tests {
         // the user contract for unconfigured providers).
         let mut usages = HashMap::new();
         usages.insert("anthropic".to_string(), usage("anthropic"));
-        let rows = assemble_meters(&accounts, &profiles, &usages, &outcomes_from_usages(&usages), &HashSet::new(), &HashMap::new());
+        let rows = assemble_meters(
+            &accounts,
+            &profiles,
+            &usages,
+            &outcomes_from_usages(&usages),
+            &HashSet::new(),
+            &HashMap::new(),
+        );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].provider, "anthropic");
     }
@@ -616,7 +660,10 @@ mod tests {
         usages.insert("openrouter".to_string(), logged_out_usage("openrouter"));
         let mut outcomes = HashMap::new();
         outcomes.insert("minimax".to_string(), no_credential_outcome("minimax"));
-        outcomes.insert("openrouter".to_string(), no_credential_outcome("openrouter"));
+        outcomes.insert(
+            "openrouter".to_string(),
+            no_credential_outcome("openrouter"),
+        );
         let rows = assemble_meters(
             &[account("minimax", true), account("openrouter", true)],
             &[],
@@ -642,10 +689,7 @@ mod tests {
         let mut usages = HashMap::new();
         usages.insert("anthropic".to_string(), logged_out_usage("anthropic"));
         let mut outcomes = HashMap::new();
-        outcomes.insert(
-            "anthropic".to_string(),
-            no_credential_outcome("anthropic"),
-        );
+        outcomes.insert("anthropic".to_string(), no_credential_outcome("anthropic"));
         let rows = assemble_meters(
             &[account("anthropic", true)],
             &claude,
@@ -675,10 +719,10 @@ mod tests {
         usages.insert("kimi".to_string(), logged_out_usage("kimi"));
         usages.insert("openrouter".to_string(), logged_out_usage("openrouter"));
         // Issue #1745: the kept rows are `Rejected` outcomes (the wire
-// envelope is `logged_out`, but the projection of a `Rejected` is
-// identical and the test cares about the affordance being visible, not
-// about which variant was minted). The gate's keep() predicate keeps
-// `Rejected` when a key is configured.
+        // envelope is `logged_out`, but the projection of a `Rejected` is
+        // identical and the test cares about the affordance being visible, not
+        // about which variant was minted). The gate's keep() predicate keeps
+        // `Rejected` when a key is configured.
         let mut outcomes = HashMap::new();
         outcomes.insert(
             "kimi".to_string(),
@@ -770,7 +814,10 @@ mod tests {
         assert!(account_visible(&account("muse-code", true), &muse));
         assert!(!account_visible(&account("muse-code", true), &[]));
         assert!(usage_tracked("muse-code"));
-        assert_eq!(poll_ids(&[account("muse-code", true)], &muse), vec!["muse-code"]);
+        assert_eq!(
+            poll_ids(&[account("muse-code", true)], &muse),
+            vec!["muse-code"]
+        );
         assert!(poll_ids(&[account("muse-code", true)], &[]).is_empty());
     }
 
@@ -838,11 +885,7 @@ mod tests {
         .into_usage("agy");
 
         // Compare the structural shape, not the provider-specific copy.
-        for (
-            (muse_field, muse_value),
-            (grok_field, grok_value),
-            (agy_field, agy_value),
-        ) in [
+        for ((muse_field, muse_value), (grok_field, grok_value), (agy_field, agy_value)) in [
             (
                 ("logged_in", muse.logged_in),
                 ("logged_in", grok.logged_in),
@@ -962,7 +1005,10 @@ mod tests {
         );
         let shown = row.usage.as_ref().expect("fallback usage");
         assert!(shown.logged_in);
-        assert!(shown.error.is_none(), "the failure envelope must not leak through");
+        assert!(
+            shown.error.is_none(),
+            "the failure envelope must not leak through"
+        );
         assert_eq!(shown.windows[0].used_percent, Some(72.5));
     }
 
@@ -1099,7 +1145,10 @@ mod tests {
         );
 
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].cached_at, None, "a rejected key is not a fallback row");
+        assert_eq!(
+            rows[0].cached_at, None,
+            "a rejected key is not a fallback row"
+        );
         let shown = rows[0].usage.as_ref().unwrap();
         assert_eq!(shown.error.as_deref(), Some("Invalid API key"));
         assert!(
@@ -1116,16 +1165,19 @@ mod tests {
         let (_, stale) = remembered("grok", 99.0, 1_700_000_000);
         let mut usages = HashMap::new();
         usages.insert("grok".to_string(), usage("grok"));
-        usages.get_mut("grok").unwrap().windows.push(usage::UsageWindow {
-            label: "Weekly".to_string(),
-            used_percent: Some(5.0),
-            resets_at: None,
-        });
+        usages
+            .get_mut("grok")
+            .unwrap()
+            .windows
+            .push(usage::UsageWindow {
+                label: "Weekly".to_string(),
+                used_percent: Some(5.0),
+                resets_at: None,
+            });
         let mut outcomes = HashMap::new();
         outcomes.insert("grok".to_string(), reading_outcome("grok"));
-        let previous: HashMap<String, LastKnown> = [("grok".to_string(), stale)]
-            .into_iter()
-            .collect();
+        let previous: HashMap<String, LastKnown> =
+            [("grok".to_string(), stale)].into_iter().collect();
 
         let rows = assemble_meters(
             &[account("grok", true)],

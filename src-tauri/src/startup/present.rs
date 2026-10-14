@@ -105,8 +105,8 @@ mod platform {
     };
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        MessageBoxW, IDNO, IDYES, MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MB_YESNO,
-        MB_YESNOCANCEL, SW_SHOWNORMAL,
+        MessageBoxW, IDNO, IDYES, MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MB_YESNO, MB_YESNOCANCEL,
+        SW_SHOWNORMAL,
     };
 
     use super::{bind_actions, DialogKind, StartupAction, StartupFailure};
@@ -145,11 +145,7 @@ mod platform {
         let dialog = bind_actions(&failure.actions());
         // The legend is appended from the same `dialog` that maps the answer
         // below, so the text can never disagree with the buttons.
-        let text = wide(&format!(
-            "{}{}",
-            failure.user_text(),
-            dialog.legend()
-        ));
+        let text = wide(&format!("{}{}", failure.user_text(), dialog.legend()));
         let caption = wide("Buildmesh could not start");
         let style = match dialog.kind {
             DialogKind::Ok => MB_OK,
@@ -161,14 +157,8 @@ mod platform {
         // SAFETY: both strings are NUL-terminated by `wide`, and a null owner
         // HWND asks for an application-modal box rather than one tied to a
         // window that does not exist yet.
-        let answer = unsafe {
-            MessageBoxW(
-                std::ptr::null_mut(),
-                text.as_ptr(),
-                caption.as_ptr(),
-                style,
-            )
-        };
+        let answer =
+            unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), style) };
 
         match answer {
             IDYES => dialog.yes.unwrap_or(dialog.dismiss),
@@ -200,7 +190,11 @@ mod platform {
                 GlobalFree(handle);
                 return;
             }
-            std::ptr::copy_nonoverlapping(units.as_ptr().cast::<u8>(), locked.cast::<u8>(), byte_len);
+            std::ptr::copy_nonoverlapping(
+                units.as_ptr().cast::<u8>(),
+                locked.cast::<u8>(),
+                byte_len,
+            );
             // A `GMEM_MOVEABLE` block that is still locked has a lock count, and
             // the return value reports that; the count is not an error, so the
             // return is deliberately ignored.
@@ -403,7 +397,11 @@ mod tests {
     }
 
     fn database_failure(corrupt: bool) -> StartupFailure {
-        let raw_code = if corrupt { code::NOTADB } else { code::CANTOPEN };
+        let raw_code = if corrupt {
+            code::NOTADB
+        } else {
+            code::CANTOPEN
+        };
         StartupFailure::database(
             Path::new("/profiles/stable/buildmesh.db"),
             &rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(raw_code), None),

@@ -4,8 +4,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-
-
 /// A mesh — top-level folder containing agent nodes.
 ///
 /// Generated to src/types/generated/Mesh.ts (issue #359). `i64` fields carry
@@ -27,7 +25,7 @@ pub struct Mesh {
     #[ts(as = "i32")]
     pub id: i64,
     pub name: String,
-    pub path: String, // absolute path to mesh root
+    pub path: String,   // absolute path to mesh root
     pub layout: String, // 'grid' or 'single'
     #[ts(as = "i32")]
     pub position: i64, // sort order in sidebar
@@ -107,7 +105,6 @@ pub struct Mesh {
     /// reads back as `None`.
     pub worktree_directory: Option<String>,
 }
-
 
 /// The folder chosen in the "New mesh" modal's location picker. Returned by
 /// the `pick_mesh_folder` command so the frontend can show the selected
@@ -190,7 +187,11 @@ pub struct MeshRow {
 impl From<&Mesh> for MeshRow {
     fn from(mesh: &Mesh) -> Self {
         Self {
-            name: if mesh.name.is_empty() { None } else { Some(mesh.name.clone()) },
+            name: if mesh.name.is_empty() {
+                None
+            } else {
+                Some(mesh.name.clone())
+            },
             build_command: mesh.build_command.clone(),
             run_command: mesh.run_command.clone(),
             model: mesh.model.clone(),

@@ -58,15 +58,14 @@ const SECRET_ACCOUNT_FIELD: &str = "api_key";
 /// The caller must pass a file it just created; this opens it read-write and
 /// commits the deletions, so the live database is never a participant.
 pub(crate) fn redact_database_copy(path: &Path) -> io::Result<usize> {
-    let conn = Connection::open(path)
-        .map_err(|e| io::Error::other(e.to_string()))?;
+    let conn = Connection::open(path).map_err(|e| io::Error::other(e.to_string()))?;
     // The copy came out of `VACUUM INTO`, which produces a rollback-journal
     // database. `quick_check` here is the belt to the container checksum's
     // braces: it proves the redaction is about to run against a sound file,
     // so a later "checksum mismatch" can only mean the bytes on disk changed.
-    if !crate::services::state_recovery::quick_check(&conn).map_err(|e| {
-        io::Error::other(format!("integrity check failed: {e}"))
-    })? {
+    if !crate::services::state_recovery::quick_check(&conn)
+        .map_err(|e| io::Error::other(format!("integrity check failed: {e}")))?
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "refusing to redact a database copy that fails its integrity check",
@@ -84,9 +83,7 @@ pub(crate) fn redact_database_copy(path: &Path) -> io::Result<usize> {
     // another machine's logged-in devices, so the rows go too. The table is
     // best-effort: a redacted export of a schema old enough not to have it
     // must still export.
-    removed += conn
-        .execute("DELETE FROM device_sessions", [])
-        .unwrap_or(0);
+    removed += conn.execute("DELETE FROM device_sessions", []).unwrap_or(0);
     conn.execute_batch("VACUUM")
         .map_err(|e| io::Error::other(e.to_string()))?;
     Ok(removed)
@@ -118,15 +115,17 @@ pub(crate) fn redact_preferences(bytes: &[u8]) -> io::Result<Vec<u8>> {
     for field in SECRET_PREF_FIELDS {
         object.remove(*field);
     }
-    if let Some(accounts) = object.get_mut("provider_accounts").and_then(Value::as_array_mut) {
+    if let Some(accounts) = object
+        .get_mut("provider_accounts")
+        .and_then(Value::as_array_mut)
+    {
         for account in accounts.iter_mut() {
             if let Some(entry) = account.as_object_mut() {
                 entry.remove(SECRET_ACCOUNT_FIELD);
             }
         }
     }
-    serde_json::to_vec_pretty(&value)
-        .map_err(|e| io::Error::other(e.to_string()))
+    serde_json::to_vec_pretty(&value).map_err(|e| io::Error::other(e.to_string()))
 }
 
 /// What a redaction pass removed, for the caller to log and the UI to show.

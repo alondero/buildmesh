@@ -194,7 +194,9 @@ impl MuseTelemetryStore {
     }
 
     pub fn snapshot(&self, node_id: i64) -> Option<ObservedMuseSessionTelemetry> {
-        self.entries.get(&node_id).map(|entry| entry.to_public(node_id))
+        self.entries
+            .get(&node_id)
+            .map(|entry| entry.to_public(node_id))
     }
 
     pub fn forget(&mut self, node_id: i64) {
@@ -224,7 +226,10 @@ impl MuseTelemetryStore {
             return None;
         }
         if params.cumulative.total_tokens < entry.cumulative.total_tokens {
-            tracing::debug!(node_id, "dropped session/tokenUsage that would rewind cumulative");
+            tracing::debug!(
+                node_id,
+                "dropped session/tokenUsage that would rewind cumulative"
+            );
             return None;
         }
         entry.last_token_cursor = Some(params.view_cursor);
@@ -511,7 +516,10 @@ mod tests {
     #[test]
     fn token_usage_increments_cumulative_and_turn_counters() {
         let snapshot = ingest(TOKEN_AND_CONTEXT, 16801, "sess-aaaa-1111");
-        assert_eq!(snapshot.kind, ObservedTelemetryKind::ObservedSessionTelemetry);
+        assert_eq!(
+            snapshot.kind,
+            ObservedTelemetryKind::ObservedSessionTelemetry
+        );
         assert_eq!(snapshot.node_id, 16801);
         assert_eq!(snapshot.session_id, "sess-aaaa-1111");
         assert_eq!(
@@ -666,7 +674,11 @@ mod tests {
         assert!(store.snapshot(16815).is_some());
         assert!(
             store
-                .ingest_ndjson(16815, "sess-node-a", "not-json\n{\"jsonrpc\":\"2.0\",\"method\":\"turn/started\"}\n")
+                .ingest_ndjson(
+                    16815,
+                    "sess-node-a",
+                    "not-json\n{\"jsonrpc\":\"2.0\",\"method\":\"turn/started\"}\n"
+                )
                 .is_none(),
             "an unparseable batch must not masquerade as a new observation"
         );
@@ -694,7 +706,9 @@ mod tests {
             "not-json\n",
             "{\"jsonrpc\":\"2.0\",\"method\":\"session/tokenUsage\",\"params\":{\"sessionId\":\"sess-aaaa-1111\"}}\n",
         );
-        assert!(store.ingest_ndjson(16809, "sess-aaaa-1111", ndjson).is_none());
+        assert!(store
+            .ingest_ndjson(16809, "sess-aaaa-1111", ndjson)
+            .is_none());
         assert!(store.snapshot(16809).is_none());
     }
 
@@ -712,7 +726,10 @@ mod tests {
             let body = std::fs::read_to_string(&path).expect("fixture readable");
             assert_fixture_redacted(&path, &body);
         }
-        assert!(scanned >= 6, "expected the recorded NDJSON fixtures to be present");
+        assert!(
+            scanned >= 6,
+            "expected the recorded NDJSON fixtures to be present"
+        );
     }
 
     fn assert_fixture_redacted(path: &std::path::Path, body: &str) {
@@ -747,8 +764,16 @@ mod tests {
                     assert!(
                         !matches!(
                             key_l.as_str(),
-                            "content" | "text" | "prompt" | "command" | "arguments" | "input"
-                                | "auth" | "token" | "apikey" | "api_key"
+                            "content"
+                                | "text"
+                                | "prompt"
+                                | "command"
+                                | "arguments"
+                                | "input"
+                                | "auth"
+                                | "token"
+                                | "apikey"
+                                | "api_key"
                         ),
                         "{} must not carry key `{key}`",
                         path.display()

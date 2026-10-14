@@ -11,9 +11,18 @@ vi.mock('../../src/lib/platform', () => ({
   isWindows: true,
 }));
 
-import { getEffectiveWorktreeDir, getNodeGitPath, pathMatchesGitEvent } from '../../src/lib/paths';
+import { getEffectiveWorktreeDir, getNodeGitPath, getNodeWorkingPath, pathMatchesGitEvent } from '../../src/lib/paths';
 
 describe('getNodeGitPath', () => {
+  it('keeps scoped cwd separate from the checkout subscription identity (#2295)', () => {
+    const node = { path: '/repo/family/parents', use_worktree: true,
+      worktree_name: 'scoped', worktree_path: '/owned/scoped', project_scope: 'family/parents' };
+    expect(getNodeGitPath(node)).toBe('/owned/scoped');
+    expect(getNodeWorkingPath(node)).toBe('/owned/scoped/family/parents');
+    expect(pathMatchesGitEvent({ path: '/owned/scoped', internal_path: getNodeGitPath(node) }, getNodeGitPath(node))).toBe(true);
+    expect(getNodeWorkingPath({ ...node, use_worktree: false })).toBe('/repo/family/parents');
+    expect(getNodeWorkingPath({ ...node, project_scope: null })).toBe('/owned/scoped');
+  });
   it('returns worktree path when worktree_name is set', () => {
     const node = { path: '/Users/adam/myproject', worktree_name: 'gentle-fox' };
     expect(getNodeGitPath(node)).toBe('/Users/adam/myproject/.claude/worktrees/gentle-fox');

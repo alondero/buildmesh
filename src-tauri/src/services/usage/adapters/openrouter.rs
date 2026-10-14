@@ -6,9 +6,9 @@
 //! response parsing. `usage.rs` keeps orchestration only.
 
 use crate::preferences::ProviderAccount;
-use crate::services::usage::types::UsagePage;
 use crate::services::usage::adapter::{api_key_for, UsageAdapter};
 use crate::services::usage::outcome::UsageOutcome;
+use crate::services::usage::types::UsagePage;
 use crate::services::usage::types::{BillingBalance, UsageError};
 use reqwest::blocking::Client;
 use serde::Deserialize;
@@ -18,7 +18,10 @@ pub(crate) struct OpenrouterAdapter;
 
 impl UsageAdapter for OpenrouterAdapter {
     fn usage_page(&self) -> Option<UsagePage> {
-        Some(UsagePage::new("https://openrouter.ai/activity", "View usage"))
+        Some(UsagePage::new(
+            "https://openrouter.ai/activity",
+            "View usage",
+        ))
     }
 
     fn id(&self) -> &'static str {
@@ -165,7 +168,6 @@ pub(crate) fn openrouter_usage(api_key: &str) -> UsageOutcome {
 mod tests {
     use super::*;
 
-
     // ─── OpenRouter ───────────────────────────────────────────────────────
     //
     // Mirrors the Kimi test set: the success-path parser, two required-field
@@ -195,7 +197,10 @@ mod tests {
         // Required-field failure — a body without `data` is malformed.
         let json = r#"{}"#;
         let err = parse_openrouter_response(json).unwrap_err();
-        assert!(matches!(err, UsageError::Shape(_)), "expected Shape error, got {err:?}");
+        assert!(
+            matches!(err, UsageError::Shape(_)),
+            "expected Shape error, got {err:?}"
+        );
     }
 
     #[test]

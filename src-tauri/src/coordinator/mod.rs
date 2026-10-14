@@ -78,7 +78,8 @@ mod tests {
                 signal_health TEXT,
                 worktree_path TEXT,
                 spawn_configuration TEXT,
-                lifecycle_snapshot TEXT
+                lifecycle_snapshot TEXT,
+                project_scope TEXT
             );
             INSERT INTO meshes (id, name, path) VALUES (1, 'core', '/tmp/core');
             INSERT INTO agent_nodes (mesh_id, name, path, provider, status, position)
@@ -134,7 +135,11 @@ mod tests {
             )
             .unwrap();
         assert_ne!(stored, raw, "raw token must never be persisted");
-        assert_eq!(stored, db::hash_token(&raw), "stored value must be SHA-256(raw)");
+        assert_eq!(
+            stored,
+            db::hash_token(&raw),
+            "stored value must be SHA-256(raw)"
+        );
         assert_eq!(stored.len(), 64, "a SHA-256 hex is 64 chars");
 
         // The raw token the caller received still validates over the hash.
@@ -218,7 +223,11 @@ mod tests {
             )
             .unwrap();
         assert_ne!(stored, raw, "raw drive token must never be persisted");
-        assert_eq!(stored, db::hash_token(&raw), "stored value must be SHA-256(raw)");
+        assert_eq!(
+            stored,
+            db::hash_token(&raw),
+            "stored value must be SHA-256(raw)"
+        );
 
         assert!(db::validate_coordinator_drive_token_inner(&conn, &raw).unwrap());
     }
@@ -301,6 +310,7 @@ mod tests {
             ALTER TABLE agent_nodes ADD COLUMN worktree_path TEXT;
             ALTER TABLE agent_nodes ADD COLUMN spawn_configuration TEXT;
             ALTER TABLE agent_nodes ADD COLUMN lifecycle_snapshot TEXT;
+            ALTER TABLE agent_nodes ADD COLUMN project_scope TEXT;
             INSERT INTO meshes (id, name, path) VALUES (1, 'core', '/tmp/core');
             -- Inserted omitting status_changed_at → stored NULL.
             INSERT INTO agent_nodes (mesh_id, name, path, status, position)
@@ -324,7 +334,10 @@ mod tests {
         // its creation time — the spine tracks lifecycle, not row age.
         let conn = seeded_db();
         let rows = db::list_coordinator_node_rows_inner(&conn).unwrap();
-        let blocked = rows.iter().find(|(n, _, _)| n.name == "blocked-node").unwrap();
+        let blocked = rows
+            .iter()
+            .find(|(n, _, _)| n.name == "blocked-node")
+            .unwrap();
         let digest = node_digest::spine(&blocked.0, &blocked.1, blocked.2);
         assert_eq!(digest.waiting_since, Some(blocked.2));
     }

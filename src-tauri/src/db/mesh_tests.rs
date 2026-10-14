@@ -40,21 +40,47 @@ mod tests {
         // the other half of this test's setup.
         let _db = crate::db::test_support::isolated();
         crate::preferences::merge_detected_profiles(vec![crate::preferences::HarnessProfile {
-            id: "muse-wsl-test".into(), name: "Muse (WSL)".into(), harness: "muse".into(),
-            runtime: Some(crate::models::EnvType::Wsl), wsl_distro: Some("Ubuntu".into()), executable: None,
-        }]).unwrap();
+            id: "muse-wsl-test".into(),
+            name: "Muse (WSL)".into(),
+            harness: "muse".into(),
+            runtime: Some(crate::models::EnvType::Wsl),
+            wsl_distro: Some("Ubuntu".into()),
+            executable: None,
+        }])
+        .unwrap();
         let path = format!("C:/buildmesh-runtime-{}", uuid::Uuid::new_v4());
         let mesh = crate::db::create_mesh("Runtime test", &path).unwrap();
-        let node = crate::db::create_agent_node(mesh.id, "Muse", &path, "main", crate::models::EnvType::Windows,
-            "muse-wsl-test", None, None, None, None, false, None, None, None).unwrap();
+        let node = crate::db::create_agent_node(
+            mesh.id,
+            "Muse",
+            &path,
+            "main",
+            crate::models::EnvType::Windows,
+            "muse-wsl-test",
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(node.env, crate::models::EnvType::Wsl);
-        assert_eq!(crate::db::get_agent_node_by_id(node.id).unwrap().env, crate::models::EnvType::Wsl);
+        assert_eq!(
+            crate::db::get_agent_node_by_id(node.id).unwrap().env,
+            crate::models::EnvType::Wsl
+        );
         crate::db::set_agent_node_provider(node.id, "terminal").unwrap();
         let node = crate::db::get_agent_node_by_id(node.id).unwrap();
         assert_eq!(node.provider, "terminal");
         assert_eq!(node.env, crate::models::EnvType::Windows);
         crate::db::set_agent_node_provider(node.id, "muse-wsl-test").unwrap();
-        assert_eq!(crate::db::get_agent_node_by_id(node.id).unwrap().env, crate::models::EnvType::Wsl);
+        assert_eq!(
+            crate::db::get_agent_node_by_id(node.id).unwrap().env,
+            crate::models::EnvType::Wsl
+        );
         crate::preferences::reset_for_tests();
     }
 
@@ -75,11 +101,17 @@ mod tests {
         // Assert: should return Ok(existing_mesh), NOT Err(UNIQUE constraint)
         match second_result {
             Ok(mesh) => {
-                assert_eq!(mesh.name, "First Project", "should return the FIRST (existing) mesh");
+                assert_eq!(
+                    mesh.name, "First Project",
+                    "should return the FIRST (existing) mesh"
+                );
                 assert_eq!(mesh.layout, "grid", "should preserve original layout");
             }
             Err(e) => {
-                panic!("create_mesh with duplicate path should NOT error, but got: {}", e);
+                panic!(
+                    "create_mesh with duplicate path should NOT error, but got: {}",
+                    e
+                );
             }
         }
     }
@@ -185,8 +217,11 @@ mod tests {
         for i in 0..600 {
             ids.push(insert_mesh(&conn, &format!("m-{i}")));
         }
-        let updates: Vec<(i64, i64)> =
-            ids.iter().enumerate().map(|(i, id)| (*id, (i + 1) as i64)).collect();
+        let updates: Vec<(i64, i64)> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (*id, (i + 1) as i64))
+            .collect();
 
         crate::db::update_mesh_positions_batch_inner(&conn, &updates).unwrap();
 
@@ -207,8 +242,11 @@ mod tests {
         for i in 0..50 {
             ids_new.push(insert_mesh(&conn_new, &format!("new-{i}")));
         }
-        let updates: Vec<(i64, i64)> =
-            ids_new.iter().enumerate().map(|(i, id)| (*id, ((i + 7) * 3) as i64)).collect();
+        let updates: Vec<(i64, i64)> = ids_new
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (*id, ((i + 7) * 3) as i64))
+            .collect();
         crate::db::update_mesh_positions_batch_inner(&conn_new, &updates).unwrap();
 
         // Per-row baseline (re-implemented locally so the test pins the
@@ -228,8 +266,14 @@ mod tests {
         }
         tx.commit().unwrap();
 
-        let positions_new: Vec<i64> = ids_new.iter().map(|id| read_position(&conn_new, *id)).collect();
-        let positions_old: Vec<i64> = ids_old.iter().map(|id| read_position(&conn_old, *id)).collect();
+        let positions_new: Vec<i64> = ids_new
+            .iter()
+            .map(|id| read_position(&conn_new, *id))
+            .collect();
+        let positions_old: Vec<i64> = ids_old
+            .iter()
+            .map(|id| read_position(&conn_old, *id))
+            .collect();
         assert_eq!(positions_new, positions_old);
     }
 
@@ -254,7 +298,8 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert!(
-            plan.iter().any(|line| line.contains("PRIMARY KEY") || line.contains("rowid")),
+            plan.iter()
+                .any(|line| line.contains("PRIMARY KEY") || line.contains("rowid")),
             "bulk UPDATE must use the INTEGER PRIMARY KEY index, got plan: {plan:?}"
         );
     }
@@ -290,8 +335,11 @@ mod tests {
             .unwrap();
             ids.push(mesh.id);
         }
-        let updates: Vec<(i64, i64)> =
-            ids.iter().enumerate().map(|(i, id)| (*id, (i + 1) as i64)).collect();
+        let updates: Vec<(i64, i64)> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (*id, (i + 1) as i64))
+            .collect();
 
         // Warm up the writer mutex + prepare cache.
         crate::db::update_mesh_positions_batch(&updates[..10]).unwrap();
@@ -355,13 +403,12 @@ mod tests {
             "CREATE TRIGGER abort_on_sentinel BEFORE UPDATE ON meshes \
              WHEN NEW.id = OLD.id AND OLD.id = {sentinel} \
              BEGIN SELECT RAISE(ABORT, 'sentinel'); END;"
-        )).unwrap();
+        ))
+        .unwrap();
 
-        let err = crate::db::update_mesh_positions_batch_inner(
-            &conn,
-            &[(keep, 100), (sentinel, 200)],
-        )
-        .expect_err("trigger must abort the update");
+        let err =
+            crate::db::update_mesh_positions_batch_inner(&conn, &[(keep, 100), (sentinel, 200)])
+                .expect_err("trigger must abort the update");
         assert!(
             err.to_string().contains("sentinel"),
             "error must surface the trigger's message, got {err}"

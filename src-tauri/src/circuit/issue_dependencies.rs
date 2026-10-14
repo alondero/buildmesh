@@ -1,6 +1,6 @@
 //! Issue dependency filtering for Circuit triggers.
+use crate::services::github::{parse_blocked_by, Issue};
 use std::collections::HashSet;
-use crate::services::github::{Issue, parse_blocked_by};
 
 pub(crate) fn unresolved_blockers(
     issue: &Issue,

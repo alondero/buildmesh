@@ -60,8 +60,8 @@ pub fn exchange(ticket: &str, label: Option<&str>, ip: &str) -> rusqlite::Result
         return Ok(None);
     };
     let conn = crate::db::write_conn();
-    let result = crate::db::pair_device_session_inner(&conn, label, Some(ip))
-        .map(|(_, token)| Some(token));
+    let result =
+        crate::db::pair_device_session_inner(&conn, label, Some(ip)).map(|(_, token)| Some(token));
     if result.is_err() {
         invitations().lock().restore(reservation, Instant::now());
     }

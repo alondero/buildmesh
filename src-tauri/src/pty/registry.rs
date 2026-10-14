@@ -30,14 +30,21 @@ impl<K: std::hash::Hash + Clone + Eq, V> PtyRegistry<K, V> {
 
     /// Replace only the observed incarnation. No caller code executes under
     /// the map lock; retirement can be coordinated outside the registry.
-    pub(crate) fn replace_if_current(&self, key: K, expected: Option<&Arc<V>>, value: Arc<V>) -> bool {
+    pub(crate) fn replace_if_current(
+        &self,
+        key: K,
+        expected: Option<&Arc<V>>,
+        value: Arc<V>,
+    ) -> bool {
         let mut map = self.processes.lock().unwrap();
         let matches = match (map.get(&key), expected) {
             (Some(current), Some(expected)) => Arc::ptr_eq(current, expected),
             (None, None) => true,
             _ => false,
         };
-        if matches { map.insert(key, value); }
+        if matches {
+            map.insert(key, value);
+        }
         matches
     }
 

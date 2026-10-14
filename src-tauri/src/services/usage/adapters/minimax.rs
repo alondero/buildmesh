@@ -7,9 +7,9 @@
 //! driver, and response parsing. `usage.rs` keeps orchestration only.
 
 use crate::preferences::ProviderAccount;
-use crate::services::usage::types::UsagePage;
 use crate::services::usage::adapter::{api_key_for, fetch_usage, UsageAdapter};
 use crate::services::usage::outcome::{AuthPolicy, UsageOutcome};
+use crate::services::usage::types::UsagePage;
 use crate::services::usage::types::{BillingBalance, UsageError, UsageWindow};
 use serde::Deserialize;
 
@@ -18,7 +18,10 @@ pub(crate) struct MinimaxAdapter;
 
 impl UsageAdapter for MinimaxAdapter {
     fn usage_page(&self) -> Option<UsagePage> {
-        Some(UsagePage::new("https://platform.minimax.io/console/plan", "View usage"))
+        Some(UsagePage::new(
+            "https://platform.minimax.io/console/plan",
+            "View usage",
+        ))
     }
 
     fn id(&self) -> &'static str {
@@ -87,8 +90,16 @@ fn parse_minimax_response(body: &str) -> Result<(Vec<UsageWindow>, Option<String
             }
         };
 
-        push_window("5-hour", model.current_interval_remaining_percent, model.end_time);
-        push_window("Weekly", model.current_weekly_remaining_percent, model.weekly_end_time);
+        push_window(
+            "5-hour",
+            model.current_interval_remaining_percent,
+            model.end_time,
+        );
+        push_window(
+            "Weekly",
+            model.current_weekly_remaining_percent,
+            model.weekly_end_time,
+        );
     }
 
     let detail = if windows.is_empty() {

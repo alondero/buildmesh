@@ -41,8 +41,7 @@ fn failed_update_does_not_publish_candidate_to_cache() {
 
     let loaded = load().unwrap();
     assert_eq!(loaded.default_provider, None);
-    let error = update(|prefs| prefs.default_provider = Some("must-not-leak".into()))
-        .unwrap_err();
+    let error = update(|prefs| prefs.default_provider = Some("must-not-leak".into())).unwrap_err();
     // The gate refuses an I/O failure too, but as a plain I/O error — not as
     // the issue-#1523 corruption refusal, which would tell the user their
     // file was damaged when it was not. The point of the assertion is that
@@ -114,9 +113,15 @@ fn malformed_json_read_falls_back_to_defaults_without_touching_the_file() {
         let original = "{not valid json";
         std::fs::write(tmp.join("preferences.json"), original).unwrap();
         let prefs = load().unwrap();
-        assert_eq!(prefs.default_provider, AppPreferences::default().default_provider);
+        assert_eq!(
+            prefs.default_provider,
+            AppPreferences::default().default_provider
+        );
         assert!(prefs.spawn_configurations.is_empty());
-        assert_eq!(std::fs::read_to_string(tmp.join("preferences.json")).unwrap(), original);
+        assert_eq!(
+            std::fs::read_to_string(tmp.join("preferences.json")).unwrap(),
+            original
+        );
     });
 }
 
@@ -127,7 +132,10 @@ fn type_invalid_preferences_are_not_overwritten_by_a_read() {
         std::fs::write(tmp.join("preferences.json"), original).unwrap();
         let prefs = load().unwrap();
         assert!(prefs.spawn_configurations.is_empty());
-        assert_eq!(std::fs::read_to_string(tmp.join("preferences.json")).unwrap(), original);
+        assert_eq!(
+            std::fs::read_to_string(tmp.join("preferences.json")).unwrap(),
+            original
+        );
     });
 }
 

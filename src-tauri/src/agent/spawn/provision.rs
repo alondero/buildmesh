@@ -9,6 +9,7 @@ use super::reader::SpawnTimer;
 use super::wire::emit_provider_error;
 use super::{MeshSyncOutcome, MeshSyncWarningPayload};
 use crate::agent::session_lifecycle::SessionLifecycleSink as _;
+use crate::env;
 use crate::git::worktree::provision::{
     fork_remote_alias, locked_fetch_pr_head, provision_for_spawn, read_origin_ref_sha,
     AppHandleSink, ProvisionHooks, SpawnContext, SpawnSource,
@@ -39,6 +40,7 @@ pub(super) struct ProvisionedWorkspace {
     pub provider: Provider,
     pub resolved: crate::env::ResolvedPath,
     pub routing: crate::agent::launch_routing::PreparedLaunchRouting,
+    pub checkout_host_path: String,
 }
 
 pub(super) fn should_prepare_muse_context(
@@ -283,9 +285,11 @@ pub(super) async fn provision_workspace(
     // are idempotent (a Codex proxy profile materialisation) and it holds no
     // lock across them.
     let routing_harness_id = node.provider.clone();
-    let routing_resolved = resolved.clone();
+    let routing_resolved = env::node_working_path(&node);
     let routing_task = tauri::async_runtime::spawn_blocking(move || {
-        if let Some(plan) = crate::db::node_spawn_configuration(session_id, &routing_harness_id)?.and_then(|c| c.resolved) {
+        if let Some(plan) = crate::db::node_spawn_configuration(session_id, &routing_harness_id)?
+            .and_then(|c| c.resolved)
+        {
             return crate::agent::launch_routing::prepare_snapshot(&plan, &routing_resolved);
         }
         crate::agent::launch_routing::prepare(&routing_harness_id, provider, &routing_resolved)
@@ -301,12 +305,22 @@ pub(super) async fn provision_workspace(
     let host_path_exists = std::path::Path::new(&resolved.host_path).exists();
     let worktree_base_ref = if spawn_worktree_name.is_some() {
         if !host_path_exists {
-            if crate::services::fetch_freshness::spawn_can_skip_fetch(&node.path) {
+            let freshness_path = node.path.clone();
+            let since_fetch = crate::blocking::run_blocking("fetch_freshness", move || {
+                Ok(crate::services::fetch_freshness::time_since_success(
+                    &freshness_path,
+                ))
+            })
+            .await?;
+            if crate::services::fetch_freshness::is_fresh_enough(
+                since_fetch,
+                crate::services::fetch_freshness::SPAWN_FETCH_TTL,
+            ) {
                 tracing::info!(
                     "provision_workspace: skipping auto-sync for session {} — mesh {} was synced {}s ago (< TTL)",
                     session_id,
                     node.path,
-                    crate::services::fetch_freshness::time_since_success(&node.path).as_secs()
+                    since_fetch.as_secs()
                 );
                 timer.checkpoint("fetch_origin_skipped_fresh");
             } else {
@@ -514,8 +528,14 @@ pub(super) async fn provision_workspace(
             );
         }
         Ok(())
-    }).await?;
+    })
+    .await?;
     timer.checkpoint("after_worktree_sanitize");
+    let checkout_host_path = resolved.host_path.clone();
+
+    // Git preparation and ownership use the complete checkout; all provider
+    // provisioning, hooks and the eventual process launch use the saved cwd.
+    let resolved = env::node_working_path(&node);
 
     // Muse's WSL and native Windows runtimes scan project rules and skills
     // before the PTY is usable. Windows Git may have checked the tracked
@@ -675,5 +695,6 @@ pub(super) async fn provision_workspace(
         provider,
         resolved,
         routing,
+        checkout_host_path,
     })
 }

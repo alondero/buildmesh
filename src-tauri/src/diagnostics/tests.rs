@@ -36,8 +36,14 @@ fn format_line_renders_expected_fields() {
     let line = format_line(&sample_fixture());
     assert!(line.starts_with("DIAG "), "stable grep prefix, got: {line}");
     assert!(line.contains("uptime_s=600"));
-    assert!(line.contains("rss_mb=812"), "working set in whole MiB: {line}");
-    assert!(line.contains("priv_mb=1340"), "private bytes in whole MiB: {line}");
+    assert!(
+        line.contains("rss_mb=812"),
+        "working set in whole MiB: {line}"
+    );
+    assert!(
+        line.contains("priv_mb=1340"),
+        "private bytes in whole MiB: {line}"
+    );
     assert!(line.contains("handles=4123"));
     assert!(line.contains("threads=210"));
     assert!(line.contains("child_procs=6"));
@@ -46,8 +52,14 @@ fn format_line_renders_expected_fields() {
     // Issue #1530: the PTY input queue's own depth and bytes are on the line,
     // so a refused prompt is diagnosable after the fact. The fixture is idle,
     // so both read zero and any non-zero here would be a gauge leak.
-    assert!(line.contains("pty_qmsg=0"), "queue depth on the DIAG line: {line}");
-    assert!(line.contains("pty_qbytes=0"), "queue bytes on the DIAG line: {line}");
+    assert!(
+        line.contains("pty_qmsg=0"),
+        "queue depth on the DIAG line: {line}"
+    );
+    assert!(
+        line.contains("pty_qbytes=0"),
+        "queue bytes on the DIAG line: {line}"
+    );
     // 20 emits over a 5 s interval → 4.0 per second.
     assert!(
         line.contains("git_changed=142(+20/4.0ps)"),
@@ -63,7 +75,10 @@ fn format_line_handles_zero_elapsed() {
     let mut s = sample_fixture();
     s.elapsed_secs = 0.0;
     let line = format_line(&s);
-    assert!(line.contains("(+20/0.0ps)"), "zero elapsed → 0 rate, got: {line}");
+    assert!(
+        line.contains("(+20/0.0ps)"),
+        "zero elapsed → 0 rate, got: {line}"
+    );
 }
 
 /// On Windows the vitals FFI must return a plausibly-live process: the working
@@ -75,8 +90,14 @@ fn format_line_handles_zero_elapsed() {
 #[test]
 fn windows_vitals_report_a_live_process() {
     let v = sample_vitals();
-    assert!(v.working_set_bytes > 0, "a live process has a non-zero working set");
-    assert!(v.thread_count > 0, "a live process owns at least one thread");
+    assert!(
+        v.working_set_bytes > 0,
+        "a live process has a non-zero working set"
+    );
+    assert!(
+        v.thread_count > 0,
+        "a live process owns at least one thread"
+    );
     // Handle count is virtually always non-zero for a running process, but we
     // don't hard-assert it in case a stripped CI sandbox denies the query.
 }

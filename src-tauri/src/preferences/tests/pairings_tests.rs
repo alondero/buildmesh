@@ -2,9 +2,7 @@
 //! proxied-provider ordering, attach-form defaults.
 
 use super::with_temp_dir;
-use crate::preferences::{
-    AppPreferences, ModelTiers, ProviderPairing, ApiSurface,
-};
+use crate::preferences::{ApiSurface, AppPreferences, ModelTiers, ProviderPairing};
 
 #[test]
 fn upsert_and_remove_provider_pairing_by_harness_provider_key() {
@@ -38,8 +36,12 @@ fn upsert_and_remove_provider_pairing_by_harness_provider_key() {
     // The detach decision is recorded separately from recipe deletions so
     // reconcile's route materialization does not recreate the pairing on
     // the following save — while retired-id alias migration still heals.
-    assert!(prefs.detached_provider_routes.contains(&"claude:minimax".to_string()));
-    assert!(!prefs.deleted_launch_configurations.contains(&"launch/claude:minimax".to_string()));
+    assert!(prefs
+        .detached_provider_routes
+        .contains(&"claude:minimax".to_string()));
+    assert!(!prefs
+        .deleted_launch_configurations
+        .contains(&"launch/claude:minimax".to_string()));
 }
 
 #[test]
@@ -50,7 +52,9 @@ fn set_proxied_provider_order_round_trips() {
             vec!["minimax".to_string(), "kimi".to_string()],
         )
         .unwrap();
-        let stored = super::super::storage::load().unwrap().proxied_provider_order;
+        let stored = super::super::storage::load()
+            .unwrap()
+            .proxied_provider_order;
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].harness_id, "claude");
         assert_eq!(
@@ -69,7 +73,9 @@ fn set_proxied_provider_order_normalises_empty_to_drop_entry() {
         )
         .unwrap();
         crate::preferences::set_proxied_provider_order("claude".to_string(), vec![]).unwrap();
-        let stored = super::super::storage::load().unwrap().proxied_provider_order;
+        let stored = super::super::storage::load()
+            .unwrap()
+            .proxied_provider_order;
         assert!(stored.is_empty());
     });
 }
@@ -102,14 +108,16 @@ fn compatible_providers_by_harness_covers_every_renderable_harness() {
                 api_key: Some("sk-test".to_string()),
             },
         );
-        prefs.harness_profiles.push(crate::preferences::HarnessProfile {
-            id: "claude".to_string(),
-            name: "Claude Code".to_string(),
-            harness: "anthropic".to_string(),
-            runtime: None,
-            wsl_distro: None,
-            executable: None,
-        });
+        prefs
+            .harness_profiles
+            .push(crate::preferences::HarnessProfile {
+                id: "claude".to_string(),
+                name: "Claude Code".to_string(),
+                harness: "anthropic".to_string(),
+                runtime: None,
+                wsl_distro: None,
+                executable: None,
+            });
         // A route stored against a harness that has no profile of its own — it
         // still renders as a row, so it still needs a picker entry.
         crate::preferences::upsert_provider_pairing(
@@ -125,14 +133,14 @@ fn compatible_providers_by_harness_covers_every_renderable_harness() {
         // Same for a saved recipe: `configuration_menu` synthesises a row for
         // a configuration whose harness has no profile, and that row must not
         // end up with an empty picker.
-        prefs
-            .spawn_configurations
-            .push(crate::preferences::spawn_configurations::SpawnConfiguration {
+        prefs.spawn_configurations.push(
+            crate::preferences::spawn_configurations::SpawnConfiguration {
                 id: "cfg-codex".to_string(),
                 name: "Codex via DeepSeek".to_string(),
                 spawn_option_id: "codex:deepseek".to_string(),
                 ..Default::default()
-            });
+            },
+        );
         crate::preferences::save(prefs).unwrap();
 
         let map = crate::preferences::compatible_providers_by_harness();

@@ -20,7 +20,9 @@
 //! `UsageOutcome` is `pub(crate)` and never serialised; the projection is the
 //! boundary between the internal taxonomy and the externally-stable wire.
 
-use super::types::{logged_out, unavailable, BillingBalance, ProviderUsage, UsageMeter, UsageWindow};
+use super::types::{
+    logged_out, unavailable, BillingBalance, ProviderUsage, UsageMeter, UsageWindow,
+};
 use std::collections::HashSet;
 
 /// Internal outcome of a single usage fetch. Adapters construct variants via
@@ -417,21 +419,11 @@ mod tests {
                 meters: vec![UsageMeter::Unavailable],
                 detail: None,
             },
-            UsageOutcome::NoCredential {
-                hint: "x".into(),
-            },
-            UsageOutcome::Rejected {
-                hint: "x".into(),
-            },
-            UsageOutcome::RateLimited {
-                reason: "x".into(),
-            },
-            UsageOutcome::Unavailable {
-                reason: "x".into(),
-            },
-            UsageOutcome::Degraded {
-                detail: "x".into(),
-            },
+            UsageOutcome::NoCredential { hint: "x".into() },
+            UsageOutcome::Rejected { hint: "x".into() },
+            UsageOutcome::RateLimited { reason: "x".into() },
+            UsageOutcome::Unavailable { reason: "x".into() },
+            UsageOutcome::Degraded { detail: "x".into() },
             UsageOutcome::ManagedExternally {
                 platform: "AWS Bedrock".into(),
             },
@@ -458,7 +450,8 @@ mod tests {
     /// gate in `assemble_meters` reads this directly after the seam change.
     #[test]
     fn keep_predicate_table() {
-        let configured: HashSet<String> = ["kimi", "openai"].iter().map(|s| s.to_string()).collect();
+        let configured: HashSet<String> =
+            ["kimi", "openai"].iter().map(|s| s.to_string()).collect();
         let unconfigured: HashSet<String> = HashSet::new();
 
         let cases = vec![
@@ -476,63 +469,49 @@ mod tests {
                 "Reading kept regardless of configured_keys",
             ),
             (
-                UsageOutcome::NoCredential {
-                    hint: "x".into(),
-                },
+                UsageOutcome::NoCredential { hint: "x".into() },
                 &configured,
                 "kimi",
                 false,
                 "NoCredential always dropped (even when configured)",
             ),
             (
-                UsageOutcome::NoCredential {
-                    hint: "x".into(),
-                },
+                UsageOutcome::NoCredential { hint: "x".into() },
                 &unconfigured,
                 "kimi",
                 false,
                 "NoCredential always dropped (unconfigured)",
             ),
             (
-                UsageOutcome::Rejected {
-                    hint: "x".into(),
-                },
+                UsageOutcome::Rejected { hint: "x".into() },
                 &configured,
                 "kimi",
                 true,
                 "Rejected kept when configured (Invalid API key affordance)",
             ),
             (
-                UsageOutcome::Rejected {
-                    hint: "x".into(),
-                },
+                UsageOutcome::Rejected { hint: "x".into() },
                 &unconfigured,
                 "kimi",
                 false,
                 "Rejected dropped when unconfigured",
             ),
             (
-                UsageOutcome::RateLimited {
-                    reason: "x".into(),
-                },
+                UsageOutcome::RateLimited { reason: "x".into() },
                 &configured,
                 "kimi",
                 true,
                 "RateLimited kept regardless",
             ),
             (
-                UsageOutcome::Unavailable {
-                    reason: "x".into(),
-                },
+                UsageOutcome::Unavailable { reason: "x".into() },
                 &unconfigured,
                 "kimi",
                 true,
                 "Unavailable kept regardless",
             ),
             (
-                UsageOutcome::Degraded {
-                    detail: "x".into(),
-                },
+                UsageOutcome::Degraded { detail: "x".into() },
                 &configured,
                 "kimi",
                 true,
@@ -550,12 +529,7 @@ mod tests {
         ];
 
         for (outcome, configured_set, id, expected_keep, name) in cases {
-            assert_eq!(
-                outcome.keep(configured_set, id),
-                expected_keep,
-                "{name}"
-            );
+            assert_eq!(outcome.keep(configured_set, id), expected_keep, "{name}");
         }
     }
-
 }

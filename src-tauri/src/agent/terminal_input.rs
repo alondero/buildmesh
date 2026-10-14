@@ -58,11 +58,17 @@ pub struct InputOutcome {
 
 impl InputOutcome {
     pub fn accepted(activity: InputActivity) -> Self {
-        Self { disposition: InputDisposition::Accepted, activity }
+        Self {
+            disposition: InputDisposition::Accepted,
+            activity,
+        }
     }
 
     pub fn backpressured() -> Self {
-        Self { disposition: InputDisposition::Backpressured, activity: InputActivity::default() }
+        Self {
+            disposition: InputDisposition::Backpressured,
+            activity: InputActivity::default(),
+        }
     }
 
     pub fn is_accepted(&self) -> bool {
@@ -109,7 +115,9 @@ impl std::fmt::Display for InputWriteError {
             // Deliberately distinct from "Agent not running": a caller (or a
             // human reading a log) must be able to tell a retryable stall
             // apart from a dead process.
-            Self::Backpressured => f.write_str("PTY input queue is full — the agent is not reading its input (retryable)"),
+            Self::Backpressured => f.write_str(
+                "PTY input queue is full — the agent is not reading its input (retryable)",
+            ),
             Self::Closed => f.write_str("Agent not running"),
             Self::InvalidStamp => f.write_str("Invalid input ownership stamp"),
         }
@@ -178,29 +186,36 @@ impl InputQueueGauge {
     /// [`Self::admits`] check and this reservation cannot interleave with
     /// another enqueue.
     pub fn reserve(&self, bytes: usize) {
-        self.queued_bytes.fetch_add(bytes as u64, std::sync::atomic::Ordering::Relaxed);
-        self.queued_messages.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.queued_bytes
+            .fetch_add(bytes as u64, std::sync::atomic::Ordering::Relaxed);
+        self.queued_messages
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Undo a reservation whose `try_send` then failed, or hand a drained
     /// buffer back once the writer has written it.
     pub fn release(&self, bytes: usize) {
-        self.queued_bytes.fetch_sub(bytes as u64, std::sync::atomic::Ordering::Relaxed);
-        self.queued_messages.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        self.queued_bytes
+            .fetch_sub(bytes as u64, std::sync::atomic::Ordering::Relaxed);
+        self.queued_messages
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Abandon every buffered byte — the sender is being dropped, so nothing
     /// queued can ever be drained and the counters must not be inherited by a
     /// later incarnation of the same session.
     pub fn reset(&self) {
-        self.queued_bytes.store(0, std::sync::atomic::Ordering::Relaxed);
-        self.queued_messages.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.queued_bytes
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.queued_messages
+            .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// `(queued_messages, queued_bytes)` for diagnostics.
     pub fn snapshot(&self) -> (usize, u64) {
         (
-            self.queued_messages.load(std::sync::atomic::Ordering::Relaxed),
+            self.queued_messages
+                .load(std::sync::atomic::Ordering::Relaxed),
             self.queued_bytes.load(std::sync::atomic::Ordering::Relaxed),
         )
     }
@@ -381,10 +396,14 @@ mod tests {
                     input.accept_event(&prefix[..split]);
                     input.accept_event(&prefix[split..]);
                     let activity = input.accept_event(&[boundary]);
-                    assert_eq!(activity, InputActivity {
-                        user_input: true,
-                        submitted: boundary != 0x03,
-                    }, "prefix {prefix:?} split {split}");
+                    assert_eq!(
+                        activity,
+                        InputActivity {
+                            user_input: true,
+                            submitted: boundary != 0x03,
+                        },
+                        "prefix {prefix:?} split {split}"
+                    );
                     assert!(input.empty_prompt(), "prefix {prefix:?} split {split}");
                 }
             }

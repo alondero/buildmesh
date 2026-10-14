@@ -166,7 +166,8 @@ impl StepStatus {
 
     /// In-flight (not terminal) step statuses, including the legacy
     /// `queued` alias so cancellation still covers old rows.
-    pub const SQL_IN_IN_FLIGHT: &'static str = "'pending_slot', 'queued', 'running', 'blocked', 'unverified'";
+    pub const SQL_IN_IN_FLIGHT: &'static str =
+        "'pending_slot', 'queued', 'running', 'blocked', 'unverified'";
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 //! Coordinator drive idempotency ledger (issue #320 / #750, ADR-0008 §6).
 
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 
 use super::{write_conn, SqlResult};
 
@@ -57,11 +57,7 @@ pub const PENDING_CLAIM_TIMEOUT_SECS: i64 = 30;
 /// real DB failure (lock, IO, corruption) — the same fail-safe contract
 /// the pre-#750 `lookup` established (issue #320 review): the orchestrator
 /// must never mistake "couldn't read" for "key never seen".
-pub fn claim_drive_prompt(
-    node_id: i64,
-    key: &str,
-    prompt_hash: &str,
-) -> SqlResult<ClaimOutcome> {
+pub fn claim_drive_prompt(node_id: i64, key: &str, prompt_hash: &str) -> SqlResult<ClaimOutcome> {
     let db = write_conn();
     claim_drive_prompt_inner(&db, node_id, key, prompt_hash)
 }
@@ -152,11 +148,7 @@ pub fn claim_drive_prompt_inner(
 /// wins, mirroring the pre-#750 `INSERT OR IGNORE` rule). Returns the number
 /// of rows actually changed so the caller can log a warning when a drive
 /// completed but the finalize found no row to update.
-pub fn finalize_drive_prompt(
-    node_id: i64,
-    key: &str,
-    verdict: VerdictStr<'_>,
-) -> SqlResult<usize> {
+pub fn finalize_drive_prompt(node_id: i64, key: &str, verdict: VerdictStr<'_>) -> SqlResult<usize> {
     let db = write_conn();
     finalize_drive_prompt_inner(&db, node_id, key, verdict)
 }
@@ -242,10 +234,7 @@ pub fn prune_drive_prompts_older_than(days: i64) -> SqlResult<usize> {
     prune_drive_prompts_older_than_inner(&db, days)
 }
 
-pub fn prune_drive_prompts_older_than_inner(
-    conn: &Connection,
-    days: i64,
-) -> SqlResult<usize> {
+pub fn prune_drive_prompts_older_than_inner(conn: &Connection, days: i64) -> SqlResult<usize> {
     conn.execute(
         "DELETE FROM coordinator_drive_prompts
              WHERE created_at < datetime('now', '-' || ?1 || ' days')",

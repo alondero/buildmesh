@@ -7,9 +7,9 @@
 //! orchestration only.
 
 use crate::preferences::ProviderAccount;
-use crate::services::usage::types::UsagePage;
 use crate::services::usage::adapter::{api_key_for, UsageAdapter};
 use crate::services::usage::outcome::UsageOutcome;
+use crate::services::usage::types::UsagePage;
 use crate::services::usage::types::{BillingBalance, UsageError};
 use chrono::Datelike;
 use reqwest::blocking::Client;
@@ -21,7 +21,10 @@ pub(crate) struct OpenaiAdapter;
 
 impl UsageAdapter for OpenaiAdapter {
     fn usage_page(&self) -> Option<UsagePage> {
-        Some(UsagePage::new("https://platform.openai.com/usage", "View usage"))
+        Some(UsagePage::new(
+            "https://platform.openai.com/usage",
+            "View usage",
+        ))
     }
 
     fn id(&self) -> &'static str {
@@ -216,19 +219,16 @@ fn openai_usage_with_base_url(api_key: &str, base_url: &str) -> UsageOutcome {
         "{}/organization/costs?start_time={}&bucket_width=1d",
         base_url, start_time
     );
-    let resp = match client
-        .get(&url)
-        .header("Authorization", auth)
-        .send()
-    {
+    let resp = match client.get(&url).header("Authorization", auth).send() {
         Ok(r) if r.status().as_u16() == 401 || r.status().as_u16() == 403 => {
             // Project key — graceful degradation per ADR-0026 §2. The key
             // is valid for inference; we just can't reach the admin
             // endpoint. Surface as `Degraded` so the panel renders the
             // `detail` hint without painting the row as "fetch failed".
             return UsageOutcome::Degraded {
-                detail: "Monthly spend tracking requires an Organization Admin API Key (sk-admin-...)"
-                    .to_string(),
+                detail:
+                    "Monthly spend tracking requires an Organization Admin API Key (sk-admin-...)"
+                        .to_string(),
             };
         }
         Ok(r) if r.status().as_u16() == 429 => {
@@ -352,7 +352,12 @@ mod tests {
         // month-day boundary: the value is always day=1 at 00:00:00 UTC.
         let epoch = current_month_start_epoch();
         let dt = chrono::DateTime::from_timestamp(epoch, 0).expect("valid epoch");
-        assert_eq!(dt.day(), 1, "month start must be day 1, got day {}", dt.day());
+        assert_eq!(
+            dt.day(),
+            1,
+            "month start must be day 1, got day {}",
+            dt.day()
+        );
         assert_eq!(dt.hour(), 0);
         assert_eq!(dt.minute(), 0);
         assert_eq!(dt.second(), 0);
@@ -435,12 +440,15 @@ mod tests {
                 for req in server.incoming_requests() {
                     match req.url() {
                         url if url.ends_with("/models") => {
-                            let _ = req.respond(tiny_http::Response::from_string(OPENAI_MODELS_BODY));
+                            let _ =
+                                req.respond(tiny_http::Response::from_string(OPENAI_MODELS_BODY));
                         }
                         url if url.contains("/organization/costs") => {
                             let _ = req.respond(
-                                tiny_http::Response::from_string(r#"{"error":"insufficient permissions"}"#)
-                                    .with_status_code(403),
+                                tiny_http::Response::from_string(
+                                    r#"{"error":"insufficient permissions"}"#,
+                                )
+                                .with_status_code(403),
                             );
                         }
                         _ => {
@@ -516,7 +524,11 @@ mod tests {
         let usage = openai_usage_with_base_url("", "http://127.0.0.1:1").into_usage("openai");
         assert!(!usage.logged_in);
         assert_eq!(usage.provider, "openai");
-        assert!(usage.error.as_deref().map(|e| e.contains("No API key")).unwrap_or(false));
+        assert!(usage
+            .error
+            .as_deref()
+            .map(|e| e.contains("No API key"))
+            .unwrap_or(false));
         assert!(usage.balance.is_none());
     }
 
@@ -542,6 +554,10 @@ mod tests {
 
         let usage = openai_usage_with_base_url("sk-test", &base).into_usage("openai");
         assert!(usage.logged_in, "429 must not flip to logged_out");
-        assert!(usage.error.as_deref().map(|e| e.contains("Rate limited")).unwrap_or(false));
+        assert!(usage
+            .error
+            .as_deref()
+            .map(|e| e.contains("Rate limited"))
+            .unwrap_or(false));
     }
 }

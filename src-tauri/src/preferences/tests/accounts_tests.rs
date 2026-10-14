@@ -4,9 +4,7 @@
 use super::super::model::ProviderAccount;
 use super::super::resolver::effective_pairings;
 use super::with_temp_dir;
-use crate::preferences::{
-    AppPreferences, ModelTiers, ProviderPairing, ApiSurface,
-};
+use crate::preferences::{ApiSurface, AppPreferences, ModelTiers, ProviderPairing};
 
 #[test]
 fn effective_pairings_returns_only_stored_proxiable() {
@@ -243,7 +241,10 @@ fn set_account_key_if_absent_only_fills_an_empty_key() {
     );
     let wrote = crate::preferences::set_account_key_if_absent(&mut prefs, "deepseek", "fresh");
     assert!(!wrote);
-    assert_eq!(prefs.provider_accounts[0].api_key.as_deref(), Some("existing"));
+    assert_eq!(
+        prefs.provider_accounts[0].api_key.as_deref(),
+        Some("existing")
+    );
     // Empty → fill.
     crate::preferences::remove_provider_account(&mut prefs, "deepseek");
     let wrote = crate::preferences::set_account_key_if_absent(&mut prefs, "deepseek", "fresh");

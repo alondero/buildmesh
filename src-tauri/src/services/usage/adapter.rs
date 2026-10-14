@@ -145,8 +145,7 @@ pub(crate) fn api_key_for<'a>(
 /// `fetch_usage` callers previously built an unbounded client, so this adds
 /// a timeout there (behaviour change covered by
 /// [`shared_client_applies_a_configured_request_timeout`]).
-static SHARED_CLIENT: std::sync::OnceLock<Result<Client, String>> =
-    std::sync::OnceLock::new();
+static SHARED_CLIENT: std::sync::OnceLock<Result<Client, String>> = std::sync::OnceLock::new();
 
 pub(crate) fn shared_client() -> Result<Client, String> {
     // Test-only override (set by `with_client_override`); when present,
@@ -307,11 +306,17 @@ where
                 AuthPolicy::NoCredential => UsageOutcome::NoCredential { hint: reason },
             }
         }
-        Ok(r) if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => UsageOutcome::RateLimited {
-            reason: "Rate limited — usage data temporarily unavailable".to_string(),
-        },
+        Ok(r) if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+            UsageOutcome::RateLimited {
+                reason: "Rate limited — usage data temporarily unavailable".to_string(),
+            }
+        }
         Ok(r) if !r.status().is_success() => UsageOutcome::Unavailable {
-            reason: format!("API error {}: {}", r.status().as_u16(), r.text().unwrap_or_default()),
+            reason: format!(
+                "API error {}: {}",
+                r.status().as_u16(),
+                r.text().unwrap_or_default()
+            ),
         },
         Ok(r) => match parse(&r.text().unwrap_or_default()) {
             Ok((windows, detail)) => UsageOutcome::Reading {
@@ -349,7 +354,10 @@ mod tests {
     #[test]
     fn api_key_rejects_missing_and_empty_keys() {
         assert_eq!(api_key_for(&[], "keyed-test"), None);
-        assert_eq!(api_key_for(&[account("keyed-test", None)], "keyed-test"), None);
+        assert_eq!(
+            api_key_for(&[account("keyed-test", None)], "keyed-test"),
+            None
+        );
         assert_eq!(
             api_key_for(&[account("keyed-test", Some(""))], "keyed-test"),
             None
