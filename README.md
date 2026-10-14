@@ -293,7 +293,7 @@ Binaries land in `src-tauri/target/release/`:
 | Stable | `buildmesh.exe` | 1992 (fallback 1993→1994) |
 | Dev | `buildmesh-dev.exe` | 2992 (fallback 2993→2994) |
 
-The development test bridge is a separate loopback listener on port 1991 (2991 for the dev profile). The release entry points do not pass the `dev-tools` feature that compiles it; this README does not claim a binary was inspected. A debug or dev-tools build listens only when started with `BUILDMESH_TEST_BRIDGE=1` and a per-launch token (`scripts/run-dev.ps1 -TestBridge` or `scripts/run-dev.sh --test-bridge`).
+The development test bridge is a separate loopback listener on port 1991 (2991 for the dev profile). The release entry points do not pass the `dev-tools` feature that compiles it. A debug or dev-tools build listens only when started with `BUILDMESH_TEST_BRIDGE=1` and a per-launch token (`scripts/run-dev.ps1 -TestBridge` or `scripts/run-dev.sh --test-bridge`).
 
 The dev profile is what `/use` and `/verify` use — it never touches the stable hub.
 

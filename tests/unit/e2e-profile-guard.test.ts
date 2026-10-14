@@ -1,10 +1,10 @@
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { BRIDGE_TOKEN_ENV } from '../../scripts/test-bridge-auth.mjs';
-import { profileOwnerIsAlive } from '../e2e/utils/buildmesh-launcher';
+import { profileOwnerIsAlive, removeSpawnDataRoot } from '../e2e/utils/buildmesh-launcher';
 import { headersForProbe } from '../e2e/utils/tauri-http';
 
 const TOKEN = 'a'.repeat(32);
@@ -52,5 +52,20 @@ describe('e2e profile and bridge probe guards', () => {
     child.kill();
     await new Promise<void>((resolve) => child.once('exit', () => resolve()));
     expect(profileOwnerIsAlive(dir)).toBe(false);
+  });
+
+  it('removes only a spawn temp root under the OS temp directory', () => {
+    const owned = mkdtempSync(path.join(tmpdir(), 'buildmesh-e2e-guard-'));
+    const kept = mkdtempSync(path.join(tmpdir(), 'bm-not-a-spawn-'));
+    scratch.push(kept);
+    writeFileSync(path.join(owned, 'buildmesh.db'), 'x');
+    writeFileSync(path.join(kept, 'buildmesh.db'), 'x');
+
+    removeSpawnDataRoot(owned);
+    expect(existsSync(owned)).toBe(false);
+    removeSpawnDataRoot(kept);
+    expect(existsSync(path.join(kept, 'buildmesh.db'))).toBe(true);
+    removeSpawnDataRoot(path.join(kept, '..', '..'));
+    expect(existsSync(kept)).toBe(true);
   });
 });

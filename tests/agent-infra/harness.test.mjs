@@ -1652,7 +1652,7 @@ test('the real plan reuses frontend gates after a Rust-only edit and docs-only e
 test('Vitest keeps re-running for the src-tauri files it reads, and every Rust gate shares one input list', () => {
   const plan = planGates(['src/owner.ts', 'src-tauri/src/lib.rs']);
   const byId = Object.fromEntries(plan.map(row => [row.id, row]));
-  for (const path of ['src-tauri/Cargo.toml', 'src-tauri/Cargo.lock', 'src-tauri/tauri.conf.json', 'src-tauri/tauri.dev.conf.json', 'src-tauri/tauri.windows.conf.json', 'src-tauri/capabilities/default.json', 'src-tauri/src/lib.rs', 'src-tauri/src/commands/file_tree.rs', 'src-tauri/src/services/mod.rs', 'src-tauri/src/http/routes/issues.rs', 'src-tauri/src/agent/provider/adapters/opencode_attention_plugin.js', 'docs/brand/b3-relay-icon.svg', 'src/types/generated/Example.ts']) {
+  for (const path of ['src-tauri/Cargo.toml', 'src-tauri/Cargo.lock', 'src-tauri/tauri.conf.json', 'src-tauri/tauri.dev.conf.json', 'src-tauri/tauri.windows.conf.json', 'src-tauri/capabilities/default.json', 'src-tauri/src/lib.rs', 'src-tauri/src/commands/file_tree.rs', 'src-tauri/src/services/mod.rs', 'src-tauri/src/startup/mod.rs', 'src-tauri/src/http/routes/issues.rs', 'src-tauri/src/agent/provider/adapters/opencode_attention_plugin.js', 'docs/brand/b3-relay-icon.svg', 'src/types/generated/Example.ts']) {
     assert.ok(gateReads(byId['frontend-tests'], path), path);
   }
   for (const path of ['src-tauri/src/secret_scrubber.rs', 'src-tauri/src/db/mod.rs', 'src-tauri/tests/fixtures/transcripts/muse/muse_transcript.jsonl', 'docs/page.md']) {
@@ -1922,6 +1922,7 @@ test('new Vitest references to src-tauri are audited against the frontend-tests 
     'src-tauri/src/lib.rs',
     'src-tauri/src/commands/file_tree.rs',
     'src-tauri/src/services/mod.rs',
+    'src-tauri/src/startup/mod.rs',
     'src-tauri/src/http/routes/issues.rs',
     'src-tauri/src/agent/provider/adapters/opencode_attention_plugin.js',
   ]) {

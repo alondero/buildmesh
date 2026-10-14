@@ -94,9 +94,13 @@ pub fn run() {
             })
             .unwrap_or("com.alond.buildmesh");
 
-        // Per-platform data dir: APPDATA on Windows, XDG_DATA_HOME (fallback
-        // ~/.local/share) on Linux, $HOME/Library/Application Support on macOS.
-        let data_dir: Option<std::path::PathBuf> = if cfg!(target_os = "windows") {
+        // Debug and dev-tools builds write under `BUILDMESH_PROFILE_DIR`
+        // when that override is an absolute profile directory. A set but
+        // unusable value writes no file, so a fixture panic cannot append
+        // to the roaming log. Otherwise use the platform data dir: APPDATA
+        // on Windows, XDG_DATA_HOME (fallback ~/.local/share) on Linux,
+        // $HOME/Library/Application Support on macOS.
+        let platform_root: Option<std::path::PathBuf> = if cfg!(target_os = "windows") {
             std::env::var_os("APPDATA").map(std::path::PathBuf::from)
         } else if let Some(home) = std::env::var_os("HOME") {
             let home = std::path::PathBuf::from(home);
@@ -113,12 +117,13 @@ pub fn run() {
             None
         };
 
-        if let Some(dir) = data_dir {
-            let log_path = dir.join(bundle_id).join("logs").join("panic_early.log");
+        if let Some(log_path) =
+            crate::startup::early_panic_log_path_from_env(bundle_id, platform_root.as_deref())
+        {
             // Create the parent dirs — `OpenOptions::create(true)` only
             // creates the file, not the path. On a fresh install neither
-            // `%APPDATA%\com.alond.buildmesh\` nor its `logs/` subdir exist
-            // when the first panic fires.
+            // the profile nor its `logs/` subdir exist when the first panic
+            // fires.
             if let Some(parent) = log_path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
@@ -639,12 +644,9 @@ pub fn run() {
                             );
 
                             #[cfg(not(target_os = "windows"))]
-                            match crate::startup::installed()
-                                .map(|bootstrap| bootstrap.profile_dir().to_path_buf())
-                                .or_else(|| _app_handle.path().app_data_dir().ok())
-                            {
-                                Some(app_dir) => match diagnostics::relaunch_detached(
-                                    &app_dir.join("logs"),
+                            match crate::startup::installed() {
+                                Some(bootstrap) => match diagnostics::relaunch_detached(
+                                    &bootstrap.profile_dir().join("logs"),
                                 ) {
                                     Ok(true) => {
                                         tracing::info!("Auto-relaunch spawned (guard passed)");
@@ -661,7 +663,9 @@ pub fn run() {
                                     }
                                 },
                                 None => {
-                                    tracing::error!("Auto-relaunch failed (no app dir)");
+                                    tracing::error!(
+                                        "Auto-relaunch failed (startup profile is not installed)"
+                                    );
                                 }
                             }
                         }

@@ -16,7 +16,7 @@
 
 import { spawn, type ChildProcess } from 'child_process';
 import { randomBytes } from 'crypto';
-import { mkdtempSync, readFileSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -166,6 +166,19 @@ export function stableHubIsRunning(): boolean {
 }
 
 /**
+ * Delete a spawn's temp root. Only a directory created under the OS temp
+ * folder, named `buildmesh-e2e-…`, is removed. Anything else is left in place.
+ */
+export function removeSpawnDataRoot(dataRoot: string): void {
+  const root = path.resolve(dataRoot);
+  const temp = path.resolve(os.tmpdir());
+  const relative = path.relative(temp, root);
+  if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) return;
+  if (!path.basename(root).startsWith('buildmesh-e2e-')) return;
+  rmSync(root, { recursive: true, force: true });
+}
+
+/**
  * Spawn the built buildmesh.exe. Attach an 'error' listener BEFORE we hand
  * the child to the caller — without one, Node treats `spawn` failures
  * (ENOENT from a misconfigured `EXE_PATH`, permission denied, missing
@@ -251,11 +264,15 @@ export async function terminate(
       // Process already gone — fall through and still drain the socket.
     }
   }
-  const closed = await waitForPortClosed('127.0.0.1', port, 5000);
-  if (!closed) {
-    throw new Error(
-      `Port ${port} remained bound 5000ms after terminating PID ${proc.pid}`,
-    );
+  try {
+    const closed = await waitForPortClosed('127.0.0.1', port, 5000);
+    if (!closed) {
+      throw new Error(
+        `Port ${port} remained bound 5000ms after terminating PID ${proc.pid}`,
+      );
+    }
+  } finally {
+    removeSpawnDataRoot(proc.dataRoot);
   }
 }
 

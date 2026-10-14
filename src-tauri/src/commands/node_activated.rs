@@ -1,10 +1,9 @@
 //! Payload for the `node-activated` event.
 //!
 //! The frontend listens for this event. Only the development test bridge emits
-//! it. That bridge is compiled when `debug_assertions` or the `dev-tools`
-//! feature is on; the release entry points do not pass that feature. This
-//! file does not prove a release binary omits the listener. The type stays
-//! here so the generated binding does not pull the bridge module into production.
+//! it, and that bridge is compiled when `debug_assertions` or the `dev-tools`
+//! feature is on. The type stays in this module so the generated binding does
+//! not pull the bridge module into a build that omits the bridge.
 
 use serde::Serialize;
 use ts_rs::TS;
