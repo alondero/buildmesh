@@ -15,13 +15,26 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 
-fun JsonElement.obj() = this as JsonObject
+// Shape mismatches throw IllegalStateException, which friendlyError shows as-is.
+// A bare cast's ClassCastException thrown while composing kills the app.
+fun JsonElement.obj() = this as? JsonObject ?: unexpectedResponse("object")
 fun JsonObject.text(key: String) = (this[key] as? JsonPrimitive)?.contentOrNull.orEmpty()
 fun JsonObject.number(key: String) = (this[key] as? JsonPrimitive)?.longOrNull ?: 0L
 fun JsonObject.flag(key: String) = (this[key] as? JsonPrimitive)?.booleanOrNull ?: false
 fun JsonObject.objectAt(key: String) = this[key] as? JsonObject
 fun JsonObject.arrayAt(key: String) = (this[key] as? JsonArray)?.map { it.obj() }.orEmpty()
-fun JsonElement.objects() = (this as JsonArray).map { it.obj() }
+fun JsonElement.objects() = (this as? JsonArray ?: unexpectedResponse("list")).map { it.obj() }
+
+fun unexpectedResponse(what: String): Nothing =
+    throw IllegalStateException("The desktop sent an unexpected $what response. Update Buildmesh on the desktop or on this phone.")
+
+// `GET /api/meshes/{id}/issues` returns a GitHubIssueFeed `{items, completeness}`
+// (issue #2024); desktops released before it returned a bare array.
+fun issueItems(response: JsonElement): List<JsonObject> = when (response) {
+    is JsonArray -> response.objects()
+    is JsonObject -> (response["items"] as? JsonArray ?: unexpectedResponse("issues")).objects()
+    else -> unexpectedResponse("issues")
+}
 
 class ApiException(val status: Int, message: String) : IOException(message) {
     val unauthorized get() = status == 401 || status == 403
@@ -157,6 +170,40 @@ fun inputBody(sequence: String): JsonObject {
     return buildJsonObject { put("seq", sequence) }.also {
         require(it.toString().toByteArray(Charsets.UTF_8).size <= 1024) { "Reply is too long. Use the terminal for longer text." }
     }
+}
+
+// A saved Launch Configuration row's `id` is the configuration's id, not a
+// Spawn Option, so it travels as `configuration_id` beside its own Spawn Option.
+fun createNodeBody(meshId: Long, option: JsonObject, prompt: String): JsonObject = buildJsonObject {
+    val configuration = option.objectAt("configuration")
+    put("mesh_id", meshId)
+    put("provider", configuration?.text("spawn_option_id") ?: option.text("id"))
+    configuration?.let { put("configuration_id", it.text("id")) }
+    put("rows", 24); put("cols", 80)
+    if (prompt.isNotBlank()) put("prompt", prompt.trim())
+}
+
+// Issue spawn and archive resume accept a Spawn Option only; they have no
+// field that could carry a saved configuration.
+fun launchableWithoutConfiguration(option: JsonObject) = option.objectAt("configuration") == null
+
+data class PrSource(val head: String, val base: String)
+
+// `GET /api/meshes/{id}/pr/source?node_id=` comes from the resolver the create
+// route uses, so the branches shown are the branches published.
+fun prSource(response: JsonElement): PrSource {
+    val source = response.obj()
+    return PrSource(source.text("head_branch"), source.text("base_branch")).also {
+        if (it.head.isEmpty() || it.base.isEmpty()) unexpectedResponse("pull request source")
+    }
+}
+
+// PRs come from an agent node's worktree. `head_branch` pins the previewed
+// branch, so a worktree that moved since the preview is rejected rather than
+// published; a blank base lets the mesh's base ref decide.
+fun pullRequestBody(nodeId: Long, title: String, body: String, source: PrSource, base: String): JsonObject = buildJsonObject {
+    put("title", title.trim()); put("body", body); put("node_id", nodeId); put("head_branch", source.head)
+    base.trim().takeIf { it.isNotEmpty() }?.let { put("base_branch", it) }
 }
 
 fun nodeLabel(node: JsonObject): String {

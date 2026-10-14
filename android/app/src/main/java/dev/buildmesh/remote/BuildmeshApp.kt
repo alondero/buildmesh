@@ -32,7 +32,7 @@ fun BuildmeshApp(vm: BuildmeshViewModel, invitation: String = "") {
     var nodeId by rememberSaveable { mutableLongStateOf(0) }
     var file by rememberSaveable { mutableStateOf("") }
     LaunchedEffect(state.paired) { if (!state.paired) screen = "home" }
-    fun back() { screen = when (screen) { "terminal", "changes" -> "node"; "diff" -> "changes"; else -> "home" } }
+    fun back() { screen = when (screen) { "terminal", "changes", "pr" -> "node"; "diff" -> "changes"; else -> "home" } }
     BackHandler(state.paired && screen != "home") { back() }
     val selected = state.nodes.firstOrNull { it.number("id") == nodeId }
     val snackbar = remember { SnackbarHostState() }
@@ -44,9 +44,9 @@ fun BuildmeshApp(vm: BuildmeshViewModel, invitation: String = "") {
             if (state.paired) TopAppBar(title = {
                 if (screen == "home") BuildmeshWordmark() else {
                     val title = when (screen) {
-                        "node", "terminal", "changes", "diff" -> selected?.text("name") ?: "Agent Node"
+                        "node", "terminal", "changes", "diff", "pr" -> selected?.text("name") ?: "Agent Node"
                         "issues" -> "Issues"; "archive" -> "Archive"; "capture" -> "New task"
-                        "connection" -> "Connection"; "pr" -> "Create pull request"; else -> "Buildmesh"
+                        "connection" -> "Connection"; else -> "Buildmesh"
                     }
                     Text(title, maxLines = 1)
                 }
@@ -84,14 +84,15 @@ fun BuildmeshApp(vm: BuildmeshViewModel, invitation: String = "") {
                 when (screen) {
                     "home" -> Dashboard(state, tab, meshId, { meshId = it }, { nodeId = it; screen = "node" },
                         { id, target -> meshId = id; screen = target })
-                    "node" -> if (selected != null) NodeScreen(selected, vm, { screen = "terminal" }, { screen = "changes" })
+                    "node" -> if (selected != null) NodeScreen(selected, vm, { screen = "terminal" }, { screen = "changes" }, { screen = "pr" })
                         else EmptyMessage("This node is no longer available.")
                     "terminal" -> vm.api?.let { TerminalPane(it, nodeId, vm) }
                     "changes" -> vm.api?.let { ChangesScreen(it, nodeId, vm, { file = it; screen = "diff" }) }
                     "diff" -> vm.api?.let { DiffScreen(it, nodeId, file, vm) }
                     "capture" -> TaskScreen(state, vm, meshId, { meshId = it }, { id -> nodeId = id; screen = "node" })
                     "issues", "archive" -> vm.api?.let { ResourceScreen(it, meshId, screen, state, vm, { id -> nodeId = id; screen = "node" }) }
-                    "pr" -> CreatePrScreen(meshId, vm)
+                    "pr" -> if (selected != null) vm.api?.let { CreatePrScreen(it, selected.number("mesh_id"), nodeId, vm) }
+                        else EmptyMessage("This node is no longer available.")
                     "connection" -> ConnectionScreen(state.origin, vm, {
                         meshId = 0; nodeId = 0; screen = "home"
                     })
@@ -164,7 +165,6 @@ fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) 
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         TextButton(onClick = { openMesh(mesh.number("id"), "issues") }) { Text("Issues") }
                         TextButton(onClick = { openMesh(mesh.number("id"), "archive") }) { Text("Archive") }
-                        TextButton(onClick = { openMesh(mesh.number("id"), "pr") }) { Text("Create PR") }
                     }
                 }
             }
