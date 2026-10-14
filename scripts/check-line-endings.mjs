@@ -58,8 +58,8 @@ export function checkLineEndings(cwd) {
     .map((record) => {
       const what = record.index === 'mixed' ? 'mixed line endings' : `${record.index.toUpperCase()} line endings`;
       return `${record.path}: stored in the index with ${what} (i/${record.index}). `
-        + 'The repository policy (issue #2044) stores every text file as LF; run '
-        + `\`git add --renormalize .\` and re-stage it.`;
+        + 'The repository policy (issue #2044) stores every text file as LF; '
+        + '`git add --renormalize .` re-stages the tree with LF.';
     });
 }
 
