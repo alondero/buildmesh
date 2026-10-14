@@ -2,7 +2,7 @@
  * useWorktreeEffectiveDir (issue #1519): resolves a mesh's effective
  * worktree container dir once per meshId via the backend-authoritative
  * `get_worktree_directory_config` (Mesh override → app default →
- * `.claude/worktrees`). Null while loading / without a mesh / on error
+ * `.worktrees`). Null while loading / without a mesh / on error
  * (callers treat null as "no extras" — legacy matching only).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -66,13 +66,13 @@ describe('useWorktreeEffectiveDir', () => {
         return Promise.resolve({
           mesh_directory: null,
           app_directory: null,
-          effective_directory: '/repo/mesh/.claude/worktrees',
+          effective_directory: '/repo/mesh/.worktrees',
         });
       }
       return Promise.resolve({});
     });
     const { result } = renderHook(() => useWorktreeEffectiveDir(7));
-    await waitFor(() => expect(result.current).toBe('/repo/mesh/.claude/worktrees'));
+    await waitFor(() => expect(result.current).toBe('/repo/mesh/.worktrees'));
     const callsAfterMount = vi.mocked(invoke).mock.calls.length;
 
     // Matching mesh id refetches.

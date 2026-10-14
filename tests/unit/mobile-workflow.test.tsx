@@ -10,6 +10,8 @@ import CaptureIdea from "../../src/mobile/screens/CaptureIdea";
 import NodeOverview from "../../src/mobile/screens/NodeOverview";
 import NodeList from "../../src/mobile/screens/NodeList";
 import type { AgentNode, Mesh, Provider } from "../../src/mobile/api";
+import type { GitHubPullRequestFeed } from '../../src/types/generated/GitHubPullRequestFeed';
+const emptyPulls: GitHubPullRequestFeed = { items: [], completeness: { returned: 0, pages_fetched: 0, complete: true, incomplete_reason: null, reported_total: null } };
 
 const mesh = { id: 1, name: "Buildmesh" } as Mesh;
 const provider = {
@@ -37,7 +39,7 @@ it('restores a question from the node snapshot without waiting for a WebSocket e
     semantic_turn: null, signal_health: 'ok', timestamp: '2026-09-29T12:00:00Z',
   } } as AgentNode;
   vi.stubGlobal('fetch', vi.fn((url: string) => Promise.resolve(response(
-    url === '/api/nodes' ? [waiting] : { ticket: 'test' },
+    url === '/api/nodes' ? [waiting] : url.includes('/pulls') ? emptyPulls : { ticket: 'test' },
   ))));
   render(<NodeOverview node={waiting} visitId={1} onBack={vi.fn()} onTerminal={vi.fn()}
     onChanges={vi.fn()} onAuthFailed={vi.fn()} />);
@@ -178,7 +180,7 @@ describe("mobile idea capture", () => {
 describe("mobile work details", () => {
   it("sends a reply without opening the terminal and enforces the encoded body limit", async () => {
     const fetcher = vi.fn((url: string) =>
-      Promise.resolve(response(url === "/api/nodes" ? [node] : { ok: true })),
+      Promise.resolve(response(url === "/api/nodes" ? [node] : url.includes('/pulls') ? emptyPulls : { ok: true })),
     );
     vi.stubGlobal("fetch", fetcher);
     const onTerminal = vi.fn();
@@ -241,7 +243,7 @@ describe("mobile work details", () => {
     const fetcher = vi.fn((url: string) =>
       url.endsWith("/input")
         ? inputResponse
-        : Promise.resolve(response([node])),
+        : Promise.resolve(response(url.includes('/pulls') ? emptyPulls : [node])),
     );
     vi.stubGlobal("fetch", fetcher);
     const onDraftChange = vi.fn();

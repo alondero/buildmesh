@@ -4,6 +4,7 @@ import { getNodeStatusConfig, isSignalHealthProblem, lifecycleNodePatch, nodeInp
 import { AppBar } from "../ui";
 import { useVisibilityPolling } from "../useVisibilityPolling";
 import { useWsEvents } from "../useWsEvents";
+import { NodePullRequest } from './PullRequests';
 
 export default function NodeOverview({
   node: initial,
@@ -215,6 +216,7 @@ export default function NodeOverview({
             Open terminal
           </button>
         </div>
+        {!missing && <NodePullRequest meshId={node.mesh_id} nodeId={node.id} onAuthFailed={onAuthFailed} />}
         <form
           className="reply-panel"
           onSubmit={(e) => {

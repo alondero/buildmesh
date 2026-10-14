@@ -163,6 +163,14 @@ Pull requests are created from an Agent Node, because the create route requires
 preview is rejected instead of published (see the
 [mobile client](mobile.md#create-pr-is-node-scoped)).
 
+Node details also show the same-repository open PR for the live worktree
+branch, with checks, review decision and mergeability. **Squash and merge**
+requires confirmation, rechecks mergeability, and deletes the branch after
+merging. The mesh's **Pull requests** shortcut lists open PRs and discloses
+truncated results. Status refreshes while foregrounded; **Refresh PR status**
+retries a failed read. See [PR status and squash merge](mobile.md#pr-status-and-squash-merge)
+for gates and recovery after an interrupted merge.
+
 The client reads untyped JSON, so the resource screens (issues, archive,
 changes, diff, PR source) decode a response inside their loader's error
 handling, and the JSON helpers raise a readable `IllegalStateException` rather
@@ -172,6 +180,12 @@ than a `ClassCastException`. A shape this build does not understand becomes an
 cast that throws while composing would instead terminate the app. The issues route returns the
 `{items, completeness}` feed; the client also accepts the bare array older
 desktops returned.
+
+The Issues screen preserves completeness and displays partial-feed warnings,
+filters by title/number/tag, and expands body previews on tap. Its tag editor
+uses the same acknowledged single-label route and Autopilot context as the
+[mobile web client](mobile.md#phone-issue-triage). Issue launch also offers the
+mesh default before available prefill options.
 
 Only the terminal is a WebView: it loads bundled xterm assets from
 `WebViewAssetLoader`, blocks all other requests/navigation, and exposes

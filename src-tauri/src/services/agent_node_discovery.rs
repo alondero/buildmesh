@@ -54,10 +54,9 @@ pub struct ArchivedAgentNode {
 /// name (issue #1519). `effective_encoded` is `encode_path` of the mesh's
 /// effective worktree container, so
 /// `-Users-adam-repo--custom-wt-fancy-name` → `Some("fancy-name")` for a
-/// `custom-wt` container — and the default container reproduces the legacy
-/// `--claude-worktrees-` marker byte-for-byte. `mesh_encoded` is the
+/// `custom-wt` container. `mesh_encoded` is the
 /// fallback for sessions cut before a directory change (or hand-placed
-/// under the legacy container): only the exact legacy marker counts there,
+/// under a built-in container): only the exact built-in markers count there,
 /// so a root-level subdir session like `...-repo-src-tauri` still maps to
 /// `None` instead of a phantom worktree.
 fn extract_worktree_name(
@@ -75,9 +74,10 @@ fn extract_worktree_name(
     }
     if !mesh_encoded.is_empty() {
         let suffix = dir_name.strip_prefix(mesh_encoded)?;
-        const LEGACY_MARKER: &str = "--claude-worktrees-";
-        if let Some(name) = suffix.strip_prefix(LEGACY_MARKER).filter(|s| !s.is_empty()) {
-            return Some(name.to_string());
+        for marker in ["--worktrees-", "--claude-worktrees-"] {
+            if let Some(name) = suffix.strip_prefix(marker).filter(|s| !s.is_empty()) {
+                return Some(name.to_string());
+            }
         }
     }
     None
@@ -86,8 +86,8 @@ fn extract_worktree_name(
 /// True when a Command Code project dir belongs to a mesh: exactly the mesh
 /// slug (root sessions), under the effective container slug (issue #1519 —
 /// `{eff}-...`, covering relative custom dirs and absolute locations
-/// outside the root), or under the legacy `{slug}-claude-worktrees-...`
-/// marker (sessions cut before a directory change).
+/// outside the root), or under a built-in worktree marker (sessions cut
+/// before a directory change).
 /// Sibling repos sharing a slug prefix (`api` vs `api-gateway`) do not match
 /// (the trailing `-` in each worktree prefix is load-bearing), and an empty
 /// slug matches nothing (it would otherwise prefix-match every project dir
@@ -110,7 +110,9 @@ fn is_commandcode_project_dir_for_mesh(
     {
         return true;
     }
-    dir_lower.starts_with(&format!("{encoded_prefix}-claude-worktrees-"))
+    ["worktrees", "claude-worktrees"]
+        .iter()
+        .any(|marker| dir_lower.starts_with(&format!("{encoded_prefix}-{marker}-")))
 }
 
 /// Strip XML/HTML-like tags from a string for clean display.
@@ -460,33 +462,16 @@ fn durable_archived_entries(
 
 /// Extract the Buildmesh worktree name from a Cursor project slug (issue
 /// #1519). `effective_slug` is `cursor_workspace_slug` of the mesh's
-/// effective worktree container: `<eff>-<name>` maps to the node name, and
-/// the default container reproduces the legacy `--claude-worktrees-`
-/// marker. `base_slug` is the fallback for sessions cut before a directory
-/// change: only the exact legacy marker counts there, so an unrelated
+/// effective worktree container: `<eff>-<name>` maps to the node name.
+/// `base_slug` preserves the built-in markers after a directory
+/// change, so an unrelated
 /// subdir slug never becomes a phantom worktree.
 fn extract_cursor_worktree_name(
     dir_name: &str,
     base_slug: &str,
     effective_slug: &str,
 ) -> Option<String> {
-    if !effective_slug.is_empty() {
-        if let Some(name) = dir_name
-            .strip_prefix(&format!("{effective_slug}-"))
-            .filter(|name| !name.is_empty())
-        {
-            return Some(name.to_string());
-        }
-    }
-    if !base_slug.is_empty() {
-        if let Some(name) = dir_name
-            .strip_prefix(&format!("{base_slug}--claude-worktrees-"))
-            .filter(|name| !name.is_empty())
-        {
-            return Some(name.to_string());
-        }
-    }
-    None
+    extract_worktree_name(dir_name, base_slug, effective_slug)
 }
 
 /// Discover Cursor's primary workspace transcripts below an explicit projects
@@ -494,7 +479,7 @@ fn extract_cursor_worktree_name(
 /// parent Cursor session and lives under the same session directory.
 ///
 /// `effective_dir_raw` is the mesh's effective worktree container
-/// (issue #1519); `None` degrades to legacy-only matching (unit tests
+/// (issue #1519); `None` still matches built-in layouts (unit tests
 /// without a mesh row).
 fn discover_cursor_sessions_in(
     projects_dir: &std::path::Path,
@@ -518,6 +503,7 @@ fn discover_cursor_sessions_in(
         format!("{effective_slug}-")
     };
     let legacy_prefix = format!("{base_slug}--claude-worktrees-");
+    let default_prefix = format!("{base_slug}--worktrees-");
     let mut sessions = Vec::new();
     let Ok(projects) = fs::read_dir(projects_dir) else {
         return sessions;
@@ -533,6 +519,7 @@ fn discover_cursor_sessions_in(
             None
         } else if dir_name.starts_with(&worktree_prefix)
             || (!legacy_prefix.is_empty() && dir_name.starts_with(&legacy_prefix))
+            || dir_name.starts_with(&default_prefix)
         {
             extract_cursor_worktree_name(&dir_name, &base_slug, &effective_slug)
         } else {
@@ -799,7 +786,7 @@ fn discover_agy_sessions_in(
 /// Map an AGY step's `workspace_path` onto a Buildmesh worktree name when the
 /// path lives under the mesh's effective worktree container
 /// (`<effective_dir>/<name>`, issue #1519) or the legacy
-/// `<mesh>/.claude/worktrees/<name>`. Mirrors the
+/// built-in `<mesh>/.worktrees/<name>` and `.claude/worktrees` layouts. Mirrors the
 /// `extract_worktree_name` / `extract_cursor_worktree_name` rules used by the
 /// other scanners — same separator handling. Returns `None` for the mesh root
 /// (no worktree) and for paths that don't resolve to a worktree inside the
@@ -807,7 +794,7 @@ fn discover_agy_sessions_in(
 ///
 /// `effective_dir_raw` is the mesh's current effective container dir from
 /// `env::effective_worktree_dir_raw` (Mesh override → app default →
-/// `.claude/worktrees`). `None` means "legacy only" (caller couldn't resolve
+/// `.worktrees`). `None` still matches built-in layouts (caller couldn't resolve
 /// settings, e.g. in a unit test without a DB).
 fn extract_worktree_name_from_path(workspace_path: &str, mesh_path: &str) -> Option<String> {
     extract_worktree_name_from_path_with_effective(workspace_path, mesh_path, None)
@@ -826,25 +813,13 @@ fn extract_worktree_name_from_path_with_effective(
         }
     }
     let mesh = mesh_path.replace('\\', "/");
-    let wp = workspace_path.replace('\\', "/");
-
-    let marker = "/.claude/worktrees/";
-    let worktree_idx = wp.find(marker)?;
-    // The parent of the marker is the mesh root (the buildmesh repo or any
-    // equivalent prefix). Match that against the calling mesh *without*
-    // including the marker itself, otherwise we'd compare `<mesh>/.claude/worktrees`
-    // against `<mesh>` and never match.
-    let parent = &wp[..worktree_idx];
-    if !same_path(parent.trim_end_matches('/'), mesh.trim_end_matches('/')) {
-        return None;
+    for directory in [".worktrees", ".claude/worktrees"] {
+        let container = format!("{}/{directory}", mesh.trim_end_matches('/'));
+        if let Some(name) = worktree_name_under_dir(workspace_path, &container) {
+            return Some(name);
+        }
     }
-    let name = &wp[worktree_idx + marker.len()..];
-    let name = name.split('/').next().unwrap_or("").trim();
-    if name.is_empty() {
-        None
-    } else {
-        Some(name.to_string())
-    }
+    None
 }
 
 /// Extract the first path component under `container_dir` when
@@ -1057,6 +1032,72 @@ mod tests {
             encode_path("X:\\src\\buildmesh\\.claude\\worktrees\\foo"),
             "X--src-buildmesh--claude-worktrees-foo"
         );
+    }
+
+    #[test]
+    fn built_in_worktree_associations_survive_directory_changes() {
+        for effective in ["/Users/adam/src/buildmesh/custom-wt", "/tmp/custom-wt"] {
+            assert_eq!(
+                extract_worktree_name(
+                    "-Users-adam-src-buildmesh--worktrees-new-node",
+                    "-Users-adam-src-buildmesh",
+                    &encode_path(effective),
+                ),
+                Some("new-node".to_string())
+            );
+            assert_eq!(
+                extract_cursor_worktree_name(
+                    "Users-adam-src-buildmesh--worktrees-new-node",
+                    "Users-adam-src-buildmesh",
+                    &cursor_workspace_slug(effective),
+                ),
+                Some("new-node".to_string())
+            );
+            assert!(is_commandcode_project_dir_for_mesh(
+                "users-adam-src-buildmesh-worktrees-new-node",
+                "users-adam-src-buildmesh",
+                &commandcode_project_slug(effective),
+            ));
+            assert_eq!(
+                extract_worktree_name_from_path_with_effective(
+                    "/Users/adam/src/buildmesh/.worktrees/new-node/src",
+                    "/Users/adam/src/buildmesh",
+                    Some(effective),
+                ),
+                Some("new-node".to_string())
+            );
+            assert_eq!(
+                extract_worktree_name_from_path_with_effective(
+                    "/Users/adam/src/buildmesh-other/.worktrees/new-node",
+                    "/Users/adam/src/buildmesh",
+                    Some(effective),
+                ),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn cursor_scanner_keeps_default_worktrees_after_override() {
+        let root =
+            std::env::temp_dir().join(format!("buildmesh_cursor_builtin_{}", std::process::id()));
+        let session = root
+            .join("Users-adam-src-buildmesh--worktrees-new-node/agent-transcripts/cursor-default");
+        fs::create_dir_all(&session).unwrap();
+        fs::write(
+            session.join("cursor-default.jsonl"),
+            r#"{"type":"user","message":{"role":"user","content":"Default worktree"}}"#,
+        )
+        .unwrap();
+        let found = discover_cursor_sessions_in(
+            &root,
+            "/Users/adam/src/buildmesh",
+            &std::collections::HashSet::new(),
+            Some("/tmp/custom-wt"),
+        );
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].worktree_name.as_deref(), Some("new-node"));
     }
 
     #[test]

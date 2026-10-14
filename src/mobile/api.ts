@@ -309,6 +309,30 @@ export async function ghAuthOk(): Promise<boolean> {
   return j.ok;
 }
 
+export async function listPulls(meshId: number): Promise<import('../types/generated/GitHubPullRequestFeed').GitHubPullRequestFeed> {
+  const feed = await (await apiFetch(`/api/meshes/${meshId}/pulls?state=open`)).json() as import('../types/generated/GitHubPullRequestFeed').GitHubPullRequestFeed;
+  if (!Array.isArray(feed?.items) || typeof feed.completeness?.complete !== 'boolean') {
+    throw new Error('The desktop sent an unexpected pull requests response. Update Buildmesh or refresh to retry.');
+  }
+  return feed;
+}
+
+export async function prMergeability(meshId: number, number: number): Promise<import('../types/generated/PrMergeability').PrMergeability> {
+  const result = await (await apiFetch(`/api/meshes/${meshId}/pulls/${number}/mergeability`)).json() as import('../types/generated/PrMergeability').PrMergeability;
+  if (!result || (result.mergeable !== null && typeof result.mergeable !== 'boolean') || typeof result.mergeable_state !== 'string') {
+    throw new Error('The desktop sent an unexpected mergeability response. Refresh before trying again.');
+  }
+  return result;
+}
+
+export async function squashMerge(meshId: number, number: number, url: string): Promise<void> {
+  await apiFetch(`/api/meshes/${meshId}/pulls/${number}/merge`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+  });
+}
+
 /**
  * Preview the source/base pair a create-PR would use.
  *
@@ -416,17 +440,20 @@ export async function importAndResume(
   return resp.json();
 }
 
-/**
- * Issue #2024 rank 6 — the route returns the feed wrapper, not a bare array,
- * so the phone can distinguish "page 1" from "everything". Callers get the
- * items; `completeness` is available on the raw response for any surface that
- * wants to state the truncation.
- */
-export async function listIssues(meshId: number): Promise<GitHubIssue[]> {
-  const feed = (await (await apiFetch(`/api/meshes/${meshId}/issues`)).json()) as {
-    items: GitHubIssue[];
-  };
-  return feed.items;
+export async function listIssues(meshId: number): Promise<import('../types/generated/GitHubIssueFeed').GitHubIssueFeed> {
+  return (await apiFetch(`/api/meshes/${meshId}/issues`)).json();
+}
+
+export async function issueLabelCatalog(meshId: number): Promise<import('../types/generated/IssueLabelCatalog').IssueLabelCatalog> {
+  return (await apiFetch(`/api/meshes/${meshId}/issue-labels`)).json();
+}
+
+export async function setIssueLabel(meshId: number, issueNumber: number, label: string, present: boolean): Promise<void> {
+  await apiFetch(`/api/meshes/${meshId}/issues/${issueNumber}/label`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label, present }),
+  });
 }
 
 export async function spawnFromIssue(

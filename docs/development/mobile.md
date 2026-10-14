@@ -48,6 +48,36 @@ sheet's error slot, where the user can pick another node. The same reasoning app
 any new mobile route that resolves user-supplied identity — a 4xx that is not 401 must
 not be able to log someone out.
 
+## PR status and squash merge
+
+Open a node's **Work details** to see its open pull request, combined check
+state, review decision and mergeability. The browser and native Android client
+read the live worktree branch from the git branch route and match it to the
+same-repository PR's `head_ref`; the node's stored base reference is not the
+source branch. Fork PRs with a coincidentally matching branch are excluded.
+The mesh's **Pull requests** shortcut lists open PRs without merge controls for
+unrelated work. An incomplete feed states its returned count, reported total
+when available, and reason; absence from a truncated feed does not establish
+that a node has no PR.
+
+The clients poll while foregrounded and offer **Refresh PR status**. Unknown
+mergeability, drafts, conflicts, policy blocks, behind-base branches, failing
+or pending checks, and required or changes-requested reviews disable merge.
+Missing check/review fields are shown as not reported, rather than passing or
+approved. Checks and reviews are nullable generated fields on
+`GitHubPullRequest`, fetched with mergeability in the existing GraphQL summary
+query, without per-row enrichment requests.
+
+**Squash and merge** asks for confirmation with the PR number and branch
+deletion. Confirm rechecks the mergeability route, then submits the PR URL to
+the existing merge route (squash plus delete branch). GitHub remains the
+authority for permissions and branch protection. An acknowledged merge removes
+the PR and reports success. A failed request shows an error; refresh its status
+before retrying, especially after an interrupted connection where the merge
+may already have happened. Browser responses are versioned against refresh,
+mutation and unmount; native polling is owned by the screen and foreground
+lifecycle, and is cancelled while merging.
+
 ## Session-cookie recovery
 
 The session is the HttpOnly `bm_session` cookie, so JavaScript cannot read it and the
@@ -137,6 +167,35 @@ so the existing spawn orchestrator owns initial prompt delivery. The create
 route validates text size. Whether the harness can take an initial prompt is
 the rule in services::agent_node, shared with the desktop commands.
 Mobile never races terminal startup by injecting the idea as keystrokes.
+
+## Phone issue triage
+
+Both phone clients filter open issues by title, number or label. Cards show
+labels, author and blockers found in the loaded open feed; tapping a card
+expands a bounded body preview and its GitHub link. Blockers outside the loaded
+feed cannot be resolved. Feed completeness stays visible even when a filter
+matches nothing, so a partial read does not imply that the repository is empty.
+
+**Edit tags** lists repository labels and changes one label per acknowledged
+request, preserving collaborators' other labels. Enabled issue-triggered
+Autopilot circuits identify their watched tags in the editor. Adding one makes
+the issue eligible on the next poll; dependencies and existing runs still apply.
+GitHub failures retain the previous selection and allow retry. Repository label
+load failures have a separate retry; older desktops without these routes need
+an update to use the editor.
+
+The admin-only `GET /api/meshes/{id}/issue-labels` returns the generated
+`IssueLabelCatalog` (names and mesh-scoped enabled circuit trigger names).
+`POST /api/meshes/{id}/issues/{number}/label` accepts `{label, present}` and awaits
+the desktop's single-label command. GitHub write failures are HTTP 500, distinct
+from HTTP 401/403 device authorization failures.
+
+**Start agent** opens a launch configuration choice in both clients, with
+**Mesh default** or an available Spawn Option supporting prefill. Saved launch
+recipes are excluded because this route accepts only a Spawn Option. Starting
+requires confirmation; cancellation creates no node, and the picker stays open
+while a request is pending. Browser back first dismisses the web picker and is
+consumed while it is starting.
 
 ## Mobile terminal socket lifecycle
 

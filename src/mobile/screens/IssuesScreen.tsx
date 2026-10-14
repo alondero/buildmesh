@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import {
   AgentNode,
   GitHubIssue,
@@ -9,12 +9,17 @@ import {
 } from "../api";
 import { AppBar, CenterNote, PulseDots } from "../ui";
 import { useAsyncEffect } from "../../hooks/useAsyncEffect";
+import type { GitHubIssueFeed } from "../../types/generated/GitHubIssueFeed";
+import { FeedCompletenessNote } from "../../components/Probe/FeedCompletenessNote";
+import { IssueTags } from "./IssueTags";
+import { IssueLaunchChoice } from "./IssueLaunchChoice";
 
 type Props = {
   mesh: Mesh;
   onBack: () => void;
   onSpawned: (node: AgentNode) => void;
   onAuthFailed?: () => void;
+  backHandlerRef?: RefObject<(() => boolean) | null>;
 };
 
 const BODY_PREVIEW_LIMIT = 600;
@@ -24,20 +29,46 @@ export default function IssuesScreen({
   onBack,
   onSpawned,
   onAuthFailed,
+  backHandlerRef,
 }: Props) {
-  const [issues, setIssues] = useState<GitHubIssue[] | null>(null);
+  const [feed, setFeed] = useState<GitHubIssueFeed | null>(null);
+  const issues = feed?.items ?? null;
   const [error, setError] = useState<string | null>(null);
   const [busyIssue, setBusyIssue] = useState<number | null>(null);
   const [filter, setFilter] = useState("");
   // Spawning creates a worktree and starts a real agent — first tap expands
   // the issue (body preview, GitHub link), the explicit button commits.
   const [selectedIssue, setSelectedIssue] = useState<number | null>(null);
+  const [launchIssue, setLaunchIssue] = useState<GitHubIssue | null>(null);
+  const lifetime = useRef<AbortSignal | null>(null);
+  const pending = useRef(false);
+  const dismissLaunch = () => {
+    if (!launchIssue) return false;
+    if (!pending.current) { setLaunchIssue(null); setError(null); }
+    return true;
+  };
+  useEffect(() => {
+    if (!backHandlerRef) return;
+    backHandlerRef.current = () => {
+      if (!launchIssue) return false;
+      if (!pending.current) { setLaunchIssue(null); setError(null); }
+      return true;
+    };
+    return () => { backHandlerRef.current = null; };
+  }, [backHandlerRef, launchIssue]);
 
   useAsyncEffect((signal) => {
+    lifetime.current = signal;
+    setFeed(null);
+    setError(null);
+    setSelectedIssue(null);
+    setLaunchIssue(null);
+    setBusyIssue(null);
+    setFilter("");
     listIssues(mesh.id)
       .then((i) => {
         if (signal.aborted) return;
-        setIssues(i);
+        setFeed(i);
       })
       .catch((e) => {
         if (signal.aborted) return;
@@ -49,33 +80,42 @@ export default function IssuesScreen({
       });
   }, [mesh.id, onAuthFailed]);
 
-  const spawn = async (issue: GitHubIssue) => {
+  const spawn = async (issue: GitHubIssue, provider?: string) => {
+    if (pending.current) return;
+    pending.current = true;
+    const owner = lifetime.current;
     setBusyIssue(issue.number);
     setError(null);
     try {
-      const node = await spawnFromIssue(mesh.id, issue);
+      const node = await spawnFromIssue(mesh.id, issue, provider);
+      if (owner?.aborted) return;
       setBusyIssue(null);
+      setLaunchIssue(null);
       onSpawned(node);
     } catch (e) {
+      if (owner?.aborted) return;
       setBusyIssue(null);
       if (isAuthError(e)) {
         onAuthFailed?.();
         return;
       }
       setError((e as Error).message);
+    } finally {
+      pending.current = false;
     }
   };
 
-  const filtered = (issues ?? []).filter(
-    (i) => !filter.trim() || i.title.toLowerCase().includes(filter.toLowerCase()),
-  );
+  const query = filter.trim().toLowerCase();
+  const filtered = (issues ?? []).filter(i => !query || i.title.toLowerCase().includes(query) || String(i.number).includes(query.replace(/^#/, "")) || i.labels.some(label => label.toLowerCase().includes(query)));
+  const openNumbers = new Set(issues?.map(issue => issue.number));
 
   return (
     <div data-testid="issues-screen" className="screen">
-      <AppBar onBack={onBack} title="GitHub Issues" subtitle={mesh.name} />
+      <AppBar onBack={() => { if (!dismissLaunch()) onBack(); }} title="GitHub Issues" subtitle={mesh.name} />
       <div style={{ padding: 12, paddingBottom: 0 }}>
         <input
-          placeholder="Filter by title…"
+          placeholder="Filter issues…"
+          aria-label="Filter issues"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           data-testid="issues-filter"
@@ -83,7 +123,8 @@ export default function IssuesScreen({
         />
       </div>
       <div style={{ flex: 1, overflowY: "auto", padding: 12 }}>
-        {error && (
+        {feed && <FeedCompletenessNote completeness={feed.completeness} label="issues" />}
+        {error && !launchIssue && (
           <div style={{ color: "var(--red)", padding: 12, fontSize: 13 }}>
             {error}
           </div>
@@ -101,6 +142,7 @@ export default function IssuesScreen({
           </CenterNote>
         )}
         {filtered.map((issue) => {
+          const owner = lifetime.current;
           const open = selectedIssue === issue.number;
           const busy = busyIssue === issue.number;
           const body = issue.body.trim();
@@ -109,6 +151,7 @@ export default function IssuesScreen({
               key={issue.number}
               role="button"
               tabIndex={0}
+              aria-expanded={open}
               // Issue #1259 — the card announces role="button" but ignored
               // Enter and Space, so keyboard / switch-access users could
               // focus but not expand (WCAG 2.1.1, 4.1.2). Mirror the native
@@ -160,24 +203,12 @@ export default function IssuesScreen({
                   {issue.title}
                 </span>
               </div>
-              {issue.labels.length > 0 && (
-                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                  {issue.labels.map((l) => (
-                    <span
-                      key={l}
-                      style={{
-                        fontSize: 10,
-                        color: "var(--text-dim)",
-                        background: "var(--surface-2)",
-                        padding: "2px 6px",
-                        borderRadius: 4,
-                      }}
-                    >
-                      {l}
-                    </span>
-                  ))}
-                </div>
-              )}
+              {issue.author && <div style={{ fontSize: 12, color: "var(--text-dim)" }}>@{issue.author}</div>}
+              {issue.blocked_by.some(number => openNumbers.has(number)) && <div style={{ fontSize: 12, color: "var(--red)", overflowWrap: "anywhere" }}>Blocked by {issue.blocked_by.filter(number => openNumbers.has(number)).map(number => `#${number}`).join(", ")}</div>}
+              <IssueTags key={`${mesh.id}-${issue.number}`} meshId={mesh.id} issue={issue} onAuthFailed={onAuthFailed} onError={message => { if (!owner?.aborted) setError(message); }} onChange={(label, present) => {
+                if (owner?.aborted) return;
+                setFeed(current => current && ({ ...current, items: current.items.map(row => row.number !== issue.number ? row : { ...row, labels: [...row.labels.filter(value => value.toLowerCase() !== label.toLowerCase()), ...(present ? [label] : [])] }) }));
+              }} />
               {open && (
                 <div onClick={(e) => e.stopPropagation()}>
                   {body && (
@@ -215,7 +246,7 @@ export default function IssuesScreen({
                       style={{ flex: 1 }}
                       disabled={busyIssue !== null}
                       data-testid={`issue-spawn-${issue.number}`}
-                      onClick={() => spawn(issue)}
+                      onClick={() => { setError(null); setLaunchIssue(issue); }}
                     >
                       {busy ? "Spawning agent…" : "Start agent on this issue"}
                     </button>
@@ -237,6 +268,7 @@ export default function IssuesScreen({
           );
         })}
       </div>
+      {launchIssue && <IssueLaunchChoice busy={busyIssue !== null} error={error} onCancel={() => { setLaunchIssue(null); setError(null); }} onStart={provider => void spawn(launchIssue, provider)} onAuthFailed={onAuthFailed} />}
     </div>
   );
 }

@@ -927,6 +927,8 @@ pub struct PullRequestSummary {
     /// Lowercase REST vocabulary (`clean`, `dirty`, `blocked`, `behind`,
     /// `unstable`, `unknown`, …) mapped from GraphQL `mergeStateStatus`.
     pub mergeable_state: String,
+    pub checks_state: Option<String>,
+    pub review_decision: Option<String>,
 }
 
 /// Page size for the GraphQL PR-summaries connection. Matches the REST
@@ -1021,6 +1023,8 @@ query PrSummaries($owner: String!, $name: String!, $states: [PullRequestState!],
         }
         mergeable
         mergeStateStatus
+        reviewDecision
+        commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
       }
       pageInfo {
         hasNextPage
@@ -1096,6 +1100,32 @@ struct GraphQLPrNode {
     mergeable: Option<String>,
     #[serde(default, rename = "mergeStateStatus")]
     merge_state_status: Option<String>,
+    #[serde(default, rename = "reviewDecision")]
+    review_decision: Option<String>,
+    #[serde(default)]
+    commits: Option<GraphQLCommits>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphQLCommits {
+    #[serde(default)]
+    nodes: Vec<Option<GraphQLCommitNode>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphQLCommitNode {
+    commit: GraphQLCommit,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphQLCommit {
+    #[serde(default, rename = "statusCheckRollup")]
+    status_check_rollup: Option<GraphQLCheckRollup>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphQLCheckRollup {
+    state: String,
 }
 
 /// `author { login }` on the summaries node. GraphQL's `author` is an
@@ -1150,6 +1180,12 @@ impl PullRequestSummary {
             head_repo_clone_url: head_clone_url,
             head_sha: node.head_ref_oid.unwrap_or_default(),
             author: node.author.and_then(|a| a.login).unwrap_or_default(),
+            checks_state: node
+                .commits
+                .and_then(|c| c.nodes.into_iter().flatten().last())
+                .and_then(|n| n.commit.status_check_rollup)
+                .map(|r| r.state.to_ascii_lowercase()),
+            review_decision: node.review_decision.map(|s| s.to_ascii_lowercase()),
             mergeable: node
                 .mergeable
                 .as_deref()
@@ -1685,7 +1721,9 @@ pub(crate) mod tests {
                 "url": "https://github.com/acme/demo"
             },
             "mergeable": "MERGEABLE",
-            "mergeStateStatus": "CLEAN"
+            "mergeStateStatus": "CLEAN",
+            "reviewDecision": "APPROVED",
+            "commits": { "nodes": [{ "commit": { "statusCheckRollup": { "state": "SUCCESS" } } }] }
         }))
         .expect("node parses");
         let s = PullRequestSummary::from_graphql_node(node);
@@ -1703,6 +1741,11 @@ pub(crate) mod tests {
         assert_eq!(s.author, "contributor-jane");
         assert_eq!(s.mergeable, Some(true));
         assert_eq!(s.mergeable_state, "clean");
+        assert_eq!(s.checks_state.as_deref(), Some("success"));
+        assert_eq!(s.review_decision.as_deref(), Some("approved"));
+        assert!(PR_SUMMARIES_QUERY.contains("reviewDecision"));
+        assert!(PR_SUMMARIES_QUERY
+            .contains("commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }"));
     }
 
     #[test]
@@ -1720,6 +1763,8 @@ pub(crate) mod tests {
         .expect("node parses");
         let s = PullRequestSummary::from_graphql_node(node);
         assert_eq!(s.author, "", "missing author must default to empty");
+        assert_eq!(s.checks_state, None);
+        assert_eq!(s.review_decision, None);
     }
 
     #[test]

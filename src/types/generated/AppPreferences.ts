@@ -153,7 +153,7 @@ detached_provider_routes: Array<string>,
  * absolute values must be in the same host environment (native/Windows
  * versus WSL) as the Mesh. Trimmed; blank collapses to `None`
  * (inherit/default). Shell variables and `~` are NOT expanded.
- * `None` means "no app-wide override — use `.claude/worktrees`
+ * `None` means "no app-wide override — use `.worktrees`
  * under the Mesh root". A per-Mesh `worktree_directory` overrides this.
  * Additive on disk — older `preferences.json` without it loads as `None`.
  */

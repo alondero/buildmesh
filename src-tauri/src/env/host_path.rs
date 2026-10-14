@@ -609,10 +609,8 @@ pub fn resolve_raw_path(raw_path: &str) -> ResolvedPath {
 ///
 /// Returns a `ResolvedPath` with host, spawn, and env fields populated.
 ///
-/// Legacy layout preserved byte-for-byte for the no-config case (issue
-/// #1519): with neither the Mesh override nor the application default
-/// set, this is `{base}/.claude/worktrees/{trimmed}`. Configurable
-/// directories go through `resolve_agent_path_in_dir` instead.
+/// Legacy layout for nodes without a persisted worktree path. New nodes
+/// go through `resolve_agent_path_in_dir` with the effective directory.
 pub fn resolve_agent_path(base_path: &str, worktree_name: Option<&str>) -> ResolvedPath {
     // Compute the effective path (with worktree if applicable)
     // NOTE: intentionally does NOT trim `worktree_name` here — the
@@ -634,7 +632,7 @@ pub fn resolve_agent_path(base_path: &str, worktree_name: Option<&str>) -> Resol
 
 /// Default worktree container dir name under the Mesh root when neither
 /// the Mesh override nor the application default is set.
-pub const DEFAULT_WORKTREE_DIR_NAME: &str = ".claude/worktrees";
+pub const DEFAULT_WORKTREE_DIR_NAME: &str = ".worktrees";
 
 /// Trim raw user input for a `worktree_directory` setting and collapse
 /// blank to `None` (inherit/default). No shell-variable or `~` expansion —
@@ -730,7 +728,7 @@ pub fn is_absolute_worktree_path(p: &str) -> bool {
 
 /// Effective worktree container directory (raw form) for a Mesh.
 ///
-/// Precedence: Mesh override → application default → `.claude/worktrees`
+/// Precedence: Mesh override → application default → `.worktrees`
 /// under the Mesh root. Relative values join from `mesh_path` with `/`
 /// (matching the legacy `format!` spelling); absolute values are used with
 /// trailing separators trimmed so `<dir>/<name>` never doubles up — the
@@ -1478,7 +1476,7 @@ mod tests {
         // (see `getEffectiveWorktreeDir`).
         assert_eq!(
             effective_worktree_dir_raw("/repo/mesh/", None, None),
-            "/repo/mesh/.claude/worktrees"
+            "/repo/mesh/.worktrees"
         );
         assert_eq!(
             effective_worktree_dir_raw("/repo/mesh/", None, Some("custom-wt")),
@@ -1487,15 +1485,15 @@ mod tests {
     }
 
     #[test]
-    fn effective_dir_defaults_to_claude_worktrees_when_unconfigured() {
+    fn effective_dir_defaults_to_worktrees_when_unconfigured() {
         assert_eq!(
             effective_worktree_dir_raw("/repo/mesh", None, None),
-            "/repo/mesh/.claude/worktrees"
+            "/repo/mesh/.worktrees"
         );
         // Blank collapses to inherit/default.
         assert_eq!(
             effective_worktree_dir_raw("/repo/mesh", Some("   "), Some("")),
-            "/repo/mesh/.claude/worktrees"
+            "/repo/mesh/.worktrees"
         );
     }
 
@@ -1565,12 +1563,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_in_dir_matches_legacy_for_default() {
+    fn resolve_in_dir_uses_new_default_while_legacy_resolution_stays_put() {
         let legacy = resolve_agent_path("/repo/mesh", Some("my-node"));
         let effective = effective_worktree_dir_raw("/repo/mesh", None, None);
         let via_dir = resolve_agent_path_in_dir("/repo/mesh", &effective, Some("my-node"));
-        assert_eq!(via_dir.raw_path, legacy.raw_path);
-        assert_eq!(via_dir.raw_path, "/repo/mesh/.claude/worktrees/my-node");
+        assert_eq!(legacy.raw_path, "/repo/mesh/.claude/worktrees/my-node");
+        assert_eq!(via_dir.raw_path, "/repo/mesh/.worktrees/my-node");
     }
 
     #[test]

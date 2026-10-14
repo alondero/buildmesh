@@ -1109,7 +1109,7 @@ export const setTitlebarMaximizeMetrics = (metrics: {
 }) => _invoke('set_titlebar_maximize_metrics', { ...metrics });
 
 /** Buildmesh-wide default Worktree Node directory (issue #1519).
- *  Pass `null` (or blank) to clear and restore `.claude/worktrees` under
+ *  Pass `null` (or blank) to clear and restore `.worktrees` under
  *  each inheriting Mesh root. Relative resolves from each Mesh root;
  *  absolute stored verbatim (per-Mesh env validation at resolution).
  *  Triggers a background rebuild of inheriting pools; live nodes keep

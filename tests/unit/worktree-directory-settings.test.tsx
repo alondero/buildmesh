@@ -2,13 +2,15 @@
  * Settings → General → Worktree directory (issue #1519): the Buildmesh-wide
  * default folder for new Worktree Nodes. Pins the UI contract: hydration
  * from preferences, commit-on-blur (not per keystroke), empty = default
- * `.claude/worktrees` (null on the wire), and trimming.
+ * `.worktrees` (null on the wire), and trimming.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { AppSettingsModal } from '../../src/components/AppSettings/AppSettingsModal';
+
+vi.mock('@tauri-apps/api/app', () => ({ getVersion: vi.fn().mockResolvedValue('1.5.0') }));
 
 function mockBackend(worktreeDir: string | null = null) {
   const calls: Record<string, unknown[]> = {};
@@ -49,6 +51,15 @@ const dirInput = async () =>
 
 describe('Settings — worktree directory', () => {
   beforeEach(() => vi.mocked(invoke).mockReset());
+
+  it('shows the provider-neutral default when unset', async () => {
+    mockBackend(null);
+    render(<AppSettingsModal onClose={() => {}} />);
+    const input = await dirInput();
+    await waitFor(() => expect(input.disabled).toBe(false));
+    expect(input.value).toBe('');
+    expect(input.placeholder).toBe('.worktrees');
+  });
 
   it('hydrates the stored directory, empty when unset', async () => {
     mockBackend('custom-wt');
