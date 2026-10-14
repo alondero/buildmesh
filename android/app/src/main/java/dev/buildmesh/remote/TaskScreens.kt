@@ -12,14 +12,14 @@ import androidx.compose.ui.unit.dp
 import kotlinx.serialization.json.*
 
 @Composable
-fun NodeScreen(node: JsonObject, vm: BuildmeshViewModel, terminal: () -> Unit, changes: () -> Unit) {
+fun NodeScreen(node: JsonObject, vm: BuildmeshViewModel, terminal: () -> Unit, changes: () -> Unit, createPr: () -> Unit) {
     val state by vm.state.collectAsState()
     val id = node.number("id")
     var draft by rememberSaveable(state.draftNamespace, id) { mutableStateOf(vm.draft("reply-$id")) }
     val lifecycle = node.objectAt("lifecycle")?.takeIf { it.text("status") == node.text("status") }
     val requestId = lifecycle?.text("timestamp").orEmpty()
     var answeredRequest by rememberSaveable(state.draftNamespace, id) { mutableStateOf<String?>(null) }
-    val choices = (lifecycle?.objectAt("request")?.get("choices") as? JsonArray)?.map { (it as JsonPrimitive).content }.orEmpty()
+    val choices = (lifecycle?.objectAt("request")?.get("choices") as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }.orEmpty()
     val canReply = node.text("status") in setOf("idle", "ready", "awaiting_input") && !state.busy && (requestId.isEmpty() || answeredRequest != requestId)
     fun send(sequence: String) {
         vm.action { api ->
@@ -39,6 +39,7 @@ fun NodeScreen(node: JsonObject, vm: BuildmeshViewModel, terminal: () -> Unit, c
         lifecycle?.objectAt("semantic_turn")?.text("description")?.takeIf { it.isNotBlank() && it != lifecycle.text("message") }?.let { Text(it) }
         Button(shape = MaterialTheme.shapes.small, onClick = terminal, modifier = Modifier.fillMaxWidth()) { Text("Open terminal") }
         OutlinedButton(shape = MaterialTheme.shapes.small, onClick = changes, modifier = Modifier.fillMaxWidth()) { Text("Review changes") }
+        OutlinedButton(shape = MaterialTheme.shapes.small, onClick = createPr, modifier = Modifier.fillMaxWidth()) { Text("Create pull request") }
         if (canReply || draft.isNotEmpty()) {
             Text("Reply to agent", style = MaterialTheme.typography.titleMedium)
             choices.forEach { choice -> Text("• $choice", color = MeshColors.secondary) }
@@ -69,10 +70,7 @@ fun TaskScreen(state: RemoteState, vm: BuildmeshViewModel, selectedMesh: Long, s
         if (!fits) Text("The prompt must be at most 16000 bytes.", color = MeshColors.amber)
         Button(shape = MaterialTheme.shapes.small, enabled = !state.busy && mesh != null && provider.isNotEmpty() && fits, onClick = {
             vm.action { api ->
-                val node = api.post("/api/nodes/create", buildJsonObject {
-                    put("mesh_id", selectedMesh); put("provider", provider); put("rows", 24); put("cols", 80)
-                    if (prompt.isNotBlank()) put("prompt", prompt.trim())
-                }).obj()
+                val node = api.post("/api/nodes/create", createNodeBody(selectedMesh, options.firstOrNull { it.text("id") == provider } ?: error("Choose a launch configuration."), prompt)).obj()
                 vm.acceptNode(node)
                 prompt = ""; vm.saveDraft("capture", "")
                 openNode(node.number("id"))

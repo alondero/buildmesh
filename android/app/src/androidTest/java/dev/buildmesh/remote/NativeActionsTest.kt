@@ -19,10 +19,11 @@ class NativeActionsTest {
     private val mesh = Json.parseToJsonElement("""{"id":3,"name":"QA mesh","path":"/repo"}""").obj()
     private val providers = Json.parseToJsonElement("""[
         {"id":"terminal","label":"Terminal","resumable":false,"capabilities":{"supports_prefill":false}},
-        {"id":"config:saved","label":"Saved agent","resumable":true,"capabilities":{"supports_prefill":true}},
+        {"id":"launch/saved","label":"Saved agent","resumable":true,"capabilities":{"supports_prefill":true},"configuration":{"id":"launch/saved","spawn_option_id":"claude","name":"Saved agent"}},
+        {"id":"claude","label":"Claude Code","resumable":true,"capabilities":{"supports_prefill":true}},
         {"id":"missing","label":"Unavailable agent","unavailable_reason":"Missing executable","resumable":true,"capabilities":{"supports_prefill":true}}
     ]""").objects()
-    private val created = """{"id":17,"mesh_id":3,"name":"Created agent","provider":"config:saved","status":"idle"}"""
+    private val created = """{"id":17,"mesh_id":3,"name":"Created agent","provider":"claude","status":"idle"}"""
 
     private fun withDesktop(respond: (RecordedRequest) -> MockResponse, body: (BuildmeshViewModel, ConcurrentLinkedQueue<RecordedRequest>) -> Unit) {
         val app = ApplicationProvider.getApplicationContext<Application>()
@@ -73,7 +74,7 @@ class NativeActionsTest {
             assertEquals("", vm.draft("capture"))
             assertTrue(vm.state.value.nodes.any { it.number("id") == 17L })
             assertEquals(2, requests.size)
-            requests.forEach { assertEquals(Json.parseToJsonElement("""{"mesh_id":3,"provider":"config:saved","rows":24,"cols":80,"prompt":"Fix the deadline"}"""), Json.parseToJsonElement(it.body.readUtf8())) }
+            requests.forEach { assertEquals(Json.parseToJsonElement("""{"mesh_id":3,"provider":"claude","configuration_id":"launch/saved","rows":24,"cols":80,"prompt":"Fix the deadline"}"""), Json.parseToJsonElement(it.body.readUtf8())) }
         }
     }
 
@@ -85,7 +86,7 @@ class NativeActionsTest {
             if (++attempts == 1) MockResponse().setResponseCode(503).setBody("""{"error":"Reply not confirmed"}""")
             else MockResponse().setResponseCode(204)
         }) { vm, requests ->
-            compose.setContent { BuildmeshTheme { NodeScreen(node, vm, {}, {}) } }
+            compose.setContent { BuildmeshTheme { NodeScreen(node, vm, {}, {}, {}) } }
             compose.onNodeWithText("Your reply").performTextInput("Continue safely")
             compose.onNodeWithText("Send reply").performScrollTo().performClick()
             compose.waitUntil(10000) { vm.state.value.error == "Reply not confirmed" && !vm.state.value.busy }
@@ -103,7 +104,7 @@ class NativeActionsTest {
         var opened = 0L
         withDesktop({ request ->
             when (request.path) {
-                "/api/meshes/3/issues" -> MockResponse().setBody("""[{"number":42,"title":"Fix deadline","body":"Issue details"}]""")
+                "/api/meshes/3/issues" -> MockResponse().setBody("""{"items":[{"number":42,"title":"Fix deadline","body":"Issue details","url":"https://github.com/o/r/issues/42","state":"open","labels":[],"blocked_by":[],"author":"octo"}],"completeness":{"returned":1,"pages_fetched":1,"complete":true,"incomplete_reason":null,"reported_total":null}}""")
                 "/api/meshes/3/issues/42/spawn" -> MockResponse().setBody(created)
                 else -> MockResponse().setResponseCode(404)
             }
@@ -114,12 +115,24 @@ class NativeActionsTest {
             } }
             compose.waitUntil(10000) { compose.onAllNodesWithText("Start agent").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithText("Start agent").performClick()
-            compose.onNodeWithText("Agent: Saved agent").assertExists()
+            compose.onNodeWithText("Agent: Claude Code").assertExists()
             compose.onNodeWithText("Start").performClick()
             compose.waitUntil(10000) { opened == 17L }
             val request = requests.single { it.method == "POST" }
             assertEquals("/api/meshes/3/issues/42/spawn", request.path)
-            assertEquals("""{"title":"Fix deadline","provider":"config:saved"}""", request.body.readUtf8())
+            assertEquals("""{"title":"Fix deadline","provider":"claude"}""", request.body.readUtf8())
+        }
+    }
+
+    @Test fun anIssuesResponseThisBuildCannotReadIsShownAsAnErrorInsteadOfCrashing() {
+        withDesktop({ MockResponse().setBody("""{"unexpected":true}""") }) { vm, _ ->
+            compose.setContent { BuildmeshTheme {
+                val state by vm.state.collectAsState()
+                ResourceScreen(vm.api!!, 3, "issues", state.copy(providers = providers), vm, {})
+            } }
+            compose.waitUntil(10000) { compose.onAllNodesWithText("Retry").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("The desktop sent an unexpected issues response. Update Buildmesh on the desktop or on this phone.").assertExists()
+            compose.onNodeWithText("Start agent").assertDoesNotExist()
         }
     }
 
@@ -138,14 +151,14 @@ class NativeActionsTest {
             } }
             compose.waitUntil(10000) { compose.onAllNodesWithText("Import and resume").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithText("Import and resume").performClick()
-            compose.onNodeWithText("Agent: Saved agent").assertExists()
+            compose.onNodeWithText("Agent: Claude Code").assertExists()
             compose.onNodeWithText("Start").performClick()
             compose.waitUntil(10000) { vm.state.value.error.contains("Node 17 was imported") && !vm.state.value.busy }
             compose.onNodeWithText("Choose a launch configuration").assertDoesNotExist()
             assertEquals(0L, opened)
             assertTrue(vm.state.value.error.contains("Executable missing"))
             val request = requests.single { it.method == "POST" }
-            assertEquals("""{"cli_session_id":"saved-session","branch":"topic","provider":"config:saved","worktree_name":"tree"}""", request.body.readUtf8())
+            assertEquals("""{"cli_session_id":"saved-session","branch":"topic","provider":"claude","worktree_name":"tree"}""", request.body.readUtf8())
         }
     }
 
@@ -154,24 +167,26 @@ class NativeActionsTest {
         withDesktop({ request ->
             when (request.path) {
                 "/api/gh/auth" -> MockResponse().setBody(if (++checks == 1) """{"ok":false}""" else """{"ok":true}""")
+                "/api/meshes/3/pr/source?node_id=17" -> MockResponse().setBody("""{"head_branch":"topic","base_branch":"main"}""")
                 "/api/meshes/3/pr" -> MockResponse().setBody("""{"url":"https://example.invalid/pull/17"}""")
                 else -> MockResponse().setResponseCode(404)
             }
         }) { vm, requests ->
-            compose.setContent { BuildmeshTheme { CreatePrScreen(3, vm) } }
+            compose.setContent { BuildmeshTheme { CreatePrScreen(vm.api!!, 3, 17, vm) } }
+            compose.waitUntil(10000) { compose.onAllNodesWithText("topic → main").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithText("Title").performTextInput("Native change")
             compose.onNodeWithText("Description").performTextInput("Explains the change")
             compose.onNodeWithText("Create pull request").performScrollTo().performClick()
             compose.waitUntil(10000) { vm.state.value.error.contains("Sign in to GitHub") && !vm.state.value.busy }
             assertFalse(requests.any { it.method == "POST" })
-            assertEquals("Native change", vm.draft("pr-title-3"))
+            assertEquals("Native change", vm.draft("pr-title-17"))
             compose.onNodeWithText("Create pull request").performClick()
             compose.waitUntil(10000) { compose.onAllNodesWithText("Open pull request").fetchSemanticsNodes().isNotEmpty() }
-            assertEquals("", vm.draft("pr-title-3"))
-            assertEquals("", vm.draft("pr-body-3"))
+            assertEquals("", vm.draft("pr-title-17"))
+            assertEquals("", vm.draft("pr-body-17"))
             val request = requests.single { it.method == "POST" }
             assertEquals("/api/meshes/3/pr", request.path)
-            assertEquals("""{"title":"Native change","body":"Explains the change","base_branch":"main"}""", request.body.readUtf8())
+            assertEquals("""{"title":"Native change","body":"Explains the change","node_id":17,"head_branch":"topic","base_branch":"main"}""", request.body.readUtf8())
         }
     }
 

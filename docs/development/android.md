@@ -137,12 +137,29 @@ from the backend menu, including saved configurations and capability filtering.
 Drafts persist privately on the phone, scoped to the verified desktop endpoint
 and trusted certificate, until an acknowledged action succeeds. Re-pairing the
 same desktop restores its drafts without exposing them to another desktop.
-Issue launch requires a configuration that supports prefill; archive resume
-requires a resumable configuration. Unavailable configurations are excluded.
+A saved Launch Configuration row's `id` is the configuration's id, not a Spawn
+Option, so task capture sends it as `configuration_id` beside the row's own
+`spawn_option_id` (the same pair the web client sends). The issue spawn and
+archive resume routes accept a Spawn Option only, so their pickers offer no
+saved configurations. Issue launch requires an option that supports prefill;
+archive resume requires a resumable one. Unavailable options are excluded.
 Archive HTTP 207 dismisses the launch dialog and reports the imported node and
 launch failure, so a user can inspect Work before attempting another import.
-PR creation uses the mesh branch, matching the current web route; an agent
-worktree PR can be requested through that agent's terminal.
+Pull requests are created from an Agent Node, because the create route requires
+`node_id` (`create_requires_a_node_id_in_the_body`): the node screen previews `GET /api/meshes/{id}/pr/source?node_id=` and submits
+`node_id` with the previewed `head_branch`, so a worktree that moved since the
+preview is rejected instead of published (see the
+[mobile client](mobile.md#create-pr-is-node-scoped)).
+
+The client reads untyped JSON, so the resource screens (issues, archive,
+changes, diff, PR source) decode a response inside their loader's error
+handling, and the JSON helpers raise a readable `IllegalStateException` rather
+than a `ClassCastException`. A shape this build does not understand becomes an
+"unexpected response" notice with Retry
+(`anIssuesResponseThisBuildCannotReadIsShownAsAnErrorInsteadOfCrashing`); a
+cast that throws while composing would instead terminate the app. The issues route returns the
+`{items, completeness}` feed; the client also accepts the bare array older
+desktops returned.
 
 Only the terminal is a WebView: it loads bundled xterm assets from
 `WebViewAssetLoader`, blocks all other requests/navigation, and exposes
@@ -189,7 +206,11 @@ input, including replayed queries that must not become keystrokes.
 Native form tests also exercise capture, replies, issue launch, archive partial
 failure and PR authentication through real OkHttp requests to MockWebServer.
 These assert literal payloads, retained drafts after failures, and acknowledged
-success. They do not create a real GitHub pull request.
+success. They do not create a real GitHub pull request. Their mocked responses
+and the JVM `WireContractTest` fixtures follow the generated Rust wire types in
+`src/types/generated/`. A fixture written in the client's own assumed shape keeps
+passing after the desktop changes: the issues-feed change crashed the Issues
+screen while the old bare-array fixture still passed.
 
 For actual desktop acceptance, start the dev profile with Remote Access enabled,
 connect an Android device through adb, and run from the repository root:
