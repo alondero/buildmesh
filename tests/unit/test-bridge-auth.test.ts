@@ -7,12 +7,17 @@ import {
   BRIDGE_ORIGINS_ENV,
   BRIDGE_TOKEN_ENV,
   MIN_TOKEN_LENGTH,
+  PROFILE_DIR_ENV,
   bridgeHeaders,
   bridgeToken,
 } from '../../scripts/test-bridge-auth.mjs';
 
 const rust = readFileSync(
   path.resolve(__dirname, '..', '..', 'src-tauri', 'src', 'commands', 'test.rs'),
+  'utf8',
+);
+const startup = readFileSync(
+  path.resolve(__dirname, '..', '..', 'src-tauri', 'src', 'startup', 'mod.rs'),
   'utf8',
 );
 
@@ -32,11 +37,14 @@ describe('test bridge auth helper', () => {
     const length = rust.match(/const MIN_BRIDGE_TOKEN_LEN: usize = (\d+);/);
     expect(length).not.toBeNull();
     expect(MIN_TOKEN_LENGTH).toBe(Number(length![1]));
+    const profile = startup.match(/const PROFILE_DIR_ENV: &str = "([^"]+)";/);
+    expect(profile, 'PROFILE_DIR_ENV').not.toBeNull();
+    expect(PROFILE_DIR_ENV).toBe(profile![1]);
   });
 
   it('rejects a missing, short, or whitespace token', () => {
     expect(() => bridgeToken({}, null)).toThrow(/BUILDMESH_TEST_BRIDGE=1/);
-    expect(() => bridgeToken({}, null)).toThrow(/production build does not expose/);
+    expect(() => bridgeToken({}, null)).toThrow(/release entry points do not compile/);
     expect(() => bridgeToken({ [BRIDGE_TOKEN_ENV]: 'short' }, null)).toThrow(/shorter than 32/);
     expect(() => bridgeToken({ [BRIDGE_TOKEN_ENV]: `${TOKEN.slice(0, -1)} ` }, null)).toThrow(/whitespace/);
   });

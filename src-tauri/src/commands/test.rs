@@ -255,11 +255,19 @@ fn admit(config: &BridgeConfig, headers: &str) -> Result<(), Admission> {
     Ok(())
 }
 
+fn is_health(request_line: &str) -> bool {
+    request_line == "GET /health HTTP/1.1"
+}
+
+fn is_invoke(request_line: &str) -> bool {
+    request_line == "POST /invoke HTTP/1.1"
+}
+
 fn act(request_line: &str, body: &[u8], app: Option<&AppHandle>) -> HttpReply {
-    if request_line.starts_with("GET /health") {
+    if is_health(request_line) {
         return HttpReply::new(200, "OK", "text/plain", "OK");
     }
-    if request_line.starts_with("POST /invoke") {
+    if is_invoke(request_line) {
         let text = String::from_utf8_lossy(body);
         let json = dispatch_invoke(text.trim(), app);
         return HttpReply::json(200, &json);
@@ -438,7 +446,7 @@ async fn serve_connection<R>(
     }
 
     let request_line = request_line.trim().to_string();
-    let reply = if request_line.starts_with("POST /invoke") {
+    let reply = if is_invoke(&request_line) {
         let claimed = content_length(&headers);
         let body = match read_body_with_cap(lines, claimed, BRIDGE_MAX_BODY).await {
             Ok(body) => body,
@@ -1228,6 +1236,25 @@ mod tests {
         let encoded = allowed.encode();
         assert_eq!(encoded.matches("HTTP/1.1").count(), 1);
         assert!(!encoded.contains("Access-Control-Allow-Origin"));
+    }
+
+    #[test]
+    fn prefixed_route_does_not_dispatch() {
+        let _db = crate::db::test_support::isolated();
+        for line in [
+            "POST /invokeX HTTP/1.1",
+            "GET /healthcheck HTTP/1.1",
+            "POST /invoke HTTP/1.0",
+        ] {
+            let reply = answer(
+                &sample(),
+                line,
+                &headers(Some(TOKEN), "127.0.0.1:1991", None),
+                &invoke("create_test_mesh", r#"{"name":"should-not-exist"}"#),
+            );
+            assert_eq!(reply.status, 404, "{line}");
+        }
+        assert!(crate::db::list_meshes().unwrap().is_empty());
     }
 
     #[test]

@@ -9,18 +9,18 @@
  * be left running).
  *
  * Per the caveat in CLAUDE.local.md the stable hub must be paused before
- * calling `spawnBuildmesh()` — the spawned exe would bind the same ports
- * the hub owns. `isPortBound()` lets specs surface that constraint loudly
- * via a pre-flight gate instead of failing later with a vague spawn error.
+ * calling `spawnBuildmesh()` — the spawned exe binds the phone/Android
+ * ports the hub owns (1992–1994). The hub does not bind the test bridge.
+ * `stableHubIsRunning()` reads the hub profile's `instance-owner.pid`.
  */
 
 import { spawn, type ChildProcess } from 'child_process';
 import { randomBytes } from 'crypto';
-import { mkdtempSync } from 'fs';
+import { mkdtempSync, readFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { BRIDGE_ENABLE_ENV, BRIDGE_TOKEN_ENV } from '../../../scripts/test-bridge-auth.mjs';
+import { BRIDGE_ENABLE_ENV, BRIDGE_TOKEN_ENV, PROFILE_DIR_ENV } from '../../../scripts/test-bridge-auth.mjs';
 import { waitForPortClosed } from './tauri-http';
 
 // The repo is ESM (`"type": "module"`), so `__dirname` is undefined at
@@ -35,11 +35,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * ENOENT at spawn() that was masked by the spec's pre-flight gate.
  *
  * Override with `BUILDMESH_EXE` for a sideloaded build. The stable-profile
- * ports are 1991 (test bridge) and 1992–1994 (phone/Android). A plain
- * `tauri build` does not include the bridge. E2E needs
- * `npx tauri build --features dev-tools` with the stable identifier so
- * those ports stay put. A dev-profile exe (`*.dev`) binds 2991/2992–2994
- * and this helper will not find it.
+ * ports are 1991 (test bridge) and 1992–1994 (phone/Android). The release
+ * entry points do not pass `dev-tools`, which is the feature that compiles
+ * the bridge. E2E needs `npx tauri build --features dev-tools` with the
+ * stable identifier so those ports stay put. A dev-profile exe (`*.dev`)
+ * binds 2991/2992–2994 and this helper will not find it.
  */
 export const EXE_PATH =
   process.env.BUILDMESH_EXE ??
@@ -106,24 +106,63 @@ export interface BuildmeshProcess {
   readonly bridgeToken: string;
   /** Log file inside the isolated profile, which may not exist until the app writes it. */
   readonly logPath: string;
-  /** Temp root passed to the child as its application-data directory. */
+  /** Temp root that contains the isolated profile directory. */
   readonly dataRoot: string;
+  /** Absolute directory passed as `BUILDMESH_PROFILE_DIR`. Holds `buildmesh.db` and `logs/`. */
+  readonly profileDir: string;
 }
 
 const STABLE_APP_NAME = 'com.alond.buildmesh';
 
-function isolatedLogPath(dataRoot: string): string {
-  if (process.platform === 'darwin') {
-    return path.join(
-      dataRoot,
-      'Library',
-      'Application Support',
-      STABLE_APP_NAME,
-      'logs',
-      'buildmesh.log',
-    );
+function isolatedProfileDir(dataRoot: string): string {
+  return path.join(dataRoot, STABLE_APP_NAME);
+}
+
+function isolatedLogPath(profileDir: string): string {
+  return path.join(profileDir, 'logs', 'buildmesh.log');
+}
+
+/** The stable hub's real profile. This is not the child's override directory. */
+export function stableProfileDir(): string | null {
+  if (process.platform === 'win32') {
+    const appData = process.env.APPDATA;
+    if (!appData) return null;
+    return path.join(appData, STABLE_APP_NAME);
   }
-  return path.join(dataRoot, STABLE_APP_NAME, 'logs', 'buildmesh.log');
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Application Support', STABLE_APP_NAME);
+  }
+  const xdg = process.env.XDG_DATA_HOME ?? path.join(os.homedir(), '.local', 'share');
+  return path.join(xdg, STABLE_APP_NAME);
+}
+
+/**
+ * True when the profile directory's `instance-owner.pid` names a live process.
+ * A stale pid from a dead hub does not count. `EPERM` means the process exists
+ * but this caller cannot signal it.
+ */
+export function profileOwnerIsAlive(profileDir: string): boolean {
+  let text: string;
+  try {
+    text = readFileSync(path.join(profileDir, 'instance-owner.pid'), 'utf8');
+  } catch {
+    return false;
+  }
+  const pid = Number(text.trim());
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/** The stable hub publishes its pid in the real profile, not on port 1991. */
+export function stableHubIsRunning(): boolean {
+  const profile = stableProfileDir();
+  if (!profile) return false;
+  return profileOwnerIsAlive(profile);
 }
 
 /**
@@ -136,20 +175,19 @@ function isolatedLogPath(dataRoot: string): string {
  */
 export function spawnBuildmesh(): BuildmeshProcess {
   const dataRoot = mkdtempSync(path.join(os.tmpdir(), `buildmesh-e2e-${process.pid}-`));
+  const profileDir = isolatedProfileDir(dataRoot);
   const bridgeToken = randomBytes(32).toString('hex');
   // Same-process callers (`invokeViaHttp`) read this. The child gets its own
   // copy below. Two overlapping spawns would clobber it; specs spawn one.
   process.env[BRIDGE_TOKEN_ENV] = bridgeToken;
+  // `BUILDMESH_PROFILE_DIR` is the profile itself. Setting APPDATA, HOME, or
+  // XDG_DATA_HOME does not move a Windows Tauri profile.
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     [BRIDGE_ENABLE_ENV]: '1',
     [BRIDGE_TOKEN_ENV]: bridgeToken,
+    [PROFILE_DIR_ENV]: profileDir,
   };
-  // Isolate the profile on the child only. macOS Tauri follows HOME; changing
-  // the parent HOME would hide the agent's own credentials.
-  if (process.platform === 'win32') env.APPDATA = dataRoot;
-  else if (process.platform === 'darwin') env.HOME = dataRoot;
-  else env.XDG_DATA_HOME = dataRoot;
 
   const child = spawn(EXE_PATH, [], {
     stdio: 'ignore',
@@ -172,8 +210,9 @@ export function spawnBuildmesh(): BuildmeshProcess {
     child,
     pid: child.pid,
     bridgeToken,
-    logPath: isolatedLogPath(dataRoot),
+    logPath: isolatedLogPath(profileDir),
     dataRoot,
+    profileDir,
   };
 }
 

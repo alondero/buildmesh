@@ -17,13 +17,22 @@ import { bridgeHeaders } from '../../../scripts/test-bridge-auth.mjs';
 const TEST_SERVER_URL = 'http://127.0.0.1:1991';
 
 export const BRIDGE_MISSING_HINT =
-  'The test bridge did not answer. A production build does not include it. ' +
+  'The test bridge did not answer. The release entry points do not compile it in. ' +
   'Build the stable profile with `npx tauri build --features dev-tools` and launch it with ' +
   'BUILDMESH_TEST_BRIDGE=1 plus BUILDMESH_TEST_BRIDGE_TOKEN (at least 32 characters). ' +
   'scripts/run-dev.ps1 -TestBridge enables it on the dev profile (port 2991).';
 
 function bridgeAuthHeaders(extra: Record<string, string> = {}): Record<string, string> {
   return bridgeHeaders(extra, process.env, null);
+}
+
+const BRIDGE_PORT = 1991;
+
+/** The bearer belongs on the loopback test bridge only. Phone and Android listen on 1992–1994. */
+export function headersForProbe(host: string, port: number): Record<string, string> | undefined {
+  const loopback = host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '[::1]';
+  if (loopback && port === BRIDGE_PORT) return bridgeAuthHeaders();
+  return undefined;
 }
 
 // Track created test projects for cleanup
@@ -117,7 +126,7 @@ export async function waitForPort(host: string, port: number, timeoutMs: number)
   while (Date.now() < deadline) {
     try {
       const res = await fetch(`http://${host}:${port}/health`, {
-        headers: bridgeAuthHeaders(),
+        headers: headersForProbe(host, port),
         signal: AbortSignal.timeout(1000),
       });
       if (res.ok) return true;

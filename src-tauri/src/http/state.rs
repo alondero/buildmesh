@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 
 use parking_lot::RwLock;
 use serde::Serialize;
-use tauri::{Emitter, Manager};
+use tauri::Emitter;
 use tokio::sync::{oneshot, watch};
 use ts_rs::TS;
 
@@ -185,11 +185,12 @@ pub(crate) async fn request_terminal_snapshot(
     }
 }
 
-/// TLS directory under the app-data dir, or `None` when the app handle / path
-/// is unavailable. Shared by cert routes and the TLS acceptor builder.
+/// TLS directory under the profile startup installed, or `None` before
+/// `preferences::init`. Debug and dev-tools builds can point that profile at
+/// `BUILDMESH_PROFILE_DIR`, so certificate files follow the database and the
+/// log. Shared by cert routes and the TLS acceptor builder.
 pub(crate) fn tls_dir() -> Option<std::path::PathBuf> {
-    let app = app_handle()?;
-    app.path().app_data_dir().ok().map(|p| p.join("tls"))
+    crate::preferences::app_data_dir().map(|dir| dir.join("tls"))
 }
 
 pub(crate) fn app_identifier() -> Option<String> {
@@ -442,5 +443,40 @@ mod tests {
         assert_eq!(port_profile_label("com.alond.buildmesh.dev"), "dev");
         assert_eq!(port_profile_label("com.alond.buildmesh.prod"), "prod");
         assert_eq!(port_profile_label("com.example.other"), "custom");
+    }
+
+    #[test]
+    fn tls_dir_follows_the_installed_profile_not_the_tauri_folder() {
+        let scratch = std::env::temp_dir().join(format!(
+            "bm-tls-profile-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        crate::preferences::init_for_tests(scratch.clone());
+        let dir = tls_dir().expect("installed profile yields a tls directory");
+        assert_eq!(dir, scratch.join("tls"));
+        crate::preferences::reset_for_tests();
+        assert!(
+            tls_dir().is_none(),
+            "an unset profile must not fall back to another folder"
+        );
+
+        let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let state = std::fs::read_to_string(src.join("http/state.rs")).expect("state.rs");
+        assert!(
+            state.contains("preferences::app_data_dir()"),
+            "tls_dir must read the profile startup installed"
+        );
+        for rel in ["http/server.rs", "commands/network.rs"] {
+            let text = std::fs::read_to_string(src.join(rel))
+                .unwrap_or_else(|error| panic!("read {rel}: {error}"));
+            assert!(
+                !text.contains("app_data_dir()"),
+                "{rel} still resolves a path through Tauri app_data_dir"
+            );
+        }
     }
 }

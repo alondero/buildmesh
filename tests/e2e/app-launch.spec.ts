@@ -1,11 +1,12 @@
 /**
  * E2E launch tests for a dev-tools build of the stable profile.
  *
- * A plain `npm run tauri build` does not include the test bridge. These
- * tests need `npx tauri build --features dev-tools` (stable identifier, so
- * the bridge stays on port 1991) and an embedded frontend (`dist/`).
+ * The release entry points do not pass `dev-tools`, which compiles the test
+ * bridge. These tests need `npx tauri build --features dev-tools` (stable
+ * identifier, so the bridge stays on port 1991) and an embedded frontend
+ * (`dist/`).
  *
- * The launcher isolates the profile and passes a per-launch credential.
+ * The launcher sets `BUILDMESH_PROFILE_DIR` and passes a per-launch credential.
  * Nothing here kills `buildmesh.exe` by image name.
  *
  * Run with: npx playwright test tests/e2e/app-launch.spec.ts
@@ -17,8 +18,8 @@ import { fileURLToPath } from 'url';
 import { BRIDGE_MISSING_HINT, invokeViaHttp, isTestServerReady, waitForPort } from './utils/tauri-http';
 import {
   EXE_PATH,
-  isPortBound,
   spawnBuildmesh,
+  stableHubIsRunning,
   terminate,
   TEST_SERVER_PORT,
   type BuildmeshProcess,
@@ -33,8 +34,8 @@ let proc: BuildmeshProcess | null = null;
 test.describe('dev-tools exe app launch', () => {
   test.beforeEach(async () => {
     test.skip(
-      await isPortBound(TEST_SERVER_PORT),
-      `port ${TEST_SERVER_PORT} is already bound — pause the stable hub before this spec. It is not killed by image name.`,
+      stableHubIsRunning(),
+      'the stable hub is running (instance-owner.pid). Pause it before this spec. It is not killed by image name, and it does not bind port 1991.',
     );
   });
 

@@ -27,7 +27,7 @@ pass.
 4. **A test mesh + node** — use the in-app "New Mesh" flow or
    `tests/e2e/agent-output.spec.ts`'s `create_test_mesh` helper if you
    have the e2e harness around. That helper talks to the development
-   test bridge, which a release build does not expose. Launch a
+   test bridge. The release entry points do not compile that bridge in. Launch a
    dev-tools build with the bridge credential first.
 
 **Note on Kimi's auth surface.** Spec #541 treated Kimi as a

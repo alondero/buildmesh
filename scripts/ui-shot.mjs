@@ -261,7 +261,8 @@ async function getPage() {
   const browser = await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`).catch((e) => {
     console.error(
       `Could not attach to CDP on port ${cdpPort}. Is buildmesh-dev running with a CDP port?\n` +
-      `Launch it with: powershell -File scripts\\run-dev.ps1 -CdpPort ${cdpPort}\n${e.message}`
+      `Launch it with: powershell -File scripts\\run-dev.ps1 -Detach -CdpPort ${cdpPort} -TestBridge\n` +
+      `Fixture calls need Authorization: Bearer from .tmp/test-bridge-token (the dev bridge is port 2991).\n${e.message}`
     );
     process.exit(1);
   });

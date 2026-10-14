@@ -639,8 +639,11 @@ pub fn run() {
                             );
 
                             #[cfg(not(target_os = "windows"))]
-                            match _app_handle.path().app_data_dir() {
-                                Ok(app_dir) => match diagnostics::relaunch_detached(
+                            match crate::startup::installed()
+                                .map(|bootstrap| bootstrap.profile_dir().to_path_buf())
+                                .or_else(|| _app_handle.path().app_data_dir().ok())
+                            {
+                                Some(app_dir) => match diagnostics::relaunch_detached(
                                     &app_dir.join("logs"),
                                 ) {
                                     Ok(true) => {
@@ -657,11 +660,8 @@ pub fn run() {
                                         tracing::error!("Auto-relaunch failed: {}", e);
                                     }
                                 },
-                                Err(e) => {
-                                    tracing::error!(
-                                        "Auto-relaunch failed (no app dir): {}",
-                                        e
-                                    );
+                                None => {
+                                    tracing::error!("Auto-relaunch failed (no app dir)");
                                 }
                             }
                         }

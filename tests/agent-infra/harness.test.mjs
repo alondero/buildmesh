@@ -1855,7 +1855,7 @@ test('new Vitest references to src-tauri are audited against the frontend-tests 
   // We pin a snapshot of every referencing line so that any new or modified reference across any
   // test file (including files already referencing src-tauri) forces re-audit against
   // VITEST_READS_FROM_SRC_TAURI in scripts/harness-plan.mjs.
-  const files = execFileSync('git', ['ls-files', '-co', '--exclude-standard', '--', 'tests/unit', 'tests/integration', 'tests/e2e', 'tests/setup'], { cwd: root, encoding: 'utf8' })
+  const files = execFileSync('git', ['ls-files', '--', 'tests/unit', 'tests/integration', 'tests/e2e', 'tests/setup'], { cwd: root, encoding: 'utf8' })
     .split('\n').filter(file => /\.(?:tsx?|mjs)$/.test(file));
   const referencingLines = files.flatMap(file =>
     readFileSync(join(root, file), 'utf8')
@@ -1899,12 +1899,14 @@ test('new Vitest references to src-tauri are audited against the frontend-tests 
     "tests/unit/ipc-contract.test.ts: const LIB_RS = join(REPO_ROOT, 'src-tauri', 'src', 'lib.rs');",
     "tests/unit/ipc-contract.test.ts: const commands = normalize(readFileSync(join(REPO_ROOT, 'src-tauri', 'src', 'commands', 'mod.rs'), 'utf8'));",
     "tests/unit/ipc-contract.test.ts: const services = normalize(readFileSync(join(REPO_ROOT, 'src-tauri', 'src', 'services', 'mod.rs'), 'utf8'));",
+    "tests/unit/ipc-contract.test.ts: const startup = normalize(readFileSync(join(REPO_ROOT, 'src-tauri', 'src', 'startup', 'mod.rs'), 'utf8'));",
     'tests/unit/opencode-attention-plugin.test.ts: const source = readFileSync(resolve("src-tauri/src/agent/provider/adapters/opencode_attention_plugin.js"), "utf8");',
     "tests/unit/tauri-capabilities.test.ts: describe('src-tauri/capabilities/default.json', () => {",
     "tests/unit/tauri-capabilities.test.ts: readFileSync(resolve(process.cwd(), 'src-tauri/capabilities/default.json'), 'utf8'),",
     "tests/unit/tauri-dev-config.test.ts: readFileSync(resolve(process.cwd(), 'src-tauri/tauri.conf.json'), 'utf8'),",
     "tests/unit/tauri-dev-config.test.ts: readFileSync(resolve(process.cwd(), 'src-tauri/tauri.dev.conf.json'), 'utf8'),",
     "tests/unit/test-bridge-auth.test.ts: path.resolve(__dirname, '..', '..', 'src-tauri', 'src', 'commands', 'test.rs'),",
+    "tests/unit/test-bridge-auth.test.ts: path.resolve(__dirname, '..', '..', 'src-tauri', 'src', 'startup', 'mod.rs'),",
   ]);
 
   // Every actual read of a src-tauri file/subpath identified across those lines must be covered by frontend-tests:

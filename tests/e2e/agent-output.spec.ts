@@ -14,7 +14,7 @@ import { BRIDGE_MISSING_HINT, invokeViaHttp, waitForPort, waitForPortClosed } fr
 import {
   spawnBuildmesh,
   terminate,
-  isPortBound,
+  stableHubIsRunning,
   TEST_SERVER_PORT,
   type BuildmeshProcess,
 } from './utils/buildmesh-launcher';
@@ -71,14 +71,12 @@ function getLogTimestamp(line: string): string | null {
 
 test.describe('agent output', () => {
   test.beforeEach(async () => {
-    // Same pre-flight as mobile-spa.spec.ts: skip cleanly when 1991 is
-    // bound (the stable hub is up). Per CLAUDE.local.md, this spec needs
-    // the hub paused — but we make that an intentional skip rather than a
-    // hard failure, so a running hub doesn't cause this spec to crash
-    // the worker's teardown or signal anything that would kill processes.
+    // The stable hub does not bind the test bridge. Its pid file in the
+    // real profile is the signal. Phone/Android ports 1992–1994 still
+    // collide, so a live hub is a skip rather than a second writer.
     test.skip(
-      await isPortBound(TEST_SERVER_PORT),
-      `port ${TEST_SERVER_PORT} is bound (likely the stable hub) — pause it first per CLAUDE.local.md before this spec can run.`,
+      stableHubIsRunning(),
+      'the stable hub is running (instance-owner.pid) — pause it first per CLAUDE.local.md before this spec can run.',
     );
 
     // Belt-and-braces: drain the previous run's child (if any) AND wait

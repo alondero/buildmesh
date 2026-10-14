@@ -15,6 +15,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const BRIDGE_ENABLE_ENV = 'BUILDMESH_TEST_BRIDGE';
 export const BRIDGE_TOKEN_ENV = 'BUILDMESH_TEST_BRIDGE_TOKEN';
 export const BRIDGE_ORIGINS_ENV = 'BUILDMESH_TEST_BRIDGE_ORIGINS';
+/** Absolute profile directory. Read only by debug and dev-tools builds. */
+export const PROFILE_DIR_ENV = 'BUILDMESH_PROFILE_DIR';
 export const MIN_TOKEN_LENGTH = 32;
 export const DEFAULT_TOKEN_FILE = path.join(root, '.tmp', 'test-bridge-token');
 
@@ -31,7 +33,7 @@ function tokenError() {
     `${BRIDGE_TOKEN_ENV} is missing, shorter than ${MIN_TOKEN_LENGTH} characters, or contains whitespace. ` +
       `Start the app with ${BRIDGE_ENABLE_ENV}=1 and a per-launch token ` +
       '(scripts/run-dev.ps1 -TestBridge or scripts/run-dev.sh --test-bridge). ' +
-      'A production build does not expose the test bridge.',
+      'The release entry points do not compile the test bridge in.',
   );
 }
 
