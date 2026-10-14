@@ -173,6 +173,12 @@ cast that throws while composing would instead terminate the app. The issues rou
 `{items, completeness}` feed; the client also accepts the bare array older
 desktops returned.
 
+The Issues screen preserves completeness and displays partial-feed warnings,
+filters by title/number/tag, and expands body previews on tap. Its tag editor
+uses the same acknowledged single-label route and Autopilot context as the
+[mobile web client](mobile.md#phone-issue-triage). Issue launch also offers the
+mesh default before available prefill options.
+
 Only the terminal is a WebView: it loads bundled xterm assets from
 `WebViewAssetLoader`, blocks all other requests/navigation, and exposes
 resize and ready callbacks. No remote page, cookie or credential enters that

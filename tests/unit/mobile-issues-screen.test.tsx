@@ -41,6 +41,7 @@ const BACKEND_ISSUES: GitHubIssue[] = [
     state: "open",
     labels: ["enhancement", "good first issue"],
     blocked_by: [],
+    author: 'octo',
   },
   {
     number: 102,
@@ -50,6 +51,7 @@ const BACKEND_ISSUES: GitHubIssue[] = [
     state: "open",
     labels: [],
     blocked_by: [],
+    author: '',
   },
   {
     number: 103,
@@ -59,6 +61,7 @@ const BACKEND_ISSUES: GitHubIssue[] = [
     state: "open",
     labels: ["bug"],
     blocked_by: [],
+    author: 'octo',
   },
 ];
 

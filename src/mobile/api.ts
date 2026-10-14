@@ -416,17 +416,20 @@ export async function importAndResume(
   return resp.json();
 }
 
-/**
- * Issue #2024 rank 6 — the route returns the feed wrapper, not a bare array,
- * so the phone can distinguish "page 1" from "everything". Callers get the
- * items; `completeness` is available on the raw response for any surface that
- * wants to state the truncation.
- */
-export async function listIssues(meshId: number): Promise<GitHubIssue[]> {
-  const feed = (await (await apiFetch(`/api/meshes/${meshId}/issues`)).json()) as {
-    items: GitHubIssue[];
-  };
-  return feed.items;
+export async function listIssues(meshId: number): Promise<import('../types/generated/GitHubIssueFeed').GitHubIssueFeed> {
+  return (await apiFetch(`/api/meshes/${meshId}/issues`)).json();
+}
+
+export async function issueLabelCatalog(meshId: number): Promise<import('../types/generated/IssueLabelCatalog').IssueLabelCatalog> {
+  return (await apiFetch(`/api/meshes/${meshId}/issue-labels`)).json();
+}
+
+export async function setIssueLabel(meshId: number, issueNumber: number, label: string, present: boolean): Promise<void> {
+  await apiFetch(`/api/meshes/${meshId}/issues/${issueNumber}/label`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label, present }),
+  });
 }
 
 export async function spawnFromIssue(
