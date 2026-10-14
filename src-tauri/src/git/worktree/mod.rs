@@ -298,24 +298,65 @@ fn owned_worktree_name(
 /// Remove worktrees whose on-disk path no longer exists.
 fn prune_stale_worktrees(repo: &git2::Repository) {
     if let Ok(worktree_names) = repo.worktrees() {
-        for i in 0..worktree_names.len() {
-            let name = match owned_worktree_name(worktree_names.get(i)) {
-                Ok(Some(name)) => name,
-                Ok(None) => continue,
-                Err(error) => {
-                    tracing::warn!(index = i, %error, "Could not read a registered worktree name; stopping stale-worktree pruning");
-                    return;
-                }
-            };
-            if let Ok(wt) = repo.find_worktree(&name) {
-                if wt.validate().is_err() {
-                    let mut prune_opts = git2::WorktreePruneOptions::new();
-                    prune_opts.valid(false);
-                    let _ = wt.prune(Some(&mut prune_opts));
-                }
+        prune_stale_worktree_names(
+            repo,
+            (0..worktree_names.len()).map(|index| worktree_names.get(index)),
+        );
+    }
+}
+
+fn prune_stale_worktree_names<'a>(
+    repo: &git2::Repository,
+    names: impl IntoIterator<Item = Result<Option<&'a str>, git2::Error>>,
+) {
+    for (index, result) in names.into_iter().enumerate() {
+        let name = match result {
+            Ok(Some(name)) => name,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(index, %error, "Could not read a registered worktree name; skipping it during stale-worktree pruning");
+                continue;
+            }
+        };
+        if let Ok(wt) = repo.find_worktree(name) {
+            if wt.validate().is_err() {
+                let mut prune_opts = git2::WorktreePruneOptions::new();
+                prune_opts.valid(false);
+                let _ = wt.prune(Some(&mut prune_opts));
             }
         }
     }
+}
+
+fn has_registered_worktree_path<'a>(
+    repo: &git2::Repository,
+    host_path: &std::path::Path,
+    names: impl IntoIterator<Item = Result<Option<&'a str>, git2::Error>>,
+) -> bool {
+    for (index, result) in names.into_iter().enumerate() {
+        let name = match result {
+            Ok(Some(name)) => name,
+            Ok(None) => continue,
+            Err(error) => {
+                // This entry provides no readable path to compare; keep scanning
+                // for a later readable match.
+                tracing::warn!(index, %error, "Could not read a registered worktree name; skipping it during linked-worktree ownership check");
+                continue;
+            }
+        };
+        if let Ok(wt) = repo.find_worktree(name) {
+            // `wt.path()` returns git's stored path verbatim — the same form we
+            // passed in when we cut the worktree, so direct equality is the
+            // safe shape (no canonicalization that could miss symlinks/UNC).
+            // In the normal create flow, the same path spelling is passed to
+            // Git and retained in the admin entry, so compare those paths
+            // directly instead of canonicalizing them.
+            if wt.path() == host_path {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Create a new Git worktree at the specified path and honor .worktreeinclude.
@@ -489,28 +530,11 @@ fn is_valid_linked_worktree(project_root: &str, host_path: &std::path::Path) -> 
     let Ok(names) = parent_repo.worktrees() else {
         return false;
     };
-    for i in 0..names.len() {
-        let name = match owned_worktree_name(names.get(i)) {
-            Ok(Some(name)) => name,
-            Ok(None) => continue,
-            Err(error) => {
-                tracing::warn!(index = i, %error, "Could not read a registered worktree name; refusing to claim linked-worktree ownership");
-                return false;
-            }
-        };
-        if let Ok(wt) = parent_repo.find_worktree(&name) {
-            // `wt.path()` returns git's stored path verbatim — the same form we
-            // passed in when we cut the worktree, so direct equality is the
-            // safe shape (no canonicalization that could miss symlinks/UNC).
-            // Windows filesystems are case-insensitive but git stores the
-            // path as given, so an exact-ASCII match on identical input is
-            // the production path.
-            if wt.path() == host_path {
-                return true;
-            }
-        }
-    }
-    false
+    has_registered_worktree_path(
+        &parent_repo,
+        host_path,
+        (0..names.len()).map(|index| names.get(index)),
+    )
 }
 
 /// Classification of a directory that exists at a target worktree path but
@@ -1547,24 +1571,6 @@ fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn registered_worktree_name_read_errors_remain_errors() {
-        let name = super::owned_worktree_name(Ok(Some("linked"))).expect("read name");
-        assert_eq!(name.as_deref(), Some("linked"));
-
-        let missing = super::owned_worktree_name(Ok(None)).expect("empty name slot");
-        assert_eq!(missing, None);
-
-        let error = git2::Error::new(
-            git2::ErrorCode::GenericError,
-            git2::ErrorClass::Os,
-            "could not decode registered worktree name",
-        );
-        let failure = super::owned_worktree_name(Err(error))
-            .expect_err("a failed name read must not become an empty slot");
-        assert_eq!(failure.code(), git2::ErrorCode::GenericError);
-    }
-
-    #[test]
     fn scoped_cold_create_has_bounded_wait_behind_sibling_sync() {
         let td = crate::env::test_helpers::TestDir::new("scoped-create-lock");
         crate::env::test_helpers::init_repo_with_commit(td.path(), &[("scope/f", "scoped")]);
@@ -2198,6 +2204,75 @@ mod tests {
             "precondition: git still holds a registration for the missing path"
         );
         wt
+    }
+
+    fn unreadable_worktree_name_error() -> git2::Error {
+        git2::Error::new(
+            git2::ErrorCode::GenericError,
+            git2::ErrorClass::Os,
+            "could not decode registered worktree name",
+        )
+    }
+
+    #[test]
+    fn linked_worktree_scan_finds_match_after_unreadable_name() {
+        let td = TestDir::new("wt_match_after_unreadable_name");
+        init_repo_with_commit(td.path(), &[("f.txt", "v1\n")]);
+        let root = td.path().to_string_lossy().to_string();
+        let worktree_path = td.path().join(".claude").join("worktrees").join("linked");
+        create_git_worktree(
+            &root,
+            worktree_path.to_str().unwrap(),
+            "linked",
+            "detached",
+            "HEAD",
+        )
+        .expect("fixture worktree must be created");
+        let repo = git2::Repository::open(td.path()).unwrap();
+        let names = repo.worktrees().unwrap();
+        let registered_name = names
+            .iter()
+            .filter_map(Result::ok)
+            .flatten()
+            .find(|name| {
+                repo.find_worktree(name)
+                    .is_ok_and(|worktree| worktree.path() == worktree_path)
+            })
+            .expect("fixture worktree must be registered");
+
+        assert!(super::has_registered_worktree_path(
+            &repo,
+            &worktree_path,
+            [
+                Err(unreadable_worktree_name_error()),
+                Ok(Some(registered_name))
+            ],
+        ));
+    }
+
+    #[test]
+    fn stale_worktree_scan_prunes_registration_after_unreadable_name() {
+        let td = TestDir::new("wt_prune_after_unreadable_name");
+        init_repo_with_commit(td.path(), &[("f.txt", "v1\n")]);
+        let stale_path = leave_stale_registration(td.path(), "stale-after-error");
+        let repo = git2::Repository::open(td.path()).unwrap();
+
+        super::prune_stale_worktree_names(
+            &repo,
+            [
+                Err(unreadable_worktree_name_error()),
+                Ok(Some("stale-after-error")),
+            ],
+        );
+
+        assert!(
+            repo.find_worktree("stale-after-error").is_err(),
+            "the later stale registration must be pruned despite the unreadable entry"
+        );
+        assert!(
+            !registered_worktree_paths(td.path()).contains(&stale_path),
+            "the pruned registration must disappear from git's worktree list"
+        );
     }
 
     /// End-to-end through the production `create_git_worktree`: a stale

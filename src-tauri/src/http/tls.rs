@@ -1360,8 +1360,8 @@ mod tests {
     }
 
     /// Existing installs keep a CA created by rcgen 0.13.2. The fixture pair
-    /// was generated with `build_root_ca_params` before the rcgen upgrade; the
-    /// upgraded issuer must still sign leaves that chain to that persisted CA.
+    /// was generated with the same parameter values as the pre-upgrade root
+    /// builder; the upgraded issuer must still sign leaves that chain to it.
     #[test]
     fn rcgen_014_leaf_chains_to_persisted_rcgen_013_root() {
         let app_data = tempfile::tempdir().unwrap();
