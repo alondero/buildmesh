@@ -373,6 +373,12 @@ export async function verify(root, { base: requestedBase, full = false, plan = p
   if (!task && !requestedBase) throw new Error('BLOCKED: start a task or provide --base <commit>; HEAD alone can miss committed work.');
   const base = resolveBase(root, requestedBase ?? task.base);
   if (task && base !== task.base) throw new Error('BLOCKED: verification base must match the active task.');
+  // The run publishes the identity its own gates read. `runIdentity` hashes the
+  // base string, so `c5f0dd42` and its full hash are two identities for one
+  // commit: the ref is resolved once here, and the `binding-drift` gate
+  // recomputes from the same spelling (issue #2350).
+  process.env.BUILDMESH_VERIFY_BASE = base;
+  process.env.BUILDMESH_BINDINGS_FINGERPRINT = fingerprint(root, base, 'src/types/generated/');
   const paths = changedPaths(root, base);
   const gates = plan(scopePaths(root, base, paths), { full });
   const tree = fingerprint(root, base);
@@ -706,6 +712,8 @@ async function internalGate(root, name) {
     if (stale.length) throw new Error(`Remove ${stale.join(', ')} from RUST_PATH_INCLUDES in scripts/harness-check.mjs: no \`#[path]\` declaration includes them.`);
   }
   else if (name === 'bindings') {
+    // Both values come from the run that spawned this gate, with the base
+    // already resolved to a full commit (issue #2350).
     const expected = process.env.BUILDMESH_BINDINGS_FINGERPRINT;
     if (!expected || fingerprint(root, process.env.BUILDMESH_VERIFY_BASE, 'src/types/generated/') !== expected) throw new Error('Generated bindings changed during verification; inspect the diff and rerun.');
   } else throw new Error('Unknown internal gate.');
@@ -767,9 +775,7 @@ async function main() {
       if (!options.spec) throw new Error(USAGE);
       result = (options.action === 'start' ? start : update)(root, readJson(resolve(options.spec)));
     } else if (options.action === 'verify') {
-      process.env.BUILDMESH_VERIFY_BASE = options.base ?? taskAt(root)?.base ?? '';
-      if (!process.env.BUILDMESH_VERIFY_BASE) throw new Error('BLOCKED: start a task or provide --base <commit>.');
-      process.env.BUILDMESH_BINDINGS_FINGERPRINT = fingerprint(root, resolveBase(root, process.env.BUILDMESH_VERIFY_BASE), 'src/types/generated/');
+      if (!options.base && !taskAt(root)) throw new Error('BLOCKED: start a task or provide --base <commit>.');
       result = await verify(root, options);
       process.exitCode = EXIT[result.outcome];
     } else if (options.action === 'finish') {

@@ -720,6 +720,30 @@ test('fingerprint ignores local logs but sees tests, lockfile, deletions and unt
   assert.notEqual(fingerprint(fixture.cwd, fixture.base), original);
   assert.notEqual(fingerprint(fixture.cwd, 'different-base'), original);
 });
+test('a short --base passes binding-drift, and a gate that rewrites the bindings still fails it (#2350)', async t => {
+  const fixture = repo(t);
+  // The gate is the real CLI in the fixture, so the harness it spawns must be there.
+  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-check.mjs', 'scripts/harness-test-failures.mjs', 'scripts/self-review.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
+  fixture.put('src/types/generated/Example.ts', 'export type Example = { id: number };\n');
+  const base = fixture.commit();
+  const short = base.slice(0, 8);
+  // One commit, two identities: the assertion below is why the run and the
+  // gate it spawns have to agree on which spelling of the base they hash.
+  assert.notEqual(fingerprint(fixture.cwd, short, 'src/types/generated/'), fingerprint(fixture.cwd, base, 'src/types/generated/'));
+  const drift = planGates(['src/types/generated/Example.ts']).find(gate => gate.id === 'binding-drift');
+  // Only a verify run publishes what this gate reads; the assertion below keeps
+  // the scoped check from planning a gate whose identity it would not publish.
+  assert.ok(!planChecks(['src/types/generated/Example.ts']).checks.some(gate => gate.id === 'binding-drift'));
+  const clean = await verify(fixture.cwd, { base: short, plan: () => [drift], selfReview: false });
+  assert.equal(clean.outcome, 'PASS', `${clean.reason ?? ''} ${JSON.stringify(clean.gates)}`);
+  // ...and the gate keeps its teeth: a gate that regenerates the bindings is drift.
+  fixture.put('regenerate.mjs', 'import { writeFileSync } from \'node:fs\';\nwriteFileSync(\'src/types/generated/Example.ts\', \'export type Example = { id: string };\\n\');\n');
+  const regenerated = await verify(fixture.cwd, { base: short, plan: () => [{ id: 'regenerate', command: ['node', 'regenerate.mjs'], minutes: 1 }, drift], selfReview: false });
+  assert.equal(regenerated.gates.find(gate => gate.id === 'regenerate').outcome, 'PASS', JSON.stringify(regenerated.gates));
+  const driftRow = regenerated.gates.find(gate => gate.id === 'binding-drift');
+  assert.equal(driftRow.outcome, 'FAIL', JSON.stringify(regenerated.gates));
+  assert.match(readFileSync(driftRow.log, 'utf8'), /Generated bindings changed during verification/);
+});
 test('two real worktrees have isolated task state and cannot reuse receipts', t => {
   const fixture = repo(t);
   const task = fixture.start();
