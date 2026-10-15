@@ -276,6 +276,10 @@ unchanged.
 Without an active task, `npm run verify -- --base <commit>` runs the same checks
 and records a standalone receipt. It cannot finish a task. `--full` expands
 verification to both frontend and Rust even for documentation changes.
+A run resolves `--base` to a full commit once, before it publishes the identity
+its gates read. `runIdentity` hashes the base string, so a short sha and its
+full hash are two identities for one commit, and both sides of the
+`binding-drift` comparison use the resolved one (issue #2350).
 
 Committed, staged, unstaged, deleted and untracked paths determine scope.
 Unknown paths select both product layers; generated wire types always select
