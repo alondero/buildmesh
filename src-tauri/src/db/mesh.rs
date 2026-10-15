@@ -355,6 +355,12 @@ pub fn get_mesh_by_path(path: &str) -> SqlResult<Mesh> {
     stmt.query_row(params![path], map_mesh_row)
 }
 
+/// Delete a mesh without reporting the removed agent-node ids.
+///
+/// Production callers use [`delete_mesh_returning_node_ids`] so they can stop
+/// each node's process state; this discarding form serves the dev-gated test
+/// bridge and unit tests only.
+#[cfg(any(test, debug_assertions, feature = "dev-tools"))]
 pub fn delete_mesh(id: i64) -> SqlResult<()> {
     let db = write_conn();
     delete_mesh_inner(&db, id).map(|_| ())

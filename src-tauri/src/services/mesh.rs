@@ -1,6 +1,7 @@
 //! Mesh service — creation with path/name extraction logic
 
 use crate::db;
+#[cfg(any(debug_assertions, feature = "dev-tools"))]
 use crate::models::Mesh;
 
 /// Error type for mesh service operations
@@ -50,6 +51,10 @@ pub fn name_from_path(path: &str) -> String {
 }
 
 /// Create a test mesh in a temporary directory.
+///
+/// Fixture-only: the sole callers are the dev-gated `create_test_mesh`
+/// command and the dev-gated fixtures, so a shipped build omits it.
+#[cfg(any(debug_assertions, feature = "dev-tools"))]
 pub fn create_test(name: &str) -> Result<Mesh, MeshError> {
     let temp_dir = std::env::temp_dir();
     let timestamp = std::time::SystemTime::now()

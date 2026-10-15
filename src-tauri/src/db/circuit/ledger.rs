@@ -203,6 +203,8 @@ pub(crate) fn create_node_circuit_run_locked(
 
 /// Recovery path: re-mint or extend a review run from a recovery plan whose
 /// source is already claimed by the failed run the plan reads.
+// Reached only from `continue_failed_review` (dev-gated) and unit tests.
+#[cfg(any(test, debug_assertions, feature = "dev-tools"))]
 pub(crate) fn create_node_circuit_run_recovery_locked(
     db: &mut Connection,
     recovery: super::recovery::ReviewRecovery,
@@ -2064,6 +2066,8 @@ pub(crate) struct CircuitAdvanceCommit {
 /// Parentage is supplied by the circuit domain/worker at the point the
 /// relationship is known; the persistence layer stores it without knowing
 /// anything about blueprint names or step roles.
+// Reached only from the dev-gated review-continuation fixture.
+#[cfg(any(debug_assertions, feature = "dev-tools"))]
 pub fn set_circuit_step_agent_node_with_parent(
     run_id: i64,
     node_id: &str,
@@ -2081,6 +2085,7 @@ pub fn set_circuit_step_agent_node_with_parent(
 }
 
 /// Per-test isolated variant of [`set_circuit_step_agent_node_with_parent`] (issue #1691).
+#[cfg(any(test, debug_assertions, feature = "dev-tools"))]
 pub(crate) fn set_circuit_step_agent_node_with_parent_inner(
     db: &Connection,
     run_id: i64,

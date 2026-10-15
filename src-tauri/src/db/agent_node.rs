@@ -1744,6 +1744,9 @@ pub fn update_agent_node_status_unless_in_inner(
     Ok(changed > 0)
 }
 
+// Only the `archive_agent_node` test-bridge handler (dev-gated, issue #2153)
+// and unit tests archive a node, so a shipped build drops the path entirely.
+#[cfg(any(test, debug_assertions, feature = "dev-tools"))]
 pub fn archive_agent_node(id: i64) -> SqlResult<()> {
     update_agent_node_status(id, SessionStatus::Archived)
 }

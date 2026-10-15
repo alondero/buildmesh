@@ -176,9 +176,10 @@ pub fn installed_paths() -> Option<ProfilePaths> {
 }
 
 /// Environment variable a debug or `dev-tools` build reads to use a profile
-/// directory other than the platform app-data folder. Release builds do not
-/// compile the read.
-#[cfg(any(debug_assertions, feature = "dev-tools"))]
+/// directory other than the platform app-data folder. A shipped release build
+/// does not compile the read; `test` is here so the startup tests still build
+/// under `cargo test --release`, which has `debug_assertions` off.
+#[cfg(any(test, debug_assertions, feature = "dev-tools"))]
 pub(crate) const PROFILE_DIR_ENV: &str = "BUILDMESH_PROFILE_DIR";
 
 /// Absolute profile from [`PROFILE_DIR_ENV`], or `None` when it is unset.
@@ -186,7 +187,7 @@ pub(crate) const PROFILE_DIR_ENV: &str = "BUILDMESH_PROFILE_DIR";
 /// A set but empty or relative value is an error. Falling through would write
 /// fixtures into the user's real profile. Windows does not consult `APPDATA`
 /// for this path.
-#[cfg(any(debug_assertions, feature = "dev-tools"))]
+#[cfg(any(test, debug_assertions, feature = "dev-tools"))]
 pub(crate) fn profile_dir_override() -> Result<Option<PathBuf>, StartupFailure> {
     let Some(raw) = std::env::var_os(PROFILE_DIR_ENV) else {
         return Ok(None);
@@ -230,10 +231,12 @@ pub(crate) fn resolve_profile_dir(
 /// cannot ask the installed profile.
 enum EarlyPanicProfile {
     /// Absolute profile directory from the debug or dev-tools override.
+    #[cfg(any(debug_assertions, feature = "dev-tools"))]
     Override(PathBuf),
     /// No override. Use the platform data directory.
     Platform,
     /// The override is set but unusable. Do not touch the real profile.
+    #[cfg(any(debug_assertions, feature = "dev-tools"))]
     Skip,
 }
 
@@ -277,10 +280,12 @@ pub(crate) fn early_panic_log_path_from_env(
     platform_root: Option<&Path>,
 ) -> Option<PathBuf> {
     match early_panic_profile() {
+        #[cfg(any(debug_assertions, feature = "dev-tools"))]
         EarlyPanicProfile::Override(profile) => {
             early_panic_log_path(Some(&profile), platform_root, bundle_id)
         }
         EarlyPanicProfile::Platform => early_panic_log_path(None, platform_root, bundle_id),
+        #[cfg(any(debug_assertions, feature = "dev-tools"))]
         EarlyPanicProfile::Skip => None,
     }
 }

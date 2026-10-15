@@ -982,6 +982,7 @@ Windows installers and sideload it (you will need to allow installs from your
 browser), or [build the APK yourself](development/android.md#build-and-install).
 Open **Buildmesh**, choose **Scan pairing QR**, and scan
 the desktop's Remote Access Connect QR. Then select **Pair with desktop**.
+Rotating the phone before you pair keeps the scanned code in the form.
 The app verifies and stores the desktop certificate privately; it does not
 require the browser's system certificate installation. On older desktops,
 paste the full pairing URL and the **Root CA SHA-256** fingerprint shown in

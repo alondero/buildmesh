@@ -26,6 +26,8 @@ class NativeActionsTest {
         {"id":"missing","label":"Unavailable agent","unavailable_reason":"Missing executable","resumable":true,"capabilities":{"supports_prefill":true}}
     ]""").objects()
     private val created = """{"id":17,"mesh_id":3,"name":"Created agent","provider":"claude","status":"idle"}"""
+    // #2379 answers POST /api/nodes/create with a typed outcome, not a bare node.
+    private val createActive = """{"outcome":"active","node":$created}"""
 
     private fun withDesktop(respond: (RecordedRequest) -> MockResponse, body: (BuildmeshViewModel, ConcurrentLinkedQueue<RecordedRequest>) -> Unit) {
         val app = ApplicationProvider.getApplicationContext<Application>()
@@ -60,7 +62,7 @@ class NativeActionsTest {
         withDesktop({ request ->
             assertEquals("/api/nodes/create", request.path)
             if (++attempts == 1) MockResponse().setResponseCode(503).setBody("""{"error":"Retry this task"}""")
-            else MockResponse().setBody(created)
+            else MockResponse().setBody(createActive)
         }) { vm, requests ->
             compose.setContent { BuildmeshTheme {
                 val state by vm.state.collectAsState()
@@ -78,7 +80,14 @@ class NativeActionsTest {
             assertEquals("", vm.draft("capture"))
             assertTrue(vm.state.value.nodes.any { it.number("id") == 17L })
             assertEquals(2, requests.size)
-            requests.forEach { assertEquals(Json.parseToJsonElement("""{"mesh_id":3,"provider":"claude","configuration_id":"launch/saved","rows":24,"cols":80,"prompt":"Fix the deadline"}"""), Json.parseToJsonElement(it.body.readUtf8())) }
+            val bodies = requests.map { Json.parseToJsonElement(it.body.readUtf8()).obj() }
+            val keys = bodies.map { it.text("operation_key") }
+            assertTrue(keys.all { it.isNotBlank() })
+            // #2331: one key per submission, so the retry after a lost response
+            // resolves to the same node instead of creating a second one.
+            assertEquals(1, keys.distinct().size)
+            val expected = Json.parseToJsonElement("""{"mesh_id":3,"provider":"claude","configuration_id":"launch/saved","rows":24,"cols":80,"operation_key":"${keys[0]}","prompt":"Fix the deadline"}""")
+            bodies.forEach { assertEquals(expected, it) }
         }
     }
 
