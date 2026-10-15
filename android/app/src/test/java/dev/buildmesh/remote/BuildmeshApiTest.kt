@@ -70,7 +70,42 @@ class BuildmeshApiTest {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setResponseCode(401).setBody("{\"error\":\"revoked\"}"))
             try { BuildmeshApi(server.url("/").toString(), initialCookie = "bm_session=old; Path=/").get("/api/nodes"); fail("Revoked session accepted") }
-            catch (e: ApiException) { assertTrue(e.unauthorized); assertEquals("revoked", e.message) }
+            catch (e: ApiException) { assertTrue(e.sessionRejected); assertEquals("revoked", e.message) }
+        }
+    }
+
+    @Test fun aRevokedSessionStillCarriesThePairingSentenceWhenTheServerSendsNoDetail() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(401))
+            try { BuildmeshApi(server.url("/").toString(), initialCookie = "bm_session=old; Path=/").get("/api/nodes"); fail("Revoked session accepted") }
+            catch (e: ApiException) { assertTrue(e.sessionRejected); assertEquals("This device is no longer authorized. Pair again from the desktop.", e.message) }
+        }
+    }
+
+    @Test fun aRefusedDataRouteIsNotASessionRejection() = runBlocking {
+        MockWebServer().use { server ->
+            // `POST /api/meshes/{id}/pr` answers 403 when the node belongs to
+            // another mesh: this request was refused, the device is still paired.
+            server.enqueue(MockResponse().setResponseCode(403).setBody("{\"error\":\"That agent node belongs to another mesh\"}"))
+            val api = BuildmeshApi(server.url("/").toString(), initialCookie = "bm_session=live; Path=/")
+            try {
+                api.post("/api/meshes/2/pr", buildJsonObject { put("node_id", 7); put("title", "from the phone") })
+                fail("Refused request accepted")
+            } catch (e: ApiException) {
+                assertEquals(403, e.status)
+                assertFalse("a 403 must never end a pairing (issue #2317)", e.sessionRejected)
+                assertTrue(e.credentialRefused)
+                assertEquals("That agent node belongs to another mesh", e.message)
+            } finally { api.close() }
+            server.enqueue(MockResponse().setResponseCode(403))
+            val bare = BuildmeshApi(server.url("/").toString(), initialCookie = "bm_session=live; Path=/")
+            try {
+                bare.get("/api/nodes"); fail("Refused request accepted")
+            } catch (e: ApiException) {
+                assertFalse(e.sessionRejected)
+                // The fallback must not claim a revocation that did not happen.
+                assertEquals("Desktop request failed (403).", e.message)
+            } finally { bare.close() }
         }
     }
 

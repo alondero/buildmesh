@@ -65,7 +65,11 @@ class BuildmeshViewModel(application: Application) : AndroidViewModel(applicatio
                     api!!.restore()
                     store.save(api!!.session())
                 } catch (e: Exception) {
-                    if (e is ApiException && e.unauthorized) unauthorized()
+                    // `/api/session` is the credential boundary: it answers 401 or
+                    // 403 for a credential it will not re-mint, so either one means
+                    // this phone must pair again. A network failure says nothing
+                    // about the credential and keeps it.
+                    if (e is ApiException && e.credentialRefused) unauthorized()
                     else mutableState.update { it.copy(error = "Cannot reach the desktop. Check that Buildmesh is running and your network or VPN is connected.") }
                 }
             }
@@ -152,7 +156,9 @@ class BuildmeshViewModel(application: Application) : AndroidViewModel(applicatio
             } catch (e: CancellationException) { throw e
             } catch (e: Exception) {
                 if (owner == generation) {
-                    if (e is ApiException && e.unauthorized) unauthorized()
+                    // A data route that answers 403 refused this request; the
+                    // device is still paired (issue #2317).
+                    if (e is ApiException && e.sessionRejected) unauthorized()
                     else mutableState.update { it.copy(error = friendlyError(e)) }
                 }
             } finally { if (owner == generation) {
@@ -165,7 +171,8 @@ class BuildmeshViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun notice(message: String) { mutableState.update { it.copy(notice = message) } }
     fun report(e: Exception) {
-        if (e is ApiException && e.unauthorized) unauthorized()
+        // Polling reads are data routes too: a 403 belongs in the error slot.
+        if (e is ApiException && e.sessionRejected) unauthorized()
         else mutableState.update { it.copy(error = friendlyError(e)) }
     }
     fun dismissError() { mutableState.update { it.copy(error = "", notice = "") } }
