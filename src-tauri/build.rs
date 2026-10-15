@@ -42,6 +42,19 @@ fn main() {
 
     println!("cargo:rustc-env=GIT_SHA={}", git_sha);
 
+    // The shard runner refuses a Buildmesh library test executable that does
+    // not carry this stamp. Cargo keys a shared target by package metadata, so
+    // another worktree's unchanged files can look fresh and its executable is
+    // what `cargo test --no-run` reports (issue #2339). The manifest directory
+    // is stable for one worktree and different for another, and the runner
+    // hashes it with the same FNV-1a.
+    println!("cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR");
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+    println!(
+        "cargo:rustc-env=BUILDMESH_ARTIFACT_OWNER={}",
+        artifact_owner_stamp(&manifest_dir)
+    );
+
     // rust-embed for the mobile bundle resolves its `folder` path at
     // compile time. Make sure the directory exists even on a fresh
     // checkout where `npm run build` has not yet run, so cargo build
@@ -78,4 +91,13 @@ fn main() {
     }
 
     tauri_build::build()
+}
+
+fn artifact_owner_stamp(manifest_dir: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in manifest_dir.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("buildmesh-artifact-owner-{hash:016x}")
 }

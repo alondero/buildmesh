@@ -17,8 +17,10 @@
       `React.act is not a function`.
     * Runs vitest with --pool=threads — the default forks pool silently times out
       every worker in a worktree and reports PASS(0) FAIL(0) exit 0 (false green).
-    * Runs cargo from src-tauri so Cargo loads its local config and ts-rs keeps
-      generated bindings under src/types/generated.
+    * Runs the Rust suite through scripts/rust-test-shards.mjs. The runner
+      compiles inside src-tauri, so ts-rs keeps bindings under
+      src/types/generated, and a shared src-tauri/target cannot execute
+      another worktree's test binary (issue #2339).
 
   A leaked npm_config_omit=dev has usually already done its damage before this
   script runs: `npm ci` / `npm install` honour it and install no devDependencies,
@@ -28,7 +30,7 @@
   Situational escalations NOT applied by default (add the flag if you hit them):
     -CleanRust         cargo clean -p buildmesh first (incremental stale binary:
                        new #[test] fns don't run, count looks unchanged)
-    -SerialRust        cargo test -- --test-threads=1. Diagnostic only, not a
+    -SerialRust        one libtest thread per process. Diagnostic only, not a
                        fix: every DB-backed test installs its own database for
                        its own thread (issue #2048), so the suite is
                        parallel-safe. Reach for this to tell an ordering-
@@ -38,7 +40,7 @@
 .PARAMETER Target
   unit | integration | rust | docs | all | all-ts  (default: all)
 
-  all    = agent checks + frontend build + unit + integration + cargo test
+  all    = agent checks + frontend build + unit + integration + Rust shards
            (the default green bar; integration added in issue #1257 to
            match the GitHub Actions quality job)
   all-ts = unit vitest + integration vitest + npm run build (full TS
@@ -308,30 +310,37 @@ function Invoke-BundleBudget {
 }
 
 function Invoke-Rust {
-  Write-Host '== rust (cargo test) ==' -ForegroundColor Cyan
+  Write-Host '== rust (shard runner) ==' -ForegroundColor Cyan
   # BUILDMESH_PREFILL is cleared once, for this process, by Clear-LeakedEnv
   # before any gate runs — not here, so the rust gate cannot be the only place
   # that knows the leak exists.
-  # Run inside src-tauri so Cargo loads its .cargo/config.toml. In particular,
-  # this keeps ts-rs output in src/types/generated instead of creating a
-  # root-level bindings/ directory when cargo test is launched from the repo.
+  # The shard runner compiles inside src-tauri, so Cargo loads its
+  # .cargo/config.toml and ts-rs writes src/types/generated. It also copies
+  # test binaries out of a shared target and rebuilds this repo's packages
+  # when they belong to another worktree (issue #2339). A direct cargo test
+  # against that target can still run the other worktree's binary.
   Push-Location (Join-Path $repo 'src-tauri')
   # Same PowerShell-5.1 NativeCommandError trap as Invoke-Unit: cargo's
   # "   Compiling …" progress lines arrive on stderr and would otherwise
   # become terminating errors under the script-wide `Stop` preference.
-  # Locally downgrade for the cargo invocation; pass/fail still tracks
+  # Locally downgrade for the invocation; pass/fail still tracks
   # $LASTEXITCODE so a real test failure surfaces as a rust failure.
   $prevPref = $ErrorActionPreference
+  $previousThreads = $env:BUILDMESH_RUST_TEST_THREADS
   try {
     $ErrorActionPreference = 'Continue'
     if ($CleanRust) {
       & cargo clean -p buildmesh
     }
-    $cargoArgs = @('test', '--locked')
-    if ($SerialRust) { $cargoArgs += @('--', '--test-threads=1') }
-    & cargo @cargoArgs
+    if ($SerialRust) { $env:BUILDMESH_RUST_TEST_THREADS = '1' }
+    & node (Join-Path $repo 'scripts/rust-test-shards.mjs')
   } finally {
     $ErrorActionPreference = $prevPref
+    if ($null -eq $previousThreads) {
+      Remove-Item Env:\BUILDMESH_RUST_TEST_THREADS -ErrorAction SilentlyContinue
+    } else {
+      $env:BUILDMESH_RUST_TEST_THREADS = $previousThreads
+    }
     Pop-Location
   }
   if ($LASTEXITCODE -ne 0) { $script:failed += 'rust' }

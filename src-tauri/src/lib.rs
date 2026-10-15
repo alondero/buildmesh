@@ -29,6 +29,9 @@ mod startup;
 mod windowing;
 pub mod worktree_blockers;
 
+#[cfg(test)]
+mod artifact_owner;
+
 use tauri::Manager;
 
 /// Handle the private external-crash-watchdog CLI before Tauri initialises.
