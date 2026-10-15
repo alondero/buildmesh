@@ -614,7 +614,7 @@ describe('MeshItem', () => {
 
     await waitFor(() => expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1));
     expect(useToastStore.getState().notifications[0].action).toEqual({
-      kind: 'mesh-sync-failure', path: MESH.path, meshName: MESH.name, detail,
+      kind: 'mesh-sync-failure', path: MESH.path, meshName: MESH.name, detail, refsFetched: true,
     });
     expect(useToastStore.getState().toasts[0].severity).toBe('warning');
   });

@@ -79,6 +79,7 @@ describe('sync failures in Needs attention', () => {
   const SYNC_ACTION = {
     kind: 'mesh-sync-failure' as const, path: '/repos/mesh-a', meshName: 'mesh-a',
     detail: 'Fetched 1 new commit but fast-forward failed: not possible to fast-forward',
+    refsFetched: true,
   };
 
   it('names the mesh and its reason, and counts it as needing attention', async () => {
@@ -90,6 +91,22 @@ describe('sync failures in Needs attention', () => {
     expect(within(card).getByText('mesh-a')).toBeTruthy();
     expect(within(card).getByText(/fast-forward failed/)).toBeTruthy();
     expect(within(card).getByText('/repos/mesh-a')).toBeTruthy();
+    // Fetched, so upstream state is known and the mesh is genuinely behind.
+    expect(within(card).getByText('Behind upstream — the fetched commits were not applied')).toBeTruthy();
+  });
+
+  it('does not claim the mesh is behind when the fetch never ran', async () => {
+    // A network outage on an already-current mesh must not be reported as
+    // confirmed lag: the backend never contacted upstream, so it established
+    // nothing about this mesh's position.
+    addToast('Git sync', 'mesh-a: Fetch failed: could not resolve host', 'error',
+      { ...SYNC_ACTION, detail: 'Fetch failed: could not resolve host', refsFetched: false });
+    render(<><NotificationButton /><ProbePanel /></>);
+    fireEvent.click(screen.getByRole('button', { name: 'Open Notifications' }));
+
+    const card = await screen.findByTestId('sync-attention-/repos/mesh-a');
+    expect(within(card).getByText('Upstream not checked — the fetch did not run')).toBeTruthy();
+    expect(within(card).queryByText(/Behind upstream/)).toBeNull();
   });
 
   it('retries the sync from the card and clears it once the mesh syncs', async () => {

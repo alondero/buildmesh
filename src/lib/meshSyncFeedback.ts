@@ -103,8 +103,8 @@ export interface SyncTarget {
   path: string;
 }
 
-function syncAction(target: SyncTarget, detail: string): MeshSyncNotificationAction {
-  return { kind: 'mesh-sync-failure', path: target.path, meshName: target.name, detail };
+function syncAction(target: SyncTarget, detail: string, refsFetched: boolean): MeshSyncNotificationAction {
+  return { kind: 'mesh-sync-failure', path: target.path, meshName: target.name, detail, refsFetched };
 }
 
 /** How loudly to report. A command that syncs N meshes reports the problems in
@@ -115,13 +115,15 @@ export interface ReportOptions {
   silent?: boolean;
 }
 
-/** Record a sync that left the mesh behind. The detail is the backend's own
- *  wording, never a UI reconstruction — the reason a pull was skipped (a dirty
- *  path, diverged history, a timeout) is the thing the user cannot otherwise
- *  see, and it is only known on the Rust side. `severity` is the caller's
- *  classification, so a bulk sync reports each mesh at its own level. */
-export function raiseSyncAttention(target: SyncTarget, detail: string, severity: ToastSeverity = 'warning', options?: ReportOptions): void {
-  addToast(SYNC_PROVIDER, `${target.name}: ${detail}`, severity, syncAction(target, detail), options);
+/** Record a sync that left the mesh behind. Takes the result rather than a
+ *  pre-digested message and severity: the card's detail is the backend's own
+ *  wording (the reason a pull was skipped — a dirty path, diverged history, a
+ *  timeout — is only known on the Rust side), and its severity and
+ *  `refsFetched` both derive from that same result, so passing them separately
+ *  would only create a way for the wording and the state claim to disagree. */
+export function raiseSyncAttention(target: SyncTarget, result: GitSyncResult, options?: ReportOptions): void {
+  addToast(SYNC_PROVIDER, `${target.name}: ${result.message}`, classifySyncResult(result).severity,
+    syncAction(target, result.message, result.fetched), options);
 }
 
 /** Publish what one completed sync did to a mesh, for rows to react to. Two
@@ -161,7 +163,7 @@ export function outcomeOf(result: GitSyncResult): SyncOutcome {
 export function reportMeshSync(target: SyncTarget, result: GitSyncResult): SyncFeedback {
   const feedback = classifySyncResult(result);
   if (feedback.unresolved) {
-    raiseSyncAttention(target, result.message, feedback.severity);
+    raiseSyncAttention(target, result);
   } else {
     addToast(SYNC_PROVIDER, `${target.name}: ${result.message}`, feedback.severity);
   }
@@ -178,7 +180,7 @@ export function reportMeshSync(target: SyncTarget, result: GitSyncResult): SyncF
 export function reportSyncError(target: SyncTarget, error: unknown, options?: ReportOptions): SyncFeedback {
   const detail = error instanceof Error ? error.message : String(error);
   addToast(SYNC_PROVIDER, `${target.name}: Sync failed: ${detail}`, 'error',
-    syncAction(target, detail), options);
+    syncAction(target, detail, false), options);
   return { severity: 'error', unresolved: true, verified: false };
 }
 

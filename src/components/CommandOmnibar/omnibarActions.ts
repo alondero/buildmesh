@@ -139,7 +139,7 @@ export async function gitSyncAllMeshes(meshes: Mesh[]): Promise<void> {
       const feedback = classifySyncResult(result);
       if (feedback.unresolved) {
         (result.status === 'failed' ? failed : behind).push(mesh.name);
-        raiseSyncAttention(target, result.message, feedback.severity, SILENT);
+        raiseSyncAttention(target, result, SILENT);
         // A partial run fetches without fast-forwarding, so the row's cached
         // behind-count is stale even though nothing was verified or resolved.
         noteSyncOutcome(target, outcomeOf(result));

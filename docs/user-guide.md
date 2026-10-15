@@ -432,9 +432,20 @@ the fetch failed, the fast-forward was refused because your local changes
 would be overwritten, your branch has diverged, or the pull timed out — a card
 also appears in **Needs attention** in the Notifications probe (the bell in the
 title bar), naming the mesh, the reason, and its path. That card stays until a
-later sync succeeds, and its **Retry sync** button re-runs the sync for you. A
-mesh whose sync fails keeps its `↓N` badge lit, so the marker you were looking
-at and the reason it stayed are explained together.
+later sync succeeds, and its **Retry sync** button re-runs the sync for you.
+
+What the card claims depends on how far the sync got. When the commits were
+fetched but the fast-forward did not apply, the mesh is definitely behind and
+the card says so. When the fetch itself never reached the remote, upstream was
+not checked at all, and the card says that instead — a network outage does not
+mean your mesh fell behind.
+
+A mesh whose sync could not finish also shows the sync retry icon next to its
+name, and that icon stays until a sync succeeds — click it to retry. It is
+separate from the `↓N` marker, which shows how far behind upstream the branch
+is and appears only when that number is above zero. After a failed fetch the
+count is whatever it was last known to be, so the two can disagree: the icon
+says the last sync did not finish, while `↓N` reports the last confirmed count.
 
 Meshes that currently have at least one open agent node sit at the top of
 the sidebar under an **Active** label, in your own drag order; every other

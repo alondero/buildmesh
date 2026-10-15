@@ -90,7 +90,7 @@ describe('notification history', () => {
 // 30-second reconciliation were allowed to touch it the user's problem would
 // silently self-heal seconds after being reported.
 describe('mesh sync failures alongside worktree problems', () => {
-  const syncAction = { kind: 'mesh-sync-failure' as const, path: '/repos/mesh-a', meshName: 'mesh-a', detail: 'Fetch failed: network down' };
+  const syncAction = { kind: 'mesh-sync-failure' as const, path: '/repos/mesh-a', meshName: 'mesh-a', detail: 'Fetch failed: network down', refsFetched: false };
 
   beforeEach(() => {
     useToastStore.setState({ toasts: [], notifications: [], worktreeRevision: 0, cleanupError: null, cleanupLoading: false });
@@ -138,6 +138,17 @@ describe('mesh sync failures alongside worktree problems', () => {
 
   it('rehydrates a persisted sync failure as needing attention', () => {
     const restored = restoreNotifications([{ id: 1, provider: SYNC, message: 'mesh-a: Fetch failed', createdAt: 1, read: false, action: syncAction }]);
+    expect(restored).toHaveLength(1);
+    expect(needsAttention(restored[0])).toBe(true);
+    expect(restored[0].action).toEqual(syncAction);
+  });
+
+  it('restores a pre-`refsFetched` record as unverified rather than dropping it', () => {
+    // Written by a build that predates the field. Dropping it would silently
+    // lose an unresolved problem; defaulting it to `true` would make the card
+    // claim the mesh is behind upstream on a failed fetch that never checked.
+    const { refsFetched: _dropped, ...legacy } = syncAction;
+    const restored = restoreNotifications([{ id: 1, provider: SYNC, message: 'mesh-a: Fetch failed', createdAt: 1, read: false, action: legacy }]);
     expect(restored).toHaveLength(1);
     expect(needsAttention(restored[0])).toBe(true);
     expect(restored[0].action).toEqual(syncAction);

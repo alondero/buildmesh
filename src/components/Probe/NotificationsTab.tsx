@@ -45,20 +45,30 @@ function AttentionCard({ title, notice, subject, detail, path, status, action, t
   </article>;
 }
 
-/** A mesh that did not reach upstream state. Retrying from here is the point of
+/** A mesh whose manual sync did not finish. Retrying from here is the point of
  *  putting it in this section: the sync runs through the same `runMeshSync` the
  *  sidebar uses, and a success resolves this very card. The local `pending`
- *  state disables the button for the duration of one IPC round trip. */
+ *  state disables the button for the duration of one IPC round trip.
+ *
+ *  The status line reports what is actually known. When the fetch ran, the
+ *  commits are here and the working tree did not move, so the mesh is
+ *  definitively behind. When it did not — a fetch failure, or an unusable
+ *  repository — upstream was never contacted, and a mesh that was already
+ *  current must not be described as behind on the strength of a network
+ *  outage. */
 function SyncAttentionCard({ notice }: { notice: Notification & { action: MeshSyncNotificationAction } }) {
   const [pending, setPending] = useState(false);
   const action = notice.action;
+  const status = pending ? 'Retrying…'
+    : action.refsFetched ? 'Behind upstream — the fetched commits were not applied'
+      : 'Upstream not checked — the fetch did not run';
   return <AttentionCard
     title="Sync from upstream incomplete"
     notice={notice}
     subject={action.meshName}
     detail={action.detail}
     path={action.path}
-    status={pending ? 'Retrying…' : 'The mesh is still behind upstream'}
+    status={status}
     testId={`sync-attention-${action.path}`}
     action={<button type="button" className="notification-resolve" disabled={pending}
       aria-label={`Retry sync for ${action.meshName}`}

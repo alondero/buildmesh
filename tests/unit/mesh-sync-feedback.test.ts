@@ -74,7 +74,7 @@ describe('reporting a manual sync', () => {
     reportMeshSync(MESH, result('partial', detail));
     const [notice] = useToastStore.getState().notifications;
     expect(needsAttention(notice)).toBe(true);
-    expect(notice.action).toEqual({ kind: 'mesh-sync-failure', path: MESH.path, meshName: MESH.name, detail });
+    expect(notice.action).toEqual({ kind: 'mesh-sync-failure', path: MESH.path, meshName: MESH.name, detail, refsFetched: true });
     // The reason is the whole point: a diverged history and a dirty path are
     // different recoveries, and the UI has no way to invent that text.
     expect(notice.message).toContain('fast-forward failed');
@@ -212,9 +212,12 @@ describe('runMeshSync', () => {
 });
 
 describe('raiseSyncAttention', () => {
+  const failed = (message: string) => result('failed', message);
+  const partial = (message: string) => result('partial', message);
+
   it('reuses the existing unresolved card for the same mesh instead of stacking duplicates', () => {
-    raiseSyncAttention(MESH, 'Fetch failed: network down');
-    raiseSyncAttention(MESH, 'Fetch failed: still down');
+    raiseSyncAttention(MESH, failed('Fetch failed: network down'));
+    raiseSyncAttention(MESH, failed('Fetch failed: still down'));
     const attention = useToastStore.getState().notifications.filter(needsAttention);
     expect(attention).toHaveLength(1);
     expect(attention[0].action).toMatchObject({ detail: 'Fetch failed: still down' });
@@ -223,9 +226,21 @@ describe('raiseSyncAttention', () => {
   it('records the problem without a visible toast when asked to be silent', () => {
     // The bulk command shows ONE summary toast; the per-mesh problems exist in
     // Needs attention only, or a dozen of them would overflow the toast stack.
-    raiseSyncAttention(MESH, 'Fetch failed: network down', 'error', { silent: true });
+    raiseSyncAttention(MESH, failed('Fetch failed: network down'), { silent: true });
     expect(useToastStore.getState().toasts).toHaveLength(0);
     expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1);
+  });
+
+  it('records whether the fetch ran, so the card need not overclaim', () => {
+    // A partial run fetched, so upstream state IS known and the card may say
+    // the mesh is behind. A failed fetch never reached the remote, so it must
+    // not claim lag it never established.
+    raiseSyncAttention(MESH, partial('Fetched 1 new commit but fast-forward failed: diverged'));
+    raiseSyncAttention({ name: 'other', path: '/repos/other' }, failed('Fetch failed: network down'));
+    const byName = new Map(useToastStore.getState().notifications
+      .filter(needsAttention).map(n => [n.action?.kind === 'mesh-sync-failure' ? n.action.meshName : '', n.action]));
+    expect(byName.get(MESH.name)).toMatchObject({ refsFetched: true });
+    expect(byName.get('other')).toMatchObject({ refsFetched: false });
   });
 
   it('still shows a toast when a silent record has no action to file it under', () => {

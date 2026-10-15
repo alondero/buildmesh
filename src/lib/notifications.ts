@@ -12,13 +12,22 @@ export interface WorktreeNotificationAction {
  *  either the fetch failed or the commits arrived but the working-tree
  *  fast-forward did not apply. Carries the mesh's identity so the card names
  *  which mesh is behind instead of only reporting a git message, and the
- *  backend's own wording as `detail` so the surface never invents a reason. */
+ *  backend's own wording as `detail` so the surface never invents a reason.
+ *
+ *  `refsFetched` is what separates the two failure shapes, and the card says
+ *  different things for each. A `Partial` run fetched, so the mesh really is
+ *  behind and the card can say so. A `Failed` run did not reach the remote, so
+ *  the upstream state was never established — a network outage on an
+ *  already-current mesh must not be reported as confirmed lag. */
 export interface MeshSyncNotificationAction {
   kind: 'mesh-sync-failure';
   /** The Mesh's DB-canonical path (the key both sync entry points sync on). */
   path: string;
   meshName: string;
   detail: string;
+  /** Whether the fetch ran. Records persisted before this field existed are
+   *  restored as `false`, the reading that claims nothing. */
+  refsFetched: boolean;
   resolution?: string;
 }
 
@@ -86,7 +95,11 @@ function restoreAction(value: unknown): NotificationAction | null {
   if (a.kind === 'mesh-sync-failure') {
     return typeof a.path === 'string' && typeof a.meshName === 'string'
       && typeof a.detail === 'string'
-      ? { kind: 'mesh-sync-failure', path: a.path, meshName: a.meshName, detail: a.detail, resolution: a.resolution as string | undefined }
+      // A record written before `refsFetched` existed restores as `false`: the
+      // card then reports the outcome without claiming the mesh is behind,
+      // which is the reading that cannot mislead. Dropping the record instead
+      // would lose an unresolved problem the user still has.
+      ? { kind: 'mesh-sync-failure', path: a.path, meshName: a.meshName, detail: a.detail, refsFetched: a.refsFetched === true, resolution: a.resolution as string | undefined }
       : null;
   }
   return null;
