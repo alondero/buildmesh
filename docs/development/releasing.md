@@ -67,6 +67,13 @@ output.)
    release workflow checks that this exact file exists and uses it as the GitHub
    Release body.
 
+   Leave the file ending with a newline. The release workflow loads a note with or
+   without one — it emits its own terminating newline before the closing
+   `$GITHUB_OUTPUT` delimiter — so this is a repository invariant rather than a
+   release-day hazard. `npm run check:docs` fails a versioned note whose last
+   byte is not a line break, which surfaces the mistake in review instead of at
+   the last step of a release.
+
    A long gap between releases is expected on an active branch and is not a
    gate: `tests/agent-infra/release-notes.test.mjs` derives its ceiling from the
    ranges this repository has actually shipped, or from the reachability count

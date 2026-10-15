@@ -240,6 +240,42 @@ route validates text size. Whether the harness can take an initial prompt is
 the rule in services::agent_node, shared with the desktop commands.
 Mobile never races terminal startup by injecting the idea as keystrokes.
 
+## Phone polling lifecycle
+
+`useVisibilityPolling` (`src/mobile/useVisibilityPolling.ts`) is the single owner of
+the phone's foreground refresh cadence: NodeList, NodeOverview, PullRequests and
+CircuitRun all hand it a `refresh` and an interval instead of arming their own timers.
+Its contract has three parts, and each is owned by a specific mechanism rather than by
+caller discipline.
+
+**One chain per instance, disposed on unmount.** The timer, the sequence token and the
+`AbortController` live in the effect's closure, so a mounted screen owns exactly one
+chain and no instance can re-arm or abort another's. Cleanup marks the instance
+disposed *first*, then cancels the pending tick, then aborts the in-flight request; a
+tick that settles afterwards re-arms nothing, invokes nothing, and reports nothing to
+`onError`. `refresh` receives that `AbortSignal` as its second argument and passes it
+to `fetch`, so leaving a screen cancels the request it actually issued instead of
+holding a connection open for a response nobody will read. A cancelled request says
+nothing about the desktop, so NodeList's `isLatest()` check drops it before `onOffline`
+can report an unreachable one.
+
+**Which result may commit.** `refresh` also receives `isLatest()`. A refresh that
+started earlier, or any refresh after disposal, must check it before touching state —
+that is what drops the hung-fetch-during-mobile-suspend response minutes after a fresh
+one landed. Consumers also keep their own mounted/revision check; `isLatest()` is about
+polling order, not about being mounted.
+
+**When the chain runs.** Each tick is a chained `setTimeout` armed only after the
+previous refresh settled, so iterations are `intervalMs` apart rather than overlapping.
+`visibilitychange` and `online` fire exactly one immediate refresh each and then
+re-arm; `hidden` and `offline` cancel the pending tick. Network return can precede
+foreground, so the `online` handler re-arms but defers its request while the document is
+hidden — the single refresh happens on whichever of the two conditions clears last. The
+*first* tick is deliberately not gated on `navigator.onLine`: it is the probe that
+tells the screen whether the desktop is reachable, and `onLine === false` is a hint
+rather than proof. Polling never pauses a live request on the strength of a browser
+hint alone.
+
 ## Phone issue triage
 
 Both phone clients filter open issues by title, number or label. Cards show

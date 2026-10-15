@@ -236,6 +236,73 @@ fn prune_generations(dir: &Path, current: &str) {
     }
 }
 
+#[cfg(unix)]
+fn sync_dir(path: &Path) -> io::Result<()> {
+    fs::File::open(path)?.sync_all()
+}
+#[cfg(not(unix))]
+fn sync_dir(_: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+pub(super) fn protect(path: &Path, directory: bool) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(
+        path,
+        fs::Permissions::from_mode(if directory { 0o700 } else { 0o600 }),
+    )
+}
+
+#[cfg(windows)]
+pub(super) fn protect(path: &Path, directory: bool) -> io::Result<()> {
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            text: *const u16,
+            revision: u32,
+            descriptor: *mut *mut c_void,
+            size: *mut u32,
+        ) -> i32;
+        fn SetFileSecurityW(path: *const u16, information: u32, descriptor: *const c_void) -> i32;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn LocalFree(memory: *mut c_void) -> *mut c_void;
+    }
+    // Protected DACL containing only OWNER RIGHTS; children inherit it.
+    let sddl: Vec<u16> = if directory {
+        "D:P(A;OICI;FA;;;OW)"
+    } else {
+        "D:P(A;;FA;;;OW)"
+    }
+    .encode_utf16()
+    .chain(Some(0))
+    .collect();
+    let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut descriptor = std::ptr::null_mut();
+    unsafe {
+        if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        ) == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let result = SetFileSecurityW(path.as_ptr(), 0x80000004, descriptor);
+        let error = io::Error::last_os_error();
+        LocalFree(descriptor);
+        if result == 0 {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,7 +402,7 @@ mod tests {
     fn old_generations_are_pruned_to_a_bounded_rollback_window() {
         let dir = tempfile::tempdir().unwrap();
         for _ in 0..(RETAINED_GENERATIONS + 4) {
-            load(&dir.path(), &[], true).unwrap();
+            load(dir.path(), &[], true).unwrap();
         }
         let count = fs::read_dir(dir.path())
             .unwrap()
@@ -362,25 +429,150 @@ mod tests {
     }
 
     #[cfg(windows)]
+    fn acl_sddl_script(path: &Path) -> String {
+        format!(
+            "(Get-Acl -LiteralPath {}).Sddl",
+            crate::env::powershell_literal(&path.display().to_string())
+        )
+    }
+
+    #[cfg(windows)]
+    fn powershell(script: &str) -> std::process::Output {
+        crate::process_util::command_no_window("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .output()
+            .unwrap()
+    }
+
+    #[cfg(windows)]
     #[test]
     fn private_keys_have_a_protected_owner_only_dacl() {
         let dir = tempfile::tempdir().unwrap();
         load(dir.path(), &[], false).unwrap();
         for name in ["ca.key.der", "key.der"] {
             let path = current_dir(dir.path()).unwrap().join(name);
-            let script = format!(
-                "(Get-Acl -LiteralPath '{}').Sddl",
-                path.display().to_string().replace('\'', "''")
-            );
-            let output = crate::process_util::command_no_window("powershell.exe")
-                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-                .output()
-                .unwrap();
+            let output = powershell(&acl_sddl_script(&path));
             assert!(output.status.success(), "ACL inspection failed");
             let descriptor = String::from_utf8_lossy(&output.stdout);
             assert!(
                 descriptor.trim_end().ends_with("D:P(A;;FA;;;OW)"),
                 "unexpected ACL: {descriptor}"
+            );
+        }
+    }
+
+    /// PowerShell accepts U+2018..U+201B as string delimiters, so an ACL probe
+    /// over such a path must still carry the exact path (#2286). The parser
+    /// check adds what the run below only implies: the literal *is* the path.
+    #[cfg(windows)]
+    #[test]
+    fn acl_scripts_quote_ascii_and_smart_apostrophes() {
+        const DRIVER: &str = r##"param($dir)
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+foreach ($file in (Get-ChildItem -LiteralPath $dir -Filter 'script-*.ps1' | Sort-Object Name)) {
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput(
+        [IO.File]::ReadAllText($file.FullName), [ref]$tokens, [ref]$errors)
+    if ($errors.Count -ne 0) {
+        [Console]::Error.WriteLine($file.Name + ': ' + $errors[0].Message)
+        exit 3
+    }
+    $constants = @($ast.FindAll(
+        { param($node) $node -is [System.Management.Automation.Language.StringConstantExpressionAst] },
+        $true) | Where-Object {
+            # 39/34 are the opening quote characters: a bare word such as the
+            # `.Sddl` member name is a string constant too.
+            [int]$_.Extent.Text[0] -eq 39 -or [int]$_.Extent.Text[0] -eq 34
+        })
+    if ($constants.Count -eq 0) {
+        [Console]::Error.WriteLine($file.Name + ': no quoted string constant')
+        exit 4
+    }
+    [Console]::Out.WriteLine($constants[$constants.Count - 1].Value)
+}
+"##;
+        let root = tempfile::tempdir().unwrap();
+        let apostrophes = ["'", "\u{2018}", "\u{2019}", "\u{201a}", "\u{201b}"];
+        let paths: Vec<std::path::PathBuf> = apostrophes
+            .iter()
+            .map(|apostrophe| {
+                root.path()
+                    .join(format!("don{apostrophe}t"))
+                    .join("key.der")
+            })
+            .collect();
+        // Windows PowerShell 5.1 decodes a BOM-less script file as ANSI, which
+        // would mangle the smart apostrophes before the parser ever sees them.
+        let bom = "\u{feff}";
+        for (index, path) in paths.iter().enumerate() {
+            fs::write(
+                root.path().join(format!("script-{index}.ps1")),
+                format!("{bom}{}", acl_sddl_script(path)),
+            )
+            .unwrap();
+        }
+        fs::write(root.path().join("driver.ps1"), DRIVER).unwrap();
+        let output = crate::process_util::command_no_window("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                &root.path().join("driver.ps1").to_string_lossy(),
+                &root.path().to_string_lossy(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "PowerShell rejected the ACL scripts: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let literals: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        let expected: Vec<String> = paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect();
+        assert_eq!(literals, expected);
+    }
+
+    /// The parser evidence above proves the literal; this proves `Get-Acl`
+    /// resolves it to a real file, over one PowerShell process for all cases.
+    #[cfg(windows)]
+    #[test]
+    fn acl_scripts_resolve_paths_holding_smart_apostrophes() {
+        let root = tempfile::tempdir().unwrap();
+        let apostrophes = ["'", "\u{2018}", "\u{2019}", "\u{201a}", "\u{201b}"];
+        let mut scripts = Vec::new();
+        for (index, apostrophe) in apostrophes.iter().enumerate() {
+            let directory = root.path().join(format!("don{apostrophe}t-{index}"));
+            fs::create_dir(&directory).unwrap();
+            let key = directory.join("key.der");
+            fs::write(&key, b"der").unwrap();
+            scripts.push(acl_sddl_script(&key));
+        }
+        let script = format!(
+            "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n{}",
+            scripts.join("\n"),
+        );
+        let output = powershell(&script);
+        assert!(
+            output.status.success(),
+            "PowerShell rejected the ACL scripts: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let reported = String::from_utf8_lossy(&output.stdout);
+        let descriptors: Vec<&str> = reported.lines().collect();
+        assert_eq!(descriptors.len(), scripts.len());
+        for (descriptor, apostrophe) in descriptors.iter().zip(apostrophes) {
+            assert!(
+                descriptor.contains("D:"),
+                "no descriptor for {apostrophe:?}: {descriptor}"
             );
         }
     }
@@ -407,71 +599,4 @@ mod tests {
             );
         }
     }
-}
-
-#[cfg(unix)]
-fn sync_dir(path: &Path) -> io::Result<()> {
-    fs::File::open(path)?.sync_all()
-}
-#[cfg(not(unix))]
-fn sync_dir(_: &Path) -> io::Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
-pub(super) fn protect(path: &Path, directory: bool) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(
-        path,
-        fs::Permissions::from_mode(if directory { 0o700 } else { 0o600 }),
-    )
-}
-
-#[cfg(windows)]
-pub(super) fn protect(path: &Path, directory: bool) -> io::Result<()> {
-    use std::ffi::c_void;
-    use std::os::windows::ffi::OsStrExt;
-    #[link(name = "advapi32")]
-    unsafe extern "system" {
-        fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            text: *const u16,
-            revision: u32,
-            descriptor: *mut *mut c_void,
-            size: *mut u32,
-        ) -> i32;
-        fn SetFileSecurityW(path: *const u16, information: u32, descriptor: *const c_void) -> i32;
-    }
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn LocalFree(memory: *mut c_void) -> *mut c_void;
-    }
-    // Protected DACL containing only OWNER RIGHTS; children inherit it.
-    let sddl: Vec<u16> = if directory {
-        "D:P(A;OICI;FA;;;OW)"
-    } else {
-        "D:P(A;;FA;;;OW)"
-    }
-    .encode_utf16()
-    .chain(Some(0))
-    .collect();
-    let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    let mut descriptor = std::ptr::null_mut();
-    unsafe {
-        if ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl.as_ptr(),
-            1,
-            &mut descriptor,
-            std::ptr::null_mut(),
-        ) == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        let result = SetFileSecurityW(path.as_ptr(), 0x80000004, descriptor);
-        let error = io::Error::last_os_error();
-        LocalFree(descriptor);
-        if result == 0 {
-            return Err(error);
-        }
-    }
-    Ok(())
 }

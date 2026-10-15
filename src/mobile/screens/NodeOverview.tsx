@@ -91,10 +91,12 @@ export default function NodeOverview({
     };
   }, []);
   const refresh = useCallback(
-    async (isLatest: () => boolean) => {
+    async (isLatest: () => boolean, signal?: AbortSignal) => {
       const version = eventVersion.current;
       try {
-        const nodes = await listNodes();
+        // `signal` is the polling hook's dispose signal (issue #1576):
+        // an unmounted screen cancels its own in-flight status read.
+        const nodes = await listNodes(signal);
         if (!active.current || !isLatest() || version !== eventVersion.current)
           return;
         const current = nodes.find((n) => n.id === initial.id);

@@ -1619,6 +1619,79 @@ describe("NodeList", () => {
     }
   });
 
+  it("aborts its in-flight poll on unmount instead of reporting the desktop offline (issue #1576)", async () => {
+    // The disposal half of the polling lifecycle, proven at the fetch
+    // boundary rather than at the hook: navigating away mid-request
+    // must cancel the request NodeList actually issued, must not ask
+    // for another one, and must NOT route the resulting AbortError to
+    // `onOffline` — a cancelled request says nothing about the desktop.
+    vi.useFakeTimers();
+    const signals: Array<AbortSignal | null | undefined> = [];
+    let nodesCalls = 0;
+    const fetch = vi.fn().mockImplementation(
+      (url: string, init?: RequestInit) => {
+        if (url.includes("/api/nodes")) {
+          nodesCalls += 1;
+          signals.push(init?.signal ?? null);
+          // Never settles on its own: like a real request, only the
+          // caller's abort ends it.
+          return new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => {
+              reject(new DOMException("Aborted", "AbortError"));
+            });
+          });
+        }
+        const body = url.includes("/api/meshes")
+          ? [mesh]
+          : url.includes("/api/ws-ticket")
+            ? { ticket: "events" }
+            : [];
+        return Promise.resolve({ ok: true, status: 200, json: async () => body });
+      },
+    );
+    vi.stubGlobal("fetch", fetch);
+    const onOffline = vi.fn();
+
+    const drain = async () => {
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+    };
+
+    try {
+      const mounted = render(
+        <NodeList
+          onOpenNode={noop}
+          onOpenAgentNodes={noop}
+          onOpenIssues={noop}
+          onOffline={onOffline}
+          onAuthFailed={noop}
+        />,
+      );
+      await drain();
+      expect(nodesCalls).toBe(1);
+      expect(signals[0]?.aborted).toBe(false);
+
+      mounted.unmount();
+      // The request NodeList issued is cancelled, not abandoned.
+      expect(signals[0]?.aborted).toBe(true);
+
+      await drain();
+      expect(onOffline).not.toHaveBeenCalled();
+
+      // And the disposed screen never asks again.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30000);
+      });
+      await drain();
+      expect(nodesCalls).toBe(1);
+      expect(onOffline).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("treats a network failure as offline", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("network")));
     const onOffline = vi.fn();
