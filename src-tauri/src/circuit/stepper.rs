@@ -1241,6 +1241,141 @@ pub enum Effect {
     },
 }
 
+/// Closed journal vocabulary for an effect that claims a `circuit_effects`
+/// row before dispatch. Continuation, nudge, close, status, and notify keep
+/// their own policies and are not members.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectJournal {
+    Spawn,
+    Prompt,
+    Github,
+}
+
+/// How one effect is persisted with the transition that emits it.
+/// Adding an [`Effect`] variant means choosing one of these here; the worker
+/// must not grow a second copy of the mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectPersistence<'a> {
+    /// Claim `circuit_effects` before any external dispatch.
+    Journal {
+        node_id: &'a str,
+        kind: EffectJournal,
+    },
+    /// Committed in the same SQLite transaction as the completed step.
+    /// There is no remote dispatch window.
+    AgentStatus { node_id: &'a str, status: &'a str },
+    /// No `circuit_effects` row. `node_id` is absent only for [`Effect::Notify`].
+    Unjournaled { node_id: Option<&'a str> },
+}
+
+/// Which live agent, if any, a prompt-bearing effect snapshots before dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnBoundaryAgent<'a> {
+    /// `InjectPty`: the step's resolved target agent.
+    ResolvedTarget(&'a str),
+    /// `SpawnAgentNode`: the agent already attached to the step.
+    Attached(&'a str),
+    /// `ContinueAgentTurn` or `NudgeIdleAgent`: the effect names the agent.
+    Named(i64),
+}
+
+impl Effect {
+    /// The one Effect-to-node and Effect-to-journal mapping.
+    pub fn persistence(&self) -> EffectPersistence<'_> {
+        match self {
+            Self::SpawnAgentNode { node_id } => EffectPersistence::Journal {
+                node_id,
+                kind: EffectJournal::Spawn,
+            },
+            Self::InjectPty { node_id, .. } => EffectPersistence::Journal {
+                node_id,
+                kind: EffectJournal::Prompt,
+            },
+            Self::CallGithub { node_id, .. } => EffectPersistence::Journal {
+                node_id,
+                kind: EffectJournal::Github,
+            },
+            Self::SetNodeStatus {
+                node_id, status, ..
+            } => EffectPersistence::AgentStatus { node_id, status },
+            Self::ContinueAgentTurn { node_id, .. }
+            | Self::NudgeIdleAgent { node_id, .. }
+            | Self::CloseAgentNode { node_id, .. } => EffectPersistence::Unjournaled {
+                node_id: Some(node_id),
+            },
+            Self::Notify { .. } => EffectPersistence::Unjournaled { node_id: None },
+        }
+    }
+
+    /// Blueprint step this effect acts on. Notify is run-scoped and has none.
+    pub fn step_node_id(&self) -> Option<&str> {
+        match self.persistence() {
+            EffectPersistence::Journal { node_id, .. }
+            | EffectPersistence::AgentStatus { node_id, .. } => Some(node_id),
+            EffectPersistence::Unjournaled { node_id } => node_id,
+        }
+    }
+
+    /// Journal kind, when this effect claims a `circuit_effects` row.
+    pub fn journal_kind(&self) -> Option<EffectJournal> {
+        match self.persistence() {
+            EffectPersistence::Journal { kind, .. } => Some(kind),
+            _ => None,
+        }
+    }
+
+    /// Step to fail when dispatch returns an error.
+    ///
+    /// `SetNodeStatus` is excluded: its write already committed with the
+    /// transition, so a later effect's failure must not reopen it. Notify
+    /// has no step.
+    pub fn dispatch_error_step(&self) -> Option<&str> {
+        match self.persistence() {
+            EffectPersistence::AgentStatus { .. }
+            | EffectPersistence::Unjournaled { node_id: None } => None,
+            EffectPersistence::Journal { node_id, .. }
+            | EffectPersistence::Unjournaled {
+                node_id: Some(node_id),
+            } => Some(node_id),
+        }
+    }
+
+    /// Synchronous cleanup that the completing transition emits and that
+    /// must still run after that transition's commit. InjectPty is absent
+    /// on purpose: it would start new work after the run has finished.
+    pub fn allowed_while_completing(&self) -> bool {
+        matches!(
+            self,
+            Self::Notify { .. } | Self::SetNodeStatus { .. } | Self::CloseAgentNode { .. }
+        )
+    }
+
+    /// Agent whose report revision is snapshotted before this effect runs.
+    pub fn turn_boundary_agent(&self) -> Option<TurnBoundaryAgent<'_>> {
+        match self {
+            Self::InjectPty { node_id, .. } => Some(TurnBoundaryAgent::ResolvedTarget(node_id)),
+            Self::SpawnAgentNode { node_id } => Some(TurnBoundaryAgent::Attached(node_id)),
+            Self::ContinueAgentTurn {
+                target_agent_id, ..
+            }
+            | Self::NudgeIdleAgent {
+                target_agent_id, ..
+            } => Some(TurnBoundaryAgent::Named(*target_agent_id)),
+            _ => None,
+        }
+    }
+
+    /// Run-context prefix for a delivery that is claimed before dispatch
+    /// (`continuation` or `nudge`). Other effects have none.
+    pub fn delivery_prefix(&self) -> Option<&'static str> {
+        match self {
+            Self::ContinueAgentTurn { .. } => Some("continuation"),
+            Self::NudgeIdleAgent { .. } => Some("nudge"),
+            _ => None,
+        }
+    }
+}
+
 /// Everything one `advance` call decided: the step-row writes and the
 /// side-effecting actions. The caller applies writes first (atomically),
 /// then executes effects.
