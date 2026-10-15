@@ -26,8 +26,8 @@ import type { ProbeTab, ViewMode } from '../../stores/uiStore';
 import type { SpawnOption } from '../../lib/groups';
 import { currentTheme, setTheme, type ThemeName } from '../../lib/theme';
 import { mapBackendProviders } from '../../lib/groups';
-import { addToast, useToastStore } from '../../stores/toastStore';
-import { classifySyncResult, raiseSyncAttention, reportSyncError, SYNC_PROVIDER } from '../../lib/meshSyncFeedback';
+import { addToast } from '../../stores/toastStore';
+import { classifySyncResult, noteSyncVerified, raiseSyncAttention, reportSyncError, SYNC_PROVIDER } from '../../lib/meshSyncFeedback';
 import * as api from '../../lib/tauri';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { enterMesh, focusNode } from '../../lib/navigation';
@@ -114,34 +114,48 @@ export function runOmnibarCommand(id: string, ctx: OmnibarActionContext): boolea
  *
  * The per-mesh outcomes are classified the same way the sidebar's
  * "Force sync from upstream" classifies them, so a `Partial` result — commits
- * fetched but the fast-forward did not apply — is reported as a problem
- * rather than counted as success. Because N meshes can produce N problems, each
- * one raises its own "Needs attention" item and this function adds a single
- * summary toast on top: with the three-toast cap, per-mesh toasts would hide
- * most of them.
+ * fetched but the fast-forward did not apply — is reported as a problem rather
+ * than counted as success.
+ *
+ * Because N meshes can produce N problems, the per-mesh problems are recorded
+ * SILENTLY (they land in Needs attention and nowhere else) and this function
+ * adds exactly ONE summary toast. N problem toasts would overflow the
+ * three-toast stack, so the meshes the user most needs to know about would be
+ * the ones whose toast had already expired.
  */
 export async function gitSyncAllMeshes(meshes: Mesh[]): Promise<void> {
   // Nothing to sync is not a result. Reporting "Synced 0 meshes" would put a
   // success toast on screen for a run that never touched a repository.
   if (meshes.length === 0) return;
+  const SILENT = { silent: true };
   const failed: string[] = [];
   const behind: string[] = [];
+  const skipped: string[] = [];
+  let synced = 0;
   for (const mesh of meshes) {
+    const target = { name: mesh.name, path: mesh.path };
     try {
       const result = await api.gitSync(mesh.path);
       const feedback = classifySyncResult(result);
       if (feedback.unresolved) {
         (result.status === 'failed' ? failed : behind).push(mesh.name);
-        raiseSyncAttention({ name: mesh.name, path: mesh.path }, result.message, feedback.severity);
+        raiseSyncAttention(target, result.message, feedback.severity, SILENT);
         continue;
       }
-      // A mesh that just synced cleanly resolves its own earlier failure.
-      useToastStore.getState().resolveMeshSyncNotification(mesh.path, 'Synced successfully.');
+      // A mesh with no remote was never contacted. It is neither synced nor
+      // behind, so it is counted separately instead of being reported as a
+      // success the command never achieved.
+      if (!feedback.verified) {
+        skipped.push(mesh.name);
+        continue;
+      }
+      synced += 1;
+      noteSyncVerified(target);
     } catch (error) {
       failed.push(mesh.name);
       // The thrown reason goes into the card, not just the summary: "sync
       // failed" is not actionable and "could not resolve host" is.
-      reportSyncError({ name: mesh.name, path: mesh.path }, error);
+      reportSyncError(target, error, SILENT);
     }
   }
   const problems = [...failed, ...behind];
@@ -149,6 +163,10 @@ export async function gitSyncAllMeshes(meshes: Mesh[]): Promise<void> {
     addToast(SYNC_PROVIDER, problems.length === meshes.length
       ? `No mesh synced: ${problems.join(', ')}`
       : `Sync incomplete for: ${problems.join(', ')}`, 'warning');
+  } else if (skipped.length > 0) {
+    addToast(SYNC_PROVIDER, skipped.length === meshes.length
+      ? `No mesh synced — no remote configured: ${skipped.join(', ')}`
+      : `Synced ${synced} of ${meshes.length} meshes; skipped with no remote: ${skipped.join(', ')}`, 'info');
   } else {
     addToast(SYNC_PROVIDER, `Synced ${meshes.length} mesh${meshes.length === 1 ? '' : 'es'}`, 'success');
   }

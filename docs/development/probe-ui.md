@@ -77,14 +77,16 @@ Failed preferences disable writes, and retries/unmount invalidate stale reads.
 
 ## Notifications
 
-The Notifications Probe puts actionable worktree problems before recent toast
-activity. `toastStore.addToast` captures history in the same transition as the
-visible toast, before the three-toast cap. Dismissal and expiry affect the toast
-stack only. History and read state persist locally; the newest 100 ordinary or
-resolved records are retained alongside all unresolved worktree problems. Mark
-all read and Clear read preserve unresolved problems. The bell prioritizes an
-amber count of unresolved worktrees, otherwise an unread count. Storage failures
-retain the in-memory view.
+The Notifications Probe puts actionable problems before recent toast activity.
+`toastStore.addToast` captures history in the same transition as the visible
+toast, before the three-toast cap — unless the caller asks for a silent record
+(one summary toast instead of one per problem). Dismissal and expiry affect the
+toast stack only. History and read state persist locally; the newest 100
+ordinary or resolved records are retained alongside every unresolved actionable
+problem of any kind. Mark all read and Clear read preserve unresolved problems.
+The bell prioritizes an amber count of unresolved problems — blocked worktree
+cleanups and incomplete mesh syncs alike — otherwise an unread count. Storage
+failures retain the in-memory view.
 
 Worktree failure events record an actionable notification without opening the
 recovery dialog. Resolve refreshes the live queue and opens the existing cleanup
@@ -104,13 +106,23 @@ different ways. A **blocked worktree cleanup** is the queue-backed kind: only th
 reconciliation may close it, so that inference is confined to
 `worktree-cleanup` actions and never touches another kind. A **mesh sync that did
 not complete** is the transient kind: `lib/meshSyncFeedback` classifies
-`GitSyncResult.status` into a toast severity, and `Partial` / `Failed` (never
-`Skipped` — a mesh with no remote is a valid local-only setup) raise an item
-whose Retry button re-runs the sync through the same path the sidebar uses. A
-sync that later succeeds resolves that item; its resolution deliberately does not
-bump the worktree revision, because it is not newer evidence about the queue.
+`GitSyncResult.status` into a toast severity, and `Partial` / `Failed` raise an
+item whose Retry button re-runs the sync through the same path the sidebar uses.
+`Skipped` — a mesh with no remote, a valid local-only setup — does neither: it
+raises nothing, and it does not resolve an earlier failure either, because it
+contacted nothing and so verified nothing. Only a result that *verified* the
+mesh (`Synced`, `UpToDate`) closes its card, and its resolution deliberately does
+not bump the worktree revision, because it is not newer evidence about the queue.
 Both kinds deduplicate by action kind *and* path, since a mesh's root checkout
 can itself be a blocked worktree path.
+
+The sync card's outcome is read back by the sidebar rather than held in it. A
+mesh row derives its failure badge from an unresolved sync item for its own path
+(as well as the spawn-time `mesh-sync-warning` event), so a retry started from
+this probe clears the badge and re-reads the behind count the same way a retry
+from the row does. A command that syncs many meshes at once records its
+per-mesh problems silently — they land here and nowhere else — and shows one
+summary toast, because N problem toasts would overflow the three-toast stack.
 
 The destination uses the standard Probe shell, tool rail and 240–720px resize
 bounds. Its toolbar and footer stay pinned around one inner scroller; diagnostic

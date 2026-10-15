@@ -19,6 +19,7 @@ import {
 } from '@dnd-kit/sortable';
 import { MeshItem } from '../../src/components/Sidebar/MeshItem';
 import { needsAttention } from '../../src/lib/notifications';
+import { reportMeshSync, useMeshSyncCompletion } from '../../src/lib/meshSyncFeedback';
 import { useToastStore } from '../../src/stores/toastStore';
 import type { Mesh } from '../../src/stores/meshStore';
 import type { AgentNode } from '../../src/stores/agentNodeStore';
@@ -191,6 +192,9 @@ describe('MeshItem', () => {
     // for every sync, so it has to be reset between tests or one test's sync
     // failure is the next test's "Needs attention" item.
     useToastStore.setState({ toasts: [], notifications: [], worktreeRevision: 0, cleanupError: null, cleanupLoading: false });
+    // Also the published-completion store: a test that leaves a completion
+    // behind would make the next test's row clear a badge it never lit.
+    useMeshSyncCompletion.setState({ completions: {} });
   });
 
   // RTL doesn't auto-unmount in this vitest setup, so the previous
@@ -677,6 +681,68 @@ describe('MeshItem', () => {
     await userEvent.click(screen.getByText('Force sync from upstream'));
 
     await waitFor(() => expect(screen.queryByLabelText(/^Sync failed for /)).toBeNull());
+  });
+
+  it('clears the badge when a sync the row did not start is verified', async () => {
+    // The spawn-time warning and the row's cached behind-count are local to
+    // this component, so a retry run from the Notifications probe would leave
+    // both stale. The row reacts to the published completion instead.
+    renderMeshItem();
+    await act(async () => {
+      await emit('mesh-sync-warning', {
+        node_id: 10,
+        mesh_path: MESH.path,
+        outcome: 'fetch_failed',
+        new_commits: null,
+        pr_number: null,
+        head_ref: null,
+        expected_sha: null,
+        actual_sha: null,
+        fallback_base_ref: null,
+        head_repo_owner: null,
+        head_repo_clone_url: null,
+        message: 'fetch failed: network down',
+      });
+    });
+    await screen.findByLabelText(/^Sync failed for /);
+
+    const readsBefore = vi.mocked(invoke).mock.calls.filter(c => c[0] === 'get_git_branch_status').length;
+    await act(async () => { reportMeshSync({ name: MESH.name, path: MESH.path }, {
+      fetched: true, pulled: true, new_commits: 2, message: 'Pulled 2 new commits', status: 'synced',
+    }); });
+
+    await waitFor(() => expect(screen.queryByLabelText(/^Sync failed for /)).toBeNull());
+    // …and the behind-count is re-read, not left showing the pre-sync value.
+    await waitFor(() => expect(vi.mocked(invoke).mock.calls.filter(c => c[0] === 'get_git_branch_status').length)
+      .toBeGreaterThan(readsBefore));
+  });
+
+  it('keeps the badge lit when a sync the row did not start only skipped the mesh', async () => {
+    renderMeshItem();
+    await act(async () => {
+      await emit('mesh-sync-warning', {
+        node_id: 10,
+        mesh_path: MESH.path,
+        outcome: 'fetch_failed',
+        new_commits: null,
+        pr_number: null,
+        head_ref: null,
+        expected_sha: null,
+        actual_sha: null,
+        fallback_base_ref: null,
+        head_repo_owner: null,
+        head_repo_clone_url: null,
+        message: 'fetch failed: network down',
+      });
+    });
+    await screen.findByLabelText(/^Sync failed for /);
+
+    // A mesh with no remote was never contacted, so the earlier failure stands.
+    await act(async () => { reportMeshSync({ name: MESH.name, path: MESH.path }, {
+      fetched: false, pulled: false, new_commits: 0, message: 'No remote configured', status: 'skipped',
+    }); });
+
+    expect(screen.getByLabelText(/^Sync failed for /)).toBeTruthy();
   });
 
   // The card's header: dots + count (no textual status), the colour bar

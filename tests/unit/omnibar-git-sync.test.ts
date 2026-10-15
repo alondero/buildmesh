@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { gitSyncAllMeshes } from '../../src/components/CommandOmnibar/omnibarActions';
 import { needsAttention } from '../../src/lib/notifications';
-import { SYNC_PROVIDER } from '../../src/lib/meshSyncFeedback';
+import { SYNC_PROVIDER, useMeshSyncCompletion } from '../../src/lib/meshSyncFeedback';
 import { useToastStore } from '../../src/stores/toastStore';
 import type { GitSyncResult } from '../../src/types/generated/GitSyncResult';
 import type { Mesh } from '../../src/types/generated/Mesh';
@@ -20,6 +20,7 @@ function sync(message: string, overrides: Partial<GitSyncResult> & Pick<GitSyncR
 beforeEach(() => {
   vi.mocked(invoke).mockReset();
   useToastStore.setState({ toasts: [], notifications: [], worktreeRevision: 0, cleanupError: null, cleanupLoading: false });
+  useMeshSyncCompletion.setState({ completions: {} });
 });
 
 describe('omnibar Git sync across meshes', () => {
@@ -43,12 +44,55 @@ describe('omnibar Git sync across meshes', () => {
     const attention = useToastStore.getState().notifications.filter(needsAttention);
     expect(attention).toHaveLength(2);
     expect(attention[0].action).toMatchObject({ meshName: expect.stringMatching(/^[ab]$/) });
-    // One summary toast, not one per mesh: with a three-toast cap, per-mesh
-    // toasts would hide most of a long list. Every mesh is behind, so the
-    // summary says so outright rather than implying some got through.
-    const summary = useToastStore.getState().toasts.filter(t => !t.message.startsWith('a:') && !t.message.startsWith('b:'));
-    expect(summary).toHaveLength(1);
-    expect(summary[0].message).toBe('No mesh synced: a, b');
+    // ONE toast for the whole run. Both meshes are behind, so the summary says
+    // so outright rather than implying some got through.
+    expect(useToastStore.getState().toasts).toHaveLength(1);
+    expect(useToastStore.getState().toasts[0].message).toBe('No mesh synced: a, b');
+  });
+
+  it('shows one toast for the run, not one per failing mesh', async () => {
+    // The failure mode this prevents: N problems each pushing a toast onto a
+    // three-deep stack, so the meshes the user most needs to know about are the
+    // ones whose toast has already expired.
+    vi.mocked(invoke).mockResolvedValue(sync('Fetch failed: network down', { status: 'failed', fetched: false }));
+    await gitSyncAllMeshes([mesh(1, 'a'), mesh(2, 'b'), mesh(3, 'c'), mesh(4, 'd')]);
+
+    expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(4);
+    const toasts = useToastStore.getState().toasts;
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]).toMatchObject({ provider: SYNC_PROVIDER, severity: 'warning' });
+    expect(toasts[0].message).toBe('No mesh synced: a, b, c, d');
+  });
+
+  it('reports a mesh with no remote as skipped rather than synced', async () => {
+    // A skipped sync contacted nothing, so counting it as synced claims a
+    // result the run never obtained.
+    vi.mocked(invoke).mockResolvedValue(sync('No remote configured', { status: 'skipped', fetched: false }));
+    await gitSyncAllMeshes([mesh(1, 'a'), mesh(2, 'b')]);
+
+    expect(useToastStore.getState().toasts[0].message)
+      .toBe('No mesh synced — no remote configured: a, b');
+    expect(useToastStore.getState().toasts[0].severity).toBe('info');
+  });
+
+  it('counts skipped meshes separately when others really did sync', async () => {
+    vi.mocked(invoke).mockImplementation(async (_cmd, args) => ((args as { path: string }).path === '/repos/a'
+      ? sync('No remote configured', { status: 'skipped', fetched: false })
+      : sync('Pulled 1 new commit', { status: 'synced', pulled: true, new_commits: 1 })));
+    await gitSyncAllMeshes([mesh(1, 'a'), mesh(2, 'b')]);
+
+    expect(useToastStore.getState().toasts[0].message)
+      .toBe('Synced 1 of 2 meshes; skipped with no remote: a');
+  });
+
+  it('does not let a skipped mesh resolve an earlier real failure', async () => {
+    vi.mocked(invoke).mockResolvedValue(sync('Fetch failed: network down', { status: 'failed', fetched: false }));
+    await gitSyncAllMeshes([mesh(1, 'a')]);
+    expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1);
+
+    vi.mocked(invoke).mockResolvedValue(sync('No remote configured', { status: 'skipped', fetched: false }));
+    await gitSyncAllMeshes([mesh(1, 'a')]);
+    expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1);
   });
 
   it('keeps going after one mesh throws and reports it as a failure', async () => {

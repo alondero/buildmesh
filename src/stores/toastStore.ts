@@ -9,13 +9,18 @@ import {
   type Notification, type NotificationAction, type WorktreeNotice,
 } from '../lib/notifications';
 
+export interface AddToastOptions {
+  /** Record the notification without showing a toast. See `addToast`. */
+  silent?: boolean;
+}
+
 interface ToastState {
   toasts: Toast[];
   notifications: Notification[];
   cleanupLoading: boolean;
   cleanupError: string | null;
   worktreeRevision: number;
-  addToast: (provider: string, message: string, severity?: ToastSeverity, action?: NotificationAction) => void;
+  addToast: (provider: string, message: string, severity?: ToastSeverity, action?: NotificationAction, options?: AddToastOptions) => void;
   dismissToast: (id: number) => void;
   dismissExpired: (now: number) => void;
   markNotificationRead: (id: number) => void;
@@ -27,6 +32,15 @@ interface ToastState {
 }
 
 let nextToastId = 0;
+
+/** The unresolved problem, if any, that a repeat of this action should merge
+ *  into rather than stack beside. Keyed by *kind + path*, not path alone: two
+ *  kinds can legitimately name the same directory (a mesh whose root checkout
+ *  is itself the blocked worktree), and collapsing them would drop one
+ *  problem's record into another's. */
+function previousFor(notices: Notification[], action: NotificationAction): Notification | undefined {
+  return notices.find(n => needsAttention(n) && n.action?.kind === action.kind && n.action.path === action.path);
+}
 
 // Storage failure must not prevent the toast or recovery state transition.
 let savedHistory: string | null = null;
@@ -41,18 +55,29 @@ const storage = createJSONStorage(() => ({
 
 export const useToastStore = create<ToastState>()(persist((set) => ({
   toasts: [], notifications: [], cleanupLoading: false, cleanupError: null, worktreeRevision: 0,
-  addToast: (provider, message, severity = 'error', action) => {
+  addToast: (provider, message, severity = 'error', action, options) => {
     const now = Date.now();
     set(state => {
+      // `silent` records the problem in history and in Needs attention without
+      // putting anything on the three-deep toast stack. It is how a command
+      // that syncs N meshes reports N problems without N toasts: the caller
+      // shows one summary instead. Only meaningful with an action — a silent
+      // record with no action would be history nobody ever sees, so the flag
+      // is ignored there and the toast is shown as usual.
+      if (options?.silent && action) {
+        const previous = previousFor(state.notifications, action);
+        const id = previous?.id ?? ++nextToastId;
+        const notice: Notification = { id, provider, message, createdAt: now, severity, read: false, action };
+        return {
+          notifications: limitNotifications([notice, ...state.notifications.filter(n => n.id !== id)]),
+          worktreeRevision: state.worktreeRevision + (isWorktreeCleanup(action) ? 1 : 0),
+        };
+      }
       const incoming = { id: ++nextToastId, provider, message, createdAt: now, severity };
       const merged = dedupToasts(state.toasts, incoming, now, TOAST_DEDUP_TTL_MS);
       const toast = merged.find(t => t.createdAt === now && createToastKey(t) === createToastKey(incoming))!;
-      // An unresolved problem is deduplicated by *kind + path*, not path
-      // alone: two different kinds can legitimately name the same directory
-      // (a mesh whose root checkout is itself the blocked worktree), and
-      // collapsing them would drop one problem's record into another's.
       const previous = action
-        ? state.notifications.find(n => needsAttention(n) && n.action?.kind === action.kind && n.action.path === action.path)
+        ? previousFor(state.notifications, action)
         : state.notifications.find(n => !n.action && n.id === toast.id);
       const id = previous?.id ?? (state.notifications.some(n => n.id === toast.id) ? ++nextToastId : toast.id);
       const notice: Notification = { ...toast, id, message, read: false, action };
@@ -127,8 +152,8 @@ export const useToastStore = create<ToastState>()(persist((set) => ({
   },
 }));
 
-export function addToast(provider: string, message: string, severity?: ToastSeverity, action?: NotificationAction): void {
-  useToastStore.getState().addToast(provider, message, severity, action);
+export function addToast(provider: string, message: string, severity?: ToastSeverity, action?: NotificationAction, options?: AddToastOptions): void {
+  useToastStore.getState().addToast(provider, message, severity, action, options);
 }
 
 export function dismissToast(id: number): void {

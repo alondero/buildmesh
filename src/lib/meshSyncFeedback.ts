@@ -10,11 +10,37 @@
 // (when the mesh was left behind) a "Needs attention" notification.
 
 import { addToast, useToastStore } from '../stores/toastStore';
+import { create } from 'zustand';
 import { gitSync } from './tauri';
 import type { GitSyncResult } from '../types/generated/GitSyncResult';
 import type { GitSyncStatus } from '../types/generated/GitSyncStatus';
 import type { MeshSyncNotificationAction } from './notifications';
 import type { ToastSeverity } from './toastUtils';
+
+/** Per-mesh "this mesh has just been verified in sync", with a counter so a
+ *  repeat is a new event rather than an equal one.
+ *
+ *  The sidebar row's failure badge and cached behind-count are component-local,
+ *  and a sync can now be run from two places the row knows nothing about — this
+ *  probe's Retry button, and the omnibar's bulk command. Without a published
+ *  completion, a retry from the card would resolve the notification while the
+ *  row beside it kept a lit badge and a stale count for a mesh that is
+ *  demonstrably in sync. */
+interface MeshSyncCompletion {
+  revision: number;
+}
+
+interface MeshSyncCompletionState {
+  completions: Record<string, MeshSyncCompletion>;
+  noteCompletion: (path: string) => void;
+}
+
+export const useMeshSyncCompletion = create<MeshSyncCompletionState>()(set => ({
+  completions: {},
+  noteCompletion: path => set(s => ({
+    completions: { ...s.completions, [path]: { revision: (s.completions[path]?.revision ?? 0) + 1 } },
+  })),
+}));
 
 /** Toast/notification provider label. Matches the omnibar command's wording
  *  so the two paths are visibly the same subsystem in the notification list. */
@@ -28,14 +54,19 @@ export interface SyncFeedback {
    *  unresolved: a Mesh with no remote is a valid local-only setup, and
    *  nagging about it would train the user to ignore the section. */
   unresolved: boolean;
+  /** The backend actually established that the mesh is in sync. `skipped` is
+   *  neither unresolved nor verified: nothing was checked, so an earlier
+   *  failure must NOT be marked resolved by it, and a summary that counted it
+   *  as synced would claim a result the command never obtained. */
+  verified: boolean;
 }
 
 const FEEDBACK: Record<GitSyncStatus, SyncFeedback> = {
-  synced: { severity: 'success', unresolved: false },
-  up_to_date: { severity: 'info', unresolved: false },
-  skipped: { severity: 'info', unresolved: false },
-  partial: { severity: 'warning', unresolved: true },
-  failed: { severity: 'error', unresolved: true },
+  synced: { severity: 'success', unresolved: false, verified: true },
+  up_to_date: { severity: 'info', unresolved: false, verified: true },
+  skipped: { severity: 'info', unresolved: false, verified: false },
+  partial: { severity: 'warning', unresolved: true, verified: false },
+  failed: { severity: 'error', unresolved: true, verified: false },
 };
 
 /** Classifies a sync result. Pure, so the severity table is pinned by tests
@@ -61,13 +92,36 @@ function syncAction(target: SyncTarget, detail: string): MeshSyncNotificationAct
   return { kind: 'mesh-sync-failure', path: target.path, meshName: target.name, detail };
 }
 
+/** How loudly to report. A command that syncs N meshes reports the problems in
+ *  Needs attention but shows ONE summary toast, so it records its per-mesh
+ *  problems silently rather than putting N entries on a three-deep stack where
+ *  the last ones would be invisible anyway. */
+export interface ReportOptions {
+  silent?: boolean;
+}
+
 /** Record a sync that left the mesh behind. The detail is the backend's own
  *  wording, never a UI reconstruction — the reason a pull was skipped (a dirty
  *  path, diverged history, a timeout) is the thing the user cannot otherwise
  *  see, and it is only known on the Rust side. `severity` is the caller's
  *  classification, so a bulk sync reports each mesh at its own level. */
-export function raiseSyncAttention(target: SyncTarget, detail: string, severity: ToastSeverity = 'warning'): void {
-  addToast(SYNC_PROVIDER, `${target.name}: ${detail}`, severity, syncAction(target, detail));
+export function raiseSyncAttention(target: SyncTarget, detail: string, severity: ToastSeverity = 'warning', options?: ReportOptions): void {
+  addToast(SYNC_PROVIDER, `${target.name}: ${detail}`, severity, syncAction(target, detail), options);
+}
+
+/** Record that this mesh has just been verified in sync. Two effects, in one
+ *  place, because both belong to the same fact and both entry points (a
+ *  row-initiated sync and a card-initiated retry) must produce them:
+ *  - resolves an earlier "Needs attention" item for it, so a fixed mesh does
+ *    not keep a card describing a problem it no longer has;
+ *  - publishes the completion so the sidebar row clears its own failure badge
+ *    and re-reads the cached behind-count even though it did not run the sync.
+ *
+ *  Called only for a result that actually *verified* the mesh. A skipped sync
+ *  checked nothing, so it must not clear a real failure. */
+export function noteSyncVerified(target: SyncTarget): void {
+  useToastStore.getState().resolveMeshSyncNotification(target.path, 'Synced successfully.');
+  useMeshSyncCompletion.getState().noteCompletion(target.path);
 }
 
 /** Report one manual sync: always a toast, plus a "Needs attention" item when
@@ -77,25 +131,25 @@ export function reportMeshSync(target: SyncTarget, result: GitSyncResult): SyncF
   const feedback = classifySyncResult(result);
   if (feedback.unresolved) {
     raiseSyncAttention(target, result.message, feedback.severity);
-    return feedback;
+  } else {
+    addToast(SYNC_PROVIDER, `${target.name}: ${result.message}`, feedback.severity);
   }
-  addToast(SYNC_PROVIDER, `${target.name}: ${result.message}`, feedback.severity);
-  // A sync that just succeeded is the resolution of any earlier failure for
-  // the same mesh. Without this the "Needs attention" card would outlive the
-  // problem it describes — it is only ever cleared by a later good sync or by
-  // the user dismissing it.
-  useToastStore.getState().resolveMeshSyncNotification(target.path, 'Synced successfully.');
+  // Only a result that *verified* the mesh clears the card. A skipped sync
+  // checked nothing — a Mesh with no remote would otherwise "resolve" a real
+  // failure it never retested, silently dropping the one durable problem the
+  // user had. See `SyncFeedback.verified`.
+  if (feedback.verified) noteSyncVerified(target);
   return feedback;
 }
 
 /** Report a sync that never produced a result — the IPC rejected (the command
  *  could not even open the repo) or the promise threw. Treated exactly like a
  *  failed sync: the mesh is still behind and the user is still owed the reason. */
-export function reportSyncError(target: SyncTarget, error: unknown): SyncFeedback {
+export function reportSyncError(target: SyncTarget, error: unknown, options?: ReportOptions): SyncFeedback {
   const detail = error instanceof Error ? error.message : String(error);
   addToast(SYNC_PROVIDER, `${target.name}: Sync failed: ${detail}`, 'error',
-    syncAction(target, detail));
-  return { severity: 'error', unresolved: true };
+    syncAction(target, detail), options);
+  return { severity: 'error', unresolved: true, verified: false };
 }
 
 /** Run a manual sync and report it. The single entry point behind the sidebar's
