@@ -729,13 +729,16 @@ fn slug_with_retry_still_rejects_prose() {
 
 #[test]
 fn slug_with_retry_refuses_a_sentence_rather_than_truncating_it() {
-    // Clamping the words of a sentence would mint a plausible-looking name
-    // that describes nothing: joining these seven words and taking the first
-    // five yields "please-rename-it-to-fix".
+    // Nothing is trimmed out of the model's own words: dropping the tail of a
+    // sentence yields a plausible-looking name that describes nothing, whether
+    // the cut lands on the word count or on the character cap.
     for sentence in [
-        "please rename it to fix auth flow",
-        "could you please rename this node now",
-        "i think the best name would be tidy",
+        "please rename it to fix auth flow",     // seven words
+        "could you please rename this node now", // seven words
+        "i think the best name would be tidy",   // eight words
+        // Five words, but 51 characters once joined: the word count alone lets
+        // this through, so only the cap refuses it.
+        "configuration refactor documentation should mention",
     ] {
         let err = slug_with_retry(sentence).unwrap_err();
         assert!(
@@ -743,10 +746,15 @@ fn slug_with_retry_refuses_a_sentence_rather_than_truncating_it() {
             "expected a refusal for: '{sentence}', got: {err}"
         );
     }
-    // A short word-separated answer is still a name.
+    // A word run inside the range is still normalised, including the ambiguous
+    // short ones — the boundary the user guide states.
     assert_eq!(
         slug_with_retry("fix auth token flow").unwrap(),
         "fix-auth-token-flow"
+    );
+    assert_eq!(
+        slug_with_retry("please rename it").unwrap(),
+        "please-rename-it"
     );
 }
 

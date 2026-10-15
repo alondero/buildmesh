@@ -284,17 +284,23 @@ fn fit_slug(candidate: &str) -> Option<String> {
 }
 
 /// [`fit_slug`] for a candidate built by joining the model's own whitespace
-/// words, and deliberately without its truncation.
+/// words, and deliberately without any of its truncation.
 ///
 /// Such a response is ambiguous in a way a hyphen-joined one is not:
 /// `fix auth token flow` is a name, `please rename it to fix auth flow` is a
 /// sentence, and nothing in the words themselves separates them. Clamping the
-/// second kind mints `please-rename-it-to-fix` — a plausible-looking name that
-/// describes nothing — so a word run past [`MAX_SLUG_TOKENS`] stays
-/// retry-worthy, exactly as it was before length stopped being a refusal
-/// reason for hyphen-joined answers.
+/// second kind mints a plausible-looking name that describes nothing, so the
+/// word count is checked without being enforced by truncation and the character
+/// cap refuses rather than cuts. Both limits are load-bearing: a run past five
+/// words loses its subject, and `configuration refactor documentation should
+/// mention` fits in five words but joins to 51 characters, where cutting would
+/// silently drop the sentence's last word.
+///
+/// A run of [`MIN_SLUG_TOKENS`] to [`MAX_SLUG_TOKENS`] words inside the
+/// character cap is still normalised, which is what this path has always done
+/// for word-separated answers.
 fn fit_spaced_words(candidate: &str) -> Option<String> {
-    if token_count(candidate) > MAX_SLUG_TOKENS {
+    if token_count(candidate) > MAX_SLUG_TOKENS || candidate.len() > MAX_NAME_CHARS {
         return None;
     }
     fit_slug(candidate)
