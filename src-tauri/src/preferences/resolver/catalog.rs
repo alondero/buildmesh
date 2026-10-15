@@ -21,7 +21,7 @@ pub(crate) struct BuiltInProviderAccount {
     /// URL + per-tier model map (issue #568), and for keyed providers that
     /// exist only for the Usage Meter with no first-class inference surface
     /// (e.g. openai). This flag describes the account row; `kimi` the Kimi
-    /// Code CLI Agent Harness is self-auth (`~/.kimi/config.toml`, #918) —
+    /// Code CLI Agent Harness is self-auth (issue #918) —
     /// see the `kimi` row below.
     pub self_auth: bool,
 }
