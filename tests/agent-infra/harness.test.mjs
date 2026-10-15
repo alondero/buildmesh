@@ -388,7 +388,10 @@ test('evaluation accepts a listed isolated pass and still rejects an unlisted fl
 
 test('the Rust shard runner records targets and reruns library and integration failures separately', async t => {
   const fixture = repo(t);
-  for (const path of ['scripts/rust-test-shards.mjs', 'scripts/harness-test-failures.mjs', 'scripts/ci/rust-shards.mjs']) fixture.put(path, readFileSync(join(root, path)));
+  // The runner imports the shared bounded drain from the CI guard, so the
+  // fixture needs that script too: a module it cannot resolve would crash the
+  // gate this test is asserting the outcome of.
+  for (const path of ['scripts/rust-test-shards.mjs', 'scripts/harness-test-failures.mjs', 'scripts/ci/rust-shards.mjs', 'scripts/ci/run-guarded.mjs']) fixture.put(path, readFileSync(join(root, path)));
   fixture.put('.github/workflows/verify.yml', 'jobs:\n  rust-tests:\n    strategy:\n      matrix:\n        shard:\n          - label: fixture\n            args: ""\n    steps:\n');
   fixture.put('src-tauri/Cargo.toml', '[package]\nname="harness-fixture"\nversion="0.1.0"\nedition="2021"\n');
   const tests = '#[test] fn transient() { assert!(std::env::args().any(|arg| arg == "--exact")); }\n#[test] fn sibling() {}\n';

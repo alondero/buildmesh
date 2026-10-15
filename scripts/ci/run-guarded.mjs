@@ -109,6 +109,29 @@ export function killTree(pid, killGraceMs) {
   return { escalated };
 }
 
+// Bounded drain: wait for the streams to end so buffered output reaches
+// the log, but never longer than `capMs` — a descendant that inherited
+// the pipe and outlived the child would otherwise hold the caller open
+// forever. Returns the cap timer so the caller can clear it once the
+// drain completes early.
+//
+// The `readableEnded` guard matters because a stream can reach EOF and
+// emit `end` before the child's `exit` event is processed, in which case
+// a freshly attached listener would never fire.
+export function drainBounded(streams, capMs, onDrained) {
+  let pending = 0;
+  for (const stream of streams) {
+    if (stream.readableEnded || stream.destroyed) continue;
+    pending += 1;
+    stream.once('end', () => { if (--pending === 0) onDrained(); });
+  }
+  if (pending === 0) {
+    onDrained();
+    return null;
+  }
+  return setTimeout(onDrained, capMs).unref();
+}
+
 export function runGuarded({ minutes, killGraceSeconds, log, label, command, cwd, env, output = chunk => process.stdout.write(chunk) }) {
   const deadlineMs = minutes * 60_000;
   const killGraceMs = killGraceSeconds * 1000;
@@ -139,12 +162,14 @@ export function runGuarded({ minutes, killGraceSeconds, log, label, command, cwd
     // Set when the deadline fires; the exit handler awaits it before
     // finishing so SIGKILL always gets its chance to clear the tree.
     let escalated = Promise.resolve();
+    let drainTimer = null;
 
     const finish = (code) => {
       if (settled) return;
       settled = true;
       clearTimeout(deadline);
       clearTimeout(overallCap);
+      clearTimeout(drainTimer);
       if (logFd != null) {
         try { closeSync(logFd); } catch { /* already closed */ }
         logFd = null;
@@ -157,24 +182,11 @@ export function runGuarded({ minutes, killGraceSeconds, log, label, command, cwd
       resolve(code);
     };
 
-    // Bounded drain: wait for the streams to end so buffered output reaches
-    // the log, but never longer than drainCapMs — a descendant that inherited
-    // the pipe and outlived the guard would otherwise hold this open forever.
-    // The `readableEnded` guard matters because a stream can reach EOF and
-    // emit `end` before the child's `exit` event is processed, in which case
-    // a freshly attached listener would never fire.
+    // Output the command left in the pipes is collected with the same bounded
+    // drain the shard runner uses, so a descendant that outlived the guard
+    // cannot hold this open either.
     const drainAndFinish = (code) => {
-      let pending = 0;
-      for (const stream of [child.stdout, child.stderr]) {
-        if (stream.readableEnded || stream.destroyed) continue;
-        pending += 1;
-        stream.once('end', () => { if (--pending === 0) finish(code); });
-      }
-      if (pending === 0) {
-        finish(code);
-        return;
-      }
-      setTimeout(() => finish(code), drainCapMs).unref();
+      drainTimer = drainBounded([child.stdout, child.stderr], drainCapMs, () => finish(code));
     };
 
     child.stdout.on('data', emit);
