@@ -112,10 +112,31 @@ root rotation requires fresh pairing. No system CA installation is needed.
 `POST /api/pair` exchanges the invitation for the existing HttpOnly
 `bm_session` cookie. The app stores origin, CA and cookie in an atomic,
 AES-GCM-encrypted private file; its key lives in Android Keystore. Cloud backup
-and device transfer exclude app data. A restored client calls `/api/session`;
-401/403 returns to pairing, while network failure retains the session for retry.
-Desktop Authorized Devices remains the revocation authority. **Forget this
-desktop** clears this phone's credential; it does not revoke the server record.
+and device transfer exclude app data. Desktop Authorized Devices remains the
+revocation authority. **Forget this desktop** clears this phone's credential;
+it does not revoke the server record.
+
+Which failures may clear that credential is narrow, because the desktop's two
+auth statuses mean different things (issue #2317). A 401 is the desktop's
+verdict on the credential — `auth::authorize` answered because no valid device
+token was presented — so a 401 from a data route, or a 401/403 from the
+`/api/session` restore that re-presents it, returns the phone to pairing. A 403
+is a request the desktop refused *after* the device authenticated (a PR create
+naming a node from another mesh, a route outside the credential's scope), so it
+becomes an ordinary error message and the stored session survives. A network
+failure is not a verdict on the credential and retains it for retry.
+
+There is deliberately no recovery refresh here. The browser client re-mints its
+cookie from a separate `localStorage` token because the browser hides that
+HttpOnly cookie from JavaScript
+([mobile.md](mobile.md#session-cookie-recovery)); the cookie stored on the phone
+*is* the device token, and `/api/session` mints that same token back, so
+re-minting hands the device the credential it already presented and does not
+recover a rejected one. The sockets follow the same split: a refused WebSocket
+upgrade (403 for a ticket minted for another target, 401 for one that expired or
+was already used) reconnects with a fresh ticket rather than revoking the
+device, and `/api/ws-ticket`, which authorizes before it mints, is where a
+revoked device does say so.
 
 Cleartext is permitted only for loopback development and the Android emulator's
 `10.0.2.2` host alias. Remote HTTP invitations, embedded URL credentials,
@@ -146,6 +167,10 @@ Compose owns Overview/Work, mesh selection and search, node details and replies,
 task capture, issue spawning, archive import/resume, changed files, selectable
 diffs, mesh-branch PR creation and connection settings. Launch selections come
 from the backend menu, including saved configurations and capability filtering.
+Tapping an Overview mesh name selects its ID and switches to Work, clearing the
+search and attention filter. Mesh headers summarize open (non-archived) nodes
+with wrapping status dots and a count, independent of dashboard filters. Empty
+mesh names and paths use the muted text token; their actions remain available.
 Drafts persist privately on the phone, scoped to the verified desktop endpoint
 and trusted certificate, until an acknowledged action succeeds. Re-pairing the
 same desktop restores its drafts without exposing them to another desktop.
@@ -217,7 +242,9 @@ one-request transport; terminal WebSockets retain their separate live connection
 ## Verification
 
 JVM tests exercise actual OkHttp requests against MockWebServer: pairing and
-cookie restoration, revocation, redirect rejection, target-bound tickets and
+cookie restoration, revocation, a refused request that must not read as one,
+a refused socket upgrade that mints a fresh ticket, redirect rejection,
+target-bound tickets and
 bounded rate-limit retry, literal input payloads, partial resume, certificate
 pins and hostname verification, invitation validation and Unicode reply limits.
 They are client transport evidence, not proof of the Rust server.
@@ -236,6 +263,9 @@ rendering, visible pixels in the native window, viewport geometry, resize and
 input, including replayed queries that must not become keystrokes.
 Native form tests also exercise capture, replies, issue launch, archive partial
 failure and PR authentication through real OkHttp requests to MockWebServer.
+Session lifecycle tests read the encrypted store back in each case: a 403 from a
+data route keeps it, a 401 from a data route and a 401 or 403 from the restore
+clear it, and an unreachable desktop keeps it.
 These assert literal payloads, retained drafts after failures, and acknowledged
 success. They do not create a real GitHub pull request. Their mocked responses
 and the JVM `WireContractTest` fixtures follow the generated Rust wire types in

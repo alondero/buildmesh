@@ -43,7 +43,13 @@ class RemoteSocket(
                         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) { messages.close(IOException("Connection closed")) }
                         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) { webSocket.close(code, reason) }
                         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                            messages.close(if (response?.code in setOf(401, 403)) ApiException(response!!.code, "Pair this device again.") else t)
+                            // A refused upgrade is this handshake being refused, not a
+                            // revoked device: 403 is a ticket minted for another target,
+                            // 401 a ticket that expired or was already used. Both are
+                            // answered by minting a fresh ticket — which is where a
+                            // revoked device does say so, with a 401 from
+                            // `/api/ws-ticket` (issue #2317).
+                            messages.close(if (response != null) IOException("The desktop refused the socket handshake (${response.code}).") else t)
                         }
                     })
                     socket = attemptSocket
@@ -63,7 +69,10 @@ class RemoteSocket(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    if (e is ApiException && e.unauthorized) {
+                    // `/api/ws-ticket` authorizes before it mints, so its 401 is the
+                    // desktop's verdict on this device. A 403 refuses the mint and
+                    // leaves the pairing alone.
+                    if (e is ApiException && e.sessionRejected) {
                         onUnauthorized()
                         break
                     }
