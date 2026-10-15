@@ -10,6 +10,7 @@ pub mod codex_session;
 pub mod commandcode_session;
 pub mod commandcode_watcher;
 pub mod coordinator_ledger_maintenance;
+pub mod create_operation;
 pub mod fetch_freshness;
 pub mod freebuff_usage;
 pub mod gh_auth_cache;

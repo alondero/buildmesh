@@ -98,6 +98,12 @@ pub enum AgentNodeError {
     /// session (issue #2332). The wrapped string is the user-facing
     /// reason, and no row is inserted.
     UnresumableHarness(String),
+    /// A remote create-and-start operation key (issue #2331) was reused for a
+    /// *different* normalized request. The node INSERT is rolled back, so
+    /// nothing was committed; the caller maps this to 409.
+    OperationKeyConflict {
+        key: String,
+    },
 }
 
 impl std::fmt::Display for AgentNodeError {
@@ -110,6 +116,10 @@ impl std::fmt::Display for AgentNodeError {
             AgentNodeError::InitialPromptUnsupported => write!(f, "{INITIAL_PROMPT_UNSUPPORTED}"),
             AgentNodeError::Backend(e) => write!(f, "{}", e),
             AgentNodeError::UnresumableHarness(e) => write!(f, "{}", e),
+            AgentNodeError::OperationKeyConflict { key } => write!(
+                f,
+                "operation key already used for a different request: {key}"
+            ),
         }
     }
 }
@@ -261,6 +271,7 @@ pub fn create_with_source_pr_fork(
         head_repo_clone_url,
         None,
         None,
+        None,
     )
 }
 
@@ -279,6 +290,7 @@ pub fn create_with_source_pr_fork_configured(
     head_repo_clone_url: Option<&str>,
     configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
     initial_prompt: Option<&str>,
+    operation: Option<&db::CreateOperationBinding>,
 ) -> Result<AgentNode, AgentNodeError> {
     let mesh = db::get_mesh_by_id(mesh_id)?;
     let mut prefs = crate::preferences::load().map_err(AgentNodeError::Backend)?;
@@ -360,23 +372,57 @@ pub fn create_with_source_pr_fork_configured(
     // to Anthropic. Resolution happens at the spawn seam. An absent provider
     // defaults to "anthropic", matching the prior `Provider::Anthropic` default.
 
-    let node = db::create_agent_node_configured(
-        mesh_id,
-        &session_name,
-        path,
-        branch,
-        env_type,
-        &provider_id,
-        worktree_db_name,
-        source_issue,
-        source_pr,
-        source_pr_pinned_sha,
-        use_worktree,
-        head_repo_owner,
-        head_repo_clone_url,
-        worktree_path_owned.as_deref(),
-        configuration.as_ref(),
-    )?;
+    // Issue #2331: when the caller supplies a remote operation key, the key
+    // binding shares this INSERT's transaction, so a lost response can never
+    // orphan a node and a retry can never double-create one. `Replayed` means
+    // a concurrent duplicate already bound this key — return that node rather
+    // than this transaction's (rolled-back) row.
+    let node = match operation {
+        Some(binding) => match db::create_agent_node_with_operation(
+            mesh_id,
+            &session_name,
+            path,
+            branch,
+            env_type,
+            &provider_id,
+            worktree_db_name,
+            source_issue,
+            source_pr,
+            source_pr_pinned_sha,
+            use_worktree,
+            head_repo_owner,
+            head_repo_clone_url,
+            worktree_path_owned.as_deref(),
+            configuration.as_ref(),
+            binding,
+        ) {
+            Ok(db::CreateAgentNodeOutcome::Created(node)) => node,
+            Ok(db::CreateAgentNodeOutcome::Replayed(node)) => return Ok(node),
+            Err(db::CreateNodeWithOperationError::KeyConflict { key }) => {
+                return Err(AgentNodeError::OperationKeyConflict { key })
+            }
+            Err(db::CreateNodeWithOperationError::Backend { source }) => {
+                return Err(AgentNodeError::Db(source))
+            }
+        },
+        None => db::create_agent_node_configured(
+            mesh_id,
+            &session_name,
+            path,
+            branch,
+            env_type,
+            &provider_id,
+            worktree_db_name,
+            source_issue,
+            source_pr,
+            source_pr_pinned_sha,
+            use_worktree,
+            head_repo_owner,
+            head_repo_clone_url,
+            worktree_path_owned.as_deref(),
+            configuration.as_ref(),
+        )?,
+    };
 
     if let Some(project) = project {
         db::save_project_scope(node.id, &project.relative_folder)?;
@@ -456,6 +502,7 @@ pub fn create_blocking(
         pending,
         None,
         initial_prompt,
+        None,
     )
 }
 
@@ -470,6 +517,7 @@ pub fn create_blocking_configured(
     pending: bool,
     configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
     initial_prompt: Option<&str>,
+    operation: Option<&db::CreateOperationBinding>,
 ) -> Result<AgentNode, AgentNodeError> {
     // 1. Mesh lookup. Map the missing-row case to the typed
     //    `AgentNodeError::MeshNotFound(mesh_id)` variant so the route
@@ -541,6 +589,7 @@ pub fn create_blocking_configured(
             None, // head_repo_clone_url
             configuration,
             initial_prompt,
+            operation,
         )
     }
 }
@@ -725,6 +774,7 @@ fn create_pending_with_source_pr_fork_and_worktree(
         head_repo_clone_url,
         configuration,
         initial_prompt,
+        None,
     )?;
     // Two writes (insert + status update) is one extra ~1ms SQLite round
     // trip. Acceptable: this function is on the fast path, and the second
@@ -2580,6 +2630,7 @@ mod tests {
                 pending,
                 Some(&configuration),
                 None,
+                None,
             )
             .unwrap();
             assert_eq!(node.provider, "codex");
@@ -2607,6 +2658,7 @@ mod tests {
             Some(false),
             false,
             Some(&configuration),
+            None,
             None,
         )
         .unwrap();

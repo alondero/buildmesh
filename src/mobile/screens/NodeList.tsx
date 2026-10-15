@@ -6,6 +6,7 @@ import {
   Provider,
   createNode,
   isAuthError,
+  newOperationKey,
   listCircuitRuns,
   listMeshes,
   listNodes,
@@ -274,15 +275,31 @@ export default function NodeList({
     setPickerMeshId(null);
     setCreating(meshId);
     setError(null);
+    // Issue #2331: one operation key per submission, reused for retries of it,
+    // so a retry after a lost response resolves to the same node instead of
+    // creating a duplicate.
+    const operationKey = newOperationKey();
     try {
-      const node = await createNode({
+      const outcome = await createNode({
         mesh_id: meshId,
         provider: providerId,
         configuration_id: configurationId,
+        operation_key: operationKey,
       });
       if (!mountedRef.current) return;
       setCreating(null);
-      onOpenNode(node);
+      // Every committed outcome carries the node, so the user is sent to it
+      // either way — a node that exists but never started is still their work.
+      if (outcome.outcome !== "active") {
+        setError(
+          `Node created but not started: ${
+            outcome.outcome === "start_failed"
+              ? outcome.start_error
+              : outcome.reason
+          } Open it to retry.`,
+        );
+      }
+      onOpenNode(outcome.node);
     } catch (e) {
       if (!mountedRef.current) return;
       setCreating(null);

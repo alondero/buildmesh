@@ -69,6 +69,17 @@ index:uq_autopilot_circuits_preset_mesh
 CREATE UNIQUE INDEX uq_autopilot_circuits_preset_mesh
             ON autopilot_circuits(mesh_id) WHERE is_preset = 1
 
+table:agent_node_create_operations
+CREATE TABLE agent_node_create_operations (
+            operation_key TEXT PRIMARY KEY,
+            node_id INTEGER NOT NULL REFERENCES agent_nodes(id) ON DELETE CASCADE,
+            request_fingerprint TEXT NOT NULL,
+            start_state TEXT NOT NULL DEFAULT 'created',
+            start_error TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+
 table:agent_node_lifecycle_leases
 CREATE TABLE agent_node_lifecycle_leases (
             node_id INTEGER PRIMARY KEY REFERENCES agent_nodes(id) ON DELETE CASCADE,

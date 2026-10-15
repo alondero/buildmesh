@@ -41,6 +41,33 @@ An initial prompt is a non-empty string after trim. When a create carries one, t
 
 An unknown mesh is `MeshNotFound` for both create and import, including when the request also carries a prompt. HTTP create maps that to 400 "Mesh not found". HTTP import maps it to 404, and any other import failure to 500 — except `UnresumableHarness`, which is a 400 because the request named an executor this build will not resume, and no row was written.
 
+### Remote create-and-start is one retry-safe operation (issue #2331)
+
+`POST /nodes/create` used to be parse → insert → spawn → reload → 200. Every failure *after* the insert answered a bare error, so a phone could not tell "nothing happened" from "a node exists and I lost the response", and a retry meant a second node, a second worktree, and a second process for one idea.
+
+`services::create_operation` now owns the outcome of that sequence; the route parses, invokes, and maps the result to HTTP. The four states are modelled explicitly and every one of them except "nothing committed" carries the node:
+
+| `outcome` | Meaning | HTTP |
+| --- | --- | --- |
+| — (`Err`) | Nothing was committed; the same key may retry | 400 / 409 / 500 |
+| `active` | Node committed, process running | 200 |
+| `start_pending` | Node committed, start never attempted (App not ready, or a restart landed between insertion and startup) | 202 |
+| `start_failed` | Node committed, start failed with an actionable error | 207 |
+
+The `outcome` discriminant — not the status code — is the contract. `start_pending` and `start_failed` are never 200, so a client that only reads the status still cannot mistake a committed-but-unstarted node for a running agent. `node-created` is emitted for *every* committed outcome, so other clients discover partial work instead of waiting for a refresh.
+
+**Phase ordering is load-bearing.** Claim (ledger lookup) → commit (node INSERT + key binding in one transaction) → start (I/O, no DB lock held) → record (durable start state). The key binding shares the INSERT's transaction deliberately: a lost response must never orphan a node that no key can find again, and a duplicate retry must never leave a key bound to a node that rolled back. Start happens *after* the commit and outside the writer mutex, so process work never holds a DB lock (issue #1228).
+
+**Retry identity** lives in `agent_node_create_operations` (schema v50). The client generates an `operation_key` once per submitted idea and reuses it for every retry of that submission. The unique `operation_key` is the concurrency fence: a same-key/same-content retry replays the recorded node, and a same-key/different-content request is a 409 (`request_fingerprint` is the SHA-256 of mesh + harness + configuration id + prompt, length-prefixed so no two field splits collide). Terminal size is deliberately excluded from the fingerprint — it is cosmetic and must not make an honest retry look like a conflict. `ON DELETE CASCADE` retires a key with its node, so a deliberately deleted node cannot leave a key that can never create again.
+
+**Compatibility.** `operation_key` is optional. A client that omits it gets the pre-#2331 behaviour (no ledger row, no replay protection), so an already-installed app is never stranded by a rollout.
+
+**Sibling paths.** Both remote surfaces — `/nodes/create` (coordinator-write) and `/api/nodes/create` (admin) — resolve to the same `Handler::NodesCreate`, so both get this contract from one handler. The desktop and background callers (`commands::agent`, `commands::agent_node`, the Circuit worker) are deliberately exempt: they are in-process, they hold the `AgentNode` they just created, and they report a typed `AgentNodeError` directly. There is no response to lose, so there is nothing for an operation key to protect. They pass `operation: None` and keep the single-insert path.
+
+**Seams.** `AgentStart` (spawn) is a trait used as `&dyn`, so tests can supply a controllable stand-in and assert how many processes were requested. `BlockingWork` (where synchronous DB work runs) is a *type parameter* instead, because its `run` method is generic and a generic method would make the trait object-unsafe; production passes `BlockingPool` (the blocking pool, issue #1380) and tests pass `InlineWork`, because a test's `isolated()` database is installed with `thread_local!` and is invisible from a `spawn_blocking` thread.
+
+**Client behaviour on a committed-but-unstarted node.** Mobile stays on the capture screen and offers the node beside the reason, rather than navigating immediately: `onStarted` unmounts the screen, so jumping to the node would discard the only thing that tells the user what to fix. Android navigates and reports the reason in the same toast.
+
 ### Archive list — durable identity and resumability are separate (issue #1065)
 
 The Archive view (desktop probe tab and mobile `ArchivedNodesScreen`, both fed

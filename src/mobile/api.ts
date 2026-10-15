@@ -28,6 +28,11 @@ export type NodeStatus = SessionStatus;
 import type { CreateNodeRequest } from '../types/generated/CreateNodeRequest';
 export type { CreateNodeRequest };
 
+// Issue #2331 — the create-and-start outcome is generated from the Rust enum
+// so the mobile client cannot drift from the server's `outcome` discriminant.
+import type { CreateNodeOutcome } from '../types/generated/CreateNodeOutcome';
+export type { CreateNodeOutcome };
+
 import type { ApproveCircuitStepRequest } from '../types/generated/ApproveCircuitStepRequest';
 import type { CheckpointRequest } from '../types/generated/CheckpointRequest';
 import type { NodeCircuitRun } from '../types/generated/NodeCircuitRun';
@@ -246,13 +251,44 @@ export const launchConfigurationApi = {
   remove: async (id: string): Promise<void> => { await apiFetch('/api/launch-configurations/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) }); },
 };
 
-export async function createNode(req: CreateNodeRequest): Promise<AgentNode> {
+/**
+ * Create-and-start one agent node (issue #2331).
+ *
+ * The wire answer is a typed *outcome*, not a bare node: the server may have
+ * committed the node row and then failed to start the process, and that is the
+ * single most important thing this function has to tell its caller. Callers
+ * switch on `outcome` — never on the HTTP status — so "committed but not
+ * running" can never be rendered as a running agent.
+ *
+ * `operation_key` makes the call retry-safe. Generate it once per submitted
+ * idea and reuse it for every retry: the server binds it to the node in the
+ * same transaction as the INSERT, so a retry after a lost response returns the
+ * same node instead of creating a second node, worktree, and process.
+ */
+export async function createNode(req: CreateNodeRequest): Promise<CreateNodeOutcome> {
   const resp = await apiFetch("/api/nodes/create", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ rows: 24, cols: 80, ...req }),
   });
   return resp.json();
+}
+
+/**
+ * A retry-safe client identity for one submitted idea.
+ *
+ * Generated with `crypto.randomUUID` so two phones submitting the same text
+ * never collide. The value is opaque to the server — it only has to stay the
+ * same across retries of one submission.
+ */
+export function newOperationKey(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  // Non-secure contexts (older WebViews) have no `randomUUID`. A
+  // timestamp+random key is enough: the server only compares it for equality
+  // against its own ledger, it is not a security token.
+  return `op-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
 // --- Stage 4: review & ship -------------------------------------------------

@@ -56,6 +56,20 @@ fun NodeScreen(node: JsonObject, vm: BuildmeshViewModel, terminal: () -> Unit, c
 fun TaskScreen(state: RemoteState, vm: BuildmeshViewModel, selectedMesh: Long, selectMesh: (Long) -> Unit, openNode: (Long) -> Unit) {
     var prompt by rememberSaveable(state.draftNamespace) { mutableStateOf(vm.draft("capture")) }
     var provider by rememberSaveable(state.draftNamespace) { mutableStateOf("") }
+    // Issue #2331 — one operation key per *submission*, reused for every retry
+    // of it, so a retry after a lost response resolves to the same node instead
+    // of creating a duplicate. Editing the prompt, the mesh, or the launch
+    // configuration starts a new submission, which must mint a fresh key: the
+    // desktop rejects a key reused with different content as a conflict.
+    var operationKey by rememberSaveable(state.draftNamespace) { mutableStateOf("") }
+    var operationFor by rememberSaveable(state.draftNamespace) { mutableStateOf("") }
+    val submission = "$selectedMesh|$provider|$prompt"
+    LaunchedEffect(submission) {
+        if (operationFor != submission) {
+            operationKey = ""
+            operationFor = submission
+        }
+    }
     val options = state.providers.filter { it.text("unavailable_reason").isEmpty() && (prompt.isBlank() || it.objectAt("capabilities")?.flag("supports_prefill") == true) }
     val mesh = state.meshes.firstOrNull { it.number("id") == selectedMesh }
     LaunchedEffect(state.meshes) { if (mesh == null && state.meshes.isNotEmpty()) selectMesh(state.meshes.first().number("id")) }
@@ -70,12 +84,34 @@ fun TaskScreen(state: RemoteState, vm: BuildmeshViewModel, selectedMesh: Long, s
         val fits = prompt.toByteArray(Charsets.UTF_8).size <= 16_000
         if (!fits) Text("The prompt must be at most 16000 bytes.", color = MeshColors.amber)
         Button(shape = MaterialTheme.shapes.small, enabled = !state.busy && mesh != null && provider.isNotEmpty() && fits, onClick = {
+            val key = operationKey.ifEmpty { newOperationKey() }
+            operationKey = key
             vm.action { api ->
-                val node = api.post("/api/nodes/create", createNodeBody(selectedMesh, options.firstOrNull { it.text("id") == provider } ?: error("Choose a launch configuration."), prompt)).obj()
-                vm.acceptNode(node)
-                prompt = ""; vm.saveDraft("capture", "")
-                openNode(node.number("id"))
-                vm.notice("Agent started")
+                val outcome = readCreateNodeOutcome(api.post("/api/nodes/create", createNodeBody(selectedMesh, options.firstOrNull { it.text("id") == provider } ?: error("Choose a launch configuration."), prompt, key)).obj())
+                when (outcome) {
+                    // Running: the draft is done and the new node is the focus.
+                    is CreateNodeOutcome.Active -> {
+                        vm.acceptNode(outcome.node)
+                        operationKey = ""; prompt = ""; vm.saveDraft("capture", "")
+                        openNode(outcome.node.number("id"))
+                        vm.notice("Agent started")
+                    }
+                    // Committed but not running (#2331): the node exists, so
+                    // send the user to it instead of showing the same message
+                    // as "nothing happened", which invited a duplicate retry.
+                    is CreateNodeOutcome.StartPending -> {
+                        vm.acceptNode(outcome.node)
+                        operationKey = ""; prompt = ""; vm.saveDraft("capture", "")
+                        openNode(outcome.node.number("id"))
+                        vm.notice("Node created but not started: ${outcome.reason}")
+                    }
+                    is CreateNodeOutcome.StartFailed -> {
+                        vm.acceptNode(outcome.node)
+                        operationKey = ""; prompt = ""; vm.saveDraft("capture", "")
+                        openNode(outcome.node.number("id"))
+                        vm.notice("Node created but not started: ${outcome.startError}")
+                    }
+                }
             }
         }, modifier = Modifier.fillMaxWidth()) { Text("Start agent") }
         Text("Your draft stays on this phone until the desktop acknowledges the new agent.", style = MaterialTheme.typography.bodySmall, color = MeshColors.secondary)

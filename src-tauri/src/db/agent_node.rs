@@ -901,6 +901,152 @@ pub fn create_agent_node_configured(
     Ok(node)
 }
 
+/// The client-supplied retry identity for one submitted idea (issue #2331).
+///
+/// `key` is generated once by the client and reused for every retry of the
+/// same submission; `fingerprint` is the SHA-256 of the *normalized* request,
+/// so the same key with different content is rejected instead of silently
+/// replaying the first idea's node.
+#[derive(Debug, Clone)]
+pub struct CreateOperationBinding {
+    pub key: String,
+    pub fingerprint: String,
+}
+
+/// The outcome of [`create_agent_node_with_operation`].
+///
+/// Deliberately not `PartialEq`: the interesting comparison in tests is the
+/// node *id* (a retry must resolve to the recorded node, not a fresh row), and
+/// deriving equality on the whole `AgentNode` would invite a tautological
+/// assertion instead.
+#[derive(Debug, Clone)]
+pub enum CreateAgentNodeOutcome {
+    /// This call inserted the node and bound the key to it.
+    Created(AgentNode),
+    /// The key was already bound to this node id with the same fingerprint.
+    /// The node row is returned as it stands; no second row was inserted.
+    Replayed(AgentNode),
+}
+
+/// Create a node and bind a remote operation key to it in one transaction
+/// (issue #2331).
+///
+/// The binding shares the node INSERT's transaction on purpose: a lost
+/// response must never leave a node row that no key can ever find again, and
+/// a duplicate retry must never leave a key bound to a node that rolled back.
+/// Worktree/process creation deliberately stays outside this function — the
+/// writer mutex is held only for the row writes (issue #1228).
+///
+/// Returns [`CreateAgentNodeOutcome::Replayed`] when the key was already bound,
+/// so a retry (or a concurrent duplicate tap) is a read, not a second node.
+/// A same-key/different-content request is a hard conflict: the node INSERT is
+/// rolled back and `Err` is returned so the caller can answer 409.
+#[allow(clippy::too_many_arguments)]
+pub fn create_agent_node_with_operation(
+    mesh_id: i64,
+    name: &str,
+    path: &str,
+    branch: &str,
+    env: EnvType,
+    provider: &str,
+    worktree_name: Option<&str>,
+    source_issue: Option<i64>,
+    source_pr: Option<i64>,
+    source_pr_pinned_sha: Option<&str>,
+    use_worktree: bool,
+    head_repo_owner: Option<&str>,
+    head_repo_clone_url: Option<&str>,
+    worktree_path: Option<&str>,
+    configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
+    operation: &CreateOperationBinding,
+) -> Result<CreateAgentNodeOutcome, CreateNodeWithOperationError> {
+    let env = resolve_spawn_env(provider, worktree_path, use_worktree, env);
+    let snapshot = configuration
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+
+    let mut db = write_conn();
+    let tx = db.transaction()?;
+
+    let node = create_agent_node_configured_inner(
+        &tx,
+        mesh_id,
+        name,
+        path,
+        branch,
+        env,
+        provider,
+        worktree_name,
+        source_issue,
+        source_pr,
+        source_pr_pinned_sha,
+        use_worktree,
+        head_repo_owner,
+        head_repo_clone_url,
+        worktree_path,
+        snapshot.as_deref(),
+    )?;
+
+    match super::create_operation::bind_create_operation_tx(
+        &tx,
+        &operation.key,
+        &operation.fingerprint,
+        node.id,
+    )? {
+        super::create_operation::CreateBindOutcome::Bound { .. } => {
+            tx.commit()?;
+            Ok(CreateAgentNodeOutcome::Created(node))
+        }
+        // Another request already bound this key to the same node. Read the
+        // *recorded* node inside this transaction, then drop it so this request's
+        // duplicate node row rolls back. Reading here rather than after the drop
+        // avoids acquiring a second connection while the writer guard is still
+        // held — the repo's no-nested-connection rule.
+        super::create_operation::CreateBindOutcome::Replay { node_id } => {
+            let existing = get_agent_node_by_id_inner(&tx, node_id)?;
+            drop(tx);
+            Ok(CreateAgentNodeOutcome::Replayed(existing))
+        }
+        // Same key, different content. Roll the node INSERT back so the
+        // rejected request leaves nothing behind.
+        super::create_operation::CreateBindOutcome::Conflict => {
+            Err(CreateNodeWithOperationError::KeyConflict {
+                key: operation.key.clone(),
+            })
+        }
+    }
+}
+
+/// Why [`create_agent_node_with_operation`] refused to create.
+#[derive(Debug)]
+pub enum CreateNodeWithOperationError {
+    /// The key is already bound to a *different* normalized request.
+    KeyConflict { key: String },
+    /// A real database failure (lock, IO, corruption).
+    Backend { source: rusqlite::Error },
+}
+
+impl From<rusqlite::Error> for CreateNodeWithOperationError {
+    fn from(source: rusqlite::Error) -> Self {
+        Self::Backend { source }
+    }
+}
+
+impl std::fmt::Display for CreateNodeWithOperationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::KeyConflict { key } => {
+                write!(
+                    f,
+                    "operation key already used for a different request: {key}"
+                )
+            }
+            Self::Backend { source } => write!(f, "{source}"),
+        }
+    }
+}
+
 /// Resolve the spawn `EnvType` from the harness config, the resolved
 /// worktree path, and the caller-supplied default. Shared by
 /// [`create_agent_node`] and [`create_agent_node_inner`] so the

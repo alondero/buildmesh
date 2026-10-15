@@ -100,6 +100,7 @@ pub(crate) fn create_agent_node_blocking(
         false,
         configuration.as_ref(),
         initial_prompt,
+        /* operation = */ None,
     )
     .map_err(|error| {
         tracing::error!("create_agent_node failed: {}", error);

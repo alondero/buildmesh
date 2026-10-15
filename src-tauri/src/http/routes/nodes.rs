@@ -43,65 +43,211 @@ pub struct CreateNodeRequest {
     #[serde(default)]
     #[ts(optional)]
     pub cols: Option<u16>,
+    /// Client-generated identity for one submitted idea (issue #2331).
+    ///
+    /// Stable across retries of the *same* submission: a phone that lost the
+    /// response reuses it and gets the same node back instead of a duplicate.
+    /// Omitted by older clients, which keep the pre-#2331 behaviour (no
+    /// ledger row, no replay protection) — the two shapes coexist so a
+    /// rollout never strands an already-installed app.
+    #[serde(default)]
+    #[ts(optional)]
+    pub operation_key: Option<String>,
 }
 
+/// Longest accepted client operation key. Bounds the ledger row and rejects
+/// an obviously-not-a-uuid body before it reaches the transaction.
+const OPERATION_KEY_MAX_BYTES: usize = 128;
+
+/// Pre-commit failures raised while preparing a create.
+///
+/// Exists so the saved-configuration error keeps its `Invalid` (400) vs
+/// `Storage` (500) distinction across the blocking-pool hop — `run_blocking`
+/// flattens to `String` and would have blamed the client for a disk failure.
 #[derive(Debug)]
-enum CreateNodeError {
+enum CreateTransportError {
     Configuration(crate::preferences::spawn_configurations::SpawnConfigurationError),
-    Agent(crate::services::agent_node::AgentNodeError),
+    /// The blocking task itself failed.
+    Offload(String),
 }
 
-fn create_node_blocking(
-    mesh_id: i64,
-    provider: &str,
-    configuration_id: Option<&str>,
-    initial_prompt: Option<&str>,
-) -> Result<crate::models::AgentNode, CreateNodeError> {
-    let configuration = crate::preferences::spawn_configurations::resolve_saved(
-        provider,
-        configuration_id.filter(|id| !id.trim().is_empty()),
-    )
-    .map_err(CreateNodeError::Configuration)?;
-    crate::services::agent_node::create_blocking_configured(
-        mesh_id,
-        Some(provider),
-        Some("main"),
-        None,
-        None,
-        None,
-        false,
-        configuration.as_ref(),
-        initial_prompt,
-    )
-    .map_err(CreateNodeError::Agent)
-}
-
-fn map_create_error(error: CreateNodeError) -> Response {
-    match error {
-        CreateNodeError::Configuration(
-            crate::preferences::spawn_configurations::SpawnConfigurationError::Invalid(message),
-        ) => Response::json_error("400 Bad Request", &message),
-        CreateNodeError::Configuration(error) => Response::json_error(
-            "500 Internal Server Error",
-            &format!("Failed to resolve spawn configuration: {error}"),
-        ),
-        CreateNodeError::Agent(crate::services::agent_node::AgentNodeError::MeshNotFound(_)) => {
-            Response::json_error("400 Bad Request", "Mesh not found")
-        }
-        CreateNodeError::Agent(
-            crate::services::agent_node::AgentNodeError::InvalidConfiguration(message),
-        ) => Response::json_error("400 Bad Request", &message),
-        CreateNodeError::Agent(
-            crate::services::agent_node::AgentNodeError::InitialPromptUnsupported,
-        ) => Response::json_error(
-            "400 Bad Request",
-            crate::services::agent_node::INITIAL_PROMPT_UNSUPPORTED,
-        ),
-        CreateNodeError::Agent(error) => Response::json_error(
-            "500 Internal Server Error",
-            &format!("Failed to create node: {error}"),
-        ),
+impl From<String> for CreateTransportError {
+    fn from(message: String) -> Self {
+        Self::Offload(message)
     }
+}
+
+/// Resolve the saved configuration, then hand the whole create-and-start
+/// sequence to the application service (issue #2331).
+///
+/// This function does transport concerns only — parse, resolve, invoke, map.
+/// It must not decide whether a failure means "committed" or "nothing
+/// committed"; that judgement belongs to `services::create_operation`.
+async fn run_create(
+    request: CreateNodeRequest,
+    start: &dyn crate::services::create_operation::AgentStart,
+) -> Response {
+    let mesh_id = request.mesh_id;
+    let prompt = match request.prompt.clone() {
+        Some(text) if text.trim().is_empty() || text.len() > 16_000 => {
+            return Response::json_error(
+                "400 Bad Request",
+                "Idea must contain 1 to 16000 bytes of text",
+            );
+        }
+        other => other,
+    };
+    let provider = match request.provider.as_deref().filter(|p| !p.trim().is_empty()) {
+        Some(provider) => provider.to_string(),
+        None => {
+            // Pre-#2331 contract, preserved: a saved configuration id doubles
+            // as the provider lookup key, so a request carrying only
+            // `configuration_id` still resolves. With neither, the create has
+            // nothing to launch, so answer before any DB work rather than
+            // letting the runner fail with an opaque error.
+            match request
+                .configuration_id
+                .as_deref()
+                .filter(|id| !id.trim().is_empty())
+            {
+                Some(id) => id.to_string(),
+                None => {
+                    return Response::json_error("400 Bad Request", "Provider is required");
+                }
+            }
+        }
+    };
+
+    let operation_key = match request.operation_key.as_deref() {
+        Some(key) if key.trim().is_empty() => {
+            return Response::json_error(
+                "400 Bad Request",
+                "operation_key must not be empty when present",
+            );
+        }
+        Some(key) if key.len() > OPERATION_KEY_MAX_BYTES => {
+            return Response::json_error(
+                "400 Bad Request",
+                &format!("operation_key must be at most {OPERATION_KEY_MAX_BYTES} bytes"),
+            );
+        }
+        other => other.map(str::to_string),
+    };
+
+    // Saved-configuration resolution reads preferences off the async worker,
+    // so it runs on the blocking pool with the rest of the create work.
+    let configuration_provider = provider.clone();
+    let configuration_id = request.configuration_id.clone();
+    let configuration = match crate::commands::run_blocking_typed::<_, CreateTransportError, _>(
+        "http_create_node",
+        move || {
+            crate::preferences::spawn_configurations::resolve_saved(
+                &configuration_provider,
+                configuration_id
+                    .as_deref()
+                    .filter(|id| !id.trim().is_empty()),
+            )
+            .map_err(CreateTransportError::Configuration)
+        },
+    )
+    .await
+    {
+        Ok(configuration) => configuration,
+        // A stored recipe that no longer validates is the caller's 400.
+        Err(CreateTransportError::Configuration(
+            crate::preferences::spawn_configurations::SpawnConfigurationError::Invalid(message),
+        )) => return Response::json_error("400 Bad Request", &message),
+        // A preferences read that failed is ours, not the caller's.
+        Err(CreateTransportError::Configuration(error)) => {
+            return Response::json_error(
+                "500 Internal Server Error",
+                &format!("Failed to resolve spawn configuration: {error}"),
+            )
+        }
+        Err(CreateTransportError::Offload(message)) => {
+            return Response::json_error(
+                "500 Internal Server Error",
+                &format!("Failed to create node: {message}"),
+            )
+        }
+    };
+
+    let outcome = crate::services::create_operation::create_and_start(
+        crate::services::create_operation::CreateAndStartRequest {
+            mesh_id,
+            provider,
+            configuration_id: request.configuration_id.clone(),
+            configuration,
+            prompt,
+            rows: request.rows.unwrap_or(24),
+            cols: request.cols.unwrap_or(80),
+            operation_key,
+        },
+        start,
+        &crate::services::create_operation::BlockingPool,
+    )
+    .await;
+
+    match outcome {
+        Ok(outcome) => {
+            let (status, body) = outcome_response(&outcome);
+            // A committed node must be discoverable by other clients even when
+            // its start failed (#2331) — the old handler emitted this event
+            // only after a *complete* success, so a partially-created node was
+            // invisible until a refresh.
+            if let Some(app) = state::app_handle() {
+                let _ = app.emit(
+                    "node-created",
+                    crate::commands::agent::NodeCreatedPayload {
+                        id: outcome.node().id,
+                    },
+                );
+            }
+            Response::json(status, body)
+        }
+        Err(rejection) => map_create_rejection(rejection),
+    }
+}
+
+/// Map a rejection (nothing committed) onto its status.
+///
+/// A same-key/different-content request is the one 409 here: it is distinct
+/// from every 4xx the shared create runner can raise, because the key — not the
+/// request — is what the client must change.
+fn map_create_rejection(rejection: crate::services::create_operation::CreateRejection) -> Response {
+    use crate::services::create_operation::CreateRejection;
+    let status = match &rejection {
+        CreateRejection::KeyConflict { .. } => "409 Conflict",
+        other if other.is_client_error() => "400 Bad Request",
+        _ => "500 Internal Server Error",
+    };
+    Response::json_error(status, &rejection.message())
+}
+
+/// Serialize a committed outcome.
+///
+/// The status code carries the same signal as the `outcome` discriminant but
+/// is *not* the contract: 202 and 207 are never produced for a running agent,
+/// so a client that only reads the status still cannot mistake a
+/// committed-but-unstarted node for a running one.
+fn outcome_response(
+    outcome: &crate::services::create_operation::CreateNodeOutcome,
+) -> (&'static str, String) {
+    use crate::services::create_operation::CreateNodeOutcome;
+
+    let status = match outcome {
+        CreateNodeOutcome::Active { .. } => "200 OK",
+        // Accepted: the node exists and will be startable — the work is
+        // committed, the process is not running yet.
+        CreateNodeOutcome::StartPending { .. } => "202 Accepted",
+        // Multi-Status is already this repo's "the row landed but a step
+        // failed" signal (see the import-and-resume route).
+        CreateNodeOutcome::StartFailed { .. } => "207 Multi-Status",
+    };
+    (
+        status,
+        serde_json::to_string(outcome).unwrap_or_else(|_| "{}".to_string()),
+    )
 }
 
 pub async fn create(req: &ParsedRequest) -> Response {
@@ -112,100 +258,19 @@ pub async fn create(req: &ParsedRequest) -> Response {
         }
     };
 
-    let mesh_id = parsed.mesh_id;
-    let intent = match parsed.prompt {
-        Some(text) if text.trim().is_empty() || text.len() > 16_000 => {
-            return Response::json_error(
-                "400 Bad Request",
-                "Idea must contain 1 to 16000 bytes of text",
-            );
-        }
-        Some(text) => crate::agent::spawn::SpawnIntent::Prompt { text },
-        None => crate::agent::spawn::SpawnIntent::Fresh,
-    };
-    let provider = if parsed
-        .provider
-        .as_deref()
-        .is_none_or(|p| p.trim().is_empty())
-    {
-        parsed.configuration_id.clone().unwrap_or_default()
-    } else {
-        parsed.provider.unwrap()
-    };
-    let configuration_id = parsed.configuration_id.clone();
-    let prompt_for_create = match &intent {
-        crate::agent::spawn::SpawnIntent::Prompt { text } => Some(text.clone()),
-        _ => None,
-    };
-    let node = match crate::commands::run_blocking("http_create_node", move || {
-        // The mesh lookup, branch, launch plan, and initial-prompt rule live
-        // in the shared runner. This closure only resolves a saved
-        // configuration and maps the typed error.
-        let result = create_node_blocking(
-            mesh_id,
-            &provider,
-            configuration_id.as_deref(),
-            prompt_for_create.as_deref(),
-        );
-        Ok::<_, String>(result)
-    })
-    .await
-    {
-        Ok(Ok(n)) => n,
-        Ok(Err(error)) => return map_create_error(error),
-        Err(e) => {
-            return Response::json_error(
-                "500 Internal Server Error",
-                &format!("Failed to create node: {e}"),
-            );
-        }
-    };
-
+    // The App handle doubles as the "can we start right now" signal. Without
+    // it the service still commits the node and reports `start_pending`, which
+    // is the whole point of #2331 — the old handler answered a bare 503 here,
+    // after the row was already committed.
     let Some(app) = state::app_handle() else {
-        return Response::json_error("503 Service Unavailable", "App not ready");
+        return run_create(parsed, &crate::services::create_operation::UnreadyStart).await;
     };
 
-    let node_id = node.id;
-
-    if let Err(e) = crate::agent::spawn::spawn_with_intent(
-        app,
-        crate::agent::spawn::SpawnRequest::new(
-            node_id,
-            intent,
-            crate::agent::spawn::TerminalSize {
-                rows: parsed.rows.unwrap_or(24),
-                cols: parsed.cols.unwrap_or(80),
-            },
-        ),
+    run_create(
+        parsed,
+        &crate::services::create_operation::TauriStart::new(app),
     )
     .await
-    {
-        return Response::json_error(
-            "500 Internal Server Error",
-            &format!("Failed to spawn agent: {}", e),
-        );
-    }
-
-    let node = match crate::commands::run_blocking("http_reload_node", move || {
-        db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())
-    })
-    .await
-    {
-        Ok(node) => node,
-        Err(e) => {
-            return Response::json_error(
-                "500 Internal Server Error",
-                &format!("Failed to reload node: {}", e),
-            );
-        }
-    };
-    let body = serde_json::to_string(&node).unwrap_or_else(|_| "{}".to_string());
-
-    let _ = app.emit(
-        "node-created",
-        crate::commands::agent::NodeCreatedPayload { id: node_id },
-    );
-    Response::json("200 OK", body)
 }
 
 /// Body-shape cap for `/api/nodes/{id}/input`. The triage deck ships 2 bytes
@@ -465,21 +530,27 @@ mod tests {
         ParsedRequest::test_post("/api/nodes/0/input", body).with_ids(Some(node_id), None)
     }
 
-    #[test]
-    fn http_and_desktop_reject_a_prompt_the_harness_cannot_take() {
-        let _db = crate::db::test_support::isolated();
+    #[tokio::test]
+    async fn http_and_desktop_reject_a_prompt_the_harness_cannot_take() {
+        // Issue #2331: the route now delegates to `services::create_operation`,
+        // and the service must not turn a client error into a *committed*
+        // outcome. The desktop half still runs on this thread.
+        //
+        // The HTTP half cannot be driven from here: both the database and the
+        // preferences app-data dir are `thread_local!` under `cfg(test)`, and
+        // the route reaches them from `spawn_blocking`, where neither install
+        // is visible. The equivalent HTTP assertion therefore lives in
+        // `services::create_operation::tests`, which injects `InlineWork` and
+        // runs the same code path on this thread.
+        let _db = crate::db::test_support::shared_global_db();
+        let root = tempfile::tempdir().unwrap();
+        crate::preferences::init_for_tests(root.path().to_path_buf());
         let mesh_id = crate::db::create_mesh(
             "prompt-gate",
             &format!("/tmp/buildmesh_prompt_gate_{}", std::process::id()),
         )
         .unwrap()
         .id;
-        let http = super::create_node_blocking(mesh_id, "terminal", None, Some("ship the prompt"))
-            .expect_err("HTTP create must reject Terminal");
-        let response = super::map_create_error(http);
-        assert_eq!(response.status_code(), 400);
-        let body = String::from_utf8(response.body().to_vec()).unwrap();
-        assert!(body.contains(crate::services::agent_node::INITIAL_PROMPT_UNSUPPORTED));
 
         let desktop = crate::commands::agent_node::create_agent_node_blocking(
             mesh_id,
@@ -497,6 +568,74 @@ mod tests {
         assert!(crate::db::list_agent_nodes_by_mesh(mesh_id)
             .unwrap()
             .is_empty());
+    }
+
+    /// The route rejects every bad request *before* it reaches the blocking
+    /// pool, so these run end-to-end without a database or preferences install.
+    #[tokio::test]
+    async fn create_rejects_unusable_requests_before_any_node_is_created() {
+        for (body, expected) in [
+            (
+                serde_json::json!({"mesh_id": 0, "prompt": " \n "}),
+                "Idea must contain",
+            ),
+            (
+                serde_json::json!({"mesh_id": 0, "prompt": "a".repeat(16_001)}),
+                "Idea must contain",
+            ),
+            (
+                serde_json::json!({"mesh_id": 0, "provider": "anthropic", "operation_key": "   "}),
+                "operation_key",
+            ),
+            (
+                serde_json::json!({
+                    "mesh_id": 0,
+                    "provider": "anthropic",
+                    "operation_key": "k".repeat(super::OPERATION_KEY_MAX_BYTES + 1),
+                }),
+                "operation_key",
+            ),
+            (serde_json::json!({"mesh_id": 0}), "Provider is required"),
+        ] {
+            let response = create(&ParsedRequest::test_post(
+                "/api/nodes/create",
+                body.to_string().as_bytes(),
+            ))
+            .await;
+            assert_eq!(response.status_code(), 400, "for {body}");
+            assert!(
+                String::from_utf8_lossy(response.body()).contains(expected),
+                "expected {expected:?} in {}",
+                String::from_utf8_lossy(response.body())
+            );
+        }
+    }
+
+    /// Issue #2331: a committed outcome never answers 200, so a client that
+    /// only reads the status cannot mistake it for a running agent.
+    #[tokio::test]
+    async fn committed_outcomes_never_answer_plain_ok() {
+        use crate::services::create_operation::CreateNodeOutcome;
+
+        let node = crate::models::AgentNode::default();
+        assert_eq!(
+            super::outcome_response(&CreateNodeOutcome::StartPending {
+                node: node.clone(),
+                operation_key: Some("op-1".into()),
+                reason: "App not ready".into(),
+            })
+            .0,
+            "202 Accepted"
+        );
+        assert_eq!(
+            super::outcome_response(&CreateNodeOutcome::StartFailed {
+                node,
+                operation_key: Some("op-1".into()),
+                start_error: "boom".into(),
+            })
+            .0,
+            "207 Multi-Status"
+        );
     }
 
     #[tokio::test]

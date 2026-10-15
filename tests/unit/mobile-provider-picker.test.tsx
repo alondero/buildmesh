@@ -153,7 +153,10 @@ describe("mobile ProviderPicker fallback glyphs (issue #1086)", () => {
     await waitFor(() => {
       const call = fetch.mock.calls.find(([url]) => String(url).includes("/api/nodes/create"));
       expect(call).toBeTruthy();
-      expect(JSON.parse(call![1].body)).toEqual({ rows: 24, cols: 80, mesh_id: 1, provider: "claude:custom-account", configuration_id: "proxy-max" });
+      // `operation_key` rides along (issue #2331): the desktop binds it to the
+      // node so a retry of this submission resolves to the same node.
+      expect(JSON.parse(call![1].body)).toMatchObject({ rows: 24, cols: 80, mesh_id: 1, provider: "claude:custom-account", configuration_id: "proxy-max" });
+      expect(JSON.parse(call![1].body).operation_key).toEqual(expect.any(String));
     });
   });
 

@@ -17,6 +17,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   createPr,
   createNode,
+  newOperationKey,
   importAndResume,
   spawnFromIssue,
   type AgentNode,
@@ -140,12 +141,16 @@ describe("mobile api wire shape (issue #1262)", () => {
   });
 
   describe("createNode", () => {
+    // Issue #2331: the route answers a typed outcome, not a bare node, because
+    // the server may commit the node row and then fail to start the process.
+    const activeOutcome = { outcome: "active", node, operation_key: "op-1" };
+
     it("defaults rows=24, cols=80 when omitted and POSTs to /api/nodes/create", async () => {
-      fetchMock.mockResolvedValue(okJson(node));
+      fetchMock.mockResolvedValue(okJson(activeOutcome));
 
       const out = await createNode({ mesh_id: 1, provider: "anthropic" });
 
-      expect(out).toEqual(node);
+      expect(out).toEqual(activeOutcome);
       const [path, init] = fetchMock.mock.calls[0];
       expect(path).toBe("/api/nodes/create");
       expect(init.method).toBe("POST");
@@ -158,7 +163,7 @@ describe("mobile api wire shape (issue #1262)", () => {
     });
 
     it("honours explicit rows/cols overrides", async () => {
-      fetchMock.mockResolvedValue(okJson(node));
+      fetchMock.mockResolvedValue(okJson(activeOutcome));
       await createNode({ mesh_id: 1, provider: "anthropic", rows: 40, cols: 120 });
       expect(JSON.parse(fetchMock.mock.calls[0][1].body as string)).toEqual({
         rows: 40,
@@ -166,6 +171,42 @@ describe("mobile api wire shape (issue #1262)", () => {
         mesh_id: 1,
         provider: "anthropic",
       });
+    });
+
+    it("forwards the operation key so a retry resolves to the same node", async () => {
+      fetchMock.mockResolvedValue(okJson(activeOutcome));
+      await createNode({ mesh_id: 1, provider: "anthropic", operation_key: "op-1" });
+      expect(JSON.parse(fetchMock.mock.calls[0][1].body as string).operation_key).toBe("op-1");
+    });
+
+    it("surfaces a committed-but-unstarted outcome with its node", async () => {
+      // The headline contract: the client must be able to tell "committed but
+      // not started" from "nothing created" and reach the node either way.
+      fetchMock.mockResolvedValue(
+        okJson({
+          outcome: "start_failed",
+          node,
+          operation_key: "op-1",
+          start_error: "claude CLI not found on PATH",
+        }),
+      );
+
+      const out = await createNode({ mesh_id: 1, provider: "anthropic" });
+
+      expect(out.outcome).toBe("start_failed");
+      expect(out.outcome === "start_failed" && out.node.id).toBe(node.id);
+      expect(out.outcome === "start_failed" && out.start_error).toBe(
+        "claude CLI not found on PATH",
+      );
+    });
+  });
+
+  describe("newOperationKey", () => {
+    it("mints a distinct key per submission and reuses crypto.randomUUID when present", () => {
+      const first = newOperationKey();
+      const second = newOperationKey();
+      expect(first).not.toBe("");
+      expect(first).not.toBe(second);
     });
   });
 

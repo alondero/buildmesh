@@ -1,8 +1,63 @@
 import { useEffect, useRef, useState } from "react";
-import { AgentNode, Mesh, Provider, createNode, isAuthError } from "../api";
+import {
+  AgentNode,
+  Mesh,
+  Provider,
+  createNode,
+  isAuthError,
+  newOperationKey,
+} from "../api";
 
 const DRAFT_KEY = "buildmesh_mobile_idea";
 const DESTINATION_KEY = "buildmesh_mobile_idea_destination";
+/**
+ * Issue #2331 — the retry-safe operation key, stored beside the draft so a
+ * retry after a lost response reuses the same key. `fingerprint` records which
+ * submission it belongs to: editing the idea or its destination starts a new
+ * submission, which must get a new key (the server rejects a key reused with
+ * different content as a conflict).
+ */
+const OPERATION_KEY = "buildmesh_mobile_idea_operation";
+
+type StoredOperation = { fingerprint: string; key: string };
+
+/** The stored key for this exact submission, or `null` for a new one. */
+function readOperationKey(fingerprint: string): string | null {
+  try {
+    const raw = localStorage.getItem(OPERATION_KEY);
+    if (!raw) return null;
+    const stored = JSON.parse(raw) as StoredOperation;
+    return stored?.fingerprint === fingerprint ? stored.key : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeOperationKey(fingerprint: string, key: string): void {
+  try {
+    localStorage.setItem(OPERATION_KEY, JSON.stringify({ fingerprint, key }));
+  } catch {
+    // A private-mode browser without storage simply loses retry safety; the
+    // submission still works.
+  }
+}
+
+/** Forget the operation key once the submission has landed either way. */
+function clearOperationKey(): void {
+  try {
+    localStorage.removeItem(OPERATION_KEY);
+  } catch {
+    /* Best-effort: a stale key only affects a later identical submission. */
+  }
+}
+
+function clearDraft(): void {
+  try {
+    localStorage.removeItem(DRAFT_KEY);
+  } catch {
+    /* The submission already landed server-side. */
+  }
+}
 
 function storedDestination(field: "meshId" | "providerId"): string {
   try {
@@ -41,6 +96,12 @@ export default function CaptureIdea({
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * A node the server committed but could not start (issue #2331). Held rather
+   * than navigated to immediately, so the reason stays on screen next to a way
+   * through to the node the user actually owns.
+   */
+  const [committed, setCommitted] = useState<AgentNode | null>(null);
   const [stored, setStored] = useState(true);
   const active = useRef(true);
   const submitting = useRef(false);
@@ -84,26 +145,62 @@ export default function CaptureIdea({
     onBusyChange?.(true);
     setBusy(true);
     setError(null);
+    setCommitted(null);
     try {
       const provider = choices.find((p) => p.id === selectedProvider)!;
-      const node = await createNode({
+      // Issue #2331: one operation key per *submission*, reused for every
+      // retry of that submission. A retry after a lost response therefore
+      // returns the same node instead of creating a second one. The key is
+      // regenerated only when the idea or its destination changes, because a
+      // key reused with different content is rejected as a conflict.
+      const fingerprint = `${selectedMesh}|${selectedProvider}|${text}`;
+      const draft = readOperationKey(fingerprint);
+      const operationKey = draft ?? newOperationKey();
+      writeOperationKey(fingerprint, operationKey);
+
+      const outcome = await createNode({
         mesh_id: Number(selectedMesh),
         provider: provider.configuration?.spawn_option_id ?? provider.id,
         configuration_id: provider.configuration?.id,
         prompt: text,
+        operation_key: operationKey,
       });
       if (!active.current) return;
-      try {
-        localStorage.removeItem(DRAFT_KEY);
-      } catch {
-        /* The launch still succeeded. */
+
+      switch (outcome.outcome) {
+        case "active":
+          clearOperationKey();
+          clearDraft();
+          setText("");
+          onStarted(outcome.node);
+          return;
+        case "start_pending":
+        case "start_failed": {
+          // The node row is committed. `onStarted` unmounts this screen, so
+          // navigating immediately would throw away the reason — which is the
+          // part the user needs in order to fix it. Stay here, say what
+          // happened, and offer the node instead.
+          clearOperationKey();
+          clearDraft();
+          setText("");
+          setCommitted(outcome.node);
+          setError(
+            `Node created but not started: ${
+              outcome.outcome === "start_failed"
+                ? outcome.start_error
+                : outcome.reason
+            } Open it to retry.`,
+          );
+          return;
+        }
       }
-      setText("");
-      onStarted(node);
     } catch (e) {
       if (!active.current) return;
       if (isAuthError(e)) onAuthFailed();
       else
+        // Keep both the draft and the operation key: a 4xx/5xx from this
+        // handler means nothing was committed, so the same key may safely
+        // retry.
         setError(
           `${(e as Error).message} Your idea is still here. Check Work before retrying if the connection was interrupted.`,
         );
@@ -197,6 +294,15 @@ export default function CaptureIdea({
           <p role="alert" className="inline-error">
             {error}
           </p>
+        )}
+        {committed && (
+          <button
+            type="button"
+            className="btn-ghost"
+            onClick={() => onStarted(committed)}
+          >
+            Open the node
+          </button>
         )}
         <button className="btn-primary" disabled={!valid || busy}>
           {busy ? "Starting agent…" : "Start working on this"}

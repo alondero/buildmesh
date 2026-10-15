@@ -40,6 +40,7 @@ pub mod test_support;
 pub mod agent_node;
 pub mod auth;
 pub mod circuit;
+pub mod create_operation;
 pub mod drive;
 pub mod mesh;
 pub mod semantic_turns;
@@ -48,6 +49,9 @@ pub mod warm_pool;
 pub use agent_node::*;
 pub use auth::*;
 pub use circuit::*;
+pub use create_operation::{
+    claim_create_operation, record_create_start_result, CreateClaim, CreateStartState,
+};
 pub use drive::*;
 pub use mesh::*;
 pub use semantic_turns::*;
@@ -116,6 +120,9 @@ mod device_session_tests;
 
 #[cfg(test)]
 mod drive_idempotency_tests;
+
+#[cfg(test)]
+mod create_operation_tests;
 
 #[cfg(test)]
 mod warm_pool_tests;
@@ -279,6 +286,20 @@ static DB: OnceCell<Database> = OnceCell::new();
 
 /// Current schema version.
 ///
+// v50 — Remote create-and-start operation ledger (issue #2331): add the
+// `agent_node_create_operations` table so `POST /nodes/create` becomes
+// retry-safe. A phone that submits an idea over a flaky link can retry with
+// the same client-generated `operation_key` and get the *same* node back
+// instead of a second node plus a second worktree. Each row binds the key to
+// the node id atomically with the node INSERT (unique index on
+// `operation_key`), records the normalized request fingerprint so key reuse
+// with different content is a `409` rather than a silent second node, and
+// carries the durable start state (`created` → `start_failed` | `started`) so
+// a restart between insertion and startup still exposes a recoverable state.
+// A brand-new table needs no data migration — `CREATE TABLE IF NOT EXISTS` in
+// `init` materializes it for every DB; the version bump just records the
+// shape moved forward. Mirrors the `coordinator_drive_prompts` ledger (#320).
+//
 // v24 — Warm pool on by default (ADR 0020, spawn-latency work): a new
 // mesh now defaults to `pre_spawn_pool_size = 1` (one pre-warmed worktree)
 // instead of 0, and a ONE-TIME backfill flips existing worktree-enabled
@@ -656,6 +677,30 @@ pub(crate) fn ensure_baseline_tables(conn: &Connection) -> SqlResult<()> {
             prompt_hash TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             PRIMARY KEY (node_id, idempotency_key)
+        );
+
+        -- Remote create-and-start operation ledger (issue #2331). One row
+        -- per client-generated `operation_key`, written in the SAME
+        -- transaction as the `agent_nodes` INSERT so the binding can never
+        -- drift. A phone retrying the same submitted idea over a flaky link
+        -- replays this row instead of creating a second node + worktree.
+        --   * `request_fingerprint` — SHA-256 of the normalized request
+        --     (mesh, provider, configuration id, prompt). Reusing a key with
+        --     different content is a 409, not a silent second node.
+        --   * `start_state` — `created` (row committed, start not yet
+        --     attempted) → `started` | `start_failed`. A restart between
+        --     insertion and startup leaves `created`, which is the
+        --     recoverable state the client renders as committed-but-unstarted.
+        -- `ON DELETE CASCADE` retires the key with its node: a deliberately
+        -- deleted node must not leave a key that can never create again.
+        CREATE TABLE IF NOT EXISTS agent_node_create_operations (
+            operation_key TEXT PRIMARY KEY,
+            node_id INTEGER NOT NULL REFERENCES agent_nodes(id) ON DELETE CASCADE,
+            request_fingerprint TEXT NOT NULL,
+            start_state TEXT NOT NULL DEFAULT 'created',
+            start_error TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
         -- Pre-spawn Worktree Pool (issue #609, PRD #608). One row per

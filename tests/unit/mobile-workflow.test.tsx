@@ -33,6 +33,17 @@ const response = (data: unknown, status = 200) =>
     headers: { "Content-Type": "application/json" },
   });
 
+/**
+ * Issue #2331: `/api/nodes/create` answers a typed outcome, not a bare node,
+ * because the server may commit the node row and then fail to start the
+ * process. Tests that mock a *successful* launch must return `active`.
+ */
+const created = (launched: AgentNode = node) => ({
+  outcome: "active",
+  node: launched,
+  operation_key: "op-test",
+});
+
 it('restores a question from the node snapshot without waiting for a WebSocket event', async () => {
   const waiting = { ...node, status: 'awaiting_input', lifecycle: {
     session_id: 7, status: 'awaiting_input', kind: 'question_requested', message: 'Which branch should I use?',
@@ -89,7 +100,7 @@ afterEach(() => {
 describe("mobile idea capture", () => {
   it("keeps a draft across remounts and sends the selected mesh and initial prompt", async () => {
     const cb = callbacks();
-    const fetcher = vi.fn().mockResolvedValue(response(node));
+    const fetcher = vi.fn().mockResolvedValue(response(created()));
     vi.stubGlobal("fetch", fetcher);
     const first = render(
       <CaptureIdea meshes={[mesh]} providers={[provider]} {...cb} />,
@@ -107,13 +118,103 @@ describe("mobile idea capture", () => {
     fireEvent.click(screen.getByText("Start working on this"));
     await waitFor(() => expect(cb.onStarted).toHaveBeenCalledWith(node));
     expect(fetcher.mock.calls[0][0]).toBe("/api/nodes/create");
-    expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({
+    const body = JSON.parse(fetcher.mock.calls[0][1].body);
+    expect(body).toMatchObject({
       rows: 24,
       cols: 80,
       mesh_id: 1,
       provider: "anthropic",
       prompt: "Fix search\nKeep keyboard support.",
     });
+    // Issue #2331: the client mints one key per submission so a retry resolves
+    // to the same node instead of creating a duplicate.
+    expect(typeof body.operation_key).toBe("string");
+    expect(body.operation_key.length).toBeGreaterThan(0);
+    expect(localStorage.getItem("buildmesh_mobile_idea")).toBeNull();
+    // A successful launch retires the key.
+    expect(
+      localStorage.getItem("buildmesh_mobile_idea_operation"),
+    ).toBeNull();
+  });
+
+  it("reuses one operation key across retries of the same submission", async () => {
+    const cb = callbacks();
+    // First attempt: the response is lost (network failure).
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(response({ error: "gateway timeout" }, 504))
+      .mockResolvedValue(response(created()));
+    vi.stubGlobal("fetch", fetcher);
+    render(<CaptureIdea meshes={[mesh]} providers={[provider]} {...cb} />);
+    fireEvent.change(screen.getByLabelText("Your idea"), {
+      target: { value: "Retryable idea" },
+    });
+
+    fireEvent.click(screen.getByText("Start working on this"));
+    expect(await screen.findByRole("alert")).toHaveProperty(
+      "textContent",
+      expect.stringContaining("gateway timeout"),
+    );
+    fireEvent.click(screen.getByText("Start working on this"));
+    await waitFor(() => expect(cb.onStarted).toHaveBeenCalledWith(node));
+
+    const firstKey = JSON.parse(fetcher.mock.calls[0][1].body).operation_key;
+    const secondKey = JSON.parse(fetcher.mock.calls[1][1].body).operation_key;
+    expect(secondKey).toBe(firstKey);
+  });
+
+  it("starts a new submission when the idea changes so the key is not reused for different content", async () => {
+    const fetcher = vi.fn().mockResolvedValue(response({ error: "boom" }, 500));
+    vi.stubGlobal("fetch", fetcher);
+    render(<CaptureIdea meshes={[mesh]} providers={[provider]} {...callbacks()} />);
+    const textarea = screen.getByLabelText("Your idea");
+
+    fireEvent.change(textarea, { target: { value: "First idea" } });
+    fireEvent.click(screen.getByText("Start working on this"));
+    await screen.findByRole("alert");
+
+    fireEvent.change(textarea, { target: { value: "A different idea" } });
+    fireEvent.click(screen.getByText("Start working on this"));
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+
+    const firstKey = JSON.parse(fetcher.mock.calls[0][1].body).operation_key;
+    const secondKey = JSON.parse(fetcher.mock.calls[1][1].body).operation_key;
+    expect(secondKey).not.toBe(firstKey);
+  });
+
+  it("reports a committed-but-unstarted node instead of implying nothing happened", async () => {
+    // Issue #2331: the node row exists, so the user must be told that and
+    // offered the node — the old copy was identical to a "nothing happened"
+    // failure, which invited a duplicate retry.
+    const cb = callbacks();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        response({
+          outcome: "start_failed",
+          node,
+          operation_key: "op-1",
+          start_error: "claude CLI not found on PATH",
+        }),
+      ),
+    );
+    render(<CaptureIdea meshes={[mesh]} providers={[provider]} {...cb} />);
+    fireEvent.change(screen.getByLabelText("Your idea"), {
+      target: { value: "An idea whose CLI is missing" },
+    });
+    fireEvent.click(screen.getByText("Start working on this"));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Node created but not started");
+    expect(alert.textContent).toContain("claude CLI not found on PATH");
+    // Staying on this screen is deliberate: `onStarted` navigates away and
+    // would take the reason with it.
+    expect(cb.onStarted).not.toHaveBeenCalled();
+    const open = screen.getByText("Open the node");
+    expect(open).toBeTruthy();
+    fireEvent.click(open);
+    expect(cb.onStarted).toHaveBeenCalledWith(node);
+    // The draft is cleared: the work exists, re-sending it would duplicate it.
     expect(localStorage.getItem("buildmesh_mobile_idea")).toBeNull();
   });
 
@@ -386,7 +487,7 @@ it("keeps Capture mounted until a pending launch is confirmed", async () => {
   expect(work).toHaveProperty("disabled", true);
   fireEvent.click(work);
   expect(screen.getByLabelText("Your idea")).toBeTruthy();
-  await act(async () => finish(response(node)));
+  await act(async () => finish(response(created())));
   expect(onOpenNode).toHaveBeenCalledTimes(1);
   expect(localStorage.getItem("buildmesh_mobile_idea")).toBeNull();
   expect(work).toHaveProperty("disabled", false);

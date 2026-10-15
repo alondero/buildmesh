@@ -41,13 +41,51 @@ class WireContractTest {
 
     @Test fun aSavedLaunchConfigurationStartsAsItsSpawnOptionPlusTheConfigurationId() {
         assertEquals(
-            Json.parseToJsonElement("""{"mesh_id":3,"provider":"claude","configuration_id":"launch/405f11ec","rows":24,"cols":80,"prompt":"Fix it"}"""),
-            createNodeBody(3, savedConfiguration, "  Fix it \n"),
+            Json.parseToJsonElement("""{"mesh_id":3,"provider":"claude","configuration_id":"launch/405f11ec","rows":24,"cols":80,"operation_key":"op-1","prompt":"Fix it"}"""),
+            createNodeBody(3, savedConfiguration, "  Fix it \n", "op-1"),
         )
         assertEquals(
-            Json.parseToJsonElement("""{"mesh_id":3,"provider":"claude:minimax","rows":24,"cols":80}"""),
-            createNodeBody(3, proxiedOption, " "),
+            Json.parseToJsonElement("""{"mesh_id":3,"provider":"claude:minimax","rows":24,"cols":80,"operation_key":"op-1"}"""),
+            createNodeBody(3, proxiedOption, " ", "op-1"),
         )
+    }
+
+    // Issue #2331 — the desktop binds `operation_key` to the node in the same
+    // transaction as the INSERT, so one key per submission makes a retry
+    // resolve to the same node instead of a duplicate.
+    @Test fun everySubmissionCarriesItsOwnOperationKey() {
+        assertNotEquals(newOperationKey(), newOperationKey())
+        assertTrue(newOperationKey().isNotBlank())
+    }
+
+    // Issue #2331 — a committed-but-unstarted node must reach the user with
+    // its identity, not be reported as "nothing was created".
+    @Test fun aCommittedOutcomeAlwaysNamesItsNode() {
+        val node = Json.parseToJsonElement("""{"id":9,"mesh_id":3,"name":"idea","status":"idle"}""").obj()
+
+        val active = readCreateNodeOutcome(
+            Json.parseToJsonElement("""{"outcome":"active","node":$node,"operation_key":"op-1"}""").obj()
+        )
+        assertEquals(9L, (active as CreateNodeOutcome.Active).node.number("id"))
+
+        val pending = readCreateNodeOutcome(
+            Json.parseToJsonElement("""{"outcome":"start_pending","node":$node,"operation_key":"op-1","reason":"App not ready yet"}""").obj()
+        )
+        assertEquals(9L, (pending as CreateNodeOutcome.StartPending).node.number("id"))
+        assertEquals("App not ready yet", pending.reason)
+
+        val failed = readCreateNodeOutcome(
+            Json.parseToJsonElement("""{"outcome":"start_failed","node":$node,"operation_key":"op-1","start_error":"claude CLI not found"}""").obj()
+        )
+        assertEquals(9L, (failed as CreateNodeOutcome.StartFailed).node.number("id"))
+        assertEquals("claude CLI not found", failed.startError)
+    }
+
+    // An unrecognised discriminant must fail loudly: silently treating it as
+    // "nothing created" is what invites the duplicate retry.
+    @Test(expected = IllegalStateException::class)
+    fun anUnknownOutcomeIsRejectedRatherThanTreatedAsNothingCreated() {
+        readCreateNodeOutcome(Json.parseToJsonElement("""{"outcome":"from_the_future"}""").obj())
     }
 
     @Test fun issueAndArchiveLaunchesOfferOnlySpawnOptionsTheirRoutesAccept() {

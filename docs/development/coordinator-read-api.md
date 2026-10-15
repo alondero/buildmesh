@@ -24,6 +24,22 @@ The returned Agent Node includes a secret-free `launch_configuration` snapshot.
 Missing recipes, credentials, or incompatible routes return a client error
 rather than switching providers.
 
+`POST /nodes/create` answers a **typed outcome**, not a bare Agent Node, because
+the node row may commit and the process start then fail (issue #2331). Branch on
+the `outcome` field, not the status code: `active` (200), `start_pending` (202 —
+committed, start not yet attempted), `start_failed` (207 — committed, start
+failed; `start_error` says why). Only an error status means nothing was
+committed. Every non-error outcome carries the `node`, so a caller can always
+navigate to the work.
+
+Supply an `operation_key` to make the call retry-safe: generate one per
+submission and reuse it for every retry. The desktop binds it to the node in
+the same transaction as the INSERT, so a retry after a lost response returns
+the same node instead of a second one. Reusing a key with *different* request
+content is a `409`. Omitting the key keeps the pre-#2331 behaviour with no
+replay protection, so an older client is never stranded. Full contract and
+phase ordering: [`agent-nodes.md`](agent-nodes.md#remote-create-and-start-is-one-retry-safe-operation-issue-2331).
+
 Admin/mobile routes additionally expose `GET /api/launch-configurations`,
 `GET /api/launch-targets`, `POST /api/launch-configurations/save` (a generated
 `SpawnConfiguration` payload), and `POST /api/launch-configurations/delete`
