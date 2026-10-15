@@ -19,9 +19,18 @@ interface NodeActivityTabsProps {
   onClose: (id: number) => void;
   grouped?: boolean;
   onUngroup?: (id: number) => void;
+  /** Present when the card belongs to a Circuit Run: its Overview tab leads the strip. */
+  overview?: {
+    selected: boolean;
+    /** The run is waiting on a person; the tab carries a badge. */
+    needsYou: boolean;
+    onSelect: () => void;
+  };
 }
 
-export function NodeActivityTabs({ rootId, members, utilities, selectedId, showingUtility, onSelect, onClose, grouped = false, onUngroup }: NodeActivityTabsProps) {
+type ActivityTab = { key: string; member: AgentNode; utility: boolean; overview: boolean; label: string };
+
+export function NodeActivityTabs({ rootId, members, utilities, selectedId, showingUtility, onSelect, onClose, grouped = false, onUngroup, overview }: NodeActivityTabsProps) {
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -32,18 +41,29 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
   // for mouse and touch; keyboard activation leaves this at the safe default.
   const activationRef = useRef<'pointer' | 'keyboard'>('keyboard');
   const menuId = `activity-list-${rootId}`;
-  const tabs = members.flatMap(member => {
+  const agentTabs: ActivityTab[] = members.flatMap(member => {
     // `activityMemberRole` is the shared vocabulary with the sidebar's cluster
     // rail, so a member is never "Review 1" in one surface and something else
     // in the other. `reviewerIndex` is the ordinal among non-root members.
     const role = activityMemberRole(member, rootId, members.length,
       members.filter(n => n.id !== rootId).findIndex(n => n.id === member.id), grouped);
-    const agent = { key: `agent-${member.id}`, member, utility: false, label: role };
+    const agent = { key: `agent-${member.id}`, member, utility: false, overview: false, label: role };
     const mode = utilities.get(member.id);
-    return mode ? [agent, { key: `utility-${member.id}`, member, utility: true,
+    return mode ? [agent, { key: `utility-${member.id}`, member, utility: true, overview: false,
       label: `${mode[0].toUpperCase()}${mode.slice(1)}${members.filter(n => utilities.get(n.id)).length > 1 ? ` · ${role}` : ''}` }] : [agent];
   });
-  const selectedIndex = tabs.findIndex(tab => tab.member.id === selectedId && tab.utility === showingUtility);
+  // The Overview tab describes the whole card, so it carries the root as its
+  // member only to satisfy the shared row shape; it never targets an agent.
+  const tabs: ActivityTab[] = overview && members[0]
+    ? [{ key: 'overview', member: members[0], utility: false, overview: true, label: 'Overview' }, ...agentTabs]
+    : agentTabs;
+  const selectedIndex = overview?.selected
+    ? 0
+    : tabs.findIndex(tab => !tab.overview && tab.member.id === selectedId && tab.utility === showingUtility);
+  const activate = (tab: ActivityTab, focusTerminal: boolean) => {
+    if (tab.overview) overview?.onSelect();
+    else onSelect(tab.member.id, tab.utility, focusTerminal);
+  };
   const closeMenu = () => { setOpen(false); triggerRef.current?.focus({ preventScroll: true }); };
   useClickOutside(open ? menuId : null, () => setOpen(false));
   useAnchoredPosition(triggerRef, menuRef, open, { align: 'end' });
@@ -61,7 +81,9 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
   useEffect(() => {
     tabRefs.current[selectedIndex]?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
   }, [selectedIndex]);
-  const fullLabel = (tab: typeof tabs[number]) => tab.label === tab.member.name
+  const fullLabel = (tab: ActivityTab) => tab.overview
+    ? `Circuit run overview${overview?.needsYou ? ' · needs you' : ''}`
+    : tab.label === tab.member.name
     ? `${tab.label} · ${tab.member.status.replace(/_/g, ' ')}`
     : `${tab.label} · ${tab.member.name}${tab.utility ? '' : ` · ${tab.member.status.replace(/_/g, ' ')}`}`;
   const statusGlyph = (status: string) => status === 'awaiting_input' ? '!' : status === 'error' ? '×'
@@ -80,13 +102,13 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
                 event.stopPropagation();
                 const focusTerminal = activationRef.current === 'pointer';
                 activationRef.current = 'keyboard';
-                onSelect(tab.member.id, tab.utility, focusTerminal);
+                activate(tab, focusTerminal);
               }}
               onKeyDown={event => {
                 if (event.key === 'Enter' || event.key === ' ') {
                   event.preventDefault();
                   activationRef.current = 'keyboard';
-                  onSelect(tab.member.id, tab.utility, false);
+                  activate(tab, false);
                   return;
                 }
                 if ((event.key === 'Delete' || event.key === 'Backspace') && selected && tab.utility) {
@@ -99,13 +121,17 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
                   : event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : null;
                 if (target === null) return;
                 event.preventDefault(); event.stopPropagation();
-                onSelect(tabs[target].member.id, tabs[target].utility, false);
+                activate(tabs[target], false);
                 tabRefs.current[target]?.focus({ preventScroll: true });
               }}
               className={`flex h-8 shrink-0 max-w-48 items-center gap-1.5 border-b-2 px-2.5 text-xs transition-colors ${selected ? 'border-accent-cyan bg-accent-cyan/5 text-text-primary' : 'border-transparent text-text-muted hover:bg-bg-card hover:text-text-primary'}`}>
-              {!tab.utility && <ProviderIcon providerId={tab.member.provider} className="h-3 w-3 shrink-0" />}
+              {tab.overview
+                ? <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0"><circle cx="6" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" /><circle cx="18" cy="12" r="2.5" /><path d="M6 8.5v7M8.3 7.2l7.4 3.6M8.3 16.8l7.4-3.6" /></svg>
+                : !tab.utility && <ProviderIcon providerId={tab.member.provider} className="h-3 w-3 shrink-0" />}
               <span className="truncate">{tab.label}</span>
-              {!tab.utility && <span aria-hidden="true" className={`shrink-0 text-2xs ${getStatusConfig(tab.member.status).color}`}>{statusGlyph(tab.member.status)}</span>}
+              {tab.overview
+                ? overview?.needsYou && <span aria-hidden="true" data-testid={`activity-overview-badge-${rootId}`} className="shrink-0 text-2xs font-semibold text-status-warning">!</span>
+                : !tab.utility && <span aria-hidden="true" className={`shrink-0 text-2xs ${getStatusConfig(tab.member.status).color}`}>{statusGlyph(tab.member.status)}</span>}
               {tab.utility && <button type="button" tabIndex={-1}
                 aria-label={`Close ${fullLabel(tab)}`} title={`Close ${fullLabel(tab)}`}
                 onClick={event => { event.stopPropagation(); onClose(tab.member.id); }}
@@ -147,7 +173,7 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
             setOpen(false);
             const focusTerminal = activationRef.current === 'pointer';
             activationRef.current = 'keyboard';
-            onSelect(tab.member.id, tab.utility, focusTerminal);
+            activate(tab, focusTerminal);
             if (!focusTerminal) {
               requestAnimationFrame(() => tabRefs.current[index]?.focus({ preventScroll: true }));
             }
@@ -161,9 +187,10 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
               ? 'bg-bg-selection text-text-primary'
               : 'text-text-secondary'
           }`}>
-          <span aria-hidden="true" className={tab.utility ? 'text-text-muted' : getStatusConfig(tab.member.status).color}>{index === selectedIndex ? '✓' : tab.utility ? '›' : statusGlyph(tab.member.status)}</span>
-          <span className="min-w-0 flex-1"><span className="block font-medium text-text-primary">{tab.label}</span><span className="block truncate text-text-muted">{tab.label === tab.member.name ? (tab.member.branch || tab.member.provider) : tab.member.name}</span></span>
-          {!tab.utility && <span className="text-2xs text-text-muted">{tab.member.status.replace(/_/g, ' ')}</span>}
+          <span aria-hidden="true" className={tab.utility || tab.overview ? 'text-text-muted' : getStatusConfig(tab.member.status).color}>{index === selectedIndex ? '✓' : tab.utility || tab.overview ? '›' : statusGlyph(tab.member.status)}</span>
+          <span className="min-w-0 flex-1"><span className="block font-medium text-text-primary">{tab.label}</span><span className="block truncate text-text-muted">{tab.overview ? 'Where the circuit run is' : tab.label === tab.member.name ? (tab.member.branch || tab.member.provider) : tab.member.name}</span></span>
+          {tab.overview ? overview?.needsYou && <span className="text-2xs text-status-warning">needs you</span>
+            : !tab.utility && <span className="text-2xs text-text-muted">{tab.member.status.replace(/_/g, ' ')}</span>}
         </button>)}
       </div>, document.body)}
     </div>

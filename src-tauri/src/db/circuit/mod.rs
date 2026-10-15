@@ -16,6 +16,10 @@ pub mod evidence;
 pub mod leases;
 pub mod ledger;
 pub mod node_run;
+pub mod operator_push;
+#[cfg(test)]
+mod operator_push_tests;
+pub mod overview;
 pub mod queue;
 pub mod recovery;
 pub mod step_recovery;

@@ -20,7 +20,9 @@ function saveGroups(groups: NodeGroups) {
 }
 
 export type UtilityMode = 'build' | 'run' | 'terminal';
-type Selection = { nodeId: number; utility: boolean };
+/** `overview` shows the card's Circuit Run Overview instead of a terminal;
+ *  `nodeId` stays the agent the header and its actions target. */
+type Selection = { nodeId: number; utility: boolean; overview?: boolean };
 
 /** View state survives card remounts; process lifetime belongs to the terminal registries. */
 export const useNodeActivityStore = create<{
@@ -32,6 +34,9 @@ export const useNodeActivityStore = create<{
   /** Low-level node/activity selection; desktop navigation lives in lib/navigation. */
   activateNode: (nodeId: number, utility?: boolean, utilityMode?: UtilityMode) => void;
   select: (rootId: number, nodeId: number, utility?: boolean) => void;
+  /** Show the card's Circuit Run Overview. Selecting any agent or utility tab
+   *  replaces the selection, which is what closes it. */
+  showOverview: (rootId: number, nodeId: number) => void;
   openUtility: (rootId: number, nodeId: number, mode: UtilityMode) => void;
   closeUtility: (rootId: number, nodeId: number) => void;
   prune: (validNodeIds: ReadonlySet<number>) => void;
@@ -106,6 +111,10 @@ export const useNodeActivityStore = create<{
   select: (rootId, nodeId, utility = false) => set(s => ({
     selections: { ...s.selections, [rootId]: { nodeId, utility } },
   })),
+  showOverview: (rootId, nodeId) => {
+    useAgentNodeStore.getState().setActiveNode(nodeId);
+    set(s => ({ selections: { ...s.selections, [rootId]: { nodeId, utility: false, overview: true } } }));
+  },
   openUtility: (rootId, nodeId, mode) => set(s => ({
     utilities: { ...s.utilities, [nodeId]: mode },
     selections: { ...s.selections, [rootId]: { nodeId, utility: true } },
