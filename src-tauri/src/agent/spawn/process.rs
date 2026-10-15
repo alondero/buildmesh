@@ -141,11 +141,8 @@ pub fn inject_attention_hook(project_path: &Path) -> Result<(), String> {
 /// `localhost` for `127.0.0.1`) keeps the merge stable — only the canonical
 /// anchors matter, and they must not drift because they are what recognises
 /// an already-provisioned config as ours.
-const BUILDMESH_HANDLER_ANCHORS: &[&str] = &[
-    "/api/attention/",
-    "BUILDMESH_PORT",
-    "BUILDMESH_SESSION_ID",
-];
+const BUILDMESH_HANDLER_ANCHORS: &[&str] =
+    &["/api/attention/", "BUILDMESH_PORT", "BUILDMESH_SESSION_ID"];
 
 pub(super) fn is_buildmesh_handler(handler: &serde_json::Value) -> bool {
     handler
@@ -189,18 +186,22 @@ fn ensure_hooks_json(path: &Path, new_handler: &serde_json::Value) -> Result<(),
         ("UserPromptSubmit", None),
         ("SubagentStart", None),
         ("SubagentStop", None),
-        ("PreToolUse", Some("^(AskUserQuestion|ExitPlanMode)$".to_string())),
-        ("PostToolUse", Some("^(AskUserQuestion|ExitPlanMode)$".to_string())),
+        (
+            "PreToolUse",
+            Some("^(AskUserQuestion|ExitPlanMode)$".to_string()),
+        ),
+        (
+            "PostToolUse",
+            Some("^(AskUserQuestion|ExitPlanMode)$".to_string()),
+        ),
         (
             "PostToolUseFailure",
             Some("^(AskUserQuestion|ExitPlanMode)$".to_string()),
         ),
     ] {
         let matcher = matcher.map(serde_json::Value::String);
-        let fields: Vec<(&str, &serde_json::Value)> = matcher
-            .iter()
-            .map(|value| ("matcher", value))
-            .collect();
+        let fields: Vec<(&str, &serde_json::Value)> =
+            matcher.iter().map(|value| ("matcher", value)).collect();
         changed |= managed_config::upsert_matcher_group(
             managed_config::array_entry(
                 hooks_obj,

@@ -18,7 +18,9 @@
 //! `CreateProcess` won't run directly — `WindowsShell::Cmd` →
 //! `cmd.exe /c dsh …`. macOS / Linux use `WindowsShell::Direct`.
 
-use crate::agent::provider::{shell_for, AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
+use crate::agent::provider::{
+    shell_for, AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell,
+};
 use crate::models::EnvType;
 
 pub struct DshAdapter;

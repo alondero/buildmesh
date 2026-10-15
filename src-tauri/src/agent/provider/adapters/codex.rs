@@ -749,9 +749,8 @@ fn write_runtime_files(files: &[(&Path, &str)], distro: Option<&str>) -> Result<
         Some(distro) => wsl_write_files(distro, files),
         None => files.iter().try_for_each(|(path, content)| {
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    format!("failed to create Codex dir {}: {e}", parent.display())
-                })?;
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("failed to create Codex dir {}: {e}", parent.display()))?;
             }
             managed_config::atomic_write(path, content)
                 .map_err(|e| format!("failed to write Codex file {}: {e}", path.display()))

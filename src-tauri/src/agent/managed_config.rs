@@ -287,7 +287,10 @@ pub fn upsert_matcher_group(
     group_fields: &[(&str, &serde_json::Value)],
 ) -> bool {
     for group in groups.iter_mut() {
-        let Some(handlers) = group.get_mut("hooks").and_then(|value| value.as_array_mut()) else {
+        let Some(handlers) = group
+            .get_mut("hooks")
+            .and_then(|value| value.as_array_mut())
+        else {
             continue;
         };
         if let Some(index) = handlers.iter().position(owned) {
@@ -390,11 +393,7 @@ mod tests {
                 .and_then(|value| value.as_str())
                 .is_some_and(|value| carries_anchors(value, ANCHORS))
         };
-        if !upsert_entry(
-            handlers,
-            &owned,
-            &json!({ "command": command }),
-        ) {
+        if !upsert_entry(handlers, &owned, &json!({ "command": command })) {
             return Ok(false);
         }
         atomic_write(path, &document.to_pretty_json().map_err(|e| e.to_string())?)
@@ -424,7 +423,10 @@ mod tests {
         let stop = written["hooks"]["stop"].as_array().unwrap();
         assert_eq!(stop.len(), 2, "user entry must survive: {stop:?}");
         assert_eq!(stop[0]["command"], json!("echo user"));
-        assert_eq!(stop[1]["command"], json!("curl $BUILDMESH_PORT/api/attention/"));
+        assert_eq!(
+            stop[1]["command"],
+            json!("curl $BUILDMESH_PORT/api/attention/")
+        );
     }
 
     /// Issue #886's idempotency invariant: a re-provision that finds our entry
@@ -465,7 +467,10 @@ mod tests {
         let stop = written["hooks"]["stop"].as_array().unwrap();
         assert_eq!(stop.len(), 2, "drift must not append a duplicate: {stop:?}");
         assert_eq!(stop[0]["command"], json!("echo user"));
-        assert_eq!(stop[1]["command"], json!("curl $BUILDMESH_PORT/api/attention/"));
+        assert_eq!(
+            stop[1]["command"],
+            json!("curl $BUILDMESH_PORT/api/attention/")
+        );
     }
 
     /// The malformed case two adapters used to answer differently (issue
@@ -505,7 +510,8 @@ mod tests {
     /// A file that cannot be read at all — a directory in the target's place,
     /// or bytes that are not UTF-8 — is reported without replacing anything.
     #[test]
-    fn unreadable_target_is_reported_without_writing() {        let dir = TempDir::new().unwrap();
+    fn unreadable_target_is_reported_without_writing() {
+        let dir = TempDir::new().unwrap();
         let path = temp_file(&dir, "hooks.json");
         std::fs::create_dir(&path).unwrap();
         let sentinel = path.join("user-data");

@@ -754,7 +754,8 @@ mod tests {
         // Two concurrent writes would collide on a plain `<name>.tmp`
         // filename; the PID+counter disambiguates them.
         managed_config::atomic_write(&target, "first").expect("first write");
-        managed_config::atomic_write(&target, "second").expect("second write");        assert_eq!(
+        managed_config::atomic_write(&target, "second").expect("second write");
+        assert_eq!(
             std::fs::read_to_string(&target).expect("read"),
             "second",
             "atomic_write must leave the latest content at the target"

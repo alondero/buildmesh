@@ -25,7 +25,9 @@
 //! text (`[prompt]`). `prefill_args()` formats the string as a single
 //! positional argument (no `--prefill` flag).
 
-use crate::agent::provider::{shell_for, AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
+use crate::agent::provider::{
+    shell_for, AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell,
+};
 use crate::models::EnvType;
 
 pub struct FreebuffAdapter;

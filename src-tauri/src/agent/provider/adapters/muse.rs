@@ -422,11 +422,8 @@ fn ensure_trust_file(path: &Path, workspace: &str) -> Result<(), String> {
             changed = true;
         }
 
-        let projects = managed_config::object_entry(
-            entry,
-            "projects",
-            "muse trust.json `projects`",
-        )?;
+        let projects =
+            managed_config::object_entry(entry, "projects", "muse trust.json `projects`")?;
         match projects.get_mut(&key) {
             Some(serde_json::Value::Object(record)) => match record.get("decision") {
                 // Already what we would write — leave the bytes alone.

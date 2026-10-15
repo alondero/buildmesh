@@ -57,9 +57,9 @@ fn ensure_hooks(path: &Path, command: &str) -> Result<(), String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(format!("failed to read Kimi config {path:?}: {e}")),
     };
-    let mut config = original.parse::<DocumentMut>().map_err(|e| {
-        managed_config::refuse_malformed(path, &e.to_string())
-    })?;
+    let mut config = original
+        .parse::<DocumentMut>()
+        .map_err(|e| managed_config::refuse_malformed(path, &e.to_string()))?;
     if !config.contains_key("hooks")
         || config["hooks"]
             .as_array()

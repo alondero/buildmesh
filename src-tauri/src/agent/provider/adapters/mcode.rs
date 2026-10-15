@@ -583,11 +583,7 @@ fn ensure_plugin_manifest(path: &Path, handler: &serde_json::Value) -> Result<()
         }
     }
 
-    let hooks = managed_config::object_entry(
-        object,
-        "hooks",
-        "mcode plugin manifest `hooks`",
-    )?;
+    let hooks = managed_config::object_entry(object, "hooks", "mcode plugin manifest `hooks`")?;
     for event in MCODE_PROVISIONED_EVENTS {
         let group_array = managed_config::array_entry(
             hooks,

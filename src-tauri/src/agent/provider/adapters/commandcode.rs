@@ -41,7 +41,9 @@
 use crate::agent::capabilities::{
     EffortControlKind, PermissionModeOption, COMMANDCODE_EFFORT_ALLOWED, PERMISSION_MODE_UNATTENDED,
 };
-use crate::agent::provider::{shell_for, AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
+use crate::agent::provider::{
+    shell_for, AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell,
+};
 use crate::models::EnvType;
 
 pub struct CommandCodeAdapter;
