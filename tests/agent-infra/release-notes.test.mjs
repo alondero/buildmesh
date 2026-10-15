@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -92,6 +94,9 @@ test('renders a release-note draft with one H1 and no internal entries by defaul
   assert.doesNotMatch(draft, /## Refactors/);
   assert.match(draft, /Internal commits excluded/);
   assert.match(draft, /refactor\(z\): internal move/);
+  // The generator is the other producer of these files, and a draft it writes
+  // without the final line break is the shape the release workflow cannot load.
+  assert.equal(draft.endsWith('\n'), true);
 });
 
 test('surfaces breaking changes and includes internal work when asked', () => {
@@ -316,4 +321,152 @@ test('the real repository resolves its own base to the latest release boundary',
     t.diagnostic(`release range ${count} is approaching its ceiling of ${allowed} (${because}) — cut a release to reset it`);
   }
   assert.ok(count < allowed, `release range ${count} exceeds ${allowed} (${because}); the next release is overdue`);
+});
+
+const RUN_ID = '38460908092';
+const DELIMITER = `RELEASE_NOTES_${RUN_ID}`;
+const NOTES_BODY = '# Buildmesh v2.0.0\n\nA user-visible fix (#42).\n';
+// The shape that broke release run 38460908092: a curated note whose editor
+// left off the final line break.
+const UNTERMINATED_NOTES = NOTES_BODY.replace(/\n$/, '');
+
+/**
+ * The `run:` block of the release.yml step that loads `releaseBody`.
+ *
+ * The loader lives in the workflow rather than in a script, so a test that
+ * re-implemented it here would stay green while the shipped workflow kept
+ * failing — the shape that failed release run 38460908092 (issue #2298).
+ * Extracting the block from the YAML keeps the test bound to what runs.
+ */
+function releaseNotesLoaderBlock(workflow) {
+  const lines = workflow.split('\n');
+  const idAt = lines.findIndex((line) => line.trim() === 'id: release-notes');
+  assert.notEqual(idAt, -1, 'release.yml must keep the `release-notes` step id');
+  const runAt = lines.findIndex((line, index) => index > idAt && /^\s*run: \|\s*$/.test(line));
+  assert.notEqual(runAt, -1, 'the release-notes step must keep its literal `run:` block');
+  const indent = lines[runAt].match(/^\s*/)[0].length + 2;
+  const block = [];
+  for (const line of lines.slice(runAt + 1)) {
+    if (line.trim() !== '' && line.match(/^\s*/)[0].length < indent) break;
+    block.push(line.trim() === '' ? '' : line.slice(indent));
+  }
+  return block.join('\n').replace(/\s+$/, '');
+}
+
+/**
+ * The runner's view of `$GITHUB_OUTPUT`: `body` is the lines strictly between
+ * the marker and a line equal to the delimiter. A notes file with no trailing
+ * newline used to splice the delimiter onto its last line, leaving no such line
+ * and failing the step with "Matching delimiter not found".
+ */
+function parseRunnerOutput(text) {
+  const lines = text.split('\n');
+  const start = lines.indexOf(`body<<${DELIMITER}`);
+  const end = start === -1 ? -1 : lines.indexOf(DELIMITER, start + 1);
+  return { found: start !== -1 && end !== -1, body: end === -1 ? null : lines.slice(start + 1, end).join('\n') };
+}
+
+/**
+ * A bash that runs in the working directory it is handed.
+ *
+ * `BASH_PATH` wins when set; otherwise the PATH `bash` (Git Bash, MSYS2, or
+ * native Linux) is probed, then the standard Git for Windows install paths,
+ * because that shell does not land on PATH by default. The probe reads a
+ * sentinel through a relative path, which rejects a bash that ignores the
+ * inherited working directory — a WSL bash would resolve it somewhere else and
+ * silently read the wrong fixture.
+ */
+function resolveBash(probeDir) {
+  writeFileSync(join(probeDir, 'bash-cwd-probe'), 'ok');
+  const localAppData = process.env.LOCALAPPDATA;
+  const candidates = [
+    process.env.BASH_PATH,
+    'bash',
+    'C:\\Program Files\\Git\\bin\\bash.exe',
+    'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
+    localAppData ? join(localAppData, 'Programs', 'Git', 'bin', 'bash.exe') : null,
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    const probe = spawnSync(candidate, ['--noprofile', '--norc', '-c', 'cat bash-cwd-probe'], {
+      cwd: probeDir,
+      encoding: 'utf8',
+    });
+    if (probe.status === 0 && probe.stdout.trim() === 'ok') return candidate;
+  }
+  return null;
+}
+
+test('the release workflow loads a notes file that has no trailing newline', () => {
+  const fixtureRoot = mkdtempSync(join(tmpdir(), 'buildmesh-release-loader-'));
+  try {
+    const bash = resolveBash(fixtureRoot);
+    assert.ok(
+      bash,
+      'no bash runs in the working directory it is given; set BASH_PATH to a Git Bash or MSYS2 shell '
+      + 'to exercise the release.yml release-notes step',
+    );
+    const workflow = readFileSync(new URL('../../.github/workflows/release.yml', import.meta.url), 'utf8');
+    const loader = releaseNotesLoaderBlock(workflow);
+
+    const run = (script, notes) => {
+      const root = mkdtempSync(join(tmpdir(), 'buildmesh-release-loader-run-'));
+      try {
+        mkdirSync(join(root, 'docs', 'releases'), { recursive: true });
+        writeFileSync(join(root, 'docs', 'releases', 'v2.0.0.md'), notes);
+        const githubOutput = join(root, 'github-output.txt');
+        // GitHub runs a `shell: bash` step as `bash --noprofile --norc -e -o pipefail`.
+        const result = spawnSync(bash, ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-s'], {
+          cwd: root,
+          input: script,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            GITHUB_OUTPUT: githubOutput,
+            GITHUB_RUN_ID: RUN_ID,
+            GITHUB_REF_NAME: 'v2.0.0',
+          },
+        });
+        return {
+          status: result.status,
+          output: `${result.stdout ?? ''}${result.stderr ?? ''}`,
+          githubOutput: result.status === 0 ? readFileSync(githubOutput, 'utf8') : '',
+        };
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    };
+
+    for (const [label, notes] of [
+      ['with a trailing newline', NOTES_BODY],
+      ['with no trailing newline', UNTERMINATED_NOTES],
+    ]) {
+      const { status, output, githubOutput } = run(loader, notes);
+      assert.equal(status, 0, `the loader step must exit 0 ${label}: ${output}`);
+      const parsed = parseRunnerOutput(githubOutput);
+      assert.equal(
+        parsed.found,
+        true,
+        `the runner found no closing "${DELIMITER}" line for a notes file ${label}`,
+      );
+      assert.equal(
+        parsed.body.replace(/\n+$/, ''),
+        notes.replace(/\n+$/, ''),
+        `releaseBody must carry the notes ${label}`,
+      );
+    }
+
+    // The same fixture run through the pre-fix loader has to fail, or the
+    // assertions above would pass for a parser that does not detect the shape.
+    const legacy = loader.replace(/^\s*printf .*"\$DELIMITER"$/m, '  echo "$DELIMITER"');
+    assert.notEqual(legacy, loader, 'the loader must emit the delimiter itself, not only echo it');
+    const unterminated = run(legacy, UNTERMINATED_NOTES);
+    assert.equal(unterminated.status, 0, `the pre-fix loader still exits 0: ${unterminated.output}`);
+    assert.equal(
+      parseRunnerOutput(unterminated.githubOutput).found,
+      false,
+      'the pre-fix loader must reproduce the "Matching delimiter not found" failure',
+    );
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
 });

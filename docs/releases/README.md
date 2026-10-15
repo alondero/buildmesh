@@ -33,6 +33,11 @@ Preview on stdout with `npm run release:notes`; add `--write` to create the file
 (`--write` refuses to overwrite an existing draft — pass `--force` to regenerate
 over one, or curate it in place).
 
+End the file with a newline. `npm run check:docs` fails a versioned note whose
+last byte is not a line break, because the release workflow splices it into
+`$GITHUB_OUTPUT` between heredoc delimiters and a missing trailing newline leaves
+the closing delimiter sharing a line with the last paragraph.
+
 Keep only changes users need to know about:
 
 - features and meaningful workflow changes;
