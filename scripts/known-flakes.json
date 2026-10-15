@@ -5,7 +5,5 @@
   "test:pty_spawn > windows_natural_child_exit_unblocks_reader_via_watcher": 2371,
   "tests/integration/ui-shot.test.ts > ui-shot mock mode runs the step script through the CLI, so dropping the step phase cannot stay green": 2245,
   "tests/integration/ui-shot.test.ts > ui-shot mock mode groups, reloads, swaps and ungroups nodes through pointer and keyboard interactions": 2245,
-  "tests/integration/ui-shot.test.ts > ui-shot mock mode keeps the node title and trailing close visible in a 240px pane": 2245,
-  "services::legacy_retirement::retirement_crash_tests::retirement_crash_after_the_acknowledgement_leaves_nothing_to_retry": 2375,
-  "services::legacy_retirement::retirement_crash_tests::retirement_crash_between_the_process_kill_and_its_acknowledgement_recovers": 2375
+  "tests/integration/ui-shot.test.ts > ui-shot mock mode keeps the node title and trailing close visible in a 240px pane": 2245
 }
