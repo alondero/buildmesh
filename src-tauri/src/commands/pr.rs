@@ -1293,11 +1293,13 @@ fn resolve_open_pr(info: &RepoInfo, client: &GitHubClient) -> Result<Option<Pull
 
 fn safe_directory_command(host_path: &str, windows: bool) -> String {
     let quoted = if windows {
-        host_path.replace('\\', "/").replace('\'', "''")
+        // PowerShell accepts smart apostrophes as string delimiters too, so the
+        // shared literal is the only escaping that survives such a path.
+        env::powershell_literal(&host_path.replace('\\', "/"))
     } else {
-        host_path.replace('\'', "'\\''")
+        format!("'{}'", host_path.replace('\'', "'\\''"))
     };
-    format!("git config --global --add safe.directory '{quoted}'")
+    format!("git config --global --add safe.directory {quoted}")
 }
 
 fn open_github_repo(path: &str) -> Result<Repository, String> {
@@ -1471,14 +1473,64 @@ mod tests {
 
     #[test]
     fn safe_directory_commands_preserve_shell_paths() {
-        assert_eq!(
-            safe_directory_command(r"C:\alice's repo", true),
-            "git config --global --add safe.directory 'C:/alice''s repo'",
-        );
+        for (apostrophe, quoted) in [
+            ("'", "''"),
+            ("\u{2018}", "\u{2018}\u{2018}"),
+            ("\u{2019}", "\u{2019}\u{2019}"),
+            ("\u{201a}", "\u{201a}\u{201a}"),
+            ("\u{201b}", "\u{201b}\u{201b}"),
+        ] {
+            assert_eq!(
+                safe_directory_command(&format!("C:\\don{apostrophe}t\\repo"), true),
+                format!("git config --global --add safe.directory 'C:/don{quoted}t/repo'"),
+                "apostrophe: {apostrophe:?}",
+            );
+        }
         assert_eq!(
             safe_directory_command(r"/tmp/alice's\repo", false),
             r"git config --global --add safe.directory '/tmp/alice'\''s\repo'",
         );
+    }
+
+    /// PowerShell treats U+2018..U+201B as string delimiters, so a path holding
+    /// one has to reach `git` as a single exact argument (#2286).
+    #[cfg(windows)]
+    #[test]
+    fn safe_directory_commands_hand_git_one_exact_argument() {
+        use crate::process_util::command_no_window;
+
+        let apostrophes = ["'", "\u{2018}", "\u{2019}", "\u{201a}", "\u{201b}"];
+        let paths: Vec<String> = apostrophes
+            .iter()
+            .map(|apostrophe| format!("C:/don{apostrophe}t\\repo"))
+            .collect();
+        // A `git` function in the session takes precedence over `git.exe` and prints
+        // the last argument it receives, so the guidance command's own output
+        // reports the path and the run touches no Git configuration.
+        let script = format!(
+            "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n\
+             function git {{ [Console]::Out.WriteLine($args[-1]) }}\n{}",
+            paths
+                .iter()
+                .map(|path| safe_directory_command(path, true))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let output = command_no_window("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "PowerShell rejected the guidance commands: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let reported: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        let expected: Vec<String> = paths.iter().map(|path| path.replace('\\', "/")).collect();
+        assert_eq!(reported, expected);
     }
 
     #[test]
@@ -3214,6 +3266,119 @@ mod tests {
         assert_eq!(result.base_branch, "main");
         handle.join().expect("server");
         assert_eq!(count.load(Ordering::SeqCst), 2);
+    }
+
+    /// Issue #2333: creating a PR from the phone with an empty description.
+    /// GitHub's REST schema types the description as `string | null`, so the
+    /// `POST /pulls` 201 answers `"body": null` — and the deserialiser failed
+    /// the whole response with `HTTP error: error decoding response body`
+    /// even though GitHub had created the PR, leaving the sheet in its error
+    /// state with no URL to show. The fixture is GitHub's literal shape; the
+    /// load-bearing assertion is that the acknowledged URL comes back.
+    #[test]
+    fn create_pr_for_node_source_acknowledges_a_pr_created_without_a_description() {
+        use std::sync::atomic::Ordering;
+
+        let _db = ensure_pr_blocking_db();
+        let (_tmp, mesh_id, node_id) = make_mesh_root_and_node(
+            "https://github.com/test-owner/test-repo.git",
+            "main",
+            "agent/fix-x",
+            "origin/main",
+        );
+        let created = serde_json::json!({
+            "number": 901,
+            "html_url": "https://github.com/test-owner/test-repo/pull/901",
+            "title": "fix(github): acknowledge pull requests created with an empty description",
+            "body": null,
+            "state": "open",
+            "draft": false,
+            "merged": false,
+            "head": {"ref": "agent/fix-x", "sha": "abc123", "repo": null},
+            "base": {"ref": "main"}
+        });
+        let (base, count, handle) = fake_server(vec![Scripted::CreatePullRequest(created)]);
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+
+        let result = create_pr_for_node_source_blocking_with_client(
+            &client,
+            mesh_id,
+            node_id,
+            "fix(github): acknowledge pull requests created with an empty description",
+            // The description the user left empty.
+            "",
+            None,
+            None,
+        )
+        .expect("a PR GitHub created must be acknowledged, not reported as a decode failure");
+
+        assert_eq!(
+            result.url,
+            "https://github.com/test-owner/test-repo/pull/901"
+        );
+        assert_eq!(result.head_branch, "agent/fix-x");
+        assert_eq!(result.base_branch, "main");
+        handle.join().expect("server");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "exactly one POST — the happy path must not pre-check"
+        );
+    }
+
+    /// The retry half of #2333: the create response was interrupted, so the
+    /// phone submits again, GitHub answers 422 "already exists", and the
+    /// recovery read returns the PR the first attempt created. That PR carries
+    /// the same empty description, so its `"body": null` must not fail the
+    /// recovery read the same way — that is what left the user unable to
+    /// acknowledge a PR that already existed.
+    #[test]
+    fn create_pr_for_node_source_recovers_a_duplicate_that_has_no_description() {
+        use std::sync::atomic::Ordering;
+
+        let _db = ensure_pr_blocking_db();
+        let (_tmp, mesh_id, node_id) = make_mesh_root_and_node(
+            "https://github.com/test-owner/test-repo.git",
+            "main",
+            "agent/fix-x",
+            "origin/main",
+        );
+        let existing = serde_json::json!([{
+            "number": 902,
+            "html_url": "https://github.com/test-owner/test-repo/pull/902",
+            "title": "fix(github): acknowledge pull requests created with an empty description",
+            "body": null,
+            "state": "open",
+            "draft": false,
+            "head": {"ref": "agent/fix-x", "sha": "abc123"}
+        }]);
+        let (base, count, handle) = fake_server(vec![
+            Scripted::CreatePrConflict(
+                r#"{"message":"Validation Failed","errors":[{"message":"A pull request already exists for test-owner:agent/fix-x."}]}"#.to_string(),
+            ),
+            Scripted::ListPulls {
+                body: existing,
+                expected_head: "test-owner%3Aagent%2Ffix-x".to_string(),
+            },
+        ]);
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+
+        let result = create_pr_for_node_source_blocking_with_client(
+            &client, mesh_id, node_id, "title", "", None, None,
+        )
+        .expect("the existing PR must be recovered rather than failing to decode it");
+
+        assert_eq!(
+            result.url,
+            "https://github.com/test-owner/test-repo/pull/902"
+        );
+        assert_eq!(result.head_branch, "agent/fix-x");
+        handle.join().expect("server");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            2,
+            "POST (422) + GET (recovery) — count == 1 means the recovery GET was skipped"
+        );
     }
 
     #[test]

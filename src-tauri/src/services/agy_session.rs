@@ -185,6 +185,9 @@ enum WorkspaceSummary {
 
 type WorkspaceSummaries = HashMap<String, WorkspaceSummary>;
 
+/// Bounds one wait for a concurrent writer, not the whole read: SQLite spends
+/// the budget per lock acquisition, so a lookup against a locked store gives up
+/// after several of them before the caller falls back to transcript Cwd.
 const SUMMARY_BUSY_TIMEOUT: Duration = Duration::from_millis(200);
 const SUMMARY_QUERY_CHUNK_SIZE: usize = 500;
 
@@ -651,7 +654,6 @@ pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: Env
 mod tests {
     use super::*;
     use std::io::Write;
-    use std::time::Instant;
 
     const UUID_A: &str = "550e8400-e29b-41d4-a716-446655440000";
     const UUID_B: &str = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
@@ -957,8 +959,18 @@ mod tests {
         );
     }
 
+    /// The store is present but locked, so the lookup has to reach the lock
+    /// and report it rather than reading as an empty set, and the capture then
+    /// has to bind from the transcript Cwd alone.
+    ///
+    /// There is deliberately no wall-clock budget here. SQLite spends the busy
+    /// timeout per lock acquisition, so reporting the lock already costs
+    /// several times `SUMMARY_BUSY_TIMEOUT`, and how much of that is real work
+    /// versus scheduling delay belongs to the machine: under the sharded suite
+    /// (four test binaries at once) the old 2 s ceiling over the whole capture
+    /// flaked while the fallback itself stayed correct (issue #2357).
     #[test]
-    fn summary_lock_uses_short_timeout_then_falls_back_to_transcript_cwd() {
+    fn summary_lock_gives_up_then_falls_back_to_transcript_cwd() {
         let temp = tempfile::tempdir().unwrap();
         let brain = temp.path().join("brain");
         let now = chrono::Utc::now();
@@ -982,15 +994,20 @@ mod tests {
             )
             .unwrap();
 
-        let started = Instant::now();
+        let lookup = read_workspace_summaries(&summary_db_path, &[UUID_A.into()]);
+        // Still locked: the capture must not wait for the writer to finish.
         let captured = find_fresh_id_in_test_root(temp.path(), &brain, "/repo/source", not_before);
-        let elapsed = started.elapsed();
         writer.execute_batch("ROLLBACK").unwrap();
 
-        assert_eq!(captured, Some(UUID_A.into()));
+        let error = lookup.expect_err("a locked summary store must not read as an empty one");
         assert!(
-            elapsed < Duration::from_secs(2),
-            "summary DB lock stalled capture for {elapsed:?}"
+            error.contains("lock"),
+            "the summary lookup must report the lock it gave up on: {error}"
+        );
+        assert_eq!(
+            captured,
+            Some(UUID_A.into()),
+            "a locked summary store must not veto the proven transcript Cwd"
         );
     }
 

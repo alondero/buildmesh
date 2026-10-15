@@ -224,12 +224,12 @@ async function exchangeSession(path: string, token?: string): Promise<boolean> {
   return resp.status === 204;
 }
 
-export async function listNodes(): Promise<AgentNode[]> {
-  return (await apiFetch("/api/nodes")).json();
+export async function listNodes(signal?: AbortSignal): Promise<AgentNode[]> {
+  return (await apiFetch("/api/nodes", { signal })).json();
 }
 
-export async function listMeshes(): Promise<Mesh[]> {
-  return (await apiFetch("/api/meshes")).json();
+export async function listMeshes(signal?: AbortSignal): Promise<Mesh[]> {
+  return (await apiFetch("/api/meshes", { signal })).json();
 }
 
 export async function listProviders(): Promise<Provider[]> {
@@ -298,8 +298,8 @@ export async function gitSummary(agentId: number): Promise<GitSummary> {
   return (await apiFetch(`/api/agents/${agentId}/git/summary`)).json();
 }
 
-export async function gitBranch(agentId: number): Promise<{ branch: string }> {
-  return (await apiFetch(`/api/agents/${agentId}/git/branch`)).json();
+export async function gitBranch(agentId: number, signal?: AbortSignal): Promise<{ branch: string }> {
+  return (await apiFetch(`/api/agents/${agentId}/git/branch`, { signal })).json();
 }
 
 export async function diffFile(
@@ -315,8 +315,8 @@ export async function ghAuthOk(): Promise<boolean> {
   return j.ok;
 }
 
-export async function listPulls(meshId: number): Promise<import('../types/generated/GitHubPullRequestFeed').GitHubPullRequestFeed> {
-  const feed = await (await apiFetch(`/api/meshes/${meshId}/pulls?state=open`)).json() as import('../types/generated/GitHubPullRequestFeed').GitHubPullRequestFeed;
+export async function listPulls(meshId: number, signal?: AbortSignal): Promise<import('../types/generated/GitHubPullRequestFeed').GitHubPullRequestFeed> {
+  const feed = await (await apiFetch(`/api/meshes/${meshId}/pulls?state=open`, { signal })).json() as import('../types/generated/GitHubPullRequestFeed').GitHubPullRequestFeed;
   if (!Array.isArray(feed?.items) || typeof feed.completeness?.complete !== 'boolean') {
     throw new Error('The desktop sent an unexpected pull requests response. Update Buildmesh or refresh to retry.');
   }
@@ -347,8 +347,8 @@ export async function squashMerge(meshId: number, number: number, url: string): 
  * `{"error":"not found"}`, so that shape means "no circuit support", not a
  * failure: the node list must keep working against an older desktop.
  */
-export async function listCircuitRuns(): Promise<NodeCircuitRun[]> {
-  const body: unknown = await (await apiFetch('/api/circuit-runs')).json();
+export async function listCircuitRuns(signal?: AbortSignal): Promise<NodeCircuitRun[]> {
+  const body: unknown = await (await apiFetch('/api/circuit-runs', { signal })).json();
   if (Array.isArray(body)) return body as NodeCircuitRun[];
   if (typeof body === 'object' && body !== null && (body as { error?: unknown }).error === 'not found') return [];
   throw new Error('The desktop sent an unexpected Circuit Run response. Update Buildmesh and refresh.');

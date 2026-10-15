@@ -130,16 +130,18 @@ export default function NodeList({
   }, []);
 
   const refresh = useCallback(
-    async (isLatest: () => boolean) => {
+    async (isLatest: () => boolean, signal?: AbortSignal) => {
       const revision = ++refreshRevision.current;
       try {
         // A circuit read that fails (a desktop mid-restart, an older build)
         // must not take the node list down with it: `null` keeps the last
         // lines on screen instead of reporting the desktop offline.
+        // `signal` is the polling hook's dispose signal (issue #1576): it
+        // cancels these requests when the screen unmounts mid-flight.
         const [m, n, runs] = await Promise.all([
-          listMeshes(),
-          listNodes(),
-          listCircuitRuns().catch(() => null),
+          listMeshes(signal),
+          listNodes(signal),
+          listCircuitRuns(signal).catch(() => null),
         ]);
         // `isLatest()` is the sequence-token check from `useVisibilityPolling`:
         // if a newer refresh started while this fetch was in flight, drop
