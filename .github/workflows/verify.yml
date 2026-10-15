@@ -309,6 +309,12 @@ jobs:
           npm run test:docs
           npm run test:readme
           npm run test:lint
+          # The checker owns what an unusable base means: it warns, skips the
+          # diff-scoped content rules and still runs the repository-wide
+          # line-ending invariant, because on a force-moved tag push `before` is
+          # an annotated tag object this clone does not have (issue #2299). The
+          # documentation gate below keeps its own bash fallback, which is where
+          # that pattern was introduced.
           base="$AGENT_DIFF_BASE"
           if [[ "$base" =~ ^0+$ ]]; then base=HEAD; fi
           node scripts/check-agent-diff.mjs --base "$base"

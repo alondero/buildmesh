@@ -41,7 +41,7 @@ test('catches staged, unstaged and untracked violations without changing the ind
   assert.equal(git('diff', '--cached'), before);
 });
 
-test('checks committed changes against the requested base and fails on a missing base', t => {
+test('checks committed changes against the requested base', t => {
   const { cwd, git, put } = repo(t);
   const base = git('rev-parse', 'HEAD').trim();
   put('src/components/Terminal.ts', 'terminal.dispose();\n');
@@ -49,9 +49,71 @@ test('checks committed changes against the requested base and fails on a missing
   git('-c', 'commit.gpgsign=false', 'commit', '-qm', 'change');
   assert.deepEqual(checkDiff(cwd), []);
   assert.equal(checkDiff(cwd, base).length, 1);
+  // The strict primitive still refuses an unusable base rather than reporting
+  // an empty successful check; `checkAgentRules` is what degrades to a warning.
+  assert.throws(() => checkDiff(cwd, 'missing-base'), /does not resolve/);
+});
+
+test('an unresolvable base warns, skips only the content scan, and passes (issue #2299)', t => {
+  const { cwd, git, put } = repo(t);
+  const base = git('rev-parse', 'HEAD').trim();
+  put('src/components/Terminal.ts', 'terminal.dispose();\n');
+  git('add', '.');
+  git('-c', 'commit.gpgsign=false', 'commit', '-qm', 'change');
+
+  // The force-updated-tag push: `github.event.before` is an annotated tag object
+  // the runner's clone does not have. The missing signal warns, it does not fail.
+  const unavailable = checkAgentRules(cwd, 'e9e059dccd4a8e20ed5673d55281525dc3c7f314');
+  assert.equal(unavailable.skipped, true);
+  assert.equal(unavailable.base, 'e9e059dccd4a8e20ed5673d55281525dc3c7f314');
+  assert.deepEqual(unavailable.failures, []);
+  assert.equal(checkAgentRules(cwd, base).skipped, false);
+
   const run = spawnSync(process.execPath, [checker, '--base', 'missing-base'], { cwd, encoding: 'utf8' });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stderr, /::warning::Changed-code scan skipped/);
+  assert.match(run.stderr, /missing-base/);
+  assert.match(run.stdout, /skipped because its diff base is unavailable/);
+
+  // Skipping the content rules must not skip the repository-wide invariant,
+  // which reads the index and needs no base: the fallback still fails for a
+  // CRLF commit, and still names the violation.
+  mkdirSync(join(cwd, 'src/lib'), { recursive: true });
+  put('src/lib/staged.ts', 'export const a = 1;\r\n');
+  git('add', 'src/lib/staged.ts');
+  const skippedButCaught = spawnSync(process.execPath, [checker, '--base', 'missing-base'], { cwd, encoding: 'utf8' });
+  assert.equal(skippedButCaught.status, 1);
+  assert.match(skippedButCaught.stderr, /staged\.ts: stored in the index with CRLF line endings/);
+});
+
+test('a resolvable base still fails the changed-code scan on a violation', t => {
+  const { cwd, git, put } = repo(t);
+  const base = git('rev-parse', 'HEAD').trim();
+  put('src/components/Terminal.ts', 'terminal.dispose();\n');
+  git('add', '.');
+  git('-c', 'commit.gpgsign=false', 'commit', '-qm', 'change');
+  const result = checkAgentRules(cwd, base);
+  assert.equal(result.skipped, false);
+  assert.equal(result.failures.length, 1);
+  assert.match(result.failures[0], /Terminal\.ts.*terminal-dispose/);
+  const run = spawnSync(process.execPath, [checker, '--base', base], { cwd, encoding: 'utf8' });
   assert.equal(run.status, 1);
-  assert.match(run.stderr, /Agent diff check failed/);
+  assert.match(run.stderr, /terminal-dispose/);
+  assert.doesNotMatch(run.stderr, /::warning::/);
+});
+
+test('an empty or all-zero base is the HEAD sentinel, not an unavailable one', t => {
+  const { cwd, git, put } = repo(t);
+  const base = git('rev-parse', 'HEAD').trim();
+  put('src/components/Terminal.ts', 'terminal.dispose();\n');
+  git('add', '.');
+  git('-c', 'commit.gpgsign=false', 'commit', '-qm', 'change');
+  for (const sentinel of ['', '0000000000000000000000000000000000000000']) {
+    const result = checkAgentRules(cwd, sentinel);
+    assert.equal(result.skipped, false, sentinel);
+    assert.equal(result.base, 'HEAD', sentinel);
+    assert.equal(result.failures.length, 0, sentinel);
+  }
 });
 
 test('allows unchanged legacy code, deletions, reasoned exceptions, and paths with spaces', t => {
@@ -140,9 +202,10 @@ test('checkAgentRules returns content-rule and line-ending failures together', t
   assert.match(content[0], /NewTerminal\.ts.*terminal-dispose/);
 
   const both = checkAgentRules(cwd);
-  assert.equal(both.length, 2, both.join('\n'));
-  assert.ok(both.some((failure) => /NewTerminal\.ts.*terminal-dispose/.test(failure)));
-  assert.ok(both.some((failure) => /src\/lib\/staged\.ts.*i\/crlf/.test(failure)));
+  assert.equal(both.skipped, false);
+  assert.equal(both.failures.length, 2, both.failures.join('\n'));
+  assert.ok(both.failures.some((failure) => /NewTerminal\.ts.*terminal-dispose/.test(failure)));
+  assert.ok(both.failures.some((failure) => /src\/lib\/staged\.ts.*i\/crlf/.test(failure)));
 
   const run = spawnSync(process.execPath, [checker], { cwd, encoding: 'utf8' });
   assert.equal(run.status, 1);
