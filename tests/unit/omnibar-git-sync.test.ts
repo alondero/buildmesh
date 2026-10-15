@@ -85,6 +85,38 @@ describe('omnibar Git sync across meshes', () => {
       .toBe('Synced 1 of 2 meshes; skipped with no remote: a');
   });
 
+  it('names skipped meshes in the problem summary too', async () => {
+    // A skipped mesh raises no Needs-attention item, so a problem-only summary
+    // left the no-remote outcome reported nowhere at all.
+    vi.mocked(invoke).mockImplementation(async (_cmd, args) => ((args as { path: string }).path === '/repos/a'
+      ? sync('Fetch failed: network down', { status: 'failed', fetched: false })
+      : sync('No remote configured', { status: 'skipped', fetched: false })));
+    await gitSyncAllMeshes([mesh(1, 'a'), mesh(2, 'b')]);
+
+    expect(useToastStore.getState().toasts).toHaveLength(1);
+    expect(useToastStore.getState().toasts[0].message)
+      .toBe('Sync incomplete for: a; skipped (no remote): b');
+    // One card for the one real problem; the no-remote mesh raises none.
+    expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1);
+  });
+
+  it('publishes a fetch for a mesh left partially synced', async () => {
+    // The bulk run advances the upstream ref without fast-forwarding, so the
+    // row's cached behind-count must be re-read even though nothing resolved.
+    vi.mocked(invoke).mockResolvedValue(sync('Fetched 9 new commits but fast-forward failed: diverged', { status: 'partial' }));
+    await gitSyncAllMeshes([mesh(1, 'a')]);
+
+    expect(useMeshSyncCompletion.getState().completions['/repos/a'])
+      .toMatchObject({ verified: false, refsFetched: true });
+  });
+
+  it('publishes nothing for a mesh that only skipped', async () => {
+    vi.mocked(invoke).mockResolvedValue(sync('No remote configured', { status: 'skipped', fetched: false }));
+    await gitSyncAllMeshes([mesh(1, 'a')]);
+
+    expect(useMeshSyncCompletion.getState().completions['/repos/a']).toBeUndefined();
+  });
+
   it('does not let a skipped mesh resolve an earlier real failure', async () => {
     vi.mocked(invoke).mockResolvedValue(sync('Fetch failed: network down', { status: 'failed', fetched: false }));
     await gitSyncAllMeshes([mesh(1, 'a')]);

@@ -116,13 +116,23 @@ not bump the worktree revision, because it is not newer evidence about the queue
 Both kinds deduplicate by action kind *and* path, since a mesh's root checkout
 can itself be a blocked worktree path.
 
-The sync card's outcome is read back by the sidebar rather than held in it. A
-mesh row derives its failure badge from an unresolved sync item for its own path
-(as well as the spawn-time `mesh-sync-warning` event), so a retry started from
-this probe clears the badge and re-reads the behind count the same way a retry
-from the row does. A command that syncs many meshes at once records its
-per-mesh problems silently — they land here and nowhere else — and shows one
-summary toast, because N problem toasts would overflow the three-toast stack.
+The sync card's outcome is read back by the sidebar rather than held in it. Each
+completed run publishes two independent signals per mesh path — whether the mesh
+was verified, and whether the fetch ran (the backend's own `fetched` flag, not
+the status) — and a mesh row applies each to the piece it owns: verification
+clears the failure badge, a fetch re-reads the cached behind-count. The split is
+what a `Partial` run needs: it advances the remote-tracking ref without
+fast-forwarding, so the count is stale while the badge is correct. Both signals
+are applied by the same effect whether the sync was started from the row, from
+this probe's Retry button, or from the omnibar's bulk command. A run that neither
+verified nor fetched (a skipped mesh, an IPC that never reached the backend)
+publishes nothing, because nothing changed.
+
+A command that syncs many meshes at once records its per-mesh problems silently
+— they land in Needs attention and nowhere else — and shows one summary toast,
+because N problem toasts would overflow the three-toast stack. That summary
+names skipped meshes as well as failing ones: a mesh with no remote raises no
+attention item, so a problem-only summary would report that outcome nowhere.
 
 The destination uses the standard Probe shell, tool rail and 240–720px resize
 bounds. Its toolbar and footer stay pinned around one inner scroller; diagnostic

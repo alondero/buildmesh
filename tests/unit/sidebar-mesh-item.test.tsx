@@ -717,6 +717,40 @@ describe('MeshItem', () => {
       .toBeGreaterThan(readsBefore));
   });
 
+  it('refreshes the behind-count when a sync the row did not start only fetched', async () => {
+    // A partial run advances the remote-tracking ref without fast-forwarding.
+    // The count is therefore stale — this is the originally reported symptom —
+    // while the badge is correct, because the mesh is still behind.
+    renderMeshItem();
+    await act(async () => {
+      await emit('mesh-sync-warning', {
+        node_id: 10,
+        mesh_path: MESH.path,
+        outcome: 'fetch_failed',
+        new_commits: null,
+        pr_number: null,
+        head_ref: null,
+        expected_sha: null,
+        actual_sha: null,
+        fallback_base_ref: null,
+        head_repo_owner: null,
+        head_repo_clone_url: null,
+        message: 'fetch failed: network down',
+      });
+    });
+    await screen.findByLabelText(/^Sync failed for /);
+
+    const readsBefore = vi.mocked(invoke).mock.calls.filter(c => c[0] === 'get_git_branch_status').length;
+    await act(async () => { reportMeshSync({ name: MESH.name, path: MESH.path }, {
+      fetched: true, pulled: false, new_commits: 9, message: 'Fetched 9 new commits but fast-forward failed: diverged', status: 'partial',
+    }); });
+
+    await waitFor(() => expect(vi.mocked(invoke).mock.calls.filter(c => c[0] === 'get_git_branch_status').length)
+      .toBeGreaterThan(readsBefore));
+    // Still behind, so the badge stays lit — the fetch resolved nothing.
+    expect(screen.getByLabelText(/^Sync failed for /)).toBeTruthy();
+  });
+
   it('keeps the badge lit when a sync the row did not start only skipped the mesh', async () => {
     renderMeshItem();
     await act(async () => {

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import {
-  classifySyncResult, raiseSyncAttention, reportMeshSync, reportSyncError, runMeshSync, SYNC_PROVIDER,
+  classifySyncResult, outcomeOf, raiseSyncAttention, reportMeshSync, reportSyncError, runMeshSync, SYNC_PROVIDER,
   useMeshSyncCompletion,
 } from '../../src/lib/meshSyncFeedback';
 import { addToast, useToastStore } from '../../src/stores/toastStore';
@@ -13,8 +13,17 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
 const MESH = { name: 'lambo-recomp', path: '/repos/lambo-recomp' };
 
+/** Mirrors the backend's own mapping (see `sync_outcome_to_git_sync_result`):
+ *  a `skipped` or `failed` run never reached the remote, so it reports
+ *  `fetched: false`. A helper that defaulted `fetched: true` would make the
+ *  "no completion was published" and "reads the flag, not the status" cases
+ *  assert against a shape the backend cannot produce. */
+const FETCHED_BY_STATUS: Record<GitSyncStatus, boolean> = {
+  synced: true, up_to_date: true, skipped: false, partial: true, failed: false,
+};
+
 function result(status: GitSyncStatus, message: string, overrides: Partial<GitSyncResult> = {}): GitSyncResult {
-  return { fetched: true, pulled: false, new_commits: 0, message, status, ...overrides };
+  return { fetched: FETCHED_BY_STATUS[status], pulled: false, new_commits: 0, message, status, ...overrides };
 }
 
 beforeEach(() => {
@@ -121,9 +130,8 @@ describe('reporting a manual sync', () => {
     const revisions = () => useMeshSyncCompletion.getState().completions[MESH.path]?.revision ?? 0;
     expect(revisions()).toBe(0);
 
-    reportMeshSync(MESH, result('partial', 'fast-forward failed'));
-    reportMeshSync(MESH, result('skipped', 'No remote configured'));
     reportSyncError(MESH, new Error('boom'));
+    reportMeshSync(MESH, result('skipped', 'No remote configured'));
     expect(revisions()).toBe(0);
 
     reportMeshSync(MESH, result('synced', 'Pulled 1 new commit', { pulled: true, new_commits: 1 }));
@@ -131,6 +139,33 @@ describe('reporting a manual sync', () => {
     reportMeshSync(MESH, result('up_to_date', 'Already up to date'));
     // A counter, not a boolean: a repeat must still wake a subscriber up.
     expect(revisions()).toBe(2);
+  });
+
+  it('publishes a fetch without a verification for a partial sync', () => {
+    // A partial run fetches but does not fast-forward, so the remote-tracking
+    // ref the behind-count is measured against has moved and every row for this
+    // mesh must re-read it — while the failure itself stays unresolved.
+    const entry = () => useMeshSyncCompletion.getState().completions[MESH.path];
+    reportMeshSync(MESH, result('partial', 'Fetched 1 new commit but fast-forward failed: diverged'));
+    expect(entry()).toMatchObject({ verified: false, refsFetched: true });
+    expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1);
+  });
+
+  it('publishes no completion for a result that neither verified nor fetched', () => {
+    // A skipped mesh, and a failed fetch that never reached the remote, leave
+    // every row's cached state exactly as it was.
+    reportMeshSync(MESH, result('skipped', 'No remote configured'));
+    reportMeshSync(MESH, result('failed', 'Fetch failed: could not resolve host', { fetched: false }));
+    expect(useMeshSyncCompletion.getState().completions[MESH.path]).toBeUndefined();
+  });
+
+  it('reads the fetch signal from the backend flag, not the status', () => {
+    // `skipped` and `failed` both carry fetched:false upstream; only a partial
+    // run reports fetched:true without verifying. Deriving the signal from the
+    // status instead would miss exactly that case.
+    expect(outcomeOf(result('partial', 'x'))).toEqual({ verified: false, refsFetched: true });
+    expect(outcomeOf(result('skipped', 'x'))).toEqual({ verified: false, refsFetched: false });
+    expect(outcomeOf(result('synced', 'x', { pulled: true }))).toEqual({ verified: true, refsFetched: true });
   });
 });
 

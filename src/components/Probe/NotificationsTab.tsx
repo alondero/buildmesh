@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react';
 import { useToastStore } from '../../stores/toastStore';
 import { openBlockedCleanups, useBlockedCleanupStore } from '../../stores/blockedCleanupStore';
 import { isMeshSyncFailure, isWorktreeCleanup, needsAttention,
@@ -20,6 +20,31 @@ function NoticeTime({ notice }: { notice: Notification }) {
   </time>;
 }
 
+/** The layout every unresolved-problem card shares: a heading with its time, the
+ *  thing that needs attention, the reason, its path, and a status line beside the
+ *  one action that can move it. The two kinds differ only in what those slots
+ *  say and in which action they offer, so the structure lives here once — a card
+ *  whose reason does not wrap and a path that does not fit is the same bug in
+ *  both kinds. */
+function AttentionCard({ title, notice, subject, detail, path, status, action, testId }: {
+  title: string;
+  notice: Notification;
+  subject: string;
+  detail: string;
+  path: string;
+  status: string;
+  action: ReactNode;
+  testId?: string;
+}) {
+  return <article className="notification-attention-card" data-testid={testId}>
+    <div className="notification-heading"><h4>{title}</h4><NoticeTime notice={notice} /></div>
+    <div className="notification-node">{subject}</div>
+    <p>{detail}</p>
+    <code>{path}</code>
+    <div className="notification-card-actions"><span>{status}</span>{action}</div>
+  </article>;
+}
+
 /** A mesh that did not reach upstream state. Retrying from here is the point of
  *  putting it in this section: the sync runs through the same `runMeshSync` the
  *  sidebar uses, and a success resolves this very card. The local `pending`
@@ -27,36 +52,34 @@ function NoticeTime({ notice }: { notice: Notification }) {
 function SyncAttentionCard({ notice }: { notice: Notification & { action: MeshSyncNotificationAction } }) {
   const [pending, setPending] = useState(false);
   const action = notice.action;
-  return <article className="notification-attention-card" data-testid={`sync-attention-${action.path}`}>
-    <div className="notification-heading"><h4>Sync from upstream incomplete</h4><NoticeTime notice={notice} /></div>
-    <div className="notification-node">{action.meshName}</div>
-    <p>{action.detail}</p>
-    <code>{action.path}</code>
-    <div className="notification-card-actions">
-      <span>{pending ? 'Retrying…' : 'The mesh is still behind upstream'}</span>
-      <button type="button" className="notification-resolve" disabled={pending}
-        aria-label={`Retry sync for ${action.meshName}`}
-        onClick={async () => {
-          setPending(true);
-          await runMeshSync({ name: action.meshName, path: action.path });
-          setPending(false);
-        }}>Retry sync <span aria-hidden="true">→</span></button>
-    </div>
-  </article>;
+  return <AttentionCard
+    title="Sync from upstream incomplete"
+    notice={notice}
+    subject={action.meshName}
+    detail={action.detail}
+    path={action.path}
+    status={pending ? 'Retrying…' : 'The mesh is still behind upstream'}
+    testId={`sync-attention-${action.path}`}
+    action={<button type="button" className="notification-resolve" disabled={pending}
+      aria-label={`Retry sync for ${action.meshName}`}
+      onClick={async () => {
+        setPending(true);
+        await runMeshSync({ name: action.meshName, path: action.path });
+        setPending(false);
+      }}>Retry sync <span aria-hidden="true">→</span></button>} />;
 }
 
 function WorktreeAttentionCard({ notice, onResolve }: { notice: Notification & { action: WorktreeNotificationAction }; onResolve: (n: Notification) => void }) {
   const action = notice.action;
-  return <article className="notification-attention-card">
-    <div className="notification-heading"><h4>Worktree cleanup blocked</h4><NoticeTime notice={notice} /></div>
-    <div className="notification-node">{action.nodeName}</div>
-    <p>{action.detail}</p>
-    <code>{action.path}</code>
-    <div className="notification-card-actions"><span>Queued for automatic retry</span>
-      <button type="button" className="notification-resolve" aria-label={`Resolve worktree ${action.nodeName}`}
-        onClick={() => onResolve(notice)}>Resolve <span aria-hidden="true">→</span></button>
-    </div>
-  </article>;
+  return <AttentionCard
+    title="Worktree cleanup blocked"
+    notice={notice}
+    subject={action.nodeName}
+    detail={action.detail}
+    path={action.path}
+    status="Queued for automatic retry"
+    action={<button type="button" className="notification-resolve" aria-label={`Resolve worktree ${action.nodeName}`}
+      onClick={() => onResolve(notice)}>Resolve <span aria-hidden="true">→</span></button>} />;
 }
 
 export function NotificationsTab() {

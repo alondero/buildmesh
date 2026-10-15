@@ -17,28 +17,43 @@ import type { GitSyncStatus } from '../types/generated/GitSyncStatus';
 import type { MeshSyncNotificationAction } from './notifications';
 import type { ToastSeverity } from './toastUtils';
 
-/** Per-mesh "this mesh has just been verified in sync", with a counter so a
+/** Per-mesh record of what the last completed sync did, with a counter so a
  *  repeat is a new event rather than an equal one.
  *
  *  The sidebar row's failure badge and cached behind-count are component-local,
- *  and a sync can now be run from two places the row knows nothing about — this
- *  probe's Retry button, and the omnibar's bulk command. Without a published
- *  completion, a retry from the card would resolve the notification while the
- *  row beside it kept a lit badge and a stale count for a mesh that is
- *  demonstrably in sync. */
+ *  and a sync can be run from two places the row knows nothing about — this
+ *  probe's Retry button, and the omnibar's bulk command — so what a sync did has
+ *  to be published for rows to react to.
+ *
+ *  The two signals are separate because they end different things. `verified`
+ *  ends the problem: it clears the failure badge and resolves the card. A
+ *  `Partial` result verifies nothing but still fetches, so the remote-tracking
+ *  ref the behind-count is measured against has moved and the count is stale
+ *  even though nothing was resolved — the original reported symptom (commits
+ *  arrive, the working tree does not move, the marker does not budge). */
 interface MeshSyncCompletion {
   revision: number;
+  /** The mesh is confirmed in sync with upstream. */
+  verified: boolean;
+  /** The fetch ran, so the remote-tracking ref may have moved. */
+  refsFetched: boolean;
+}
+
+/** What one completed sync did to a mesh. */
+export interface SyncOutcome {
+  verified: boolean;
+  refsFetched: boolean;
 }
 
 interface MeshSyncCompletionState {
   completions: Record<string, MeshSyncCompletion>;
-  noteCompletion: (path: string) => void;
+  noteCompletion: (path: string, outcome: SyncOutcome) => void;
 }
 
 export const useMeshSyncCompletion = create<MeshSyncCompletionState>()(set => ({
   completions: {},
-  noteCompletion: path => set(s => ({
-    completions: { ...s.completions, [path]: { revision: (s.completions[path]?.revision ?? 0) + 1 } },
+  noteCompletion: (path, outcome) => set(s => ({
+    completions: { ...s.completions, [path]: { revision: (s.completions[path]?.revision ?? 0) + 1, ...outcome } },
   })),
 }));
 
@@ -109,19 +124,31 @@ export function raiseSyncAttention(target: SyncTarget, detail: string, severity:
   addToast(SYNC_PROVIDER, `${target.name}: ${detail}`, severity, syncAction(target, detail), options);
 }
 
-/** Record that this mesh has just been verified in sync. Two effects, in one
- *  place, because both belong to the same fact and both entry points (a
- *  row-initiated sync and a card-initiated retry) must produce them:
- *  - resolves an earlier "Needs attention" item for it, so a fixed mesh does
- *    not keep a card describing a problem it no longer has;
- *  - publishes the completion so the sidebar row clears its own failure badge
- *    and re-reads the cached behind-count even though it did not run the sync.
+/** Publish what one completed sync did to a mesh, for rows to react to. Two
+ *  effects in one place, because both belong to the same fact and every entry
+ *  point must produce both:
+ *  - resolves an earlier "Needs attention" item when the mesh was *verified*,
+ *    so a fixed mesh does not keep a card describing a problem it no longer has;
+ *  - publishes the outcome so a sidebar row clears its own failure badge and
+ *    re-reads the cached behind-count even though it did not run the sync.
  *
- *  Called only for a result that actually *verified* the mesh. A skipped sync
- *  checked nothing, so it must not clear a real failure. */
-export function noteSyncVerified(target: SyncTarget): void {
-  useToastStore.getState().resolveMeshSyncNotification(target.path, 'Synced successfully.');
-  useMeshSyncCompletion.getState().noteCompletion(target.path);
+ *  A result that neither verified nor fetched (a skipped mesh, an IPC that
+ *  never reached the backend) publishes nothing: nothing changed for any row.
+ *  `refsFetched` is read from the backend's own `fetched` flag rather than
+ *  inferred from the status, because a `Partial` run fetches without
+ *  fast-forwarding and that is exactly the case whose behind-count goes stale. */
+export function noteSyncOutcome(target: SyncTarget, outcome: SyncOutcome): void {
+  if (!outcome.verified && !outcome.refsFetched) return;
+  if (outcome.verified) {
+    useToastStore.getState().resolveMeshSyncNotification(target.path, 'Synced successfully.');
+  }
+  useMeshSyncCompletion.getState().noteCompletion(target.path, outcome);
+}
+
+/** The outcome of a `git_sync` result, in the two signals rows react to. */
+export function outcomeOf(result: GitSyncResult): SyncOutcome {
+  const feedback = classifySyncResult(result);
+  return { verified: feedback.verified, refsFetched: result.fetched };
 }
 
 /** Report one manual sync: always a toast, plus a "Needs attention" item when
@@ -134,11 +161,10 @@ export function reportMeshSync(target: SyncTarget, result: GitSyncResult): SyncF
   } else {
     addToast(SYNC_PROVIDER, `${target.name}: ${result.message}`, feedback.severity);
   }
-  // Only a result that *verified* the mesh clears the card. A skipped sync
-  // checked nothing — a Mesh with no remote would otherwise "resolve" a real
-  // failure it never retested, silently dropping the one durable problem the
-  // user had. See `SyncFeedback.verified`.
-  if (feedback.verified) noteSyncVerified(target);
+  // Publishes both what the run verified and whether it moved the refs, so a
+  // row re-reads its behind-count for a fetched-but-not-fast-forwarded result
+  // and only clears its badge for a verified one.
+  noteSyncOutcome(target, outcomeOf(result));
   return feedback;
 }
 

@@ -314,18 +314,21 @@ function MeshItemView({
   // Notifications probe's Retry button and the omnibar's bulk command — and
   // both of the things this row owns are component-local: the spawn-warning
   // flag above, and the behind-count cached by `useGitBranchStatus`. Reacting
-  // to the published completion is what keeps a retry from the card from
-  // leaving a mesh that is now in sync still showing a lit badge and a stale
-  // count. The row's own retries publish the same completion, so this is the
-  // only place either update happens.
+  // to the published outcome is what keeps a retry from the card from leaving
+  // a mesh that has moved showing a stale count, or a mesh that is in sync
+  // still showing a lit badge. The row's own retries publish the same outcome,
+  // so this is the only place either update happens.
+  //
+  // The two signals are applied separately on purpose: a partial sync fetches
+  // without fast-forwarding, so the count is stale while the badge is correct.
   const completion = useMeshSyncCompletion(s => s.completions[mesh.path]);
   const lastHandled = useRef(0);
   useEffect(() => {
     const revision = completion?.revision ?? 0;
     if (revision === lastHandled.current) return;
     lastHandled.current = revision;
-    setSpawnSyncFailed(false);
-    refreshBranchStatus();
+    if (completion?.verified) setSpawnSyncFailed(false);
+    if (completion?.refsFetched) refreshBranchStatus();
   }, [completion, refreshBranchStatus]);
 
   // One sync path behind both entry points: the failure badge in the header

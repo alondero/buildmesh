@@ -27,7 +27,7 @@ import type { SpawnOption } from '../../lib/groups';
 import { currentTheme, setTheme, type ThemeName } from '../../lib/theme';
 import { mapBackendProviders } from '../../lib/groups';
 import { addToast } from '../../stores/toastStore';
-import { classifySyncResult, noteSyncVerified, raiseSyncAttention, reportSyncError, SYNC_PROVIDER } from '../../lib/meshSyncFeedback';
+import { classifySyncResult, noteSyncOutcome, outcomeOf, raiseSyncAttention, reportSyncError, SYNC_PROVIDER } from '../../lib/meshSyncFeedback';
 import * as api from '../../lib/tauri';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { enterMesh, focusNode } from '../../lib/navigation';
@@ -140,6 +140,9 @@ export async function gitSyncAllMeshes(meshes: Mesh[]): Promise<void> {
       if (feedback.unresolved) {
         (result.status === 'failed' ? failed : behind).push(mesh.name);
         raiseSyncAttention(target, result.message, feedback.severity, SILENT);
+        // A partial run fetches without fast-forwarding, so the row's cached
+        // behind-count is stale even though nothing was verified or resolved.
+        noteSyncOutcome(target, outcomeOf(result));
         continue;
       }
       // A mesh with no remote was never contacted. It is neither synced nor
@@ -150,7 +153,7 @@ export async function gitSyncAllMeshes(meshes: Mesh[]): Promise<void> {
         continue;
       }
       synced += 1;
-      noteSyncVerified(target);
+      noteSyncOutcome(target, outcomeOf(result));
     } catch (error) {
       failed.push(mesh.name);
       // The thrown reason goes into the card, not just the summary: "sync
@@ -160,9 +163,13 @@ export async function gitSyncAllMeshes(meshes: Mesh[]): Promise<void> {
   }
   const problems = [...failed, ...behind];
   if (problems.length > 0) {
-    addToast(SYNC_PROVIDER, problems.length === meshes.length
+    // A skipped mesh raises no Needs-attention item, so a problem-only summary
+    // would leave the no-remote outcome reported nowhere at all. Name them here
+    // rather than dropping them from the one toast this run produces.
+    const skippedNote = skipped.length > 0 ? `; skipped (no remote): ${skipped.join(', ')}` : '';
+    addToast(SYNC_PROVIDER, (problems.length === meshes.length
       ? `No mesh synced: ${problems.join(', ')}`
-      : `Sync incomplete for: ${problems.join(', ')}`, 'warning');
+      : `Sync incomplete for: ${problems.join(', ')}`) + skippedNote, 'warning');
   } else if (skipped.length > 0) {
     addToast(SYNC_PROVIDER, skipped.length === meshes.length
       ? `No mesh synced — no remote configured: ${skipped.join(', ')}`

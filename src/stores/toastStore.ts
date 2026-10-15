@@ -62,27 +62,29 @@ export const useToastStore = create<ToastState>()(persist((set) => ({
       // putting anything on the three-deep toast stack. It is how a command
       // that syncs N meshes reports N problems without N toasts: the caller
       // shows one summary instead. Only meaningful with an action — a silent
-      // record with no action would be history nobody ever sees, so the flag
-      // is ignored there and the toast is shown as usual.
-      if (options?.silent && action) {
-        const previous = previousFor(state.notifications, action);
-        const id = previous?.id ?? ++nextToastId;
-        const notice: Notification = { id, provider, message, createdAt: now, severity, read: false, action };
-        return {
-          notifications: limitNotifications([notice, ...state.notifications.filter(n => n.id !== id)]),
-          worktreeRevision: state.worktreeRevision + (isWorktreeCleanup(action) ? 1 : 0),
-        };
-      }
+      // record with no action would be history nobody ever sees, so the flag is
+      // ignored there and the toast is shown as usual.
+      //
+      // The recording step below is shared by both cases; only the toast stack
+      // differs. Recording is the part that must not drift: a silent record and
+      // a visible one have to deduplicate against the same unresolved problem
+      // and be retained by the same rules, or the same failure would file two
+      // differently-behaving records depending on which entry point reported it.
+      const silent = options?.silent === true && action !== undefined;
       const incoming = { id: ++nextToastId, provider, message, createdAt: now, severity };
-      const merged = dedupToasts(state.toasts, incoming, now, TOAST_DEDUP_TTL_MS);
-      const toast = merged.find(t => t.createdAt === now && createToastKey(t) === createToastKey(incoming))!;
+      const merged = silent ? state.toasts : dedupToasts(state.toasts, incoming, now, TOAST_DEDUP_TTL_MS);
+      // The record the history entry is built from: the toast as it ended up on
+      // the stack after dedup, or the incoming record when there is no stack.
+      const toast = silent
+        ? incoming
+        : merged.find(t => t.createdAt === now && createToastKey(t) === createToastKey(incoming))!;
       const previous = action
         ? previousFor(state.notifications, action)
         : state.notifications.find(n => !n.action && n.id === toast.id);
       const id = previous?.id ?? (state.notifications.some(n => n.id === toast.id) ? ++nextToastId : toast.id);
       const notice: Notification = { ...toast, id, message, read: false, action };
       return {
-        toasts: applyToastCap(merged, TOAST_MAX),
+        toasts: silent ? state.toasts : applyToastCap(merged, TOAST_MAX),
         notifications: limitNotifications([notice, ...state.notifications.filter(n => n.id !== id)]),
         // Only a worktree-cleanup action changes what the reconciliation can
         // legitimately decide. Bumping on a sync failure would instead fence
