@@ -152,11 +152,20 @@ describe('reporting a manual sync', () => {
   });
 
   it('publishes no completion for a result that neither verified nor fetched', () => {
-    // A skipped mesh, and a failed fetch that never reached the remote, leave
-    // every row's cached state exactly as it was.
-    reportMeshSync(MESH, result('skipped', 'No remote configured'));
-    reportMeshSync(MESH, result('failed', 'Fetch failed: could not resolve host', { fetched: false }));
+    // Publishing nothing and raising a card are separate questions, and this
+    // pins the difference so the documented contract cannot drift from it: a
+    // failed fetch that never reached the remote is a completed `git_sync`
+    // result — the backend answered — that still moved no refs and established
+    // nothing, so no row's cached state changes.
+    reportMeshSync(MESH, result('failed', 'Fetch failed: could not resolve host'));
     expect(useMeshSyncCompletion.getState().completions[MESH.path]).toBeUndefined();
+    // …but the user still has to be told, so it raises an unresolved card.
+    expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1);
+    // A mesh with no remote neither publishes nor raises: there is nothing to
+    // report and nothing that is wrong.
+    reportMeshSync(MESH, result('skipped', 'No remote configured'));
+    expect(useMeshSyncCompletion.getState().completions[MESH.path]).toBeUndefined();
+    expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1);
   });
 
   it('reads the fetch signal from the backend flag, not the status', () => {

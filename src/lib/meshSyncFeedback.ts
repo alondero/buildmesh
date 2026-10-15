@@ -132,8 +132,12 @@ export function raiseSyncAttention(target: SyncTarget, detail: string, severity:
  *  - publishes the outcome so a sidebar row clears its own failure badge and
  *    re-reads the cached behind-count even though it did not run the sync.
  *
- *  A result that neither verified nor fetched (a skipped mesh, an IPC that
- *  never reached the backend) publishes nothing: nothing changed for any row.
+ *  A result that neither verified nor fetched publishes nothing, so every row
+ *  keeps what it already had: a `skipped` mesh, a `failed` result that came back
+ *  with `fetched: false` (the fetch failed, or the path was not a usable
+ *  repository — a completed command result, not an error), and an IPC that never
+ *  reached the backend all land here. Those still raise a toast and a
+ *  Needs-attention card; they simply changed nothing for another mesh's row.
  *  `refsFetched` is read from the backend's own `fetched` flag rather than
  *  inferred from the status, because a `Partial` run fetches without
  *  fast-forwarding and that is exactly the case whose behind-count goes stale. */

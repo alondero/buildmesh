@@ -116,17 +116,26 @@ not bump the worktree revision, because it is not newer evidence about the queue
 Both kinds deduplicate by action kind *and* path, since a mesh's root checkout
 can itself be a blocked worktree path.
 
-The sync card's outcome is read back by the sidebar rather than held in it. Each
-completed run publishes two independent signals per mesh path — whether the mesh
-was verified, and whether the fetch ran (the backend's own `fetched` flag, not
-the status) — and a mesh row applies each to the piece it owns: verification
+The sync card's outcome is read back by the sidebar rather than held in it. A
+completed run publishes up to two independent signals per mesh path — whether the
+mesh was verified, and whether the fetch ran (the backend's own `fetched` flag,
+not the status) — and a mesh row applies each to the piece it owns: verification
 clears the failure badge, a fetch re-reads the cached behind-count. The split is
 what a `Partial` run needs: it advances the remote-tracking ref without
 fast-forwarding, so the count is stale while the badge is correct. Both signals
 are applied by the same effect whether the sync was started from the row, from
-this probe's Retry button, or from the omnibar's bulk command. A run that neither
-verified nor fetched (a skipped mesh, an IPC that never reached the backend)
-publishes nothing, because nothing changed.
+this probe's Retry button, or from the omnibar's bulk command.
+
+A run that neither verified nor fetched publishes nothing, so every row keeps
+the state it already had. That is three cases, and the third is the one worth
+naming: a `skipped` mesh (no remote configured); a `failed` result that came
+back from the backend with `fetched: false`, i.e. the fetch itself failed or the
+path was not a usable repository; and an IPC that never reached the backend at
+all. The middle one is a completed `git_sync` result, not an error, and it still
+publishes nothing — because it moved no refs and established nothing. The
+difference is only in how the user learns about it: the first and second raise a
+Needs-attention card, the third reports the failure as a toast and a card too,
+and none of them touches another mesh's row.
 
 A command that syncs many meshes at once records its per-mesh problems silently
 — they land in Needs attention and nowhere else — and shows one summary toast,
