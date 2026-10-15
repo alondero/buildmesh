@@ -25,6 +25,22 @@ class NativeScreensTest {
         compose.runOnIdle { assertEquals("https://desktop:1992/#pair=invitation&ca=pin", received) }
     }
 
+    @Test fun scannedPairingUrlSurvivesRotation() {
+        val restoration = StateRestorationTester(compose)
+        var received = ""
+        restoration.setContent { BuildmeshTheme { PairScreen("", false) { url, _ -> received = url } } }
+        compose.onNodeWithText("Pairing URL").performTextInput("https://desktop:1992/#pair=invitation&ca=pin")
+
+        // Rotating recreates the activity, and MainActivity has already cleared
+        // the intent a deep link arrived on, so the URL is only still here if
+        // the form saved it across the recreation.
+        restoration.emulateSavedInstanceStateRestore()
+
+        compose.onNodeWithText("https://desktop:1992/#pair=invitation&ca=pin", substring = false).assertExists()
+        compose.onNodeWithText("Pair with desktop").assertIsEnabled().performScrollTo().performClick()
+        compose.runOnIdle { assertEquals("https://desktop:1992/#pair=invitation&ca=pin", received) }
+    }
+
     @Test fun savedFormStateIsNotRestoredAcrossDesktopIdentityChanges() {
         val restoration = StateRestorationTester(compose)
         var identity = "desktop-a"

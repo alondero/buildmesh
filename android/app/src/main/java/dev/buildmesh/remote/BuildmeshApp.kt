@@ -130,7 +130,10 @@ fun ErrorBanner(message: String, dismiss: () -> Unit) {
 
 @Composable
 fun PairScreen(invitation: String, busy: Boolean, pair: (String, String) -> Unit) {
-    var url by remember { mutableStateOf(invitation) }
+    // A scanned QR is not redelivered after a rotation: MainActivity clears the
+    // intent it arrived on, so `invitation` reads empty in the recreated
+    // activity. Save the field or rotating wipes the pairing URL.
+    var url by rememberSaveable { mutableStateOf(invitation) }
     var fingerprint by rememberSaveable { mutableStateOf("") }
     LaunchedEffect(invitation) { if (invitation.isNotEmpty()) url = invitation }
     val scanner = rememberLauncherForActivityResult(ScanContract()) { result -> result.contents?.let { url = it } }

@@ -142,7 +142,10 @@ Cleartext is permitted only for loopback development and the Android emulator's
 `10.0.2.2` host alias. Remote HTTP invitations, embedded URL credentials,
 query-string invitations and redirects are rejected. Deep links use
 `buildmesh://pair?url=<encoded-full-invitation>` and only populate the pairing
-form; they do not authorize or pair automatically.
+form; they do not authorize or pair automatically. A deep link is consumed once
+— `MainActivity` clears the intent it arrived on — so the pairing form keeps
+the URL in its own saved state, which is what survives a rotation or a process
+recreation.
 
 ## Screens and ownership
 
