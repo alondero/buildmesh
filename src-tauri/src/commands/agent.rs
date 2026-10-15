@@ -337,9 +337,8 @@ pub async fn spawn_issue_agent(
 // closing: the desktop frontend calls `create_issue_node` (which only
 // touches the DB) and immediately closes the modal, then fires
 // `start_node_background` (which does the slow git/worktree/PTY work)
-// without awaiting. The original synchronous `spawn_issue_agent` is kept
-// for the mobile HTTP route — its callers tolerate the wait because they
-// have no interactive UI to keep responsive.
+// without awaiting. The mobile issue and PR spawn routes use the same
+// fast path, so a phone is not held for the worktree/PTY work either.
 // ---------------------------------------------------------------------------
 
 /// A new agent node draft returned from the fast stage-1 spawn command.

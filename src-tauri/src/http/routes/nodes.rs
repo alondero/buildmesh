@@ -77,6 +77,20 @@ impl From<String> for CreateTransportError {
     }
 }
 
+/// The mesh's default Spawn Option, with a missing mesh as the caller's 400
+/// (the runner's `MeshNotFound` answers the same) and a failed read as ours.
+fn mesh_default_provider(mesh_id: i64) -> Result<String, (&'static str, String)> {
+    crate::commands::mesh::get_default_provider_blocking(mesh_id).map_err(|error| match error {
+        rusqlite::Error::QueryReturnedNoRows => {
+            ("400 Bad Request", format!("Mesh not found: {mesh_id}"))
+        }
+        other => (
+            "500 Internal Server Error",
+            format!("Failed to read the mesh default: {other}"),
+        ),
+    })
+}
+
 /// Resolve the saved configuration, then hand the whole create-and-start
 /// sequence to the application service (issue #2331).
 ///
@@ -102,18 +116,25 @@ async fn run_create(
         None => {
             // Pre-#2331 contract, preserved: a saved configuration id doubles
             // as the provider lookup key, so a request carrying only
-            // `configuration_id` still resolves. With neither, the create has
-            // nothing to launch, so answer before any DB work rather than
-            // letting the runner fail with an opaque error.
+            // `configuration_id` still resolves. With neither, the phone asked
+            // for the mesh default, resolved by the desktop's own chain.
             match request
                 .configuration_id
                 .as_deref()
                 .filter(|id| !id.trim().is_empty())
             {
                 Some(id) => id.to_string(),
-                None => {
-                    return Response::json_error("400 Bad Request", "Provider is required");
-                }
+                None => match crate::commands::run_blocking("http_create_node_default", move || {
+                    Ok(mesh_default_provider(mesh_id))
+                })
+                .await
+                {
+                    Ok(Ok(provider)) => provider,
+                    Ok(Err((status, message))) => return Response::json_error(status, &message),
+                    Err(message) => {
+                        return Response::json_error("500 Internal Server Error", &message)
+                    }
+                },
             }
         }
     };
@@ -595,7 +616,6 @@ mod tests {
                 }),
                 "operation_key",
             ),
-            (serde_json::json!({"mesh_id": 0}), "Provider is required"),
         ] {
             let response = create(&ParsedRequest::test_post(
                 "/api/nodes/create",
@@ -609,6 +629,31 @@ mod tests {
                 String::from_utf8_lossy(response.body())
             );
         }
+    }
+
+    /// "Mesh default" on the phone omits both `provider` and
+    /// `configuration_id`; the desktop's own default chain (explicit > mesh >
+    /// app-wide > Claude Code) decides, as it does for issue and PR spawns.
+    #[test]
+    fn an_omitted_provider_resolves_the_mesh_default() {
+        let _db = crate::db::test_support::isolated();
+        let root = tempfile::tempdir().unwrap();
+        crate::preferences::init_for_tests(root.path().to_path_buf());
+        let path = |name: &str| format!("/tmp/buildmesh_default_{}_{name}", std::process::id());
+        let plain = crate::db::create_mesh("plain", &path("plain")).unwrap();
+        let pinned = crate::db::create_mesh("pinned", &path("pinned")).unwrap();
+        crate::db::write_conn()
+            .execute(
+                "UPDATE meshes SET default_provider = 'codex' WHERE id = ?1",
+                [pinned.id],
+            )
+            .unwrap();
+
+        assert_eq!(super::mesh_default_provider(pinned.id).unwrap(), "codex");
+        assert_eq!(super::mesh_default_provider(plain.id).unwrap(), "claude");
+        let (status, message) = super::mesh_default_provider(plain.id + pinned.id + 1).unwrap_err();
+        assert_eq!(status, "400 Bad Request");
+        assert!(message.contains("Mesh not found"), "{message}");
     }
 
     /// Issue #2331: a committed outcome never answers 200, so a client that

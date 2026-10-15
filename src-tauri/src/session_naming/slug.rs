@@ -34,8 +34,8 @@ pub fn on_spawn() -> String {
 /// Composes `gh{issue_number}-{slug_from_title}` so the user can spot the
 /// origin in the mesh list from the moment the spawn modal closes (e.g.
 /// issue #123 "fix this feature" → `gh123-fix-this-feature`). The prefix is
-/// the same on both spawn paths (`spawn_issue_agent` for the mobile HTTP
-/// route and `create_issue_node` for the desktop two-stage flow).
+/// the same on both spawn paths (`spawn_issue_agent` and the
+/// `create_issue_node` two-stage flow that the desktop and mobile share).
 ///
 /// Behaviour:
 /// - Re-uses `slugify_issue_title` for the title → slug step, so all the

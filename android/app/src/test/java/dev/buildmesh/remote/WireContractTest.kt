@@ -88,9 +88,70 @@ class WireContractTest {
         readCreateNodeOutcome(Json.parseToJsonElement("""{"outcome":"from_the_future"}""").obj())
     }
 
-    @Test fun issueAndArchiveLaunchesOfferOnlySpawnOptionsTheirRoutesAccept() {
+    @Test fun archiveResumeOffersOnlySpawnOptionsItsRouteAccepts() {
         assertFalse(launchableWithoutConfiguration(savedConfiguration))
         assertTrue(launchableWithoutConfiguration(proxiedOption))
+    }
+
+    private val terminalOption = Json.parseToJsonElement("""{"id":"terminal","label":"Terminal","harness_id":"terminal","provider_id":null,
+        "capabilities":{"supports_prefill":false}}""").obj()
+    private val unavailableOption = Json.parseToJsonElement("""{"id":"codex","label":"Codex","harness_id":"codex","provider_id":null,
+        "unavailable_reason":"Missing executable","capabilities":{"supports_prefill":true}}""").obj()
+    private val menu = listOf(terminalOption, savedConfiguration, proxiedOption, unavailableOption)
+
+    // Issue and PR spawns always carry the backend-built prompt, so they offer
+    // only rows that can take one; Capture can also open a plain session.
+    @Test fun spawnMenusKeepBackendOrderAndOfferSavedConfigurations() {
+        assertEquals(listOf("launch/405f11ec", "claude:minimax"), launchOptions(menu, needsPrompt = true).map { it.text("id") })
+        assertEquals(listOf("terminal", "launch/405f11ec", "claude:minimax"), launchOptions(menu, needsPrompt = false).map { it.text("id") })
+    }
+
+    // Mesh default sends no launch fields: the desktop resolves its own
+    // explicit > mesh > app-wide chain, exactly as for a desktop spawn.
+    @Test fun meshDefaultLeavesTheLaunchChoiceToTheDesktop() {
+        assertEquals(
+            Json.parseToJsonElement("""{"mesh_id":3,"rows":24,"cols":80,"operation_key":"op-1","prompt":"Fix it"}"""),
+            createNodeBody(3, null, "Fix it", "op-1"),
+        )
+        val issue = issueItems(Json.parseToJsonElement(issueFeed)).single()
+        assertEquals(Json.parseToJsonElement("""{"title":"Mobile issues crash"}"""), issueSpawnBody(issue, null))
+        assertEquals(
+            Json.parseToJsonElement("""{"title":"Mobile issues crash","provider":"claude","configuration_id":"launch/405f11ec"}"""),
+            issueSpawnBody(issue, savedConfiguration),
+        )
+        assertEquals(
+            Json.parseToJsonElement("""{"title":"Mobile issues crash","provider":"claude:minimax"}"""),
+            issueSpawnBody(issue, proxiedOption),
+        )
+    }
+
+    // http::routes::pr::PullSpawnRequest parses this exact body
+    // (`pull_spawn_forwards_the_phone_body_and_answers_the_created_node`).
+    @Test fun aPullRequestSpawnSendsTheHeadTheDesktopProbeSends() {
+        val pr = pullFeed(Json.parseToJsonElement("""{"items":[{"number":42,"title":"Fix deadline","body":"","url":"https://github.com/octo/r/pull/42",
+            "state":"open","draft":false,"head_ref":"feat/deadline","head_repo_owner":"octo","head_repo_clone_url":"https://github.com/octo/r.git",
+            "head_sha":"abc123","author":"octo","mergeable":null,"mergeable_state":"unknown","checks_state":null,"review_decision":null}],
+            "completeness":{"returned":1,"pages_fetched":1,"complete":true,"incomplete_reason":null,"reported_total":null}}""")).items.single()
+        val saved = Json.parseToJsonElement("""{"id":"launch/saved","label":"Saved agent","capabilities":{"supports_prefill":true},
+            "configuration":{"id":"launch/saved","spawn_option_id":"claude","name":"Saved agent"}}""").obj()
+        assertEquals(
+            Json.parseToJsonElement("""{"title":"Fix deadline","head_ref":"feat/deadline","head_sha":"abc123","head_repo_owner":"octo","head_repo_clone_url":"https://github.com/octo/r.git","provider":"claude","configuration_id":"launch/saved"}"""),
+            pullSpawnBody(pr, saved),
+        )
+        assertEquals(
+            Json.parseToJsonElement("""{"title":"Fix deadline","head_ref":"feat/deadline","head_sha":"abc123","head_repo_owner":"octo","head_repo_clone_url":"https://github.com/octo/r.git"}"""),
+            pullSpawnBody(pr, null),
+        )
+    }
+
+    // A mesh's own default names its row; otherwise the app-wide default the
+    // phone cannot see applies, so the control just says "Mesh default".
+    @Test fun theMeshDefaultIsNamedOnlyWhenTheMeshPinsAMenuRow() {
+        fun mesh(default: String) = Json.parseToJsonElement("""{"id":3,"name":"m","path":"/r","default_provider":$default}""").obj()
+        assertEquals("MiniMax via Claude Code", meshDefaultName(mesh("\"claude:minimax\""), menu))
+        assertNull(meshDefaultName(mesh("null"), menu))
+        assertNull(meshDefaultName(mesh("\"retired-harness\""), menu))
+        assertNull(meshDefaultName(null, menu))
     }
 
     // POST /api/meshes/{id}/pr requires node_id (http::routes::pr::CreatePrRequest);
