@@ -257,9 +257,12 @@ fn token_count(slug: &str) -> usize {
 /// [`MAX_NAME_CHARS`] on a whole-word boundary.
 ///
 /// `None` means the candidate cannot name the task: fewer than
-/// [`MIN_SLUG_TOKENS`] words, characters `SLUG_REGEX` forbids (which is what
-/// still keeps prose out of node names), or words long enough that the leading
-/// ones exceed the cap on their own.
+/// [`MIN_SLUG_TOKENS`] words, characters `SLUG_REGEX` forbids, or words long
+/// enough that the leading ones exceed the cap on their own. The regex
+/// enforces slug syntax — a lowercase alphanumeric start, then lowercase
+/// alphanumerics and hyphens inside the length bounds — not meaning: it rejects
+/// punctuation, capitals and leading digits, and says nothing about whether the
+/// words are a name or a sentence.
 fn fit_slug(candidate: &str) -> Option<String> {
     let words: Vec<&str> = candidate
         .split('-')
