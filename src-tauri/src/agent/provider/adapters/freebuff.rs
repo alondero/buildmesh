@@ -35,10 +35,6 @@ use crate::models::EnvType;
 pub struct FreebuffAdapter;
 pub static FREEBUFF: FreebuffAdapter = FreebuffAdapter;
 
-/// Shell selection per platform is `provider::shell_for`: Windows native
-/// uses `cmd.exe /c` to wrap the npm `.cmd` batch shim, while Unix platforms
-/// invoke the binary directly.
-
 impl AgentProvider for FreebuffAdapter {
     fn id(&self) -> &'static str {
         "freebuff"
