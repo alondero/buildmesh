@@ -18,9 +18,11 @@
 //! `CreateProcess` won't run directly — `WindowsShell::Cmd` →
 //! `cmd.exe /c dsh …`. macOS / Linux use `WindowsShell::Direct`.
 
-use crate::agent::provider::{
-    shell_for, AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell,
-};
+use crate::agent::provider::{shell_for, AgentProvider, Platform, SpawnRecipe, UiMeta};
+// The recipe tests assert the shell each platform produces; nothing outside
+// `cfg(test)` names the type now that `shell_for` is shared.
+#[cfg(test)]
+use crate::agent::provider::WindowsShell;
 use crate::models::EnvType;
 
 pub struct DshAdapter;

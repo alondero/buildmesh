@@ -124,11 +124,11 @@ pub enum WindowsShell {
 /// not by a bare process spawn) and a direct spawn everywhere else, where no
 /// shell wrapping applies.
 ///
-/// Every adapter that spawns a `.cmd` shim on Windows uses this table — it
-/// was copied into eight of them (issue #2235). An adapter with a genuine
-/// reason to differ does not call this: Codex spawns under PowerShell so ANSI
-/// escape sequences propagate correctly through ConPTY, and declares that
-/// choice in its own `shell_for`.
+/// The `.cmd`-shim adapters use this table for both arms; before issue
+/// #2235 eight of them restated the identical match. An adapter with a
+/// genuine reason to differ does not call this: Codex spawns under
+/// PowerShell so ANSI escape sequences propagate correctly through ConPTY,
+/// and declares that choice in its own `shell_for`.
 pub fn shell_for(platform: Platform) -> WindowsShell {
     match platform {
         Platform::Macos | Platform::Linux => WindowsShell::Direct,

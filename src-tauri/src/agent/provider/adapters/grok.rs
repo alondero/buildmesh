@@ -187,11 +187,11 @@ fn merge_question_handler(
 /// it unchanged to the loopback endpoint, and callback failures are
 /// best-effort so they never block a prompt or stop event.
 ///
-/// If the file already exists, it is never silently overwritten: an
-/// unparseable document is refused through the shared
-/// `managed_config::read_document` refusal so the spawn path surfaces a
-/// provision error rather than wiping user data. A missing file is the
-/// happy path (fresh install).
+/// If the file exists but will not parse, it is never overwritten: the
+/// shared `managed_config::read_document` refusal surfaces a provision error
+/// to the spawn path rather than wiping user data. A file that does parse is
+/// merged, not replaced — the user's groups and handlers survive. A missing
+/// file is the happy path (fresh install).
 ///
 /// `Notification` is wired with no matcher field at all (Grok docs
 /// match-all behaviour); the matcher-group array is the array of

@@ -70,8 +70,12 @@ use std::path::Path;
 use crate::agent::capabilities::{PermissionModeOption, PERMISSION_MODE_UNATTENDED};
 use crate::agent::managed_config;
 use crate::agent::provider::{
-    shell_for, AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell,
+    shell_for, AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta,
 };
+// The recipe tests assert the shell each platform produces; nothing outside
+// `cfg(test)` names the type now that `shell_for` is shared.
+#[cfg(test)]
+use crate::agent::provider::WindowsShell;
 use crate::env::ResolvedPath;
 use crate::models::EnvType;
 

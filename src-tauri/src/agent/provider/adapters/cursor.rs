@@ -37,8 +37,12 @@ use crate::agent::capabilities::{
 };
 use crate::agent::managed_config;
 use crate::agent::provider::{
-    shell_for, AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell,
+    shell_for, AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta,
 };
+// The recipe tests assert the shell each platform produces; nothing outside
+// `cfg(test)` names the type now that `shell_for` is shared.
+#[cfg(test)]
+use crate::agent::provider::WindowsShell;
 use crate::agent::session_lifecycle::LifecycleKind;
 use crate::env::ResolvedPath;
 use crate::models::EnvType;
@@ -69,9 +73,10 @@ const BUILDMESH_HOOK_MARKER: &str = "/api/attention/";
 
 /// Every anchor that must appear in a `stop` handler for it to be ours.
 /// `BUILDMESH_HOOK_MARKER` plus the two per-agent env var names are the
-/// triple an installed Buildmesh handler always carries; a user handler
-/// that merely posts somewhere is not ours to replace. These markers
-/// identify already-provisioned configs, so they must not drift.
+/// triple `window_attention_command` writes into every handler this adapter
+/// installs; a user handler that merely posts somewhere is not ours to
+/// replace. These markers identify already-provisioned configs, so they must
+/// not drift.
 const BUILDMESH_HOOK_ANCHORS: &[&str] = &[
     BUILDMESH_HOOK_MARKER,
     "BUILDMESH_PORT",

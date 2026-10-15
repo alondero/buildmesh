@@ -81,8 +81,11 @@ use crate::agent::capabilities::{AttentionCapability, AttentionLaunchMode, Effor
 use crate::agent::managed_config;
 use crate::agent::provider::{
     shell_for, AgentProvider, LaunchRuntime, Platform, ResolvedPath, SpawnRecipe, UiMeta,
-    WindowsShell,
 };
+// The recipe tests assert the shell each platform produces; nothing outside
+// `cfg(test)` names the type now that `shell_for` is shared.
+#[cfg(test)]
+use crate::agent::provider::WindowsShell;
 use crate::agent::session_lifecycle::LifecycleKind;
 use crate::models::EnvType;
 
