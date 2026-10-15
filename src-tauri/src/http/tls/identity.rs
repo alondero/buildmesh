@@ -236,6 +236,73 @@ fn prune_generations(dir: &Path, current: &str) {
     }
 }
 
+#[cfg(unix)]
+fn sync_dir(path: &Path) -> io::Result<()> {
+    fs::File::open(path)?.sync_all()
+}
+#[cfg(not(unix))]
+fn sync_dir(_: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+pub(super) fn protect(path: &Path, directory: bool) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(
+        path,
+        fs::Permissions::from_mode(if directory { 0o700 } else { 0o600 }),
+    )
+}
+
+#[cfg(windows)]
+pub(super) fn protect(path: &Path, directory: bool) -> io::Result<()> {
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            text: *const u16,
+            revision: u32,
+            descriptor: *mut *mut c_void,
+            size: *mut u32,
+        ) -> i32;
+        fn SetFileSecurityW(path: *const u16, information: u32, descriptor: *const c_void) -> i32;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn LocalFree(memory: *mut c_void) -> *mut c_void;
+    }
+    // Protected DACL containing only OWNER RIGHTS; children inherit it.
+    let sddl: Vec<u16> = if directory {
+        "D:P(A;OICI;FA;;;OW)"
+    } else {
+        "D:P(A;;FA;;;OW)"
+    }
+    .encode_utf16()
+    .chain(Some(0))
+    .collect();
+    let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut descriptor = std::ptr::null_mut();
+    unsafe {
+        if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        ) == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let result = SetFileSecurityW(path.as_ptr(), 0x80000004, descriptor);
+        let error = io::Error::last_os_error();
+        LocalFree(descriptor);
+        if result == 0 {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,7 +402,7 @@ mod tests {
     fn old_generations_are_pruned_to_a_bounded_rollback_window() {
         let dir = tempfile::tempdir().unwrap();
         for _ in 0..(RETAINED_GENERATIONS + 4) {
-            load(&dir.path(), &[], true).unwrap();
+            load(dir.path(), &[], true).unwrap();
         }
         let count = fs::read_dir(dir.path())
             .unwrap()
@@ -532,71 +599,4 @@ foreach ($file in (Get-ChildItem -LiteralPath $dir -Filter 'script-*.ps1' | Sort
             );
         }
     }
-}
-
-#[cfg(unix)]
-fn sync_dir(path: &Path) -> io::Result<()> {
-    fs::File::open(path)?.sync_all()
-}
-#[cfg(not(unix))]
-fn sync_dir(_: &Path) -> io::Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
-pub(super) fn protect(path: &Path, directory: bool) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(
-        path,
-        fs::Permissions::from_mode(if directory { 0o700 } else { 0o600 }),
-    )
-}
-
-#[cfg(windows)]
-pub(super) fn protect(path: &Path, directory: bool) -> io::Result<()> {
-    use std::ffi::c_void;
-    use std::os::windows::ffi::OsStrExt;
-    #[link(name = "advapi32")]
-    unsafe extern "system" {
-        fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            text: *const u16,
-            revision: u32,
-            descriptor: *mut *mut c_void,
-            size: *mut u32,
-        ) -> i32;
-        fn SetFileSecurityW(path: *const u16, information: u32, descriptor: *const c_void) -> i32;
-    }
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn LocalFree(memory: *mut c_void) -> *mut c_void;
-    }
-    // Protected DACL containing only OWNER RIGHTS; children inherit it.
-    let sddl: Vec<u16> = if directory {
-        "D:P(A;OICI;FA;;;OW)"
-    } else {
-        "D:P(A;;FA;;;OW)"
-    }
-    .encode_utf16()
-    .chain(Some(0))
-    .collect();
-    let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    let mut descriptor = std::ptr::null_mut();
-    unsafe {
-        if ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl.as_ptr(),
-            1,
-            &mut descriptor,
-            std::ptr::null_mut(),
-        ) == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        let result = SetFileSecurityW(path.as_ptr(), 0x80000004, descriptor);
-        let error = io::Error::last_os_error();
-        LocalFree(descriptor);
-        if result == 0 {
-            return Err(error);
-        }
-    }
-    Ok(())
 }
