@@ -157,6 +157,38 @@ test('doctest failures remain named and FAIL without an unsupported isolation at
   assert.match(row.reason, /Doctest isolation unavailable/);
 });
 
+test('a clippy warning in a touched file fails the gate for a Windows span path (#2352)', async t => {
+  // Cargo reports `file_name` with the host separator while git reports the
+  // touched path with slashes, so a backslash span missed the touched set and
+  // the gate answered PASS for a warning in a file the branch touched (measured
+  // on PR #2351; the backslash span is fed explicitly, so the case is covered
+  // wherever the suite runs, not only on Windows).
+  const fixture = repo(t);
+  const paths = ['src-tauri/src/services/transcript_reader/readers/claude_code.rs', 'src-tauri/src/lib.rs'];
+  const warning = file => JSON.stringify({ reason: 'compiler-message', message: { level: 'warning', message: 'calls to `.last()` on a `DoubleEndedIterator`', code: { code: 'double_ended_iterator_last' }, spans: [{ file_name: file, is_primary: true }] } });
+  const clippy = (...files) => ({
+    id: 'rust-clippy', warnings: true, minutes: 1,
+    command: ['node', '-e', files.map(file => `console.log(${JSON.stringify(warning(file))})`).join(';')],
+  });
+  // The gate runs with `src-tauri` as its cwd, so its spans are crate-relative.
+  const gate = async files => runGate(fixture.cwd, clippy(...files), fixture.base, paths);
+
+  const windows = await gate(['src\\services\\transcript_reader\\readers\\claude_code.rs']);
+  assert.equal(windows.outcome, 'FAIL', JSON.stringify(windows));
+  assert.match(windows.reason, /^1 Rust warnings in touched files\.$/);
+
+  // The posix spelling keeps failing, and a backslash span still resolves
+  // through the `src-tauri/` prefix the crate-relative form needs.
+  const both = await gate(['src/services/transcript_reader/readers/claude_code.rs', 'src\\lib.rs']);
+  assert.equal(both.outcome, 'FAIL', JSON.stringify(both));
+  assert.equal(both.reason, '2 Rust warnings in touched files.');
+
+  // A warning outside the diff is still the acknowledged backlog, not a failure.
+  const elsewhere = await gate(['src\\services\\probe\\unrelated.rs']);
+  assert.equal(elsewhere.outcome, 'PASS', JSON.stringify(elsewhere));
+  assert.equal(elsewhere.warningCount, 1);
+});
+
 test('isolation shares a total deadline across gates and leaves remaining failures TIMEOUT', async t => {
   const fixture = repo(t);
   let clock = 0;
@@ -687,6 +719,30 @@ test('fingerprint ignores local logs but sees tests, lockfile, deletions and unt
   fixture.put('package-lock.json', '{}');
   assert.notEqual(fingerprint(fixture.cwd, fixture.base), original);
   assert.notEqual(fingerprint(fixture.cwd, 'different-base'), original);
+});
+test('a short --base passes binding-drift, and a gate that rewrites the bindings still fails it (#2350)', async t => {
+  const fixture = repo(t);
+  // The gate is the real CLI in the fixture, so the harness it spawns must be there.
+  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-check.mjs', 'scripts/harness-test-failures.mjs', 'scripts/self-review.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
+  fixture.put('src/types/generated/Example.ts', 'export type Example = { id: number };\n');
+  const base = fixture.commit();
+  const short = base.slice(0, 8);
+  // One commit, two identities: the assertion below is why the run and the
+  // gate it spawns have to agree on which spelling of the base they hash.
+  assert.notEqual(fingerprint(fixture.cwd, short, 'src/types/generated/'), fingerprint(fixture.cwd, base, 'src/types/generated/'));
+  const drift = planGates(['src/types/generated/Example.ts']).find(gate => gate.id === 'binding-drift');
+  // Only a verify run publishes what this gate reads; the assertion below keeps
+  // the scoped check from planning a gate whose identity it would not publish.
+  assert.ok(!planChecks(['src/types/generated/Example.ts']).checks.some(gate => gate.id === 'binding-drift'));
+  const clean = await verify(fixture.cwd, { base: short, plan: () => [drift], selfReview: false });
+  assert.equal(clean.outcome, 'PASS', `${clean.reason ?? ''} ${JSON.stringify(clean.gates)}`);
+  // ...and the gate keeps its teeth: a gate that regenerates the bindings is drift.
+  fixture.put('regenerate.mjs', 'import { writeFileSync } from \'node:fs\';\nwriteFileSync(\'src/types/generated/Example.ts\', \'export type Example = { id: string };\\n\');\n');
+  const regenerated = await verify(fixture.cwd, { base: short, plan: () => [{ id: 'regenerate', command: ['node', 'regenerate.mjs'], minutes: 1 }, drift], selfReview: false });
+  assert.equal(regenerated.gates.find(gate => gate.id === 'regenerate').outcome, 'PASS', JSON.stringify(regenerated.gates));
+  const driftRow = regenerated.gates.find(gate => gate.id === 'binding-drift');
+  assert.equal(driftRow.outcome, 'FAIL', JSON.stringify(regenerated.gates));
+  assert.match(readFileSync(driftRow.log, 'utf8'), /Generated bindings changed during verification/);
 });
 test('two real worktrees have isolated task state and cannot reuse receipts', t => {
   const fixture = repo(t);
