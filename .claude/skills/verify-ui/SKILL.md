@@ -16,7 +16,7 @@ The change affects something **visible in the UI** (desktop app or mobile SPA) a
 
 ## How it works (one paragraph)
 
-For the native path, `scripts\run-dev.ps1 -Detach -CdpPort 9223 -TestBridge` builds **this working tree** into the dev profile (`buildmesh-dev.exe`, phone/Android on 2992, own data dir), launches with CDP on loopback, and enables the dev test bridge on 2991. The bridge stays closed without `-TestBridge`. The launcher writes the bearer to `.tmp/test-bridge-token` and does not print it. `scripts/ui-shot.mjs` attaches Playwright to that window, sends `Authorization: Bearer` from that file, and runs functional steps before saving a PNG. The stable hub (`buildmesh.exe`, phone/Android on 1992) is never touched. The stable hub does not bind 1991.
+For the native path, `scripts\run-dev.ps1 -Detach -CdpPort 9223 -TestBridge` builds **this working tree** into the dev profile (`buildmesh-dev.exe`, own data dir), launches with CDP on loopback, and enables the dev test bridge. From the main checkout those are 2992 (fallback 2993→2994) and 2991; from a linked worktree they are the `Dev ports:` line the launcher prints, because each worktree gets its own range so two can run at once. The bridge stays closed without `-TestBridge`. The launcher writes the bearer to `.tmp/test-bridge-token` and does not print it. `scripts/ui-shot.mjs` attaches Playwright to that window, sends `Authorization: Bearer` from that file, and runs functional steps before saving a PNG. The stable hub (`buildmesh.exe`, phone/Android on 1992) is never touched. The stable hub does not bind 1991.
 
 ## Procedure
 

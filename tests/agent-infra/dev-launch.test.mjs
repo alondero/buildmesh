@@ -127,6 +127,185 @@ test('a stale PID record cannot stop an unrelated live process', { timeout: 6000
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Issue #2345 — a linked worktree is the fixture whose `.git` is a FILE (that is
+// how `git worktree add` records the link), which is how both launchers tell a
+// worktree from the main checkout. Every other fixture in this file is the main
+// checkout and keeps the canonical dev profile and ports.
+function worktreeFixture() {
+  const dir = fixture();
+  writeFileSync(join(dir, '.git'), 'gitdir: F:/src/buildmesh/.git/worktrees/fixture\n');
+  return dir;
+}
+
+// A long-lived fixture app that binds the ports the launcher assigned it. The
+// ports are held before it reports ready, so a second worktree's probe meets a
+// real listener rather than an assumption.
+function stubApp(dir, dataRoot) {
+  const binaryDir = join(dir, 'src-tauri', 'target', 'release-dev', 'release');
+  mkdirSync(binaryDir, { recursive: true });
+  const envPath = join(dir, 'launch-env.json');
+  const preload = join(dir, 'app.cjs');
+  writeFileSync(preload, `if (process.execPath.includes('buildmesh-dev') || process.platform !== 'win32') {
+const fs = require('node:fs');
+const net = require('node:net');
+const path = require('node:path');
+const offset = Number(process.env.BUILDMESH_PORT_OFFSET || 0);
+const profileDir = process.env.BUILDMESH_PROFILE_DIR;
+fs.writeFileSync(${JSON.stringify(join(dir, 'app-pid'))}, String(process.pid));
+const listening = [1991, 1992, 1993, 1994].map(base => {
+  const server = net.createServer();
+  return new Promise(resolve => server.on('error', () => resolve(false)).listen(base + offset, '127.0.0.1', () => resolve(true)));
+});
+Promise.all(listening).then(bound => {
+  fs.writeFileSync(${JSON.stringify(envPath)}, JSON.stringify({
+    backtrace: process.env.RUST_BACKTRACE,
+    portOffset: process.env.BUILDMESH_PORT_OFFSET,
+    profileDir,
+    bound,
+  }));
+  fs.appendFileSync(path.join(profileDir, 'logs', 'buildmesh.log'), 'fixture ready\\n');
+  setInterval(() => console.log('still alive'), 1000);
+});
+}
+`);
+  if (process.platform === 'win32') {
+    // Copied once per fixture. A re-launch stops the previous instance *inside*
+    // the launcher, which runs after this fixture is prepared, and Windows
+    // refuses to overwrite the image file of a running process.
+    const binary = join(binaryDir, 'buildmesh-dev.exe');
+    if (!existsSync(binary)) copyFileSync(process.execPath, binary);
+    // Build stubbed at the npm boundary; Start-Process/Get-Process adapted so the
+    // console fixture does not open a visible window.
+    const wrapper = join(dir, 'launch.ps1');
+    const quote = value => `'${value.replaceAll("'", "''")}'`;
+    writeFileSync(wrapper, `function npm { $global:LASTEXITCODE = 0 }\nfunction Get-Process { param($Name, $Id) if ($Id) { Microsoft.PowerShell.Management\\Get-Process -Id $Id -ErrorAction SilentlyContinue } }\nfunction Start-Process { param($FilePath, [switch]$PassThru, $WindowStyle) if ($WindowStyle -eq 'Hidden') { throw 'Dev GUI visibility must not be forced hidden' }; Microsoft.PowerShell.Management\\Start-Process -FilePath $FilePath -PassThru:$PassThru -WindowStyle Hidden }\n& ${quote(join(dir, 'scripts', 'run-dev.ps1'))} -Detach -ReadinessTimeoutSeconds 8\nexit $LASTEXITCODE\n`);
+    return run(ps, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', wrapper], {
+      env: {
+        ...environment,
+        APPDATA: dataRoot,
+        NODE_OPTIONS: `--require "${preload.replaceAll('\\', '/')}"`,
+        // A caller who pins the identity must not have it re-derived.
+        BUILDMESH_PORT_OFFSET: '',
+        BUILDMESH_PROFILE_DIR: '',
+      },
+    });
+  }
+  const binary = join(binaryDir, 'buildmesh-dev');
+  const shellQuote = value => "'" + value.replaceAll("'", "'\\''") + "'";
+  writeFileSync(binary, `#!/usr/bin/env bash\nexec ${shellQuote(process.execPath)} --require ${shellQuote(preload)}\n`, { mode: 0o755 });
+  const wrapper = join(dir, 'launch.sh');
+  writeFileSync(wrapper, `function npm() { return 0; }; export -f npm\nexec bash ${shellQuote(join(dir, 'scripts', 'run-dev.sh'))} --detach --readiness-timeout-seconds 8\n`);
+  return run('bash', [wrapper], {
+    env: {
+      ...environment,
+      HOME: join(dataRoot, 'home'),
+      XDG_DATA_HOME: dataRoot,
+      BUILDMESH_PORT_OFFSET: '',
+      BUILDMESH_PROFILE_DIR: '',
+    },
+  });
+}
+
+function instanceRecord(dir) {
+  return JSON.parse(readFileSync(join(dir, '.tmp', 'dev-instance.json'), 'utf8'));
+}
+
+async function stopFixtureApp(dir) {
+  const pidPath = join(dir, 'app-pid');
+  if (!existsSync(pidPath)) return;
+  const pid = Number(readFileSync(pidPath, 'utf8'));
+  if (!alive(pid)) return;
+  process.kill(pid);
+  const deadline = Date.now() + 5000;
+  while (alive(pid) && Date.now() < deadline) await new Promise(resolvePromise => setTimeout(resolvePromise, 50));
+  assert.equal(alive(pid), false, `fixture app ${pid} must exit before its executable is deleted`);
+}
+
+test('two worktrees each run their own dev instance: distinct profile, distinct ports, neither stops the other', { timeout: 180000 }, async () => {
+  const first = worktreeFixture();
+  const second = worktreeFixture();
+  // One data root, two worktrees: the second launch must move somewhere else
+  // inside it, which is the whole point of the per-worktree profile.
+  const dataRoot = mkdtempSync(join(root, '.tmp', `bm-dev-appdata-${process.pid}-`));
+  const running = [];
+  let failure;
+  try {
+    for (const dir of [first, second]) {
+      const result = await stubApp(dir, dataRoot);
+      assert.equal(result.code, 0, result.output);
+      assert.match(result.output, /OK - Buildmesh Dev running detached/);
+      const record = instanceRecord(dir);
+      const env = JSON.parse(readFileSync(join(dir, 'launch-env.json'), 'utf8'));
+      assert.equal(record.pid, Number(readFileSync(join(dir, 'app-pid'), 'utf8')));
+      assert.equal(record.profileDir, env.profileDir);
+      assert.equal(Number(record.portOffset), Number(env.portOffset));
+      // The identity variables reach the child through the same launch-only
+      // scope as RUST_BACKTRACE, and nothing the launcher derives leaks past it.
+      assert.equal(env.backtrace, '1', result.output);
+      // The child sees what the record says, and the ports it was told to use
+      // are the ones it actually bound.
+      assert.deepEqual(env.bound, [true, true, true, true], result.output);
+      running.push({ dir, pid: record.pid, offset: Number(record.portOffset), profile: env.profileDir });
+      // The other worktree's instance is untouched by this launch.
+      for (const other of running.slice(0, -1)) assert.equal(alive(other.pid), true, result.output);
+    }
+
+    const [a, b] = running;
+    assert.notEqual(a.profile, b.profile, 'two worktrees must not share a profile');
+    assert.notEqual(a.offset, b.offset, 'two worktrees must not share a port range');
+    assert.ok(a.offset >= 1000 && b.offset >= 1000);
+    for (const entry of running) {
+      assert.match(entry.profile, /com\.alond\.buildmesh\.dev[\\/]worktrees[\\/]/);
+    }
+
+    // Re-running one worktree replaces only its own instance.
+    const again = await stubApp(first, dataRoot);
+    assert.equal(again.code, 0, again.output);
+    assert.match(again.output, new RegExp(`Stopping this worktree's buildmesh-dev \\(PID ${a.pid}`));
+    assert.equal(alive(a.pid), false, 'the re-launched worktree stops its own old instance');
+    assert.equal(alive(b.pid), true, "another worktree's instance must survive");
+    const restarted = instanceRecord(first);
+    assert.notEqual(restarted.pid, a.pid);
+    assert.equal(alive(restarted.pid), true);
+  } catch (error) {
+    // Held so cleanup below cannot replace the real failure with a locked file.
+    failure = error;
+  } finally {
+    for (const dir of [first, second]) await stopFixtureApp(dir);
+  }
+  for (const target of [first, second, dataRoot]) {
+    await rm(target, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+  if (failure) throw failure;
+});
+
+test('a recorded PID that is not this worktree binary is reported and left running', { timeout: 120000 }, async () => {
+  const dir = worktreeFixture();
+  const dataRoot = mkdtempSync(join(root, '.tmp', `bm-dev-appdata-${process.pid}-`));
+  let failure;
+  try {
+    // A PID this runner already owns, standing in for a recycled id: live, but
+    // not the executable this worktree launched.
+    mkdirSync(join(dir, '.tmp'), { recursive: true });
+    writeFileSync(join(dir, '.tmp', 'dev-instance.json'), JSON.stringify({
+      pid: process.pid, binary: join(dir, 'src-tauri', 'target', 'release-dev', 'release'), profileDir: 'F:/none', portOffset: 4200,
+    }));
+    const result = await stubApp(dir, dataRoot);
+    assert.equal(result.code, 0, result.output);
+    assert.match(result.output, new RegExp(`Left PID ${process.pid} alone`));
+    assert.equal(alive(process.pid), true, 'an unrelated live process must not be stopped');
+    assert.notEqual(instanceRecord(dir).pid, process.pid, 'the record now names the new instance');
+  } catch (error) {
+    failure = error;
+  } finally {
+    await stopFixtureApp(dir);
+  }
+  for (const target of [dir, dataRoot]) {
+    await rm(target, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+  if (failure) throw failure;
+});
+
 for (const failure of ['unavailable', 'forbidden', 'invalid JSON', 'wrong owner', 'timeout']) {
   test(`unconfirmed live PID recovery: ${failure}`, { timeout: 90000 }, async () => {
     const dir = fixture();

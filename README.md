@@ -295,7 +295,7 @@ Binaries land in `src-tauri/target/release/`:
 
 The development test bridge is a separate loopback listener on port 1991 (2991 for the dev profile). The release entry points do not pass the `dev-tools` feature that compiles it. A debug or dev-tools build listens only when started with `BUILDMESH_TEST_BRIDGE=1` and a per-launch token (`scripts/run-dev.ps1 -TestBridge` or `scripts/run-dev.sh --test-bridge`).
 
-The dev profile is what `/use` and `/verify` use — it never touches the stable hub.
+The dev profile is what `/use` and `/verify` use — it never touches the stable hub. Run from a linked worktree, the launcher gives that worktree its own ports and its own app-data profile, and stops only the instance it launched before, so several worktrees can each verify their own build at once. It prints the `Dev ports:` and `Dev profile:` it chose; set `BUILDMESH_PORT_OFFSET` or `BUILDMESH_PROFILE_DIR` to pin either.
 
 ## Test
 

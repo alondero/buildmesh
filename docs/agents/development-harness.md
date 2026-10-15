@@ -148,9 +148,17 @@ fails the launch and cleans up its PID. Success prints the PID and app log path
 and leaves the app running. Windows uses an independent ShellExecute launch
 with normal GUI visibility; macOS/Linux redirect console output to
 `.harness/logs/dev-app.*.log` with nohup.
-Stop the printed dev PID when finished. Existing dev instances are replaced
-as before; the stable hub is unaffected. Without detach, the existing launch
-check retains its process-alive fallback.
+Stop the printed dev PID when finished. A dev instance belongs to the worktree
+that launched it: the launcher records it in `.tmp/dev-instance.json` and stops
+only that PID, plus any `buildmesh-dev` running *this* worktree's executable.
+A linked worktree also gets its own app-data profile and port range, so two
+worktrees can each hold a dev instance without touching each other's ports or
+agents; the stable hub is unaffected either way. See
+[startup-and-profiles](../development/startup-and-profiles.md) for the identity
+rules and the `BUILDMESH_PROFILE_DIR` / `BUILDMESH_PORT_OFFSET` overrides. Each
+launch prints its `Dev ports:` and `Dev profile:` lines, so a check can name the
+ports it expects. Without detach, the existing launch check retains its
+process-alive fallback.
 
 UI-only checks use `ui-shot --mock` first on every host, with functional
 assertions, inspected screenshots and elapsed time recorded in the PR. This

@@ -20,7 +20,7 @@ Run the deterministic dev-profile launch script for the host platform:
 - **Windows (default for this project):** `pwsh -File scripts\run-dev.ps1` (or `powershell.exe -File scripts\run-dev.ps1`)
 - **macOS / Linux:** `./scripts/run-dev.sh`
 
-Each script handles: kill existing **buildmesh-dev** (never the stable hub) → build dev profile → launch raw `buildmesh-dev` binary → verify startup. Check that an existing dev instance belongs to this task before replacing it; another session may be using it.
+Each script handles: stop **this worktree's** dev instance (never the stable hub, never another worktree's) → build dev profile → launch raw `buildmesh-dev` binary → verify startup. The instance is identified by this worktree's executable path and the PID in `.tmp/dev-instance.json`, so another session's dev build and its agents are left running; launched from a linked worktree, the launch also prints its own `Dev ports:` and `Dev profile:` lines because each worktree gets its own ports and app-data profile.
 
 **Read the exit code together with stdout — do not treat non-zero as failure on its own.** A launcher that printed its `OK - ...` line has launched and verified the app (issue #2043). All four launchers use the same `OK - ` prefix.
 
