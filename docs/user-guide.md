@@ -986,6 +986,12 @@ agent to open a worktree PR from its terminal. **Connection → Forget this
 desktop** removes this phone's saved session. Revoke the device on the desktop
 to remove its authorization. Certificate resets require fresh pairing.
 
+In Android **Overview**, tap a mesh name to open **Work** for that mesh. This
+clears the search and attention filter so you see all its open agents. Each
+mesh header shows a status dot per open agent and their count. Meshes without
+open agents have muted names and paths, with **No agents yet**; they remain
+tappable. Choose **All meshes** in Work's Mesh selector to widen the view.
+
 The phone opens on **Overview**, with counts for agents needing attention,
 running agents, and all active agents. Errors and degraded status reporting
 appear first, followed by agents waiting for input. Each agent card shows its

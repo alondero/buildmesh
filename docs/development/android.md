@@ -146,6 +146,10 @@ Compose owns Overview/Work, mesh selection and search, node details and replies,
 task capture, issue spawning, archive import/resume, changed files, selectable
 diffs, mesh-branch PR creation and connection settings. Launch selections come
 from the backend menu, including saved configurations and capability filtering.
+Tapping an Overview mesh name selects its ID and switches to Work, clearing the
+search and attention filter. Mesh headers summarize open (non-archived) nodes
+with wrapping status dots and a count, independent of dashboard filters. Empty
+mesh names and paths use the muted text token; their actions remain available.
 Drafts persist privately on the phone, scoped to the verified desktop endpoint
 and trusted certificate, until an acknowledged action succeeds. Re-pairing the
 same desktop restores its drafts without exposing them to another desktop.

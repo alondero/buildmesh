@@ -2,10 +2,13 @@ package dev.buildmesh.remote
 
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -15,6 +18,10 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -83,7 +90,10 @@ fun BuildmeshApp(vm: BuildmeshViewModel, invitation: String = "") {
             else DesktopStateBoundary(state.draftNamespace) {
                 when (screen) {
                     "home" -> Dashboard(state, tab, meshId, { meshId = it }, { nodeId = it; screen = "node" },
-                        { id, target -> meshId = id; screen = target })
+                        { id, target ->
+                            meshId = id
+                            if (target == "work") tab = "Work" else screen = target
+                        })
                     "node" -> if (selected != null) NodeScreen(selected, vm, { screen = "terminal" }, { screen = "changes" }, { screen = "pr" })
                         else EmptyMessage("This node is no longer available.")
                     "terminal" -> vm.api?.let { TerminalPane(it, nodeId, vm) }
@@ -143,7 +153,9 @@ fun PairScreen(invitation: String, busy: Boolean, pair: (String, String) -> Unit
 fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) -> Unit, openNode: (Long) -> Unit, openMesh: (Long, String) -> Unit) {
     var query by rememberSaveable { mutableStateOf("") }
     var attentionOnly by rememberSaveable { mutableStateOf(false) }
-    val visible = state.nodes.filter { node ->
+    val openNodes = state.nodes.filter { it.text("status") != "archived" }
+    val nodesByMesh = openNodes.groupBy { it.number("mesh_id") }
+    val visible = openNodes.filter { node ->
         (meshId == 0L || node.number("mesh_id") == meshId) &&
             (!attentionOnly || node.text("status") == "awaiting_input") &&
             (query.isBlank() || node.text("name").contains(query, true) || node.text("branch").contains(query, true))
@@ -151,7 +163,7 @@ fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) 
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item {
             Text(if (tab == "Overview") "Overview" else "Your work", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-            Text("${state.nodes.count { it.text("status") == "running" }} running · ${state.nodes.count { it.text("status") == "awaiting_input" }} need attention · ${state.meshes.size} meshes", color = MeshColors.secondary)
+            Text("${openNodes.count { it.text("status") == "running" }} running · ${openNodes.count { it.text("status") == "awaiting_input" }} need attention · ${state.meshes.size} meshes", color = MeshColors.secondary)
         }
         item {
             Selector("Mesh", listOf(0L to "All meshes") + state.meshes.map { it.number("id") to it.text("name") }, meshId, selectMesh)
@@ -159,10 +171,22 @@ fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) 
             FilterChip(selected = attentionOnly, onClick = { attentionOnly = !attentionOnly }, label = { Text("Needs attention") })
         }
         if (tab == "Overview") items(state.meshes, key = { "mesh-${it.number("id")}" }) { mesh ->
+            val members = nodesByMesh[mesh.number("id")].orEmpty()
             Card(colors = CardDefaults.cardColors(containerColor = MeshColors.card)) {
                 Column(Modifier.fillMaxWidth().padding(14.dp)) {
-                    Text(mesh.text("name"), style = MaterialTheme.typography.titleMedium)
-                    Text(mesh.text("path"), style = MaterialTheme.typography.bodySmall, color = MeshColors.secondary)
+                    Column(Modifier.fillMaxWidth().clickable(role = Role.Button, onClickLabel = "View work in ${mesh.text("name")}") {
+                        query = ""
+                        attentionOnly = false
+                        openMesh(mesh.number("id"), "work")
+                    }.heightIn(min = 48.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(mesh.text("name"), style = MaterialTheme.typography.titleMedium,
+                            color = if (members.isEmpty()) MeshColors.muted else MeshColors.text,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        MeshActivitySummary(members)
+                    }
+                    Text(mesh.text("path"), style = MaterialTheme.typography.bodySmall,
+                        color = if (members.isEmpty()) MeshColors.muted else MeshColors.secondary,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         TextButton(onClick = { openMesh(mesh.number("id"), "pulls") }) { Text("Pull requests") }
                         TextButton(onClick = { openMesh(mesh.number("id"), "issues") }) { Text("Issues") }
@@ -181,6 +205,26 @@ fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) 
                     node.objectAt("lifecycle")?.text("message")?.takeIf { it.isNotBlank() }?.let { Text(it, maxLines = 3) }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun MeshActivitySummary(nodes: List<JsonObject>) {
+    val count = nodes.size
+    val summary = if (count == 0) "No agents yet" else
+        "$count agent${if (count == 1) "" else "s"}: ${nodes.joinToString(", ") { nodeLabel(it) }}"
+    Row(Modifier.fillMaxWidth().semantics(mergeDescendants = true) { contentDescription = summary },
+        horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (count == 0) Text("No agents yet", style = MaterialTheme.typography.bodySmall, color = MeshColors.muted)
+        else {
+            FlowRow(Modifier.weight(1f, fill = false), horizontalArrangement = Arrangement.spacedBy(3.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                nodes.forEach { node ->
+                    Box(Modifier.size(6.dp).background(MeshColors.status(node.text("status")), CircleShape))
+                }
+            }
+            Text("$count", style = MaterialTheme.typography.bodySmall, color = MeshColors.secondary)
         }
     }
 }
