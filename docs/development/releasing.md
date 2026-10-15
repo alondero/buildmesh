@@ -67,11 +67,12 @@ output.)
    release workflow checks that this exact file exists and uses it as the GitHub
    Release body.
 
-   Leave the file ending with a newline. `npm run check:docs` fails a versioned
-   note whose last byte is not a line break — the workflow splices the file into
-   `$GITHUB_OUTPUT` between heredoc delimiters, so a missing trailing newline puts
-   the closing delimiter on the last line and the release run fails with
-   `Matching delimiter not found`.
+   Leave the file ending with a newline. The release workflow loads a note with or
+   without one — it emits its own terminating newline before the closing
+   `$GITHUB_OUTPUT` delimiter — so this is a repository invariant rather than a
+   release-day hazard. `npm run check:docs` fails a versioned note whose last
+   byte is not a line break, which surfaces the mistake in review instead of at
+   the last step of a release.
 
    A long gap between releases is expected on an active branch and is not a
    gate: `tests/agent-infra/release-notes.test.mjs` derives its ceiling from the

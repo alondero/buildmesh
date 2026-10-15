@@ -124,16 +124,6 @@ export function hasDocumentStatus(markdown) {
     || /^##\s+Status\s*\n+\s*\S.+$/m.test(markdown);
 }
 
-// The release workflow splices the notes file into `$GITHUB_OUTPUT` between
-// heredoc delimiters, so the closing delimiter must start its own line. A file
-// whose last byte is not a newline fails the last step of a release with an
-// error that names a delimiter rather than the file (issue #2298). The loader
-// now tolerates the shape anyway; this catches the mistake in seconds instead.
-function endsWithNewline(path) {
-  const bytes = readFileSync(path);
-  return bytes.length > 0 && bytes[bytes.length - 1] === 0x0a;
-}
-
 export function checkDocumentationImpact({ changedFiles = [], commitMessages = [] } = {}) {
   const sensitive = changedFiles.filter(isBehaviorSensitivePath);
   if (sensitive.length === 0) return [];
@@ -328,17 +318,20 @@ export function checkDocumentation({ root = repoRoot, files = collectMarkdownFil
     const relativePath = relative(root, source).replaceAll('\\', '/');
     const releaseMatch = relativePath.match(/^docs\/releases\/(v\d+\.\d+\.\d+)\.md$/i);
     if (releaseMatch) {
-      const headings = markdownHeadings(readFileSync(source, 'utf8'));
+      // One read serves both checks: the title needs text, and the terminator
+      // has to be judged on the raw byte, not on decoded text.
+      const bytes = readFileSync(source);
+      const headings = markdownHeadings(bytes.toString('utf8'));
       const expectedTitle = `Buildmesh ${releaseMatch[1]}`;
       if (!headings.some(({ level, text }) => level === 1 && text === expectedTitle)) {
         add('release-note', `${relativePath} must have the title "${expectedTitle}"`);
       }
-      if (!endsWithNewline(source)) {
+      if (bytes.length === 0 || bytes[bytes.length - 1] !== 0x0a) {
         add(
           'release-note-newline',
           `${relativePath} must end with a newline: the release workflow splices it into `
-          + '$GITHUB_OUTPUT between heredoc delimiters, and a file without one fails the '
-          + 'release run with "Matching delimiter not found"',
+          + '$GITHUB_OUTPUT between heredoc delimiters, so an unterminated file is an easy '
+          + 'one to write and a needless thing to carry',
         );
       }
     } else if (relativePath.startsWith('docs/releases/') && !/\/README\.md$/i.test(relativePath)) {
