@@ -14,39 +14,12 @@
   ],
   "advisories": [
     {
-      "id": "RUSTSEC-2026-0183",
-      "crate": "git2",
-      "version": "0.20.4",
-      "kind": "unsound",
-      "owner": "maintainers",
-      "rationale": "libgit2 Remote::list() can trigger undefined behaviour. The vulnerable path is libgit2's remote-list API, which Buildmesh does not call: it uses git2 for local repository, worktree and status operations only, and has no remote-fetch surface. Tracked for the next git2/libgit2 release that fixes it.",
-      "reviewBy": "2027-01-15"
-    },
-    {
-      "id": "RUSTSEC-2026-0184",
-      "crate": "git2",
-      "version": "0.20.4",
-      "kind": "unsound",
-      "owner": "maintainers",
-      "rationale": "Signature created from a buffer-created BlameHunk has undefined behaviour. Buildmesh reads blame output for display only and never constructs a Signature from a BlameHunk, so the unsound path is unreachable from application code.",
-      "reviewBy": "2027-01-15"
-    },
-    {
       "id": "RUSTSEC-2024-0429",
       "crate": "glib",
       "version": "0.18.5",
       "kind": "unsound",
       "owner": "maintainers (transitive, GTK3 runtime)",
       "rationale": "Unsound Iterator/DoubleEndedIterator impls in glib::VariantStrIter. glib is pulled in transitively by the GTK3 stack Tauri links on Linux; Buildmesh does not call VariantStrIter, and the crate cannot be upgraded without a Tauri GTK4 migration.",
-      "reviewBy": "2027-01-15"
-    },
-    {
-      "id": "RUSTSEC-2017-0008",
-      "crate": "serial",
-      "version": "0.4.0",
-      "kind": "unmaintained",
-      "owner": "maintainers (transitive, via portable-pty)",
-      "rationale": "The `serial` crate is unmaintained but is a test-serialisation helper used transitively by portable-pty's own tests, not by Buildmesh code. It is a build-time-only dependency of the PTY layer with no attacker-controlled input.",
       "reviewBy": "2027-01-15"
     },
     {
@@ -77,14 +50,5 @@
       "reviewBy": "2027-01-15"
     }
   ],
-  "yanked": [
-    {
-      "crate": "libssh2-sys",
-      "version": "0.3.2",
-      "kind": "yanked",
-      "owner": "maintainers (transitive, via git2)",
-      "rationale": "libssh2-sys 0.3.2 was yanked upstream. It is vendored-by-crate into the build by libgit2-sys and is only linked for git operations; the yanked version has no known security advisory, only an upstream build-stability concern. Recorded so the warning is reviewed rather than ignored by default.",
-      "reviewBy": "2027-01-15"
-    }
-  ]
+  "yanked": []
 }

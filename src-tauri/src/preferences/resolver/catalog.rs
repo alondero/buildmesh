@@ -17,9 +17,12 @@ pub(crate) struct BuiltInProviderAccount {
     pub name: &'static str,
     /// True for harnesses that authenticate via their own CLI (`~/.claude`,
     /// `~/.codex`, …) and therefore hold no credentials in Buildmesh. False
-    /// for Claude-compatible keyed providers (MiniMax, custom) that ship a
-    /// base URL + per-tier model map (issue #568). `kimi` is self_auth post-
-    /// #918 (Kimi Code CLI handles auth via `~/.kimi/config.toml`).
+    /// for keyed providers (e.g. MiniMax, `kimi`, custom) that ship a base
+    /// URL + per-tier model map (issue #568), and for keyed providers that
+    /// exist only for the Usage Meter with no first-class inference surface
+    /// (e.g. openai). This flag describes the account row; `kimi` the Kimi
+    /// Code CLI Agent Harness is self-auth (issue #918) —
+    /// see the `kimi` row below.
     pub self_auth: bool,
 }
 

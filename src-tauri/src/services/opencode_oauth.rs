@@ -24,6 +24,7 @@
 //! platform-agnostic by design — the upstream host is reachable on every
 //! OS, even though the credential sink isn't.
 
+use crate::services::http_client::blocking_client_builder;
 use crate::services::usage::types::UsageError;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
@@ -259,7 +260,7 @@ pub(crate) fn fetch_workspaces_against(
     base_url: &str,
     access_token: &str,
 ) -> Result<Vec<OpenCodeWorkspace>, OAuthError> {
-    let client = Client::builder()
+    let client = blocking_client_builder()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| OAuthError::Transport(format!("workspace client: {e}")))?;
@@ -354,7 +355,7 @@ pub(crate) fn try_refresh_against(
     refresh_url: &str,
     refresh_token: &str,
 ) -> Result<TokenResponse, OAuthError> {
-    let client = Client::builder()
+    let client = blocking_client_builder()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| OAuthError::Transport(format!("refresh client: {e}")))?;
@@ -739,7 +740,7 @@ pub(crate) fn parse_workspaces_response(body: &str) -> Result<Vec<OpenCodeWorksp
 /// (`blocking network in async runtime`) applies — callers wrap this in
 /// `commands::run_blocking` when invoked from `#[command]`.
 pub(crate) fn start_device_flow() -> Result<(DeviceCode, Client), OAuthError> {
-    let client = Client::builder()
+    let client = blocking_client_builder()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| OAuthError::Transport(format!("client builder: {e}")))?;
@@ -920,7 +921,7 @@ pub(crate) fn poll_for_token_once_against(
     if device_code_is_expired(started_at_ms, original_expires_in_secs, now_ms) {
         return Ok(OpenCodeDeviceCodeStatus::CodeExpired);
     }
-    let client = Client::builder()
+    let client = blocking_client_builder()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| OAuthError::Transport(format!("poll-once client: {e}")))?;

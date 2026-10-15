@@ -38,6 +38,10 @@ pub fn run_crash_watchdog_if_requested() -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Reqwest 0.13 uses `rustls-no-provider` to keep AWS-LC out of the tree.
+    // Install ring before Tauri plugins or app code can construct clients.
+    crate::services::http_client::ensure_crypto_provider();
+
     // Early panic hook — captures panics that fire BEFORE the main panic
     // hook is installed later in `setup` (Tauri setup can panic on misconfig,
     // and those panics would otherwise die with only the truncated "disabled

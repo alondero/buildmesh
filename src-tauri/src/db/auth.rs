@@ -427,7 +427,7 @@ pub fn revoke_device_session_inner(conn: &Connection, id: i64) -> SqlResult<bool
 /// reuse the same 128-bit entropy source for its short-lived handshake
 /// tickets.
 pub(crate) fn generate_token() -> String {
-    use rand::Rng;
+    use rand::RngExt;
     let mut rng = rand::rng();
     let bytes: [u8; 16] = rng.random();
     hex::encode(bytes)

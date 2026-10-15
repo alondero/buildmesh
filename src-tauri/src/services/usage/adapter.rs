@@ -46,6 +46,7 @@
 use super::outcome::{AuthPolicy, UsageOutcome};
 use super::types::{UsageError, UsagePage, UsageWindow};
 use crate::preferences::ProviderAccount;
+use crate::services::http_client::blocking_client_builder;
 use reqwest::blocking::{Client, RequestBuilder};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
@@ -158,7 +159,7 @@ pub(crate) fn shared_client() -> Result<Client, String> {
     }
     SHARED_CLIENT
         .get_or_init(|| {
-            Client::builder()
+            blocking_client_builder()
                 .timeout(Duration::from_secs(15))
                 .build()
                 .map_err(|e| format!("Client error: {e}"))
@@ -392,7 +393,7 @@ mod tests {
         // Issue #1745: `fetch_usage` now returns `UsageOutcome`; the
         // timeout path is `UsageOutcome::Unavailable { reason: "Request failed: ..." }`.
         const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
-        let client = Client::builder()
+        let client = blocking_client_builder()
             .timeout(TIMEOUT)
             .build()
             .expect("test client build");

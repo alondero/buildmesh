@@ -213,11 +213,14 @@ pub(super) fn tail_lines(path: &Path, max_bytes: u64) -> Option<(String, bool)> 
 
 pub(super) fn assistant_revision(position: &str, preview: &str, text: &str) -> String {
     use sha2::{Digest, Sha256};
-    let legacy = format!("{position}:{:x}", Sha256::digest(preview.as_bytes()));
+    let legacy = format!(
+        "{position}:{}",
+        hex::encode(Sha256::digest(preview.as_bytes()))
+    );
     if preview == text {
         legacy
     } else {
-        format!("{legacy}:{:x}", Sha256::digest(text.as_bytes()))
+        format!("{legacy}:{}", hex::encode(Sha256::digest(text.as_bytes())))
     }
 }
 

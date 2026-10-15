@@ -66,6 +66,12 @@ ecosystem while the gates keep the safety. Cargo is split by semver level so a
 major bump — the kind that changes an API — arrives alone rather than hidden in
 a batch.
 
+Dependabot's `labels` override is omitted because the repository does not define
+the custom `security` label. With no override, Dependabot can apply its default
+`dependencies` and ecosystem labels. If a custom label is configured but absent
+from the repository, GitHub documents that it is ignored; it does not reject the
+update configuration ([Dependabot labels documentation](https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference#labels)).
+
 The Actions group matters most for this policy: Dependabot rewrites a
 SHA-pinned `uses:` **and** the `# vX.Y.Z` comment beside it, so pinning does not
 mean updates become manual.

@@ -9,8 +9,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use rcgen::{
-    Certificate, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair,
-    KeyUsagePurpose, SanType,
+    CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose,
+    SanType,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use sha2::{Digest, Sha256};
@@ -186,12 +186,13 @@ pub fn generate(interface_ips: &[IpAddr]) -> Result<CertChain, rcgen::Error> {
     // `.mobileconfig` install profile. Same PKCS#8 DER shape as the leaf
     // key below (`KeyPair::serialize_der()`).
     let root_key_der = root_key.serialize_der();
+    let root_issuer = Issuer::new(root_params, root_key);
 
     // Leaf — TLS server cert shape (CA:FALSE, serverAuth EKU, DigitalSignature
     // KU) signed by the root above.
     let leaf_params = build_params(interface_ips)?;
     let leaf_key = KeyPair::generate()?;
-    let leaf_cert = leaf_params.signed_by(&leaf_key, &root_cert, &root_key)?;
+    let leaf_cert = leaf_params.signed_by(&leaf_key, &root_issuer)?;
     let leaf_cert_der = leaf_cert.der().as_ref().to_vec();
     let leaf_key_der = leaf_key.serialize_der();
 
@@ -208,17 +209,15 @@ pub fn generate(interface_ips: &[IpAddr]) -> Result<CertChain, rcgen::Error> {
 // --- Trust-anchor split (issue #1527) ------------------------------------
 //
 // `RootKeyPair` owns the root CA's lifetime: load it from disk, or create
-// it once and persist. Once loaded, the same `KeyPair` + `Certificate` can
-// sign any number of leaves via `issue_leaf_for`. The leaf itself is
+// it once and persist. Once loaded, the same `KeyPair` + `Issuer` can sign
+// any number of leaves via `issue_leaf_for`. The leaf itself is
 // persisted through `atomic_write_leaf` so a crash mid-rotation never
 // leaves a partial cert/key/sans triplet on disk.
 
-/// In-memory representation of the persisted root CA. The `cached_cert` is
-/// the rcgen `Certificate` we sign leaves with — rebuilt from the loaded
-/// key + deterministic params (rcgen has no `Certificate::from_der`, so the
-/// cert bytes can't be re-imported; rebuilding from the same params + the
-/// same key yields the same subject / SANs / extensions and signs leaves
-/// that chain to the persisted root).
+/// In-memory representation of the persisted root CA. The `cached_issuer` is
+/// an rcgen `Issuer` rebuilt from the loaded key + deterministic params. The
+/// persisted cert bytes remain the trust anchor; the issuer carries the same
+/// subject and signing key for new leaves.
 struct RootKeyPair {
     /// Raw `ca.der` bytes — what the phone installs.
     cert_der: Vec<u8>,
@@ -227,10 +226,8 @@ struct RootKeyPair {
     /// below); kept so `CertChain` consumers see the same shape as the
     /// pre-split API.
     key_der: Vec<u8>,
-    /// Parsed `KeyPair` for signing leaves.
-    cached_key: KeyPair,
-    /// Parsed `Certificate` issuer — passed to `signed_by` for new leaves.
-    cached_cert: Certificate,
+    /// Parsed issuer for signing leaves.
+    cached_issuer: Issuer<'static, KeyPair>,
 }
 
 impl RootKeyPair {
@@ -272,14 +269,11 @@ impl RootKeyPair {
         let cached_key = KeyPair::try_from(key_der.as_slice())
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("ca.key.der: {e}")))?;
         let root_params = build_root_ca_params().map_err(io::Error::other)?;
-        let cached_cert = root_params
-            .self_signed(&cached_key)
-            .map_err(io::Error::other)?;
+        let cached_issuer = Issuer::new(root_params, cached_key);
         Ok(Self {
             cert_der,
             key_der,
-            cached_key,
-            cached_cert,
+            cached_issuer,
         })
     }
 
@@ -293,13 +287,13 @@ impl RootKeyPair {
             .map_err(io::Error::other)?;
         let cert_der = cached_cert.der().as_ref().to_vec();
         let key_der = cached_key.serialize_der();
+        let cached_issuer = Issuer::new(root_params, cached_key);
         atomic_write_root(dir, &cert_der, &key_der)?;
         bump_root_generation(dir)?;
         Ok(Self {
             cert_der,
             key_der,
-            cached_key,
-            cached_cert,
+            cached_issuer,
         })
     }
 
@@ -309,7 +303,7 @@ impl RootKeyPair {
     fn issue_leaf_for(&self, interface_ips: &[IpAddr]) -> Result<SelfSignedCert, rcgen::Error> {
         let leaf_params = build_params(interface_ips)?;
         let leaf_key = KeyPair::generate()?;
-        let leaf_cert = leaf_params.signed_by(&leaf_key, &self.cached_cert, &self.cached_key)?;
+        let leaf_cert = leaf_params.signed_by(&leaf_key, &self.cached_issuer)?;
         Ok(SelfSignedCert {
             cert_der: leaf_cert.der().as_ref().to_vec(),
             key_der: leaf_key.serialize_der(),
@@ -1362,6 +1356,46 @@ mod tests {
         assert!(
             stdout.contains("CA:TRUE"),
             "root cert MUST declare BasicConstraints CA:TRUE (Android install requirement); got: {stdout}"
+        );
+    }
+
+    /// Existing installs keep a CA created by rcgen 0.13.2. The fixture pair
+    /// was generated with the same parameter values as the pre-upgrade root
+    /// builder; the upgraded issuer must still sign leaves that chain to it.
+    #[test]
+    fn rcgen_014_leaf_chains_to_persisted_rcgen_013_root() {
+        let app_data = tempfile::tempdir().unwrap();
+        let identity_path = identity_dir(app_data.path()).expect("identity path");
+        std::fs::create_dir_all(&identity_path).expect("identity dir");
+        let old_root_cert = include_bytes!("fixtures/rcgen-0.13.2-ca.der");
+        let old_root_key = include_bytes!("fixtures/rcgen-0.13.2-ca.key.der");
+        std::fs::write(identity_path.join("ca.der"), old_root_cert).expect("persist old CA");
+        std::fs::write(identity_path.join("ca.key.der"), old_root_key).expect("persist old CA key");
+
+        let root = RootKeyPair::load(&identity_path).expect("load rcgen 0.13 CA with rcgen 0.14");
+        let leaf = root
+            .issue_leaf_for(&[])
+            .expect("issue a leaf from the persisted rcgen 0.13 CA");
+
+        let verify_dir = tempfile::tempdir().unwrap();
+        let root_pem = verify_dir.path().join("root.pem");
+        let leaf_pem = verify_dir.path().join("leaf.pem");
+        std::fs::write(&root_pem, pem_encode("CERTIFICATE", old_root_cert)).unwrap();
+        std::fs::write(&leaf_pem, pem_encode("CERTIFICATE", &leaf.cert_der)).unwrap();
+        let output = std::process::Command::new("openssl")
+            .args([
+                "verify",
+                "-CAfile",
+                root_pem.to_str().unwrap(),
+                leaf_pem.to_str().unwrap(),
+            ])
+            .output()
+            .expect("openssl must be on PATH");
+        assert!(
+            output.status.success(),
+            "rcgen 0.14 leaf must chain to the persisted rcgen 0.13 root; stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 

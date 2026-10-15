@@ -733,12 +733,13 @@ pub(crate) fn current_branch_upstream_remote(repo: &git2::Repository) -> Option<
     if !head.is_branch() {
         return None;
     }
-    let branch_name = head.shorthand()?;
+    let branch_name = head.shorthand().ok()?;
     let local_refname = format!("refs/heads/{}", branch_name);
     if let Ok(buf) = repo.branch_upstream_name(&local_refname) {
         // Format: refs/remotes/<remote>/<branch...>
         if let Some(remote) = buf
             .as_str()
+            .ok()
             .and_then(|s| s.strip_prefix("refs/remotes/"))
             .and_then(|s| s.split_once('/'))
             .map(|(r, _)| r.to_string())
@@ -890,7 +891,7 @@ pub fn commits_behind_upstream(repo: &git2::Repository) -> Result<u32, String> {
         .head()
         .map_err(|e| format!("Failed to read HEAD: {}", e))?
         .shorthand()
-        .ok_or_else(|| "HEAD is not on a branch".to_string())?
+        .map_err(|_| "HEAD is not on a branch".to_string())?
         .to_string();
     let upstream_oid = primitives::upstream_oid_for_branch(repo, &branch_name)
         .ok_or_else(|| format!("no upstream configured for refs/heads/{}", branch_name))?;

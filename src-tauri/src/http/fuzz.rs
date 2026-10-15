@@ -63,7 +63,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufStream};
 use tokio::runtime::Runtime;
 
@@ -667,6 +667,7 @@ fn mutate(input: &mut Vec<u8>, rng: &mut StdRng) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::RngExt;
 
     #[test]
     fn corpus_matches_pinned_outcomes() {

@@ -481,7 +481,7 @@ fn collect_prune_info(
     }
 
     if let Ok(names) = repo.worktrees() {
-        for wt_name in names.iter().flatten() {
+        for wt_name in names.iter().filter_map(|name| name.ok().flatten()) {
             let wt = match repo.find_worktree(wt_name) {
                 Ok(w) => w,
                 Err(_) => continue,
@@ -534,7 +534,7 @@ fn collect_prune_info(
         let refname = format!("refs/heads/{}", name);
         if let Ok(upstream_buf) = repo.branch_upstream_name(&refname) {
             // An upstream is configured for this branch.
-            if let Some(upstream_ref) = upstream_buf.as_str() {
+            if let Ok(upstream_ref) = upstream_buf.as_str() {
                 match repo.find_reference(upstream_ref) {
                     Ok(up_ref) => {
                         if let (Some(local), Some(up)) = (branch_oid, up_ref.target()) {

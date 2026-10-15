@@ -71,7 +71,7 @@ pub fn runtime_hook_token() -> Option<String> {
 pub fn mint_runtime_hook_token() -> String {
     RUNTIME_HOOK_TOKEN
         .get_or_init(|| {
-            use rand::Rng;
+            use rand::RngExt;
             let mut rng = rand::rng();
             let bytes: [u8; 16] = std::array::from_fn(|_| rng.random());
             bytes.iter().map(|b| format!("{:02x}", b)).collect()

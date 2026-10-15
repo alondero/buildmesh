@@ -114,9 +114,9 @@ impl ReportSnapshot {
         };
         let snapshot = Self {
             revision: format!(
-                "{}:result:{:x}",
+                "{}:result:{}",
                 turn_revision,
-                Sha256::digest(text.as_bytes())
+                hex::encode(Sha256::digest(text.as_bytes()))
             ),
             text: crate::secret_scrubber::SecretScrubber::scrub(&text),
             published_at_ms,

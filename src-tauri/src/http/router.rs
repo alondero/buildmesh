@@ -218,6 +218,11 @@ enum Handler {
     IssuesSpawn,
     IssueLabels,
     IssueSetLabel,
+    CircuitRuns,
+    CircuitApprove,
+    CircuitOutcome,
+    CircuitRecover,
+    CircuitCancel,
     GitStatus,
     GitSummary,
     GitBranch,
@@ -453,6 +458,55 @@ const ROUTES: &[Route] = &[
         scope: RouteScope::Admin,
         body: BodyPolicy::Cap(8 * 1024),
         handler: Handler::IssueSetLabel,
+    },
+    // Circuit Runs on Agent Nodes (issue #2314). The run id is in the path;
+    // the act routes reuse the desktop commands, so eligibility is theirs.
+    Route {
+        method: "GET",
+        m: RouteMatch::Exact("/api/circuit-runs"),
+        scope: RouteScope::Admin,
+        body: BodyPolicy::None,
+        handler: Handler::CircuitRuns,
+    },
+    Route {
+        method: "POST",
+        m: RouteMatch::OneId {
+            prefix: "/api/circuit-runs/",
+            suffix: "/approve",
+        },
+        scope: RouteScope::Admin,
+        body: BodyPolicy::Cap(8 * 1024),
+        handler: Handler::CircuitApprove,
+    },
+    Route {
+        method: "POST",
+        m: RouteMatch::OneId {
+            prefix: "/api/circuit-runs/",
+            suffix: "/outcome",
+        },
+        scope: RouteScope::Admin,
+        body: BodyPolicy::Cap(64 * 1024),
+        handler: Handler::CircuitOutcome,
+    },
+    Route {
+        method: "POST",
+        m: RouteMatch::OneId {
+            prefix: "/api/circuit-runs/",
+            suffix: "/recover",
+        },
+        scope: RouteScope::Admin,
+        body: BodyPolicy::Cap(64 * 1024),
+        handler: Handler::CircuitRecover,
+    },
+    Route {
+        method: "POST",
+        m: RouteMatch::OneId {
+            prefix: "/api/circuit-runs/",
+            suffix: "/cancel",
+        },
+        scope: RouteScope::Admin,
+        body: BodyPolicy::None,
+        handler: Handler::CircuitCancel,
     },
     Route {
         method: "GET",
@@ -780,6 +834,11 @@ async fn run_handler(handler: Handler, req: &ParsedRequest) -> DispatchResult {
         Handler::IssuesSpawn => Http(routes::issues::spawn(req).await),
         Handler::IssueLabels => Http(routes::issues::labels(req).await),
         Handler::IssueSetLabel => Http(routes::issues::set_label(req).await),
+        Handler::CircuitRuns => Http(routes::circuit::list(req).await),
+        Handler::CircuitApprove => Http(routes::circuit::approve(req).await),
+        Handler::CircuitOutcome => Http(routes::circuit::outcome(req).await),
+        Handler::CircuitRecover => Http(routes::circuit::recover(req).await),
+        Handler::CircuitCancel => Http(routes::circuit::cancel(req).await),
         Handler::GitStatus => Http(routes::git::status(req).await),
         Handler::GitSummary => Http(routes::git::summary(req).await),
         Handler::GitBranch => Http(routes::git::branch(req).await),
@@ -1099,6 +1158,11 @@ POST /api/meshes/{id}/agent-nodes/import-and-resume -> Admin
 POST /api/meshes/{mesh_id}/issues/{issue_number}/spawn -> Admin
 GET /api/meshes/{id}/issue-labels -> Admin
 POST /api/meshes/{mesh_id}/issues/{issue_number}/label -> Admin
+GET /api/circuit-runs -> Admin
+POST /api/circuit-runs/{id}/approve -> Admin
+POST /api/circuit-runs/{id}/outcome -> Admin
+POST /api/circuit-runs/{id}/recover -> Admin
+POST /api/circuit-runs/{id}/cancel -> Admin
 GET /api/agents/{id}/git/status -> Admin
 GET /api/agents/{id}/git/summary -> Admin
 GET /api/agents/{id}/git/branch -> Admin

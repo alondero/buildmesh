@@ -156,10 +156,17 @@ the pairing rows for selectors that still choose a provider route directly.
 **The registries are independent.** The brand string may coincide across
 namespaces, but each registry is the single source of its own kind:
 
+`BuiltInProviderAccount::self_auth` describes the account's credential
+ownership: `true` means its CLI manages authentication; `false` means a keyed
+account, including Usage Meter-only providers such as OpenAI that have no
+first-class inference surface. The keyed Moonshot / Kimi account therefore
+has `self_auth: false`, while the Kimi Code CLI Agent Harness manages its own
+authentication in the separate harness namespace.
+
 | Registry | What it carries | Example for Kimi |
 |---|---|---|
 | `BUILTIN_PROVIDER_ACCOUNTS` (`src-tauri/src/preferences/resolver/catalog.rs`) | One row per credential/billing identity. Self-auth rows always appear via `default_provider_accounts`; keyed first-class (`self_auth: false`) are catalog-only until added (`keyed_first_class_catalog`) — credentials + Usage Meter only. | `id: "kimi", self_auth: false` (endpoint on pairing / `first_class_surfaces`) |
-| `HarnessProfile` + `Provider::Kimi` enum variant + `KIMI` adapter | The Kimi Code CLI Agent Harness — uses `~/.kimi/config.toml` for its own auth; Buildmesh doesn't manage the credential. | `HarnessProfile { id: "kimi", harness: "kimi", binaries: &["kimi"] }` + `KimiAdapter` |
+| `HarnessProfile` + `Provider::Kimi` enum variant + `KIMI` adapter | The Kimi Code CLI Agent Harness — uses `~/.kimi-code/config.toml` by default for its own auth; Buildmesh doesn't manage the credential. | `HarnessProfile { id: "kimi", harness: "kimi", binaries: &["kimi"] }` + `KimiAdapter` |
 | `src-tauri/src/services/usage/catalog.rs` | One row per fetchable Usage Meter: provider id, native-harness visibility gate or account-key lookup, and fetch adapter. Add a meter here instead of creating parallel lists or dispatch matches in `commands/usage.rs`. | `UsageMeterDefinition::keyed("kimi", usage::kimi_usage)` |
 
 The string `"kimi"` appearing in both is fine because the namespaces are

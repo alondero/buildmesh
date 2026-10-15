@@ -28,6 +28,12 @@ export type NodeStatus = SessionStatus;
 import type { CreateNodeRequest } from '../types/generated/CreateNodeRequest';
 export type { CreateNodeRequest };
 
+import type { ApproveCircuitStepRequest } from '../types/generated/ApproveCircuitStepRequest';
+import type { CheckpointRequest } from '../types/generated/CheckpointRequest';
+import type { NodeCircuitRun } from '../types/generated/NodeCircuitRun';
+import type { RecoveryRequest } from '../types/generated/RecoveryRequest';
+export type { NodeCircuitRun };
+
 export function readStoredToken(): string | null {
   try {
     return localStorage.getItem(TOKEN_STORAGE_KEY);
@@ -331,6 +337,48 @@ export async function squashMerge(meshId: number, number: number, url: string): 
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ url }),
   });
+}
+
+/**
+ * The implementation nodes that are inside a live Circuit Run (or whose failed
+ * run is unacknowledged), with what a person can do about it (issue #2314).
+ *
+ * A desktop that predates the route answers unknown `/api/*` paths with a 200
+ * `{"error":"not found"}`, so that shape means "no circuit support", not a
+ * failure: the node list must keep working against an older desktop.
+ */
+export async function listCircuitRuns(): Promise<NodeCircuitRun[]> {
+  const body: unknown = await (await apiFetch('/api/circuit-runs')).json();
+  if (Array.isArray(body)) return body as NodeCircuitRun[];
+  if (typeof body === 'object' && body !== null && (body as { error?: unknown }).error === 'not found') return [];
+  throw new Error('The desktop sent an unexpected Circuit Run response. Update Buildmesh and refresh.');
+}
+
+async function postCircuit(path: string, body?: unknown): Promise<void> {
+  await apiFetch(path, {
+    method: 'POST',
+    ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+  });
+}
+
+/** Approve the parked approval gate `nodeId` (a circuit node id, not an Agent Node). */
+export function approveCircuitStep(runId: number, nodeId: string): Promise<void> {
+  const body: ApproveCircuitStepRequest = { node_id: nodeId };
+  return postCircuit(`/api/circuit-runs/${runId}/approve`, body);
+}
+
+/** Recheck an Unverified Checkpoint or record an Operator-recorded Outcome. */
+export function recordCircuitOutcome(request: CheckpointRequest): Promise<void> {
+  return postCircuit(`/api/circuit-runs/${request.run_id}/outcome`, request);
+}
+
+/** Run Recovery: retry the failed step, or record that the person did it. */
+export function recoverCircuitRun(request: RecoveryRequest): Promise<void> {
+  return postCircuit(`/api/circuit-runs/${request.run_id}/recover`, request);
+}
+
+export function cancelCircuitRun(runId: number): Promise<void> {
+  return postCircuit(`/api/circuit-runs/${runId}/cancel`);
 }
 
 /**

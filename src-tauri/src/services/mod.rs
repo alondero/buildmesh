@@ -14,6 +14,7 @@ pub mod fetch_freshness;
 pub mod freebuff_usage;
 pub mod gh_auth_cache;
 pub mod github;
+pub(crate) mod http_client;
 pub mod legacy_retirement;
 pub mod mcode_session;
 pub mod mesh;

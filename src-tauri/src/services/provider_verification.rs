@@ -6,6 +6,7 @@ use crate::models::EnvType;
 use crate::preferences::{
     self, PairingVerification, PairingVerificationStatus, ProviderAccount, ProviderPairing,
 };
+use crate::services::http_client::blocking_client_builder;
 use chrono::Utc;
 use std::io::BufRead;
 
@@ -81,7 +82,7 @@ fn verify_responses_agent_loop(
         .ok()
         .and_then(|u| u.host_str().map(str::to_string))
         .unwrap_or_else(|| "provider".into());
-    let client = reqwest::blocking::Client::builder()
+    let client = blocking_client_builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| format!("could not initialize verification client: {e}"))?;
@@ -638,6 +639,9 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
 
+    type CapturedEventFields = Vec<(String, String)>;
+    type CapturedEvents = std::sync::Arc<std::sync::Mutex<Vec<CapturedEventFields>>>;
+
     fn read_request(stream: &mut TcpStream) -> String {
         let mut bytes = Vec::new();
         let mut chunk = [0u8; 4096];
@@ -768,7 +772,6 @@ mod tests {
     /// test gets its own `init_for_tests` + `reset_for_tests` round and
     /// collateral tests run concurrently without seeing each other's
     /// state.
-
     /// A verification recorded against an older Codex CLI (npm auto-updates)
     /// must report the CLI change as the staleness cause — not the generic
     /// "routing inputs changed" message that masks the real state.
@@ -1058,7 +1061,7 @@ mod tests {
             }
         }
         struct Capture {
-            events: Arc<Mutex<Vec<Vec<(String, String)>>>>,
+            events: CapturedEvents,
         }
         impl tracing::Subscriber for Capture {
             fn enabled(&self, _: &Metadata<'_>) -> bool {
@@ -1078,7 +1081,7 @@ mod tests {
             fn exit(&self, _: &Id) {}
         }
 
-        let events: Arc<Mutex<Vec<Vec<(String, String)>>>> = Arc::new(Mutex::new(Vec::new()));
+        let events: CapturedEvents = Arc::new(Mutex::new(Vec::new()));
         // `tracing` caches per-callsite interest globally: a first hit under
         // the default no-op dispatcher pins the site as disabled, and a
         // rebuild only reaches already-registered sites — so a sibling test

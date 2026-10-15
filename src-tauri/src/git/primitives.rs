@@ -89,7 +89,7 @@ pub(crate) fn is_ignored_entry(repo: &Repository, entry: &git2::StatusEntry) -> 
     if !entry.status().is_wt_new() {
         return false;
     }
-    let Some(path) = entry.path() else {
+    let Ok(path) = entry.path() else {
         return false;
     };
     let Some(workdir) = repo.workdir() else {
@@ -185,8 +185,8 @@ fn dirty_paths_mirrors_git_status(
             continue;
         }
         let path = match e.path() {
-            Some(p) => p,
-            None => return Ok(None),
+            Ok(p) => p,
+            Err(_) => return Ok(None),
         };
         if let Some(rule) = ignore_rules.get(path) {
             match rule.as_str() {
@@ -287,12 +287,12 @@ fn read_submodule_ignore_rules(repo: &Repository) -> HashMap<String, String> {
             Err(_) => continue,
         };
         let name = match entry.name() {
-            Some(n) => n,
-            None => continue,
+            Ok(n) => n,
+            Err(_) => continue,
         };
         let value = match entry.value() {
-            Some(v) => v.to_string(),
-            None => continue,
+            Ok(v) => v.to_string(),
+            Err(_) => continue,
         };
         // Key is e.g. "submodule.lib/foo.ignore"; strip prefix + suffix to
         // recover the gitlink path. The pattern above guarantees both halves
@@ -326,7 +326,7 @@ pub fn short_sha(repo: &Repository, oid: Oid) -> String {
 /// (no symbolic target).
 pub fn head_branch_name(repo: &Repository) -> Option<String> {
     let head = repo.find_reference("HEAD").ok()?;
-    let target = head.symbolic_target()?;
+    let target = head.symbolic_target().ok()??;
     target.strip_prefix("refs/heads/").map(|s| s.to_string())
 }
 
@@ -348,7 +348,7 @@ pub fn head_branch_name(repo: &Repository) -> Option<String> {
 pub fn upstream_oid_for_branch(repo: &Repository, branch: &str) -> Option<Oid> {
     let refname = format!("refs/heads/{}", branch);
     if let Ok(buf) = repo.branch_upstream_name(&refname) {
-        if let Some(name) = buf.as_str() {
+        if let Ok(name) = buf.as_str() {
             if let Some(oid) = repo.find_reference(name).ok().and_then(|r| r.target()) {
                 return Some(oid);
             }

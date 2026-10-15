@@ -30,12 +30,9 @@ pub(crate) fn receipt_source_id(
     session_incarnation: &Option<String>,
 ) -> Result<String, String> {
     use sha2::{Digest, Sha256};
-    Ok(format!(
-        "{:x}",
-        Sha256::digest(
-            serde_json::to_vec(&(hook, session_incarnation)).map_err(|e| e.to_string())?
-        )
-    ))
+    Ok(hex::encode(Sha256::digest(
+        serde_json::to_vec(&(hook, session_incarnation)).map_err(|e| e.to_string())?,
+    )))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -236,7 +233,7 @@ fn normalize(
         && !stale;
     let mut facts = Vec::new();
     if let Some(text) = receipt.hook.final_report {
-        let revision = format!("{:x}", Sha256::digest(text.as_bytes()));
+        let revision = hex::encode(Sha256::digest(text.as_bytes()));
         facts.push(Fact::AssistantReport { text, revision });
     }
     if let Some(fact) = human_fact {

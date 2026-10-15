@@ -20,6 +20,8 @@
 version: 2
 
 updates:
+  # The repository does not define the `dependencies` or `security` labels.
+  # Leave label assignment out so Dependabot can open updates cleanly.
   - package-ecosystem: npm
     directory: /
     schedule:
@@ -30,9 +32,6 @@ updates:
       time: "06:00"
       timezone: Europe/London
     open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - security
     groups:
       # Runtime dependencies and the toolchain (Vite/Vitest/ESLint/Tailwind) are
       # the two sets that move together and break together. Splitting them
@@ -50,9 +49,6 @@ updates:
       time: "06:00"
       timezone: Europe/London
     open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - security
     groups:
       # Patch and minor updates are the ones CI can absorb unattended. `cargo
       # update` moves the whole graph, so each group is still reviewed, but a
@@ -77,9 +73,6 @@ updates:
       time: "06:00"
       timezone: Europe/London
     open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - security
     groups:
       # Every action in this repository is pinned to a full commit SHA (issue
       # #1541); Dependabot rewrites the SHA and updates the `# vX.Y.Z` comment

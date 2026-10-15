@@ -29,6 +29,11 @@ to review committed changes from the merge-base and uncommitted/untracked
 changes, without editing files or posting to GitHub. It has its own worktree;
 no commit, push, or PR is required for this workflow.
 
+From a paired phone's browser client, the node card and node screen show the run, its
+review round and the latest verdict, and a run that needs a person can be approved,
+rechecked, recovered or cancelled there. See
+[Circuit Runs on the phone](mobile.md#circuit-runs-on-the-phone).
+
 ## Completion and recovery
 
 Circuits can progress from a finished, readable agent report even when the harness

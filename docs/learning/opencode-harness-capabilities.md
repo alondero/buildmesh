@@ -329,6 +329,40 @@ the captured id belongs to the old harness's session format.
 
 ---
 
+## TUI input readiness (issue #2344)
+
+**Question:** what does OpenCode's TUI need before it will accept a keystroke?
+
+**Answer:** it needs to have attached its input reader, which it does during
+startup rather than at process start. In the shipped 1.18.3 binary the renderer's
+`setupInput()` runs `stdin.setRawMode(true)` → `stdin.on("data", …)` →
+`stdin.resume()`, and its `resume()` path begins with `while (this.stdin.read() !== null);`
+— a drain of everything already buffered. Bytes written into the PTY before that
+runs are consumed there and never reach the composer.
+
+That is the whole of issue #2344: Buildmesh writes a keystroke as soon as xterm
+reports it, and a prompt typed into a freshly spawned node can land in that
+window. The symptom is a silent loss — empty input box, no `session.status busy`,
+no turn — and a resend seconds later works, because by then the reader is attached.
+
+**`server.connected` is not a usable readiness marker.** It exists (`ServerEvent`
+in the 1.18.3 binary; the server emits it as the first frame of an event-stream
+subscription), and OpenCode's own client code treats it as "go" — it refreshes and
+re-activates children on it. But it marks the *event stream* connecting, which is
+not proof that the renderer has mounted and drained stdin, so gating input on it
+would be a guess about ordering this repository cannot observe. Codex, whose gate
+is driven by a rendered marker in the startup output (`ready_for_initial_prompt`),
+is safe there precisely because the composer having been painted *is* the evidence.
+
+**What Buildmesh does instead:** it verifies rather than predicts. `AgentProvider::
+replays_unconfirmed_submit` marks OpenCode as a harness that discards early input,
+and the retained bytes behind each submit are written to the PTY again once when
+`on_submit_unconfirmed` proves no turn started — see `docs/development/
+node-status-observation.md`. Re-sending is safe *because* OpenCode discards rather
+than queues: a harness that buffered the keystrokes would run the prompt twice.
+
+---
+
 ## Doc drift
 
 - **ADR-0024** — corrected: OpenCode is self-assign + `--session`, not `--session-id` assign.

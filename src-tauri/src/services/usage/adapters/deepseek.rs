@@ -6,11 +6,11 @@
 //! orchestration only.
 
 use crate::preferences::ProviderAccount;
+use crate::services::http_client::blocking_client_builder;
 use crate::services::usage::adapter::{api_key_for, UsageAdapter};
 use crate::services::usage::outcome::UsageOutcome;
 use crate::services::usage::types::UsagePage;
 use crate::services::usage::types::{BillingBalance, UsageError};
-use reqwest::blocking::Client;
 use serde::Deserialize;
 
 /// Drop-in [`UsageAdapter`] for `deepseek`.
@@ -160,7 +160,7 @@ fn deepseek_usage_with_url(api_key: &str, live_url: &str) -> UsageOutcome {
             hint: "No API key configured".to_string(),
         };
     }
-    let client = match Client::builder()
+    let client = match blocking_client_builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
     {

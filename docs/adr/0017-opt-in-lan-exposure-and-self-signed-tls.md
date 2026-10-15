@@ -60,11 +60,13 @@ make all handlers generic over `AsyncRead + AsyncWrite`, a `MaybeTls` enum
 traits and is that one type. WSS comes for free: the WebSocket upgrade wraps
 whichever `MaybeTls` it was handed. See `http::stream`.
 
-**6. Crypto provider is `ring`, selected explicitly.** `rustls`/`tokio-rustls`/
-`ring` already ride in transitively (reqwest's `hyper-rustls`), but with no crypto
-provider compiled in and no aws-lc-rs in the tree. We enable the `ring` provider
-and build every `ServerConfig`/`ClientConfig` with `builder_with_provider(ring)`
-so TLS never depends on a process-default provider.
+**6. Crypto provider is `ring`.** The embedded server builds its
+`ServerConfig`/`ClientConfig` with `builder_with_provider(ring)`, so those
+configs do not depend on the process default. Reqwest 0.13 uses
+`rustls-no-provider`; app startup installs `ring` as rustls's process-default
+provider so reqwest's client builder can select it. This keeps aws-lc-rs out of
+the dependency tree while preserving explicit provider selection for the
+embedded server.
 
 **7. The interface snapshot refreshes on each bind (issue #585), and one walk
 produces both data sets (issue #630).** The bind path calls
