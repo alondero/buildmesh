@@ -37,7 +37,19 @@ fun issueItems(response: JsonElement): List<JsonObject> = when (response) {
 }
 
 class ApiException(val status: Int, message: String) : IOException(message) {
-    val unauthorized get() = status == 401 || status == 403
+    /**
+     * The desktop no longer accepts this credential: `auth::authorize` answers
+     * 401 only when no valid device token was presented, so this is the single
+     * status that may end a pairing on a data route.
+     */
+    val sessionRejected get() = status == 401
+
+    /**
+     * A refusal at the credential boundary: `/api/session` answers 401 or 403
+     * for a stored credential it will not mint a cookie from, so restoring one
+     * ends the pairing on either status.
+     */
+    val credentialRefused get() = sessionRejected || status == 403
 }
 
 class BuildmeshApi(
@@ -108,7 +120,10 @@ class BuildmeshApi(
         if (!response.isSuccessful) {
             val detail = runCatching { Json.parseToJsonElement(response.body!!.string()).obj().text("error") }.getOrDefault("")
             throw ApiException(response.code, detail.ifEmpty {
-                if (response.code in setOf(401, 403)) "This device is no longer authorized. Pair again from the desktop."
+                // Only a 401 ends the pairing, so only a 401 may claim to. A 403
+                // is this request being refused and belongs in an error slot
+                // (issue #2317).
+                if (response.code == 401) "This device is no longer authorized. Pair again from the desktop."
                 else "Desktop request failed (${response.code})."
             })
         }
