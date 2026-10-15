@@ -318,10 +318,21 @@ export function checkDocumentation({ root = repoRoot, files = collectMarkdownFil
     const relativePath = relative(root, source).replaceAll('\\', '/');
     const releaseMatch = relativePath.match(/^docs\/releases\/(v\d+\.\d+\.\d+)\.md$/i);
     if (releaseMatch) {
-      const headings = markdownHeadings(readFileSync(source, 'utf8'));
+      // One read serves both checks: the title needs text, and the terminator
+      // has to be judged on the raw byte, not on decoded text.
+      const bytes = readFileSync(source);
+      const headings = markdownHeadings(bytes.toString('utf8'));
       const expectedTitle = `Buildmesh ${releaseMatch[1]}`;
       if (!headings.some(({ level, text }) => level === 1 && text === expectedTitle)) {
         add('release-note', `${relativePath} must have the title "${expectedTitle}"`);
+      }
+      if (bytes.length === 0 || bytes[bytes.length - 1] !== 0x0a) {
+        add(
+          'release-note-newline',
+          `${relativePath} must end with a newline: the release workflow splices it into `
+          + '$GITHUB_OUTPUT between heredoc delimiters, so an unterminated file is an easy '
+          + 'one to write and a needless thing to carry',
+        );
       }
     } else if (relativePath.startsWith('docs/releases/') && !/\/README\.md$/i.test(relativePath)) {
       add('release-note', `${relativePath} must be named vX.Y.Z.md`);

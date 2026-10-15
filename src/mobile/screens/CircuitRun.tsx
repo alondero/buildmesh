@@ -88,12 +88,14 @@ export function NodeCircuitRunPanel({
     return () => { active.current = false; };
   }, []);
 
-  async function refresh(isLatest: () => boolean = () => true) {
+  async function refresh(isLatest: () => boolean = () => true, signal?: AbortSignal) {
     if (acting.current) return;
     const request = ++version.current;
     const owns = () => active.current && request === version.current && isLatest();
     try {
-      const runs = await listCircuitRuns();
+      // `signal` is the polling hook's dispose signal (issue #1576): an
+      // unmounted panel cancels its own in-flight run read.
+      const runs = await listCircuitRuns(signal);
       if (!owns()) return;
       setRun(runs.find((candidate) => candidate.node_id === nodeId) ?? null);
       setReadError('');

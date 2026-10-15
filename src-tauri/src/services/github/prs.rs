@@ -35,8 +35,11 @@ pub struct PullRequest {
     /// `true` for draft PRs. GitHub always returns this field on `/pulls` responses.
     #[serde(default)]
     pub draft: bool,
-    /// PR description body. `#[serde(default)]` so a partial response (or a PR
-    /// opened with no body) parses to `""` rather than failing.
+    /// PR description body. A description that is *missing* or explicitly
+    /// `null` — GitHub's REST shape is `string | null`, and it answers `null`
+    /// for a PR opened without one — reads as `""` rather than failing the
+    /// whole response, through the shared rule documented on
+    /// `deserialize_opt_string`. This attribute only covers serialisation.
     #[serde(default)]
     pub body: String,
     /// `"open"` or `"closed"`. The list endpoint echoes the `state` filter, but
@@ -138,7 +141,10 @@ impl<'de> serde::Deserialize<'de> for PullRequest {
             pub title: String,
             #[serde(default)]
             pub draft: bool,
-            #[serde(default)]
+            // `body` is `string | null` in GitHub's REST schema, so a PR
+            // opened without a description answers `null`. `#[serde(default)]`
+            // alone only covers a *missing* key (issue #2333).
+            #[serde(default, deserialize_with = "super::deserialize_opt_string")]
             pub body: String,
             #[serde(default)]
             pub state: String,
@@ -1411,6 +1417,139 @@ pub(crate) mod tests {
             "missing head.repo.clone_url defaults to empty"
         );
         assert_eq!(pr.head_sha, "", "missing head.sha defaults to empty");
+    }
+
+    /// Issue #2333: GitHub's REST `/pulls` type `body` as `string | null` —
+    /// a PR opened with no description comes back as `"body": null`, which
+    /// `#[serde(default)]` does not cover (it only fills a *missing* key).
+    /// The decode error it produced surfaced as "error decoding response
+    /// body" from the phone's create route even though GitHub had created
+    /// the PR, and again from the duplicate-recovery read.
+    #[test]
+    fn pull_request_deserialises_null_body_as_an_empty_description() {
+        let json = r#"{
+            "number": 2333,
+            "html_url": "https://github.com/alondero/buildmesh/pull/2333",
+            "title": "fix(github): acknowledge pull requests created with an empty description",
+            "body": null,
+            "draft": false,
+            "state": "open",
+            "user": {"login": "alondero", "id": 1, "type": "User"},
+            "head": {
+                "ref": "gh2333-fixgithub-acknowledge-pull-requests-created",
+                "sha": "0123456789abcdef0123456789abcdef01234567",
+                "repo": {
+                    "clone_url": "https://github.com/alondero/buildmesh.git",
+                    "owner": {"login": "alondero"}
+                }
+            },
+            "base": {"ref": "main", "sha": "fedcba9876543210fedcba9876543210fedcba98"}
+        }"#;
+        let pr: PullRequest =
+            serde_json::from_str(json).expect("a PR with a null body must still parse");
+        assert_eq!(
+            pr.body, "",
+            "a null description reads as empty, not a failure"
+        );
+        // The nullable description must not cost us any other field — the
+        // spawn path still needs the head ref and SHA off the same payload.
+        assert_eq!(pr.number, 2333);
+        assert_eq!(
+            pr.title,
+            "fix(github): acknowledge pull requests created with an empty description"
+        );
+        assert_eq!(pr.state, "open");
+        assert_eq!(
+            pr.head_ref,
+            "gh2333-fixgithub-acknowledge-pull-requests-created"
+        );
+        assert_eq!(pr.head_sha, "0123456789abcdef0123456789abcdef01234567");
+        assert_eq!(pr.author, "alondero");
+    }
+
+    /// The same nullable body on the object `POST /pulls` answers with (the
+    /// create acknowledgement) and on the `GET /pulls?head=` recovery read —
+    /// both endpoints return the PR as a single object/element, so the list
+    /// test above alone would leave those paths unpinned.
+    #[test]
+    fn pull_request_create_and_recovery_shapes_accept_a_null_body() {
+        // `POST /repos/{o}/{r}/pulls` → 201 Created.
+        let create = r#"{
+            "number": 12,
+            "html_url": "https://github.com/acme/demo/pull/12",
+            "title": "fix: acknowledge empty-description PRs",
+            "body": null,
+            "state": "open",
+            "draft": false,
+            "merged": false,
+            "head": {"ref": "feat/2333", "sha": "abc123", "repo": null},
+            "base": {"ref": "main"}
+        }"#;
+        let created: PullRequest =
+            serde_json::from_str(create).expect("a created PR with a null body must parse");
+        assert_eq!(created.html_url, "https://github.com/acme/demo/pull/12");
+        assert_eq!(created.body, "");
+        // A deleted head repo (`repo: null`) degrades to the same-repo
+        // sentinel rather than failing alongside the null body.
+        assert_eq!(created.head_repo_owner, "");
+        assert_eq!(created.head_repo_clone_url, "");
+
+        // `GET /repos/{o}/{r}/pulls?head=…` → a one-element array.
+        let recovery = r#"[{
+            "number": 12,
+            "html_url": "https://github.com/acme/demo/pull/12",
+            "title": "fix: acknowledge empty-description PRs",
+            "body": null,
+            "state": "open",
+            "draft": false,
+            "head": {"ref": "feat/2333", "sha": "abc123"}
+        }]"#;
+        let found: Vec<PullRequest> =
+            serde_json::from_str(recovery).expect("a recovered PR with a null body must parse");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].number, 12);
+        assert_eq!(
+            found[0].body, "",
+            "recovery must read a null description as empty"
+        );
+    }
+
+    /// The GraphQL summaries path already tolerates a null body (`Option`).
+    /// Pin the equivalence the phone depends on: the same PR must render the
+    /// same description whether it arrived via REST or via the summaries
+    /// query, so switching endpoints can't change what the sheet shows.
+    #[test]
+    fn graphql_summary_matches_the_rest_deserialiser_for_a_null_body() {
+        let node: GraphQLPrNode = serde_json::from_value(serde_json::json!({
+            "number": 12,
+            "title": "fix: acknowledge empty-description PRs",
+            "body": null,
+            "url": "https://github.com/acme/demo/pull/12",
+            "state": "OPEN",
+            "isDraft": false,
+            "headRefName": "feat/2333",
+            "headRefOid": "abc123",
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN"
+        }))
+        .expect("node parses");
+        let summary = PullRequestSummary::from_graphql_node(node);
+        let rest: PullRequest = serde_json::from_str(
+            r#"{
+                "number": 12,
+                "html_url": "https://github.com/acme/demo/pull/12",
+                "title": "fix: acknowledge empty-description PRs",
+                "body": null,
+                "state": "open",
+                "draft": false,
+                "head": {"ref": "feat/2333", "sha": "abc123"}
+            }"#,
+        )
+        .expect("REST shape parses");
+        assert_eq!(summary.body, "");
+        assert_eq!(summary.body, rest.body);
+        assert_eq!(summary.head_ref, rest.head_ref);
+        assert_eq!(summary.html_url, rest.html_url);
     }
 
     /// Issue #443: a fork PR (head's `repo.owner.login` differs from the

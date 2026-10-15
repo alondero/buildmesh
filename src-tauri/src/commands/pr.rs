@@ -3268,6 +3268,119 @@ mod tests {
         assert_eq!(count.load(Ordering::SeqCst), 2);
     }
 
+    /// Issue #2333: creating a PR from the phone with an empty description.
+    /// GitHub's REST schema types the description as `string | null`, so the
+    /// `POST /pulls` 201 answers `"body": null` — and the deserialiser failed
+    /// the whole response with `HTTP error: error decoding response body`
+    /// even though GitHub had created the PR, leaving the sheet in its error
+    /// state with no URL to show. The fixture is GitHub's literal shape; the
+    /// load-bearing assertion is that the acknowledged URL comes back.
+    #[test]
+    fn create_pr_for_node_source_acknowledges_a_pr_created_without_a_description() {
+        use std::sync::atomic::Ordering;
+
+        let _db = ensure_pr_blocking_db();
+        let (_tmp, mesh_id, node_id) = make_mesh_root_and_node(
+            "https://github.com/test-owner/test-repo.git",
+            "main",
+            "agent/fix-x",
+            "origin/main",
+        );
+        let created = serde_json::json!({
+            "number": 901,
+            "html_url": "https://github.com/test-owner/test-repo/pull/901",
+            "title": "fix(github): acknowledge pull requests created with an empty description",
+            "body": null,
+            "state": "open",
+            "draft": false,
+            "merged": false,
+            "head": {"ref": "agent/fix-x", "sha": "abc123", "repo": null},
+            "base": {"ref": "main"}
+        });
+        let (base, count, handle) = fake_server(vec![Scripted::CreatePullRequest(created)]);
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+
+        let result = create_pr_for_node_source_blocking_with_client(
+            &client,
+            mesh_id,
+            node_id,
+            "fix(github): acknowledge pull requests created with an empty description",
+            // The description the user left empty.
+            "",
+            None,
+            None,
+        )
+        .expect("a PR GitHub created must be acknowledged, not reported as a decode failure");
+
+        assert_eq!(
+            result.url,
+            "https://github.com/test-owner/test-repo/pull/901"
+        );
+        assert_eq!(result.head_branch, "agent/fix-x");
+        assert_eq!(result.base_branch, "main");
+        handle.join().expect("server");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "exactly one POST — the happy path must not pre-check"
+        );
+    }
+
+    /// The retry half of #2333: the create response was interrupted, so the
+    /// phone submits again, GitHub answers 422 "already exists", and the
+    /// recovery read returns the PR the first attempt created. That PR carries
+    /// the same empty description, so its `"body": null` must not fail the
+    /// recovery read the same way — that is what left the user unable to
+    /// acknowledge a PR that already existed.
+    #[test]
+    fn create_pr_for_node_source_recovers_a_duplicate_that_has_no_description() {
+        use std::sync::atomic::Ordering;
+
+        let _db = ensure_pr_blocking_db();
+        let (_tmp, mesh_id, node_id) = make_mesh_root_and_node(
+            "https://github.com/test-owner/test-repo.git",
+            "main",
+            "agent/fix-x",
+            "origin/main",
+        );
+        let existing = serde_json::json!([{
+            "number": 902,
+            "html_url": "https://github.com/test-owner/test-repo/pull/902",
+            "title": "fix(github): acknowledge pull requests created with an empty description",
+            "body": null,
+            "state": "open",
+            "draft": false,
+            "head": {"ref": "agent/fix-x", "sha": "abc123"}
+        }]);
+        let (base, count, handle) = fake_server(vec![
+            Scripted::CreatePrConflict(
+                r#"{"message":"Validation Failed","errors":[{"message":"A pull request already exists for test-owner:agent/fix-x."}]}"#.to_string(),
+            ),
+            Scripted::ListPulls {
+                body: existing,
+                expected_head: "test-owner%3Aagent%2Ffix-x".to_string(),
+            },
+        ]);
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+
+        let result = create_pr_for_node_source_blocking_with_client(
+            &client, mesh_id, node_id, "title", "", None, None,
+        )
+        .expect("the existing PR must be recovered rather than failing to decode it");
+
+        assert_eq!(
+            result.url,
+            "https://github.com/test-owner/test-repo/pull/902"
+        );
+        assert_eq!(result.head_branch, "agent/fix-x");
+        handle.join().expect("server");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            2,
+            "POST (422) + GET (recovery) — count == 1 means the recovery GET was skipped"
+        );
+    }
+
     #[test]
     fn create_pr_for_node_source_rejects_a_stale_expected_head() {
         let _db = ensure_pr_blocking_db();

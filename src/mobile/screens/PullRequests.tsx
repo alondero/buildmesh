@@ -46,13 +46,15 @@ function PullRequestList({ meshId, nodeId, onAuthFailed }: { meshId: number; nod
     return () => { active.current = false; };
   }, []);
 
-  async function refresh(isLatest: () => boolean = () => true) {
+  async function refresh(isLatest: () => boolean = () => true, signal?: AbortSignal) {
     if (merging.current) return;
     const request = ++version.current;
     const owns = () => active.current && request === version.current && isLatest();
     try {
+      // `signal` is the polling hook's dispose signal (issue #1576): an
+      // unmounted screen cancels its own in-flight feed read.
       const [next, currentBranch] = await Promise.all([
-        listPulls(meshId), nodeId === undefined ? Promise.resolve('') : gitBranch(nodeId).then(b => b.branch),
+        listPulls(meshId, signal), nodeId === undefined ? Promise.resolve('') : gitBranch(nodeId, signal).then(b => b.branch),
       ]);
       if (!owns()) return;
       setConfirm(current => {

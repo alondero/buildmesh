@@ -136,7 +136,12 @@ jobs:
           {
             echo "body<<$DELIMITER"
             cat "$NOTES"
-            echo "$DELIMITER"
+            # `cat` leaves a file that has no trailing newline unterminated, so
+            # the closing delimiter lands on its last line and the runner rejects
+            # the whole step with "Matching delimiter not found" — at the last
+            # step of a release, naming a delimiter instead of the file. Emit the
+            # terminating newline here so both shapes load (issue #2298).
+            printf '\n%s\n' "$DELIMITER"
           } >> "$GITHUB_OUTPUT"
 
       - name: Build + publish signed release

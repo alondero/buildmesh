@@ -98,6 +98,36 @@ test('versioned release notes use a matching Buildmesh title', () => {
   }
 });
 
+test('versioned release notes must end with a newline', () => {
+  const fixtureRoot = mkdtempSync(join(tmpdir(), 'buildmesh-release-notes-newline-'));
+  try {
+    mkdirSync(join(fixtureRoot, 'docs', 'releases'), { recursive: true });
+    const release = join(fixtureRoot, 'docs', 'releases', 'v2.0.0.md');
+    const body = '# Buildmesh v2.0.0\n\nFixes.\n';
+
+    writeFileSync(release, body);
+    const newlineFailures = checkDocumentation({ root: fixtureRoot, files: [release] })
+      .filter((failure) => failure.includes('release-note-newline'));
+    assert.deepEqual(newlineFailures, [], newlineFailures.join('\n'));
+
+    // The release run splices this file between heredoc delimiters, so the last
+    // byte decides whether the closing delimiter gets a line of its own.
+    writeFileSync(release, body.replace(/\n$/, ''));
+    const failures = checkDocumentation({ root: fixtureRoot, files: [release] });
+    assert.equal(
+      failures.some((failure) => failure.includes('release-note-newline')),
+      true,
+      `expected a trailing-newline failure, got ${JSON.stringify(failures)}`,
+    );
+    assert.match(
+      failures.find((failure) => failure.includes('release-note-newline')),
+      /docs\/releases\/v2\.0\.0\.md must end with a newline/,
+    );
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
 test('documentation impact requires a relevant page or a reasoned exemption', () => {
   assert.equal(checkDocumentationImpact({ changedFiles: ['src/App.tsx'] }).length, 1);
   assert.equal(checkDocumentationImpact({
