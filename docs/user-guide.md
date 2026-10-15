@@ -778,6 +778,13 @@ Harnesses without a transcript reader keep their generated names; you can rename
 any node manually. Existing task names are preserved, including names generated
 by earlier versions; rename those manually if they are misleading.
 
+A proposed name longer than five words is shortened to its first five words
+rather than refused, and an over-long name is also trimmed at 50 characters
+between words. Only a name that cannot describe the task — fewer than three
+words, or something other than lowercase words joined by hyphens within 50
+characters — is refused: the node keeps its generated name and naming retries
+on a later turn.
+
 If the selected configuration cannot be resolved, auto-naming retries on a later
 turn after you repair it. On Windows, Claude Code background work also checks
 the standard native and npm install locations when the app's PATH is stale.

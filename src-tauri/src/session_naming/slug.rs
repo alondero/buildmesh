@@ -11,6 +11,10 @@ use rand::seq::IndexedRandom;
 pub(super) static SLUG_REGEX: once_cell::sync::Lazy<regex::Regex> =
     once_cell::sync::Lazy::new(|| regex::Regex::new(r"^[a-z][a-z0-9-]{2,50}$").unwrap());
 
+/// A node name is also its worktree directory and (in branched mode) its local
+/// branch, so every name this module produces stays within this cap.
+const MAX_NAME_CHARS: usize = 50;
+
 // ---------------------------------------------------------------------------
 // Public lifecycle API
 // ---------------------------------------------------------------------------
@@ -118,23 +122,23 @@ pub fn disambiguate_node_name(base: &str, taken: &HashSet<String>) -> String {
     on_spawn()
 }
 
-/// `base` + `-{n}`, keeping the total within the 50-char slug cap by trimming
-/// the base (and any hyphen the cut exposes) before appending the suffix.
+/// `base` + `-{n}`, keeping the total within the [`MAX_NAME_CHARS`] slug cap by
+/// trimming the base (and any hyphen the cut exposes) before appending the suffix.
 fn suffixed(base: &str, n: u32) -> String {
     let suffix = format!("-{n}");
-    if base.len() + suffix.len() <= 50 {
+    if base.len() + suffix.len() <= MAX_NAME_CHARS {
         return format!("{base}{suffix}");
     }
-    let keep = 50 - suffix.len();
+    let keep = MAX_NAME_CHARS - suffix.len();
     let trimmed = base.get(..keep).unwrap_or(base).trim_end_matches('-');
     format!("{trimmed}{suffix}")
 }
 
 /// Shared core for `issue_node_name` / `pr_node_name` — both flows just
 /// pick a prefix and the rules below apply uniformly. Centralising the
-/// 50-char cap, trailing-hyphen re-trim, and `SLUG_REGEX` / `on_spawn()`
-/// fallback in one place means a future tweak (e.g. bumping the cap) lands
-/// for every spawn source at once.
+/// [`MAX_NAME_CHARS`] cap, trailing-hyphen re-trim, and `SLUG_REGEX` /
+/// `on_spawn()` fallback in one place means a future tweak (e.g. bumping the
+/// cap) lands for every spawn source at once.
 ///
 /// Wire format: `{prefix}{number}-{slug}` (no dash between prefix and
 /// number — `gh123-fix-this-feature`, not `gh-123-fix-this-feature`).
@@ -144,8 +148,8 @@ pub(super) fn prefixed_node_name(prefix: &str, number: i64, title: &str) -> Stri
     let slug = slugify_issue_title(title);
     let mut full = format!("{}{}-{}", prefix, number, slug);
 
-    if full.len() > 50 {
-        full.truncate(50);
+    if full.len() > MAX_NAME_CHARS {
+        full.truncate(MAX_NAME_CHARS);
         while full.ends_with('-') {
             full.pop();
         }
@@ -162,9 +166,9 @@ pub(super) fn prefixed_node_name(prefix: &str, number: i64, title: &str) -> Stri
 ///
 /// Pipeline: lowercase → spaces/underscores become hyphens → strip
 /// non-alphanumeric characters (keeping hyphens) → trim leading and trailing
-/// hyphens → cap at 50 chars (with another trailing-hyphen trim in case
-/// truncation lands on one). If the result is empty, starts with a digit, or
-/// otherwise fails `SLUG_REGEX`, fall back to a random default name from
+/// hyphens → cap at [`MAX_NAME_CHARS`] (with another trailing-hyphen trim in
+/// case truncation lands on one). If the result is empty, starts with a digit,
+/// or otherwise fails `SLUG_REGEX`, fall back to a random default name from
 /// `on_spawn()` so the caller always gets a valid name — an empty string
 /// would break the worktree directory creation downstream.
 ///
@@ -188,9 +192,9 @@ pub fn slugify_issue_title(title: &str) -> String {
     // 4. trim leading and trailing hyphens
     s = s.trim_matches('-').to_string();
 
-    // 5. cap at 50 chars (re-trim trailing hyphens if truncation split a word)
-    if s.len() > 50 {
-        s.truncate(50);
+    // 5. cap at MAX_NAME_CHARS (re-trim trailing hyphens if truncation split a word)
+    if s.len() > MAX_NAME_CHARS {
+        s.truncate(MAX_NAME_CHARS);
         while s.ends_with('-') {
             s.pop();
         }
@@ -233,6 +237,79 @@ pub(super) fn is_conversational_response(s: &str) -> bool {
     conversational_prefixes.iter().any(|p| lower.starts_with(p))
 }
 
+/// The slug shape the naming prompt asks for. A candidate with *more* words
+/// is shortened to [`MAX_SLUG_TOKENS`] rather than refused: an over-long slug
+/// is still a good name, and refusing one cost the node its whole rename —
+/// three inference attempts and then the "Couldn't auto-name node …" toast
+/// for a name as usable as `fix-rust-dead-code-warnings-raise-pr`. Fewer than
+/// [`MIN_SLUG_TOKENS`] words carries no information about the task, so that
+/// still spends an attempt to retry the backend.
+const MIN_SLUG_TOKENS: usize = 3;
+const MAX_SLUG_TOKENS: usize = 5;
+
+fn token_count(slug: &str) -> usize {
+    slug.split('-').filter(|w| !w.is_empty()).count()
+}
+
+/// Coerce a model-produced candidate into a usable node name.
+///
+/// Length is clamped, not refused: empty tokens collapse, the tail is dropped
+/// past [`MAX_SLUG_TOKENS`] words, and what remains is cut at
+/// [`MAX_NAME_CHARS`] on a whole-word boundary. Dropping a suffix is a
+/// cosmetic loss; dropping the rename is not — the node would keep its random
+/// `adj-adj-noun` name and the user would get an error toast.
+///
+/// `None` means the candidate cannot name the task: fewer than
+/// [`MIN_SLUG_TOKENS`] words, characters `SLUG_REGEX` forbids (which is what
+/// still keeps prose out of node names), or words long enough that the leading
+/// ones exceed the cap on their own.
+fn fit_slug(candidate: &str) -> Option<String> {
+    let words: Vec<&str> = candidate
+        .split('-')
+        .filter(|w| !w.is_empty())
+        .take(MAX_SLUG_TOKENS)
+        .collect();
+    if words.len() < MIN_SLUG_TOKENS {
+        return None;
+    }
+    let mut slug = String::new();
+    for word in words {
+        let with_separator = slug.len() + if slug.is_empty() { 0 } else { 1 } + word.len();
+        if with_separator > MAX_NAME_CHARS {
+            break;
+        }
+        if !slug.is_empty() {
+            slug.push('-');
+        }
+        slug.push_str(word);
+    }
+    (token_count(&slug) >= MIN_SLUG_TOKENS && SLUG_REGEX.is_match(&slug)).then_some(slug)
+}
+
+/// Why a candidate was refused, for the error the user sees in the
+/// "Couldn't auto-name" toast. The token count only ever reports a name that
+/// was too thin; anything else failed the shape or the character cap.
+fn slug_rejection(candidate: &str) -> String {
+    let tokens = token_count(candidate);
+    if tokens < MIN_SLUG_TOKENS {
+        format!(
+            "slug has {tokens} dash-separated tokens (expected {MIN_SLUG_TOKENS}-{MAX_SLUG_TOKENS}): '{candidate}'"
+        )
+    } else {
+        format!(
+            "slug is not {MIN_SLUG_TOKENS}-{MAX_SLUG_TOKENS} lowercase words joined by \
+             hyphens within {MAX_NAME_CHARS} characters: '{candidate}'"
+        )
+    }
+}
+
+/// Turn one naming-backend response into a node slug, or an error the caller
+/// charges against the node's rename budget.
+///
+/// Prefers the first hyphenated line, then normalises space-separated words to
+/// hyphens, then clamps through [`fit_slug`]. A candidate that survives neither
+/// the raw nor the hyphen-run fallback was not a slug at all — that is the one
+/// case worth spending another backend attempt on.
 pub(super) fn slug_with_retry(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim().trim_matches('"').trim_matches('`');
     if trimmed.split_whitespace().nth(5).is_some() && is_conversational_response(trimmed) {
@@ -266,9 +343,8 @@ pub(super) fn slug_with_retry(raw: &str) -> Result<String, String> {
         candidate
     };
 
-    let token_count = candidate.split('-').count();
-    if (3..=5).contains(&token_count) && SLUG_REGEX.is_match(&candidate) {
-        return Ok(candidate);
+    if let Some(slug) = fit_slug(&candidate) {
+        return Ok(slug);
     }
 
     // Fallback: extract longest run of hyphenated words
@@ -279,16 +355,7 @@ pub(super) fn slug_with_retry(raw: &str) -> Result<String, String> {
         .unwrap_or(&candidate)
         .to_string();
 
-    let fallback_count = fallback.split('-').count();
-    if (3..=5).contains(&fallback_count) && SLUG_REGEX.is_match(&fallback) {
-        return Ok(fallback);
-    }
-
-    Err(format!(
-        "slug has {} dash-separated tokens (expected 3-5): '{}'",
-        fallback_count.max(token_count),
-        candidate
-    ))
+    fit_slug(&fallback).ok_or_else(|| slug_rejection(&candidate))
 }
 
 // ---------------------------------------------------------------------------

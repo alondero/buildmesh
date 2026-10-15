@@ -677,9 +677,54 @@ fn slug_with_retry_rejects_too_short() {
 }
 
 #[test]
-fn slug_with_retry_rejects_too_long() {
-    let err = slug_with_retry("one-two-three-four-five-six").unwrap_err();
-    assert!(err.contains("dash-separated tokens"));
+fn slug_with_retry_truncates_too_long() {
+    assert_eq!(
+        slug_with_retry("one-two-three-four-five-six").unwrap(),
+        "one-two-three-four-five"
+    );
+    // The real report: node 5552 burned all three attempts and toasted
+    // "Couldn't auto-name" over a perfectly usable seven-word slug.
+    assert_eq!(
+        slug_with_retry("fix-rust-dead-code-warnings-raise-pr").unwrap(),
+        "fix-rust-dead-code-warnings"
+    );
+}
+
+#[test]
+fn slug_with_retry_truncates_at_the_character_cap() {
+    // Five words, 66 chars: the word-boundary cut keeps three whole words and
+    // never leaves a trailing hyphen.
+    let slug = slug_with_retry("extraordinarily-complicated-configuration-normalization-refactor")
+        .unwrap();
+    assert_eq!(slug, "extraordinarily-complicated-configuration");
+    assert!(slug.len() <= 50);
+    assert!(!slug.ends_with('-'));
+}
+
+#[test]
+fn slug_with_retry_collapses_empty_tokens_before_clamping() {
+    assert_eq!(
+        slug_with_retry("fix--rust--dead--code--warnings--raise--pr").unwrap(),
+        "fix-rust-dead-code-warnings"
+    );
+}
+
+#[test]
+fn slug_with_retry_still_rejects_prose() {
+    // Clamping is for length only: a response that is not slug-shaped must
+    // still spend an attempt so the backend gets another go.
+    for prose in [
+        "the task: improve auth flow",
+        "the task: improve auth flow and the tests too",
+    ] {
+        let err = slug_with_retry(prose).unwrap_err();
+        assert!(
+            err.contains("lowercase words joined by hyphens"),
+            "expected a shape rejection for: '{prose}', got: {err}"
+        );
+    }
+    let err = slug_with_retry("fix: it").unwrap_err();
+    assert!(err.contains("dash-separated tokens"), "got: {err}");
 }
 
 #[test]
