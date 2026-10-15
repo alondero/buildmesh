@@ -80,6 +80,28 @@ pub fn record_circuit_outcome(
     Ok(())
 }
 
+/// Everything a node card's Overview tab draws for one run, read at once.
+#[command]
+pub fn circuit_run_overview(
+    run_id: i64,
+) -> Result<crate::db::circuit::overview::CircuitRunOverview, String> {
+    crate::db::circuit::overview::overview(run_id)
+}
+
+/// Move a stuck agent wait or classifier step on to the outcome a person
+/// chose, overriding stale work or input evidence, and wake the worker so the
+/// next stage starts promptly.
+#[command]
+pub fn push_circuit_step(
+    app: AppHandle,
+    request: crate::db::circuit::operator_push::CircuitStepPushRequest,
+) -> Result<(), String> {
+    crate::db::circuit::operator_push::push_step(&request)?;
+    crate::services::circuit_worker::wake_circuit_worker();
+    emit_run_updated(Some(&app), request.run_id, "running");
+    Ok(())
+}
+
 /// What the run card shows a person who has to act: the steps awaiting a
 /// decision, how a failed run can be recovered, and the revision to act against.
 /// Cheap by design: unlike the history it carries no log.

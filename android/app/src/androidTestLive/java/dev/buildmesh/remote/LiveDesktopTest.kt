@@ -101,7 +101,7 @@ class LiveDesktopTest {
             withTimeout(15000) { model.state.first { !it.paired && it.error.contains("no longer authorized") } }
             assertNull(store.read())
             val failure = runCatching { api.restore() }.exceptionOrNull()
-            assertTrue(failure is ApiException && failure.unauthorized)
+            assertTrue(failure is ApiException && failure.sessionRejected)
         } finally {
             withContext(Dispatchers.Main) { terminal?.stop(); vm?.forget() }
             scope.cancel()

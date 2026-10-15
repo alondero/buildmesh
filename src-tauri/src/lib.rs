@@ -29,6 +29,9 @@ mod startup;
 mod windowing;
 pub mod worktree_blockers;
 
+#[cfg(test)]
+mod artifact_owner;
+
 use tauri::Manager;
 
 /// Handle the private external-crash-watchdog CLI before Tauri initialises.
@@ -435,6 +438,8 @@ pub fn run() {
             commands::circuit::list_circuit_runs,
             commands::circuit::circuit_run_history,
             commands::circuit::record_circuit_outcome,
+            commands::circuit::push_circuit_step,
+            commands::circuit::circuit_run_overview,
             commands::circuit::circuit_run_attention,
             commands::circuit::count_circuit_run_attention,
             commands::circuit::dismiss_all_circuit_run_attention,

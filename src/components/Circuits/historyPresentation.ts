@@ -31,6 +31,7 @@ const KIND_TITLES: Record<string, string> = {
   effect_reconciled: 'Action reconciled by read-only check',
   effect_target: 'Action target recorded',
   operator_attestation: 'Operator-recorded outcome (attestation)',
+  operator_override: 'Moved on by an operator',
   operator_retry: 'Step retried by an operator',
   checkpoint_reason: 'Checkpoint explanation',
   observation: 'Observed evidence',

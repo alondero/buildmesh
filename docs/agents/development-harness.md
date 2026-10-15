@@ -319,6 +319,19 @@ own tests multi-threaded, which is safe because every DB-backed test installs
 a private database for its own thread (issue #2048). The concurrency suites
 assert a mechanism instead of a wall-clock budget (#2049). Verification
 reruns failing tests alone as described below.
+
+The shard runner copies each test executable out of the Cargo target before
+running it. `src-tauri/build.rs` stamps the Buildmesh library binary with a
+hash of the manifest directory, and the runner refuses a binary that does not
+carry this worktree's stamp. A shared target, including a junctioned
+`src-tauri/target`, can report another worktree's executable as fresh: Cargo's
+metadata hash for a path package omits that path (issue #2339). The runner
+then removes this repository's packages from the target (`cargo clean -p`,
+including path dependencies such as `buildmesh_macros`) and compiles them
+again. Registry dependency artifacts stay. `scripts/check.ps1` uses this
+runner. A direct `cargo test` against the shared target can still execute the
+other worktree's binary. Doctests stay on `cargo test --doc`, which holds the
+target lock for that whole invocation.
 Rust tests compile the desktop target as well as executing tests; this is a
 compile smoke, not a packaged Tauri or real-window smoke. Playwright smoke uses
 mock IPC. Visible UI or backend acceptance still requires the relevant real

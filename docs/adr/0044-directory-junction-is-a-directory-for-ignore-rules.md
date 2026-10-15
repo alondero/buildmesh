@@ -76,6 +76,14 @@ clean worktree dirty. The submodule contract is unchanged: `is_dirty` still
 ignores `submodule.<path>.ignore` and still reports submodule dirt, because that
 is what the data-safety consumers depend on.
 
+The same junction shares Cargo's artifact directory. Registry dependency
+artifacts are safe to reuse. Test binaries are not: Cargo's metadata hash for a
+path package omits the manifest directory, so another worktree's executable can
+look fresh and its export tests write that worktree's wire types into this tree
+(issue #2339). `scripts/rust-test-shards.mjs` copies those binaries aside and
+rebuilds this repository's packages when the Buildmesh library binary lacks
+this worktree's stamp. A direct `cargo test` against the junction does not.
+
 Verification evidence: `git::primitives::tests::junction_tests` (an ignored
 junction is clean, an *un*ignored junction stays dirty, a modified tracked file
 stays dirty), `circuit::verification::tests::observe_wrapup_git_state_clean_when_target_is_a_junction`,

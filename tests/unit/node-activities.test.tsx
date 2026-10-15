@@ -207,7 +207,7 @@ describe('node activities', () => {
   it('does not repeat grouped agent names in the All sessions menu', async () => {
     useNodeActivityStore.getState().groupNodes(1, 3);
     render(<NodeCard nodeId={3} memberIds={[3, 1, 2]} isActive onActivate={useNodeActivityStore.getState().activateNode} />);
-    await userEvent.click(screen.getByRole('button', { name: 'All sessions (3)' }));
+    await userEvent.click(screen.getByRole('button', { name: 'All sessions (4)' }));
     const item = screen.getByRole('menuitem', { name: /^Agent 1/ });
     expect(item.textContent).not.toMatch(/Agent 1.*Agent 1/);
     expect(item.textContent).toContain('main');
@@ -330,7 +330,7 @@ describe('node activities', () => {
     render(card());
     fireEvent.click(screen.getByText('Show attention'));
     expect(screen.getByLabelText('Agent 2')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'All sessions (2)' }));
+    fireEvent.click(screen.getByRole('button', { name: 'All sessions (3)' }));
     expect(screen.getByRole('menuitem', { name: /Security reviewer.*awaiting input/ })).toBeTruthy();
     fireEvent.click(screen.getByRole('menuitem', { name: /^Implementation/ }));
     expect(screen.getByLabelText('Agent 1')).toBeTruthy();
@@ -338,7 +338,7 @@ describe('node activities', () => {
 
   it('focuses the terminal when a session is chosen from All sessions with the pointer', async () => {
     render(card());
-    await userEvent.click(screen.getByRole('button', { name: 'All sessions (2)' }));
+    await userEvent.click(screen.getByRole('button', { name: 'All sessions (3)' }));
     await userEvent.click(screen.getByRole('menuitem', { name: /Review.*Reviewer/ }));
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     expect(focusAgentTerminal).toHaveBeenCalled();
@@ -351,14 +351,16 @@ describe('node activities', () => {
     // row 0 and highlight the wrong row).
     render(card());
     fireEvent.click(screen.getByRole('tab', { name: /^Review.*Reviewer/ }));
-    await userEvent.click(screen.getByRole('button', { name: 'All sessions (2)' }));
+    await userEvent.click(screen.getByRole('button', { name: 'All sessions (3)' }));
     const items = screen.getAllByRole('menuitem');
-    // Caret (focus + highlight) sits on the Review row (index 1).
-    expect(document.activeElement).toBe(items[1]);
-    expect(items[1].className.split(/\s+/)).toContain('bg-bg-selection');
+    // The circuit card's Overview leads the list; the caret (focus +
+    // highlight) sits on the Review row (index 2), never row 0.
+    expect(items[0].textContent).toContain('Overview');
+    expect(document.activeElement).toBe(items[2]);
+    expect(items[2].className.split(/\s+/)).toContain('bg-bg-selection');
     expect(items[0].className.split(/\s+/)).not.toContain('bg-bg-selection');
     // The committed selection marker agrees with the caret.
-    expect(items[1].getAttribute('aria-current')).toBe('true');
+    expect(items[2].getAttribute('aria-current')).toBe('true');
     expect(items[0].getAttribute('aria-current')).toBeNull();
   });
 
@@ -367,14 +369,14 @@ describe('node activities', () => {
     // (focus + index move together); a second row must never light up.
     render(card());
     fireEvent.click(screen.getByRole('tab', { name: /^Review.*Reviewer/ }));
-    await userEvent.click(screen.getByRole('button', { name: 'All sessions (2)' }));
+    await userEvent.click(screen.getByRole('button', { name: 'All sessions (3)' }));
     const items = screen.getAllByRole('menuitem');
     // Opened on the Review row; hover the Implementation row.
+    expect(items[2].className.split(/\s+/)).toContain('bg-bg-selection');
+    fireEvent.mouseEnter(items[1]);
+    expect(document.activeElement).toBe(items[1]);
     expect(items[1].className.split(/\s+/)).toContain('bg-bg-selection');
-    fireEvent.mouseEnter(items[0]);
-    expect(document.activeElement).toBe(items[0]);
-    expect(items[0].className.split(/\s+/)).toContain('bg-bg-selection');
-    expect(items[1].className.split(/\s+/)).not.toContain('bg-bg-selection');
+    expect(items[2].className.split(/\s+/)).not.toContain('bg-bg-selection');
     // No CSS hover paint on any row — hover moves the caret instead.
     for (const item of items) {
       expect(item.className.split(/\s+/)).not.toContain('hover:bg-bg-card-hover');
@@ -383,7 +385,7 @@ describe('node activities', () => {
 
   it('keeps tab focus for keyboard activation from All sessions', async () => {
     render(card());
-    await userEvent.click(screen.getByRole('button', { name: 'All sessions (2)' }));
+    await userEvent.click(screen.getByRole('button', { name: 'All sessions (3)' }));
     const reviewer = screen.getByRole('menuitem', { name: /Review.*Reviewer/ });
     reviewer.focus();
     act(() => {
@@ -396,6 +398,8 @@ describe('node activities', () => {
   });
 
   it('does not allocate tabs for a standalone agent without a utility', () => {
+    // No Circuit Run either: a circuit card always carries its Overview tab.
+    useAgentNodeStore.setState({ circuitOwnerships: {} });
     render(<NodeCard nodeId={1} isActive onActivate={() => {}} />);
     expect(screen.queryByRole('tablist')).toBeNull();
     expect(screen.getByLabelText('Agent 1')).toBeTruthy();
@@ -403,7 +407,7 @@ describe('node activities', () => {
 
   it('toggles the session list closed with a second pointer click', async () => {
     render(card());
-    const trigger = screen.getByRole('button', { name: 'All sessions (2)' });
+    const trigger = screen.getByRole('button', { name: 'All sessions (3)' });
     await userEvent.click(trigger);
     expect(screen.getByRole('menu', { name: 'All sessions' })).toBeTruthy();
     await userEvent.click(trigger);

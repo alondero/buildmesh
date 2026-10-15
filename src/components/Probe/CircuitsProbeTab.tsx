@@ -100,7 +100,7 @@ import { useProbeContext } from '../../hooks/useProbeContext';
 import { useUIStore } from '../../stores/uiStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
-import { focusAgentNode } from '../../lib/focusAgentNode';
+import { focusAgentNode, reopenAndAdoptAgentNode } from '../../lib/focusAgentNode';
 import { EmptyState } from '../shared/Spinner';
 import { CircuitRunCard } from './CircuitRunCard';
 
@@ -535,12 +535,7 @@ export function CircuitsProbeTab() {
     setOpeningAgentId(nodeId);
     const meshId = activeMeshIdRef.current;
     try {
-      const { reopenAgentNode } = await import('../../lib/tauri/history');
-      const node = await reopenAgentNode(nodeId);
-      useAgentNodeStore.getState().adoptAgentNode(node);
-      if (useAgentNodeStore.getState().nodesById[nodeId]?.status === 'archived') {
-        useAgentNodeStore.getState().patchAgentNode(nodeId, { status: node.status });
-      }
+      await reopenAndAdoptAgentNode(nodeId);
       if (mountedRef.current && activeMeshIdRef.current === meshId && !focusAgentNode(nodeId)) {
         setFocusNotice(`Agent node #${nodeId} is no longer available.`);
       }

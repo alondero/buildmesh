@@ -439,6 +439,9 @@ pub struct CircuitRunAttention {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub recovery: Option<super::step_recovery::RunRecovery>,
+    /// Running or unverified steps a person can move on by hand, overriding
+    /// stale evidence. See [`super::operator_push`].
+    pub pushes: Vec<super::operator_push::CircuitStepPush>,
 }
 
 pub fn attention(run_id: i64) -> Result<CircuitRunAttention, String> {
@@ -457,8 +460,10 @@ pub(crate) fn attention_inner(db: &Connection, run_id: i64) -> Result<CircuitRun
     let steps =
         super::ledger::list_circuit_run_steps_inner(db, run_id).map_err(|e| e.to_string())?;
     let mut checkpoints = Vec::new();
+    let mut pushes = Vec::new();
     if run.state == "running" {
         let view = recovery_view(db, &run)?;
+        pushes = super::operator_push::pushes(&view);
         for step in steps.iter().filter(|step| step.status == "unverified") {
             checkpoints.push(CircuitCheckpoint {
                 node_id: step.node_id.clone(),
@@ -471,10 +476,11 @@ pub(crate) fn attention_inner(db: &Connection, run_id: i64) -> Result<CircuitRun
         revision: revision_inner(db, run_id).map_err(|e| e.to_string())?,
         checkpoints,
         recovery: super::step_recovery::build_recovery(db, &run, &graph, &steps)?,
+        pushes,
     })
 }
 
-fn history_inner(db: &Connection, run_id: i64) -> SqlResult<Vec<CircuitHistoryEntry>> {
+pub(super) fn history_inner(db: &Connection, run_id: i64) -> SqlResult<Vec<CircuitHistoryEntry>> {
     let mut stmt = db.prepare("SELECT id,node_id,attempt,kind,detail,source,disposition,observed_at FROM circuit_run_history WHERE run_id=?1 ORDER BY id")?;
     let rows = stmt
         .query_map([run_id], |r| {
@@ -898,7 +904,10 @@ pub fn record_outcome(request: &CheckpointRequest) -> Result<(), String> {
     record_outcome_locked(&mut db, request)
 }
 
-fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Result<(), String> {
+pub(super) fn record_outcome_locked(
+    db: &mut Connection,
+    request: &CheckpointRequest,
+) -> Result<(), String> {
     // For an acknowledgement the note annotates the history entry when given;
     // every branch below therefore renders a sensible sentence without one. A
     // review verdict is different: it is a person's judgement about someone
@@ -1666,7 +1675,7 @@ pub(super) fn append_history(
     Ok(())
 }
 
-fn revision_inner(db: &Connection, run_id: i64) -> SqlResult<i64> {
+pub(super) fn revision_inner(db: &Connection, run_id: i64) -> SqlResult<i64> {
     db.query_row(
         "SELECT COALESCE(MAX(id),0) FROM circuit_run_history WHERE run_id=?1",
         [run_id],
