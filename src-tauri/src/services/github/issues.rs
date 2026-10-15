@@ -18,14 +18,15 @@ pub struct Issue {
     /// Issue body (`body` in the GitHub API). GitHub returns `null` for
     /// issues created without a description (e.g. alondero/buildmesh #1210
     /// has `body: null`). `#[serde(default)]` only rescues a *missing* key,
-    /// so the field also layers `deserialize_with = "deserialize_opt_string"`
-    /// to collapse the `null` value to `""`. Without this, a single
+    /// so the field also layers
+    /// `deserialize_with = "super::deserialize_opt_string"` to collapse the
+    /// `null` value to `""`. Without this, a single
     /// bodyless issue poisons the entire `SearchResult { items }` response
     /// and `get_repo_issues` rejects with
     /// `HTTP error: error decoding response body`. Pinned by
     /// `issue_deserialises_with_null_body_defaults_to_empty` and the
     /// end-to-end `issue_search_result_with_mixed_null_body_items_parses_end_to_end`.
-    #[serde(default, deserialize_with = "deserialize_opt_string")]
+    #[serde(default, deserialize_with = "super::deserialize_opt_string")]
     pub body: String,
     /// Absolute GitHub URL for the issue (`html_url` in the API response).
     /// The mobile "View ↗" link opens this directly; the desktop modal
@@ -57,20 +58,6 @@ pub struct Issue {
     /// `author` for serialisation.
     #[serde(default, alias = "user", deserialize_with = "deserialize_user_login")]
     pub author: String,
-}
-
-/// Tolerates both an *absent* key (rescued by `#[serde(default)]` on the
-/// field) and a present-but-`null` value. The latter is the gotcha: serde
-/// does NOT invoke `Default` when the key is present with a JSON `null`,
-/// so a per-field `deserialize_with` is required for any field that may
-/// arrive as `null`. `body` is the only such field today — GitHub emits
-/// `body: null` on issues opened without a description (issue #1210 in
-/// alondero/buildmesh).
-fn deserialize_opt_string<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 /// Private GitHub wire shape for the `user` object on an issue/PR. We only need

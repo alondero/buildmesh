@@ -32,6 +32,18 @@ node's real branch. Omitting `base_branch` lets the mesh decide it.
 A node whose worktree branch equals the resolved base is rejected as "nothing to compare"
 before GitHub is ever called.
 
+### The description is optional, and GitHub answers `null`
+
+Submitting the sheet with an empty description is allowed. GitHub's REST `/pulls` type
+`body` as `string | null`, so a PR created without one comes back as `"body": null` — both
+from the create acknowledgement and from the duplicate-recovery read that #771 performs. A
+missing or null description must therefore read as an empty description everywhere:
+`PullRequest`'s deserialiser accepts both, matching the summaries query, which already
+degrades a null body to `""`. Anything else turns a PR GitHub *did* create into
+`HTTP error: error decoding response body`, which reads the same as a genuinely failed
+create: the sheet keeps its error state, and the retry that follows has no acknowledged URL
+to show.
+
 ### PR-source failures are typed, not string-matched
 
 `resolve_pr_source_for_node` returns `PrSourceError`, and each variant maps to exactly one
