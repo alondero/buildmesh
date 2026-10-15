@@ -425,6 +425,17 @@ agent. Right-click the card for Properties, File Explorer, Force sync from
 upstream, Archive, GitHub Issues, and — for a mesh with a GitHub origin — View
 on GitHub.
 
+Forcing a sync always reports back, one way or another. A toast says what
+happened: how many commits were pulled, that the mesh was already up to date,
+or that this mesh has no remote configured. When the sync could not finish —
+the fetch failed, the fast-forward was refused because your local changes
+would be overwritten, your branch has diverged, or the pull timed out — a card
+also appears in **Needs attention** in the Notifications probe (the bell in the
+title bar), naming the mesh, the reason, and its path. That card stays until a
+later sync succeeds, and its **Retry sync** button re-runs the sync for you. A
+mesh whose sync fails keeps its `↓N` badge lit, so the marker you were looking
+at and the reason it stayed are explained together.
+
 Meshes that currently have at least one open agent node sit at the top of
 the sidebar under an **Active** label, in your own drag order; every other
 mesh follows below, dimmed, in the same manual order. Nothing is hidden — all

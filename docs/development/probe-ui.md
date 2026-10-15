@@ -98,6 +98,20 @@ failure or resurrect a manual resolution. A read failure preserves last known
 problems and shows a retryable alert outside the scroller. Queue absence means
 only that cleanup is no longer pending, without claiming how it ended.
 
+Needs attention holds two kinds of unresolved problem, each with its own card
+and its own recovery, because the two problems are unrelated and are ended in
+different ways. A **blocked worktree cleanup** is the queue-backed kind: only the
+reconciliation may close it, so that inference is confined to
+`worktree-cleanup` actions and never touches another kind. A **mesh sync that did
+not complete** is the transient kind: `lib/meshSyncFeedback` classifies
+`GitSyncResult.status` into a toast severity, and `Partial` / `Failed` (never
+`Skipped` — a mesh with no remote is a valid local-only setup) raise an item
+whose Retry button re-runs the sync through the same path the sidebar uses. A
+sync that later succeeds resolves that item; its resolution deliberately does not
+bump the worktree revision, because it is not newer evidence about the queue.
+Both kinds deduplicate by action kind *and* path, since a mesh's root checkout
+can itself be a blocked worktree path.
+
 The destination uses the standard Probe shell, tool rail and 240–720px resize
 bounds. Its toolbar and footer stay pinned around one inner scroller; diagnostic
 text and action rows wrap at the minimum width. The recovery modal is loaded

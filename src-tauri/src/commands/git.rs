@@ -350,6 +350,38 @@ pub(crate) fn get_default_branch_blocking(path: String) -> Result<String, String
     Ok(default_branch_from_repo(&repo))
 }
 
+/// How a manual `git_sync` ended, as the *user* experiences it. This is the
+/// one field the frontend needs and cannot infer from the flags: a failed
+/// fetch and a Mesh with no remote both report `fetched: false` with zero new
+/// commits, and only the wording of `message` distinguishes them — so a UI
+/// that classified outcomes from the flags had to either shout "error" at a
+/// purely local Mesh or stay silent about a real network failure.
+///
+/// `Partial` is the outcome that motivated this field: the fetch succeeded
+/// but the working-tree fast-forward did not apply (dirty overlap, diverged
+/// history, or a pull timeout). The mesh is *not* up to date, so the behind
+/// marker stays — the user needs to be told why rather than left staring at
+/// an unchanged count. `Partial` and `Failed` are the two statuses that leave
+/// the mesh behind; which of them earns a "Needs attention" notification is
+/// decided once on the frontend, in `src/lib/meshSyncFeedback.ts`.
+///
+/// Generated to src/types/generated/GitSyncStatus.ts (issue #404).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "GitSyncStatus.ts")]
+pub enum GitSyncStatus {
+    /// Fast-forward applied; the local branch moved onto upstream.
+    Synced,
+    /// The fetch ran and there was nothing new to pull.
+    UpToDate,
+    /// No remote configured — a purely local Mesh. Not a failure.
+    Skipped,
+    /// Commits were fetched but the fast-forward did not apply.
+    Partial,
+    /// The fetch failed, or the path is not a usable repository.
+    Failed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "GitSyncResult.ts")]
 /// Generated to src/types/generated/GitSyncResult.ts (issue #404). `u32`
@@ -360,11 +392,21 @@ pub struct GitSyncResult {
     #[ts(as = "i32")]
     pub new_commits: u32,
     pub message: String,
+    /// The user-facing outcome. `fetched` / `pulled` describe *which steps
+    /// ran*; this describes whether the mesh ended up in sync, which is what
+    /// the toast and the Needs-attention notification key off.
+    pub status: GitSyncStatus,
 }
 
 /// Fetch from the current branch's configured upstream remote and
 /// attempt a fast-forward pull. Returns a structured result with
 /// feedback about what happened.
+///
+/// `GitSyncResult.status` is the field a UI classifies on: it separates
+/// "the mesh is now in sync", "there was nothing to pull", "this Mesh has no
+/// remote" and "the sync did not complete" — the last of which covers both a
+/// failed fetch and a fetched-but-not-fast-forwarded run. The `fetched` /
+/// `pulled` flags still describe which steps ran.
 ///
 /// This is now a thin wrapper over the shared `do_sync` helper
 /// (issue #274). The wrapper's job is purely the `git_sync`-specific
@@ -474,9 +516,18 @@ fn git_sync_blocking(path: String) -> Result<GitSyncResult, String> {
 
 /// Map a [`crate::git::sync::SyncOutcome`] to the [`GitSyncResult`]
 /// shape the frontend expects from the `git_sync` Tauri command. The
-/// four wire fields are unchanged; the messages match the prior
-/// `format!` strings where the variant maps cleanly.
-fn sync_outcome_to_git_sync_result(outcome: crate::git::sync::SyncOutcome) -> GitSyncResult {
+/// four original wire fields are unchanged; the messages match the prior
+/// `format!` strings where the variant maps cleanly. `status` is set
+/// from the variant so the UI never has to re-derive the outcome from
+/// the flags and the message text.
+///
+/// `pub(crate)` rather than private so `commands::git_tests` can pin the
+/// mapping table directly: `status` is the contract the frontend's toast and
+/// "Needs attention" severity key off, and a variant quietly mapped to the
+/// wrong arm would be invisible from the command's happy-path tests.
+pub(crate) fn sync_outcome_to_git_sync_result(
+    outcome: crate::git::sync::SyncOutcome,
+) -> GitSyncResult {
     use crate::git::sync::SyncOutcome;
     match outcome {
         SyncOutcome::FetchedButDirty {
@@ -504,6 +555,7 @@ fn sync_outcome_to_git_sync_result(outcome: crate::git::sync::SyncOutcome) -> Gi
                     plural_s(new_commits),
                     overwritten
                 ),
+                status: GitSyncStatus::Partial,
             }
         }
         SyncOutcome::SkippedNoRemote => GitSyncResult {
@@ -511,18 +563,21 @@ fn sync_outcome_to_git_sync_result(outcome: crate::git::sync::SyncOutcome) -> Gi
             pulled: false,
             new_commits: 0,
             message: "No remote configured".to_string(),
+            status: GitSyncStatus::Skipped,
         },
         SyncOutcome::UpToDate => GitSyncResult {
             fetched: true,
             pulled: false,
             new_commits: 0,
             message: "Already up to date".to_string(),
+            status: GitSyncStatus::UpToDate,
         },
         SyncOutcome::Synced { new_commits } => GitSyncResult {
             fetched: true,
             pulled: true,
             new_commits,
             message: format!("Pulled {} new commit{}", new_commits, plural_s(new_commits)),
+            status: GitSyncStatus::Synced,
         },
         SyncOutcome::FetchedButDiverged {
             new_commits,
@@ -537,6 +592,7 @@ fn sync_outcome_to_git_sync_result(outcome: crate::git::sync::SyncOutcome) -> Gi
                 plural_s(new_commits),
                 reason
             ),
+            status: GitSyncStatus::Partial,
         },
         SyncOutcome::PullTimedOut {
             new_commits,
@@ -556,18 +612,21 @@ fn sync_outcome_to_git_sync_result(outcome: crate::git::sync::SyncOutcome) -> Gi
                 plural_s(new_commits),
                 reason
             ),
+            status: GitSyncStatus::Partial,
         },
         SyncOutcome::FetchFailed { reason } => GitSyncResult {
             fetched: false,
             pulled: false,
             new_commits: 0,
             message: format!("Fetch failed: {}", reason),
+            status: GitSyncStatus::Failed,
         },
         SyncOutcome::RepoUnusable { reason } => GitSyncResult {
             fetched: false,
             pulled: false,
             new_commits: 0,
             message: format!("Repository unusable: {}", reason),
+            status: GitSyncStatus::Failed,
         },
     }
 }

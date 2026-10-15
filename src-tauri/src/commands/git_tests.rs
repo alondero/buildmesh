@@ -666,6 +666,84 @@ mod tests {
         );
     }
 
+    /// Every `SyncOutcome` variant maps to the `GitSyncStatus` the frontend
+    /// classifies on. The bug this pins is silent: a variant mapped to the
+    /// wrong status would still produce a well-formed result, and the
+    /// happy-path `git_sync` tests above only ever see `UpToDate` / `Synced`.
+    ///
+    /// `Partial` covers every "fetched but the working tree did not move"
+    /// case, which is the one the user cannot otherwise diagnose: the behind
+    /// marker stays put and nothing else changes on screen. Which statuses
+    /// count as unresolved is pinned by its own test below.
+    #[test]
+    fn sync_outcome_maps_to_the_status_the_ui_classifies_on() {
+        use crate::commands::git::{sync_outcome_to_git_sync_result, GitSyncStatus};
+        use crate::git::sync::SyncOutcome;
+
+        let cases = vec![
+            (
+                SyncOutcome::Synced { new_commits: 3 },
+                GitSyncStatus::Synced,
+            ),
+            (SyncOutcome::UpToDate, GitSyncStatus::UpToDate),
+            // A Mesh with no remote is a valid local-only setup, not a
+            // problem to nag about — the frontend's classifier treats it as
+            // resolved, and `mesh-sync-feedback.test.ts` pins that.
+            (SyncOutcome::SkippedNoRemote, GitSyncStatus::Skipped),
+            (
+                SyncOutcome::FetchedButDirty {
+                    new_commits: 2,
+                    blocking_paths: vec!["src/App.tsx".to_string()],
+                },
+                GitSyncStatus::Partial,
+            ),
+            (
+                SyncOutcome::FetchedButDirty {
+                    new_commits: 1,
+                    blocking_paths: Vec::new(),
+                },
+                GitSyncStatus::Partial,
+            ),
+            (
+                SyncOutcome::FetchedButDiverged {
+                    new_commits: 4,
+                    reason: "not possible to fast-forward".to_string(),
+                },
+                GitSyncStatus::Partial,
+            ),
+            (
+                SyncOutcome::PullTimedOut {
+                    new_commits: 1,
+                    reason: "timed out".to_string(),
+                },
+                GitSyncStatus::Partial,
+            ),
+            (
+                SyncOutcome::FetchFailed {
+                    reason: "network down".to_string(),
+                },
+                GitSyncStatus::Failed,
+            ),
+            (
+                SyncOutcome::RepoUnusable {
+                    reason: "not a repository".to_string(),
+                },
+                GitSyncStatus::Failed,
+            ),
+        ];
+
+        for (outcome, expected) in cases {
+            let label = format!("{:?}", outcome);
+            let result = sync_outcome_to_git_sync_result(outcome);
+            assert_eq!(result.status, expected, "status for {}", label);
+            assert!(
+                !result.message.is_empty(),
+                "every sync outcome needs user-facing text ({})",
+                label
+            );
+        }
+    }
+
     #[test]
     fn test_count_status_worktree_isolation() {
         let _repo = TempGitRepo::new();

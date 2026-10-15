@@ -5,8 +5,8 @@ import {
   type Toast, type ToastSeverity,
 } from '../lib/toastUtils';
 import {
-  limitNotifications, needsAttention, restoreNotifications,
-  type Notification, type WorktreeNotificationAction, type WorktreeNotice,
+  isMeshSyncFailure, isWorktreeCleanup, limitNotifications, needsAttention, restoreNotifications,
+  type Notification, type NotificationAction, type WorktreeNotice,
 } from '../lib/notifications';
 
 interface ToastState {
@@ -15,13 +15,14 @@ interface ToastState {
   cleanupLoading: boolean;
   cleanupError: string | null;
   worktreeRevision: number;
-  addToast: (provider: string, message: string, severity?: ToastSeverity, action?: WorktreeNotificationAction) => void;
+  addToast: (provider: string, message: string, severity?: ToastSeverity, action?: NotificationAction) => void;
   dismissToast: (id: number) => void;
   dismissExpired: (now: number) => void;
   markNotificationRead: (id: number) => void;
   markAllNotificationsRead: () => void;
   clearReadNotifications: () => void;
   resolveWorktreeNotification: (path: string, resolution: string) => void;
+  resolveMeshSyncNotification: (path: string, resolution: string) => void;
   reconcileWorktrees: (entries: WorktreeNotice[], expectedRevision: number) => void;
 }
 
@@ -46,15 +47,22 @@ export const useToastStore = create<ToastState>()(persist((set) => ({
       const incoming = { id: ++nextToastId, provider, message, createdAt: now, severity };
       const merged = dedupToasts(state.toasts, incoming, now, TOAST_DEDUP_TTL_MS);
       const toast = merged.find(t => t.createdAt === now && createToastKey(t) === createToastKey(incoming))!;
+      // An unresolved problem is deduplicated by *kind + path*, not path
+      // alone: two different kinds can legitimately name the same directory
+      // (a mesh whose root checkout is itself the blocked worktree), and
+      // collapsing them would drop one problem's record into another's.
       const previous = action
-        ? state.notifications.find(n => needsAttention(n) && n.action?.path === action.path)
+        ? state.notifications.find(n => needsAttention(n) && n.action?.kind === action.kind && n.action.path === action.path)
         : state.notifications.find(n => !n.action && n.id === toast.id);
       const id = previous?.id ?? (state.notifications.some(n => n.id === toast.id) ? ++nextToastId : toast.id);
       const notice: Notification = { ...toast, id, message, read: false, action };
       return {
         toasts: applyToastCap(merged, TOAST_MAX),
         notifications: limitNotifications([notice, ...state.notifications.filter(n => n.id !== id)]),
-        worktreeRevision: state.worktreeRevision + (action ? 1 : 0),
+        // Only a worktree-cleanup action changes what the reconciliation can
+        // legitimately decide. Bumping on a sync failure would instead fence
+        // out an in-flight queue read for no reason.
+        worktreeRevision: state.worktreeRevision + (isWorktreeCleanup(action) ? 1 : 0),
       };
     });
   },
@@ -65,17 +73,41 @@ export const useToastStore = create<ToastState>()(persist((set) => ({
   clearReadNotifications: () => set(state => ({ notifications: state.notifications.filter(n => !n.read || needsAttention(n)) })),
   resolveWorktreeNotification: (path, resolution) => set(state => ({
     worktreeRevision: state.worktreeRevision + 1,
-    notifications: limitNotifications(state.notifications.map(n => needsAttention(n) && n.action?.path === path
+    // `needsAttention` matters: a path can be blocked again after an earlier
+    // attempt was resolved. Without it this setter would also rewrite that
+    // older record's resolution text, overwriting what actually happened then.
+    notifications: limitNotifications(state.notifications.map(n => isWorktreeCleanup(n.action) && needsAttention(n)
+      && n.action.path === path
+      ? { ...n, action: { ...n.action, resolution } } : n)),
+  })),
+  /** Close a mesh-sync failure. Deliberately does NOT bump
+   *  `worktreeRevision`: that counter fences an in-flight cleanup-queue read,
+   *  and a sync saying nothing about worktrees is not newer evidence about
+   *  them — bumping here would make a concurrent poll discard a perfectly
+   *  good reconciliation. */
+  resolveMeshSyncNotification: (path, resolution) => set(state => ({
+    notifications: limitNotifications(state.notifications.map(n => isMeshSyncFailure(n.action) && needsAttention(n)
+      && n.action.path === path
       ? { ...n, action: { ...n.action, resolution } } : n)),
   })),
   reconcileWorktrees: (entries, expectedRevision) => set(state => {
     // A failure event or manual recovery after this read began owns the newer state.
     if (state.worktreeRevision !== expectedRevision) return state;
-    let notifications = state.notifications.map(n => needsAttention(n) && !entries.some(e => e.path === n.action?.path)
-      ? { ...n, action: { ...n.action!, resolution: 'No longer awaiting cleanup.' } } : n);
+    // Only cleanup notices may be closed by queue absence. A mesh sync failure
+    // is not in this queue and is not ended by a row leaving it, so a poll
+    // must never invent a resolution for one.
+    let notifications = state.notifications.map(n => {
+      // Bound to a local so the narrowing survives into the `some` closure —
+      // `n.action` is re-read there, and TS does not carry a property
+      // narrowing across a function boundary.
+      const existing = n.action;
+      return isWorktreeCleanup(existing) && needsAttention(n)
+        && !entries.some(e => e.path === existing.path)
+        ? { ...n, action: { ...existing, resolution: 'No longer awaiting cleanup.' } } : n;
+    });
     for (const entry of entries) {
-      const previous = notifications.find(n => needsAttention(n) && n.action?.path === entry.path);
-      const action: WorktreeNotificationAction = { kind: 'worktree-cleanup', path: entry.path, nodeName: entry.nodeName, detail: entry.detail };
+      const previous = notifications.find(n => isWorktreeCleanup(n.action) && needsAttention(n) && n.action.path === entry.path);
+      const action: NotificationAction = { kind: 'worktree-cleanup', path: entry.path, nodeName: entry.nodeName, detail: entry.detail };
       const notice: Notification = {
         id: previous?.id ?? ++nextToastId, provider: 'Worktree', severity: 'warning', message: entry.message,
         createdAt: entry.createdAt, action,
@@ -95,7 +127,7 @@ export const useToastStore = create<ToastState>()(persist((set) => ({
   },
 }));
 
-export function addToast(provider: string, message: string, severity?: ToastSeverity, action?: WorktreeNotificationAction): void {
+export function addToast(provider: string, message: string, severity?: ToastSeverity, action?: NotificationAction): void {
   useToastStore.getState().addToast(provider, message, severity, action);
 }
 

@@ -6,8 +6,8 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import type { Mesh } from '../../stores/meshStore';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import { getMeshColor } from '../../lib/meshColors';
-import { gitSync } from '../../lib/tauri';
 import type { MeshHealth } from '../../lib/tauri';
+import { runMeshSync } from '../../lib/meshSyncFeedback';
 import { listen } from '@tauri-apps/api/event';
 import { pathMatchesGitEvent } from '../../lib/paths';
 import type { MeshSyncWarningPayload } from '../../types/generated/MeshSyncWarningPayload';
@@ -298,19 +298,22 @@ function MeshItemView({
   }, [mesh.path]);
 
   // One sync path behind both entry points: the failure badge in the header
-  // and "Force sync from upstream" in the context menu. A success clears the
-  // badge and recomputes the behind count (the pull may have advanced HEAD);
-  // a failure leaves the badge lit, which is the only feedback the card
-  // gives by design.
+  // and "Force sync from upstream" in the context menu. Both now report the
+  // outcome: `git_sync`'s result carries a status, so a toast always says what
+  // happened and a sync that left the mesh behind also raises a "Needs
+  // attention" item. The badge still tracks the spawn-time `mesh-sync-warning`
+  // event and is cleared only by a sync that actually succeeded — a failed
+  // sync leaves it lit, because the mesh is still not in sync.
   const handleSync = async () => {
     if (syncing) return;
     setSyncing(true);
     try {
-      await gitSync(mesh.path);
-      setSyncFailed(false);
-      refreshBranchStatus();
-    } catch (err) {
-      console.error('Sync failed:', err);
+      const { feedback, completed } = await runMeshSync({ name: mesh.name, path: mesh.path });
+      setSyncFailed(feedback.unresolved);
+      // Re-read the behind count on any completed sync, as before: the fetch
+      // half alone advances the remote-tracking ref the count is measured
+      // against, so even a skipped pull can move it.
+      if (completed) refreshBranchStatus();
     } finally {
       setSyncing(false);
     }

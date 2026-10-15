@@ -3,6 +3,11 @@ import { addToast, dismissToast, useToastStore } from '../../src/stores/toastSto
 import { needsAttention, NOTIFICATION_HISTORY_LIMIT, restoreNotifications } from '../../src/lib/notifications';
 import { TOAST_TTL_MS } from '../../src/lib/toastUtils';
 
+// Spelled out rather than imported from `meshSyncFeedback`: these tests are
+// about the store's handling of an action kind, so they should not drag the
+// IPC layer in behind it. The label itself is pinned by mesh-sync-feedback.
+const SYNC = 'Git sync';
+
 const action = { kind: 'worktree-cleanup' as const, path: '/repo/worktrees/blocked', nodeName: 'blocked', detail: 'Folder in use' };
 
 beforeEach(() => {
@@ -77,5 +82,100 @@ describe('notification history', () => {
 
   it('drops malformed persisted entries', () => {
     expect(restoreNotifications([null, { id: 'bad' }, { id: 1, read: true }])).toEqual([]);
+  });
+});
+
+// The worktree queue can close a cleanup notice on its own, and only a cleanup
+// notice. A mesh sync failure is resolved by a later successful sync, so if the
+// 30-second reconciliation were allowed to touch it the user's problem would
+// silently self-heal seconds after being reported.
+describe('mesh sync failures alongside worktree problems', () => {
+  const syncAction = { kind: 'mesh-sync-failure' as const, path: '/repos/mesh-a', meshName: 'mesh-a', detail: 'Fetch failed: network down' };
+
+  beforeEach(() => {
+    useToastStore.setState({ toasts: [], notifications: [], worktreeRevision: 0, cleanupError: null, cleanupLoading: false });
+  });
+
+  it('counts an unresolved sync as needing attention and a resolved one as history', () => {
+    expect(needsAttention({ id: 1, provider: SYNC, message: 'x', createdAt: 1, read: false, action: syncAction })).toBe(true);
+    expect(needsAttention({ id: 1, provider: SYNC, message: 'x', createdAt: 1, read: false, action: { ...syncAction, resolution: 'Synced.' } })).toBe(false);
+  });
+
+  it('keeps a sync failure out of the worktree reconciliation', () => {
+    addToast(SYNC, 'mesh-a: Fetch failed', 'error', syncAction);
+    useToastStore.getState().reconcileWorktrees([], 0);
+    const [notice] = useToastStore.getState().notifications;
+    expect(needsAttention(notice)).toBe(true);
+    expect(notice.action).not.toHaveProperty('resolution');
+  });
+
+  it('keeps resolving a worktree problem from resolving a sync failure on the same path', () => {
+    // A mesh's root checkout can itself be a blocked worktree path, so the two
+    // kinds must never be conflated by path alone.
+    addToast(SYNC, 'mesh-a: Fetch failed', 'error', syncAction);
+    addToast('Worktree', 'Cannot remove', 'warning', { ...action, path: syncAction.path });
+    useToastStore.getState().resolveWorktreeNotification(syncAction.path, 'Removed.');
+    const sync = useToastStore.getState().notifications.filter(n => n.action?.kind === 'mesh-sync-failure');
+    expect(sync).toHaveLength(1);
+    expect(needsAttention(sync[0])).toBe(true);
+  });
+
+  it('does not merge a sync failure into a worktree problem that shares its path', () => {
+    addToast('Worktree', 'Cannot remove', 'warning', { ...action, path: syncAction.path });
+    addToast(SYNC, 'mesh-a: Fetch failed', 'error', syncAction);
+    expect(useToastStore.getState().notifications).toHaveLength(2);
+    expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(2);
+  });
+
+  it('resolves only the sync failure a later successful sync names', () => {
+    addToast(SYNC, 'mesh-a: Fetch failed', 'error', syncAction);
+    addToast(SYNC, 'mesh-b: Fetch failed', 'error', { ...syncAction, path: '/repos/mesh-b', meshName: 'mesh-b' });
+    useToastStore.getState().resolveMeshSyncNotification('/repos/mesh-a', 'Synced successfully.');
+    const attention = useToastStore.getState().notifications.filter(needsAttention);
+    expect(attention).toHaveLength(1);
+    expect(attention[0].action).toMatchObject({ path: '/repos/mesh-b' });
+  });
+
+  it('rehydrates a persisted sync failure as needing attention', () => {
+    const restored = restoreNotifications([{ id: 1, provider: SYNC, message: 'mesh-a: Fetch failed', createdAt: 1, read: false, action: syncAction }]);
+    expect(restored).toHaveLength(1);
+    expect(needsAttention(restored[0])).toBe(true);
+    expect(restored[0].action).toEqual(syncAction);
+  });
+
+  it('drops a persisted sync failure whose fields are incomplete', () => {
+    // Rehydrating a malformed action would render a Needs-attention card with
+    // no mesh name and no retry target.
+    expect(restoreNotifications([
+      { id: 1, provider: SYNC, message: 'x', createdAt: 1, read: false, action: { kind: 'mesh-sync-failure', path: '/repos/mesh-a' } },
+      { id: 2, provider: SYNC, message: 'x', createdAt: 2, read: false, action: { kind: 'something-else', path: '/repos/mesh-a' } },
+    ])).toEqual([]);
+  });
+
+  it('does not rewrite an older resolved cleanup for the same path', () => {
+    // A path can be blocked again after an earlier attempt was resolved, so
+    // two records can share it. Resolving the new one must not overwrite what
+    // actually happened on the earlier one.
+    addToast('Worktree', 'First block', 'warning', action);
+    useToastStore.getState().resolveWorktreeNotification(action.path, 'Removed.');
+    addToast('Worktree', 'Blocked again', 'warning', action);
+    useToastStore.getState().resolveWorktreeNotification(action.path, 'Removed. (again)');
+
+    const cleanup = useToastStore.getState().notifications.filter(n => n.action?.kind === 'worktree-cleanup');
+    expect(cleanup).toHaveLength(2);
+    // Order-independent: the point is that both texts survive, not which one
+    // sorts first.
+    expect(cleanup.map(n => n.action!.resolution)).toEqual(
+      expect.arrayContaining(['Removed.', 'Removed. (again)']));
+  });
+
+  it('protects an unresolved sync failure from the activity cap and Clear read', () => {
+    addToast(SYNC, 'mesh-a: Fetch failed', 'error', syncAction);
+    for (let i = 0; i <= NOTIFICATION_HISTORY_LIMIT; i++) addToast('App', `Message ${i}`, 'info');
+    useToastStore.getState().markAllNotificationsRead();
+    useToastStore.getState().clearReadNotifications();
+    const left = useToastStore.getState().notifications;
+    expect(left).toHaveLength(1);
+    expect(left[0].action?.kind).toBe('mesh-sync-failure');
   });
 });
