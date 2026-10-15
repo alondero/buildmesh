@@ -237,13 +237,12 @@ pub(super) fn is_conversational_response(s: &str) -> bool {
     conversational_prefixes.iter().any(|p| lower.starts_with(p))
 }
 
-/// The slug shape the naming prompt asks for. A candidate with *more* words
-/// is shortened to [`MAX_SLUG_TOKENS`] rather than refused: an over-long slug
-/// is still a good name, and refusing one cost the node its whole rename —
-/// three inference attempts and then the "Couldn't auto-name node …" toast
-/// for a name as usable as `fix-rust-dead-code-warnings-raise-pr`. Fewer than
-/// [`MIN_SLUG_TOKENS`] words carries no information about the task, so that
-/// still spends an attempt to retry the backend.
+/// The slug shape the naming prompt asks for. A hyphen-joined answer with
+/// *more* words is shortened to [`MAX_SLUG_TOKENS`] rather than refused: an
+/// over-long slug is still a good name, and losing it over length costs the
+/// node its rename for a cosmetic reason. Fewer than [`MIN_SLUG_TOKENS`] words
+/// carries no information about the task, so that still spends an attempt to
+/// retry the backend.
 const MIN_SLUG_TOKENS: usize = 3;
 const MAX_SLUG_TOKENS: usize = 5;
 
@@ -251,13 +250,11 @@ fn token_count(slug: &str) -> usize {
     slug.split('-').filter(|w| !w.is_empty()).count()
 }
 
-/// Coerce a model-produced candidate into a usable node name.
+/// Coerce a hyphen-joined model answer into a usable node name.
 ///
 /// Length is clamped, not refused: empty tokens collapse, the tail is dropped
 /// past [`MAX_SLUG_TOKENS`] words, and what remains is cut at
-/// [`MAX_NAME_CHARS`] on a whole-word boundary. Dropping a suffix is a
-/// cosmetic loss; dropping the rename is not — the node would keep its random
-/// `adj-adj-noun` name and the user would get an error toast.
+/// [`MAX_NAME_CHARS`] on a whole-word boundary.
 ///
 /// `None` means the candidate cannot name the task: fewer than
 /// [`MIN_SLUG_TOKENS`] words, characters `SLUG_REGEX` forbids (which is what
@@ -286,6 +283,23 @@ fn fit_slug(candidate: &str) -> Option<String> {
     (token_count(&slug) >= MIN_SLUG_TOKENS && SLUG_REGEX.is_match(&slug)).then_some(slug)
 }
 
+/// [`fit_slug`] for a candidate built by joining the model's own whitespace
+/// words, and deliberately without its truncation.
+///
+/// Such a response is ambiguous in a way a hyphen-joined one is not:
+/// `fix auth token flow` is a name, `please rename it to fix auth flow` is a
+/// sentence, and nothing in the words themselves separates them. Clamping the
+/// second kind mints `please-rename-it-to-fix` — a plausible-looking name that
+/// describes nothing — so a word run past [`MAX_SLUG_TOKENS`] stays
+/// retry-worthy, exactly as it was before length stopped being a refusal
+/// reason for hyphen-joined answers.
+fn fit_spaced_words(candidate: &str) -> Option<String> {
+    if token_count(candidate) > MAX_SLUG_TOKENS {
+        return None;
+    }
+    fit_slug(candidate)
+}
+
 /// Why a candidate was refused, for the error the user sees in the
 /// "Couldn't auto-name" toast. The token count only ever reports a name that
 /// was too thin; anything else failed the shape or the character cap.
@@ -306,10 +320,10 @@ fn slug_rejection(candidate: &str) -> String {
 /// Turn one naming-backend response into a node slug, or an error the caller
 /// charges against the node's rename budget.
 ///
-/// Prefers the first hyphenated line, then normalises space-separated words to
-/// hyphens, then clamps through [`fit_slug`]. A candidate that survives neither
-/// the raw nor the hyphen-run fallback was not a slug at all — that is the one
-/// case worth spending another backend attempt on.
+/// Prefers the first hyphenated line, then fits it — clamped when it was
+/// already hyphen-joined, shape-checked when its words had to be joined here.
+/// A response that is not slug-shaped at all is the one case worth spending
+/// another backend attempt on.
 pub(super) fn slug_with_retry(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim().trim_matches('"').trim_matches('`');
     if trimmed.split_whitespace().nth(5).is_some() && is_conversational_response(trimmed) {
@@ -336,12 +350,14 @@ pub(super) fn slug_with_retry(raw: &str) -> Result<String, String> {
                 .to_lowercase()
         });
 
-    // Normalise space-separated words to hyphens when no hyphens present
-    let candidate = if !candidate.contains('-') {
-        candidate.split_whitespace().collect::<Vec<_>>().join("-")
-    } else {
-        candidate
-    };
+    // No hyphen anywhere in the response: these are the model's own words, and
+    // joining them here cannot tell a name from a sentence. The fallback below
+    // has nothing to extract either — a joined candidate is a single
+    // whitespace token — so this is the whole path.
+    if !candidate.contains('-') {
+        let joined = candidate.split_whitespace().collect::<Vec<_>>().join("-");
+        return fit_spaced_words(&joined).ok_or_else(|| slug_rejection(&joined));
+    }
 
     if let Some(slug) = fit_slug(&candidate) {
         return Ok(slug);

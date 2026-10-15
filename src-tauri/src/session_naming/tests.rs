@@ -682,8 +682,8 @@ fn slug_with_retry_truncates_too_long() {
         slug_with_retry("one-two-three-four-five-six").unwrap(),
         "one-two-three-four-five"
     );
-    // The real report: node 5552 burned all three attempts and toasted
-    // "Couldn't auto-name" over a perfectly usable seven-word slug.
+    // Seven words is past the prompt's own range, but the answer is already
+    // hyphen-joined, so it is a name and only its tail is over-long.
     assert_eq!(
         slug_with_retry("fix-rust-dead-code-warnings-raise-pr").unwrap(),
         "fix-rust-dead-code-warnings"
@@ -725,6 +725,29 @@ fn slug_with_retry_still_rejects_prose() {
     }
     let err = slug_with_retry("fix: it").unwrap_err();
     assert!(err.contains("dash-separated tokens"), "got: {err}");
+}
+
+#[test]
+fn slug_with_retry_refuses_a_sentence_rather_than_truncating_it() {
+    // Clamping the words of a sentence would mint a plausible-looking name
+    // that describes nothing: joining these seven words and taking the first
+    // five yields "please-rename-it-to-fix".
+    for sentence in [
+        "please rename it to fix auth flow",
+        "could you please rename this node now",
+        "i think the best name would be tidy",
+    ] {
+        let err = slug_with_retry(sentence).unwrap_err();
+        assert!(
+            err.contains("lowercase words joined by hyphens"),
+            "expected a refusal for: '{sentence}', got: {err}"
+        );
+    }
+    // A short word-separated answer is still a name.
+    assert_eq!(
+        slug_with_retry("fix auth token flow").unwrap(),
+        "fix-auth-token-flow"
+    );
 }
 
 #[test]
