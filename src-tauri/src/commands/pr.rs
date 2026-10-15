@@ -1293,11 +1293,13 @@ fn resolve_open_pr(info: &RepoInfo, client: &GitHubClient) -> Result<Option<Pull
 
 fn safe_directory_command(host_path: &str, windows: bool) -> String {
     let quoted = if windows {
-        host_path.replace('\\', "/").replace('\'', "''")
+        // PowerShell accepts smart apostrophes as string delimiters too, so the
+        // shared literal is the only escaping that survives such a path.
+        env::powershell_literal(&host_path.replace('\\', "/"))
     } else {
-        host_path.replace('\'', "'\\''")
+        format!("'{}'", host_path.replace('\'', "'\\''"))
     };
-    format!("git config --global --add safe.directory '{quoted}'")
+    format!("git config --global --add safe.directory {quoted}")
 }
 
 fn open_github_repo(path: &str) -> Result<Repository, String> {
@@ -1471,14 +1473,64 @@ mod tests {
 
     #[test]
     fn safe_directory_commands_preserve_shell_paths() {
-        assert_eq!(
-            safe_directory_command(r"C:\alice's repo", true),
-            "git config --global --add safe.directory 'C:/alice''s repo'",
-        );
+        for (apostrophe, quoted) in [
+            ("'", "''"),
+            ("\u{2018}", "\u{2018}\u{2018}"),
+            ("\u{2019}", "\u{2019}\u{2019}"),
+            ("\u{201a}", "\u{201a}\u{201a}"),
+            ("\u{201b}", "\u{201b}\u{201b}"),
+        ] {
+            assert_eq!(
+                safe_directory_command(&format!("C:\\don{apostrophe}t\\repo"), true),
+                format!("git config --global --add safe.directory 'C:/don{quoted}t/repo'"),
+                "apostrophe: {apostrophe:?}",
+            );
+        }
         assert_eq!(
             safe_directory_command(r"/tmp/alice's\repo", false),
             r"git config --global --add safe.directory '/tmp/alice'\''s\repo'",
         );
+    }
+
+    /// PowerShell treats U+2018..U+201B as string delimiters, so a path holding
+    /// one has to reach `git` as a single exact argument (#2286).
+    #[cfg(windows)]
+    #[test]
+    fn safe_directory_commands_hand_git_one_exact_argument() {
+        use crate::process_util::command_no_window;
+
+        let apostrophes = ["'", "\u{2018}", "\u{2019}", "\u{201a}", "\u{201b}"];
+        let paths: Vec<String> = apostrophes
+            .iter()
+            .map(|apostrophe| format!("C:/don{apostrophe}t\\repo"))
+            .collect();
+        // A `git` function in the session takes precedence over `git.exe` and prints
+        // the last argument it receives, so the guidance command's own output
+        // reports the path and the run touches no Git configuration.
+        let script = format!(
+            "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n\
+             function git {{ [Console]::Out.WriteLine($args[-1]) }}\n{}",
+            paths
+                .iter()
+                .map(|path| safe_directory_command(path, true))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let output = command_no_window("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "PowerShell rejected the guidance commands: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let reported: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        let expected: Vec<String> = paths.iter().map(|path| path.replace('\\', "/")).collect();
+        assert_eq!(reported, expected);
     }
 
     #[test]
