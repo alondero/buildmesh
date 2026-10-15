@@ -157,6 +157,38 @@ test('doctest failures remain named and FAIL without an unsupported isolation at
   assert.match(row.reason, /Doctest isolation unavailable/);
 });
 
+test('a clippy warning in a touched file fails the gate for a Windows span path (#2352)', async t => {
+  // Cargo reports `file_name` with the host separator while git reports the
+  // touched path with slashes, so a backslash span missed the touched set and
+  // the gate answered PASS for a warning in a file the branch touched (measured
+  // on PR #2351; the backslash span is fed explicitly, so the case is covered
+  // wherever the suite runs, not only on Windows).
+  const fixture = repo(t);
+  const paths = ['src-tauri/src/services/transcript_reader/readers/claude_code.rs', 'src-tauri/src/lib.rs'];
+  const warning = file => JSON.stringify({ reason: 'compiler-message', message: { level: 'warning', message: 'calls to `.last()` on a `DoubleEndedIterator`', code: { code: 'double_ended_iterator_last' }, spans: [{ file_name: file, is_primary: true }] } });
+  const clippy = (...files) => ({
+    id: 'rust-clippy', warnings: true, minutes: 1,
+    command: ['node', '-e', files.map(file => `console.log(${JSON.stringify(warning(file))})`).join(';')],
+  });
+  // The gate runs with `src-tauri` as its cwd, so its spans are crate-relative.
+  const gate = async files => runGate(fixture.cwd, clippy(...files), fixture.base, paths);
+
+  const windows = await gate(['src\\services\\transcript_reader\\readers\\claude_code.rs']);
+  assert.equal(windows.outcome, 'FAIL', JSON.stringify(windows));
+  assert.match(windows.reason, /^1 Rust warnings in touched files\.$/);
+
+  // The posix spelling keeps failing, and a backslash span still resolves
+  // through the `src-tauri/` prefix the crate-relative form needs.
+  const both = await gate(['src/services/transcript_reader/readers/claude_code.rs', 'src\\lib.rs']);
+  assert.equal(both.outcome, 'FAIL', JSON.stringify(both));
+  assert.equal(both.reason, '2 Rust warnings in touched files.');
+
+  // A warning outside the diff is still the acknowledged backlog, not a failure.
+  const elsewhere = await gate(['src\\services\\probe\\unrelated.rs']);
+  assert.equal(elsewhere.outcome, 'PASS', JSON.stringify(elsewhere));
+  assert.equal(elsewhere.warningCount, 1);
+});
+
 test('isolation shares a total deadline across gates and leaves remaining failures TIMEOUT', async t => {
   const fixture = repo(t);
   let clock = 0;

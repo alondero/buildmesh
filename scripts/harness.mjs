@@ -353,7 +353,14 @@ function classify(gate, code, output, paths) {
     });
     // The repository has an acknowledged Clippy backlog. Cached dependencies
     // need not replay warnings; Cargo JSON reports current crate diagnostics.
-    const touched = diagnostics.filter(message => message.spans.some(span => paths.some(path => path === span.file_name || path === `src-tauri/${span.file_name}`)));
+    // Cargo writes `file_name` with the host separator, so a Windows span reads
+    // `src\services\reader.rs` and matched no git path until both sides were
+    // folded to slashes — the gate reported PASS for touched-file warnings (#2352).
+    const touchedPaths = new Set(paths.map(path => path.replaceAll('\\', '/')));
+    const touched = diagnostics.filter(message => message.spans.some(span => {
+      const file = span.file_name.replaceAll('\\', '/');
+      return touchedPaths.has(file) || touchedPaths.has(`src-tauri/${file}`);
+    }));
     if (touched.length) return { outcome: 'FAIL', reason: `${touched.length} Rust warnings in touched files.`, warningCount: diagnostics.length };
     return { outcome: 'PASS', count, warningCount: diagnostics.length };
   }
