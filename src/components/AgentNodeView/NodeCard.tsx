@@ -11,9 +11,15 @@ import { NodeDropCue } from './nodeDrag';
 import { SemanticTurnBanner } from './SemanticTurnBanner';
 import { NodeActivityTabs } from './NodeActivityTabs';
 import { buildRunTerminalManager } from '../Terminal/BuildRunTerminalRegistry';
+import { useCircuitRunOverview } from '../Circuits/useCircuitRunOverview';
+import { overviewNeedsYou } from '../Circuits/runOverviewModel';
+import { openAgentNode } from '../../lib/focusAgentNode';
 
 // Keep the utility terminal's second xterm registry out of the initial bundle.
 const BuildRunTerminal = lazy(() => import('../Terminal/BuildRunTerminal').then((m) => ({ default: m.BuildRunTerminal })));
+// The Overview shares the Probe's run components; loading it on first open keeps
+// them out of the first-paint bundle (#1568).
+const CircuitRunOverview = lazy(() => import('../Circuits/CircuitRunOverview').then((m) => ({ default: m.CircuitRunOverview })));
 
 interface NodeCardProps {
   nodeId: number;
@@ -64,6 +70,7 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
     [stableMemberIds, utilityModes],
   );
   const closeUtility = useNodeActivityStore(s => s.closeUtility);
+  const showOverview = useNodeActivityStore(s => s.showOverview);
   const ungroupNode = useNodeActivityStore(s => s.ungroupNode);
   const activeMember = members.find(n => n.id === activeNodeId);
   // The entity store is the primary navigation source. Activity selection is
@@ -99,6 +106,13 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
     () => resolveCircuitOutcome(members, outcomeSources, selectedId),
     [members, outcomeSources, selectedId],
   );
+  // The card's Circuit Run: the root's own, else the first member's. Members
+  // of one card share their run (circuit lineage is what grouped them).
+  const runId = memberCircuitOwnerships[stableMemberIds.indexOf(nodeId)]?.run_id
+    ?? memberCircuitOwnerships.find(ownership => ownership !== undefined)?.run_id
+    ?? null;
+  const runOverview = useCircuitRunOverview(runId);
+  const showingOverview = runId !== null && !!selection?.overview;
   const writeToAgent = useAgentNodeStore((s) => s.writeToAgent);
   const clearAttention = useAgentNodeStore((s) => s.clearAttention);
   // dnd-kit hooks (useDraggable / useDroppable) MUST run unconditionally.
@@ -125,7 +139,7 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
   const memberIndex = indexAgentNodes(members);
   const grouped = new Set(members.map(member => activityRootId(member.id,
     memberIndex, outcomeSources.circuitOwnerships))).size > 1;
-  const hasTabs = members.length > 1 || members.some(n => utilities.get(n.id));
+  const hasTabs = members.length > 1 || members.some(n => utilities.get(n.id)) || runId !== null;
   const choose = (id: number, utility = false, focusTerminal = true) => {
     setKeyboardSelection(focusTerminal ? null : { nodeId: id, utility });
     // activateNode owns the cross-store transition. The terminal receives a
@@ -136,6 +150,10 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
     if (focusTerminal) setFocusRequest(request => request + 1);
   };
   const status = activityStatus(root, members, grouped);
+  const openAgent = async (id: number) => {
+    if (members.some(member => member.id === id)) choose(id);
+    else await openAgentNode(id);
+  };
   const revealAttention = () => {
     if (!attentionOutcome) return;
     const ids = attentionOutcome.nodeIds;
@@ -183,7 +201,8 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
       onClick={() => {
         if (cardActive) return;
         const current = useNodeActivityStore.getState().selections[nodeId];
-        if (current && members.some(n => n.id === current.nodeId)) choose(current.nodeId, current.utility);
+        if (current?.overview && runId !== null) showOverview(nodeId, selectedId);
+        else if (current && members.some(n => n.id === current.nodeId)) choose(current.nodeId, current.utility);
         else choose(selectedId, showingUtility);
       }}
       onKeyDown={handleNodeKeyDown}
@@ -205,7 +224,12 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
       {hasTabs && (
         <NodeActivityTabs rootId={nodeId} members={members} utilities={utilities}
           selectedId={selectedId} showingUtility={showingUtility} onSelect={choose} onClose={closeTab}
-          grouped={grouped} onUngroup={ungroupNode} />
+          grouped={grouped} onUngroup={ungroupNode}
+          overview={runId === null ? undefined : {
+            selected: showingOverview,
+            needsYou: runOverview.overview !== null && overviewNeedsYou(runOverview.overview),
+            onSelect: () => showOverview(nodeId, selectedId),
+          }} />
       )}
       {!showingUtility && node.status === 'awaiting_input' && semanticTurn && (
         <SemanticTurnBanner
@@ -216,9 +240,17 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
         />
       )}
       <div role={hasTabs ? 'tabpanel' : undefined} id={`activity-panel-${nodeId}`}
-        aria-labelledby={hasTabs ? `activity-${nodeId}-${showingUtility ? 'utility' : 'agent'}-${selectedId}` : undefined}
+        aria-labelledby={hasTabs ? (showingOverview ? `activity-${nodeId}-overview` : `activity-${nodeId}-${showingUtility ? 'utility' : 'agent'}-${selectedId}`) : undefined}
         className="min-h-0 flex-1 flex flex-col overflow-hidden bg-black">
-        {showingUtility && selectedUtilityMode ? (
+        {showingOverview ? (
+          <Suspense fallback={<span className="flex-1 bg-bg-card p-3 text-xs text-text-muted">Loading the circuit run…</span>}>
+            <CircuitRunOverview overview={runOverview.overview} error={runOverview.error}
+              onRefresh={runOverview.refresh}
+              onChanged={() => { void useAgentNodeStore.getState().fetchAgentNodes(); }}
+              onOpenAgent={openAgent}
+              agentName={id => useAgentNodeStore.getState().nodesById[id]?.name ?? null} />
+          </Suspense>
+        ) : showingUtility && selectedUtilityMode ? (
           <Suspense fallback={<span className="p-2 text-text-muted">Loading terminal…</span>}>
             <BuildRunTerminal key={`${node.id}-${selectedUtilityMode}`} sessionId={node.id}
               mode={selectedUtilityMode} useWorktree={node.use_worktree} focusOnAttach={focusOnAttach}

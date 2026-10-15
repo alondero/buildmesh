@@ -34,6 +34,32 @@ review round and the latest verdict, and a run that needs a person can be approv
 rechecked, recovered or cancelled there. See
 [Circuit Runs on the phone](mobile.md#circuit-runs-on-the-phone).
 
+## Overview tab
+
+A desktop node card whose agents belong to a Circuit Run shows an **Overview**
+tab first in its activity tab strip, for live and finished runs alike. It never
+selects itself: the card keeps showing the terminal until the user picks it, and
+a warning badge on the tab marks a run that needs a person (an approval, an
+Unverified checkpoint, or an unacknowledged failure that can be recovered). A
+step that is merely waiting does not raise the badge.
+
+The tab reads one backend snapshot (`circuit_run_overview`): the run, its steps,
+the graph pinned for that run, and the same attention data the Probe uses. It
+refreshes on `circuit-run-updated` for that run. The header carries the circuit
+name, state or review verdict, review round, elapsed time and run id, with
+Pause, Resume and Cancel while the run is live. Below it, a step rail lists the
+graph's visible circuit nodes in flow order (triggers, joins and retry counters
+are wiring and stay hidden), each marked done, current, failed, remaining or
+skipped, with the pass number for steps a loop has repeated. A branch the run
+did not take reads as skipped only once nothing left in the run can come back
+round to the step that chose it. Rows expand to the step's times, verdict,
+review report, agent link and error; the current step starts expanded. Approvals,
+Unverified checkpoints, failed-run recovery and the full Run History reuse the
+Probe's components and backend eligibility. A push, checkpoint or recovery
+decision is sent against the run revision it was offered at, so a run that has moved on
+since refuses it rather than acting on stale state.
+
+
 ## Completion and recovery
 
 Circuits can progress from a finished, readable agent report even when the harness
@@ -56,6 +82,23 @@ after the same session, input, freshness and known-work checks. READY means the
 assigned phase is ready for its next gate; independent review still decides
 approval. Older reports without a result use the configured classifier, and an
 exhausted classifier budget still requires an explicit evidence recheck.
+
+A person can move a stuck agent step on by hand from the Overview tab. This is
+for a step Autopilot is still waiting on when the person knows better: the
+harness still reports background work that has in fact ended, a permission or
+question wait that was already answered, the agent finished but its report never
+arrived, or a classifier that could not decide. The backend offers the push
+(`push_circuit_step`) only for a running or Unverified step that waits on an
+agent: a spawn step with its agent, an agent-turn wait, or a completion
+classifier. It offers the outcomes the graph routes onward, plus "finished" on
+a step with no way onward. Review verdicts are not pushed: they keep their
+explicit Review passed and Request changes decisions. An evidence conflict on
+any of that agent's steps still blocks the push. The confirmation names what is
+holding the step, and the note is optional. The push checks the run revision.
+It settles that agent's stale background-work and input-wait evidence across
+the run and clears a stale lifecycle report that is blocking it, then records
+the outcome as an operator override in Run History. It is an Operator-recorded
+Outcome, not verified evidence, and it grants no review approval.
 
 When an agent disappears, its cancellation explanation retains the preceding
 checkpoint. Siblings stopped by a failed run identify that failure as their cause.

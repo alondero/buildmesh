@@ -41,6 +41,10 @@ The application automation runtime is a composable trigger-action graph. A **Cir
 
 ## Monitoring and intervening from Probe
 
+The node card of an agent a run owns also carries an Overview tab with the run's
+step rail, its actions and a manual push for stuck agent steps; see
+[Overview tab](agent-node-circuits.md#overview-tab).
+
 Activity shows admitted runs with issue-led names, elapsed time, current stage,
 and a link to the agent currently working. Running and paused runs both count
 toward mesh capacity; card order is only a display order and does not assign a

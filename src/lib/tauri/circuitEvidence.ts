@@ -2,6 +2,8 @@ import { _invoke } from './_invoke';
 import type { CircuitEvidenceView } from '../../types/generated/CircuitEvidenceView';
 import type { CheckpointRequest } from '../../types/generated/CheckpointRequest';
 import type { CircuitRunAttention } from '../../types/generated/CircuitRunAttention';
+import type { CircuitRunOverview } from '../../types/generated/CircuitRunOverview';
+import type { CircuitStepPushRequest } from '../../types/generated/CircuitStepPushRequest';
 import type { RecoveryRequest } from '../../types/generated/RecoveryRequest';
 
 export const circuitRunHistory = (runId: number) =>
@@ -13,6 +15,16 @@ export const recordCircuitOutcome = (request: CheckpointRequest) =>
 /** What a run needs from a person right now, without loading its history. */
 export const circuitRunAttention = (runId: number) =>
   _invoke<CircuitRunAttention>('circuit_run_attention', { runId });
+
+/** A run, its step ledger, executed graph and attention, read together for a
+ *  node card's Overview tab. */
+export const circuitRunOverview = (runId: number) =>
+  _invoke<CircuitRunOverview>('circuit_run_overview', { runId });
+
+/** Move a stuck agent wait or classifier step on to the outcome a person chose,
+ *  overriding stale background-work or input evidence. */
+export const pushCircuitStep = (request: CircuitStepPushRequest) =>
+  _invoke<void>('push_circuit_step', { request });
 
 /** Retry a failed run's failed step, or record that it was finished by hand. */
 export const recoverFailedCircuitRun = (request: RecoveryRequest) =>

@@ -190,17 +190,7 @@ impl RunView {
         node_id: &str,
     ) -> Option<super::observation::CircuitObservationBlocker> {
         use super::observation::CircuitObservationBlocker as B;
-        let target = self
-            .step(node_id)
-            .and_then(|step| step.agent_node_id)
-            .or_else(|| self.resolve_target_agent(node_id));
-        for step in self.steps.iter().filter(|step| {
-            step.node_id == node_id
-                || step
-                    .agent_node_id
-                    .or_else(|| self.resolve_target_agent(&step.node_id))
-                    .is_some_and(|id| Some(id) == target)
-        }) {
+        for step in self.same_agent_steps(node_id) {
             if self.has_human_wait(&step.node_id) {
                 return Some(B::HumanResponseRequired);
             }
@@ -229,6 +219,35 @@ impl RunView {
         None
     }
 
+    /// The step itself and every step that worked on the same agent.
+    fn same_agent_steps<'a>(&'a self, node_id: &'a str) -> impl Iterator<Item = &'a StepView> + 'a {
+        let target = self
+            .step(node_id)
+            .and_then(|step| step.agent_node_id)
+            .or_else(|| self.resolve_target_agent(node_id));
+        self.steps.iter().filter(move |step| {
+            step.node_id == node_id
+                || step
+                    .agent_node_id
+                    .or_else(|| self.resolve_target_agent(&step.node_id))
+                    .is_some_and(|id| Some(id) == target)
+        })
+    }
+
+    /// Evidence for this agent that may belong to another session (or cannot
+    /// be read). `report_blocker` stops at the first blocker it meets, so a
+    /// stale lifecycle report would otherwise hide a conflict behind it.
+    fn has_evidence_conflict(&self, node_id: &str) -> bool {
+        self.same_agent_steps(node_id).any(|step| {
+            self.context
+                .get(&format!("node.{}.evidence.{}", step.node_id, step.attempt))
+                .is_some_and(|json| {
+                    serde_json::from_str::<super::observation::WorkEvidence>(json)
+                        .map_or(true, |evidence| evidence.conflicted)
+                })
+        })
+    }
+
     pub(crate) fn report_has_known_blockers(&self, node_id: &str) -> bool {
         self.report_blocker(node_id).is_some()
     }
@@ -253,6 +272,52 @@ impl RunView {
                 )
             )
             && !self.report_has_known_blockers(node_id)
+    }
+
+    /// The outcomes a person may push a stuck agent wait or classifier step to.
+    ///
+    /// Unlike [`Self::can_attest_completion`], this is offered while the step is
+    /// still running and despite outstanding-work or input-wait evidence: the
+    /// person is overriding evidence they know to be stale (a background task
+    /// whose completion hook never arrived, a turn whose report never landed, a
+    /// classifier that could not decide). The write records it as an override.
+    /// An identity conflict still refuses, because it says the observations
+    /// may belong to another session, not that they are out of date. Review
+    /// verdicts are not offered here: they keep their explicit decision path.
+    pub(crate) fn operator_push_outcomes(&self, node_id: &str) -> Vec<StepOutcome> {
+        if self.state != RunState::Running {
+            return Vec::new();
+        }
+        let Some(step) = self.step(node_id) else {
+            return Vec::new();
+        };
+        if !matches!(step.status, StepStatus::Running | StepStatus::Unverified)
+            || self.has_evidence_conflict(node_id)
+        {
+            return Vec::new();
+        }
+        let candidates: &[StepOutcome] = match self.graph.node(node_id).map(|node| &node.kind) {
+            Some(CircuitNodeKind::SpawnAgentNode { .. }) if step.agent_node_id.is_some() => {
+                &[StepOutcome::Completed]
+            }
+            Some(
+                CircuitNodeKind::AwaitAgentTurn { .. } | CircuitNodeKind::LlmTurnClassifier { .. },
+            ) if self.resolve_target_agent(node_id).is_some() => &[
+                StepOutcome::Completed,
+                StepOutcome::Working,
+                StepOutcome::Blocked,
+            ],
+            _ => &[],
+        };
+        let has_exits = self.graph.edges.iter().any(|edge| edge.from == node_id);
+        candidates
+            .iter()
+            .copied()
+            .filter(|outcome| {
+                classifier_outcome_is_routed(self, node_id, *outcome)
+                    || (*outcome == StepOutcome::Completed && !has_exits)
+            })
+            .collect()
     }
 
     /// Read-path availability is structural; the write boundary validates delivery.
