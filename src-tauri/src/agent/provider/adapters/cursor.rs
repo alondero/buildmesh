@@ -37,7 +37,7 @@ use crate::agent::capabilities::{
 };
 use crate::agent::managed_config;
 use crate::agent::provider::{
-    AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell,
+    shell_for, AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell,
 };
 use crate::agent::session_lifecycle::LifecycleKind;
 use crate::env::ResolvedPath;
@@ -58,13 +58,6 @@ pub static CURSOR: CursorAdapter = CursorAdapter;
 /// enforce a runtime version gate because Cursor doesn't expose
 /// semver through the hook surface.
 pub const CURSOR_MIN_HOOK_VERSION: &str = "1.0.0";
-
-fn shell_for(platform: Platform) -> WindowsShell {
-    match platform {
-        Platform::Macos | Platform::Linux => WindowsShell::Direct,
-        Platform::Windows => WindowsShell::Cmd,
-    }
-}
 
 /// Marker substring written into the Buildmesh-owned `stop` handler.
 /// Used by `ensure_hooks_json` to detect a stale Buildmesh entry on

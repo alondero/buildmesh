@@ -25,20 +25,15 @@
 //! text (`[prompt]`). `prefill_args()` formats the string as a single
 //! positional argument (no `--prefill` flag).
 
-use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
+use crate::agent::provider::{shell_for, AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
 use crate::models::EnvType;
 
 pub struct FreebuffAdapter;
 pub static FREEBUFF: FreebuffAdapter = FreebuffAdapter;
 
-/// Shell selection per platform. Windows native uses `cmd.exe /c` to wrap
-/// the npm `.cmd` batch shim, while Unix platforms invoke the binary directly.
-fn shell_for(platform: Platform) -> WindowsShell {
-    match platform {
-        Platform::Macos | Platform::Linux => WindowsShell::Direct,
-        Platform::Windows => WindowsShell::Cmd,
-    }
-}
+/// Shell selection per platform is `provider::shell_for`: Windows native
+/// uses `cmd.exe /c` to wrap the npm `.cmd` batch shim, while Unix platforms
+/// invoke the binary directly.
 
 impl AgentProvider for FreebuffAdapter {
     fn id(&self) -> &'static str {
