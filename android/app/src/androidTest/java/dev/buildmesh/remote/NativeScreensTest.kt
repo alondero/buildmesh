@@ -67,7 +67,7 @@ class NativeScreensTest {
         val ready = Json.parseToJsonElement("{\"id\":3,\"mesh_id\":2,\"name\":\"Ready agent\",\"branch\":\"main\",\"status\":\"ready\"}").obj()
         val waiting = Json.parseToJsonElement("{\"id\":4,\"mesh_id\":2,\"name\":\"Waiting agent\",\"branch\":\"task\",\"status\":\"awaiting_input\"}").obj()
         var opened = 0L
-        compose.setContent { BuildmeshTheme { Dashboard(RemoteState(nodes = listOf(ready, waiting), meshes = listOf(mesh)), "Work", 0, {}, { opened = it }, { _, _ -> }) } }
+        compose.setContent { BuildmeshTheme { Dashboard(RemoteState(nodes = listOf(ready, waiting), meshes = listOf(mesh)), "Work", 0, {}, { opened = it }, { _, _ -> }, { _, _ -> }) } }
         compose.onAllNodesWithText("Needs attention", substring = false).onFirst().performClick()
         compose.onNodeWithText("Ready agent").assertDoesNotExist()
         compose.onNodeWithText("Waiting agent").performScrollTo().performClick()

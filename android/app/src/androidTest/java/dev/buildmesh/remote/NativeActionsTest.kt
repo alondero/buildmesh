@@ -4,6 +4,8 @@ import android.app.Application
 import androidx.activity.ComponentActivity
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -66,10 +68,14 @@ class NativeActionsTest {
         }) { vm, requests ->
             compose.setContent { BuildmeshTheme {
                 val state by vm.state.collectAsState()
-                TaskScreen(state.copy(meshes = listOf(mesh), providers = providers), vm, 3, {}, { opened = it })
+                var launch by remember { mutableStateOf("") }
+                TaskScreen(state.copy(meshes = listOf(mesh), providers = providers), vm, 3, {}, launch, { launch = it }, { opened = it })
             } }
             compose.onNodeWithText("What should the agent do?").performTextInput("Fix the deadline")
-            compose.waitUntil(5000) { compose.onAllNodesWithText("Launch configuration: Saved agent").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("Launch configuration: Mesh default").performClick()
+            compose.onNodeWithText("Unavailable agent").assertDoesNotExist()
+            compose.onNodeWithText("Saved agent").performClick()
+            compose.onNodeWithText("Launch configuration: Saved agent").assertExists()
             compose.onNodeWithText("Start agent").performScrollTo().performClick()
             compose.waitUntil(10000) { vm.state.value.error == "Retry this task" && !vm.state.value.busy }
             compose.onNodeWithText("Fix the deadline").assertExists()
@@ -88,6 +94,33 @@ class NativeActionsTest {
             assertEquals(1, keys.distinct().size)
             val expected = Json.parseToJsonElement("""{"mesh_id":3,"provider":"claude","configuration_id":"launch/saved","rows":24,"cols":80,"operation_key":"${keys[0]}","prompt":"Fix the deadline"}""")
             bodies.forEach { assertEquals(expected, it) }
+        }
+    }
+
+    // The Overview's spawn button opens Capture with a launch already chosen.
+    // Mesh default sends no launch fields, and a pre-selected harness that
+    // cannot take a prompt is kept and explained rather than swapped.
+    @Test fun capturePreselectedLaunchIsKeptAndMeshDefaultLeavesTheChoiceToTheDesktop() {
+        var opened = 0L
+        withDesktop({ MockResponse().setBody(createActive) }) { vm, requests ->
+            val launch = mutableStateOf("terminal")
+            compose.setContent { BuildmeshTheme {
+                val state by vm.state.collectAsState()
+                TaskScreen(state.copy(meshes = listOf(mesh), providers = providers), vm, 3, {}, launch.value, { launch.value = it }, { opened = it })
+            } }
+            compose.onNodeWithText("Launch configuration: Terminal").assertExists()
+            compose.onNodeWithText("Start agent").performScrollTo().assertIsEnabled()
+            compose.onNodeWithText("What should the agent do?").performTextInput("Fix the deadline")
+            compose.onNodeWithText("Terminal can't take an initial prompt", substring = true).assertExists()
+            compose.onNodeWithText("Launch configuration: Terminal").assertExists()
+            compose.onNodeWithText("Start agent").performScrollTo().assertIsNotEnabled()
+            compose.onNodeWithText("Launch configuration: Terminal").performScrollTo().performClick()
+            compose.onNodeWithText("Mesh default").performClick()
+            compose.onNodeWithText("Start agent").performScrollTo().performClick()
+            compose.waitUntil(10000) { opened == 17L && !vm.state.value.busy }
+            val body = Json.parseToJsonElement(requests.single().body.readUtf8()).obj()
+            assertEquals("/api/nodes/create", requests.single().path)
+            assertEquals(Json.parseToJsonElement("""{"mesh_id":3,"rows":24,"cols":80,"operation_key":"${body.text("operation_key")}","prompt":"Fix the deadline"}"""), body)
         }
     }
 
@@ -113,7 +146,10 @@ class NativeActionsTest {
         }
     }
 
-    @Test fun issueSpawnUsesAnAvailablePrefillConfigurationAndTheStrictPayload() {
+    // Like the desktop Issues probe: the main half starts with the mesh
+    // default, the menu lists prompt-capable rows including saved
+    // configurations, and either choice starts the agent at once.
+    @Test fun issueSplitButtonStartsWithTheMeshDefaultOrAChosenSavedConfiguration() {
         var opened = 0L
         withDesktop({ request ->
             when (request.path) {
@@ -124,24 +160,61 @@ class NativeActionsTest {
         }) { vm, requests ->
             compose.setContent { BuildmeshTheme {
                 val state by vm.state.collectAsState()
-                ResourceScreen(vm.api!!, 3, "issues", state.copy(providers = providers), vm, { opened = it })
+                ResourceScreen(vm.api!!, 3, "issues", state.copy(meshes = listOf(mesh), providers = providers), vm, { opened = it })
             } }
             compose.waitUntil(10000) { compose.onAllNodesWithText("#42 Fix deadline").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithText("Issue details").assertDoesNotExist()
-            compose.onNodeWithText("#42 Fix deadline").performClick()
+            // The title, not the merged card: the card's centre is the spawn button.
+            compose.onNodeWithText("#42 Fix deadline", useUnmergedTree = true).performClick()
             compose.onNodeWithText("Issue details").assertExists()
-            compose.onNodeWithText("Start agent").performClick()
-            compose.onNodeWithText("Launch configuration: Mesh default").performClick()
+            assertEquals(0L, opened)
+            compose.onNodeWithContentDescription("Start issue #42 with Mesh default").performClick()
+            compose.waitUntil(10000) { opened == 17L && !vm.state.value.busy }
+            opened = 0L
+            compose.onNodeWithContentDescription("Choose how to start issue #42").performClick()
             compose.onNodeWithText("Terminal").assertDoesNotExist()
-            compose.onNodeWithText("Saved agent").assertDoesNotExist()
             compose.onNodeWithText("Unavailable agent").assertDoesNotExist()
+            compose.onNodeWithText("Claude Code").assertExists()
+            compose.onNodeWithText("Saved configuration").assertExists()
+            compose.onNodeWithText("Saved agent").performClick()
+            compose.waitUntil(10000) { opened == 17L && !vm.state.value.busy }
+            val posts = requests.filter { it.method == "POST" }
+            assertEquals(listOf("/api/meshes/3/issues/42/spawn", "/api/meshes/3/issues/42/spawn"), posts.map { it.path })
+            assertEquals(listOf("""{"title":"Fix deadline"}""", """{"title":"Fix deadline","provider":"claude","configuration_id":"launch/saved"}"""),
+                posts.map { it.body.readUtf8() })
+        }
+    }
+
+    // The mesh-wide PR list starts an agent on the PR head; the desktop
+    // renders the review prompt, so the body carries only the head fields.
+    @Test fun pullRequestSplitButtonStartsAReviewAgentOnTheHead() {
+        var opened = 0L
+        withDesktop({ request ->
+            when (request.path) {
+                "/api/meshes/3/pulls?state=open" -> MockResponse().setBody("""{"items":[{"number":42,"title":"Fix deadline","body":"","url":"https://github.com/octo/r/pull/42","state":"open","draft":false,"head_ref":"feat/deadline","head_repo_owner":"octo","head_repo_clone_url":"https://github.com/octo/r.git","head_sha":"abc123","author":"octo","mergeable":null,"mergeable_state":"unknown","checks_state":null,"review_decision":null}],"completeness":{"returned":1,"pages_fetched":1,"complete":true,"incomplete_reason":null,"reported_total":null}}""")
+                "/api/meshes/3/pulls/42/spawn" -> MockResponse().setBody(created)
+                // The panel reads the menu from the ViewModel's own snapshot.
+                "/api/meshes" -> MockResponse().setBody("[$mesh]")
+                "/api/nodes" -> MockResponse().setBody("[]")
+                "/api/providers" -> MockResponse().setBody(kotlinx.serialization.json.JsonArray(providers).toString())
+                else -> MockResponse().setResponseCode(404)
+            }
+        }) { vm, requests ->
+            compose.runOnUiThread { vm.resume() }
+            compose.waitUntil(10000) { vm.state.value.providers.isNotEmpty() }
+            compose.runOnUiThread { vm.pause() }
+            compose.setContent { BuildmeshTheme { PullRequestsScreen(vm.api!!, 3, vm, { opened = it }) } }
+            compose.waitUntil(10000) { compose.onAllNodesWithText("PR #42: Fix deadline").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("Squash and merge").assertDoesNotExist()
+            compose.onNodeWithContentDescription("Choose how to start PR #42").performClick()
+            compose.onNodeWithText("Terminal").assertDoesNotExist()
             compose.onNodeWithText("Claude Code").performClick()
-            compose.onNodeWithText("Launch configuration: Claude Code").assertExists()
-            compose.onNodeWithText("Start").performClick()
-            compose.waitUntil(10000) { opened == 17L }
-            val request = requests.single { it.method == "POST" }
-            assertEquals("/api/meshes/3/issues/42/spawn", request.path)
-            assertEquals("""{"title":"Fix deadline","provider":"claude"}""", request.body.readUtf8())
+            compose.waitUntil(10000) { opened == 17L && !vm.state.value.busy }
+            // `resume()` also mints an event-socket ticket, which is a POST too.
+            val post = requests.single { it.path?.endsWith("/spawn") == true }
+            assertEquals("/api/meshes/3/pulls/42/spawn", post.path)
+            assertEquals("""{"title":"Fix deadline","head_ref":"feat/deadline","head_sha":"abc123","head_repo_owner":"octo","head_repo_clone_url":"https://github.com/octo/r.git","provider":"claude"}""",
+                post.body.readUtf8())
         }
     }
 
@@ -153,7 +226,7 @@ class NativeActionsTest {
             } }
             compose.waitUntil(10000) { compose.onAllNodesWithText("Retry").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithText("The desktop sent an unexpected issues response. Update Buildmesh on the desktop or on this phone.").assertExists()
-            compose.onNodeWithText("Start agent").assertDoesNotExist()
+            compose.onNodeWithContentDescription("Choose how to start issue", substring = true).assertDoesNotExist()
         }
     }
 
@@ -201,12 +274,13 @@ class NativeActionsTest {
             compose.onNodeWithText("No matches.").assertExists()
             compose.onNodeWithText("Showing the first 2 of 120 issues.", substring = true).assertExists()
             compose.onNodeWithText("Filter issues").performTextClearance()
-            compose.onNodeWithText("#42 Fix the mobile", substring = true).performClick()
+            compose.onNodeWithText("#42 Fix the mobile", substring = true, useUnmergedTree = true).performClick()
             compose.onNodeWithText("Expanded issue details").assertExists()
-            compose.onNodeWithText("Start agent").performScrollTo().performClick()
-            compose.onNodeWithText("Launch configuration: Mesh default").assertExists()
+            compose.onNodeWithContentDescription("Choose how to start issue #42").performScrollTo().performClick()
+            compose.onNodeWithText("Claude Code").assertExists()
             issueScreenshot("issues-android-launch")
-            compose.onNodeWithText("Cancel").performClick()
+            androidx.test.espresso.Espresso.pressBack()
+            compose.onNodeWithText("Claude Code").assertDoesNotExist()
             assertFalse(requests.any { it.method == "POST" })
             compose.onNodeWithText("Edit tags for issue #42").performScrollTo().performClick()
             compose.waitUntil(10000) { compose.onAllNodesWithContentDescription("buildmesh:run").fetchSemanticsNodes().isNotEmpty() }

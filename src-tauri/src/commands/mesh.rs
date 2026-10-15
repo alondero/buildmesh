@@ -479,14 +479,20 @@ pub async fn get_local_ip() -> Result<String, String> {
 #[command]
 pub async fn get_default_provider(mesh_id: i64) -> Result<String, String> {
     crate::commands::run_blocking("get_default_provider", move || {
-        let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| format!("{}", e))?;
-        Ok(crate::preferences::resolve_default_provider(
-            None,
-            mesh.default_provider,
-            crate::preferences::default_provider(),
-        ))
+        get_default_provider_blocking(mesh_id).map_err(|e| format!("{}", e))
     })
     .await
+}
+
+/// Blocking core of [`get_default_provider`]; the mobile create route uses it
+/// for "Mesh default" and keeps the typed error to tell a missing mesh apart.
+pub(crate) fn get_default_provider_blocking(mesh_id: i64) -> rusqlite::Result<String> {
+    let mesh = db::get_mesh_by_id(mesh_id)?;
+    Ok(crate::preferences::resolve_default_provider(
+        None,
+        mesh.default_provider,
+        crate::preferences::default_provider(),
+    ))
 }
 
 #[cfg(test)]

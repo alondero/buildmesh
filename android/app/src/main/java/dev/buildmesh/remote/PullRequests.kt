@@ -17,7 +17,8 @@ import kotlinx.serialization.json.*
 // Fields follow GitHubPullRequestFeed / GitHubPullRequest in src/types/generated.
 data class PhonePullRequest(val number: Long, val title: String, val url: String, val head: String,
     val headRepo: String, val state: String, val draft: Boolean, val mergeable: Boolean?,
-    val mergeState: String, val checks: String?, val review: String?) {
+    val mergeState: String, val checks: String?, val review: String?, val headSha: String,
+    val headOwner: String) {
     val canMerge get() = state == "open" && !draft && mergeable == true &&
         mergeState in setOf("clean", "has_hooks", "unstable") &&
         checks !in setOf("failure", "error", "pending", "expected") && review !in setOf("changes_requested", "review_required")
@@ -51,7 +52,8 @@ fun pullFeed(response: JsonElement): PhonePullFeed {
         PhonePullRequest(number, pr.text("title"), pr.text("url"), pr.text("head_ref"),
             pr.text("head_repo_clone_url"), pr.text("state"), draft, mergeable, pr.text("mergeable_state"),
             (pr["checks_state"] as? JsonPrimitive)?.contentOrNull,
-            (pr["review_decision"] as? JsonPrimitive)?.contentOrNull)
+            (pr["review_decision"] as? JsonPrimitive)?.contentOrNull,
+            pr.text("head_sha"), pr.text("head_repo_owner"))
     }
     return PhonePullFeed(items, complete, completeness.number("returned"),
         (completeness["reported_total"] as? JsonPrimitive)?.longOrNull, completeness.text("incomplete_reason"))
@@ -78,19 +80,21 @@ suspend fun BuildmeshApi.squashNodePull(meshId: Long, pr: PhonePullRequest) {
 }
 
 @Composable
-fun PullRequestsScreen(api: BuildmeshApi, meshId: Long, vm: BuildmeshViewModel) {
+fun PullRequestsScreen(api: BuildmeshApi, meshId: Long, vm: BuildmeshViewModel, openNode: (Long) -> Unit) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
-        PullRequestsPanel(api, meshId, vm)
+        PullRequestsPanel(api, meshId, vm, openNode = openNode)
     }
 }
 
+// `openNode` enables spawning from the mesh-wide list; a node's own panel
+// shows that node's PR and offers merging instead.
 @Composable
-fun PullRequestsPanel(api: BuildmeshApi, meshId: Long, vm: BuildmeshViewModel, nodeId: Long? = null) {
-    key(api, meshId, nodeId) { OwnedPullRequestsPanel(api, meshId, vm, nodeId) }
+fun PullRequestsPanel(api: BuildmeshApi, meshId: Long, vm: BuildmeshViewModel, nodeId: Long? = null, openNode: ((Long) -> Unit)? = null) {
+    key(api, meshId, nodeId) { OwnedPullRequestsPanel(api, meshId, vm, nodeId, openNode) }
 }
 
 @Composable
-private fun OwnedPullRequestsPanel(api: BuildmeshApi, meshId: Long, vm: BuildmeshViewModel, nodeId: Long?) {
+private fun OwnedPullRequestsPanel(api: BuildmeshApi, meshId: Long, vm: BuildmeshViewModel, nodeId: Long?, openNode: ((Long) -> Unit)?) {
     val state by vm.state.collectAsState()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var reload by remember { mutableIntStateOf(0) }
@@ -117,6 +121,14 @@ private fun OwnedPullRequestsPanel(api: BuildmeshApi, meshId: Long, vm: Buildmes
         }
     }
     val prs = feed?.let { if (nodeId == null) it.items else nodePulls(it, branch) }.orEmpty()
+    val options = launchOptions(state.providers, needsPrompt = true)
+    val defaultName = meshDefaultName(state.meshes.firstOrNull { it.number("id") == meshId }, state.providers)
+    // The desktop PR probe's `+`: the agent starts on the PR head with the
+    // review prompt the desktop renders from its template.
+    fun start(pr: PhonePullRequest, option: JsonObject?) = vm.action { client ->
+        val node = client.post("/api/meshes/$meshId/pulls/${pr.number}/spawn", pullSpawnBody(pr, option)).obj()
+        vm.acceptNode(node); openNode?.invoke(node.number("id"))
+    }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(if (nodeId == null) "Open pull requests" else "This node’s pull request", style = MaterialTheme.typography.titleMedium)
         TextButton(enabled = !merging, onClick = { reload++; confirming = null }) { Text("Refresh PR status") }
@@ -134,6 +146,7 @@ private fun OwnedPullRequestsPanel(api: BuildmeshApi, meshId: Long, vm: Buildmes
                     Text("${pr.head} · ${pr.state} · ${pr.mergeLabel}")
                     Text("Checks: ${when (pr.checks) { "success" -> "passing"; "failure" -> "failing"; null -> "not reported"; else -> pr.checks }}")
                     Text("Review: ${pr.review?.replace('_', ' ') ?: "no decision reported"}")
+                    if (openNode != null) SpawnSplitButton(defaultName, options, "PR #${pr.number}", !state.busy && !merging, { start(pr, null) }, { start(pr, it) })
                     if (pr.url.startsWith("https://")) ExternalLink(pr.url, "Open on GitHub")
                     if (nodeId != null) Button(shape = MaterialTheme.shapes.small, enabled = !state.busy && !merging && pr.canMerge,
                         onClick = { confirming = pr }) { Text(if (merging) "Merging…" else "Squash and merge") }

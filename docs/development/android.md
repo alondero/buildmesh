@@ -178,11 +178,28 @@ Drafts persist privately on the phone, scoped to the verified desktop endpoint
 and trusted certificate, until an acknowledged action succeeds. Re-pairing the
 same desktop restores its drafts without exposing them to another desktop.
 A saved Launch Configuration row's `id` is the configuration's id, not a Spawn
-Option, so task capture sends it as `configuration_id` beside the row's own
-`spawn_option_id` (the same pair the web client sends). The issue spawn and
-archive resume routes accept a Spawn Option only, so their pickers offer no
-saved configurations. Issue launch requires an option that supports prefill;
-archive resume requires a resumable one. Unavailable options are excluded.
+Option, so Capture, issue and pull request launches send it as `configuration_id` beside the row's own
+`spawn_option_id` (the same pair the web client sends). **Mesh default** sends
+neither, and the desktop resolves its own default chain.
+
+Mesh cards, issue cards and the mesh's open pull requests carry the same split
+button as the desktop spawn cluster (`SpawnSplitButton`). The main half names the
+mesh's pinned default, or reads **Mesh default** when the app-wide default
+applies, which the phone cannot see. The chevron lists the backend menu in its
+own order, saved configurations included, without unavailable rows. On a mesh
+card both halves open Capture with that mesh and launch already selected, because
+Capture is where the first prompt is written; an empty prompt opens a plain
+session. Capture keeps an explicit choice that cannot take a prompt and explains
+why, instead of silently switching to another harness. On an issue or pull
+request the menu offers only prompt-capable rows, and a tap starts the agent at
+once, as on the desktop. `POST /api/meshes/{id}/issues/{n}/spawn` and
+`POST /api/meshes/{id}/pulls/{n}/spawn` run the desktop probes'
+`create_issue_node` and `create_pr_node`. The node row is returned straight
+away, and its status reports the background worktree and process start. The
+backend renders the issue or review prompt from the user's template, so the
+phone sends only a title hint and, for a pull request, the head fields from the
+feed. Archive resume accepts a Spawn Option only, so its picker offers no saved
+configurations and requires a resumable option.
 Archive HTTP 207 dismisses the launch dialog and reports the imported node and
 launch failure, so a user can inspect Work before attempting another import.
 Pull requests are created from an Agent Node, because the create route requires
@@ -212,8 +229,7 @@ desktops returned.
 The Issues screen preserves completeness and displays partial-feed warnings,
 filters by title/number/tag, and expands body previews on tap. Its tag editor
 uses the same acknowledged single-label route and Autopilot context as the
-[mobile web client](mobile.md#phone-issue-triage). Issue launch also offers the
-mesh default before available prefill options.
+[mobile web client](mobile.md#phone-issue-triage).
 
 Only the terminal is a WebView: it loads bundled xterm assets from
 `WebViewAssetLoader`, blocks all other requests/navigation, and exposes

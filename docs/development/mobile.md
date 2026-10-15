@@ -233,7 +233,9 @@ HEAD)" — a false claim about files that demonstrably changed.
 The mobile shell owns screen history and the selected home tab. NodeList owns
 Overview/Work polling and attention events; NodeOverview polls the selected
 node and sends short replies through the acknowledged HTTP input route.
-CaptureIdea retains a browser-local draft until creation succeeds. Its prompt
+CaptureIdea retains a browser-local draft until creation succeeds. A create
+request without a provider or saved configuration launches the mesh default, the
+same chain the desktop sidebar uses. Its prompt
 crosses the generated CreateNodeRequest boundary into SpawnIntent::Prompt,
 so the existing spawn orchestrator owns initial prompt delivery. The create
 route validates text size. Whether the harness can take an initial prompt is
@@ -298,12 +300,22 @@ The admin-only `GET /api/meshes/{id}/issue-labels` returns the generated
 the desktop's single-label command. GitHub write failures are HTTP 500, distinct
 from HTTP 401/403 device authorization failures.
 
-**Start agent** opens a launch configuration choice in both clients, with
-**Mesh default** or an available Spawn Option supporting prefill. Saved launch
-recipes are excluded because this route accepts only a Spawn Option. Starting
+`POST /api/meshes/{id}/issues/{n}/spawn` runs the desktop Issues probe's
+`create_issue_node` and answers with the committed node as soon as its row
+exists. The body is `{title, provider?, configuration_id?}`. Omitting both launch
+fields means the mesh default, and unknown fields, such as the retired issue
+`body`, are rejected with 400. `POST /api/meshes/{id}/pulls/{n}/spawn` is the PR
+probe's `create_pr_node`, taking `{title, head_ref, head_sha?, head_repo_owner?,
+head_repo_clone_url?, provider?, configuration_id?}`. Both routes build the
+prompt on the desktop from the user's template, so the phone never sends one.
+
+On the web client, **Start agent** opens a launch configuration choice with
+**Mesh default** or an available Spawn Option supporting prefill. Starting
 requires confirmation; cancellation creates no node, and the picker stays open
 while a request is pending. Browser back first dismisses the web picker and is
-consumed while it is starting.
+consumed while it is starting. The Android client instead uses the desktop's
+split button, including saved configurations, and starts the agent on the
+tap (see [Screens and ownership](android.md#screens-and-ownership)).
 
 ## Mobile terminal socket lifecycle
 

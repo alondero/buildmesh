@@ -116,43 +116,64 @@ pub async fn list(req: &ParsedRequest) -> Response {
 // legacy `{title, body, provider}` shape, we want a loud 400 — not a silent
 // body-dropped success — so the user knows to refresh. See memory:
 // buildmesh-serde-default-fragility.
+#[derive(Debug, Clone, PartialEq)]
 struct SpawnRequest {
     title: String,
+    /// Spawn Option; absent means the mesh default.
+    #[serde(default)]
     provider: Option<String>,
+    /// Saved Launch Configuration under `provider`.
+    #[serde(default)]
+    configuration_id: Option<String>,
 }
 
+/// `POST /api/meshes/{id}/issues/{n}/spawn` — the desktop Issues probe's
+/// `create_issue_node`: the node row is committed and returned at once, and
+/// the worktree and process start in the background, reporting through the
+/// node's status. The backend derives the issue URL from the mesh's `origin`
+/// remote and renders the prompt, so the body carries only a title hint.
 pub async fn spawn(req: &ParsedRequest) -> Response {
-    let mesh_id = req.id0();
-    let issue_number = req.id1();
-
-    let parsed: SpawnRequest = match serde_json::from_slice(&req.body) {
-        Ok(r) => r,
-        Err(e) => {
-            return Response::json_error("400 Bad Request", &format!("Invalid JSON: {}", e));
-        }
-    };
-
     let Some(app) = state::app_handle() else {
         return Response::json_error("503 Service Unavailable", "App not ready");
     };
-
-    // spawn_issue_agent is a #[tauri::command] but takes plain args except
-    // for AppHandle which we already hold, so we call it directly. The
-    // backend derives the GitHub URL from the mesh's `origin` remote — we
-    // only need the issue number and a title hint here.
-    match crate::commands::agent::spawn_issue_agent(
-        app.clone(),
-        mesh_id,
-        issue_number,
-        parsed.title,
-        parsed.provider,
-    )
+    spawn_with(req, |mesh_id, issue_number, body| async move {
+        crate::commands::run_blocking("http_spawn_issue", move || {
+            crate::commands::agent::create_issue_node(
+                app.clone(),
+                mesh_id,
+                issue_number,
+                body.title,
+                body.provider,
+                body.configuration_id,
+            )
+            .map(|draft| draft.node)
+        })
+        .await
+    })
     .await
-    {
-        Ok(node) => {
-            let body = serde_json::to_string(&node).unwrap_or_else(|_| "{}".to_string());
-            Response::json("200 OK", body)
-        }
+}
+
+async fn spawn_with<F, Fut, T>(req: &ParsedRequest, create: F) -> Response
+where
+    F: FnOnce(i64, i64, SpawnRequest) -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+    T: serde::Serialize,
+{
+    let parsed: SpawnRequest = match serde_json::from_slice(&req.body) {
+        Ok(value) => value,
+        Err(e) => return Response::json_error("400 Bad Request", &format!("Invalid JSON: {e}")),
+    };
+    if req.id0() <= 0 || req.id1() <= 0 {
+        return Response::json_error(
+            "400 Bad Request",
+            "A positive mesh and issue number are required",
+        );
+    }
+    match create(req.id0(), req.id1(), parsed).await {
+        Ok(node) => match serde_json::to_string(&node) {
+            Ok(body) => Response::json("200 OK", body),
+            Err(e) => Response::json_error("500 Internal Server Error", &e.to_string()),
+        },
         Err(e) => Response::json_error("500 Internal Server Error", &e),
     }
 }
@@ -218,6 +239,95 @@ mod tests {
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(response.body()).unwrap()["error"],
             "GitHub permission denied"
+        );
+    }
+
+    fn issue_spawn_request(mesh_id: i64, issue: i64, body: &str) -> ParsedRequest {
+        ParsedRequest::test_post(
+            &format!("/api/meshes/{mesh_id}/issues/{issue}/spawn"),
+            body.as_bytes(),
+        )
+        .with_ids(Some(mesh_id), Some(issue))
+    }
+
+    async fn never_create(_: i64, _: i64, _: SpawnRequest) -> Result<serde_json::Value, String> {
+        panic!("a rejected body must not create a node")
+    }
+
+    #[tokio::test]
+    async fn issue_spawn_rejects_the_legacy_body_shape_and_non_positive_ids() {
+        for (mesh, issue, body) in [
+            (
+                3,
+                42,
+                r#"{"title":"t","body":"full issue text","provider":"claude"}"#,
+            ),
+            (3, 42, r#"{"provider":"claude"}"#),
+            (3, 0, r#"{"title":"t"}"#),
+            (0, 42, r#"{"title":"t"}"#),
+        ] {
+            let response = spawn_with(&issue_spawn_request(mesh, issue, body), never_create).await;
+            assert_eq!(response.status_code(), 400, "body {body} on {mesh}/{issue}");
+        }
+    }
+
+    #[tokio::test]
+    async fn issue_spawn_keeps_the_original_body_and_accepts_a_saved_configuration() {
+        for (body, expected) in [
+            (
+                r#"{"title":"Fix deadline","provider":"claude"}"#,
+                SpawnRequest {
+                    title: "Fix deadline".into(),
+                    provider: Some("claude".into()),
+                    configuration_id: None,
+                },
+            ),
+            (
+                r#"{"title":"Fix deadline"}"#,
+                SpawnRequest {
+                    title: "Fix deadline".into(),
+                    provider: None,
+                    configuration_id: None,
+                },
+            ),
+            (
+                r#"{"title":"Fix deadline","provider":"claude","configuration_id":"launch/saved"}"#,
+                SpawnRequest {
+                    title: "Fix deadline".into(),
+                    provider: Some("claude".into()),
+                    configuration_id: Some("launch/saved".into()),
+                },
+            ),
+        ] {
+            let response = spawn_with(&issue_spawn_request(3, 42, body), |mesh, issue, request| {
+                let expected = expected.clone();
+                async move {
+                    assert_eq!((mesh, issue, request), (3, 42, expected));
+                    Ok(serde_json::json!({"id": 17, "status": "pending"}))
+                }
+            })
+            .await;
+            assert_eq!(response.status_code(), 200, "body {body}");
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(response.body()).unwrap(),
+                serde_json::json!({"id": 17, "status": "pending"})
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn issue_spawn_creation_failure_is_reported_with_its_message() {
+        let response = spawn_with(
+            &issue_spawn_request(3, 42, r#"{"title":"t"}"#),
+            |_, _, _| async {
+                Err::<serde_json::Value, _>("Unknown launch configuration".to_string())
+            },
+        )
+        .await;
+        assert_eq!(response.status_code(), 500);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(response.body()).unwrap()["error"],
+            "Unknown launch configuration"
         );
     }
 
