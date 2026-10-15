@@ -276,6 +276,12 @@ pub fn review_recovery_source(run_id: i64) -> Result<i64, String> {
     Ok(source_id)
 }
 
+/// Re-mint a successor review run for a failed one.
+///
+/// The user-facing path extends the failed run in place (see
+/// [`extend_failed_review`]); only the dev-gated review-continuation fixture
+/// mints the successor, so a shipped build drops this.
+#[cfg(any(debug_assertions, feature = "dev-tools"))]
 pub fn continue_failed_review(run_id: i64, rounds: i32) -> Result<i64, String> {
     let mut db = crate::db::write_conn();
     let recovery = review_recovery_inner(&db, run_id, rounds)?;

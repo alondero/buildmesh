@@ -230,10 +230,12 @@ pub(crate) fn resolve_profile_dir(
 /// cannot ask the installed profile.
 enum EarlyPanicProfile {
     /// Absolute profile directory from the debug or dev-tools override.
+    #[cfg(any(debug_assertions, feature = "dev-tools"))]
     Override(PathBuf),
     /// No override. Use the platform data directory.
     Platform,
     /// The override is set but unusable. Do not touch the real profile.
+    #[cfg(any(debug_assertions, feature = "dev-tools"))]
     Skip,
 }
 
@@ -277,10 +279,12 @@ pub(crate) fn early_panic_log_path_from_env(
     platform_root: Option<&Path>,
 ) -> Option<PathBuf> {
     match early_panic_profile() {
+        #[cfg(any(debug_assertions, feature = "dev-tools"))]
         EarlyPanicProfile::Override(profile) => {
             early_panic_log_path(Some(&profile), platform_root, bundle_id)
         }
         EarlyPanicProfile::Platform => early_panic_log_path(None, platform_root, bundle_id),
+        #[cfg(any(debug_assertions, feature = "dev-tools"))]
         EarlyPanicProfile::Skip => None,
     }
 }
