@@ -150,4 +150,43 @@ class BuildmeshApiTest {
         assertEquals("Running", nodeLabel(node))
         assertEquals("Needs an answer", nodeLabel(JsonObject(node + ("status" to JsonPrimitive("awaiting_input")))))
     }
+
+    // Issue #2331 review finding 1. `ensureSuccess` intercepts 207 for the
+    // import-and-resume route, but create-and-start answers 207 with a typed
+    // `outcome`. If 207 stayed unconditional, every `start_failed` create threw
+    // an "imported" error and `readCreateNodeOutcome` was never reached, so the
+    // committed node was stranded. These drive the real HTTP path so the
+    // collision cannot come back unnoticed.
+    @Test fun aCreateFailureSurvivesHttp207AndReachesTheOutcomeReader() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(207).setBody(
+                """{"outcome":"start_failed","node":{"id":9,"mesh_id":1,"name":"idea"},"operation_key":"op-1","start_error":"claude CLI not found on PATH"}"""
+            ))
+            val api = BuildmeshApi(server.url("/").toString())
+            try {
+                val outcome = readCreateNodeOutcome(api.post("/api/nodes/create", createNodeBody(1, Json.parseToJsonElement("""{"id":"anthropic"}""").obj(), "Fix it", "op-1")).obj())
+                assertTrue(outcome is CreateNodeOutcome.StartFailed)
+                assertEquals(9L, (outcome as CreateNodeOutcome.StartFailed).node.number("id"))
+                assertEquals("claude CLI not found on PATH", outcome.startError)
+            } finally { api.close() }
+        }
+    }
+
+    @Test fun theImportRouteKeepsItsOwn207Exception() = runBlocking {
+        // The import shape has no `outcome`, so it must still throw — that is
+        // what ResourceScreens catches to show the partial-import message.
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(207).setBody(
+                """{"node":{"id":9,"mesh_id":1,"name":"idea"},"spawn_error":"worktree already exists"}"""
+            ))
+            val api = BuildmeshApi(server.url("/").toString())
+            try {
+                api.post("/api/meshes/1/agent-nodes/import-and-resume", buildJsonObject { put("cli_session_id", "s-1") })
+                fail("import 207 no longer raises its partial-import error")
+            } catch (e: ApiException) {
+                assertEquals(207, e.status)
+                assertTrue("unexpected 207 message: ${e.message}", e.message.orEmpty().contains("worktree already exists"))
+            } finally { api.close() }
+        }
+    }
 }

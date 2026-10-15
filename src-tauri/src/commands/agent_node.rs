@@ -51,6 +51,11 @@ pub struct WorktreeCleanupFailedPayload {
 /// mesh path from the mesh row. `initial_prompt` is optional. When it
 /// trims to text, the runner rejects a harness that cannot take one
 /// before inserting a row.
+// The 8-argument surface is the wire contract for this command; bundling it
+// into a struct would be a breaking IPC change for no gain. Suppressed here
+// rather than repo-wide so `clippy::too_many_arguments` stays useful
+// (issue #2331 review; AGENTS.md requires zero warnings in touched files).
+#[allow(clippy::too_many_arguments)]
 #[command]
 pub async fn create_agent_node(
     mesh_id: i64,
@@ -106,6 +111,7 @@ pub(crate) fn create_agent_node_blocking(
         tracing::error!("create_agent_node failed: {}", error);
         error.to_string()
     })
+    .map(|created| created.node)
 }
 
 /// List all agent nodes

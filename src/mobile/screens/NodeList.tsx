@@ -97,6 +97,14 @@ export default function NodeList({
   const [creating, setCreating] = useState<number | null>(null);
   const [meshActions, setMeshActions] = useState<Mesh | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * A node quick-create committed but could not start (issue #2331). Held
+   * rather than navigated to, because `onOpenNode` unmounts this screen and
+   * would take the reason with it.
+   */
+  const [committed, setCommitted] = useState<AgentNode | null>(null);
+  /** The quick-create submission currently in flight, for key retention. */
+  const quickCreateKey = useRef<{ submission: string; key: string } | null>(null);
   const mountedRef = useRef(true);
   const refreshRevision = useRef(0);
 
@@ -275,10 +283,17 @@ export default function NodeList({
     setPickerMeshId(null);
     setCreating(meshId);
     setError(null);
+    setCommitted(null);
     // Issue #2331: one operation key per submission, reused for retries of it,
     // so a retry after a lost response resolves to the same node instead of
-    // creating a duplicate.
-    const operationKey = newOperationKey();
+    // creating a duplicate. Quick-create has no draft to key off, so the
+    // submission identity is the mesh/harness/configuration triple; a different
+    // triple is a different submission and must mint a fresh key (the server
+    // rejects a key reused with different content as a conflict).
+    const submission = `${meshId}|${providerId}|${configurationId ?? ""}`;
+    const keyRef = quickCreateKey.current;
+    const operationKey = keyRef?.submission === submission ? keyRef.key : newOperationKey();
+    quickCreateKey.current = { submission, key: operationKey };
     try {
       const outcome = await createNode({
         mesh_id: meshId,
@@ -288,18 +303,25 @@ export default function NodeList({
       });
       if (!mountedRef.current) return;
       setCreating(null);
-      // Every committed outcome carries the node, so the user is sent to it
-      // either way — a node that exists but never started is still their work.
-      if (outcome.outcome !== "active") {
-        setError(
-          `Node created but not started: ${
-            outcome.outcome === "start_failed"
-              ? outcome.start_error
-              : outcome.reason
-          } Open it to retry.`,
-        );
+      if (outcome.outcome === "active") {
+        // Landed and running: the submission is complete, so retire the key.
+        quickCreateKey.current = null;
+        onOpenNode(outcome.node);
+        return;
       }
-      onOpenNode(outcome.node);
+      // Committed but not running (issue #2331). `onOpenNode` unmounts this
+      // screen, so navigating now would throw away the only thing that says
+      // what to fix. Hold the node and let the user go there deliberately —
+      // the same shape CaptureIdea uses.
+      quickCreateKey.current = null;
+      setCommitted(outcome.node);
+      setError(
+        `Node created but not started: ${
+          outcome.outcome === "start_failed"
+            ? outcome.start_error
+            : outcome.reason
+        } Open it to retry.`,
+      );
     } catch (e) {
       if (!mountedRef.current) return;
       setCreating(null);
@@ -850,8 +872,18 @@ export default function NodeList({
       {error && (
         <div className="toast error" data-testid="create-error">
           <span style={{ flex: 1 }}>{error}</span>
+          {/* The node exists but is not running: give the user a way through
+              to it that does not depend on the toast still being there. */}
+          {committed && (
+            <button className="btn-ghost" onClick={() => onOpenNode(committed)}>
+              Open
+            </button>
+          )}
           <button
-            onClick={() => setError(null)}
+            onClick={() => {
+              setError(null);
+              setCommitted(null);
+            }}
             aria-label="Dismiss"
             style={{
               background: "transparent",

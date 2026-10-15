@@ -103,8 +103,20 @@ class BuildmeshApi(
 
     private fun ensureSuccess(response: Response) {
         if (response.code == 207) {
-            val partial = Json.parseToJsonElement(response.body!!.string()).obj()
-            throw ApiException(207, "Node ${partial.objectAt("node")?.number("id")} was imported, but could not start: ${partial.text("spawn_error")}. Check Work before retrying.")
+            // `peekBody`, not `body.string()`: inspecting the payload must not
+            // consume it. `json()` reads the body again on the way out, and a
+            // consumed stream fails with "closed" once the create outcome is
+            // allowed to fall through here (issue #2331 review).
+            val partial = Json.parseToJsonElement(response.peekBody(Long.MAX_VALUE).string()).obj()
+            // 207 is shared by two routes (issue #2331). import-and-resume
+            // answers it with a bare node plus `spawn_error`, and the caller in
+            // ResourceScreens catches the 207 to show that message. Create
+            // answers it with a typed `outcome`, which the caller must reach —
+            // throwing here would make its StartFailed branch unreachable and
+            // strand a node that was genuinely committed.
+            if (partial.text("outcome").isEmpty()) {
+                throw ApiException(207, "Node ${partial.objectAt("node")?.number("id")} was imported, but could not start: ${partial.text("spawn_error")}. Check Work before retrying.")
+            }
         }
         if (!response.isSuccessful) {
             val detail = runCatching { Json.parseToJsonElement(response.body!!.string()).obj().text("error") }.getOrDefault("")

@@ -625,7 +625,8 @@ pub(crate) fn create_issue_node_impl(
         Some(prefill.as_str()),
         /* operation = */ None,
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())?
+    .node;
 
     Ok((IssueNodeDraft { node, prefill }, intent))
 }
@@ -1776,7 +1777,8 @@ mod tests {
             /* initial_prompt = */ None,
             /* operation = */ None,
         )
-        .expect("create pending node");
+        .expect("create pending node")
+        .node;
         (_tmp, node.id)
     }
 

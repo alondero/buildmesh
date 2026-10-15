@@ -132,6 +132,39 @@ function mockApi(
 
 const noop = () => {};
 
+const QUICK_NODE = makeNode(31, "idle");
+
+/**
+ * A fetch stub whose `/api/nodes/create` responses are supplied in order, so a
+ * test can drive a quick-create failure and then its retry (issue #2331).
+ */
+function quickCreateFetch(createResponses: { ok: boolean; status: number; json: () => Promise<unknown> }[]) {
+  let create = 0;
+  const fn = vi.fn().mockImplementation(async (url: string) => {
+    if (url.includes("/api/nodes/create")) {
+      const next = createResponses[Math.min(create, createResponses.length - 1)];
+      create += 1;
+      return next;
+    }
+    if (url.includes("/api/ws-ticket")) return { ok: true, status: 200, json: async () => ({ ticket: "t" }) };
+    if (url.includes("/api/meshes")) return { ok: true, status: 200, json: async () => [mesh] };
+    if (url.includes("/api/nodes")) return { ok: true, status: 200, json: async () => [] };
+    if (url.includes("/api/providers"))
+      return { ok: true, status: 200, json: async () => [QUICK_PROVIDER] };
+    return { ok: true, status: 200, json: async () => ({}) };
+  });
+  vi.stubGlobal("fetch", fn);
+  return { fetch: fn, mesh, provider: QUICK_PROVIDER };
+}
+
+const QUICK_PROVIDER = {
+  id: "claude",
+  label: "Claude Code",
+  provider_id: "anthropic",
+  is_proxied: false,
+  capabilities: { supports_prefill: true },
+} as unknown as Provider;
+
 describe("NodeList", () => {
   beforeEach(() => {
     localStorage.clear();
@@ -1492,6 +1525,81 @@ describe("NodeList", () => {
 
     await waitFor(() => expect(onAuthFailed).toHaveBeenCalledTimes(1));
     expect(screen.queryByTestId("create-error")).toBeNull();
+  });
+
+  // Issue #2331 review finding 3: quick-create claimed retry safety in a
+  // comment but minted a fresh key on every invocation, so a retry after a
+  // lost response created a duplicate node.
+  it("quick-create reuses one operation key across retries of the same submission", async () => {
+    const { fetch, mesh, provider } = quickCreateFetch([
+      { ok: false, status: 504, json: async () => ({ error: "gateway timeout" }) },
+      { ok: true, status: 200, json: async () => ({ outcome: "active", node: QUICK_NODE, operation_key: "op-1" }) },
+    ]);
+    vi.stubGlobal("fetch", fetch);
+    const onOpenNode = vi.fn();
+    render(
+      <NodeList
+        onOpenNode={onOpenNode}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={noop}
+      />,
+    );
+
+    const clickCreate = async () => {
+      fireEvent.click(await screen.findByTestId(`new-node-${mesh.id}`));
+      fireEvent.click(await screen.findByTestId(`provider-${provider.id}`));
+    };
+    await clickCreate();
+    await waitFor(() => expect(screen.getByTestId("create-error")).toBeTruthy());
+    await clickCreate();
+    await waitFor(() => expect(onOpenNode).toHaveBeenCalledWith(QUICK_NODE));
+
+    const createCalls = fetch.mock.calls.filter(([url]) => String(url).includes("/api/nodes/create"));
+    expect(createCalls).toHaveLength(2);
+    const first = JSON.parse(createCalls[0][1].body).operation_key;
+    const second = JSON.parse(createCalls[1][1].body).operation_key;
+    expect(second).toBe(first);
+  });
+
+  // Issue #2331 review finding 3: quick-create set an error and then navigated,
+  // which unmounts NodeList and drops the message before it is ever seen.
+  it("quick-create keeps a committed-but-unstarted node visible instead of navigating away", async () => {
+    const { fetch, mesh, provider } = quickCreateFetch([
+      {
+        ok: true,
+        status: 207,
+        json: async () => ({
+          outcome: "start_failed",
+          node: QUICK_NODE,
+          operation_key: "op-1",
+          start_error: "claude CLI not found on PATH",
+        }),
+      },
+    ]);
+    vi.stubGlobal("fetch", fetch);
+    const onOpenNode = vi.fn();
+    render(
+      <NodeList
+        onOpenNode={onOpenNode}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={noop}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId(`new-node-${mesh.id}`));
+    fireEvent.click(await screen.findByTestId(`provider-${provider.id}`));
+
+    const toast = await screen.findByTestId("create-error");
+    expect(toast.textContent).toContain("Node created but not started");
+    expect(toast.textContent).toContain("claude CLI not found on PATH");
+    expect(onOpenNode).not.toHaveBeenCalled();
+    // The node is reachable, just not by an unmounting navigation.
+    fireEvent.click(screen.getByText("Open"));
+    expect(onOpenNode).toHaveBeenCalledWith(QUICK_NODE);
   });
 
   it("pauses the 5s poll while document.hidden and refreshes on becoming visible (issue #1261)", async () => {

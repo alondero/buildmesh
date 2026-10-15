@@ -240,6 +240,33 @@ impl BlockingWork for InlineWork {
     }
 }
 
+/// Test executor that yields before each unit of work, so two concurrent
+/// operations genuinely interleave instead of running one to completion.
+///
+/// Without a real suspension point both callers finish Phase 1 before either
+/// commits, so the loser is caught by the claim rather than by the key binding
+/// — which means the Phase-2 replay path is never exercised.
+#[cfg(test)]
+pub struct YieldingWork;
+
+#[cfg(test)]
+impl BlockingWork for YieldingWork {
+    fn run<'a, T, F>(
+        &'a self,
+        _label: &'static str,
+        work: F,
+    ) -> Pin<Box<dyn Future<Output = Result<T, CreateRejection>> + Send + 'a>>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T, CreateRejection> + Send + 'static,
+    {
+        Box::pin(async move {
+            tokio::task::yield_now().await;
+            work()
+        })
+    }
+}
+
 /// The injectable start seam.
 ///
 /// Production spawns through the crate's orchestrator; tests supply a
@@ -363,7 +390,48 @@ pub async fn create_and_start<R: BlockingWork>(
             key: key.clone(),
             fingerprint: fingerprint.clone(),
         });
-    let node = commit_node(&request, binding.as_ref(), work).await?;
+    let created = commit_node(&request, binding.as_ref(), work).await?;
+
+    // A concurrent duplicate already bound this key inside the transaction, so
+    // our candidate row rolled back and the *recorded* node came back. That
+    // request owns the single start attempt for this key: advancing here would
+    // start a second process and, worse, overwrite a recorded `StartFailed`
+    // with `Started`, reporting a node as running that never started
+    // (issue #2331 review). Re-read the ledger and report its honest state.
+    if created.replayed {
+        let replay_key = operation_key.clone().unwrap_or_default();
+        let replay_fingerprint = fingerprint.clone();
+        let recorded = work
+            .run("http_replay_claim", move || {
+                db::claim_create_operation(&replay_key, &replay_fingerprint)
+                    .map_err(CreateRejection::from)
+            })
+            .await?;
+        return match recorded {
+            Some(db::CreateClaim::Replay {
+                node_id,
+                start_state,
+                start_error,
+            }) => replay_committed(node_id, operation_key, start_state, start_error, work).await,
+            // Unreachable in practice: the bind just told us this key exists
+            // with this fingerprint. Treating anything else as a fresh conflict
+            // is the honest fallback, and it still commits nothing.
+            Some(db::CreateClaim::Conflict) => Err(CreateRejection::KeyConflict {
+                key: operation_key.unwrap_or_default(),
+            }),
+            None => {
+                replay_committed(
+                    created.node.id,
+                    operation_key,
+                    CreateStartState::Created,
+                    None,
+                    work,
+                )
+                .await
+            }
+        };
+    }
+    let node = created.node;
 
     // --- Phase 3: start (I/O, no DB lock held) ---------------------------
     let intent = match &request.prompt {
@@ -432,16 +500,13 @@ async fn commit_node<R: BlockingWork>(
     request: &CreateAndStartRequest,
     binding: Option<&db::CreateOperationBinding>,
     work: &R,
-) -> Result<AgentNode, CreateRejection> {
+) -> Result<crate::services::agent_node::CreatedNode, CreateRejection> {
     let task_request = request.clone();
     let task_binding = binding.cloned();
-    let node = work
-        .run("http_create_node", move || {
-            create_node_blocking(&task_request, task_binding.as_ref())
-                .map_err(CreateRejection::Create)
-        })
-        .await?;
-    Ok(node)
+    work.run("http_create_node", move || {
+        create_node_blocking(&task_request, task_binding.as_ref()).map_err(CreateRejection::Create)
+    })
+    .await
 }
 
 /// The shared create runner, unchanged apart from the optional key binding.
@@ -452,7 +517,7 @@ async fn commit_node<R: BlockingWork>(
 fn create_node_blocking(
     request: &CreateAndStartRequest,
     operation: Option<&db::CreateOperationBinding>,
-) -> Result<AgentNode, AgentNodeError> {
+) -> Result<crate::services::agent_node::CreatedNode, AgentNodeError> {
     crate::services::agent_node::create_blocking_configured(
         request.mesh_id,
         Some(&request.provider),
@@ -649,6 +714,15 @@ mod tests {
         create_and_start(request, start, &InlineWork).await
     }
 
+    /// Same as [`run`] but with a yielding executor, so two concurrent calls
+    /// really race instead of serialising on the first await.
+    async fn run_yielding(
+        request: CreateAndStartRequest,
+        start: &dyn AgentStart,
+    ) -> Result<CreateNodeOutcome, CreateRejection> {
+        create_and_start(request, start, &YieldingWork).await
+    }
+
     #[tokio::test]
     async fn app_unavailable_commits_the_node_and_reports_pending() {
         // The #2331 headline: the old handler answered a bare 503 *after* the
@@ -776,6 +850,61 @@ mod tests {
         let second = second.expect("committed");
         assert_eq!(first.node().id, second.node().id);
         assert_eq!(node_count(), 1);
+        // One node means one start: the loser must replay, not start a second
+        // process for the same idea.
+        assert_eq!(
+            start_a.started_nodes().len() + start_b.started_nodes().len(),
+            1,
+            "exactly one start attempt for one key"
+        );
+    }
+
+    /// Regression for the concurrency defect found in review: the losing racer
+    /// used to be handed `Ok(node)` indistinguishable from a fresh create, so
+    /// it walked into the start phase and its Phase 4 overwrote the winner's
+    /// recorded `StartFailed` with `Started` — reporting a node as running that
+    /// never started, and corrupting the durable ledger.
+    #[tokio::test]
+    async fn a_concurrent_race_starts_once_and_never_overwrites_a_recorded_failure() {
+        let (_db, mesh_id) = fixture();
+
+        // Both seams fail, so whichever wins the bind records `StartFailed`.
+        // The assertion is then deterministic: the ledger must still say so.
+        let start_a = ScriptedStart::failing("claude CLI not found on PATH");
+        let start_b = ScriptedStart::failing("claude CLI not found on PATH");
+        let a = run_yielding(request(mesh_id, Some("op-race")), &start_a);
+        let b = run_yielding(request(mesh_id, Some("op-race")), &start_b);
+        let (first, second) = tokio::join!(a, b);
+
+        let first = first.expect("committed");
+        let second = second.expect("committed");
+        assert_eq!(first.node().id, second.node().id, "one node per key");
+        assert_eq!(node_count(), 1);
+
+        // The core assertion: only the winner of the bind may start.
+        assert_eq!(
+            start_a.started_nodes().len() + start_b.started_nodes().len(),
+            1,
+            "the losing racer must not start a second process"
+        );
+
+        // The recorded failure survives; nothing overwrote it with `Started`.
+        let stored = crate::db::create_operation::find_create_operation("op-race")
+            .unwrap()
+            .expect("ledger row");
+        assert_eq!(
+            stored.start_state,
+            CreateStartState::StartFailed,
+            "a losing racer must not overwrite the recorded start state"
+        );
+
+        // Neither caller may be told the agent is running.
+        for outcome in [&first, &second] {
+            assert!(
+                !matches!(outcome, CreateNodeOutcome::Active { .. }),
+                "a failed start must never report Active, got {outcome:?}"
+            );
+        }
     }
 
     #[tokio::test]

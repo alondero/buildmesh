@@ -273,6 +273,7 @@ pub fn create_with_source_pr_fork(
         None,
         None,
     )
+    .map(|created| created.node)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -291,7 +292,7 @@ pub fn create_with_source_pr_fork_configured(
     configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
     initial_prompt: Option<&str>,
     operation: Option<&db::CreateOperationBinding>,
-) -> Result<AgentNode, AgentNodeError> {
+) -> Result<CreatedNode, AgentNodeError> {
     let mesh = db::get_mesh_by_id(mesh_id)?;
     let mut prefs = crate::preferences::load().map_err(AgentNodeError::Backend)?;
     let selection = crate::preferences::resolve_default_provider(
@@ -374,10 +375,14 @@ pub fn create_with_source_pr_fork_configured(
 
     // Issue #2331: when the caller supplies a remote operation key, the key
     // binding shares this INSERT's transaction, so a lost response can never
-    // orphan a node and a retry can never double-create one. `Replayed` means
-    // a concurrent duplicate already bound this key — return that node rather
-    // than this transaction's (rolled-back) row.
-    let node = match operation {
+    // orphan a node and a retry can never double-create one.
+    //
+    // `replayed` must survive the return: it is the only signal that a
+    // *concurrent* duplicate already owns this key's start attempt. Collapsing
+    // it into a plain `AgentNode` let a losing racer walk on into the start
+    // phase and overwrite the winner's recorded `StartFailed` with `Started`,
+    // reporting a node as running when it never started (#2331 review).
+    let created = match operation {
         Some(binding) => match db::create_agent_node_with_operation(
             mesh_id,
             &session_name,
@@ -396,8 +401,19 @@ pub fn create_with_source_pr_fork_configured(
             configuration.as_ref(),
             binding,
         ) {
-            Ok(db::CreateAgentNodeOutcome::Created(node)) => node,
-            Ok(db::CreateAgentNodeOutcome::Replayed(node)) => return Ok(node),
+            // A concurrent duplicate already bound this key: return *that*
+            // node, and tell the caller this was a replay so it never advances
+            // to the start phase for work somebody else owns.
+            Ok(db::CreateAgentNodeOutcome::Replayed(node)) => {
+                return Ok(CreatedNode {
+                    node,
+                    replayed: true,
+                })
+            }
+            Ok(db::CreateAgentNodeOutcome::Created(node)) => CreatedNode {
+                node,
+                replayed: false,
+            },
             Err(db::CreateNodeWithOperationError::KeyConflict { key }) => {
                 return Err(AgentNodeError::OperationKeyConflict { key })
             }
@@ -421,15 +437,34 @@ pub fn create_with_source_pr_fork_configured(
             head_repo_clone_url,
             worktree_path_owned.as_deref(),
             configuration.as_ref(),
-        )?,
+        )
+        .map(|node| CreatedNode {
+            node,
+            replayed: false,
+        })?,
     };
 
     if let Some(project) = project {
-        db::save_project_scope(node.id, &project.relative_folder)?;
-        return Ok(db::get_agent_node_by_id(node.id)?);
+        db::save_project_scope(created.node.id, &project.relative_folder)?;
+        return Ok(CreatedNode {
+            node: db::get_agent_node_by_id(created.node.id)?,
+            replayed: created.replayed,
+        });
     }
 
-    Ok(node)
+    Ok(created)
+}
+
+/// What one create produced, and whether this caller owns the start attempt.
+///
+/// `replayed` is `true` only when a *concurrent* duplicate already bound the
+/// same operation key. The node row this transaction inserted is rolled back
+/// and the recorded node is returned instead, so the caller must not start it:
+/// somebody else owns that key's single start (issue #2331).
+#[derive(Debug, Clone)]
+pub struct CreatedNode {
+    pub node: AgentNode,
+    pub replayed: bool,
 }
 
 /// Single shared "create a fresh node" runner used by BOTH Tauri commands
@@ -504,6 +539,7 @@ pub fn create_blocking(
         initial_prompt,
         None,
     )
+    .map(|created| created.node)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -518,7 +554,7 @@ pub fn create_blocking_configured(
     configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
     initial_prompt: Option<&str>,
     operation: Option<&db::CreateOperationBinding>,
-) -> Result<AgentNode, AgentNodeError> {
+) -> Result<CreatedNode, AgentNodeError> {
     // 1. Mesh lookup. Map the missing-row case to the typed
     //    `AgentNodeError::MeshNotFound(mesh_id)` variant so the route
     //    can match on `Err(_)` patterns instead of inspecting a
@@ -574,6 +610,10 @@ pub fn create_blocking_configured(
             configuration,
             initial_prompt,
         )
+        .map(|node| CreatedNode {
+            node,
+            replayed: false,
+        })
     } else {
         create_with_source_pr_fork_configured(
             mesh_id,
@@ -775,7 +815,8 @@ fn create_pending_with_source_pr_fork_and_worktree(
         configuration,
         initial_prompt,
         None,
-    )?;
+    )?
+    .node;
     // Two writes (insert + status update) is one extra ~1ms SQLite round
     // trip. Acceptable: this function is on the fast path, and the second
     // write is the whole point — without it the new node would look
@@ -2632,7 +2673,8 @@ mod tests {
                 None,
                 None,
             )
-            .unwrap();
+            .unwrap()
+            .node;
             assert_eq!(node.provider, "codex");
             assert_eq!(
                 node.status,
@@ -2661,7 +2703,8 @@ mod tests {
             None,
             None,
         )
-        .unwrap();
+        .unwrap()
+        .node;
         configuration.model = Some("edited-later".into());
         assert_eq!(
             db::node_spawn_configuration(node.id, "codex")
