@@ -1,4 +1,5 @@
-# Shared helpers for the Windows launchers (run.ps1, run-dev.ps1).
+# Shared helpers for the Windows launchers (run.ps1, run-dev.ps1) and the dev
+# log helpers that have to look at the same profile.
 #
 # Dot-sourced, not executed:
 #     . (Join-Path $PSScriptRoot "launcher-common.ps1")
@@ -130,4 +131,44 @@ function Compare-LogGrowth {
         Grew    = ($after.Lines.Count -gt $Before.Lines.Count)
         Lines   = $after.Lines
     }
+}
+
+function Resolve-DevProfileDir {
+    <#
+    .SYNOPSIS
+        The app-data profile this worktree's dev instance writes its logs to.
+
+    .DESCRIPTION
+        A linked worktree runs its own dev instance: run-dev.ps1 gives it its
+        own profile dir and port offset (issue #2345), so a helper that reads
+        the dev log has to read THAT instance's log. Reading the canonical dev
+        profile instead reports another worktree's, or the main checkout's,
+        build — the wrong window's lines presented as this one's.
+
+        The launcher records the profile it launched in <repo>\.tmp\dev-instance.json.
+        A missing record means nothing has been launched from here yet, or this
+        is the main checkout, which uses the canonical dev profile.
+
+        Never throws: a damaged record resolves to the canonical profile instead
+        of aborting a diagnostic whose whole job is to report state.
+
+    .PARAMETER RepoRoot
+        The worktree root. Defaults to the parent of this script's directory,
+        which is the layout every caller in scripts\ sits in.
+    #>
+    param([string]$RepoRoot)
+
+    if (-not $RepoRoot) { $RepoRoot = Join-Path $PSScriptRoot '..' }
+    $recordPath = Join-Path $RepoRoot '.tmp\dev-instance.json'
+    if (Test-Path -LiteralPath $recordPath) {
+        try {
+            # ReadAllText, not Get-Content: a launcher rewriting the record at
+            # this moment would raise a sharing violation and abort the caller.
+            $record = [System.IO.File]::ReadAllText($recordPath) | ConvertFrom-Json
+            if ($record.profileDir) { return $record.profileDir }
+        } catch {
+            Write-Warning "ignoring an unreadable instance record at ${recordPath}"
+        }
+    }
+    return (Join-Path $env:APPDATA 'com.alond.buildmesh.dev')
 }

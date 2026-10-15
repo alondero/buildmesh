@@ -197,7 +197,7 @@ if [ ! -f "$BINARY" ]; then
   exit 1
 fi
 
-# 4. Record log position
+# 4. Resolve this launch's ports, then record log position
 BEFORE_LINES=0
 BEFORE_FIRST_LINE=""
 if [ -f "$LOG_PATH" ]; then
@@ -224,8 +224,8 @@ echo "Buildmesh Dev pre-launch line count (panic_early.log): $BEFORE_PANIC_EARLY
 # probes, preferring the range it used last time so its ports stay put across
 # restarts.
 PORT_OFFSET=""
-if [ -n "${BUILDMESH_PORT_OFFSET:-}" ]; then
-  echo "Dev ports: offset $BUILDMESH_PORT_OFFSET (from BUILDMESH_PORT_OFFSET)"
+if [ -n "$CALLER_PORT_OFFSET" ]; then
+  echo "Dev ports: offset $CALLER_PORT_OFFSET (from BUILDMESH_PORT_OFFSET)"
 elif [ -n "$WORKTREE_SLUG" ]; then
   CANDIDATES=()
   if [ -n "$recorded_offset" ]; then CANDIDATES+=("$recorded_offset"); fi

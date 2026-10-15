@@ -9,7 +9,7 @@ description: Launch Buildmesh exe and monitor its debug log output in this sessi
 
 The user says "run /use" — activate this skill. This is the **human-in-the-loop** launch-and-watch path; for autonomous pass/fail verification of a change, use `/verify` instead.
 
-`/use` runs the **dev profile** (`buildmesh-dev`, identity `com.alond.buildmesh.dev`, ports 2991/2992). It builds and launches a separate binary that runs side-by-side with the stable `buildmesh` hub — so launching it **never** interrupts the agents the hub is orchestrating.
+`/use` runs the **dev profile** (`buildmesh-dev`, identity `com.alond.buildmesh.dev`, ports 2991/2992 from the main checkout — a linked worktree gets its own range and profile, and the launcher prints both). It builds and launches a separate binary that runs side-by-side with the stable `buildmesh` hub — so launching it **never** interrupts the agents the hub is orchestrating.
 
 ## What to do
 
@@ -30,10 +30,10 @@ Each script handles: stop **this worktree's** dev instance (never the stable hub
 
 ### Step 2: Start log monitor
 
-Once the script confirms success, tail the **dev-profile** log for the host platform:
+Once the script confirms success, tail the log of the profile it printed. Use `scripts\tail-dev-log.ps1` (Windows) or the path below, substituting the profile the launcher reported:
 
-- **Windows:** `Get-Content "$env:APPDATA\com.alond.buildmesh.dev\logs\buildmesh.log" -Wait -Tail 0`
-- **macOS:** `tail -f "$HOME/Library/Application Support/com.alond.buildmesh.dev/logs/buildmesh.log"`
+- **Windows:** `Get-Content "<profile>\logs\buildmesh.log" -Wait -Tail 0`
+- **macOS:** `tail -f "<profile>/logs/buildmesh.log"`
 
 Run this as a background task. Filter for: `ERROR`, `error`, `failed`, `Failed`, `WARN`, `warn`.
 
@@ -43,7 +43,8 @@ Show PID and confirm log monitor is active.
 
 ## Log file location
 
-Dev profile (what `/use` launches):
+The launcher's `Dev profile:` line is authoritative — from the main checkout it is the canonical dev profile, and from a linked worktree it is that worktree's own profile under `…\com.alond.buildmesh.dev\worktrees\`:
+
 - **Windows:** `%APPDATA%\com.alond.buildmesh.dev\logs\buildmesh.log`
 - **macOS:** `~/Library/Application Support/com.alond.buildmesh.dev/logs/buildmesh.log`
 
@@ -67,6 +68,8 @@ The HTTP server's actually-bound port (`current_http_port()`) may be `+1/+2` hig
 #   1. Open the desktop Remote Access modal (it calls invoke('get_root_token')).
 #   2. sqlite3 "$env:APPDATA\com.alond.buildmesh.dev\buildmesh.db" \
 #        "SELECT value FROM app_settings WHERE key='remote_access_token';"
+#      (from a linked worktree, use the profile the launcher printed, and the
+#       port from its `Dev ports:` line rather than 2992)
 #   3. Read the log line "Generated remote access root token" on first launch.
 $root   = '<root token>'
 $body   = @{ surface='terminal'; node_id=<node_id> } | ConvertTo-Json -Compress

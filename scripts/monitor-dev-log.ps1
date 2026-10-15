@@ -1,5 +1,9 @@
 # Wait for the dev log file to appear, then tail it filtered for notable lines.
-$logPath = Join-Path $env:APPDATA 'com.alond.buildmesh.dev\logs\buildmesh.log'
+. (Join-Path $PSScriptRoot 'launcher-common.ps1')
+# The profile this worktree's last launch recorded: a linked worktree runs its
+# own dev instance (issue #2345), and monitoring the canonical dev profile would
+# report another worktree's or the main checkout's launch as this one's.
+$logPath = Join-Path (Resolve-DevProfileDir) 'logs\buildmesh.log'
 $pattern = 'ERROR|error|failed|Failed|WARN|warn'
 
 $logDir = Split-Path -Parent $logPath
