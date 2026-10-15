@@ -339,12 +339,29 @@ fn temp_path(path: &Path) -> PathBuf {
 /// is why the temp file must be a sibling. A crash before the rename leaves
 /// the user's file untouched and the temp file as the only residue; a rename
 /// failure cleans the temp file up and returns the error.
+///
+/// On unix the temp file is created `0o600`, which the rename carries onto the
+/// target. `File::create` would inherit `0o666 & !umask` — typically `0o644` —
+/// and four of the writers this replaced built their temp file with
+/// `tempfile::NamedTempFile`, which is `0o600` by design. Without the explicit
+/// mode this would have silently widened `.claude/settings.local.json` inside
+/// the user's own repository, `~/.grok/hooks/hooks.json`, Cline's hook script
+/// and `.codex/{config.toml,hooks.json}` to world-readable. Picking the
+/// stricter of the two keeps every managed file at or below the permissions it
+/// had before.
 pub fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
     use std::io::Write;
 
     let temp = temp_path(path);
     {
-        let mut file = std::fs::File::create(&temp)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp)?;
         file.write_all(content.as_bytes())?;
         file.sync_all()?;
     }
@@ -548,10 +565,30 @@ mod tests {
         assert!(!unreadable.reason().is_empty());
     }
 
+    /// The rename carries the temp file's mode onto the target, and these are
+    /// config files — one of them (`.claude/settings.local.json`) lives inside
+    /// the user's own repository. `File::create` would land `0o644`.
+    #[cfg(unix)]
+    #[test]
+    fn written_file_is_owner_only_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let path = temp_file(&dir, "settings.local.json");
+        atomic_write(&path, "{}").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "atomic_write must not widen the target");
+    }
+
     /// The reason two writers cannot both be the implementation: two threads
     /// writing the same target concurrently would share a fixed temp name, and
     /// on Windows one's rename would then clobber the other's half-written
     /// file. Every write must land whole, and nothing may be left behind.
+    ///
+    /// Pair this with `temp_names_are_unique_per_call`: a shared name fails
+    /// deterministically on Windows, but on Linux a writer may win by luck if
+    /// the threads happen to serialise, so this test alone is not the proof.
     #[test]
     fn concurrent_writes_do_not_share_a_temp_name() {
         let dir = TempDir::new().unwrap();

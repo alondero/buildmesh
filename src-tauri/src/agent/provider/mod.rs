@@ -125,7 +125,7 @@ pub enum WindowsShell {
 /// shell wrapping applies.
 ///
 /// The `.cmd`-shim adapters use this table for both arms; before issue
-/// #2235 eight of them restated the identical match. An adapter with a
+/// #2235 seven of them restated the identical match. An adapter with a
 /// genuine reason to differ does not call this: Codex spawns under
 /// PowerShell so ANSI escape sequences propagate correctly through ConPTY,
 /// and declares that choice in its own `shell_for`.
