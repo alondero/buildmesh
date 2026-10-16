@@ -1308,6 +1308,16 @@ impl EffectKind {
     }
 }
 
+impl From<crate::circuit::stepper::EffectJournal> for EffectKind {
+    fn from(kind: crate::circuit::stepper::EffectJournal) -> Self {
+        match kind {
+            crate::circuit::stepper::EffectJournal::Spawn => Self::Spawn,
+            crate::circuit::stepper::EffectJournal::Prompt => Self::Prompt,
+            crate::circuit::stepper::EffectJournal::Github => Self::Github,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectIntent {
     pub node_id: String,

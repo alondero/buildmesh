@@ -25,7 +25,8 @@
 //!    evidence transaction; local `SetNodeStatus` changes commit with their
 //!    completed step;
 //! 4. **Executes** external or transient effects (spawn agent node, inject
-//!    PTY prompt, notify UI).
+//!    PTY prompt, notify UI). [`dispatch`] owns that pass: the gate, the
+//!    journal claim, then the effect host.
 //!
 //! A crash between commit and effect execution is recovered by
 //! observation on the next pass: a spawn step whose agent node has
@@ -55,6 +56,7 @@ use crate::circuit::stepper::{
     advance, CircuitEvent, RunState, RunView, StepStatus, StepView, Transition,
 };
 mod admission;
+mod dispatch;
 mod github;
 #[cfg(test)]
 mod github_recovery_tests;
@@ -70,6 +72,7 @@ mod spawn;
 mod turn_classify;
 mod zombie_sweep;
 use admission::{global_agent_reservation_fits, may_admit_run, required_agent_slots};
+use dispatch::execute_effects;
 use observation::{agent_lookup_for_observation, observe};
 pub use restart::startup_reconcile_pass;
 use restart::{recover_run_observers, release_run_evaluators, restore_run_evaluators};
@@ -128,7 +131,7 @@ pub struct CircuitEffectBatchPermit {
 }
 
 impl CircuitEffectBatchPermit {
-    fn is_cancelled(&self) -> bool {
+    pub(super) fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
 }
@@ -863,17 +866,7 @@ fn drive_run(app: &AppHandle, active: &db::ActiveCircuitRun) -> Result<(), Strin
                 let failed: Vec<String> = transition
                     .effects
                     .iter()
-                    .filter_map(|eff| match eff {
-                        crate::circuit::stepper::Effect::SpawnAgentNode { node_id }
-                        | crate::circuit::stepper::Effect::InjectPty { node_id, .. }
-                        | crate::circuit::stepper::Effect::ContinueAgentTurn { node_id, .. }
-                        | crate::circuit::stepper::Effect::NudgeIdleAgent { node_id, .. }
-                        | crate::circuit::stepper::Effect::CloseAgentNode { node_id, .. }
-                        | crate::circuit::stepper::Effect::CallGithub { node_id, .. } => {
-                            Some(node_id.clone())
-                        }
-                        _ => None,
-                    })
+                    .filter_map(|eff| eff.dispatch_error_step().map(str::to_string))
                     .collect();
                 let ops = failed
                     .iter()
@@ -989,7 +982,7 @@ pub(super) fn persist_transition(
         .map_err(TransitionPersistFailure::into_message)
 }
 
-fn dispatch_prompt_and_acknowledge(
+pub(super) fn dispatch_prompt_and_acknowledge(
     submit: impl FnOnce() -> Result<bool, String>,
     acknowledge: impl FnOnce() -> Result<Option<i64>, String>,
 ) -> Result<Option<i64>, String> {
@@ -1093,26 +1086,16 @@ fn failed_effect_step_ops(
     effects: &[crate::circuit::stepper::Effect],
     message: &str,
 ) -> Vec<db::CircuitStepOp> {
-    use crate::circuit::stepper::Effect;
     let mut seen = HashSet::new();
     effects
         .iter()
         .filter_map(|effect| {
-            let node_id = match effect {
-                Effect::SpawnAgentNode { node_id }
-                | Effect::InjectPty { node_id, .. }
-                | Effect::ContinueAgentTurn { node_id, .. }
-                | Effect::NudgeIdleAgent { node_id, .. }
-                | Effect::SetNodeStatus { node_id, .. }
-                | Effect::CloseAgentNode { node_id, .. }
-                | Effect::CallGithub { node_id, .. } => node_id,
-                Effect::Notify { .. } => return None,
-            };
-            if !seen.insert(node_id.clone()) {
+            let node_id = effect.step_node_id()?;
+            if !seen.insert(node_id.to_string()) {
                 return None;
             }
             Some(db::CircuitStepOp {
-                node_id: node_id.clone(),
+                node_id: node_id.to_string(),
                 status: "failed".into(),
                 outcome: Some(Some("failed".into())),
                 error: Some(Some(message.into())),
@@ -1162,43 +1145,32 @@ fn effect_persistence_writes(
     ),
     TransitionPersistFailure,
 > {
-    use crate::circuit::stepper::Effect;
+    use crate::circuit::stepper::EffectPersistence;
 
     let mut intents = Vec::new();
     let mut agent_status_effects = Vec::new();
     let attempt_for = |node_id: &str| view.step(node_id).map_or(1, |step| step.attempt);
     for effect in effects {
-        let intent = match effect {
-            Effect::SpawnAgentNode { node_id } => Some(db::circuit::evidence::EffectIntent {
-                node_id: node_id.clone(),
-                attempt: attempt_for(node_id),
-                kind: db::circuit::evidence::EffectKind::Spawn,
-            }),
-            Effect::InjectPty { node_id, .. } => Some(db::circuit::evidence::EffectIntent {
-                node_id: node_id.clone(),
-                attempt: attempt_for(node_id),
-                kind: db::circuit::evidence::EffectKind::Prompt,
-            }),
-            Effect::CallGithub { node_id, .. } => Some(db::circuit::evidence::EffectIntent {
-                node_id: node_id.clone(),
-                attempt: attempt_for(node_id),
-                kind: db::circuit::evidence::EffectKind::Github,
-            }),
-            Effect::SetNodeStatus {
-                node_id, status, ..
-            } => {
+        match effect.persistence() {
+            EffectPersistence::Journal { node_id, kind } => {
+                intents.push(db::circuit::evidence::EffectIntent {
+                    node_id: node_id.to_string(),
+                    attempt: attempt_for(node_id),
+                    kind: kind.into(),
+                });
+            }
+            EffectPersistence::AgentStatus { node_id, status } => {
                 let agent_node_id = view.resolve_target_agent(node_id).ok_or_else(|| {
                     TransitionPersistFailure::Other(format!(
                         "SetNodeStatus target agent not found in lineage for node {node_id}"
                     ))
                 })?;
                 agent_status_effects.push(db::circuit::evidence::AgentStatusEffect {
-                    node_id: node_id.clone(),
+                    node_id: node_id.to_string(),
                     attempt: attempt_for(node_id),
                     agent_node_id,
                     status: crate::models::SessionStatus::from_db_str(status),
                 });
-                None
             }
             // Continuation and nudge prompts have their own pending/claimed
             // delivery state in run context (`*.continuation.delivery`,
@@ -1206,13 +1178,7 @@ fn effect_persistence_writes(
             // Prompt effect row — an `InjectPty` on the same step already owns
             // it. Close is replayed idempotently while its spawn association
             // remains; notifications are transient.
-            Effect::ContinueAgentTurn { .. }
-            | Effect::NudgeIdleAgent { .. }
-            | Effect::CloseAgentNode { .. }
-            | Effect::Notify { .. } => None,
-        };
-        if let Some(intent) = intent {
-            intents.push(intent);
+            EffectPersistence::Unjournaled { .. } => {}
         }
     }
     Ok((intents, agent_status_effects))
@@ -1577,24 +1543,19 @@ pub(super) fn prepare_turn_boundaries(
     let mut seen = HashSet::new();
     let mut changed = false;
     for effect in effects {
-        let agent_node_id = match effect {
-            crate::circuit::stepper::Effect::InjectPty { node_id, .. } => view
-                .resolve_target_agent(node_id)
-                .filter(|id| crate::agent::process::PROCESS_REGISTRY.is_alive(id)),
-            crate::circuit::stepper::Effect::ContinueAgentTurn {
-                target_agent_id, ..
-            }
-            | crate::circuit::stepper::Effect::NudgeIdleAgent {
-                target_agent_id, ..
-            } => crate::agent::process::PROCESS_REGISTRY
-                .is_alive(target_agent_id)
-                .then_some(*target_agent_id),
-            crate::circuit::stepper::Effect::SpawnAgentNode { node_id } => view
-                .step(node_id)
-                .and_then(|step| step.agent_node_id)
-                .filter(|id| crate::agent::process::PROCESS_REGISTRY.is_alive(id)),
-            _ => None,
-        };
+        use crate::circuit::stepper::TurnBoundaryAgent;
+        let agent_node_id = effect.turn_boundary_agent().and_then(|subject| {
+            let id = match subject {
+                TurnBoundaryAgent::ResolvedTarget(node_id) => view.resolve_target_agent(node_id)?,
+                TurnBoundaryAgent::Attached(node_id) => {
+                    view.step(node_id).and_then(|step| step.agent_node_id)?
+                }
+                TurnBoundaryAgent::Named(id) => id,
+            };
+            crate::agent::process::PROCESS_REGISTRY
+                .is_alive(&id)
+                .then_some(id)
+        });
         let Some(agent_node_id) = agent_node_id else {
             continue;
         };
@@ -1602,22 +1563,20 @@ pub(super) fn prepare_turn_boundaries(
             continue;
         }
         let agent = db::get_agent_node_by_id(agent_node_id).map_err(|error| error.to_string())?;
-        let continuation_node = effects.iter().find_map(|effect| match effect {
-            crate::circuit::stepper::Effect::ContinueAgentTurn {
-                node_id,
-                target_agent_id,
-                ..
-            } if *target_agent_id == agent_node_id => Some((node_id, "continuation")),
-            // A wake-up carries its own revision, so the boundary must be taken
-            // against the report the nudge actually observed — falling back to a
-            // live re-read here would let a report that changed in between mark
-            // the nudge's turn as if it had not.
-            crate::circuit::stepper::Effect::NudgeIdleAgent {
-                node_id,
-                target_agent_id,
-                ..
-            } if *target_agent_id == agent_node_id => Some((node_id, "nudge")),
-            _ => None,
+        // A wake-up carries its own revision, so the boundary must be taken
+        // against the report the nudge actually observed — falling back to a
+        // live re-read here would let a report that changed in between mark
+        // the nudge's turn as if it had not. Continuation uses the same shape
+        // under its own prefix.
+        let continuation_node = effects.iter().find_map(|effect| {
+            let prefix = effect.delivery_prefix()?;
+            let TurnBoundaryAgent::Named(id) = effect.turn_boundary_agent()? else {
+                return None;
+            };
+            if id != agent_node_id {
+                return None;
+            }
+            effect.step_node_id().map(|node_id| (node_id, prefix))
         });
         let revision = continuation_node
             .and_then(|(id, prefix)| view.context.get(&format!("node.{id}.{prefix}.revision")))
@@ -1719,7 +1678,7 @@ fn run_verification_command(
 /// Find the SpawnAgentNode row whose association owns a CloseAgentNode
 /// target. Explicit targets already name that spawn step; omitted targets
 /// use the same resolved agent as the close effect and find its owning step.
-fn close_target_spawn_step_id(
+pub(super) fn close_target_spawn_step_id(
     view: &RunView,
     close_node_id: &str,
     target_node_id: Option<&str>,
@@ -1748,7 +1707,7 @@ fn close_target_spawn_step_id(
 /// step (and the DB) so later effects in the same pass — and the
 /// observation loop next pass — resolve targets from the view instead of
 /// re-querying SQLite.
-fn continuation_is_current(
+pub(super) fn continuation_is_current(
     view: &RunView,
     node_id: &str,
     target: i64,
@@ -1803,7 +1762,7 @@ fn continuation_is_current_for(
                 .get(&format!("node.{node_id}.{prefix}.revision"))
 }
 
-struct BackgroundWakeEvidence<'a> {
+pub(super) struct BackgroundWakeEvidence<'a> {
     status: SessionStatus,
     alive: bool,
     stamp: Option<&'a str>,
@@ -1813,7 +1772,7 @@ struct BackgroundWakeEvidence<'a> {
     lifecycle_allows_wake: bool,
 }
 
-fn background_wake_is_current(
+pub(super) fn background_wake_is_current(
     view: &RunView,
     node_id: &str,
     target: i64,
@@ -1835,707 +1794,6 @@ fn background_wake_is_current(
             },
             "nudge",
         )
-}
-
-/// Dispatch one `CallGithub` effect. App-free: the recheck lookup and the
-/// idempotent create path use only the DB and the GitHub client, never the
-/// Tauri handle (which unit tests cannot construct — the codebase keeps
-/// `AppHandle` concrete everywhere). `execute_effects` delegates here, so
-/// the deterministic coverage drives the worker's real dispatch wiring
-/// against a controllable endpoint; production passes `None` for the live
-/// client.
-pub(super) fn execute_call_github_effect(
-    active: &db::ActiveCircuitRun,
-    view: &mut RunView,
-    node_id: &str,
-    action: crate::circuit::model::GithubActionKind,
-    label: Option<&str>,
-    comment: Option<&str>,
-    github_client: Option<&crate::services::github::GitHubClient>,
-) -> Result<Vec<CircuitEvent>, String> {
-    use crate::circuit::model::GithubActionKind;
-    let attempt = view.step(node_id).map_or(1, |s| s.attempt);
-    if view.context.get(&format!("node.{node_id}.recheck_only")) == Some("1") {
-        if action == GithubActionKind::OpenPr {
-            let event = match github_client {
-                Some(client) => github::reconcile_open_pr_effect_for_worker_with_client(
-                    active, view, node_id, client,
-                ),
-                None => github::reconcile_open_pr_effect_for_worker(active, view, node_id),
-            };
-            return Ok(vec![event]);
-        }
-        view.context
-            .set(&format!("node.{node_id}.recheck_only"), "0");
-        return Ok(vec![CircuitEvent::EffectUncertain {
-            node_id: node_id.to_string(),
-            attempt,
-            reason: "Read-only external-action recheck is unavailable for this GitHub action."
-                .into(),
-        }]);
-    }
-    let intent = db::circuit::evidence::EffectIntent {
-        node_id: node_id.to_string(),
-        attempt,
-        kind: db::circuit::evidence::EffectKind::Github,
-    };
-    let Some(revision) =
-        db::circuit::evidence::claim_effect(view.run_id, &intent).map_err(|e| e.to_string())?
-    else {
-        return Ok(Vec::new());
-    };
-    view.context.set("evidence.revision", revision.to_string());
-    Ok(vec![github::call_github_effect(
-        active, view, node_id, action, label, comment,
-    )
-    .unwrap_or_else(|reason| CircuitEvent::EffectUncertain {
-        node_id: node_id.to_string(),
-        attempt,
-        reason,
-    })])
-}
-
-/// Apply the worker's dispatch gates to one effect and, while open, dispatch
-/// a `CallGithub` effect through [`execute_call_github_effect`]. App-free.
-/// `execute_effects` delegates its `CallGithub` arm here — re-checking the
-/// same predicates the loop just evaluated, the way the InjectPty arms
-/// re-check the batch mid-effect — so the deterministic coverage drives the
-/// identical gate-then-dispatch composition against a controllable endpoint
-/// instead of reproducing it.
-pub(super) fn gated_dispatch_call_github(
-    batch: &CircuitEffectBatchPermit,
-    run_state: Option<&str>,
-    completing_transition: bool,
-    active: &db::ActiveCircuitRun,
-    view: &mut RunView,
-    effect: &crate::circuit::stepper::Effect,
-    github_client: Option<&crate::services::github::GitHubClient>,
-) -> Result<Vec<CircuitEvent>, String> {
-    use crate::circuit::stepper::Effect;
-    if batch.is_cancelled() {
-        return Ok(Vec::new());
-    }
-    if !run_state.is_some_and(|state| effect_allowed_in_state(state, completing_transition, effect))
-    {
-        return Ok(Vec::new());
-    }
-    match effect {
-        Effect::CallGithub {
-            node_id,
-            action,
-            label,
-            comment,
-        } => execute_call_github_effect(
-            active,
-            view,
-            node_id,
-            *action,
-            label.as_deref(),
-            comment.as_deref(),
-            github_client,
-        ),
-        _ => Ok(Vec::new()),
-    }
-}
-
-/// Drive one GitHub effect through the full worker composition — batch
-/// permit, durable run-state snapshot, gates, dispatch — without the Tauri
-/// handle `execute_effects` requires. Test entry point for the deterministic
-/// cancellation-ordering coverage; production reaches the same gated dispatch
-/// through the loop above. Returns the outcome events plus whether the
-/// batch observed cancellation while in flight (the ordering evidence a
-/// held lookup needs).
-#[cfg(test)]
-pub(super) fn run_github_effect_pass(
-    active: &db::ActiveCircuitRun,
-    view: &mut RunView,
-    effect: &crate::circuit::stepper::Effect,
-    github_client: Option<&crate::services::github::GitHubClient>,
-) -> Result<(Vec<CircuitEvent>, bool), String> {
-    let batch = begin_circuit_effect_batch(active.run.id);
-    let run_state = db::get_circuit_run(active.run.id)
-        .map_err(|e| e.to_string())?
-        .map(|run| run.state);
-    let completing = matches!(view.state, RunState::Completed | RunState::Failed);
-    let outcomes = gated_dispatch_call_github(
-        &batch,
-        run_state.as_deref(),
-        completing,
-        active,
-        view,
-        effect,
-        github_client,
-    )?;
-    Ok((outcomes, batch.is_cancelled()))
-}
-
-pub(super) fn execute_effects(
-    app: &AppHandle,
-    active: &db::ActiveCircuitRun,
-    view: &mut RunView,
-    effects: &[crate::circuit::stepper::Effect],
-) -> Result<Vec<CircuitEvent>, String> {
-    use crate::circuit::stepper::Effect;
-    let mut outcome_events = Vec::new();
-    let effect_batch = begin_circuit_effect_batch(active.run.id);
-    let run_state = db::get_circuit_run(active.run.id)
-        .map_err(|e| e.to_string())?
-        .map(|run| run.state);
-    for effect in effects {
-        if effect_batch.is_cancelled() {
-            tracing::info!(
-                "circuits: cancellation invalidated remaining effects for run {}",
-                active.run.id
-            );
-            return Ok(outcome_events);
-        }
-        let accepts_effect = run_state.as_deref().is_some_and(|state| {
-            effect_allowed_in_state(
-                state,
-                matches!(view.state, RunState::Completed | RunState::Failed),
-                effect,
-            )
-        });
-        if !accepts_effect {
-            tracing::info!(
-                "circuits: stopped effects for terminal/deleted run {}",
-                active.run.id
-            );
-            return Ok(outcome_events);
-        }
-        match effect {
-            Effect::SpawnAgentNode { node_id } => {
-                let attempt = view.step(node_id).map_or(1, |s| s.attempt);
-                let intent = db::circuit::evidence::EffectIntent {
-                    node_id: node_id.clone(),
-                    attempt,
-                    kind: db::circuit::evidence::EffectKind::Spawn,
-                };
-                let Some(revision) = db::circuit::evidence::claim_effect(active.run.id, &intent)
-                    .map_err(|e| e.to_string())?
-                else {
-                    continue;
-                };
-                view.context.set("evidence.revision", revision.to_string());
-                if let Err(error) =
-                    spawn::spawn_step_agent(app, active.run.id, active.run.mesh_id, view, node_id)
-                {
-                    outcome_events.push(CircuitEvent::EffectUncertain { node_id: node_id.clone(), attempt,
-                        reason: format!("Agent dispatch is unverified: {error}. Inspect retained agents before recording an outcome.") });
-                }
-            }
-            Effect::InjectPty {
-                node_id, prompt, ..
-            } => {
-                let requests_result = report_contract::requests_result(view, node_id, prompt);
-                let prompt = report_contract::prompt(view, node_id, prompt);
-                let attempt = view.step(node_id).map_or(1, |s| s.attempt);
-                let intent = db::circuit::evidence::EffectIntent {
-                    node_id: node_id.clone(),
-                    attempt,
-                    kind: db::circuit::evidence::EffectKind::Prompt,
-                };
-                match view.resolve_target_agent(node_id) {
-                    Some(target) => {
-                        // Mirrors `observe`'s agent-existence check: treat
-                        // both "row deleted" AND "row archived" as lost.
-                        // An archived row can't accept a PTY write, and
-                        // returning Err here makes `drive_run` persist
-                        // `status: "failed"` directly via
-                        // `commit_circuit_advance` — no AgentLost event,
-                        // no stepper cascade. That's intentional: the
-                        // stepper only emits AgentLost via observation,
-                        // and a missing target here means the row is
-                        // already gone, so a direct write is honest.
-                        let Some(target_node) = db::get_agent_node_by_id(target)
-                            .ok()
-                            .filter(|n| n.status != SessionStatus::Archived)
-                        else {
-                            let reason = format!(
-                                "target agent {} for step {} was lost before prompt injection",
-                                target, node_id
-                            );
-                            tracing::warn!("circuits: run {}: {}", active.run.id, reason);
-                            return Err(reason);
-                        };
-                        if effect_batch.is_cancelled()
-                            || db::get_circuit_run(active.run.id)
-                                .ok()
-                                .flatten()
-                                .is_none_or(|r| r.state != "running")
-                        {
-                            return Ok(outcome_events);
-                        }
-                        let Some(revision) =
-                            db::circuit::evidence::claim_effect(active.run.id, &intent)
-                                .map_err(|e| e.to_string())?
-                        else {
-                            continue;
-                        };
-                        view.context.set("evidence.revision", revision.to_string());
-                        // The full prompt goes to its handoff file; the terminal
-                        // receives either the same text or a pointer to it. The
-                        // digest and the PTY write both use what is delivered.
-                        let staged = crate::circuit::handoff::stage_prompt(
-                            active.run.id,
-                            node_id,
-                            attempt,
-                            target_node.env,
-                            &prompt,
-                            requests_result,
-                        );
-                        let prepared = crate::circuit::delivery::PreparedPrompt::prepare(
-                            target,
-                            &staged.delivered,
-                        )?;
-                        crate::circuit::handoff::set_agent_turn(
-                            active.run.id,
-                            target,
-                            staged.turn.as_ref(),
-                        );
-                        // Record the submission before the PTY write. Claude
-                        // echoes the prompt back within milliseconds of Enter,
-                        // and that echo only proves *this* submission if the
-                        // record already exists when the hook is handled
-                        // (issue #1898).
-                        match db::circuit::evidence::record_prompt_submission(
-                            active.run.id,
-                            node_id,
-                            attempt,
-                            &prepared,
-                        ) {
-                            Ok(revision) => {
-                                view.context.set("evidence.revision", revision.to_string())
-                            }
-                            Err(error) => {
-                                tracing::warn!(
-                                    "circuits: run {}: could not record prompt submission: {}",
-                                    active.run.id,
-                                    error
-                                );
-                                outcome_events.push(CircuitEvent::EffectUncertain { node_id: node_id.clone(), attempt, reason: format!("Prompt submission could not be recorded for correlation: {error}") });
-                                continue;
-                            }
-                        }
-                        crate::circuit::evaluator::note_turn_start(target);
-                        let delivered = dispatch_prompt_and_acknowledge(
-                            || {
-                                let input = crate::agent::process::PROCESS_REGISTRY
-                                    .input_stamp(target)
-                                    .ok_or(
-                                        "Terminal input is already owned; prompt was not sent",
-                                    )?;
-                                crate::circuit::delivery::write_prompt_to_pty_guarded(
-                                    &crate::agent::process::PROCESS_REGISTRY,
-                                    &prepared,
-                                    app,
-                                    Some(&input),
-                                )
-                            },
-                            || {
-                                db::circuit::evidence::acknowledge_prompt_delivery(active.run.id, node_id, attempt)
-                                .map_err(|error| format!("Prompt was submitted but acknowledgement could not be recorded: {error}"))
-                            },
-                        );
-                        match delivered {
-                            Ok(Some(revision)) => {
-                                view.context.set("evidence.revision", revision.to_string())
-                            }
-                            Ok(None) => continue,
-                            Err(error) => {
-                                outcome_events.push(CircuitEvent::EffectUncertain {
-                                    node_id: node_id.clone(),
-                                    attempt,
-                                    reason: format!("Prompt delivery is unverified: {error}"),
-                                });
-                                continue;
-                            }
-                        }
-                        let _ = db::update_agent_node_status(target, SessionStatus::Running);
-                        outcome_events.push(CircuitEvent::PromptDelivered {
-                            node_id: node_id.clone(),
-                            attempt,
-                        });
-                        tracing::info!(
-                            "circuits: injected prompt into agent {} for run {}",
-                            target,
-                            active.run.id
-                        );
-                    }
-                    None => {
-                        return Err(format!(
-                            "circuits: run {} had no piloted agent in lineage to inject into (node {})",
-                            active.run.id,
-                            node_id
-                        ));
-                    }
-                }
-            }
-            Effect::ContinueAgentTurn {
-                node_id,
-                target_agent_id,
-                prompt,
-            } => {
-                let key = format!("node.{node_id}.continuation.delivery");
-                if view.context.get(&key) != Some("claimed") {
-                    continue;
-                }
-                let node = db::get_agent_node_by_id(*target_agent_id).map_err(|e| e.to_string())?;
-                let stamp = db::agent_turn_stamp(*target_agent_id).map_err(|e| e.to_string())?;
-                let revision =
-                    crate::coordinator::enrichment::assistant_report(&node).map(|r| r.revision);
-                let valid = continuation_is_current(
-                    view,
-                    node_id,
-                    *target_agent_id,
-                    node.status,
-                    crate::agent::process::PROCESS_REGISTRY.is_alive(target_agent_id),
-                    stamp.as_deref(),
-                    revision.as_deref(),
-                );
-                if !valid {
-                    outcome_events.push(CircuitEvent::ContinuationObsolete {
-                        node_id: node_id.clone(),
-                        attempt: view
-                            .step(node_id)
-                            .map(|step| step.attempt)
-                            .unwrap_or_default(),
-                    });
-                    continue;
-                }
-                if effect_batch.is_cancelled()
-                    || db::get_circuit_run(active.run.id)
-                        .ok()
-                        .flatten()
-                        .is_none_or(|r| r.state != "running")
-                {
-                    return Ok(outcome_events);
-                }
-                let expected = view
-                    .context
-                    .get(&format!("node.{node_id}.continuation.input"))
-                    .ok_or_else(|| "Continuation lacks an input ownership stamp".to_string())?;
-                // The agent may owe a result file from an earlier turn. Archive it so the
-                // continuation cannot be judged from that stale report.
-                let prompt = crate::circuit::handoff::prepare_continuation(
-                    active.run.id,
-                    *target_agent_id,
-                    node.env,
-                    prompt,
-                );
-                let prepared =
-                    crate::circuit::delivery::PreparedPrompt::prepare(*target_agent_id, &prompt)?;
-                match crate::circuit::delivery::write_prompt_to_pty_guarded(
-                    &crate::agent::process::PROCESS_REGISTRY,
-                    &prepared,
-                    app,
-                    Some(expected),
-                ) {
-                    Ok(true) => {
-                        let _ =
-                            db::update_agent_node_status(*target_agent_id, SessionStatus::Running);
-                        outcome_events.push(CircuitEvent::ContinuationDelivered {
-                            node_id: node_id.clone(),
-                            attempt: view
-                                .step(node_id)
-                                .map(|step| step.attempt)
-                                .unwrap_or_default(),
-                        });
-                    }
-                    Ok(false) => outcome_events.push(CircuitEvent::ContinuationObsolete {
-                        node_id: node_id.clone(),
-                        attempt: view
-                            .step(node_id)
-                            .map(|step| step.attempt)
-                            .unwrap_or_default(),
-                    }),
-                    Err(error) => {
-                        crate::commands::attention::mark_attention(*target_agent_id, app);
-                        outcome_events.push(CircuitEvent::ContinuationUncertain {
-                            node_id: node_id.clone(),
-                            attempt: view
-                                .step(node_id)
-                                .map(|step| step.attempt)
-                                .unwrap_or_default(),
-                            error,
-                        });
-                    }
-                }
-            }
-            Effect::NudgeIdleAgent {
-                node_id,
-                target_agent_id,
-                prompt,
-            } => {
-                let key = format!("node.{node_id}.nudge.delivery");
-                if view.context.get(&key) != Some("claimed") {
-                    continue;
-                }
-                let node = db::get_agent_node_by_id(*target_agent_id).map_err(|e| e.to_string())?;
-                // Re-read native completion before the identity/status fences:
-                // an agent may have resumed since observation claimed the wake.
-                let task_id = observation::stalled_background_task(&node);
-                let node = db::get_agent_node_by_id(*target_agent_id).map_err(|e| e.to_string())?;
-                let stamp = db::agent_turn_stamp(*target_agent_id).map_err(|e| e.to_string())?;
-                let revision =
-                    crate::coordinator::enrichment::assistant_report(&node).map(|r| r.revision);
-                let attempt = view
-                    .step(node_id)
-                    .map(|step| step.attempt)
-                    .unwrap_or_default();
-                // The wake-up is only worth sending to the turn that was
-                // observed as stalled. Reuse the continuation fence, bound to
-                // this nudge's own claim keys: a turn that has since moved on
-                // needs nothing.
-                let valid = background_wake_is_current(view, node_id, *target_agent_id, BackgroundWakeEvidence {
-                    status: node.status,
-                    alive: crate::agent::process::PROCESS_REGISTRY.is_alive(target_agent_id),
-                    stamp: stamp.as_deref(), revision: revision.as_deref(),
-                    quiet_ms: crate::circuit::evaluator::millis_since_last_output(*target_agent_id),
-                    task_id: task_id.as_deref(),
-                    lifecycle_allows_wake: matches!(db::agent_node::circuit_lifecycle_blocker(*target_agent_id),
-                        Ok(None | Some(crate::circuit::observation::CircuitObservationBlocker::KnownWorkOutstanding))),
-                });
-                if !valid {
-                    outcome_events.push(CircuitEvent::NudgeObsolete {
-                        node_id: node_id.clone(),
-                        attempt,
-                    });
-                    continue;
-                }
-                if effect_batch.is_cancelled()
-                    || db::get_circuit_run(active.run.id)
-                        .ok()
-                        .flatten()
-                        .is_none_or(|r| r.state != "running")
-                {
-                    return Ok(outcome_events);
-                }
-                let expected = view
-                    .context
-                    .get(&format!("node.{node_id}.nudge.input"))
-                    .ok_or_else(|| "Wake-up lacks an input ownership stamp".to_string())?;
-                let prepared =
-                    crate::circuit::delivery::PreparedPrompt::prepare(*target_agent_id, prompt)?;
-                // The nudge is a real prompt submission, so it is recorded the
-                // same way an injected one is: the receipt it may produce has to
-                // bind to a submission Buildmesh itself made.
-                if let Err(error) = db::circuit::evidence::record_prompt_submission(
-                    active.run.id,
-                    node_id,
-                    attempt,
-                    &prepared,
-                ) {
-                    tracing::warn!(
-                        "circuits: run {}: could not record wake-up submission: {}",
-                        active.run.id,
-                        error
-                    );
-                    outcome_events.push(CircuitEvent::NudgeUncertain {
-                        node_id: node_id.clone(),
-                        attempt,
-                        error: format!(
-                            "Wake-up submission could not be recorded for correlation: {error}"
-                        ),
-                    });
-                    continue;
-                }
-                match crate::circuit::delivery::write_prompt_to_pty_guarded(
-                    &crate::agent::process::PROCESS_REGISTRY,
-                    &prepared,
-                    app,
-                    Some(expected),
-                ) {
-                    Ok(true) => {
-                        let _ =
-                            db::update_agent_node_status(*target_agent_id, SessionStatus::Running);
-                        outcome_events.push(CircuitEvent::NudgeDelivered {
-                            node_id: node_id.clone(),
-                            attempt,
-                        });
-                    }
-                    Ok(false) => outcome_events.push(CircuitEvent::NudgeObsolete {
-                        node_id: node_id.clone(),
-                        attempt,
-                    }),
-                    Err(error) => {
-                        crate::commands::attention::mark_attention(*target_agent_id, app);
-                        outcome_events.push(CircuitEvent::NudgeUncertain {
-                            node_id: node_id.clone(),
-                            attempt,
-                            error,
-                        });
-                    }
-                }
-            }
-            Effect::SetNodeStatus { .. } => {
-                // persist_transition commits this local SQLite mutation with
-                // the completed step, closing the crash gap before dispatch.
-            }
-            Effect::CloseAgentNode {
-                node_id,
-                target_node_id,
-            } => {
-                let target = view.resolve_target_agent(node_id).ok_or_else(|| {
-                    format!(
-                        "CloseAgentNode target agent not found in lineage for node {}",
-                        node_id
-                    )
-                })?;
-                // Closing is intentionally idempotent.  A previous worker
-                // pass may have killed/deleted the row after committing the
-                // close step but before the effect was retried.
-                match db::get_agent_node_by_id(target) {
-                    Ok(_) => {
-                        // An agent no step identifies as a helper is treated as
-                        // the user's work, the safer reading. A failed DB read
-                        // here is the safer reading too: leave the agent open
-                        // and let the next sweep retry.
-                        let is_helper = match db::circuit::agent_is_circuit_helper(target) {
-                            Ok(value) => value,
-                            Err(error) => {
-                                tracing::warn!(
-                                    "circuits: run {} could not read helper status for agent {}: {}; leaving the node open",
-                                    active.run.id,
-                                    target,
-                                    error
-                                );
-                                false
-                            }
-                        };
-                        // Helpers are always closed without inspecting their
-                        // worktree. For the implementation agent, a failed
-                        // worktree inspection is reported as having changes so
-                        // the node stays open until a person looks at it.
-                        let mut safety = crate::git::worktree::WorktreeCloseSafety {
-                            worktree_path: None,
-                            has_uncommitted: false,
-                            has_unpushed: false,
-                            is_detached: false,
-                        };
-                        if !is_helper {
-                            match crate::services::agent_node::get_worktree_close_safety(target) {
-                                Ok(s) => safety = s,
-                                Err(error) => {
-                                    tracing::warn!(
-                                        "circuits: run {} could not inspect the worktree of agent {}: {}; leaving the node open",
-                                        active.run.id,
-                                        target,
-                                        error
-                                    );
-                                    safety.has_uncommitted = true;
-                                }
-                            }
-                        }
-                        if let Some(reason) = close_blocker(is_helper, &safety) {
-                            tracing::warn!(
-                                "circuits: run {} left agent {} open instead of closing it: {}",
-                                active.run.id,
-                                target,
-                                reason
-                            );
-                            let _ = app.emit(
-                                "circuit-notification",
-                                CircuitNotificationPayload {
-                                    run_id: active.run.id,
-                                    message: format!(
-                                        "The implementation agent was left open instead of being closed: {reason}."
-                                    ),
-                                    severity: "warning".into(),
-                                },
-                            );
-                        } else {
-                            crate::services::agent_node::delete(target, true)
-                                .map_err(|e| format!("agent node close failed: {}", e))?;
-                        }
-                    }
-                    Err(rusqlite::Error::QueryReturnedNoRows) => {}
-                    Err(e) => {
-                        return Err(format!("agent node lookup failed during close: {}", e));
-                    }
-                }
-                let spawn_step_id =
-                    close_target_spawn_step_id(view, node_id, target_node_id.as_deref(), target);
-                db::clear_circuit_step_agent_node(active.run.id, &spawn_step_id)
-                    .map_err(|e| format!("circuit close association cleanup failed: {}", e))?;
-                if let Some(step) = view.step_mut(&spawn_step_id) {
-                    step.agent_node_id = None;
-                }
-            }
-            Effect::Notify { message } => {
-                let _ = app.emit(
-                    "circuit-notification",
-                    CircuitNotificationPayload {
-                        run_id: active.run.id,
-                        message: message.clone(),
-                        severity: notification_severity(message),
-                    },
-                );
-            }
-            Effect::CallGithub {
-                node_id, action, ..
-            } => {
-                let outcomes = gated_dispatch_call_github(
-                    &effect_batch,
-                    run_state.as_deref(),
-                    matches!(view.state, RunState::Completed | RunState::Failed),
-                    active,
-                    view,
-                    effect,
-                    None,
-                )?;
-                let pr_is_available = *action == crate::circuit::model::GithubActionKind::OpenPr
-                    && outcomes.iter().any(|event| {
-                        matches!(
-                            event,
-                            CircuitEvent::GithubActionResult {
-                                success: true,
-                                pr_number: Some(_),
-                                ..
-                            }
-                        )
-                    });
-                if pr_is_available {
-                    if let Some(agent_node_id) = view.resolve_target_agent(node_id) {
-                        let _ = app.emit(
-                            "circuit-pr-ready",
-                            CircuitPrReadyPayload {
-                                run_id: active.run.id,
-                                node_id: agent_node_id,
-                            },
-                        );
-                    }
-                }
-                outcome_events.extend(outcomes);
-            }
-        }
-    }
-    Ok(outcome_events)
-}
-
-/// Cancellation commits the terminal run state before retiring external
-/// resources. The transition's effects take one durable-state snapshot before
-/// execution and check an in-memory cancellation token before each effect;
-/// terminal transitions retain only their synchronous cleanup and notification
-/// effects, while InjectPty is never allowed after completion.
-fn effect_allowed_in_state(
-    state: &str,
-    completing_transition: bool,
-    effect: &crate::circuit::stepper::Effect,
-) -> bool {
-    use crate::circuit::stepper::Effect;
-    RunState::is_live_db_str(state)
-        // Synchronous terminal actions are emitted by the same transition
-        // that completes the run, and must survive its commit-before-effects.
-        // InjectPty is intentionally absent: it starts new work after the
-        // run has durably finished and would leave an untracked command.
-        // A DB state of "cancelled" blocks everything even when the
-        // in-memory transition is completing: cancellation wins over a
-        // concurrently-computed completion, whose Notify would otherwise
-        // fire about a run the user just cancelled. Cancellation cleanup
-        // runs through the lease/retire path, not stepper effects.
-        || (matches!(state, s if s == RunState::Completed.as_db_str() || s == RunState::Failed.as_db_str()) && completing_transition && matches!(effect,
-            Effect::Notify { .. } | Effect::SetNodeStatus { .. } | Effect::CloseAgentNode { .. }))
 }
 
 pub(super) fn run_accepts_effects(run_id: i64) -> Result<bool, String> {
@@ -2682,7 +1940,7 @@ pub struct CircuitNotificationPayload {
     pub severity: String,
 }
 
-fn notification_severity(message: &str) -> String {
+pub(super) fn notification_severity(message: &str) -> String {
     let lower = message.to_ascii_lowercase();
     if lower.contains("not approved")
         || lower.contains("not been approved")
