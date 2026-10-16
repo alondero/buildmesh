@@ -19,9 +19,9 @@
 //! which can't trust a WSL path; the WSL guest's own `~/.claude/settings.json`
 //! is a separate concern that lives in the WSL env.
 
+use crate::agent::managed_config;
 use crate::env::ResolvedPath;
 use crate::models::EnvType;
-use std::io;
 use std::path::{Path, PathBuf};
 
 /// Relative paths under `$HOME` whose `trustedWorkspaces` array we manage.
@@ -88,19 +88,23 @@ fn home_dir() -> Option<PathBuf> {
 /// `trustedWorkspaces` value is a non-array (e.g. a string), we refuse to
 /// overwrite it and log a warning — better to be loud than to silently
 /// destroy user data.
+///
+/// The read and the write are the shared `managed_config` ones, so a file
+/// that cannot be parsed is logged with the same refusal wording every other
+/// harness uses. Pre-trusting a worktree is best-effort: a failure is logged
+/// and the spawn continues, so none of these paths return an error.
 fn update_settings_file(path: &Path, label: &str, project_path: &str) {
     if !path.exists() {
         return;
     }
-    let original = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(_) => return,
+    let mut document = match managed_config::read_document(path) {
+        Ok(document) => document,
+        Err(error) => {
+            tracing::warn!("ensure_trusted: {}: {error}", label);
+            return;
+        }
     };
-    let mut settings: serde_json::Value = match serde_json::from_str(&original) {
-        Ok(v) => v,
-        Err(_) => return,
-    };
-    let arr = match trusted_workspaces_array(&mut settings) {
+    let arr = match trusted_workspaces_array(&mut document.root) {
         Some(arr) => arr,
         None => {
             tracing::warn!(
@@ -118,19 +122,14 @@ fn update_settings_file(path: &Path, label: &str, project_path: &str) {
     arr.push(serde_json::Value::String(normalized.clone()));
     tracing::info!("ensure_trusted: added {:?} to {}", normalized, label);
 
-    let body = match serde_json::to_string_pretty(&settings) {
+    let body = match document.to_pretty_json() {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!("ensure_trusted: serialize {} failed: {}", label, e);
             return;
         }
     };
-    let with_newline = if original.ends_with('\n') && !body.ends_with('\n') {
-        format!("{}\n", body)
-    } else {
-        body
-    };
-    if let Err(e) = atomic_write(path, &with_newline) {
+    if let Err(e) = managed_config::atomic_write(path, &body) {
         tracing::warn!("ensure_trusted: write {} failed: {}", label, e);
     }
 }
@@ -178,21 +177,6 @@ fn matches_existing(existing: &serde_json::Value, candidate: &str) -> bool {
     } else {
         s == candidate
     }
-}
-
-/// Write via a sibling temp file + rename. `std::fs::rename` on Windows uses
-/// `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` and is atomic for same-volume
-/// NTFS — so two concurrent spawns can't lose a path or see a half-written
-/// file. On a rename failure the `.tmp` file is cleaned up and the caller
-/// surfaces a `warn!`.
-fn atomic_write(path: &Path, content: &str) -> io::Result<()> {
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, content)?;
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -418,14 +402,29 @@ mod tests {
         assert_eq!(body, "{}");
     }
 
+    /// The shared writer names its temp file `<name>.<pid>.<counter>.tmp`,
+    /// so pinning a literal `settings.json.tmp` would assert nothing. Scan for
+    /// any `.tmp` left in the harness directory instead.
     #[test]
     fn atomic_write_leaves_no_tmp_residue_on_success() {
         let home = TempDir::new().unwrap();
         write_file(home.path(), ".claude/settings.json", "{}");
         drive(home.path(), &windows_resolved("C:/work/proj"));
 
-        let tmp = home.path().join(".claude/settings.json.tmp");
-        assert!(!tmp.exists(), "tmp file leaked: {:?}", tmp);
+        let residue: Vec<_> = fs::read_dir(home.path().join(".claude"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(residue.is_empty(), "tmp file leaked: {residue:?}");
+        assert_eq!(
+            fs::read_to_string(home.path().join(".claude/settings.json")).unwrap(),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "trustedWorkspaces": ["C:\\work\\proj"]
+            }))
+            .unwrap(),
+            "the trust entry must have been written"
+        );
     }
 
     #[test]

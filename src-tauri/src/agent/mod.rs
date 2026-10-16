@@ -11,6 +11,9 @@
 //! - `provider_menu.rs` — Spawn Menu composition (`compose_provider_menu`,
 //!   `order_providers`, `order_proxied_children`, `available_providers`,
 //!   `list_providers` Tauri command)
+//! - `launch.rs` — routing a launch request to the orchestrator
+//! - `managed_config.rs` — the one place a harness config document is read,
+//!   merged and atomically rewritten (issue #2235)
 //! - `sandbox.rs` — macOS Seatbelt profile generation + `sandbox-exec` wrapping
 //! - `session_lifecycle.rs` — single owner of state transitions (issue #132)
 //! - `spawn.rs` — `spawn_agent_inner` coordinates prepare / provision /
@@ -27,6 +30,7 @@ pub mod harness_catalog;
 pub(crate) mod hook_state;
 pub mod launch;
 pub mod launch_routing;
+pub(crate) mod managed_config;
 pub(crate) mod node_teardown;
 pub mod output;
 pub mod process;

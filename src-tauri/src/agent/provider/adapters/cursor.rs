@@ -35,15 +35,18 @@
 use crate::agent::capabilities::{
     AttentionCapability, AttentionLaunchMode, PermissionModeOption, PERMISSION_MODE_UNATTENDED,
 };
+use crate::agent::managed_config;
 use crate::agent::provider::{
-    AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell,
+    shell_for, AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta,
 };
+// The recipe tests assert the shell each platform produces; nothing outside
+// `cfg(test)` names the type now that `shell_for` is shared.
+#[cfg(test)]
+use crate::agent::provider::WindowsShell;
 use crate::agent::session_lifecycle::LifecycleKind;
 use crate::env::ResolvedPath;
 use crate::models::EnvType;
-use std::io::Write;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct CursorAdapter;
 pub static CURSOR: CursorAdapter = CursorAdapter;
@@ -60,18 +63,6 @@ pub static CURSOR: CursorAdapter = CursorAdapter;
 /// semver through the hook surface.
 pub const CURSOR_MIN_HOOK_VERSION: &str = "1.0.0";
 
-/// Counter backing the PID+counter `.tmp` suffix for atomic writes
-/// (`agy.rs:14-39`). Same pattern as AGY: two concurrent writes in the
-/// same process would otherwise collide on a fixed tmp name.
-static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn shell_for(platform: Platform) -> WindowsShell {
-    match platform {
-        Platform::Macos | Platform::Linux => WindowsShell::Direct,
-        Platform::Windows => WindowsShell::Cmd,
-    }
-}
-
 /// Marker substring written into the Buildmesh-owned `stop` handler.
 /// Used by `ensure_hooks_json` to detect a stale Buildmesh entry on
 /// re-provision (issue #886 idempotency invariant): a re-run that finds
@@ -79,6 +70,18 @@ fn shell_for(platform: Platform) -> WindowsShell {
 /// that finds a different Buildmesh entry updates it in place, and a
 /// re-run that finds no Buildmesh entry appends a fresh one.
 const BUILDMESH_HOOK_MARKER: &str = "/api/attention/";
+
+/// Every anchor that must appear in a `stop` handler for it to be ours.
+/// `BUILDMESH_HOOK_MARKER` plus the two per-agent env var names are the
+/// triple `window_attention_command` writes into every handler this adapter
+/// installs; a user handler that merely posts somewhere is not ours to
+/// replace. These markers identify already-provisioned configs, so they must
+/// not drift.
+const BUILDMESH_HOOK_ANCHORS: &[&str] = &[
+    BUILDMESH_HOOK_MARKER,
+    "BUILDMESH_PORT",
+    "BUILDMESH_SESSION_ID",
+];
 
 /// The callback command Cursor's hook runner invokes on `stop`. The runner
 /// forwards stdin JSON (Cursor's `conversation_id` +
@@ -125,58 +128,15 @@ fn hook_command(env_type: EnvType) -> String {
     }
 }
 
-/// Atomically persist `content` to `path` via a PID+counter `.tmp`
-/// file + rename. Mirrors AGY's `atomic_write` (`agy.rs:17-40`) — the
-/// `NamedTempFile::new_in` + `persist` pattern from Codex/Grok is
-/// equivalent but the AGY pattern is the more directly comparable
-/// precedent for a project-local file (no WSL read/write split needed).
-fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
-    let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("hooks.json");
-    let tmp = path.with_file_name(format!(
-        "{}.{}.{}.tmp",
-        file_name,
-        std::process::id(),
-        counter
-    ));
-
-    {
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(content.as_bytes())?;
-        file.sync_all()?;
-    }
-
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        if let Err(rm_err) = std::fs::remove_file(&tmp) {
-            tracing::warn!(
-                "cursor atomic_write: failed to clean up temp file {:?}: {}",
-                tmp,
-                rm_err
-            );
-        }
-        return Err(e);
-    }
-    Ok(())
-}
-
 /// True when `handler` looks like the Buildmesh-owned `stop` entry —
-/// the URL contains our `/api/attention/` marker AND the command carries
-/// the per-agent env var names. Used by `ensure_hooks_json` to upsert
-/// the Buildmesh entry into an event's handler array.
+/// its command carries our attention marker and the per-agent env var
+/// names. Used by `ensure_hooks_json` to upsert the Buildmesh entry into
+/// an event's handler array.
 fn is_buildmesh_handler(handler: &serde_json::Value) -> bool {
     handler
         .get("command")
-        .and_then(|v| v.as_str())
-        .is_some_and(|command| {
-            let decoded = crate::env::decode_powershell_command(command);
-            let command = decoded.as_deref().unwrap_or(command);
-            command.contains(BUILDMESH_HOOK_MARKER)
-                && command.contains("BUILDMESH_PORT")
-                && command.contains("BUILDMESH_SESSION_ID")
-        })
+        .and_then(|value| value.as_str())
+        .is_some_and(|command| managed_config::carries_anchors(command, BUILDMESH_HOOK_ANCHORS))
 }
 
 /// Add or refresh the Buildmesh-owned `stop` handler in
@@ -190,38 +150,21 @@ fn is_buildmesh_handler(handler: &serde_json::Value) -> bool {
 ///
 /// A malformed existing file (trailing comma, partial edit, syntax
 /// error) is treated as an explicit `Err` rather than silently clobbered
-/// with `{}` — the Grok precedent (`grok.rs:222-243`) pins the round-2
-/// review fix: a missing file is `{}`, but a present-but-unparseable
-/// file is the user's data and must surface to the spawn path as a
-/// provision failure so the agent user can repair it.
+/// with `{}` — the shared `managed_config::read_document` refusal: a
+/// missing file is `{}`, but a present-but-unparseable file is the user's
+/// data and must surface to the spawn path as a provision failure so the
+/// agent user can repair it.
 fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
-    let mut settings: serde_json::Value = match std::fs::read_to_string(path) {
-        Ok(content) => serde_json::from_str(&content).map_err(|e| {
-            format!(
-                "refusing to overwrite malformed {path:?}: {e}. \
-                 Repair or remove the file and retry"
-            )
-        })?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
-        Err(e) => return Err(format!("failed to read {path:?}: {e}")),
-    };
-    if !settings.is_object() {
-        // A valid JSON top-level that isn't an object (e.g. an array,
-        // a string, a number, `null`) is a misconfiguration — refuse
-        // to clobber the user's payload with `{}`. Mirrors the
-        // `codex.rs:941` "must be an object" rejection.
-        return Err(format!(
-            "cursor hooks.json top-level must be a JSON object; got {}",
-            settings_kind(&settings)
-        ));
-    }
+    let mut document = managed_config::read_document(path).map_err(|error| error.to_string())?;
+    let settings = managed_config::root_object(&mut document, "cursor hooks.json top-level")?;
     // Cursor's documented shape requires `"version": 1` at the root.
     // We don't write anything other than `1` — a user with a future
     // major-version file would surface that here as an explicit
     // overwrite rather than silently coercing it.
     match settings.get("version") {
+        // `Map`'s `Index` panics on a missing key, so insert through the map.
         None => {
-            settings["version"] = serde_json::json!(1);
+            settings.insert("version".to_string(), serde_json::json!(1));
         }
         Some(v) if v == &serde_json::json!(1) => {}
         Some(other) => {
@@ -230,61 +173,22 @@ fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
             ));
         }
     }
-    if settings.get("hooks").is_none() {
-        settings["hooks"] = serde_json::json!({});
-    }
-    let hooks = settings.get_mut("hooks").expect("hooks key inserted above");
-    if !hooks.is_object() {
-        return Err(format!(
-            "cursor hooks.json `hooks` must be a JSON object; got {}",
-            settings_kind(hooks)
-        ));
-    }
-    if hooks.get("stop").is_none() {
-        hooks["stop"] = serde_json::json!([]);
-    }
-    let stop = hooks.get_mut("stop").expect("stop key inserted above");
-    if !stop.is_array() {
-        return Err(format!(
-            "cursor hooks.json `hooks.stop` must be an array; got {}",
-            settings_kind(stop)
-        ));
-    }
-    let stop_array = stop.as_array_mut().expect("verified is_array above");
+    let stop_array = managed_config::array_entry(
+        managed_config::object_entry(settings, "hooks", "cursor hooks.json `hooks`")?,
+        "stop",
+        "cursor hooks.json `hooks.stop`",
+    )?;
     let new_handler = serde_json::json!({ "command": command });
-    let mut changed = false;
-    if let Some(existing) = stop_array.iter_mut().find(|h| is_buildmesh_handler(h)) {
-        if *existing != new_handler {
-            *existing = new_handler;
-            changed = true;
-        }
-    } else {
-        stop_array.push(new_handler);
-        changed = true;
-    }
-    if !changed {
+    if !managed_config::upsert_entry(stop_array, &is_buildmesh_handler, &new_handler) {
         return Ok(());
     }
-    let content = serde_json::to_string_pretty(&settings)
+    let content = document
+        .to_pretty_json()
         .map_err(|e| format!("serialize hooks.json failed: {e}"))?;
-    atomic_write(path, &content).map_err(|e| format!("failed to write hooks.json: {e}"))?;
+    managed_config::atomic_write(path, &content)
+        .map_err(|e| format!("failed to write hooks.json: {e}"))?;
     tracing::info!("cursor provision_attention_hooks: wrote {:?}", path);
     Ok(())
-}
-
-/// Human-readable JSON kind tag for error messages. Mirrors
-/// `grok.rs:146-155` — distinguishes `Object`, `Array`, `String`,
-/// `Number`, `Boolean`, `Null` so the malformed-file rejection names
-/// the actual shape rather than `serde_json::Value`.
-fn settings_kind(value: &serde_json::Value) -> &'static str {
-    match value {
-        serde_json::Value::Object(_) => "Object",
-        serde_json::Value::Array(_) => "Array",
-        serde_json::Value::String(_) => "String",
-        serde_json::Value::Number(_) => "Number",
-        serde_json::Value::Bool(_) => "Boolean",
-        serde_json::Value::Null => "Null",
-    }
 }
 
 impl AgentProvider for CursorAdapter {

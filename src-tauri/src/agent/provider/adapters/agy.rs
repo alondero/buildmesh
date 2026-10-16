@@ -1,6 +1,7 @@
 use crate::agent::capabilities::{
     EffortControlKind, PermissionModeOption, PERMISSION_MODE_UNATTENDED,
 };
+use crate::agent::managed_config;
 use crate::agent::provider::{
     AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell,
 };
@@ -12,47 +13,8 @@ use crate::env::ResolvedPath;
 use crate::models::EnvType;
 use std::path::Path;
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
 pub struct AgyAdapter;
 pub static AGY: AgyAdapter = AgyAdapter;
-
-static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Write content to path atomically using a unique PID+counter .tmp file,
-/// fsync for durability, and atomic rename.
-fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
-    let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("hooks.json");
-    let tmp = path.with_file_name(format!(
-        "{}.{}.{}.tmp",
-        file_name,
-        std::process::id(),
-        counter
-    ));
-
-    {
-        use std::io::Write;
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(content.as_bytes())?;
-        file.sync_all()?;
-    }
-
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        if let Err(rm_err) = std::fs::remove_file(&tmp) {
-            tracing::warn!(
-                "atomic_write: failed to clean up temp file {:?}: {}",
-                tmp,
-                rm_err
-            );
-        }
-        return Err(e);
-    }
-    Ok(())
-}
 
 /// The callback command Antigravity (agy) lifecycle hooks run. AGY pipes
 /// the hook's stdin JSON — `{conversationId, transcriptPath, fullyIdle,
@@ -139,23 +101,23 @@ fn ensure_hooks_json(
     command: &str,
     question: Option<(&str, &str)>,
 ) -> Result<(), String> {
-    let mut settings: serde_json::Value = match std::fs::read_to_string(path) {
-        Ok(content) => serde_json::from_str(&content)
-            .map_err(|e| format!("invalid agy hooks.json at {}: {e}", path.display()))?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
-        Err(e) => {
+    let mut document = match managed_config::read_document(path) {
+        Ok(document) => document,
+        // A file that is readable but not JSON is the user's to repair, and
+        // every harness now answers that one case the same way.
+        Err(error) if error.is_malformed() => return Err(error.to_string()),
+        // A file Buildmesh could not read at all — a directory in the target's
+        // place, or bytes that are not UTF-8 — is a different failure, and AGY
+        // names its own file in it.
+        Err(error) => {
             return Err(format!(
-                "failed to read agy hooks.json at {}: {e}",
-                path.display()
+                "failed to read agy hooks.json at {}: {}",
+                path.display(),
+                error.reason()
             ))
         }
     };
-    if !settings.is_object() {
-        return Err(format!(
-            "agy hooks.json at {} must be a JSON object",
-            path.display()
-        ));
-    }
+    managed_config::root_object(&mut document, "agy hooks.json top-level")?;
 
     // Stop fires the moment a turn ends. The simple shape — AGY's harness
     // doesn't need a matcher (no tool name to filter on; the whole turn
@@ -173,13 +135,15 @@ fn ensure_hooks_json(
         expected["PreToolUse"] = scoped(pre);
         expected["PostToolUse"] = scoped(post);
     }
-    if settings.get("buildmesh-attention") == Some(&expected) {
+    if document.root.get("buildmesh-attention") == Some(&expected) {
         return Ok(());
     }
-    settings["buildmesh-attention"] = expected;
-    let content = serde_json::to_string_pretty(&settings)
+    document.root["buildmesh-attention"] = expected;
+    let content = document
+        .to_pretty_json()
         .map_err(|e| format!("serialize hooks.json failed: {e}"))?;
-    atomic_write(path, &content).map_err(|e| format!("failed to write hooks.json: {e}"))?;
+    managed_config::atomic_write(path, &content)
+        .map_err(|e| format!("failed to write hooks.json: {e}"))?;
     tracing::info!("agy provision_attention_hooks: wrote {:?}", path);
     Ok(())
 }

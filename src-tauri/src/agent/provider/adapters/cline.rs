@@ -75,13 +75,17 @@
 //! deliberately not surfaced by this reader: it must never be presented as an
 //! account-level quota.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::agent::capabilities::{AttentionCapability, AttentionLaunchMode, EffortControlKind};
+use crate::agent::managed_config;
 use crate::agent::provider::{
-    AgentProvider, LaunchRuntime, Platform, ResolvedPath, SpawnRecipe, UiMeta, WindowsShell,
+    shell_for, AgentProvider, LaunchRuntime, Platform, ResolvedPath, SpawnRecipe, UiMeta,
 };
+// The recipe tests assert the shell each platform produces; nothing outside
+// `cfg(test)` names the type now that `shell_for` is shared.
+#[cfg(test)]
+use crate::agent::provider::WindowsShell;
 use crate::agent::session_lifecycle::LifecycleKind;
 use crate::models::EnvType;
 
@@ -100,16 +104,6 @@ pub const CLINE_NEVER_PASS: &[&str] = &[
     "--hooks-dir",
     "--data-dir",
 ];
-
-/// Per-platform shell selection. Mirrors the OpenCode pattern
-/// (`adapters/opencode.rs`): Windows resolves the npm `.cmd` shim through
-/// `cmd.exe`; macOS/Linux spawn the real binary directly.
-fn shell_for(platform: Platform) -> WindowsShell {
-    match platform {
-        Platform::Macos | Platform::Linux => WindowsShell::Direct,
-        Platform::Windows => WindowsShell::Cmd,
-    }
-}
 
 // ── Attention hook provisioning (issue #1775) ───────────────────────────────
 
@@ -244,17 +238,6 @@ fn hooks_dir(resolved: &ResolvedPath, runtime: &LaunchRuntime) -> Option<PathBuf
         .map(|dir| dir.join("hooks"))
 }
 
-/// Atomically persist `content` to `path` via a sibling temp file + rename.
-/// Mirrors `grok.rs:133` / `mcode.rs` — a crash leaves the canonical file
-/// untouched.
-fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
-    tmp.write_all(content.as_bytes())?;
-    tmp.as_file().sync_all()?;
-    tmp.persist(path).map(|_| ()).map_err(|error| error.error)
-}
-
 /// Add or refresh one Buildmesh-owned hook file, idempotently and without ever
 /// clobbering a user-authored file.
 ///
@@ -266,6 +249,11 @@ fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
 ///   so this path is not ours to take silently; surfacing the error lets the
 ///   spawn mark `SignalHealth::Unavailable` instead of destroying the user's
 ///   hook (the mcode / cursor malformed-file precedent).
+///
+/// The hook is a script, not a parsed document, so it has no malformed-document
+/// refusal to share — the ownership marker check below is the whole contract.
+/// Only the write is shared (`managed_config::atomic_write`): a crash leaves the
+/// canonical file untouched.
 fn ensure_hook_file(path: &Path, content: &str) -> Result<(), String> {
     match std::fs::read_to_string(path) {
         Ok(existing) => {
@@ -282,7 +270,7 @@ fn ensure_hook_file(path: &Path, content: &str) -> Result<(), String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(format!("failed to read {path:?}: {error}")),
     }
-    write_atomic(path, content)
+    managed_config::atomic_write(path, content)
         .map_err(|error| format!("failed to write Cline hook {path:?}: {error}"))?;
     tracing::info!("cline provision_attention_hooks: wrote {path:?}");
     Ok(())
@@ -1249,7 +1237,7 @@ mod tests {
 
     /// A Buildmesh-owned file whose content drifted (e.g. provisioned by an
     /// earlier build, or the callback URL changed) is rewritten in place — the
-    /// only path that runs `write_atomic` over an *existing* file, and the one
+    /// the only path that writes over an *existing* file, and the one
     /// the Windows rename-over-existing write depends on.
     #[test]
     fn provision_rewrites_a_drifted_buildmesh_hook_in_place() {
