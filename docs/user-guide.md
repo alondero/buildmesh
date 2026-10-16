@@ -207,10 +207,14 @@ changes.
 
 ## Find agents that need attention
 
-Choose **Attention** in the sidebar to see failed, waiting and suspended nodes
-across repositories. Each row names its repository and offers **Open terminal**
-and, where applicable, **Retry** or **Resume**. Return to **Workspace** to use
-the existing repository and drag order.
+Choose **Attention** in the sidebar to see nodes across repositories, grouped
+into **Failed sessions**, **Needs input**, and **Paused sessions**, in that
+order. Each heading shows its count; empty groups disappear. Cards name the
+repository and show the current question or permission request when the
+harness supplied one. **Open terminal** takes you to that
+session. Failed sessions also offer **Retry**; paused sessions offer **Resume**
+when a saved session identity is available. Return to **Workspace** to use the
+existing repository and drag order.
 
 In **Filtered** view, use the header's **Filters** button for provider, status,
 sort and direction. The count shows matching nodes out of all loaded nodes.

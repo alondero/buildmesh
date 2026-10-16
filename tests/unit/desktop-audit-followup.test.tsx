@@ -327,7 +327,7 @@ describe('October desktop audit follow-up', () => {
     useMeshStore.setState({ selectedMeshId: 1 }); useUIStore.getState().setViewMode(mode);
     useUIStore.getState().setGridSearchQuery('unmatched');
     render(<AttentionList />);
-    fireEvent.click(screen.getByText('Web failure').closest('button')!);
+    fireEvent.click(screen.getByRole('button', { name: 'Open terminal for Web failure' }));
     expect(useMeshStore.getState().selectedMeshId).toBe(2);
     expect(useAgentNodeStore.getState().activeNodeId).toBe(2);
     expect(useUIStore.getState().viewMode).toBe('single');
