@@ -1179,7 +1179,20 @@ pub fn opencode_usage() -> UsageOutcome {
 const AGY_HOST: &str = "https://daily-cloudcode-pa.googleapis.com";
 /// The Antigravity CLI identifies with this User-Agent and the Cloud Code private
 /// API allowlists it. Load-bearing: without it the API returns 403 PERMISSION_DENIED.
-const AGY_USER_AGENT: &str = "antigravity/cli/1.0.3 windows/amd64";
+///
+/// The advertised CLI version is ALSO load-bearing: `retrieveUserQuotaSummary`
+/// gates the "Gemini Models" (weekly + 5-hour) quota group on it. The API still
+/// returns HTTP 200 for an older version, it just silently strips that group —
+/// so the Gemini Usage Meters disappear with no error (regression 2026-10-16: an
+/// `antigravity/cli/1.0.3` UA was served only the "Claude and GPT models" group).
+///
+/// Pin provenance — `1.4.0` is the current published Antigravity CLI version
+/// (`agy --version`), and was exercised live against the real endpoint on
+/// 2026-10-16 varying only this string: `1.1.5` returns only "Claude and GPT
+/// models"; `1.2.0` adds "Gemini Models"; `1.4.0` returns "Gemini Models" too,
+/// plus the newer "Gemini 4 Argon" group. Keep the pin at or above the gate in
+/// `agy_user_agent_meets_gemini_quota_version_gate`.
+const AGY_USER_AGENT: &str = "antigravity/cli/1.4.0 windows/amd64";
 
 // ─── OpenCode Go (live `_server billing.get` probe) ────────────────────────
 //
@@ -1438,7 +1451,11 @@ fn parse_agy_quota_summary(body: &str) -> Result<(Vec<UsageWindow>, Option<Strin
         serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
 
     let mut windows = Vec::new();
+    let mut saw_gemini_group = false;
     for group in resp.groups {
+        if group.display_name.starts_with(GEMINI_DISPLAY_PREFIX) {
+            saw_gemini_group = true;
+        }
         let mut buckets = group.buckets;
         buckets.sort_by_key(|bucket| agy_window_rank(&bucket.window));
         for bucket in buckets {
@@ -1460,7 +1477,21 @@ fn parse_agy_quota_summary(body: &str) -> Result<(Vec<UsageWindow>, Option<Strin
             "retrieveUserQuotaSummary returned no quota buckets".to_string(),
         ));
     }
-    Ok((windows, None))
+    // A below-gate User-Agent is served HTTP 200 with the Gemini group silently
+    // stripped, so the meters just vanish. Keep the surviving windows, but attach
+    // a detail when no Gemini group came back at all, so a re-gate (or a stale
+    // pin) is visible rather than silent — the failure mode this module exists to
+    // avoid.
+    let detail = if saw_gemini_group {
+        None
+    } else {
+        Some(
+            "retrieveUserQuotaSummary returned no Gemini quota group — the API \
+             may require a newer Antigravity CLI User-Agent"
+                .to_string(),
+        )
+    };
+    Ok((windows, detail))
 }
 
 fn agy_quota_summary(
@@ -1828,6 +1859,33 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn parse_agy_quota_summary_flags_a_missing_gemini_group() {
+        // Regression 2026-10-16: a below-gate User-Agent is served HTTP 200 with
+        // the "Gemini Models" group silently stripped, so the Gemini meters
+        // vanish with no error. Keep the surviving windows, but attach a detail
+        // so a re-gate (or a stale pin) is visible instead of silent.
+        let json = r#"{
+            "groups": [
+                {
+                    "displayName": "Claude and GPT models",
+                    "buckets": [
+                        {"bucketId":"3p-5h","window":"5h","remainingFraction":0.5,"resetTime":"2026-10-16T14:03:39Z"}
+                    ]
+                }
+            ]
+        }"#;
+        let (windows, detail) = parse_agy_quota_summary(json).unwrap();
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].label, "Claude and GPT models — 5-hour");
+        assert!(
+            detail
+                .as_deref()
+                .is_some_and(|d| d.contains("no Gemini quota group")),
+            "expected a missing-Gemini detail, got {detail:?}"
+        );
+    }
+
+    #[test]
     fn agy_usage_does_not_spawn_cli() {
         // #1324 spawned `agy --print /usage` (≈6s CLI boot) to reach the weekly
         // Gemini bucket. retrieveUserQuotaSummary is the same payload over HTTP
@@ -1840,6 +1898,41 @@ pub(crate) mod tests {
         assert!(
             !src.contains("\"/usage\""),
             "do not spawn agy --print /usage; call retrieveUserQuotaSummary instead"
+        );
+    }
+
+    #[test]
+    fn agy_user_agent_meets_gemini_quota_version_gate() {
+        // Regression 2026-10-16: `retrieveUserQuotaSummary` gates the
+        // "Gemini Models" (weekly + 5-hour) group on the CLI version advertised
+        // in the User-Agent. An `antigravity/cli/1.0.3` UA still got HTTP 200
+        // but with the Gemini group stripped, so both Gemini Usage Meters
+        // vanished. Bisected live 2026-10-16 varying only the UA: `1.1.5`
+        // returns only "Claude and GPT models", `1.2.0` adds "Gemini Models".
+        // The pin is `1.4.0` — the current `agy --version`, also exercised live
+        // (it additionally returns the "Gemini 4 Argon" group). Guard the pin
+        // against drifting back below the gate.
+        let version_token = AGY_USER_AGENT
+            .strip_prefix("antigravity/cli/")
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("AGY_USER_AGENT must read `antigravity/cli/<major.minor.patch> <os>/<arch>`");
+        let version: Vec<u32> = version_token
+            .split('.')
+            .map(|part| {
+                part.parse()
+                    .unwrap_or_else(|_| panic!("non-numeric version segment in {version_token:?}"))
+            })
+            .collect();
+        assert_eq!(
+            version.len(),
+            3,
+            "AGY_USER_AGENT must advertise a major.minor.patch version, got {version_token:?}"
+        );
+        assert!(
+            (version[0], version[1], version[2]) >= (1, 2, 0),
+            "the quota API returns the Gemini (weekly + 5-hour) group only for \
+             User-Agent cli versions >= 1.2.0, but AGY_USER_AGENT advertises \
+             {version_token:?}; bump the pin"
         );
     }
 
