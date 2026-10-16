@@ -140,7 +140,7 @@ function worktreeFixture() {
 // A long-lived fixture app that binds the ports the launcher assigned it. The
 // ports are held before it reports ready, so a second worktree's probe meets a
 // real listener rather than an assumption.
-function stubApp(dir, dataRoot) {
+function stubApp(dir, dataRoot, extraEnv = {}) {
   const binaryDir = join(dir, 'src-tauri', 'target', 'release-dev', 'release');
   mkdirSync(binaryDir, { recursive: true });
   const envPath = join(dir, 'launch-env.json');
@@ -175,10 +175,13 @@ Promise.all(listening).then(bound => {
     const binary = join(binaryDir, 'buildmesh-dev.exe');
     if (!existsSync(binary)) copyFileSync(process.execPath, binary);
     // Build stubbed at the npm boundary; Start-Process/Get-Process adapted so the
-    // console fixture does not open a visible window.
+    // console fixture does not open a visible window. Get-Process answers BOTH
+    // -Id and -Name: the launcher's name sweep is how it finds an instance whose
+    // ownership record was lost, so a mock that silently dropped -Name would
+    // leave that path untested.
     const wrapper = join(dir, 'launch.ps1');
     const quote = value => `'${value.replaceAll("'", "''")}'`;
-    writeFileSync(wrapper, `function npm { $global:LASTEXITCODE = 0 }\nfunction Get-Process { param($Name, $Id) if ($Id) { Microsoft.PowerShell.Management\\Get-Process -Id $Id -ErrorAction SilentlyContinue } }\nfunction Start-Process { param($FilePath, [switch]$PassThru, $WindowStyle) if ($WindowStyle -eq 'Hidden') { throw 'Dev GUI visibility must not be forced hidden' }; Microsoft.PowerShell.Management\\Start-Process -FilePath $FilePath -PassThru:$PassThru -WindowStyle Hidden }\n& ${quote(join(dir, 'scripts', 'run-dev.ps1'))} -Detach -ReadinessTimeoutSeconds 8\nexit $LASTEXITCODE\n`);
+    writeFileSync(wrapper, `function npm { $global:LASTEXITCODE = 0 }\nfunction Get-Process { param($Name, $Id) if ($Id) { Microsoft.PowerShell.Management\\Get-Process -Id $Id -ErrorAction SilentlyContinue } elseif ($Name) { Microsoft.PowerShell.Management\\Get-Process -Name $Name -ErrorAction SilentlyContinue } }\nfunction Start-Process { param($FilePath, [switch]$PassThru, $WindowStyle) if ($WindowStyle -eq 'Hidden') { throw 'Dev GUI visibility must not be forced hidden' }; Microsoft.PowerShell.Management\\Start-Process -FilePath $FilePath -PassThru:$PassThru -WindowStyle Hidden }\n& ${quote(join(dir, 'scripts', 'run-dev.ps1'))} -Detach -ReadinessTimeoutSeconds 8\nexit $LASTEXITCODE\n`);
     return run(ps, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', wrapper], {
       env: {
         ...environment,
@@ -187,6 +190,7 @@ Promise.all(listening).then(bound => {
         // A caller who pins the identity must not have it re-derived.
         BUILDMESH_PORT_OFFSET: '',
         BUILDMESH_PROFILE_DIR: '',
+        ...extraEnv,
       },
     });
   }
@@ -202,6 +206,7 @@ Promise.all(listening).then(bound => {
       XDG_DATA_HOME: dataRoot,
       BUILDMESH_PORT_OFFSET: '',
       BUILDMESH_PROFILE_DIR: '',
+      ...extraEnv,
     },
   });
 }
@@ -274,6 +279,73 @@ test('two worktrees each run their own dev instance: distinct profile, distinct 
     for (const dir of [first, second]) await stopFixtureApp(dir);
   }
   for (const target of [first, second, dataRoot]) {
+    await rm(target, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+  if (failure) throw failure;
+});
+
+// The record is a cache, not the only way back to the instance: an
+// interrupted launch or a wiped .tmp leaves an orphaned buildmesh-dev that no
+// PID points at. The launcher has to find it by executable path instead, and
+// still leave another worktree's identical-named instance alone.
+test('an instance whose ownership record was lost is still stopped, without touching another worktree', { timeout: 180000 }, async () => {
+  const first = worktreeFixture();
+  const second = worktreeFixture();
+  const dataRoot = mkdtempSync(join(root, '.tmp', `bm-dev-appdata-${process.pid}-`));
+  let failure;
+  try {
+    for (const dir of [first, second]) {
+      const result = await stubApp(dir, dataRoot);
+      assert.equal(result.code, 0, result.output);
+    }
+    const orphan = instanceRecord(first).pid;
+    const bystander = instanceRecord(second).pid;
+    assert.equal(alive(orphan), true);
+    assert.equal(alive(bystander), true);
+
+    await rm(join(first, '.tmp', 'dev-instance.json'), { force: true });
+    const again = await stubApp(first, dataRoot);
+    assert.equal(again.code, 0, again.output);
+    assert.match(again.output, new RegExp(`Stopping this worktree's buildmesh-dev \\(PID ${orphan}`));
+    assert.equal(alive(orphan), false, 'the orphaned instance must still be stopped');
+    assert.equal(alive(bystander), true, 'another worktree has the same process name and must survive');
+    assert.equal(instanceRecord(first).pid !== orphan, true);
+  } catch (error) {
+    failure = error;
+  } finally {
+    for (const dir of [first, second]) await stopFixtureApp(dir);
+  }
+  for (const target of [first, second, dataRoot]) {
+    await rm(target, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+  if (failure) throw failure;
+});
+
+// A caller who pins the offset owns the decision: no probing, and the record
+// has to say which range the instance is on, or a helper reading it reports an
+// unknown port.
+test('a pinned BUILDMESH_PORT_OFFSET is used verbatim and recorded', { timeout: 120000 }, async () => {
+  const dir = worktreeFixture();
+  const dataRoot = mkdtempSync(join(root, '.tmp', `bm-dev-appdata-${process.pid}-`));
+  let failure;
+  try {
+    const result = await stubApp(dir, dataRoot, { BUILDMESH_PORT_OFFSET: '3300' });
+    assert.equal(result.code, 0, result.output);
+    assert.match(result.output, /Dev ports: offset 3300 \(from BUILDMESH_PORT_OFFSET\)/);
+    const record = instanceRecord(dir);
+    assert.equal(record.portOffset, 3300, 'the record must report the pinned offset');
+    const env = JSON.parse(readFileSync(join(dir, 'launch-env.json'), 'utf8'));
+    assert.equal(env.portOffset, '3300');
+    // The app bound the pinned range, which is the point of pinning it.
+    assert.deepEqual(env.bound, [true, true, true, true], result.output);
+    // The main checkout's documented range stays free for it.
+    assert.equal(alive(record.pid), true);
+  } catch (error) {
+    failure = error;
+  } finally {
+    await stopFixtureApp(dir);
+  }
+  for (const target of [dir, dataRoot]) {
     await rm(target, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
   if (failure) throw failure;

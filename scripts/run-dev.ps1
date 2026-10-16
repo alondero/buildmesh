@@ -59,31 +59,9 @@ Set-Location "$PSScriptRoot\.."
 # `com.alond.buildmesh.dev` profile and the identifier's 1000 offset, so an
 # ordinary dev launch behaves exactly as before.
 #
-# A linked worktree is the one whose `.git` is a *file* rather than a
-# directory — `git worktree add` writes `gitdir: …` into it. Anything else (a
-# plain checkout, an exported copy, a test fixture) is the main checkout.
-function Get-WorktreeSlug {
-    param([Parameter(Mandatory = $true)][string]$RepoRoot)
-
-    # The leaf alone is not unique: `.worktrees/<name>` and
-    # `.claude/worktrees/<name>` are both real worktree layouts. Pair it with a
-    # hash of the full path, lower-cased so two spellings of one path resolve to
-    # one profile directory.
-    $leaf = Split-Path $RepoRoot -Leaf
-    $safe = $leaf -replace '[^A-Za-z0-9._-]', '-'
-    if ([string]::IsNullOrWhiteSpace($safe)) { $safe = 'worktree' }
-    if ($safe.Length -gt 48) { $safe = $safe.Substring(0, 48) }
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $digest = $sha.ComputeHash(
-            [System.Text.Encoding]::UTF8.GetBytes($RepoRoot.ToLowerInvariant())
-        )
-    } finally {
-        $sha.Dispose()
-    }
-    $hex = -join ($digest | ForEach-Object { $_.ToString('x2') })
-    return "$safe-$($hex.Substring(0, 8))"
-}
+# The slug and the profile directory live in launcher-common.ps1, which the log
+# helpers share, so a helper reading this worktree's log resolves the same
+# directory this launcher will open.
 
 # Ports the app binds at a given offset: the dev test bridge (1991) and the
 # HTTP/WebSocket range (1992-1994). These must match src-tauri/src/http/state.rs
@@ -204,20 +182,13 @@ $env:CARGO_TARGET_DIR = Join-Path (Resolve-Path "src-tauri") "target\release-dev
 $Binary = Join-Path $env:CARGO_TARGET_DIR "release\buildmesh-dev.exe"
 
 $RepoRoot = (Get-Location).Path
-$WorktreeSlug = $null
-if (Test-Path -LiteralPath (Join-Path $RepoRoot '.git') -PathType Leaf) {
-    $WorktreeSlug = Get-WorktreeSlug $RepoRoot
-}
+$WorktreeSlug = Get-WorktreeSlug -RepoRoot $RepoRoot
 # An explicit BUILDMESH_PROFILE_DIR wins: a caller that pinned a profile (or a
 # harness fixture) gets exactly that, and this script neither derives nor
 # clears it. Otherwise a linked worktree gets a profile of its own.
 $ProfileDir = $env:BUILDMESH_PROFILE_DIR
 if (-not $ProfileDir) {
-    if ($WorktreeSlug) {
-        $ProfileDir = Join-Path (Join-Path $env:APPDATA 'com.alond.buildmesh.dev\worktrees') $WorktreeSlug
-    } else {
-        $ProfileDir = Join-Path $env:APPDATA 'com.alond.buildmesh.dev'
-    }
+    $ProfileDir = Resolve-DevProfileDir -RepoRoot $RepoRoot
 }
 # The app writes its logs under the profile it actually opened, so the
 # readiness and panic checks below have to read that directory — not the
@@ -303,10 +274,20 @@ if (-not (Test-Path $Binary)) {
 #    has no log file yet, and Read-LogFile reports a missing file as "read
 #    with zero lines", which is only true once the app can actually write there.
 $null = New-Item -ItemType Directory -Force -Path $LogDir
+# $PortOffset is the offset this launch will use, and it is what the instance
+# record reports, so a helper can tell which range the instance is on.
+# $SetPortOffsetForLaunch is a separate flag: only a value THIS script derives
+# may be cleared afterwards. Folding the two together would clear a caller's
+# own BUILDMESH_PORT_OFFSET the moment the record needed it.
 $PortOffset = $null
+$SetPortOffsetForLaunch = $false
 if ($env:BUILDMESH_PORT_OFFSET) {
     # An explicit choice by the caller: pass it through untouched and do not
-    # probe. The app warns and falls back if it is not a usable offset.
+    # probe. Recorded when it is a number so downstream tooling can read the
+    # active offset; an unusable value stays null here and the app warns and
+    # falls back.
+    $pinned = 0
+    if ([int]::TryParse($env:BUILDMESH_PORT_OFFSET, [ref]$pinned)) { $PortOffset = $pinned }
     Write-Output "Dev ports: offset $($env:BUILDMESH_PORT_OFFSET) (from BUILDMESH_PORT_OFFSET)"
 } elseif ($WorktreeSlug) {
     $PortOffset = Select-PortOffset $InstanceRecord
@@ -314,6 +295,7 @@ if ($env:BUILDMESH_PORT_OFFSET) {
         Write-Output "ERROR: no free dev port range (1991-2994 offsets 1000-9000) for this worktree"
         exit 1
     }
+    $SetPortOffsetForLaunch = $true
     Write-Output "Dev ports: offset $PortOffset (test bridge $(1991 + $PortOffset), HTTP $(1992 + $PortOffset)-$(1994 + $PortOffset))"
 } else {
     Write-Output "Dev ports: identifier offset 1000 (test bridge 2991, HTTP 2992-2994)"
@@ -358,7 +340,7 @@ $env:RUST_BACKTRACE = '1'
 # finally below leaves those alone).
 $SetProfileDirForLaunch = -not $env:BUILDMESH_PROFILE_DIR
 if ($SetProfileDirForLaunch) { $env:BUILDMESH_PROFILE_DIR = $ProfileDir }
-if ($null -ne $PortOffset) { $env:BUILDMESH_PORT_OFFSET = [string]$PortOffset }
+if ($SetPortOffsetForLaunch) { $env:BUILDMESH_PORT_OFFSET = [string]$PortOffset }
 # Opt-in development test bridge. The token is generated here and handed to
 # the child through the environment. A copy without a trailing newline is
 # written for scripts in other processes (ui-shot, the Android live check).
@@ -427,7 +409,7 @@ try {
     if ($SetProfileDirForLaunch) {
         Remove-Item Env:BUILDMESH_PROFILE_DIR -ErrorAction SilentlyContinue
     }
-    if ($null -ne $PortOffset) {
+    if ($SetPortOffsetForLaunch) {
         Remove-Item Env:BUILDMESH_PORT_OFFSET -ErrorAction SilentlyContinue
     }
 }

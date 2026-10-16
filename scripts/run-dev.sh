@@ -166,13 +166,23 @@ is_our_instance() {
   ps -p "$1" -o command= 2> /dev/null | grep -qF -- "$BINARY"
 }
 
-if [ -n "$recorded_pid" ] && kill -0 "$recorded_pid" 2> /dev/null &&
-  ! is_our_instance "$recorded_pid"; then
-  echo "Left PID $recorded_pid alone: recorded for this worktree but not running $BINARY"
-fi
 STOPPED=""
+if [ -n "$recorded_pid" ]; then
+  # The recorded PID is stopped directly, not left to the pgrep sweep below:
+  # pgrep is absent on some hosts (MSYS2, minimal containers), and a sweep is a
+  # search that can miss. The record names a PID; use it when it is ours.
+  if is_our_instance "$recorded_pid"; then
+    STOPPED="$STOPPED $recorded_pid"
+    kill "$recorded_pid" 2> /dev/null || true
+  elif kill -0 "$recorded_pid" 2> /dev/null; then
+    echo "Left PID $recorded_pid alone: recorded for this worktree but not running $BINARY"
+  fi
+fi
+# The sweep is the other half: an instance left behind by a run whose record was
+# lost (an interrupted launch, a wiped .tmp) is still this worktree's, and
+# nothing else would find it.
 for pid in $(pgrep -f "$BINARY" 2> /dev/null || true); do
-  if is_our_instance "$pid"; then
+  if [ "$pid" != "$recorded_pid" ] && is_our_instance "$pid"; then
     STOPPED="$STOPPED $pid"
     kill "$pid" 2> /dev/null || true
   fi
@@ -222,9 +232,14 @@ echo "Buildmesh Dev pre-launch line count (panic_early.log): $BEFORE_PANIC_EARLY
 # another worktree take the range first. An explicit BUILDMESH_PORT_OFFSET
 # passes through untouched and is never probed; otherwise only a linked worktree
 # probes, preferring the range it used last time so its ports stay put across
-# restarts.
+# restarts. PORT_OFFSET is the offset this launch uses and is what the instance
+# record reports, so a helper can tell which range the instance is on.
 PORT_OFFSET=""
 if [ -n "$CALLER_PORT_OFFSET" ]; then
+  case "$CALLER_PORT_OFFSET" in
+    '' | *[!0-9]*) ;;
+    *) PORT_OFFSET="$CALLER_PORT_OFFSET" ;;
+  esac
   echo "Dev ports: offset $CALLER_PORT_OFFSET (from BUILDMESH_PORT_OFFSET)"
 elif [ -n "$WORKTREE_SLUG" ]; then
   CANDIDATES=()
