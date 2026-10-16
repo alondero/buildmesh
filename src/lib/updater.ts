@@ -233,7 +233,10 @@ export async function downloadUpdate(
     });
   } catch (e) {
     console.error('[updater] download failed:', e);
-    throw new Error(sanitizeUpdaterError(e));
+    // `cause` carries the plugin's own error for anyone reading the chain.
+    // It is deliberately NOT what the modal renders: `sanitizeUpdaterError`
+    // redacts absolute paths from the message the user sees.
+    throw new Error(sanitizeUpdaterError(e), { cause: e });
   }
 }
 
@@ -247,7 +250,8 @@ export async function installUpdate(update: Update): Promise<void> {
     await update.install();
   } catch (e) {
     console.error('[updater] install failed:', e);
-    throw new Error(sanitizeUpdaterError(e));
+    // As above: the unsanitized plugin error rides the chain, never the UI.
+    throw new Error(sanitizeUpdaterError(e), { cause: e });
   }
 }
 

@@ -197,7 +197,7 @@ async function main() {
   catch (error) {
     if (error.code !== 'EEXIST') throw error;
     const lock = readState(lockPath);
-    if (!lock || alive(lock.pid)) throw new Error('Another dev server operation holds the worktree lock');
+    if (!lock || alive(lock.pid)) throw new Error('Another dev server operation holds the worktree lock', { cause: error });
     unlinkSync(lockPath);
     writeFileSync(lockPath, JSON.stringify({ pid: process.pid }), { flag: 'wx' });
   }
