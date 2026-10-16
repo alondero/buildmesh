@@ -100,6 +100,21 @@ access token). It never replaces a live reading or a
 rejected-key prompt; with nothing remembered the row is hidden (or errors) as before. See
 [ADR-0037](../adr/0037-usage-last-known-fallback.md).
 
+**Antigravity (`agy`) quota request version gate.** The `agy` meter calls
+`POST daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary`
+with the Antigravity CLI User-Agent, and the API gates the response on the CLI
+version that User-Agent advertises. Below cli `1.2.0` it still answers
+`HTTP 200` but strips the "Gemini Models" (weekly + 5-hour) group, so both
+Gemini meters silently disappear — an old pin is a blank meter, not an error.
+`AGY_USER_AGENT` (`services/usage.rs`) pins the current published CLI version
+(`agy --version`), verified live 2026-10-16 at `1.4.0`: `1.1.5` returned only
+"Claude and GPT models", `1.2.0` added "Gemini Models", and `1.4.0` also returned
+the "Gemini 4 Argon" group.
+`agy_user_agent_meets_gemini_quota_version_gate` fails if the pin drifts back
+below `1.2.0`, and when a response carries no Gemini group at all
+`parse_agy_quota_summary` attaches a `detail` so a re-gate surfaces instead of
+blanking.
+
 **Claude Code authentication source.** The Anthropic meter follows Claude's
 documented credential precedence rather than always reading
 `~/.claude/.credentials.json`. Cloud flags (`CLAUDE_CODE_USE_BEDROCK`,
