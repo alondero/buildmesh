@@ -225,7 +225,10 @@ fn fetch_origin_reports_repo_unusable_for_non_repo() {
     // fetched when no fetch ever happened.
     assert!(matches!(
         outcome,
-        Err(FetchError::RepoUnusable { fetch_completed: false, .. })
+        Err(FetchError::RepoUnusable {
+            fetch_completed: false,
+            ..
+        })
     ));
 }
 
