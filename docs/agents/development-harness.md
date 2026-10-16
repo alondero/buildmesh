@@ -340,6 +340,14 @@ again. Registry dependency artifacts stay. `scripts/check.ps1` uses this
 runner. A direct `cargo test` against the shared target can still execute the
 other worktree's binary. Doctests stay on `cargo test --doc`, which holds the
 target lock for that whole invocation.
+
+A test process counts as finished when it exits, and its stdout and stderr are
+collected for a bounded drain after that — the same cap `scripts/ci/run-guarded.mjs`
+drains with, shared as `drainBounded`. A descendant that inherited those pipes
+(a lingering `conhost.exe`, a stray cargo child) keeps them open past the child's
+exit, and waiting for them left a process that was already gone reading as still
+running (issue #2374). Reporting on `exit` settles a process the runner is no
+longer waiting for; `tests/agent-infra/rust-test-shards.test.mjs` pins it.
 Rust tests compile the desktop target as well as executing tests; this is a
 compile smoke, not a packaged Tauri or real-window smoke. Playwright smoke uses
 mock IPC. Visible UI or backend acceptance still requires the relevant real

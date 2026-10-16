@@ -21,7 +21,7 @@ public API instead of re-deriving the fact.
 | **Commands are thin** | `commands/` | A `#[command]` is an adapter: validate, call one service or `db::` function, map the error to `String`. No policy, no SQL, no `git2` handles. Every new `#[command]` must be registered in `lib.rs` or it fails at runtime with "command not found". Files that still hold a `Repository` are [seam debt](#seam-debt), not the pattern to copy. |
 | **Git access lives in `git/`** | `git/` | New `git2` use goes through `git/primitives`, `git/worktree`, `git/sync`, `git/health` (ADR 0007). If you need "is the repo dirty", the ahead/behind count, or the short SHA, call `git::primitives`. Do not open a `Repository` in a command or in `circuit/`. The files that still do are [seam debt](#seam-debt). |
 | **The stepper is pure** | `circuit/stepper.rs` | `advance(run, event) -> Transition` performs no I/O. SQLite state, PTY liveness, capacity counts and clocks arrive as `CircuitEvent`s from outside; the return value is `step_writes` plus `effects`. It is unit-testable with no database, which is why its tests run as a pure module. A change that needs a connection or a process handle does not belong here. |
-| **The worker is not** | `services/circuit_worker/` | The worker owns every impure half of the circuit loop: observe → step → commit → execute effects, on a dedicated OS thread. It is the only place allowed to turn live state into `CircuitEvent`s and the only place that commits a `Transition`. GitHub effects are in `worker/github.rs`, spawn overrides in `worker/spawn.rs`; a new effect kind extends those, not the pass loop. |
+| **The worker is not** | `services/circuit_worker/` | The worker owns every impure half of the circuit loop: observe → step → commit → execute effects, on a dedicated OS thread. It is the only place allowed to turn live state into `CircuitEvent`s and the only place that commits a `Transition`. Effect application (gate, claim, dispatch) is `circuit_worker/dispatch.rs`. GitHub calls stay in `circuit_worker/github.rs` and spawn overrides in `circuit_worker/spawn.rs`; a new effect kind extends dispatch, not the pass loop. |
 
 Two more boundaries are load-bearing even though they are not "seams" in the
 same sense:
@@ -101,7 +101,7 @@ makes a move behaviour-preserving.
 | `db/circuit/ledger.rs` | ~2.7k | The `commit_circuit_advance` transaction. |
 | `services/transcript_reader/report_snapshot.rs` | ~2.7k | Transcript report snapshots. |
 | `circuit/delivery.rs` | ~2.6k | Delivering a step's prompt to a live agent. |
-| `services/circuit_worker/mod.rs` | ~2.6k | The impure circuit loop. Its tests live in `services/circuit_worker/tests.rs` (~6.9k non-blank lines), which is the largest file in the crate. |
+| `services/circuit_worker/mod.rs` | ~2.0k | The impure circuit loop. Effect dispatch lives in `dispatch.rs`. Its tests live in `services/circuit_worker/tests.rs` (~6.9k non-blank lines), which is the largest file in the crate. |
 
 When you split one of these, move code rather than rewriting it: an extraction
 that keeps the same tests green and changes no runtime behaviour is the safe

@@ -110,7 +110,50 @@ mistaken for a current one. `lastError` is gated on the same clock — a
 recorded failure is per-key retained state and can never outlive the value
 it belongs to.
 
-## Deleted entities
+## Failure and staleness at the hook layer
+
+`usePathInvalidatedQuery` commits every refetch — mount, `GIT_CHANGED`, window
+focus, and the imperative `refresh` — through one `settle` helper. A failed
+fetch never overwrites `data`; it records `error` and leaves the last
+successful value in place. That produces exactly three states a consumer can
+act on:
+
+| State | `data` | `error` | What the app actually knows |
+|---|---|---|---|
+| Never observed | `null` | `null` | Nothing has been asked yet |
+| Observed | value (possibly empty) | `null` | A successful answer, clean or not |
+| Unavailable | `null` | `Error` | The dependency never answered |
+| Last known | previous value | `Error` | A real answer, now out of date |
+
+A key change clears `data` and `error` together. The value must not outlive
+the key, or switching repositories paints the previous one's rows under the
+new one.
+
+Wrapper hooks in `src/hooks/` pass these four states through instead of
+narrowing them. `useChangedFiles` returns `files: GitStatus[] | null` rather
+than defaulting to `[]`, because an empty list *is* the clean-repo answer —
+defaulting to it is what let a failed status fetch render as "No changes".
+`useGitSummary` keeps `summary: GitSummary | null` for panel-visibility
+compatibility and adds `unavailable` / `stale` alongside it. When you add a
+consumer, read the error channel; do not re-derive availability from an empty
+value.
+
+Derive a wrapper's `unavailable` / `stale` flags from the value the consumer
+actually renders, not from the raw cached `data`. A wrapper that projects its
+data — `useGitSummary` collapses a zero-total summary to `null` — makes those
+two disagree: after a clean repo's refresh fails, `data` is still
+`{ total: 0 }` while `summary` is already `null`, so `data`-derived
+`unavailable` was false with `summary` null and the surface rendered nothing.
+A broken status then looked exactly like a healthy clean repo, which is the
+confusion the error channel exists to prevent (issue #2328, review of #2389).
+Keep the flags consistent with what is on screen: `unavailable` when there is
+nothing to show, `stale` only when counts are still showing.
+
+Two consequences for surfaces. A surface that asserts a *state* (a clean
+count, "No changes") must render unavailable explicitly with a retry. A
+surface that only *annotates* — the `FileTree` badges, which never claim a
+repo is clean — may resolve unknown status to "no badges", because withholding
+an annotation cannot make a false claim.
 
 Nothing routes a deletion event into the cache, and it does not need to.
 Mesh and Agent Node deletion is reclaimed by the same policy as any other
