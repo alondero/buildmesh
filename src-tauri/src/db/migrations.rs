@@ -318,6 +318,19 @@ pub(crate) enum AlwaysStep {
     /// merge-verification upgrades it had blocked (their flags were already
     /// recorded). Unfinished runs lose only that route from their pinned graph.
     RepairReviewFeedbackRoute,
+    /// Drop the single-column indexes the composites superseded (issue #2410).
+    /// `idx_autopilot_runs_mesh` (`mesh_id`) and `idx_warm_worktrees_mesh`
+    /// (`mesh_id`) are leftmost prefixes of `idx_autopilot_runs_mesh_state`
+    /// (`mesh_id, state`) and `idx_warm_worktrees_mesh_status_created`
+    /// (`mesh_id, status, created_at`), so a `mesh_id`-only read seeks the
+    /// composite either way and the pair only costs write amplification.
+    ///
+    /// No `SCHEMA_VERSION` bump: `DROP INDEX IF EXISTS` is idempotent and this
+    /// pass runs on every launch, so a database that predates the removal
+    /// drops the pair at its next start — the same shape as `DropCheckpoints`.
+    /// `create_canonical_indexes_after_evolution` runs after this step and no
+    /// longer declares either index, so nothing recreates them.
+    DropSupersededSingleColumnIndexes,
 }
 
 // `pub(crate)` so the migration tests reset the exact flag a migration reads: a
@@ -1201,6 +1214,7 @@ const ALWAYS_STEPS: &[AlwaysStep] = &[
     AlwaysStep::UpgradeReviewPublicationFlow,
     AlwaysStep::UpgradeMergeVerification,
     AlwaysStep::RepairReviewFeedbackRoute,
+    AlwaysStep::DropSupersededSingleColumnIndexes,
 ];
 
 // ---------------------------------------------------------------------------
@@ -1909,6 +1923,16 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                 REVIEW_FEEDBACK_ROUTE_REPAIR_FLAG,
                 "the feedback route repair",
                 repair_run_snapshot_feedback_routes,
+            )?;
+        }
+        AlwaysStep::DropSupersededSingleColumnIndexes => {
+            // Issue #2410 — each index is a leftmost prefix of the composite its
+            // reader now seeks. `DROP INDEX IF EXISTS` is fully idempotent, so
+            // a fresh database (which never creates them) is a no-op here and a
+            // pre-#2410 one loses them on its next launch.
+            conn.execute_batch(
+                "DROP INDEX IF EXISTS idx_autopilot_runs_mesh;
+                 DROP INDEX IF EXISTS idx_warm_worktrees_mesh;",
             )?;
         }
     }
