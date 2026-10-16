@@ -399,7 +399,9 @@ pub enum GitSyncStatus {
     /// so the mesh's position is unknown. Distinct from `UpToDate` — which
     /// asserts "verified in sync" and would resolve attention cards and clear
     /// failure badges — and from `Failed`, which reports a fetch that did not
-    /// complete. Reports `fetched: true`: the refs did move.
+    /// complete. `fetched: true` says the fetch *completed*, which is what the
+    /// row-refresh signal keys off; it does not claim a ref moved, since the
+    /// refs may have been current already.
     Unverified,
     /// The fetch was attempted and did not complete successfully (network,
     /// auth, remote deleted mid-flight, or the command timing out), or the

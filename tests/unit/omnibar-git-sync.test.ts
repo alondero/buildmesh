@@ -70,7 +70,7 @@ describe('omnibar Git sync across meshes', () => {
     vi.mocked(invoke).mockResolvedValue(sync('No remote configured', { status: 'skipped', fetched: false }));
     await gitSyncAllMeshes([mesh(1, 'a'), mesh(2, 'b')]);
 
-    expect(useToastStore.getState().toasts[0].message).toBe('no remote: a, b');
+    expect(useToastStore.getState().toasts[0].message).toBe('No mesh synced — no remote: a, b');
     expect(useToastStore.getState().toasts[0].severity).toBe('info');
   });
 
@@ -80,7 +80,7 @@ describe('omnibar Git sync across meshes', () => {
     vi.mocked(invoke).mockResolvedValue(sync('Fetched, but this branch has no upstream to compare against', { status: 'no_upstream', fetched: true }));
     await gitSyncAllMeshes([mesh(1, 'a')]);
 
-    expect(useToastStore.getState().toasts[0].message).toBe('nothing to compare: a');
+    expect(useToastStore.getState().toasts[0].message).toBe('No mesh synced — nothing to compare: a');
     expect(useToastStore.getState().toasts[0].message).not.toContain('no remote');
     // Still a normal case: no Needs-attention card for it.
     expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(0);
@@ -92,7 +92,7 @@ describe('omnibar Git sync across meshes', () => {
       : sync('Fetched, but this branch has no upstream', { status: 'no_upstream', fetched: true })));
     await gitSyncAllMeshes([mesh(1, 'a'), mesh(2, 'b')]);
 
-    expect(useToastStore.getState().toasts[0].message).toBe('no remote: a; nothing to compare: b');
+    expect(useToastStore.getState().toasts[0].message).toBe('No mesh synced — no remote: a; nothing to compare: b');
   });
 
   it('counts skipped meshes separately when others really did sync', async () => {
@@ -101,7 +101,30 @@ describe('omnibar Git sync across meshes', () => {
       : sync('Pulled 1 new commit', { status: 'synced', pulled: true, new_commits: 1 })));
     await gitSyncAllMeshes([mesh(1, 'a'), mesh(2, 'b')]);
 
-    expect(useToastStore.getState().toasts[0].message).toBe('no remote: a');
+    // The successful meshes must be named too. A run that fetched and
+    // fast-forwarded mesh b is not "nothing happened", and a toast listing only
+    // the mesh with no remote says nothing about b at all.
+    expect(useToastStore.getState().toasts[0].message).toBe('Synced 1 of 2 meshes; no remote: a');
+  });
+
+  it('reports both kinds of nothing-to-do against the synced count', async () => {
+    vi.mocked(invoke).mockImplementation(async (_cmd, args) => {
+      const { path } = args as { path: string };
+      if (path === '/repos/a') return sync('No remote configured', { status: 'skipped', fetched: false });
+      if (path === '/repos/b') return sync('Fetched, but this branch has no upstream', { status: 'no_upstream', fetched: true });
+      return sync('Pulled 1 new commit', { status: 'synced', pulled: true, new_commits: 1 });
+    });
+    await gitSyncAllMeshes([mesh(1, 'a'), mesh(2, 'b'), mesh(3, 'c')]);
+
+    expect(useToastStore.getState().toasts[0].message)
+      .toBe('Synced 1 of 3 meshes; no remote: a; nothing to compare: b');
+  });
+
+  it('says plainly that nothing synced when every mesh had nothing to do', async () => {
+    vi.mocked(invoke).mockResolvedValue(sync('No remote configured', { status: 'skipped', fetched: false }));
+    await gitSyncAllMeshes([mesh(1, 'a'), mesh(2, 'b')]);
+
+    expect(useToastStore.getState().toasts[0].message).toBe('No mesh synced — no remote: a, b');
   });
 
   it('names skipped meshes in the problem summary too', async () => {

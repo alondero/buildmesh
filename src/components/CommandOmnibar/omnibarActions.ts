@@ -137,6 +137,7 @@ export async function gitSyncAllMeshes(meshes: Mesh[]): Promise<void> {
   // other would tell a user their mesh has no remote when it has one.
   const noRemote: string[] = [];
   const noComparison: string[] = [];
+  let synced = 0;
   for (const mesh of meshes) {
     const target = { name: mesh.name, path: mesh.path };
     try {
@@ -155,7 +156,9 @@ export async function gitSyncAllMeshes(meshes: Mesh[]): Promise<void> {
       // Neither synced nor a problem: say which of the two it is.
       if (!feedback.verified) {
         (result.status === 'skipped' ? noRemote : noComparison).push(mesh.name);
+        continue;
       }
+      synced += 1;
     } catch (error) {
       failed.push(mesh.name);
       // The thrown reason goes into the card, not just the summary: "sync
@@ -176,7 +179,12 @@ export async function gitSyncAllMeshes(meshes: Mesh[]): Promise<void> {
       ? `No mesh synced: ${problems.join(', ')}`
       : `Sync incomplete for: ${problems.join(', ')}`) + asideNote, 'warning');
   } else if (aside) {
-    addToast(SYNC_PROVIDER, aside, 'info');
+    // Name what DID sync. Reporting only the meshes that had nothing to do
+    // leaves the successful ones unreported, which reads as "nothing happened"
+    // for a run that fetched and fast-forwarded most of the workspace.
+    addToast(SYNC_PROVIDER, synced > 0
+      ? `Synced ${synced} of ${meshes.length} meshes; ${aside}`
+      : `No mesh synced — ${aside}`, 'info');
   } else {
     addToast(SYNC_PROVIDER, `Synced ${meshes.length} mesh${meshes.length === 1 ? '' : 'es'}`, 'success');
   }

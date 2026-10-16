@@ -743,7 +743,8 @@ describe('MeshItem', () => {
     // remote-tracking refs before failing on another. The count is therefore
     // possibly stale and must be re-read — even though the result reports
     // `fetched: false`, which means "did not complete", not "moved nothing".
-    // The badge stays lit: the mesh is still behind.
+    // The badge stays lit because nothing resolved this mesh — which is not the
+    // same as knowing it is behind.
     renderMeshItem();
     await act(async () => {
       await emit('mesh-sync-warning', {

@@ -41,7 +41,10 @@ interface MeshSyncCompletion {
   revision: number;
   /** The mesh is confirmed in sync with upstream. */
   verified: boolean;
-  /** A fetch was launched, so the remote-tracking refs may have moved. */
+  /** The remote-tracking refs may have moved since this mesh's last read.
+   *  Conservative: true for every outcome except a provable no-fetch. It does
+   *  not assert that a fetch ran — `failed` also covers a path that is not a
+   *  usable repository, returned before any fetch. */
   refsMayHaveChanged: boolean;
 }
 

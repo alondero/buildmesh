@@ -119,12 +119,15 @@ can itself be a blocked worktree path.
 
 The sync card's outcome is read back by the sidebar rather than held in it. Each
 sync publishes two independent signals per mesh path — whether the mesh was
-verified, and whether a fetch was *launched* — and a mesh row applies each to
-the piece it owns: verification clears the failure badge, a launched fetch
-re-reads the cached behind-count. The second signal is deliberately
-"may have changed", not "did": the manual fetch runs without `--atomic`, so it
-can update some remote-tracking refs before failing on another, and a `failed`
-result leaves the count possibly stale. Only a mesh with no remote — where no
+verified, and whether the cached behind-count may be stale — and a mesh row
+applies each to the piece it owns: verification clears the failure badge, a
+possibly-stale count re-reads the branch status. The second signal is
+deliberately "may have changed", not "did": the manual fetch runs without
+`--atomic`, so it can update some remote-tracking refs before failing on
+another, leaving a `failed` result's count possibly stale. It is also true for a
+`failed` outcome that never launched a fetch at all (an unusable repository),
+because one redundant read is cheaper than trusting a flag that cannot make
+that promise. Only a mesh with no remote — where no
 fetch was launched at all — skips the refresh, so that publication is reserved
 for a provable no-op. The split is what a `Partial` run needs: it advances the
 remote-tracking ref without fast-forwarding, so the count is stale while the
