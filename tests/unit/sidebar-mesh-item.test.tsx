@@ -651,6 +651,27 @@ describe('MeshItem', () => {
     expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(0);
   });
 
+  it('costs no branch-status re-read for a mesh with no remote', async () => {
+    // No remote means no fetch was launched, so nothing can have moved the ref
+    // the behind-count is measured against. The row must not spend an IPC call
+    // re-reading it — the published outcome carries that decision, and an
+    // earlier `answered` flag re-read unconditionally.
+    vi.mocked(invoke).mockImplementation((cmd: string) =>
+      cmd === 'git_sync'
+        ? Promise.resolve({ fetched: false, pulled: false, new_commits: 0, message: 'No remote configured', status: 'skipped' })
+        : Promise.resolve({}),
+    );
+    renderMeshItem();
+    await waitFor(() => expect(vi.mocked(invoke).mock.calls.filter(c => c[0] === 'get_git_branch_status').length).toBeGreaterThan(0));
+    const readsBefore = vi.mocked(invoke).mock.calls.filter(c => c[0] === 'get_git_branch_status').length;
+
+    fireEvent.contextMenu(screen.getByText('my-mesh'));
+    await userEvent.click(screen.getByText('Force sync from upstream'));
+    await waitFor(() => expect(useToastStore.getState().toasts).toHaveLength(1));
+
+    expect(vi.mocked(invoke).mock.calls.filter(c => c[0] === 'get_git_branch_status').length).toBe(readsBefore);
+  });
+
   it('clears the failure badge after a successful force sync', async () => {
     // The stale indicator must be reset by a successful manual sync —
     // otherwise the user stays alarmed after the mesh is demonstrably
@@ -749,6 +770,8 @@ describe('MeshItem', () => {
 
     await waitFor(() => expect(vi.mocked(invoke).mock.calls.filter(c => c[0] === 'get_git_branch_status').length)
       .toBeGreaterThan(readsBefore));
+    // The badge stays lit because nothing resolved this mesh — which is not
+    // the same as knowing it is behind, only that the state is unresolved.
     expect(screen.getByLabelText(/^Sync failed for /)).toBeTruthy();
   });
 

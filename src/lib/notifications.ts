@@ -28,10 +28,12 @@ export type SyncEvidence =
   /** Nothing in the stored record establishes the mesh's position. */
   | 'unknown';
 
-/** A manual mesh sync that did not leave the mesh in sync with upstream —
- *  either the fetch failed or the commits arrived but the working-tree
- *  fast-forward did not apply. Carries the mesh's identity so the card names
- *  which mesh is behind instead of only reporting a git message, and the
+/** A manual mesh sync whose outcome left the mesh's position unresolved: a
+ *  fast-forward that did not apply, a fetch that did not complete, a comparison
+ *  that could not be made, or an IPC that never returned. Only the first of
+ *  those establishes that the mesh is behind; the rest establish nothing, which
+ *  is why `evidence` exists. Carries the mesh's identity so the card names
+ *  which mesh is affected instead of only reporting a git message, and the
  *  backend's own wording as `detail` so the surface never invents a reason. */
 export interface MeshSyncNotificationAction {
   kind: 'mesh-sync-failure';

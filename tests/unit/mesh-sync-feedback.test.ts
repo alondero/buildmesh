@@ -223,20 +223,30 @@ describe('reporting a manual sync', () => {
 describe('runMeshSync', () => {
   it('invokes git_sync and reports the result it gets back', async () => {
     vi.mocked(invoke).mockResolvedValue(PARTIAL('Fetched 2 new commits; fast-forward skipped: changes to a.txt would be overwritten'));
-    const { feedback, answered } = await runMeshSync(MESH);
+    const { feedback } = await runMeshSync(MESH);
     expect(invoke).toHaveBeenCalledWith('git_sync', { path: MESH.path });
-    // `answered` means only that the backend replied — it does NOT mean the
-    // fetch ran. The fetch fact comes from the result's own `fetched` flag
-    // (via `outcomeOf`), which is what makes the row's refresh precise.
-    expect(answered).toBe(true);
     expect(feedback.unresolved).toBe(true);
     expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1);
   });
 
-  it('reports a rejected IPC as unanswered so the caller skips the refresh', async () => {
+  it('publishes the refresh itself, so no caller needs a second refresh signal', async () => {
+    // `runMeshSync` used to hand back an `answered` flag that the sidebar read
+    // to decide whether to re-read its branch status. That created a second
+    // refresh path which also fired for a remote-less mesh — whose entire point
+    // is that no fetch ran. The published outcome is now the only signal.
+    vi.mocked(invoke).mockResolvedValue(NO_REMOTE());
+    await runMeshSync(MESH);
+    expect(useMeshSyncCompletion.getState().completions[MESH.path]).toBeUndefined();
+
+    vi.mocked(invoke).mockResolvedValue(FAILED());
+    await runMeshSync(MESH);
+    expect(useMeshSyncCompletion.getState().completions[MESH.path])
+      .toMatchObject({ verified: false, refsMayHaveChanged: true });
+  });
+
+  it('reports a rejected IPC as an unknown position, not a known one', async () => {
     vi.mocked(invoke).mockRejectedValue(new Error('boom'));
-    const { feedback, answered } = await runMeshSync(MESH);
-    expect(answered).toBe(false);
+    const { feedback } = await runMeshSync(MESH);
     expect(feedback).toEqual({ severity: 'error', unresolved: true, verified: false });
     expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1);
     // A rejected IPC learned nothing about the fetch, so the card must not
@@ -250,9 +260,8 @@ describe('runMeshSync', () => {
     // failure is the safe reading; throwing would take the sidebar row down
     // and leave the user with no feedback at all.
     vi.mocked(invoke).mockResolvedValue({ fetched: true, pulled: false, new_commits: 0, message: 'who knows', status: 'invented' } as unknown as GitSyncResult);
-    const { feedback, answered } = await runMeshSync(MESH);
+    const { feedback } = await runMeshSync(MESH);
     expect(feedback).toEqual({ severity: 'error', unresolved: true, verified: false });
-    expect(answered).toBe(true);
     expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1);
   });
 });

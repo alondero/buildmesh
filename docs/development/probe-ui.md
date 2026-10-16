@@ -106,12 +106,13 @@ different ways. A **blocked worktree cleanup** is the queue-backed kind: only th
 reconciliation may close it, so that inference is confined to
 `worktree-cleanup` actions and never touches another kind. A **mesh sync that did
 not complete** is the transient kind: `lib/meshSyncFeedback` classifies
-`GitSyncResult.status` into a toast severity, and `Partial` / `Failed` raise an
-item whose Retry button re-runs the sync through the same path the sidebar uses.
-`Skipped` — a mesh with no remote, a valid local-only setup — does neither: it
-raises nothing, and it does not resolve an earlier failure either, because it
-contacted nothing and so verified nothing. Only a result that *verified* the
-mesh (`Synced`, `UpToDate`) closes its card, and its resolution deliberately does
+`GitSyncResult.status` into a toast severity, and `Partial`, `Unverified` and
+`Failed` — the three statuses that leave the mesh's position unresolved or
+unknown — raise an item whose Retry button re-runs the sync through the same
+path the sidebar uses. `Skipped` (no remote) and `NoUpstream` (a branch that
+tracks nothing) do neither: both are ordinary states that raise nothing, and
+neither resolves an earlier failure, because neither verified anything. Only a
+result that *verified* the mesh (`Synced`, `UpToDate`) closes its card, and its resolution deliberately does
 not bump the worktree revision, because it is not newer evidence about the queue.
 Both kinds deduplicate by action kind *and* path, since a mesh's root checkout
 can itself be a blocked worktree path.

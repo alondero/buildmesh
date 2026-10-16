@@ -259,10 +259,16 @@ impl SyncOutcome {
 ///    five-day-old SHA). Narrowing to one branch is the spawn-time
 ///    latency fix from `parse_branch_for_base_ref`; the manual
 ///    `git_sync` passes `None`.
-/// 4. **Count-behind** via [`commits_behind_upstream`]. Treats "no
-///    upstream" as `UpToDate` (most common cause: a fresh local-only
-///    branch that just gained a remote via `git remote add` but
-///    hasn't been pushed).
+/// 4. **Count-behind** via [`commits_behind_upstream`]. "No upstream
+///    configured" returns [`SyncOutcome::NoUpstream`], NOT `UpToDate`:
+///    `UpToDate` asserts a comparison ran and found zero commits behind, and
+///    nothing was compared here (most common cause: a fresh local-only branch
+///    that just gained a remote via `git remote add` but has not been pushed).
+///    Any other count-behind failure returns [`SyncOutcome::ComparisonFailed`]
+///    for the same reason. Only the spawn adapter folds either back into
+///    `FetchOutcome::UpToDate`, which has no card to get wrong — the manual
+///    `git_sync` result must not, or it resolves attention cards and clears
+///    failure badges for a mesh nobody compared.
 /// 5. **Clobber-check.** Compute [`primitives::ff_pull_blockers`] — the
 ///    locally dirty/untracked paths that the `HEAD..upstream`
 ///    fast-forward would overwrite, i.e. exactly the condition

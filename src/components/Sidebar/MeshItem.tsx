@@ -269,9 +269,9 @@ function MeshItemView({
   // Failure-only sync indicator (no always-on button): syncs are automatic
   // (background sync per ADR 0020 + spawn-time auto-sync), so a permanent
   // header button duplicated the Regenerate icon for an action the user
-  // rarely needs. The badge appears ONLY when the backend reported a failed
-  // sync for this mesh — i.e. it may be going stale — and the card has no
-  // textual status line, so the badge is itself the retry affordance.
+  // rarely needs. The badge appears ONLY when this mesh's sync state is
+  // unresolved — it may be going stale — and the card has no textual status
+  // line, so the badge is itself the retry affordance.
   //
   // Two independent sources light it, and it is the UNION of both:
   //   - `spawnSyncFailed`: a `mesh-sync-warning` event from the automatic
@@ -339,23 +339,19 @@ function MeshItemView({
   // One sync path behind both entry points: the failure badge in the header
   // and "Force sync from upstream" in the context menu. Both now report the
   // outcome: `git_sync`'s result carries a status, so a toast always says what
-  // happened and a sync that left the mesh behind also raises a "Needs
-  // attention" item, which `syncAttention` above reads. This handler does not
-  // touch the badge: `runMeshSync` publishes the outcome and the completion
-  // effect above applies it, so a retry started here and one started from the
-  // Notifications probe take the identical path.
+  // happened and a sync that left the mesh unresolved also raises a "Needs
+  // attention" item, which `syncAttention` above reads.
+  //
+  // This handler applies nothing itself. `runMeshSync` publishes the outcome and
+  // the completion effect above owns both the badge and the behind-count, so a
+  // retry started here and one started from the Notifications probe take the
+  // identical path — and a mesh with no remote, which publishes no completion,
+  // correctly costs no branch-status read.
   const handleSync = async () => {
     if (syncing) return;
     setSyncing(true);
     try {
-      const { answered } = await runMeshSync({ name: mesh.name, path: mesh.path });
-      // Re-read the behind count whenever the backend answered: the fetch half
-      // alone advances the remote-tracking ref the count is measured against,
-      // so even a skipped fast-forward can move it. A thrown IPC means nothing
-      // could have moved. A verified sync also refreshes via the completion
-      // effect above; that redundant read is cheaper than the conditional that
-      // would avoid it.
-      if (answered) refreshBranchStatus();
+      await runMeshSync({ name: mesh.name, path: mesh.path });
     } finally {
       setSyncing(false);
     }

@@ -194,14 +194,17 @@ export function noteSyncOutcome(target: SyncTarget, outcome: SyncOutcome): void 
 
 /** The two signals a `git_sync` result gives to the rows watching that mesh.
  *
- *  `refsMayHaveChanged` is derived from the status, not from the result's
- *  `fetched` flag: `skipped` (no remote) is the one outcome where no fetch was
- *  launched at all, and every other outcome launched one. A `failed` fetch
- *  reports `fetched: false` because it did not *complete*, but the manual fetch
- *  runs without `--atomic` and can update some remote-tracking refs before
- *  failing on another, so the behind-count may genuinely be stale. Reading
- *  `fetched` here is what let a stale marker survive a bulk sync and a card
- *  retry. */
+ *  `refsMayHaveChanged` is the conservative reading: anything other than
+ *  `skipped` may have moved a remote-tracking ref. It is derived from the status
+ *  rather than from the result's `fetched` flag, which reports only whether the
+ *  fetch *completed* — a failed one reports `false` and may still have updated
+ *  some refs first, since the manual fetch runs without `--atomic`. It is also
+ *  deliberately true for `failed` outcomes that never launched a fetch at all
+ *  (a path that is not a usable repository): one redundant branch-status read
+ *  is cheaper than trusting a flag that cannot make that promise.
+ *
+ *  Only `skipped` — no remote configured — is a provable no-fetch, so it is
+ *  the one status that publishes nothing. */
 export function outcomeOf(result: GitSyncResult): SyncOutcome {
   const feedback = classifySyncResult(result);
   return { verified: feedback.verified, refsMayHaveChanged: result.status !== 'skipped' };
@@ -225,13 +228,15 @@ export function reportMeshSync(target: SyncTarget, result: GitSyncResult): SyncF
 }
 
 /** Report a sync that never produced a result — the IPC rejected (the command
- *  could not even open the repo) or the promise threw. Treated exactly like a
- *  failed sync: the mesh is still behind and the user is still owed the reason. */
+ *  could not even open the repo) or the promise threw. Reported like a failed
+ *  sync: the user is owed a reason, and nothing is established about the mesh's
+ *  position, which is why the record carries `evidence: 'unknown'` rather than
+ *  a claim. */
 export function reportSyncError(target: SyncTarget, error: unknown, options?: ReportOptions): SyncFeedback {
   const detail = error instanceof Error ? error.message : String(error);
   addToast(SYNC_PROVIDER, `${target.name}: Sync failed: ${detail}`, 'error',
     syncAction(target, detail, 'unknown'), options);
-  // Publish the refresh too. An IPC rejection does not tell us whether the
+  // Publishing the refresh too. An IPC rejection does not tell us whether the
   // backend stopped before or after running the fetch, so the same conservative
   // reading as a failed fetch applies: the refs may have moved, and a redundant
   // re-read is cheaper than a marker the last sync already invalidated.
@@ -243,17 +248,17 @@ export function reportSyncError(target: SyncTarget, error: unknown, options?: Re
  *  "Force sync from upstream" and the notification card's "Retry sync", so the
  *  two cannot drift apart on severity, wording or resolution.
  *
- *  `answered` means only that the backend returned a `GitSyncResult` — not that
- *  the fetch ran, and not that it did not. It is the right signal for "the
- *  result is worth reporting at all": a rejected IPC produced no result to
- *  classify, while a returned one — including `failed` and `skipped` — always
- *  carries a status. Callers needing to know what to refresh read
- *  `refsMayHaveChanged` from `outcomeOf`. */
-export async function runMeshSync(target: SyncTarget): Promise<{ feedback: SyncFeedback; answered: boolean }> {
+ *  It returns only the classification. Whether the caller should re-read the
+ *  row's cached branch status is NOT re-derivable here and is deliberately not
+ *  exposed: the published outcome already carries `refsMayHaveChanged`, and the
+ *  row applies it. An earlier `answered` flag invited a second refresh path
+ *  that also fired for a remote-less mesh, whose whole point is that no fetch
+ *  ran. */
+export async function runMeshSync(target: SyncTarget): Promise<{ feedback: SyncFeedback }> {
   try {
     const result = await gitSync(target.path);
-    return { feedback: reportMeshSync(target, result), answered: true };
+    return { feedback: reportMeshSync(target, result) };
   } catch (error) {
-    return { feedback: reportSyncError(target, error), answered: false };
+    return { feedback: reportSyncError(target, error) };
   }
 }
