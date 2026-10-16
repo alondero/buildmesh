@@ -329,6 +329,56 @@ fn temp_path(path: &Path) -> PathBuf {
     ))
 }
 
+/// How many temp names [`open_temp`] tries before giving up. Each attempt takes
+/// a fresh counter value, so this only bounds a pathologically occupied
+/// directory rather than a transient race.
+const TEMP_NAME_ATTEMPTS: u32 = 32;
+
+/// Create the temp file at `temp`, exclusively.
+///
+/// `create_new` — not `create` + `truncate` — is the whole point: the file must
+/// be one this call brought into existence, or two guarantees are lost. On unix
+/// `OpenOptionsExt::mode` applies only to a newly created file, so reopening a
+/// stale temp left by a crashed run would carry that file's permissions onto
+/// the managed config instead of `0o600` — and a leftover from the
+/// `File::create` writers this module replaced is `0o644`. Exclusive creation
+/// also refuses to follow a symlink planted at the predictable name.
+fn create_temp_file(temp: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(temp)
+}
+
+/// Open a fresh temp file for `path`, trying `first` and then successive names.
+///
+/// The name is predictable — the process id and a counter — so it is not a
+/// capability. Whatever occupies it (crash residue, a live writer that got
+/// there first, a symlink) is left exactly as it is and skipped.
+fn open_temp(path: &Path, first: PathBuf) -> std::io::Result<(PathBuf, std::fs::File)> {
+    let mut candidate = first;
+    for _ in 0..TEMP_NAME_ATTEMPTS {
+        match create_temp_file(&candidate) {
+            Ok(file) => return Ok((candidate, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                candidate = temp_path(path);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!(
+            "no free temp name for {:?} after {TEMP_NAME_ATTEMPTS} attempts",
+            path
+        ),
+    ))
+}
+
 /// Persist `content` to `path` atomically: write a process-unique sibling temp
 /// file, fsync it, then rename it over the target.
 ///
@@ -352,19 +402,11 @@ fn temp_path(path: &Path) -> PathBuf {
 pub fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
     use std::io::Write;
 
-    let temp = temp_path(path);
-    {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&temp)?;
-        file.write_all(content.as_bytes())?;
-        file.sync_all()?;
-    }
+    let (temp, mut file) = open_temp(path, temp_path(path))?;
+    file.write_all(content.as_bytes())?;
+    file.sync_all()?;
+    // Windows cannot rename over a file that is still open.
+    drop(file);
     if let Err(error) = std::fs::rename(&temp, path) {
         if let Err(cleanup) = std::fs::remove_file(&temp) {
             tracing::warn!(
@@ -622,6 +664,76 @@ mod tests {
             "the surviving file must be one writer's complete payload, not a blend"
         );
         assert_eq!(temp_files(&dir), vec!["hooks.json"], "no temp residue");
+    }
+
+    /// A stale temp from a crashed run sits at a name this process will pick.
+    /// The writer must never adopt it: on unix `.mode(0o600)` applies only to a
+    /// file this call creates, so reusing a leftover would carry the leftover's
+    /// permissions onto the managed config — and a leftover from the
+    /// `File::create` writers this module replaced is `0o644`.
+    #[test]
+    fn a_stale_temp_file_is_never_reopened() {
+        let dir = TempDir::new().unwrap();
+        let occupied = dir.path().join("hooks.json.1.2.tmp");
+        std::fs::write(
+            &occupied,
+            "residue from a run that crashed before its rename",
+        )
+        .unwrap();
+
+        let error = create_temp_file(&occupied).expect_err("an existing file must not be reopened");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read_to_string(&occupied).unwrap(),
+            "residue from a run that crashed before its rename",
+            "the residue must be left exactly as it was found"
+        );
+    }
+
+    /// The occupied name is skipped, not written through: the write lands and
+    /// the residue survives untouched.
+    #[test]
+    fn a_collision_falls_through_to_the_next_temp_name() {
+        let dir = TempDir::new().unwrap();
+        let path = temp_file(&dir, "hooks.json");
+        let first = temp_path(&path);
+        std::fs::write(&first, "stale").unwrap();
+
+        let (used, _file) = open_temp(&path, first.clone())
+            .expect("must skip the occupied name");
+
+        assert_ne!(used, first, "the occupied name must not be reused");
+        assert_eq!(
+            used.parent(),
+            path.parent(),
+            "the rename must stay on one volume"
+        );
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "stale");
+    }
+
+    /// A symlink planted at the predictable temp name must never be written
+    /// through. Compiled out on Windows, where creating one needs an elevated
+    /// privilege this test must not assume.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_at_the_temp_name_is_not_followed() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().unwrap();
+        let secret = dir.path().join("outside-the-directory");
+        std::fs::write(&secret, "a file this directory has no business writing").unwrap();
+        let link = dir.path().join("hooks.json.1.3.tmp");
+        symlink(&secret, &link).unwrap();
+
+        let error = create_temp_file(&link).expect_err("a symlink must not be followed");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read_to_string(&secret).unwrap(),
+            "a file this directory has no business writing",
+            "the symlink target must be untouched"
+        );
     }
 
     /// The temp name is what makes concurrent writes safe, so the naming rule
