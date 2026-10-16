@@ -173,7 +173,7 @@ pub(super) fn emit_sync_outcome_event(
                 message,
             })
         }
-        Err(crate::git::sync::FetchError::RepoUnusable(reason)) => {
+        Err(crate::git::sync::FetchError::RepoUnusable { reason, .. }) => {
             let message = format!(
                 "Couldn't auto-sync the mesh — repository is unusable: {}. Spawning from local HEAD instead.",
                 reason

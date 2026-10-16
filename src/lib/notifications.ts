@@ -10,12 +10,13 @@ export interface WorktreeNotificationAction {
 
 /** How much a stored sync failure supports the card claiming.
  *
- *  Deliberately not the same fact as `SyncOutcome.refsFetched` (which says
- *  whether the remote-tracking ref moved, and drives a row's behind-count
- *  refresh). A ref can move without anything being learned about the mesh:
- *  a fetch that succeeds but whose comparison fails leaves the position
- *  unknown, and a record written before this distinction existed cannot say.
- *  Both are `unknown`, and the card says so rather than asserting either.
+ *  Deliberately not the same fact as `SyncOutcome.refsMayHaveChanged` (the
+ *  pessimistic signal that drives a row's behind-count refresh). The two can
+ *  disagree in both directions: a completed fetch may have moved no ref at all,
+ * and an unusable repository warrants the refresh without any fetch having
+ * run. What this records is narrower — whether the *outcome* establishes where
+ *  the mesh stands — and only a fetched fast-forward that did not apply does.
+ *  Everything else is `unknown`, and the card says so rather than asserting.
  */
 export type SyncEvidence =
   /** The fetch ran and the fast-forward did not apply: the mesh is behind. */

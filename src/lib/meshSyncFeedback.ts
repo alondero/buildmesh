@@ -112,11 +112,14 @@ const FEEDBACK: Record<GitSyncStatus, SyncFeedback> = {
  *  construction: any status this build does not recognise falls to `unknown`
  *  rather than defaulting to a claim.
  *
- *  The single thing this must not do is treat `fetched: false` as "no fetch
- *  was attempted". That flag means the fetch did not *complete*, and Rust
- *  returns `failed` after launching `git fetch` — so a network failure proves
- *  nothing about whether upstream was contacted. Only `skipped` (no remote
- *  configured) proves nothing was ever fetched. */
+ *  The single thing this must not do is read `fetched` as evidence about the
+ *  fetch at all. It records only whether the fetch COMPLETED, which leaves
+ *  every interesting question open: a `failed` result may come from a network
+ *  failure after `git fetch` had already contacted upstream, from a command
+ *  that could not be spawned at all, from a repo that became unopenable
+ *  afterwards, or from a path that was never a repository. None of those
+ *  supports a claim about where the mesh stands. Only `skipped` — no remote
+ *  configured — proves nothing was ever fetched. */
 export function evidenceOf(result: GitSyncResult): SyncEvidence {
   switch (result.status) {
     // Fetched, commits arrived, the fast-forward did not apply: the mesh is
@@ -167,11 +170,11 @@ export interface ReportOptions {
   silent?: boolean;
 }
 
-/** Record a sync that left the mesh behind. Takes the result rather than a
- *  pre-digested message and severity: the card's detail is the backend's own
- *  wording (the reason a pull was skipped — a dirty path, diverged history, a
- *  timeout — is only known on the Rust side), and its severity and
- *  `refsFetched` both derive from that same result, so passing them separately
+/** Record a sync that left the mesh in an unresolved state. Takes the result
+ *  rather than a pre-digested message and severity: the card's detail is the
+ *  backend's own wording (the reason a pull was skipped — a dirty path, diverged
+ *  history, a timeout — is only known on the Rust side), and its severity and
+ *  `evidence` both derive from that same result, so passing them separately
  *  would only create a way for the wording and the state claim to disagree. */
 export function raiseSyncAttention(target: SyncTarget, result: GitSyncResult, options?: ReportOptions): void {
   addToast(SYNC_PROVIDER, `${target.name}: ${result.message}`, classifySyncResult(result).severity,

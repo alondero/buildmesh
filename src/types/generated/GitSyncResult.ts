@@ -7,8 +7,11 @@ import type { GitSyncStatus } from "./GitSyncStatus";
  */
 export type GitSyncResult = { fetched: boolean, pulled: boolean, new_commits: number, message: string, 
 /**
- * The user-facing outcome. `fetched` / `pulled` describe *which steps
- * ran*; this describes whether the mesh ended up in sync, which is what
- * the toast and the Needs-attention notification key off.
+ * The user-facing outcome. The booleans are narrower than "which steps ran":
+ * `fetched` is true only when the fetch COMPLETED (a fetch that failed, or
+ * a repo that could not be opened, is false), and `pulled` is true only when
+ * the fast-forward was applied. Neither says whether a step was attempted,
+ * which is why `status` exists and why the frontend classifies on it rather
+ * than on these flags.
  */
 status: GitSyncStatus, };

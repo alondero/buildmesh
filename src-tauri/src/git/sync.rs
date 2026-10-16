@@ -64,17 +64,42 @@ pub enum FetchOutcome {
 /// Failure modes for `fetch_origin` that the caller should treat as
 /// "auto-sync unavailable, proceed with local HEAD anyway". The
 /// variants carry enough context to compose a user-readable toast.
+///
+/// `RepoUnusable` also carries whether the fetch had already completed when the
+/// repo became unopenable: `do_sync` fetches first and reopens the repo for the
+/// count-behind, and that reopen can be what fails. Dropping the fact here would
+/// make the spawn path stamp a mesh stale after a fetch that had just succeeded,
+/// and fetch it again for no reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FetchError {
     /// The path exists but isn't a git repository (or can't be
     /// opened as one). Unusual — a Mesh without a repo is a
     /// misconfiguration — but we still proceed to spawn since the
     /// agent's behaviour with a non-repo path is a separate concern.
-    RepoUnusable(String),
+    RepoUnusable {
+        reason: String,
+        /// True when this was returned after the fetch completed.
+        fetch_completed: bool,
+    },
     /// `git fetch` itself failed (most commonly: no network, DNS
     /// failure, or `origin` was removed between the no-remote check
     /// and the fetch). Carries stderr for the toast.
     FetchFailed(String),
+}
+
+impl FetchError {
+    /// The twin of [`FetchOutcome::fetched_ok`] for the error arm, so a sync
+    /// that fetched and then failed to read the result still counts as fresh.
+    /// Without it the spawn path would stamp such a mesh stale and re-fetch
+    /// upstream for no reason.
+    pub(crate) fn fetched_ok(&self) -> bool {
+        match self {
+            Self::RepoUnusable {
+                fetch_completed, ..
+            } => *fetch_completed,
+            Self::FetchFailed(_) => false,
+        }
+    }
 }
 
 impl FetchOutcome {
@@ -220,7 +245,9 @@ impl SyncOutcome {
     /// mesh stale because the *reader* failed would be exactly backwards.
     pub(crate) fn fetched_ok(&self) -> bool {
         match self {
-            Self::RepoUnusable { fetch_completed, .. } => *fetch_completed,
+            Self::RepoUnusable {
+                fetch_completed, ..
+            } => *fetch_completed,
             other => matches!(
                 other,
                 Self::UpToDate
@@ -876,7 +903,11 @@ pub fn fetch_origin(project_root: &str, base_ref: &str) -> Result<FetchOutcome, 
                 host_root,
                 e
             );
-            return Err(FetchError::RepoUnusable(e.to_string()));
+            return Err(FetchError::RepoUnusable {
+                reason: e.to_string(),
+                // Opened before anything ran — no fetch has completed.
+                fetch_completed: false,
+            });
         }
     };
 
@@ -955,7 +986,17 @@ pub fn fetch_origin(project_root: &str, base_ref: &str) -> Result<FetchOutcome, 
             }
         }
         SyncOutcome::FetchFailed { reason } => return Err(FetchError::FetchFailed(reason)),
-        SyncOutcome::RepoUnusable { reason, .. } => return Err(FetchError::RepoUnusable(reason)),
+        SyncOutcome::RepoUnusable {
+            reason,
+            fetch_completed,
+        } => {
+            return Err(FetchError::RepoUnusable {
+                reason,
+                // Carried through so the spawn path can still stamp the fetch
+                // as having refreshed upstream — see `FetchError::fetched_ok`.
+                fetch_completed,
+            });
+        }
     })
 }
 
@@ -1074,11 +1115,10 @@ pub async fn locked_fetch_origin(
             // Stamp the per-Mesh fetch-freshness registry from the bounded-
             // wait's outcome (ADR 0020): a spawn that won the lock and ran
             // the fetch must record both attempt + (when reached) success,
-            // matching the policy `stamp_fetch_freshness` enforces.
-            stamp_fetch_freshness(
-                &mesh_path,
-                &inner.as_ref().map(|o| o.fetched_ok()).unwrap_or(false),
-            );
+            // matching the policy `stamp_fetch_freshness` enforces. The error
+            // arm is consulted too — a repo that became unopenable after a
+            // completed fetch still refreshed upstream.
+            stamp_fetch_freshness(&mesh_path, &fetched_ok_of(inner));
         })
         .unwrap_or_else(|| {
             tracing::warn!(
@@ -1128,10 +1168,7 @@ pub fn locked_fetch_origin_blocking(
     let result = crate::services::sync_lock::with_mesh_sync_lock(mesh_path, || {
         fetch_origin(mesh_path, base_ref)
     });
-    stamp_fetch_freshness(
-        mesh_path,
-        &result.as_ref().map(|o| o.fetched_ok()).unwrap_or(false),
-    );
+    stamp_fetch_freshness(mesh_path, &fetched_ok_of(&result));
     result
 }
 
@@ -1146,6 +1183,20 @@ fn stamp_fetch_freshness(mesh_path: &str, fetched_ok: &bool) {
     if *fetched_ok {
         crate::services::fetch_freshness::note_success(mesh_path);
     }
+}
+
+/// Did the fetch complete, on either arm of a spawn-time sync?
+///
+/// Both locked wrappers need this, and getting it wrong on the error arm
+/// stamps a mesh stale after a fetch that had succeeded — so the answer lives
+/// in one place rather than being re-derived (and mis-defaulted) at each call
+/// site. Each arm's own `fetched_ok` carries the detail: `FetchOutcome` for a
+/// completed sync, `FetchError` for the case where the repo became unopenable
+/// after the fetch had already run.
+fn fetched_ok_of(result: &Result<FetchOutcome, FetchError>) -> bool {
+    result
+        .as_ref()
+        .map_or_else(FetchError::fetched_ok, FetchOutcome::fetched_ok)
 }
 
 #[cfg(test)]

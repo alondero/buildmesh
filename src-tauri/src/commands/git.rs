@@ -403,10 +403,16 @@ pub enum GitSyncStatus {
     /// row-refresh signal keys off; it does not claim a ref moved, since the
     /// refs may have been current already.
     Unverified,
-    /// The fetch was attempted and did not complete successfully (network,
-    /// auth, remote deleted mid-flight, or the command timing out), or the
-    /// path is not a usable repository. Reports `fetched: false`, which means
-    /// "did not complete" — not "was never attempted".
+    /// The sync did not complete: the fetch failed (network, auth, the remote
+    /// deleted mid-flight, the command timing out, or the spawn failing before
+    /// any child started), or the path is not a usable repository.
+    ///
+    /// `fetched` is `true` or `false` depending on WHERE it failed — a repo
+    /// that becomes unopenable after a completed fetch reports `true`, while a
+    /// fetch that never completed reports `false`. The flag records whether the
+    /// fetch completed; it never records whether a fetch was attempted, and it
+    /// says nothing about which side of the network the run died on. The
+    /// frontend therefore treats this status as establishing nothing.
     Failed,
 }
 
@@ -420,9 +426,12 @@ pub struct GitSyncResult {
     #[ts(as = "i32")]
     pub new_commits: u32,
     pub message: String,
-    /// The user-facing outcome. `fetched` / `pulled` describe *which steps
-    /// ran*; this describes whether the mesh ended up in sync, which is what
-    /// the toast and the Needs-attention notification key off.
+    /// The user-facing outcome. The booleans are narrower than "which steps ran":
+    /// `fetched` is true only when the fetch COMPLETED (a fetch that failed, or
+    /// a repo that could not be opened, is false), and `pulled` is true only when
+    /// the fast-forward was applied. Neither says whether a step was attempted,
+    /// which is why `status` exists and why the frontend classifies on it rather
+    /// than on these flags.
     pub status: GitSyncStatus,
 }
 
