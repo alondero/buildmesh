@@ -31,8 +31,35 @@ describe('omnibar Git sync across meshes', () => {
     const toasts = useToastStore.getState().toasts;
     expect(toasts).toHaveLength(1);
     expect(toasts[0]).toMatchObject({ provider: SYNC_PROVIDER, severity: 'success' });
-    expect(toasts[0].message).toBe('Synced 2 meshes');
+    expect(toasts[0].message).toBe('Synced 2 of 2 meshes');
     expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(0);
+  });
+
+  it('leads with the synced count even when another mesh failed', async () => {
+    // The regression this pins: a run that fetched and fast-forwarded one mesh
+    // must not summarise as "Sync incomplete for: b" — that reads as if nothing
+    // was updated, which is the one conclusion the summary must not support.
+    vi.mocked(invoke).mockImplementation(async (_cmd, args) => ((args as { path: string }).path === '/repos/a'
+      ? sync('Pulled 1 new commit', { status: 'synced', pulled: true, new_commits: 1 })
+      : sync('Fetch failed: network down', { status: 'failed', fetched: false })));
+    await gitSyncAllMeshes([mesh(1, 'a'), mesh(2, 'b')]);
+
+    const [toast] = useToastStore.getState().toasts;
+    expect(toast.message).toBe('Synced 1 of 2 meshes — b');
+    expect(toast.severity).toBe('warning');
+  });
+
+  it('says nothing synced when a failure leaves the rest with nothing to do', async () => {
+    vi.mocked(invoke).mockImplementation(async (_cmd, args) => ((args as { path: string }).path === '/repos/a'
+      ? sync('Fetch failed: network down', { status: 'failed', fetched: false })
+      : sync('No remote configured', { status: 'skipped', fetched: false })));
+    await gitSyncAllMeshes([mesh(1, 'a'), mesh(2, 'b')]);
+
+    // Zero synced, and only one of the two was a failure — "Sync incomplete"
+    // alone would imply the other had synced.
+    const [toast] = useToastStore.getState().toasts;
+    expect(toast.message).toBe('No mesh synced — a; no remote: b');
+    expect(toast.severity).toBe('warning');
   });
 
   it('counts a fetched-but-not-fast-forwarded mesh as a problem, not a success', async () => {
@@ -47,7 +74,7 @@ describe('omnibar Git sync across meshes', () => {
     // ONE toast for the whole run. Both meshes are behind, so the summary says
     // so outright rather than implying some got through.
     expect(useToastStore.getState().toasts).toHaveLength(1);
-    expect(useToastStore.getState().toasts[0].message).toBe('No mesh synced: a, b');
+    expect(useToastStore.getState().toasts[0].message).toBe('No mesh synced — a, b');
   });
 
   it('shows one toast for the run, not one per failing mesh', async () => {
@@ -61,7 +88,7 @@ describe('omnibar Git sync across meshes', () => {
     const toasts = useToastStore.getState().toasts;
     expect(toasts).toHaveLength(1);
     expect(toasts[0]).toMatchObject({ provider: SYNC_PROVIDER, severity: 'warning' });
-    expect(toasts[0].message).toBe('No mesh synced: a, b, c, d');
+    expect(toasts[0].message).toBe('No mesh synced — a, b, c, d');
   });
 
   it('reports a mesh with no remote as such, rather than synced', async () => {
@@ -104,7 +131,7 @@ describe('omnibar Git sync across meshes', () => {
     // The successful meshes must be named too. A run that fetched and
     // fast-forwarded mesh b is not "nothing happened", and a toast listing only
     // the mesh with no remote says nothing about b at all.
-    expect(useToastStore.getState().toasts[0].message).toBe('Synced 1 of 2 meshes; no remote: a');
+    expect(useToastStore.getState().toasts[0].message).toBe('Synced 1 of 2 meshes — no remote: a');
   });
 
   it('reports both kinds of nothing-to-do against the synced count', async () => {
@@ -117,7 +144,7 @@ describe('omnibar Git sync across meshes', () => {
     await gitSyncAllMeshes([mesh(1, 'a'), mesh(2, 'b'), mesh(3, 'c')]);
 
     expect(useToastStore.getState().toasts[0].message)
-      .toBe('Synced 1 of 3 meshes; no remote: a; nothing to compare: b');
+      .toBe('Synced 1 of 3 meshes — no remote: a; nothing to compare: b');
   });
 
   it('says plainly that nothing synced when every mesh had nothing to do', async () => {
@@ -137,7 +164,7 @@ describe('omnibar Git sync across meshes', () => {
 
     expect(useToastStore.getState().toasts).toHaveLength(1);
     expect(useToastStore.getState().toasts[0].message)
-      .toBe('Sync incomplete for: a; no remote: b');
+      .toBe('No mesh synced — a; no remote: b');
     // One card for the one real problem; the no-remote mesh raises none.
     expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1);
   });
@@ -213,7 +240,7 @@ describe('omnibar Git sync across meshes', () => {
     vi.mocked(invoke).mockResolvedValue(sync('Fetch failed: network down', { status: 'failed', fetched: false }));
     await gitSyncAllMeshes([mesh(1, 'a')]);
 
-    expect(useToastStore.getState().toasts.at(-1)?.message).toBe('No mesh synced: a');
+    expect(useToastStore.getState().toasts.at(-1)?.message).toBe('No mesh synced — a');
   });
 
   it('resolves a mesh that previously failed once it syncs cleanly', async () => {

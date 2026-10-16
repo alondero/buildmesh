@@ -619,9 +619,10 @@ fn sync_outcome_to_git_sync_result(outcome: crate::git::sync::SyncOutcome) -> Gi
             status: GitSyncStatus::NoUpstream,
         },
         SyncOutcome::ComparisonFailed { reason } => GitSyncResult {
-            // `fetched: true` because the fetch ran and moved the
-            // remote-tracking refs — this is not a fetch failure. The status is
-            // what stops it reading as "verified in sync".
+            // `fetched: true` because the fetch completed — this is not a fetch
+            // failure. It does NOT claim the refs moved: they may have been
+            // current already. The status is what stops this reading as
+            // "verified in sync".
             fetched: true,
             pulled: false,
             new_commits: 0,
@@ -677,8 +678,15 @@ fn sync_outcome_to_git_sync_result(outcome: crate::git::sync::SyncOutcome) -> Gi
             message: format!("Fetch failed: {}", reason),
             status: GitSyncStatus::Failed,
         },
-        SyncOutcome::RepoUnusable { reason } => GitSyncResult {
-            fetched: false,
+        SyncOutcome::RepoUnusable {
+            reason,
+            fetch_completed,
+        } => GitSyncResult {
+            // Report what happened, not "this failed": `do_sync` re-opens the
+            // repo after the fetch for the count-behind, and that open can be
+            // what fails. `fetched` means the fetch completed, so a repo that
+            // became unreadable afterwards still says so.
+            fetched: fetch_completed,
             pulled: false,
             new_commits: 0,
             message: format!("Repository unusable: {}", reason),
@@ -1304,9 +1312,21 @@ mod sync_status_mapping_tests {
             (
                 SyncOutcome::RepoUnusable {
                     reason: "not a repository".to_string(),
+                    fetch_completed: false,
                 },
                 GitSyncStatus::Failed,
                 false,
+            ),
+            // Re-opening after a completed fetch failed. Same status — the repo
+            // is unusable either way — but `fetched` must report the fetch that
+            // really happened, or the UI is told nothing was fetched when it was.
+            (
+                SyncOutcome::RepoUnusable {
+                    reason: "repo went away mid-sync".to_string(),
+                    fetch_completed: true,
+                },
+                GitSyncStatus::Failed,
+                true,
             ),
         ]
     }
@@ -1356,6 +1376,7 @@ mod sync_status_mapping_tests {
             },
             SyncOutcome::RepoUnusable {
                 reason: "x".to_string(),
+                fetch_completed: false,
             },
         ] {
             let label = format!("{:?}", outcome);

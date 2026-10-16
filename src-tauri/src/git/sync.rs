@@ -190,7 +190,16 @@ pub(crate) enum SyncOutcome {
     /// without a repo is a misconfiguration — but spawn / sync
     /// proceed anyway since the worker's behaviour on a non-repo
     /// path is a separate concern.
-    RepoUnusable { reason: String },
+    ///
+    /// `fetch_completed` separates the two ways this is returned: opening
+    /// the repo BEFORE the fetch fails (`false`), and re-opening it for the
+    /// count-behind AFTER a successful fetch fails (`true`). Without it the
+    /// caller cannot tell "nothing was fetched" from "fetched, then could not
+    /// read the result", and the first is what a stale marker would look like.
+    RepoUnusable {
+        reason: String,
+        fetch_completed: bool,
+    },
 }
 
 impl SyncOutcome {
@@ -205,18 +214,24 @@ impl SyncOutcome {
     /// fast-forward hung. `ComparisonFailed` and `NoUpstream` count too: in
     /// both the fetch succeeded and only the count-behind read failed to
     /// produce a number. `SkippedNoRemote` does NOT count (no fetch ran), and
-    /// the two hard error variants obviously don't.
+    /// neither does `FetchFailed`. `RepoUnusable` depends on WHEN it was
+    /// returned: reopening the repo for the count-behind can fail after a
+    /// completed fetch, and the refs are current either way — stamping that
+    /// mesh stale because the *reader* failed would be exactly backwards.
     pub(crate) fn fetched_ok(&self) -> bool {
-        matches!(
-            self,
-            Self::UpToDate
-                | Self::ComparisonFailed { .. }
-                | Self::NoUpstream
-                | Self::Synced { .. }
-                | Self::FetchedButDiverged { .. }
-                | Self::FetchedButDirty { .. }
-                | Self::PullTimedOut { .. }
-        )
+        match self {
+            Self::RepoUnusable { fetch_completed, .. } => *fetch_completed,
+            other => matches!(
+                other,
+                Self::UpToDate
+                    | Self::ComparisonFailed { .. }
+                    | Self::NoUpstream
+                    | Self::Synced { .. }
+                    | Self::FetchedButDiverged { .. }
+                    | Self::FetchedButDirty { .. }
+                    | Self::PullTimedOut { .. }
+            ),
+        }
     }
 
     /// Same predicate as [`FetchOutcome::advanced_ref`] — the two enums
@@ -328,8 +343,11 @@ pub(crate) fn do_sync(
     let repo = match super::project::open(host_path) {
         Ok(r) => r,
         Err(e) => {
+            // The fetch above completed, so the wire result must not claim
+            // otherwise — see `RepoUnusable::fetch_completed`.
             return SyncOutcome::RepoUnusable {
                 reason: e.to_string(),
+                fetch_completed: true,
             };
         }
     };
@@ -508,6 +526,8 @@ pub(crate) fn do_fetch_only(
             );
             return Err(SyncOutcome::RepoUnusable {
                 reason: e.to_string(),
+                // Opened before the fetch ran — nothing has been fetched.
+                fetch_completed: false,
             });
         }
     };
@@ -935,7 +955,7 @@ pub fn fetch_origin(project_root: &str, base_ref: &str) -> Result<FetchOutcome, 
             }
         }
         SyncOutcome::FetchFailed { reason } => return Err(FetchError::FetchFailed(reason)),
-        SyncOutcome::RepoUnusable { reason } => return Err(FetchError::RepoUnusable(reason)),
+        SyncOutcome::RepoUnusable { reason, .. } => return Err(FetchError::RepoUnusable(reason)),
     })
 }
 

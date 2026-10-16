@@ -751,7 +751,16 @@ fn sync_outcome_advanced_ref_table() {
     assert!(!UpToDate.advanced_ref());
     assert!(!SkippedNoRemote.advanced_ref());
     assert!(!FetchFailed { reason: "x".into() }.advanced_ref());
-    assert!(!RepoUnusable { reason: "x".into() }.advanced_ref());
+    assert!(!RepoUnusable {
+        reason: "x".into(),
+        fetch_completed: false
+    }
+    .advanced_ref());
+    assert!(!RepoUnusable {
+        reason: "x".into(),
+        fetch_completed: true
+    }
+    .advanced_ref());
     // The count-behind produced no number, so we do not know whether new
     // commits arrived. Resetting the warm pool onto an unconfirmed SHA is the
     // phantom advance PullTimedOut avoids, so this stays false.
@@ -788,7 +797,18 @@ fn sync_outcome_fetched_ok_table() {
     assert!(ComparisonFailed { reason: "x".into() }.fetched_ok());
     assert!(!SkippedNoRemote.fetched_ok());
     assert!(!FetchFailed { reason: "x".into() }.fetched_ok());
-    assert!(!RepoUnusable { reason: "x".into() }.fetched_ok());
+    assert!(!RepoUnusable {
+        reason: "x".into(),
+        fetch_completed: false
+    }
+    .fetched_ok());
+    // Re-opening the repo for the count-behind can fail AFTER the fetch
+    // completed. The freshness stamp must follow the fetch, not the reopen.
+    assert!(RepoUnusable {
+        reason: "x".into(),
+        fetch_completed: true
+    }
+    .fetched_ok());
 }
 
 // ── 2026-07-17 incident — URL-only remote (no fetch refspec) ────────────────

@@ -320,11 +320,14 @@ function MeshItemView({
   // so this is the only place either update happens.
   //
   // The two signals are applied separately on purpose. Verification ends the
-  // problem: it clears the badge. A fetch that was merely ATTEMPTED ends
-  // staleness: it re-reads the behind-count, because `git fetch` without
-  // --atomic can update some remote-tracking refs before failing on another,
-  // so a failed sync may still have moved the ref this count is measured
-  // against. Only a provable no-fetch — a mesh with no remote — skips the
+  // problem: it clears the badge. "The refs may have changed" ends staleness:
+  // it re-reads the behind-count. That one is deliberately pessimistic rather
+  // than a claim about what ran — a failed sync cannot say whether `git fetch`
+  // reached upstream, failed mid-flight, or was never spawned at all, and the
+  // manual fetch runs without `--atomic`, so a failure can leave some
+  // remote-tracking refs updated. Re-reading costs one IPC call; the ref this
+  // count is measured against having moved silently costs the user the truth.
+  // Only a provable no-fetch — a mesh with no remote — skips the
   // refresh.
   const completion = useMeshSyncCompletion(s => s.completions[mesh.path]);
   const lastHandled = useRef(0);

@@ -142,10 +142,10 @@ mesh is behind, so the card says so. Everything else establishes nothing either
 way — a fetch that did not complete, a comparison that could not be made, an
 IPC that rejected, a record written before the field existed — and the card
 says the state is unknown rather than choosing a reading. Note what is *not* a
-claim: `fetched: false` means the fetch did not complete, never that it was
-never attempted, because Rust reports the failure after launching `git fetch`.
-Only `skipped` — no remote at all — proves nothing was ever fetched, and that
-one raises no card to make the claim.
+claim: `fetched: false` means the fetch did not complete, and it cannot say
+whether `git fetch` reached upstream, died mid-fetch, or was never spawned — so
+it settles nothing either way. Only `skipped` — no remote at all — proves
+nothing was fetched, and that one raises no card to make the claim.
 
 A command that syncs many meshes at once records its per-mesh problems silently
 — they land in Needs attention and nowhere else — and shows one summary toast,

@@ -167,27 +167,23 @@ export async function gitSyncAllMeshes(meshes: Mesh[]): Promise<void> {
     }
   }
   const problems = [...failed, ...unresolved];
-  // Both non-failure buckets raise no Needs-attention item, so a summary that
-  // mentioned only the problems would report them nowhere at all.
-  const aside = [
+  // One message, assembled from segments, so the synced count can never go
+  // missing from a branch. A run that fetched and fast-forwarded some meshes
+  // must say so even when others failed — "Sync incomplete for: a" on its own
+  // reads as if nothing was updated, which is the one conclusion this summary
+  // must never support.
+  const details = [
+    problems.length > 0 ? problems.join(', ') : '',
     noRemote.length > 0 ? `no remote: ${noRemote.join(', ')}` : '',
     noComparison.length > 0 ? `nothing to compare: ${noComparison.join(', ')}` : '',
   ].filter(Boolean).join('; ');
-  const asideNote = aside ? `; ${aside}` : '';
-  if (problems.length > 0) {
-    addToast(SYNC_PROVIDER, (problems.length === meshes.length
-      ? `No mesh synced: ${problems.join(', ')}`
-      : `Sync incomplete for: ${problems.join(', ')}`) + asideNote, 'warning');
-  } else if (aside) {
-    // Name what DID sync. Reporting only the meshes that had nothing to do
-    // leaves the successful ones unreported, which reads as "nothing happened"
-    // for a run that fetched and fast-forwarded most of the workspace.
-    addToast(SYNC_PROVIDER, synced > 0
-      ? `Synced ${synced} of ${meshes.length} meshes; ${aside}`
-      : `No mesh synced — ${aside}`, 'info');
-  } else {
-    addToast(SYNC_PROVIDER, `Synced ${meshes.length} mesh${meshes.length === 1 ? '' : 'es'}`, 'success');
-  }
+  const headline = synced > 0
+    ? `Synced ${synced} of ${meshes.length} mesh${meshes.length === 1 ? '' : 'es'}`
+    // Nothing synced: say so outright, then name which meshes failed or had
+    // nothing to compare — otherwise those meshes go unreported.
+    : 'No mesh synced';
+  addToast(SYNC_PROVIDER, details ? `${headline} — ${details}` : headline,
+    problems.length > 0 ? 'warning' : synced > 0 ? 'success' : 'info');
 }
 
 /**

@@ -98,9 +98,13 @@ const FEEDBACK: Record<GitSyncStatus, SyncFeedback> = {
   // a problem — the mesh may be arbitrarily far behind — and it is emphatically
   // not a verified success, so it must not resolve a card or clear a badge.
   unverified: { severity: 'warning', unresolved: true, verified: false },
-  // The fetch was attempted and did not complete. `fetched: false` here means
-  // "did not finish", NOT "was never tried" — `git fetch` had already been
-  // launched and may have contacted upstream before failing.
+  // The fetch did not complete, and the cause may be either side of the process
+  // boundary: `git fetch` can have run and failed on the network, or the spawn
+  // itself can have failed before any child started. It also covers a path that
+  // is not a usable repository, where nothing is attempted at all. So this
+  // status carries no claim about whether upstream was contacted — see
+  // `evidenceOf`, which is why the card says "unknown" rather than either
+  // alternative.
   failed: { severity: 'error', unresolved: true, verified: false },
 };
 
@@ -183,9 +187,9 @@ export function raiseSyncAttention(target: SyncTarget, result: GitSyncResult, op
  *    re-reads the cached behind-count even though it did not run the sync.
  *
  *  Publishing nothing is reserved for a provable no-op: a mesh with no remote,
- *  where no fetch was ever launched and nothing could have moved. Everything
- *  else publishes, because a fetch that was attempted may have moved a ref even
- *  when it did not complete — see `outcomeOf`. Those outcomes still raise a
+ *  where the backend never reached for a remote at all and nothing could have
+ *  moved. Everything else publishes, because the outcome carries no way to
+ *  prove the refs stayed put — see `outcomeOf`. Those outcomes still raise a
  *  toast, and a card when they leave the mesh in trouble. */
 export function noteSyncOutcome(target: SyncTarget, outcome: SyncOutcome): void {
   if (!outcome.verified && !outcome.refsMayHaveChanged) return;
@@ -198,13 +202,14 @@ export function noteSyncOutcome(target: SyncTarget, outcome: SyncOutcome): void 
 /** The two signals a `git_sync` result gives to the rows watching that mesh.
  *
  *  `refsMayHaveChanged` is the conservative reading: anything other than
- *  `skipped` may have moved a remote-tracking ref. It is derived from the status
- *  rather than from the result's `fetched` flag, which reports only whether the
- *  fetch *completed* — a failed one reports `false` and may still have updated
- *  some refs first, since the manual fetch runs without `--atomic`. It is also
- *  deliberately true for `failed` outcomes that never launched a fetch at all
- *  (a path that is not a usable repository): one redundant branch-status read
- *  is cheaper than trusting a flag that cannot make that promise.
+ *  `skipped` may have moved a remote-tracking ref. It cannot be derived from the
+ *  result's `fetched` flag, which reports only whether the fetch *completed* —
+ *  a failed one reports `false` whether the network died mid-fetch or the spawn
+ *  never produced a child, and the manual fetch runs without `--atomic`, so it
+ *  may have updated some refs before failing. It is also true for a `failed`
+ *  outcome that never reached for a remote at all (an unusable repository), for
+ *  the same reason: one redundant branch-status read is cheaper than trusting a
+ *  flag that cannot make that promise.
  *
  *  Only `skipped` — no remote configured — is a provable no-fetch, so it is
  *  the one status that publishes nothing. */
