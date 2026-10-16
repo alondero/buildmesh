@@ -666,91 +666,98 @@ mod tests {
         );
     }
 
-    /// Every `SyncOutcome` variant maps to the `GitSyncStatus` the frontend
-    /// classifies on. The bug this pins is silent: a variant mapped to the
-    /// wrong status would still produce a well-formed result, and the
-    /// happy-path `git_sync` tests above only ever see `UpToDate` / `Synced`.
+    /// Wire a bare "remote" at `remote_dir` to `repo_dir` as `origin`, so the
+    /// fetch path runs end-to-end with no network. `git remote add` creates no
+    /// tracking relationship, which is exactly the state under test.
+    fn add_origin_remote(repo_dir: &std::path::Path, remote_dir: &std::path::Path) {
+        let status = std::process::Command::new("git")
+            .args(["init", "--bare", "--initial-branch=main"])
+            .arg(remote_dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git init --bare must succeed");
+        let status = std::process::Command::new("git")
+            .args(["remote", "add", "origin", &remote_dir.to_string_lossy()])
+            .current_dir(repo_dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git remote add must succeed");
+    }
+
+    /// A repo whose branch has no upstream must NOT be reported as verified
+    /// up to date. `git_sync` resolves the remote to `origin` and fetches
+    /// successfully, so the fetch runs — and then the comparison cannot be
+    /// made, because the branch tracks nothing. Reporting `UpToDate` here
+    /// would read "a comparison ran and found zero commits behind", which
+    /// would resolve Needs-attention cards and clear failure badges for a
+    /// mesh nobody checked.
     ///
-    /// `Partial` covers every "fetched but the working tree did not move"
-    /// case, which is the one the user cannot otherwise diagnose: the behind
-    /// marker stays put and nothing else changes on screen. Which statuses
-    /// count as unresolved is pinned by its own test below.
-    #[test]
-    fn sync_outcome_maps_to_the_status_the_ui_classifies_on() {
-        use crate::commands::git::{sync_outcome_to_git_sync_result, GitSyncStatus};
-        use crate::git::sync::SyncOutcome;
+    /// This drives the real `git_sync` command over a real repo rather than
+    /// asserting on the mapping table: the bug being guarded lives in the
+    /// `do_sync` error branch, which a table test cannot reach.
+    #[tokio::test]
+    async fn git_sync_reports_a_branch_with_no_upstream_as_uncompared() {
+        use crate::commands::git::git_sync;
+        use crate::env::test_helpers::{init_repo_with_commit, TestDir};
+        let td = TestDir::new("git_sync_no_upstream");
+        let repo_dir = td.path();
+        init_repo_with_commit(repo_dir, &[("README.md", "x\n")]);
+        add_origin_remote(repo_dir, &td.sibling("origin"));
 
-        let cases = vec![
-            (
-                SyncOutcome::Synced { new_commits: 3 },
-                GitSyncStatus::Synced,
-            ),
-            (SyncOutcome::UpToDate, GitSyncStatus::UpToDate),
-            // A comparison error must NOT fold into UpToDate: the frontend
-            // classifies UpToDate as verified, which resolves attention cards
-            // and clears failure badges for a mesh nobody actually checked.
-            (
-                SyncOutcome::ComparisonFailed {
-                    reason: "reference 'refs/remotes/origin/main' not found".to_string(),
-                },
-                GitSyncStatus::Unverified,
-            ),
-            // A Mesh with no remote is a valid local-only setup, not a
-            // problem to nag about — the frontend's classifier treats it as
-            // resolved, and `mesh-sync-feedback.test.ts` pins that.
-            (SyncOutcome::SkippedNoRemote, GitSyncStatus::Skipped),
-            (
-                SyncOutcome::FetchedButDirty {
-                    new_commits: 2,
-                    blocking_paths: vec!["src/App.tsx".to_string()],
-                },
-                GitSyncStatus::Partial,
-            ),
-            (
-                SyncOutcome::FetchedButDirty {
-                    new_commits: 1,
-                    blocking_paths: Vec::new(),
-                },
-                GitSyncStatus::Partial,
-            ),
-            (
-                SyncOutcome::FetchedButDiverged {
-                    new_commits: 4,
-                    reason: "not possible to fast-forward".to_string(),
-                },
-                GitSyncStatus::Partial,
-            ),
-            (
-                SyncOutcome::PullTimedOut {
-                    new_commits: 1,
-                    reason: "timed out".to_string(),
-                },
-                GitSyncStatus::Partial,
-            ),
-            (
-                SyncOutcome::FetchFailed {
-                    reason: "network down".to_string(),
-                },
-                GitSyncStatus::Failed,
-            ),
-            (
-                SyncOutcome::RepoUnusable {
-                    reason: "not a repository".to_string(),
-                },
-                GitSyncStatus::Failed,
-            ),
-        ];
+        let result = git_sync(repo_dir.to_string_lossy().to_string())
+            .await
+            .unwrap();
 
-        for (outcome, expected) in cases {
-            let label = format!("{:?}", outcome);
-            let result = sync_outcome_to_git_sync_result(outcome);
-            assert_eq!(result.status, expected, "status for {}", label);
-            assert!(
-                !result.message.is_empty(),
-                "every sync outcome needs user-facing text ({})",
-                label
-            );
-        }
+        assert_ne!(
+            result.status,
+            crate::commands::git::GitSyncStatus::UpToDate,
+            "an uncompared branch must not claim it was verified up to date (message: {})",
+            result.message
+        );
+        // The fetch did run, so the row's behind-count refresh still applies.
+        assert!(
+            result.fetched,
+            "the remote-tracking refs are current after the fetch"
+        );
+        assert!(!result.pulled);
+    }
+
+    /// A successful fetch followed by a comparison that cannot read HEAD must
+    /// surface as `Unverified`, not as "already up to date". The fetch ran, so
+    /// the refs are current — but nothing established the mesh's position.
+    ///
+    /// The failure is induced through the real command: an unborn HEAD makes
+    /// `commits_behind_upstream` fail with a non-"no upstream" error, which is
+    /// the branch that used to fold into `UpToDate`.
+    #[tokio::test]
+    async fn git_sync_reports_a_failed_comparison_as_unverified() {
+        use crate::commands::git::git_sync;
+        use crate::env::test_helpers::{init_repo_with_commit, TestDir};
+        let td = TestDir::new("git_sync_compare_fail");
+        let repo_dir = td.path();
+        init_repo_with_commit(repo_dir, &[("README.md", "x\n")]);
+        add_origin_remote(repo_dir, &td.sibling("origin"));
+        // Point HEAD at a branch that does not exist. The fetch does not read
+        // HEAD, so it still succeeds; the count-behind then cannot resolve a
+        // commit.
+        let status = std::process::Command::new("git")
+            .args(["symbolic-ref", "HEAD", "refs/heads/does-not-exist"])
+            .current_dir(repo_dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git symbolic-ref must succeed");
+
+        let result = git_sync(repo_dir.to_string_lossy().to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.status,
+            crate::commands::git::GitSyncStatus::Unverified,
+            "a comparison that never ran must not read as up to date (message: {})",
+            result.message
+        );
+        assert!(result.fetched, "the fetch ran, so the refs are current");
     }
 
     #[test]

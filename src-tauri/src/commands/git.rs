@@ -421,8 +421,16 @@ pub struct GitSyncResult {
 /// `git_sync_fetches_current_branch_upstream_when_remote_is_not_origin`
 /// keeps passing — a repo whose upstream is named `main` rather
 /// than `origin` must still be synced against that upstream), and
-/// translate the shared `SyncOutcome` back to the `GitSyncResult`
-/// shape the frontend expects (the wire type is unchanged).
+/// translate the shared `SyncOutcome` back to the [`GitSyncResult`]
+/// shape the frontend expects.
+///
+/// The result carries a `status` ([`GitSyncStatus`]) alongside the four
+/// original fields, because those fields cannot express the outcomes that
+/// matter to a user: a fetch failure and a mesh with no remote both report
+/// `fetched: false`, and a comparison that never ran is indistinguishable
+/// from one that found zero commits behind. The frontend classifies the
+/// status to decide the toast severity, whether a "Needs attention" card is
+/// raised, whether an earlier card is resolved, and what the card may claim.
 ///
 /// Note: the shared helper always runs the fetch (a fetch never
 /// touches the working tree) and skips the fast-forward pull only
@@ -527,13 +535,10 @@ fn git_sync_blocking(path: String) -> Result<GitSyncResult, String> {
 /// from the variant so the UI never has to re-derive the outcome from
 /// the flags and the message text.
 ///
-/// `pub(crate)` rather than private so `commands::git_tests` can pin the
-/// mapping table directly: `status` is the contract the frontend's toast and
-/// "Needs attention" severity key off, and a variant quietly mapped to the
-/// wrong arm would be invisible from the command's happy-path tests.
-pub(crate) fn sync_outcome_to_git_sync_result(
-    outcome: crate::git::sync::SyncOutcome,
-) -> GitSyncResult {
+/// Private, and its mapping table is tested by the `#[cfg(test)]` module
+/// at the foot of this file — a child module can reach it, while
+/// `pub(crate)` would widen production visibility purely for a test.
+fn sync_outcome_to_git_sync_result(outcome: crate::git::sync::SyncOutcome) -> GitSyncResult {
     use crate::git::sync::SyncOutcome;
     match outcome {
         SyncOutcome::FetchedButDirty {
@@ -577,6 +582,19 @@ pub(crate) fn sync_outcome_to_git_sync_result(
             new_commits: 0,
             message: "Already up to date".to_string(),
             status: GitSyncStatus::UpToDate,
+        },
+        // The remote was fetched, but this branch tracks nothing, so no
+        // comparison ran. Reported as `skipped` — the same "there is nothing
+        // to compare against, and nothing is wrong" reading as a mesh with no
+        // remote — rather than `UpToDate`, which the frontend treats as
+        // verified and would use to resolve cards and clear badges. The
+        // message says which case this is.
+        SyncOutcome::NoUpstream => GitSyncResult {
+            fetched: true,
+            pulled: false,
+            new_commits: 0,
+            message: "Fetched, but this branch has no upstream to compare against".to_string(),
+            status: GitSyncStatus::Skipped,
         },
         SyncOutcome::ComparisonFailed { reason } => GitSyncResult {
             // `fetched: true` because the fetch ran and moved the
@@ -1179,6 +1197,159 @@ fn assert_inside_repo(repo_root: &Path, file_path: &Path) -> Result<(), String> 
         return Err(format!("path escapes repository: {}", file_path.display()));
     }
     Ok(())
+}
+
+// ── The `SyncOutcome → GitSyncResult` mapping table ─────────────────────────
+//
+// A child module so it can reach the private mapping fn. Widening that fn to
+// `pub(crate)` purely so the sibling `commands::git_tests` could call it would
+// put a test-only name in production's public surface (engineering contract:
+// do not export internals only to test them).
+//
+// The mapping is the contract the frontend's severity table, its "Needs
+// attention" decision and its resolution rule all key off, so every variant is
+// pinned here. A variant mapped to the wrong status is invisible from the
+// command's happy paths, which only ever produce `UpToDate` / `Synced`.
+#[cfg(test)]
+mod sync_status_mapping_tests {
+    use super::{sync_outcome_to_git_sync_result, GitSyncResult, GitSyncStatus};
+    use crate::git::sync::SyncOutcome;
+
+    /// Every variant, with the status the frontend classifies it by.
+    /// `fetched` is asserted alongside: it is a separate fact the row-refresh
+    /// signal reads directly, and a variant that reported the wrong one would
+    /// leave a mesh's cached behind-count stale.
+    fn table() -> Vec<(SyncOutcome, GitSyncStatus, bool)> {
+        vec![
+            (
+                SyncOutcome::Synced { new_commits: 3 },
+                GitSyncStatus::Synced,
+                true,
+            ),
+            (SyncOutcome::UpToDate, GitSyncStatus::UpToDate, true),
+            // No remote: a valid local-only Mesh, nothing to nag about.
+            (SyncOutcome::SkippedNoRemote, GitSyncStatus::Skipped, false),
+            // Remote fetched, branch tracks nothing: nothing was compared, and
+            // nothing is wrong. Must NOT be `UpToDate`, which the frontend
+            // reads as verified and uses to resolve cards and clear badges.
+            (SyncOutcome::NoUpstream, GitSyncStatus::Skipped, true),
+            (
+                SyncOutcome::ComparisonFailed {
+                    reason: "reference is locked".to_string(),
+                },
+                GitSyncStatus::Unverified,
+                true,
+            ),
+            (
+                SyncOutcome::FetchedButDirty {
+                    new_commits: 2,
+                    blocking_paths: vec!["src/App.tsx".to_string()],
+                },
+                GitSyncStatus::Partial,
+                true,
+            ),
+            (
+                SyncOutcome::FetchedButDirty {
+                    new_commits: 1,
+                    blocking_paths: Vec::new(),
+                },
+                GitSyncStatus::Partial,
+                true,
+            ),
+            (
+                SyncOutcome::FetchedButDiverged {
+                    new_commits: 4,
+                    reason: "not possible to fast-forward".to_string(),
+                },
+                GitSyncStatus::Partial,
+                true,
+            ),
+            (
+                SyncOutcome::PullTimedOut {
+                    new_commits: 1,
+                    reason: "timed out".to_string(),
+                },
+                GitSyncStatus::Partial,
+                true,
+            ),
+            (
+                SyncOutcome::FetchFailed {
+                    reason: "network down".to_string(),
+                },
+                GitSyncStatus::Failed,
+                false,
+            ),
+            (
+                SyncOutcome::RepoUnusable {
+                    reason: "not a repository".to_string(),
+                },
+                GitSyncStatus::Failed,
+                false,
+            ),
+        ]
+    }
+
+    #[test]
+    fn every_outcome_maps_to_the_status_the_ui_classifies_on() {
+        for (outcome, expected, expected_fetched) in table() {
+            let label = format!("{:?}", outcome);
+            let result: GitSyncResult = sync_outcome_to_git_sync_result(outcome);
+            assert_eq!(result.status, expected, "status for {}", label);
+            assert_eq!(result.fetched, expected_fetched, "`fetched` for {}", label);
+            assert!(
+                !result.message.is_empty(),
+                "every outcome needs user-facing text ({})",
+                label
+            );
+        }
+    }
+
+    /// The three statuses that leave nothing verified, and why each is there.
+    /// `UpToDate` is the one that matters most: it is the only status the
+    /// frontend treats as verified, so putting a no-comparison outcome there
+    /// resolves cards and clears badges for a mesh nobody checked.
+    #[test]
+    fn unverified_statuses_are_exactly_the_three_that_did_not_compare() {
+        use GitSyncStatus::*;
+        for outcome in [
+            SyncOutcome::SkippedNoRemote,
+            SyncOutcome::NoUpstream,
+            SyncOutcome::ComparisonFailed {
+                reason: "x".to_string(),
+            },
+            SyncOutcome::FetchedButDirty {
+                new_commits: 1,
+                blocking_paths: vec![],
+            },
+            SyncOutcome::FetchedButDiverged {
+                new_commits: 1,
+                reason: "x".to_string(),
+            },
+            SyncOutcome::PullTimedOut {
+                new_commits: 1,
+                reason: "x".to_string(),
+            },
+            SyncOutcome::FetchFailed {
+                reason: "x".to_string(),
+            },
+            SyncOutcome::RepoUnusable {
+                reason: "x".to_string(),
+            },
+        ] {
+            let label = format!("{:?}", outcome);
+            let status = sync_outcome_to_git_sync_result(outcome).status;
+            assert_ne!(
+                status, UpToDate,
+                "{} must not claim a comparison happened",
+                label
+            );
+        }
+        // …and the one that did compare and found nothing.
+        assert_eq!(
+            sync_outcome_to_git_sync_result(SyncOutcome::UpToDate).status,
+            UpToDate
+        );
+    }
 }
 
 // ── gh-auth cache accessor (issue #1483) ─────────────────────────────────

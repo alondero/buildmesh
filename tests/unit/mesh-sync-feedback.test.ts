@@ -19,7 +19,7 @@ const MESH = { name: 'lambo-recomp', path: '/repos/lambo-recomp' };
  *  "no completion was published" and "reads the flag, not the status" cases
  *  assert against a shape the backend cannot produce. */
 const FETCHED_BY_STATUS: Record<GitSyncStatus, boolean> = {
-  synced: true, up_to_date: true, skipped: false, partial: true, failed: false,
+  synced: true, up_to_date: true, skipped: false, partial: true, unverified: true, failed: false,
 };
 
 function result(status: GitSyncStatus, message: string, overrides: Partial<GitSyncResult> = {}): GitSyncResult {
@@ -175,6 +175,16 @@ describe('reporting a manual sync', () => {
     expect(outcomeOf(result('partial', 'x'))).toEqual({ verified: false, refsFetched: true });
     expect(outcomeOf(result('skipped', 'x'))).toEqual({ verified: false, refsFetched: false });
     expect(outcomeOf(result('synced', 'x', { pulled: true }))).toEqual({ verified: true, refsFetched: true });
+  });
+
+  it('publishes a fetch for an unverified comparison so the row re-reads its count', () => {
+    // `Unverified` fetched — the remote-tracking refs DID move — so the row's
+    // cached behind-count is stale and must be re-read, even though nothing
+    // was verified and nothing was resolved.
+    expect(outcomeOf(result('unverified', 'Fetched, but could not compare with upstream'))).toEqual({ verified: false, refsFetched: true });
+    reportMeshSync(MESH, result('unverified', 'Fetched, but could not compare with upstream'));
+    expect(useMeshSyncCompletion.getState().completions[MESH.path])
+      .toMatchObject({ verified: false, refsFetched: true });
   });
 });
 

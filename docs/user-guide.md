@@ -445,7 +445,9 @@ different claims and only one of them is about being behind:
   succeeded, so the references are current, but nothing established how far
   behind the mesh is, so the card says the state is unknown.
 
-A network outage never makes the app claim your mesh fell behind.
+A fetch that never reached the remote never makes the app claim your mesh fell
+behind. A pull that times out is a different case: by then the commits were
+fetched and counted, so the mesh really is behind and the card says so.
 
 A mesh whose sync could not finish also shows the sync retry icon next to its
 name, and that icon stays until a sync succeeds — click it to retry. It is

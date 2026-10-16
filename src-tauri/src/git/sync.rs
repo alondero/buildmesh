@@ -143,6 +143,17 @@ pub(crate) enum SyncOutcome {
     SkippedNoRemote,
     /// Fetched; no new commits to pull.
     UpToDate,
+    /// Fetched successfully, but the current branch has no upstream to
+    /// compare against, so nothing established how far behind it is. Common
+    /// cause: a branch that gained a remote via `git remote add` but has
+    /// never been pushed, so no tracking relationship exists.
+    ///
+    /// Distinct from [`UpToDate`], which asserts a comparison ran and found
+    /// zero: here no comparison was possible, so reporting "already up to
+    /// date" would be a claim we cannot support. Also distinct from
+    /// `SkippedNoRemote` — the fetch DID run, so the remote-tracking refs
+    /// are current.
+    NoUpstream,
     /// Fetched successfully, but comparing the local branch against upstream
     /// failed for a reason other than a missing upstream (perm denied on
     /// .git/HEAD, corrupt object db, refdb lock contention). The fetch DID
@@ -191,14 +202,16 @@ impl SyncOutcome {
     /// after any of these outcomes is cut from up-to-date refs.
     ///
     /// `PullTimedOut` counts — the FETCH succeeded; only the working-tree
-    /// fast-forward hung. `ComparisonFailed` counts too: the fetch succeeded
-    /// and only the count-behind read failed. `Skipped*` do NOT count (no
-    /// fetch ran), and the two error variants obviously don't.
+    /// fast-forward hung. `ComparisonFailed` and `NoUpstream` count too: in
+    /// both the fetch succeeded and only the count-behind read failed to
+    /// produce a number. `SkippedNoRemote` does NOT count (no fetch ran), and
+    /// the two hard error variants obviously don't.
     pub(crate) fn fetched_ok(&self) -> bool {
         matches!(
             self,
             Self::UpToDate
                 | Self::ComparisonFailed { .. }
+                | Self::NoUpstream
                 | Self::Synced { .. }
                 | Self::FetchedButDiverged { .. }
                 | Self::FetchedButDirty { .. }
@@ -218,7 +231,8 @@ impl SyncOutcome {
     /// whether new commits arrived, and resetting the warm pool onto a SHA we
     /// never confirmed is the phantom advance `PullTimedOut` avoids. The refs
     /// are still fresh — that is `fetched_ok`'s job — but the pool must not
-    /// move.
+    /// move. `NoUpstream` returns `false` for the same reason: no comparison
+    /// ran, so there is no confirmed new commit to move onto.
     pub(crate) fn advanced_ref(&self) -> bool {
         matches!(
             self,
@@ -326,11 +340,15 @@ pub(crate) fn do_sync(
         Ok(n) => n,
         Err(e) => {
             if e.starts_with("no upstream") {
+                // The remote exists and was fetched, but this branch tracks
+                // nothing, so there is no comparison to make. That is a
+                // normal state for an unpushed branch — not an error, and not
+                // evidence of being up to date either.
                 tracing::info!(
-                    "do_sync: no upstream to compare against ({}); treating as up-to-date",
+                    "do_sync: no upstream to compare against ({}); nothing was compared",
                     e
                 );
-                return SyncOutcome::UpToDate;
+                return SyncOutcome::NoUpstream;
             }
             // A real git2 error, not the benign "no upstream" case. The fetch
             // already ran, so the refs are fresh — but "how far behind are we"
@@ -869,6 +887,11 @@ pub fn fetch_origin(project_root: &str, base_ref: &str) -> Result<FetchOutcome, 
         },
         SyncOutcome::SkippedNoRemote => FetchOutcome::SkippedNoRemote,
         SyncOutcome::UpToDate => FetchOutcome::UpToDate,
+        // Same reasoning as `ComparisonFailed` below: the spawn path keeps
+        // the behaviour it had when both of these folded into `UpToDate` —
+        // the fetch ran, so `fetched_ok` stamps freshness, and no warning
+        // toast is raised. The spawn path has no card to get wrong.
+        SyncOutcome::NoUpstream => FetchOutcome::UpToDate,
         // The spawn-time contract keeps the behaviour it had when this folded
         // into `UpToDate`: fetch succeeded, so `fetched_ok` stamps freshness,
         // and no warning toast is raised. `ComparisonFailed` exists for the
