@@ -365,7 +365,7 @@ export const useMeshSettingsStore = create<MeshSettingsState>((set, get) => {
         worktreeDirAppDefault: appDir,
         worktreeDirEffective:
           dirConfig?.effective_directory ??
-          getEffectiveWorktreeDir(get().meshPath ?? '', meshDir, appDir),
+          getEffectiveWorktreeDir(state.meshPath ?? '', meshDir, appDir),
       },
     }));
   };
