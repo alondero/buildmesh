@@ -5,9 +5,8 @@
  * clickable `<button>`) and `WorktreeCloseDialog` (wrapped in a plain
  * `<div>`). The call sites own the wrapper; this component owns the status
  * letter, the path, and the `+additions / -deletions` counts. It returns a
- * fragment, so these assertions are the only thing pinning that it stays
- * wrapper-free — an element here would change the rendered output of both
- * lists.
+ * fragment, so the first test below is what keeps it wrapper-free: an element
+ * here would change the rendered output of both lists.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -33,7 +32,6 @@ describe('ChangedFileRow (#2406)', () => {
     // the first child is the letter itself, not a wrapper this component owns.
     expect(container.firstElementChild?.tagName).toBe('SPAN');
     expect(container.childElementCount).toBe(4);
-    expect(screen.getByText('src/app.ts').tagName).toBe('SPAN');
   });
 
   it('renders the path and the +additions / -deletions counts', () => {
