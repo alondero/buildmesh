@@ -154,7 +154,6 @@ describe('Diff view toggle (issue #1374)', () => {
       closingNodeIds: new Set(),
       circuitOwnerships: {},
       semanticTurns: {},
-      schedules: {},
     });
   });
 

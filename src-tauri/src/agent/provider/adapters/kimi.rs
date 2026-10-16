@@ -26,6 +26,7 @@
 //! `.cmd` shim), so `WindowsShell::Direct` is correct everywhere — matching
 //! the AGY and Grok adapter patterns.
 
+use crate::agent::managed_config;
 use crate::agent::provider::{
     AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell,
 };
@@ -48,7 +49,6 @@ fn hook_command(windows: bool) -> String {
 /// Kimi Code 0.27.0 reads flat [[hooks]] entries from its global config.
 /// Keep callbacks runtime-bound: this file is shared by all Kimi sessions.
 fn ensure_hooks(path: &Path, command: &str) -> Result<(), String> {
-    use std::io::Write;
     use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table};
     let _guard = HOOK_CONFIG_LOCK.lock().map_err(|e| e.to_string())?;
     let original = match std::fs::read_to_string(path) {
@@ -58,7 +58,7 @@ fn ensure_hooks(path: &Path, command: &str) -> Result<(), String> {
     };
     let mut config = original
         .parse::<DocumentMut>()
-        .map_err(|e| format!("refusing to overwrite malformed Kimi config {path:?}: {e}"))?;
+        .map_err(|e| managed_config::refuse_malformed(path, &e.to_string()))?;
     if !config.contains_key("hooks")
         || config["hooks"]
             .as_array()
@@ -120,11 +120,7 @@ fn ensure_hooks(path: &Path, command: &str) -> Result<(), String> {
     }
     let parent = path.parent().ok_or("Kimi config has no parent")?;
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
-    temp.write_all(updated.as_bytes())
-        .map_err(|e| e.to_string())?;
-    temp.as_file().sync_all().map_err(|e| e.to_string())?;
-    temp.persist(path)
+    managed_config::atomic_write(path, &updated)
         .map_err(|e| format!("failed to replace Kimi config {path:?}: {e}"))?;
     Ok(())
 }

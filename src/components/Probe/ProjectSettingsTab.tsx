@@ -19,9 +19,9 @@
  *
  * Sections are the point of this rewrite, not decoration: each `ProbeSection`
  * heading tells the user whether the controls under it are identity, runtime,
- * commands, or strategy. Delete Mesh lives in an explicitly labelled danger
- * zone that states its impact and recovery story *before* the confirmation
- * (the old inline red button said neither).
+ *     commands, or strategy. Delete Mesh lives in an explicitly labelled danger
+ *     zone that states its impact and recovery story *before* the confirmation
+ *     (the old inline red button said neither).
  *
  * Fields carried over from the legacy `MeshPropertiesPanel` (deleted in
  * #380; `AiContextSection` moved into the Probe directory in #410):
@@ -35,6 +35,14 @@
  * Legacy Autopilot policy was removed from the application; Circuit settings
  * live in the Circuits destination.
  *
+ * **This component holds no settings state.** The per-Mesh editing session —
+ * the form drafts, the worktree-strategy drafts, the load, the auto-save
+ * writes, the save-status machine and the mesh-switch guard that drops a write
+ * whose Mesh the user has left — lives in `stores/meshSettingsStore.ts`
+ * (issue #2242). This file keeps only what is genuinely local to the render:
+ * the provider catalogue, the app-wide default label, the sandbox
+ * availability probe, the `gh auth` flag, and the delete confirmation.
+ *
  * Reactivity model matches the legacy panel: text fields save on blur,
  * selects, radios, and toggles save on change. Two error channels, both
  * pre-existing: the destination-level `saveStatus` banner (issue #729) for
@@ -43,82 +51,62 @@
  * write. Neither reverts the user's input on failure.
  */
 
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { useMeshStore } from '../../stores/meshStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useUIStore } from '../../stores/uiStore';
+import { useMeshSettingsStore } from '../../stores/meshSettingsStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { usePoolChanged } from '../../hooks/usePoolChanged';
 import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
-import { useSaveStatus } from '../../hooks/useSaveStatus';
 import { WORKTREE_DIR_CHANGED_EVENT } from '../../lib/events';
-import { formatError } from '../../lib/errorUtils';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { AiContextSection } from './AiContextSection';
 import { SaveIndicator } from '../shared/SaveIndicator';
 import { SpawnOptionPicker, useSpawnOptionLabel } from '../Providers/SpawnOptionPicker';
 import {
   checkGhAuth,
-  detectMeshProject,
   getAppPreferences,
-  getMeshProperties,
-  getWarmPoolCount,
-  getWorktreeDirectoryConfig,
   listProviders,
   sandboxDevModeEnabled,
-  updateMeshColumn,
-  updateMeshPoolSize,
-  updateMeshSandbox,
-  updateMeshUseWorktree,
-  updateMeshWorktreeDirectory,
-  updateWorktreeBaseRef,
-  type AppPreferences,
   type ProviderInfo,
-  type WorktreeDirectoryConfig,
 } from '../../lib/tauri';
-import {
-  PROJECT_PRESETS,
-  resolvePreset,
-  type DetectedProject,
-  type ProjectPreset,
-} from '../../lib/projectPresets';
-import { getEffectiveWorktreeDir } from '../../lib/paths';
+import { PROJECT_PRESETS, resolvePreset } from '../../lib/projectPresets';
 import { ErrorState, LoadingState } from '../shared/Spinner';
 import { ProbeTabBody } from './ProbeTabBody';
 import { ProbeScopeNote, ProbeSection } from './ProbeSection';
 import { Field } from './Field';
-import {
-  WorktreeStrategySection,
-  formToWireBaseRef,
-  wireToFormBaseRef,
-  wireToFormMode,
-  type BaseRefForm,
-  type WorktreeModeForm,
-} from './WorktreeStrategySection';
+import { WorktreeStrategySection } from './WorktreeStrategySection';
 
 export function ProjectSettingsTab() {
   const { activeMeshId, activeMeshPath } = useProbeContext();
   const mesh = useMeshStore((s) =>
     activeMeshId !== null ? s.meshesById.get(activeMeshId) : undefined
   );
-  const updateMeshName = useMeshStore((s) => s.updateMeshName);
   // Delete Mesh. The store's `deleteMesh` calls `delete_mesh` and refetches
   // the mesh list; `toggleProbe` closes the probe on success, matching the
   // legacy `closePropertiesPanel()` behaviour.
   const deleteMesh = useMeshStore((s) => s.deleteMesh);
   const toggleProbe = useUIStore((s) => s.toggleProbe);
 
-  const [form, setForm] = useState({
-    name: '',
-    buildCommand: '',
-    runCommand: '',
-    rootBuildCommand: '',
-    rootRunCommand: '',
-    defaultProvider: '',
-    sandbox: false,
-  });
+  // ── The editing session (issue #2242) ──────────────────────────────────
+  const form = useMeshSettingsStore((s) => s.form);
+  const detected = useMeshSettingsStore((s) => s.detected);
+  const loading = useMeshSettingsStore((s) => s.loading);
+  const loadedMeshId = useMeshSettingsStore((s) => s.loadedMeshId);
+  const loadError = useMeshSettingsStore((s) => s.loadError);
+  const status = useMeshSettingsStore((s) => s.status);
+  const statusError = useMeshSettingsStore((s) => s.statusError);
+  const load = useMeshSettingsStore((s) => s.load);
+  const editForm = useMeshSettingsStore((s) => s.editForm);
+  const save = useMeshSettingsStore((s) => s.save);
+  const applyPreset = useMeshSettingsStore((s) => s.applyPreset);
+  const resetSaveStatus = useMeshSettingsStore((s) => s.resetSaveStatus);
+  const refreshWorktreeDirectory = useMeshSettingsStore((s) => s.refreshWorktreeDirectory);
+  const refreshPoolCountFor = useMeshSettingsStore((s) => s.refreshPoolCount);
+
   // Whether the experimental agent sandbox is available in this process
   // (issue #2034). The backend ignores `meshes.sandbox` entirely unless
   // BUILDMESH_SANDBOX=1, so shipping builds must not offer the toggle at all —
@@ -126,7 +114,6 @@ export function ProjectSettingsTab() {
   // than no control. Defaults to false so the toggle never flashes in.
   const [sandboxDevMode, setSandboxDevMode] = useState(false);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
-  const [detected, setDetected] = useState<DetectedProject | null>(null);
   // App-wide default provider id (from preferences.json). Drives the
   // `<Default> ({X})` label on the dropdown's first option so Adam can
   // see at a glance whether `<Default>` would route through Claude Code
@@ -135,9 +122,6 @@ export function ProjectSettingsTab() {
   // doesn't flash a stale `"anthropic"` label before the async fetch
   // resolves.
   const [appWideDefault, setAppWideDefault] = useState<string>('claude');
-  const [loading, setLoading] = useState(true);
-  const [loadedMeshId, setLoadedMeshId] = useState<number | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   // `MeshHealth` does not surface `gh auth` status (it's about branch /
   // drift / dirty, not the GitHub CLI login state), but `<AiContextSection>`
@@ -149,58 +133,21 @@ export function ProjectSettingsTab() {
   // Delete-Mesh confirm dialog. The trigger lives in the danger zone; the
   // dialog uses the shared `<ConfirmDialog>` shape.
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  const mountedRef = useRef(true);
-
-  // ── Worktree strategy state (moved from the Worktree Manager tab,
-  //    issue #1460). The three radio/toggle fields initialise to the legacy
-  //    `MeshPropertiesPanel` defaults (use a worktree, start a fresh
-  //    session, branched mode); the load effect below replaces them with
-  //    the persisted values from the wire.
-  const [useWorktree, setUseWorktree] = useState(true);
-  const [baseRef, setBaseRef] = useState<BaseRefForm>('fresh');
-  const [worktreeMode, setWorktreeMode] = useState<WorktreeModeForm>('branched');
-  // Pre-spawn Worktree Pool size (issue #611). `0` = pool off, `1..=5` =
-  // target. The toggle's `checked` is derived from `preSpawnPoolSize > 0`;
-  // the size input clamps to 1..5 and is disabled when the toggle is off.
-  // The pool worker (`services::warm_pool`) reads this column on startup +
-  // after each claim, draining excess and filling up to this target.
-  const [preSpawnPoolSize, setPreSpawnPoolSize] = useState(0);
-  // Issue #1519: per-Mesh worktree directory override draft (`''` = inherit)
-  // plus the inherited effective value for display. Hydrated from
-  // `getMeshProperties` + `getAppPreferences`; the effective display also
-  // refreshes from `getWorktreeDirectoryConfig` so the backend precedence
-  // rule (not a TS re-spelling) is authoritative.
-  const [worktreeDirectory, setWorktreeDirectory] = useState('');
-  const [worktreeDirEffective, setWorktreeDirEffective] = useState('');
-  const [worktreeDirAppDefault, setWorktreeDirAppDefault] = useState<string | null>(null);
-  // Live pre-spawn pool *ready* count for the active mesh. Source of
-  // truth is `db::count_available_warm_for_mesh` on the Rust side; the
-  // badge re-fetches on mount, on mesh switch, and on every
-  // `pool-count-changed` event (which fires from try_claim, prewarm_one,
-  // drain_excess_warm_entries, update_mesh_pool_size, and
-  // reconcile_on_startup). `null` = first fetch in flight (don't show
-  // a stale "0/N" while we don't know yet).
-  const [poolCount, setPoolCount] = useState<number | null>(null);
-  // Section-local save failure for the worktree strategy controls. Kept
-  // apart from `saveStatus` because these messages name the column that
-  // refused the write, which a single destination-level banner cannot do.
-  const [strategyError, setStrategyError] = useState<string | null>(null);
-
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
 
   // Fetch the provider list once on mount; the catalogue is mostly static
   // for the life of the session, so a re-fetch per mesh switch would be
   // wasted work — but it CAN change when the user adds or removes a custom
   // provider in App Settings, so the hook below re-fires this fetch on the
   // `provider-list-changed` event.
+  //
+  // A payload that is not a list is treated as an empty catalogue, the same as
+  // a rejected read. `useSpawnOptionLabel` maps the array on every render, so a
+  // non-array that survives here crashes the whole destination on the next
+  // render for any other reason — an async store update, a mesh switch. The
+  // boundary that fetches the payload is the right place to normalise it.
   const refreshProviders = useCallback(() => {
     listProviders()
-      .then(setProviders)
+      .then((next) => setProviders(Array.isArray(next) ? next : []))
       .catch(() => setProviders([]));
   }, []);
 
@@ -245,62 +192,9 @@ export function ProjectSettingsTab() {
       });
   }, [activeMeshId]);
 
-  // Project-type detection: drives the "Looks like an X project" hint and
-  // which preset gets the ✓ marker in the dropdown. Runs against the
-  // MESH ROOT, not the focused node's working directory — a Worktree
-  // Node's path is the worktree subdir (often missing Cargo.toml /
-  // package.json if the worktree only carries the agent's edits), so
-  // running detection against `activePath` (the focused-node path) would
-  // silently miss the mesh's actual project type whenever a node is
-  // focused.
-  useAsyncEffect((signal) => {
-    if (activeMeshId === null || !activeMeshPath) return;
-    setDetected(null);
-    detectMeshProject(activeMeshPath)
-      .then((d) => {
-        if (!signal.aborted) setDetected(d);
-      })
-      .catch(() => {
-        if (!signal.aborted) setDetected(null);
-      });
-  }, [activeMeshId, activeMeshPath]);
-
-  // Load the mesh's saved config every time the active mesh changes.
-  // Intentionally depends on `activeMeshId` only — re-firing on
-  // `mesh?.name` would clobber the user's in-flight edits to Model,
-  // Build, Run, etc. with the just-saved values (the `updateMeshName`
-  // call mutates `meshesById` and would otherwise re-trigger this
-  // effect on every name save). The "config.name → mesh.name → folder
-  // name" fallback chain runs at mount only; the user can still rename
-  // later via the Name field.
-  //
-  // Applies a loaded directory config to the form state. Shared by the
-  // orchestrated mount loader below (guarded by its AbortSignal) and the
-  // `worktree-directory-changed` listener further down (guarded by its own
-  // `cancelled` flag) so a Settings change elsewhere refreshes this tab
-  // instead of leaving a stale inherited value until remount (issue #1519).
-  // Declared before the loader so the loader can call it in one pass.
-  const applyWorktreeDirConfig = useCallback(
-    (
-      config: { worktree_directory?: string | null },
-      prefs: AppPreferences | null,
-      dirConfig: WorktreeDirectoryConfig | null,
-    ) => {
-      const meshDir = config.worktree_directory?.trim() ?? '';
-      setWorktreeDirectory(meshDir);
-      const appDir = (prefs?.worktree_directory?.trim() ?? '') || null;
-      setWorktreeDirAppDefault(appDir);
-      setWorktreeDirEffective(
-        dirConfig?.effective_directory ??
-          getEffectiveWorktreeDir(activeMeshPath ?? '', meshDir, appDir),
-      );
-    },
-    [activeMeshPath],
-  );
-
   // Sandbox availability is a property of the running process, not of the
   // selected Mesh, so it is read once on mount rather than inside the
-  // per-mesh load above. A failed read leaves the toggle hidden: the backend
+  // per-mesh load. A failed read leaves the toggle hidden: the backend
   // would ignore `meshes.sandbox` in that state anyway, so showing the control
   // would advertise a setting that does nothing.
   useEffect(() => {
@@ -311,381 +205,39 @@ export function ProjectSettingsTab() {
     return () => { cancelled = true; };
   }, []);
 
-  // One orchestrated load per mesh selection (issue #1460). `getMeshProperties`
-  // is called ONCE and its single result feeds the form, the worktree
-  // strategy, and the directory resolution. The pre-split tab fetched it from
-  // two effects with only one of them under `loading`, so the destination
-  // could render the previous project's worktree-directory override for a
-  // frame after `loading` flipped.
+  // One orchestrated load per mesh selection (issue #1460). The store issues
+  // ONE `getMeshProperties` whose single result feeds the form, the worktree
+  // strategy, the directory resolution, and the project-type detection, and
+  // applies all of it only while this request is still the newest — see the
+  // store's `load` for the request-identity rule that replaced the old
+  // per-effect `AbortSignal` fence.
   //
   // Dep discipline is inherited from the Worktree Manager tab (issue #451):
-  // the form state is deliberately NOT a dependency, or every save would
+  // the session state is deliberately NOT a dependency, or every save would
   // re-fire the load and overwrite the user's in-flight edits.
   useAsyncEffect(
-    (signal) => {
+    () => {
       if (activeMeshId === null || !activeMeshPath) return;
-      setLoading(true);
-      setLoadedMeshId(null);
-      setLoadError(null);
       setShowDeleteConfirm(false);
-      Promise.all([
-        getMeshProperties(activeMeshId),
-        // The two secondary reads are individually best-effort: a failure to
-        // resolve preferences or the directory config must degrade the
-        // "Effective:" display, never blank the whole form.
-        getAppPreferences().catch(() => null),
-        getWorktreeDirectoryConfig(activeMeshId).catch(() => null),
-      ])
-        .then(([config, prefs, dirConfig]) => {
-          if (signal.aborted) return;
-          const folderName = activeMeshPath.split(/[/\\]/).pop() ?? '';
-          const resolvedName = config.name || mesh?.name || folderName;
-          setForm({
-            name: resolvedName,
-            buildCommand: config.build_command ?? '',
-            runCommand: config.run_command ?? '',
-            rootBuildCommand: config.root_build_command ?? '',
-            rootRunCommand: config.root_run_command ?? '',
-            defaultProvider: config.default_provider ?? '',
-            sandbox: config.sandbox,
-          });
-          setUseWorktree(config.use_worktree);
-          setBaseRef(wireToFormBaseRef(config.base_ref));
-          setWorktreeMode(wireToFormMode(config.worktree_mode));
-          setPreSpawnPoolSize(config.pre_spawn_pool_size);
-          // Issue #1519 — the directory override and its resolved effective
-          // path hydrate in the same pass, so nothing is left showing the
-          // previous project's value.
-          applyWorktreeDirConfig(config, prefs, dirConfig);
-          setLoadedMeshId(activeMeshId);
-          setLoading(false);
-        })
-        .catch((error) => {
-          if (signal.aborted) return;
-          setLoadError(formatError(error));
-          setLoading(false);
-        });
-      // Dep array intentionally excludes `mesh?.name` (see comment above).
-      // `mesh` is captured at effect-run time, which is fine for the
-      // fallback chain — the user can rename later via the form itself.
+      void load({
+        meshId: activeMeshId,
+        meshPath: activeMeshPath,
+        fallbackName: mesh?.name,
+      });
     },
-    [activeMeshId, activeMeshPath, applyWorktreeDirConfig, reloadKey],
-  );
-
-  // Keep `mountedRef` ONLY for the blur handlers' "save-after-unmount"
-  // guard. The 3 IPC effects above use `useAsyncEffect`'s AbortSignal
-  // (PR #390, issue #349) — see the hook for the rationale.
-  // (No further effects below this line use mountedRef.)
-
-  // Auto-save helpers — each returns a promise so callers can await then
-  // refetch. The legacy panel reused `git.refresh()` after every save to
-  // keep the sidebar drift badge in sync; the new tab skips the explicit
-  // refresh because the `useMeshHealth` cache the sidebar consumes is
-  // already refetched by its own GIT_CHANGED / focus invalidate path
-  // (and `meshes` column writes don't change git health anyway).
-  //
-  // Issue #729 — every save goes through `saveStatus` so the top-of-tab
-  // "Saving… / Saved / Save failed" indicator tracks the most-recent
-  // write. We keep one hook instance for the tab (rather than one per
-  // field) because a single global indicator satisfies the requirement and
-  // the tab has many auto-save fields; stacked tiny indicators would
-  // compete for the same attention as the form below them. The hook clears
-  // the prior error before each save and surfaces the rejection's
-  // `.message` on fail.
-  const saveStatus = useSaveStatus();
-
-  // Reset the indicator on mesh-switch so a stale "Save failed" from
-  // the outgoing mesh doesn't bleed onto the incoming mesh's form. A
-  // bare useEffect that tracks `activeMeshId` is sufficient — the
-  // hook's own reset() cancels the pending saved→idle timer cleanly.
-  // `saveStatus.reset()` is bound to the SaveIndicator hook instance,
-  // which is stable for the lifetime of the consumer — the rule can't
-  // see through the hook's return type, so the disable is justified.
-  useEffect(() => {
-    saveStatus.reset();
-    setStrategyError(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeMeshId, saveStatus.reset]);
-
-  // Ref mirror of `activeMeshId` so the IPC-`.then`/`.catch` in
-  // `wrappedSave` can read the CURRENT mesh id at resolve time, not
-  // the closure-captured value from the render where the IPC was
-  // fired. Without this, a slow save from the outgoing mesh would
-  // still see `activeMeshId === saveMeshId` (both are the stale value
-  // from the previous render) and surface its error on the new mesh
-  // — review finding #1.
-  const activeMeshIdRef = useRef(activeMeshId);
-  useEffect(() => {
-    activeMeshIdRef.current = activeMeshId;
-  }, [activeMeshId]);
-
-  /**
-   * Internal save wrapper. Drives the state machine on every IPC
-   * outcome, and on rejection surfaces the rejection's `.message`
-   * (previously swallowed). The user's input value is intentionally NOT
-   * reverted on a failure (matching the existing `saveSandbox` optimistic
-   * rule and the "keep the field's text" requirement).
-   *
-   * Mesh-switch guard (review finding #1): we capture `activeMeshId`
-   * at the moment the IPC starts, then check it on resolve/reject
-   * via the ref (NOT the closure-captured prop — that would always
-   * equal the value at fire time, never the current one). If the user
-   * switched meshes while the IPC was in flight, the result belongs
-   * to the OUTGOING mesh, not the one the user is looking at —
-   * surfacing "Save failed" or "Saved" on the new mesh would be wrong.
-   * Same defensive pattern as `ScratchpadTab.tsx` (`if
-   * (pending.meshId === activeMeshId)`). The `saveStatus.reset()` in
-   * the `useEffect([activeMeshId])` above already clears the
-   * indicator on switch, but it cannot stop the IPC's later
-   * `.then`/`.catch` from re-applying state — this guard is the
-   * second line of defence.
-   */
-  const wrappedSave = async (op: () => Promise<void>) => {
-    const saveMeshId = activeMeshIdRef.current;
-    if (loadedMeshId !== saveMeshId || loading || loadError !== null) return;
-    saveStatus.start();
-    try {
-      await op();
-      if (activeMeshIdRef.current !== saveMeshId) return;
-      saveStatus.success();
-    } catch (e) {
-      if (activeMeshIdRef.current !== saveMeshId) {
-        // Audit trail only — the user is looking at a different
-        // mesh's form; the indicator stays clean.
-        console.error('Project setting save failed after mesh switch:', e);
-        return;
-      }
-      // Console.error preserves the audit trail in buildmesh.log for
-      // the dev / bug-report path; the rendered banner shows the same
-      // message to the user so the cause is actionable.
-      console.error('Project setting save failed:', e);
-      saveStatus.fail(e);
-    }
-  };
-
-  const saveName = async (name: string) => {
-    if (activeMeshId === null) return;
-    if (name === mesh?.name) {
-      // No-op write: skip the IPC and avoid a false "Saved" flicker
-      // that would briefly show success for a no-op.
-      return;
-    }
-    await wrappedSave(() => updateMeshName(activeMeshId, name));
-  };
-
-  const saveBuildCommand = async (value: string) => {
-    if (activeMeshId === null) return;
-    await wrappedSave(() => updateMeshColumn(activeMeshId, 'build_command', value));
-  };
-
-  const saveRunCommand = async (value: string) => {
-    if (activeMeshId === null) return;
-    await wrappedSave(() => updateMeshColumn(activeMeshId, 'run_command', value));
-  };
-
-  // Per-context commands (issue #802). Optional — a blank value clears the
-  // column so the Root Node falls back to build_command / run_command.
-  const saveRootBuildCommand = async (value: string) => {
-    if (activeMeshId === null) return;
-    await wrappedSave(() => updateMeshColumn(activeMeshId, 'root_build_command', value));
-  };
-
-  const saveRootRunCommand = async (value: string) => {
-    if (activeMeshId === null) return;
-    await wrappedSave(() => updateMeshColumn(activeMeshId, 'root_run_command', value));
-  };
-
-  const saveDefaultProvider = async (value: string) => {
-    if (activeMeshId === null) return;
-    await wrappedSave(() => updateMeshColumn(activeMeshId, 'default_provider', value));
-  };
-
-  // Sandbox toggle (#497 / #528). Optimistic, matching the "do not revert on
-  // failure" rule of the other binary controls — reverting a checkbox the user
-  // just clicked is more confusing than an unchanged value. The flag is OS-
-  // agnostic at the DB/UI layer; the OS-specific spawn policy is decided in
-  // `spawn_environment::wrap` on the backend, which only honours it when
-  // BUILDMESH_SANDBOX=1 (#2034) — the same gate that decides whether this
-  // control is rendered at all.
-  const saveSandbox = async (value: boolean) => {
-    if (activeMeshId === null) return;
-    setForm((p) => ({ ...p, sandbox: value }));
-    await wrappedSave(() => updateMeshSandbox(activeMeshId, value));
-  };
-
-  const applyPreset = async (preset: ProjectPreset) => {
-    if (activeMeshId === null) return;
-    setForm((p) => ({ ...p, buildCommand: preset.build, runCommand: preset.run }));
-    await wrappedSave(async () => {
-      await Promise.all([
-        updateMeshColumn(activeMeshId, 'build_command', preset.build),
-        updateMeshColumn(activeMeshId, 'run_command', preset.run),
-      ]);
-    });
-  };
-
-  const applyPresetById = async (id: string) => {
-    const preset = resolvePreset(id, detected?.node_scripts);
-    if (!preset) return;
-    await applyPreset(preset);
-  };
-
-  /**
-   * Mesh-switch guard for the worktree-strategy saves, which is the same rule
-   * `wrappedSave` applies with two differences: the failure lands in the
-   * section-local `strategyError` (it must name the column that refused the
-   * write), and the control is NOT reverted on failure (the "form mirrors
-   * user intent" rule).
-   *
-   * `saveMeshId` is captured at the moment the IPC starts and compared against
-   * the ref on settle. Without this, a write for the outgoing project would
-   * paint its error over the incoming project's form — and, in
-   * `handleChangeWorktreeDirectory`, would write the outgoing project's
-   * directory config into the incoming project's fields.
-   *
-   * Returns whether the write succeeded so the caller can gate its own
-   * post-save refresh on the same boundary.
-   */
-  const strategySave = useCallback(
-    async (saveMeshId: number, op: () => Promise<unknown>, failurePrefix: string) => {
-      try {
-        await op();
-        return true;
-      } catch (e) {
-        if (activeMeshIdRef.current !== saveMeshId) {
-          // Audit trail only — the user is looking at a different project's
-          // form, so the section stays clean.
-          console.error('Worktree strategy save failed after mesh switch:', e);
-          return false;
-        }
-        setStrategyError(`${failurePrefix}: ${formatError(e)}`);
-        return false;
-      }
-    },
-    [],
-  );
-
-  // ── Worktree-strategy save handlers (moved from the Worktree Manager
-  //    tab, issue #1460). Each: (1) update form state optimistically,
-  //    (2) clear any prior save error, (3) call the typed wrapper through
-  //    `strategySave` so the mesh-switch boundary is respected, (4) on
-  //    reject, surface the error inline WITHOUT reverting the form. The
-  //    "do not revert" rule matches the legacy panel — for a binary control
-  //    like a checkbox, reverting would silently undo the user's click and
-  //    they would have no idea why.
-  const handleToggleUseWorktree = useCallback(
-    async (next: boolean) => {
-      const saveMeshId = activeMeshId;
-      if (saveMeshId === null) return;
-      setUseWorktree(next);
-      setStrategyError(null);
-      await strategySave(
-        saveMeshId,
-        () => updateMeshUseWorktree(saveMeshId, next),
-        'Failed to update use_worktree',
-      );
-    },
-    [activeMeshId, strategySave],
-  );
-
-  const handleChangeBaseRef = useCallback(
-    async (next: BaseRefForm) => {
-      const saveMeshId = activeMeshId;
-      if (saveMeshId === null) return;
-      setBaseRef(next);
-      setStrategyError(null);
-      await strategySave(
-        saveMeshId,
-        () => updateWorktreeBaseRef(saveMeshId, formToWireBaseRef(next)),
-        'Failed to update base_ref',
-      );
-    },
-    [activeMeshId, strategySave],
-  );
-
-  const handleChangeWorktreeMode = useCallback(
-    async (next: WorktreeModeForm) => {
-      const saveMeshId = activeMeshId;
-      if (saveMeshId === null) return;
-      setWorktreeMode(next);
-      setStrategyError(null);
-      await strategySave(
-        saveMeshId,
-        () => updateMeshColumn(saveMeshId, 'worktree_mode', next),
-        'Failed to update worktree_mode',
-      );
-    },
-    [activeMeshId, strategySave],
-  );
-
-  // Pre-spawn pool size save (issue #611). Single handler for both the
-  // toggle (which sends 0 or 1) and the size input (which sends 1..5);
-  // the backend enforces the `0..=5` invariant and rejects otherwise.
-  // Mirrors the other save handlers' "do not revert on save failure"
-  // rule — if the user shrinks the pool to 5 and the backend rejects,
-  // the form keeps their typed value so the failure message is
-  // actionable.
-  const handleChangePoolSize = useCallback(
-    async (next: number) => {
-      const saveMeshId = activeMeshId;
-      if (saveMeshId === null) return;
-      const clamped = Math.max(0, Math.min(5, Math.trunc(next) || 0));
-      setPreSpawnPoolSize(clamped);
-      setStrategyError(null);
-      await strategySave(
-        saveMeshId,
-        () => updateMeshPoolSize(saveMeshId, clamped),
-        'Failed to update pool size',
-      );
-    },
-    [activeMeshId, strategySave],
-  );
-
-  // Per-Mesh worktree directory save (issue #1519). `''`/blank clears the
-  // override so the Mesh inherits the app default; anything else stores the
-  // trimmed raw input (no shell/`~` expansion). Absolute paths are validated
-  // backend-side for same-environment (native vs WSL) with an actionable
-  // error. Like the other handlers, the form keeps the typed value on
-  // failure. On success, refresh the effective display from the backend so
-  // the inherited value can't drift from the precedence rule — and re-check
-  // the mesh boundary after each await, because that refresh is the one place
-  // this handler writes three fields from a second project's response.
-  const handleChangeWorktreeDirectory = useCallback(
-    async (next: string) => {
-      const saveMeshId = activeMeshId;
-      if (saveMeshId === null) return;
-      setWorktreeDirectory(next);
-      setStrategyError(null);
-      const trimmed = next.trim();
-      const saved = await strategySave(
-        saveMeshId,
-        () => updateMeshWorktreeDirectory(saveMeshId, trimmed === '' ? null : trimmed),
-        'Failed to update worktree directory',
-      );
-      if (!saved || activeMeshIdRef.current !== saveMeshId) return;
-      try {
-        const cfg = await getWorktreeDirectoryConfig(saveMeshId);
-        if (activeMeshIdRef.current !== saveMeshId) return;
-        setWorktreeDirEffective(cfg.effective_directory);
-        setWorktreeDirAppDefault(cfg.app_directory);
-        setWorktreeDirectory(cfg.mesh_directory?.trim() ?? '');
-      } catch {
-        // Keep the optimistic form on config-refresh failure — the save
-        // itself succeeded; the effective display refreshes on next load.
-        if (activeMeshIdRef.current !== saveMeshId) return;
-        setWorktreeDirEffective(
-          getEffectiveWorktreeDir(activeMeshPath ?? '', trimmed, worktreeDirAppDefault),
-        );
-      }
-    },
-    [activeMeshId, activeMeshPath, worktreeDirAppDefault, strategySave],
+    // Dep array intentionally excludes `mesh?.name`: the rename save mutates
+    // `meshesById`, and re-firing here would clobber the user's in-flight
+    // edits with the values that were just saved. `mesh` is read at
+    // effect-run time, which is enough for the store's fallback chain —
+    // the user can rename later via the form itself.
+    [activeMeshId, activeMeshPath, load, reloadKey],
   );
 
   // Re-resolve when the directory config changes outside this destination
   // (e.g. the app-wide default edited in Settings while the probe is
   // open). Skips events for other meshes; `null` (app default moved)
-  // refreshes any mesh. Guarded by its own `cancelled` flag (the mount loader
-  // has the AbortSignal for the same race).
+  // refreshes any mesh. The store owns the reads and drops a response that
+  // lands after the user has switched meshes.
   useEffect(() => {
     if (activeMeshId === null) return;
     let cancelled = false;
@@ -694,17 +246,7 @@ export function ProjectSettingsTab() {
       const affected = event.payload;
       if (affected !== null && affected !== undefined && affected !== activeMeshId) return;
       if (cancelled) return;
-      Promise.all([
-        getMeshProperties(activeMeshId),
-        getAppPreferences().catch(() => null),
-        getWorktreeDirectoryConfig(activeMeshId).catch(() => null),
-      ])
-        .then(([config, prefs, dirConfig]) => {
-          if (!cancelled) applyWorktreeDirConfig(config, prefs, dirConfig);
-        })
-        .catch(() => {
-          // Swallow — keep the existing form state (see above).
-        });
+      void refreshWorktreeDirectory();
     }).then((fn) => {
       if (cancelled) fn();
       else unlisten = fn;
@@ -713,46 +255,32 @@ export function ProjectSettingsTab() {
       cancelled = true;
       unlisten?.();
     };
-  }, [activeMeshId, applyWorktreeDirConfig]);
+  }, [activeMeshId, refreshWorktreeDirectory]);
 
   // Single refresh body for the warm-pool readiness badge — mount,
   // mesh-switch, and every `pool-count-changed` event. Stable closure via
   // `useCallback([activeMeshId])` so `usePoolChanged` doesn't tear down and
   // re-attach its listener on every render (the dep-array contract
-  // `usePoolChanged` documents). Errors are swallowed (keep stale value)
-  // so a transient SQLite hiccup doesn't blank the badge — same recovery
-  // rule as the config-load path.
+  // `usePoolChanged` documents). A null mesh clears the badge; errors are
+  // swallowed (keep stale value) so a transient SQLite hiccup doesn't blank
+  // it — same recovery rule as the config-load path.
   const refreshPoolCount = useCallback(() => {
-    if (activeMeshId === null) return;
-    getWarmPoolCount(activeMeshId)
-      .then((n) => setPoolCount(n))
-      .catch(() => {
-        /* keep stale value */
-      });
-  }, [activeMeshId]);
+    refreshPoolCountFor(activeMeshId);
+  }, [activeMeshId, refreshPoolCountFor]);
 
-  useAsyncEffect(
-    (signal) => {
-      if (activeMeshId === null) {
-        setPoolCount(null);
-        return;
-      }
-      getWarmPoolCount(activeMeshId)
-        .then((n) => {
-          if (!signal.aborted) setPoolCount(n);
-        })
-        .catch(() => {
-          /* keep stale value */
-        });
-    },
-    [activeMeshId],
-  );
+  useEffect(() => { refreshPoolCount(); }, [refreshPoolCount]);
 
   // Cross-component invalidation: re-fetch on every `pool-count-changed`
   // event from the Rust pool service. The payload (mesh_id) is currently
   // ignored — the badge re-fetches unconditionally on any mesh's change
   // (one extra O(1) COUNT query per event, which is fine).
   usePoolChanged(refreshPoolCount);
+
+  const applyPresetById = async (id: string) => {
+    const preset = resolvePreset(id, detected?.node_scripts);
+    if (!preset) return;
+    await applyPreset(preset);
+  };
 
   // Delete Mesh. The store swallows IPC errors into `state.error` (mirrors
   // the legacy try/catch and matches the rest of the meshStore surface), so
@@ -802,7 +330,7 @@ export function ProjectSettingsTab() {
   return (
     <ProbeTabBody padding="p-3" className="space-y-4">
       {/* Issue #729 — global SaveIndicator at the top of the destination.
-          Renders the current `saveStatus`: "Saving…" mid-write, "Saved"
+          Renders the session's `status`: "Saving…" mid-write, "Saved"
           after a successful write (auto-clearing), or "Save failed:
           <message>" when the IPC rejects. The banner sits above the
           sections so a failed write is visible without scrolling; empty /
@@ -811,9 +339,9 @@ export function ProjectSettingsTab() {
           `ScratchpadTab` adopts the same vocabulary without
           re-implementing both the state machine and the visual. */}
       <SaveIndicator
-        status={saveStatus.status}
-        error={saveStatus.error}
-        onDismiss={saveStatus.reset}
+        status={status}
+        error={statusError}
+        onDismiss={resetSaveStatus}
       />
       {loadError !== null ? (
         <div>
@@ -835,11 +363,8 @@ export function ProjectSettingsTab() {
                 id="mesh-prop-name"
                 type="text"
                 value={form.name}
-                onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))}
-                onBlur={async (e) => {
-                  if (!mountedRef.current) return;
-                  await saveName(e.target.value);
-                }}
+                onChange={(e) => editForm({ name: e.target.value })}
+                onBlur={(e) => void save('name', e.target.value)}
                 className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
               />
             </Field>
@@ -892,11 +417,7 @@ export function ProjectSettingsTab() {
                 value={form.defaultProvider || null}
                 unsetLabel={`<Default> (${appWideDefaultLabel})`}
                 unsetValue=""
-                onSelect={async (next) => {
-                  const value = next ?? '';
-                  setForm((p) => ({ ...p, defaultProvider: value }));
-                  await saveDefaultProvider(value);
-                }}
+                onSelect={(next) => void save('defaultProvider', next ?? '')}
               />
             </Field>
 
@@ -906,7 +427,9 @@ export function ProjectSettingsTab() {
                 a release never presents it. The help text states the real
                 per-platform behaviour rather than promising worktree
                 confinement everywhere — Windows denies no filesystem access
-                (#542), Linux has no backend (#828), and WSL is not contained. */}
+                (#542), Linux has no backend (#828), and WSL is not contained.
+                The write is optimistic: reverting a checkbox the user just
+                clicked is more confusing than an unchanged value. */}
             {sandboxDevMode && (
               <div>
                 <label
@@ -917,11 +440,7 @@ export function ProjectSettingsTab() {
                     id="mesh-prop-sandbox"
                     type="checkbox"
                     checked={form.sandbox}
-                    onChange={async (e) => {
-                      const next = e.target.checked;
-                      setForm((p) => ({ ...p, sandbox: next }));
-                      await saveSandbox(next);
-                    }}
+                    onChange={(e) => void save('sandbox', e.target.checked)}
                     className="accent-accent-cyan"
                   />
                   <span className="text-text-primary">
@@ -988,11 +507,8 @@ export function ProjectSettingsTab() {
                 id="mesh-prop-build"
                 type="text"
                 value={form.buildCommand}
-                onChange={(e) => setForm((p) => ({ ...p, buildCommand: e.target.value }))}
-                onBlur={async (e) => {
-                  if (!mountedRef.current) return;
-                  await saveBuildCommand(e.target.value);
-                }}
+                onChange={(e) => editForm({ buildCommand: e.target.value })}
+                onBlur={(e) => void save('buildCommand', e.target.value)}
                 placeholder="e.g., npm run build — type to override, or pick a preset above"
                 className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted placeholder:italic focus:outline-none focus:border-accent-cyan"
               />
@@ -1003,11 +519,8 @@ export function ProjectSettingsTab() {
                 id="mesh-prop-run"
                 type="text"
                 value={form.runCommand}
-                onChange={(e) => setForm((p) => ({ ...p, runCommand: e.target.value }))}
-                onBlur={async (e) => {
-                  if (!mountedRef.current) return;
-                  await saveRunCommand(e.target.value);
-                }}
+                onChange={(e) => editForm({ runCommand: e.target.value })}
+                onBlur={(e) => void save('runCommand', e.target.value)}
                 placeholder="e.g., npm run dev — type to override, or pick a preset above"
                 className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted placeholder:italic focus:outline-none focus:border-accent-cyan"
               />
@@ -1025,11 +538,8 @@ export function ProjectSettingsTab() {
                 id="mesh-prop-root-build"
                 type="text"
                 value={form.rootBuildCommand}
-                onChange={(e) => setForm((p) => ({ ...p, rootBuildCommand: e.target.value }))}
-                onBlur={async (e) => {
-                  if (!mountedRef.current) return;
-                  await saveRootBuildCommand(e.target.value);
-                }}
+                onChange={(e) => editForm({ rootBuildCommand: e.target.value })}
+                onBlur={(e) => void save('rootBuildCommand', e.target.value)}
                 placeholder="e.g., cargo build --workspace — run from the mesh root"
                 className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted placeholder:italic focus:outline-none focus:border-accent-cyan"
               />
@@ -1044,11 +554,8 @@ export function ProjectSettingsTab() {
                 id="mesh-prop-root-run"
                 type="text"
                 value={form.rootRunCommand}
-                onChange={(e) => setForm((p) => ({ ...p, rootRunCommand: e.target.value }))}
-                onBlur={async (e) => {
-                  if (!mountedRef.current) return;
-                  await saveRootRunCommand(e.target.value);
-                }}
+                onChange={(e) => editForm({ rootRunCommand: e.target.value })}
+                onBlur={(e) => void save('rootRunCommand', e.target.value)}
                 placeholder="e.g., npm run lint --workspaces — run from the mesh root"
                 className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted placeholder:italic focus:outline-none focus:border-accent-cyan"
               />
@@ -1059,27 +566,15 @@ export function ProjectSettingsTab() {
               (issue #1460). "Where do new agent worktrees get cut, and from
               which ref?" is a strategy decision, and it was previously
               reachable only by entering a maintenance surface whose other
-              controls delete branches. */}
+              controls delete branches. The section reads the editing session
+              itself (issue #2242), so the thirteen props it used to be handed
+              are gone. */}
           <ProbeSection
             title="Worktree strategy"
             testId="project-settings-worktree-strategy"
             description="How new agent worktrees are created and where they start from. Repository cleanup lives in the Repository destination."
           >
-            <WorktreeStrategySection
-              useWorktree={useWorktree}
-              baseRef={baseRef}
-              worktreeMode={worktreeMode}
-              preSpawnPoolSize={preSpawnPoolSize}
-              poolCount={poolCount}
-              worktreeDirectory={worktreeDirectory}
-              worktreeDirEffective={worktreeDirEffective}
-              error={strategyError}
-              onToggleUseWorktree={handleToggleUseWorktree}
-              onChangeBaseRef={handleChangeBaseRef}
-              onChangeWorktreeMode={handleChangeWorktreeMode}
-              onChangePoolSize={handleChangePoolSize}
-              onChangeWorktreeDirectory={handleChangeWorktreeDirectory}
-            />
+            <WorktreeStrategySection />
           </ProbeSection>
 
           {/* Danger zone — Delete Mesh. Issue #1460 requires the destructive

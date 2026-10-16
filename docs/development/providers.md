@@ -281,6 +281,12 @@ enumerated here**. Each harness adapter's `spawn_recipe`
 and `spawn_environment::wrap` consumes that value. macOS and Linux always spawn
 `Direct`, so only the Windows arm of a platform match can differ.
 
+The common arms have one table, `provider::shell_for` (`Cmd` on Windows, `Direct`
+elsewhere), which the `.cmd`-shim adapters call instead of restating the match
+— seven identical copies existed before issue #2235. An adapter with a real
+reason to differ keeps its own function and documents it: Codex's `shell_for`
+returns `PowerShell`, and `anthropic` declares no value at all (see below).
+
 The three values exist for three structural reasons, which is the part worth
 remembering:
 
@@ -469,6 +475,80 @@ a Claude Code terminal, which no script can help with.
 Read `CLAUDE_SESSION_MARKER_ENV_VARS` before adding a variable: a new marker
 Claude Code exports belongs there, and its own test asserts none of the
 deliberately-set names above ever drift in.
+
+## Harness hook config documents
+
+Every adapter that injects a Buildmesh entry into a harness config does the same
+three things: read the user's document, merge Buildmesh's own entry into it, and
+persist the result without losing the user's content.
+`src-tauri/src/agent/managed_config.rs` owns the read and the write for every
+adapter that uses it, plus the merge wherever the document's shape fits one of
+the two shared upserts. How much each adapter shares follows its document.
+
+Claude Code, Cursor, Grok and mcode share all three: their entry is a member of
+an array of handlers or matcher groups, which is what `upsert_entry` and
+`upsert_matcher_group` are for. AGY, Muse and the workspace-trust stores share
+the read and the write but merge in their own way, because their entry is not a
+member of a handler array — AGY owns one whole namespace key, Muse sets a
+decision value keyed by workspace, and a trust store appends a path to a list of
+values. Cline and OpenCode share only the writer: a hook script and a pure
+plugin template have no document to parse and no user entries to preserve. Kimi
+shares the refusal and the writer, because its config is TOML and its
+`config.yaml` permission pin is a surgical single-line edit rather than a
+round-trip. Codex shares only the writer, and only on its native arm.
+
+**What the shared module owns.**
+
+- `atomic_write` is the single temp-file-then-rename writer for these config
+  documents. The temp file is a sibling of the target (the rename must stay on
+  one volume) named with the process id and a per-process counter, so two
+  concurrent provisions — or two `rust-test-shards` binaries writing the same
+  directory — can never land on one name. On unix it is created `0o600` and the
+  rename carries that onto the target: `File::create` would inherit
+  `0o666 & !umask`, which would have widened `.claude/settings.local.json` inside
+  the user's own repository among others.
+- `read_document` treats a missing file as an empty document and refuses a
+  malformed one through `refuse_malformed`, **one** wording for every harness and
+  every format. Before issue #2235 that answer had drifted: AGY reported
+  `invalid agy hooks.json …` where Cursor and Grok reported
+  `refusing to overwrite malformed …`, on the same corruption, in the same user
+  session. A file that cannot be read at all is a different failure and keeps
+  its own wording — an adapter whose tests pin it (AGY's non-UTF-8 and
+  directory cases) branches on `DocumentError::is_malformed`.
+- `Document` carries whether the user's file ended in a newline, so a rewrite
+  restores it instead of turning a hand-edited file into an unrelated diff.
+- `carries_anchors` is the single ownership test: an entry is Buildmesh's when
+  its stored command carries every marker the adapter declared. It decodes a
+  `powershell.exe -EncodedCommand` line first, because the WindowsInterop relay
+  base64-encodes the callback and an undecoded match would make a re-provision
+  append a duplicate of our own hook instead of replacing it. For Claude Code
+  and Grok that decode widened their predicates, which did not decode before
+  #2235: a WindowsInterop-installed config is now recognised as ours and updated
+  in place rather than duplicated beside a stale copy. Cursor and mcode already
+  decoded, so theirs is unchanged.
+- `upsert_entry` and `upsert_matcher_group` are the two merge shapes. Both
+  report whether anything changed, which is what lets a re-provision skip the
+  write entirely (issue #886's no-spurious-mtime invariant). Neither appends into
+  a matcher group the user already filtered on — that would silently scope our
+  hook to the tools they filtered.
+- `root_object` / `object_entry` / `array_entry` reject a valid-JSON value of
+  the wrong shape and name it (`got Array`), so a rejection points at the key
+  the user has to repair.
+
+**What stays with the adapter**, and must not be generalised away: which file,
+which events, which handler shape, and which markers make an entry ours. Those
+markers are what identify an already-installed config as Buildmesh's, so
+changing one would stop Buildmesh recognising its own prior installs and append
+a second copy instead of updating it.
+
+Two shapes stay outside the module because only one harness has them. Codex
+writes through the guest CLI on WSL (`read_runtime_files` / `write_runtime_files`,
+a `wsl.exe` round-trip rather than a local rename) and *retires* Buildmesh's
+entries by stripping them — a removal the merge does not model; its native arm
+still uses `atomic_write`. Codex's `materialize_native_profile_at` is also a
+separate temp-and-persist writer: it writes the Codex *profile* home rather than
+a hook document, sets its own `0o600` on unix, and cleans up legacy profiles
+afterwards.
 
 ## Saved Spawn Configurations
 

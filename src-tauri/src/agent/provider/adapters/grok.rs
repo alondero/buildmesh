@@ -55,6 +55,7 @@
 //! the AGY adapter pattern.
 
 use crate::agent::capabilities::{EffortControlKind, GROK_EFFORT_ALLOWED};
+use crate::agent::managed_config;
 use crate::agent::provider::{
     AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell,
 };
@@ -137,77 +138,22 @@ fn grok_home() -> Result<std::path::PathBuf, String> {
         .map(|p| p.join(".grok").join("hooks"))
 }
 
-/// Atomically persist `content` to `path` via `tempfile::NamedTempFile +
-/// persist`. The Codex/AGY precedents both pin this pattern
-/// (`codex.rs:998-1007`); the Python `os.replace` analogue. A
-/// crash mid-rename or pre-rename leaves the canonical file
-/// untouched and the orphan `.tmp` is the only residue — visible at
-/// `dir.parent().join("name.*.tmp")` until the OS reclaims it.
-fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
-    tmp.write_all(content.as_bytes())?;
-    tmp.as_file().sync_all()?;
-    tmp.persist(path).map(|_| ()).map_err(|error| error.error)
-}
-
-/// Human-readable JSON kind tag for error messages. The codec
-/// distinguishes `Object`, `Array`, `String`, `Number`, `Boolean`,
-/// `Null`. Non-`Object` values produce the right rejection: the
-/// path-coverage test pins the rejection for an Array.
-fn settings_kind(value: &serde_json::Value) -> &'static str {
-    match value {
-        serde_json::Value::Object(_) => "Object",
-        serde_json::Value::Array(_) => "Array",
-        serde_json::Value::String(_) => "String",
-        serde_json::Value::Number(_) => "Number",
-        serde_json::Value::Bool(_) => "Boolean",
-        serde_json::Value::Null => "Null",
-    }
-}
+/// Anchors that identify a Buildmesh-owned handler. `url` and `command`
+/// both count, so the next spawn can replace an older generated HTTP
+/// handler in place after the move to command hooks. These markers
+/// identify already-installed configs, so they must not drift.
+const BUILDMESH_HANDLER_ANCHORS: &[&str] = &["/api/attention/", "BUILDMESH_PORT"];
 
 /// Marker predicate: a Grok handler is Buildmesh-owned when its `url` or
-/// `command` carries both canonical anchors. Checking both fields lets the
-/// next spawn replace older generated HTTP handlers in place after moving to
-/// command hooks; unrelated user-authored handlers remain untouched.
+/// `command` carries both canonical anchors. Unrelated user-authored
+/// handlers remain untouched.
 fn is_buildmesh_handler(handler: &serde_json::Value) -> bool {
     ["url", "command"].iter().any(|field| {
         handler
             .get(*field)
             .and_then(|value| value.as_str())
-            .is_some_and(|value| {
-                value.contains("/api/attention/") && value.contains("BUILDMESH_PORT")
-            })
+            .is_some_and(|value| managed_config::carries_anchors(value, BUILDMESH_HANDLER_ANCHORS))
     })
-}
-
-/// Add or update the Buildmesh-owned handler in a single event's
-/// matcher-group array. Returns `true` when something changed
-/// (caller decides whether to rewrite the document). User-authored
-/// sibling handlers, matcher groups, and the array itself are
-/// preserved across the merge — only the Buildmesh entry is created
-/// (one per event) or replaced (handler-shape drift).
-fn merge_buildmesh_handler(
-    groups: &mut Vec<serde_json::Value>,
-    new_handler: &serde_json::Value,
-) -> bool {
-    for group in groups.iter_mut() {
-        let Some(handlers) = group.get_mut("hooks").and_then(|v| v.as_array_mut()) else {
-            continue;
-        };
-        if let Some(index) = handlers.iter().position(is_buildmesh_handler) {
-            if handlers[index] != *new_handler {
-                handlers[index] = new_handler.clone();
-                return true;
-            }
-            // Already correct → no-op. Caller skips the rewrite.
-            return false;
-        }
-    }
-    // No Buildmesh entry yet → append a fresh matcher group.
-    groups.push(serde_json::json!({ "hooks": [new_handler.clone()] }));
-    true
 }
 
 fn merge_question_handler(
@@ -241,56 +187,30 @@ fn merge_question_handler(
 /// it unchanged to the loopback endpoint, and callback failures are
 /// best-effort so they never block a prompt or stop event.
 ///
+/// If the file exists but will not parse, it is never overwritten: the
+/// shared `managed_config::read_document` refusal surfaces a provision error
+/// to the spawn path rather than wiping user data. A file that does parse is
+/// merged, not replaced — the user's groups and handlers survive. A missing
+/// file is the happy path (fresh install).
+///
 /// `Notification` is wired with no matcher field at all (Grok docs
 /// match-all behaviour); the matcher-group array is the array of
 /// matcher groups, each `{"hooks":[handler]}` shaped. `Stop` has no
 /// matcher either — Grok's docs warn "A matcher on `Stop` or
 /// `UserPromptSubmit` is ignored with a warning".
 fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
-    // If the file already exists, refuse to overwrite a malformed
-    // user-authored payload (trailing comma, partial edit, …) — the
-    // Codex pattern (`codex.rs:938`) treats parse failure as an
-    // explicit `Err` so the spawn path surfaces a provision error
-    // rather than silently wiping user data. A missing file is the
-    // happy path (fresh install); only an existing-but-unparseable
-    // file is the failure case.
-    let mut settings: serde_json::Value = match std::fs::read_to_string(path) {
-        Ok(content) => serde_json::from_str(&content).map_err(|e| {
-            format!(
-                "refusing to overwrite malformed {path:?}: {e}. \
-                 Repair or remove the file and retry"
-            )
-        })?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            serde_json::json!({})
-        }
-        Err(e) => return Err(format!("failed to read {path:?}: {e}")),
-    };
-    // Round-2 fix (reviewer point 5): a valid JSON top-level that
-    // isn't an object (e.g. an array, a string, a number, `null`)
-    // is a misconfiguration — return Err instead of clobbering the
-    // user's payload with `{}`. Mirrors `codex.rs:941`.
-    if !settings.is_object() {
-        return Err(format!(
-            "{path:?}: top-level value must be a JSON object; got {}",
-            settings_kind(&settings)
-        ));
-    }
+    let mut document = managed_config::read_document(path).map_err(|error| error.to_string())?;
 
     let new_handler = serde_json::json!({
         "type": "command",
         "command": command,
     });
 
-    let settings_obj = settings
-        .as_object_mut()
-        .expect("settings coerced to object above");
-    let hooks = settings_obj
-        .entry("hooks")
-        .or_insert_with(|| serde_json::json!({}));
-    let hooks_obj = hooks
-        .as_object_mut()
-        .ok_or_else(|| "hooks.json `hooks` value must be an object".to_string())?;
+    let hooks_obj = managed_config::object_entry(
+        managed_config::root_object(&mut document, "grok hooks.json top-level")?,
+        "hooks",
+        "grok hooks.json `hooks`",
+    )?;
 
     let mut changed = false;
     for event in [
@@ -303,16 +223,20 @@ fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
         "PostToolUse",
         "PostToolUseFailure",
     ] {
-        let groups = hooks_obj
-            .entry(event)
-            .or_insert_with(|| serde_json::json!([]));
-        let groups_array = groups
-            .as_array_mut()
-            .ok_or_else(|| format!("hooks.json event `{event}` must be an array"))?;
+        let groups_array = managed_config::array_entry(
+            hooks_obj,
+            event,
+            &format!("grok hooks.json event `{event}`"),
+        )?;
         if matches!(event, "PreToolUse" | "PostToolUse" | "PostToolUseFailure") {
             changed = merge_question_handler(groups_array, &new_handler) || changed;
         } else {
-            changed = merge_buildmesh_handler(groups_array, &new_handler) || changed;
+            changed = managed_config::upsert_matcher_group(
+                groups_array,
+                &is_buildmesh_handler,
+                &new_handler,
+                &[],
+            ) || changed;
         }
     }
 
@@ -320,9 +244,11 @@ fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    let content = serde_json::to_string_pretty(&settings)
+    let content = document
+        .to_pretty_json()
         .map_err(|e| format!("serialize hooks.json failed: {e}"))?;
-    write_atomic(path, &content).map_err(|e| format!("failed to write hooks.json: {e}"))?;
+    managed_config::atomic_write(path, &content)
+        .map_err(|e| format!("failed to write hooks.json: {e}"))?;
     tracing::info!("grok provision_attention_hooks: wrote {:?}", path);
     Ok(())
 }

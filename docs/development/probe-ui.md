@@ -139,15 +139,105 @@ authentication (see [troubleshooting](../troubleshooting.md#github-feeds-fail-fo
 
 ## Configuration saves reject, they never resolve silently
 
-Every Project Settings field saves through `wrappedSave`, which routes success and
-failure to the destination's `SaveIndicator`. That is only meaningful if the store
-action underneath actually rejects: `meshStore.updateMeshName` used to catch the
-`update_mesh_name` IPC failure, write `state.error`, and **resolve**, so `wrappedSave`
+Every Project Settings field saves through `meshSettingsStore`'s `save`, which routes
+success and failure to the destination's `SaveIndicator`. That is only meaningful if the
+store action underneath actually rejects: `meshStore.updateMeshName` used to catch the
+`update_mesh_name` IPC failure, write `state.error`, and **resolve**, so the save channel
 took its success branch and the tab rendered "Saved" for a write the backend refused —
 while the sidebar, which only moves on success, kept the old name. The action now
 rethrows after recording the error, so the caller shows the real rejection and the
 draft the user typed survives for a retry. The pattern generalises: a store action
 that swallows a failure makes every success indicator above it a lie.
+
+## Per-Mesh editing session (issue #2242)
+
+`meshSettingsStore` is the single owner of the editable state the two Mesh-lens
+configuration destinations render: Project Settings' form and worktree-strategy drafts,
+the Scratch Pad's text, the save-status machine, and the load that fills them. The tab
+files keep only what is local to the render (provider catalogue, the app-wide default
+label, the sandbox-availability probe, the `gh auth` flag, the delete confirmation) and
+render the session, so the destinations stay dumb and the state has one writer.
+
+Three rules live in the store because each one is about the *session*, not a widget:
+
+- **Load once per Mesh, applied only while it is the newest request.** One
+  `get_mesh_properties` feeds the form, the worktree strategy, and the directory
+  resolution; detection, preferences and the directory config ride along as
+  individually best-effort reads so a failure degrades the "Effective:" display rather
+  than blanking the form. Identity is a monotonic token rather than a Mesh-id
+  comparison, so a retry or a path edit retires the previous read too. Drafts are
+  cleared when a load *starts*, not when it resolves, so a slow load cannot leave
+  the previous Mesh's values in the form under the new Mesh's header — the user would
+  edit one project and save it to another. This is the same authority rule
+  `useMeshStore` applies to `list_meshes` (below).
+- **A save that settles after the user left drops its result.** Each save captures the
+  session's Mesh when the IPC starts and compares it on settle. A "Saved" or a "Save
+  failed" for the outgoing Mesh describes a project the user is no longer looking at.
+  The Scratch Pad applies the same rule with its own revision counter, because a second
+  keystroke also supersedes the first write's result.
+- **One indicator per session, not per field.** `idle → saving → saved` auto-clears
+  after a fixed window; `error` persists until the next save starts. Worktree-strategy
+  failures use a section-local channel instead, because that message has to name the
+  column that refused the write.
+
+Because every async continuation writes to the store rather than into a component's
+`useState`, a write that settles after a destination unmounts is harmless. That is what
+the hand-rolled `mountedRef` and `activeMeshIdRef` in `ProjectSettingsTab` used to
+guard, and what `ScratchpadTab`'s own `AbortSignal` ref guarded as a second copy: the
+store is the owner of "which Mesh am I editing", so the mirrors are gone rather than
+relocated.
+
+## Mesh snapshot authority (issue #2326)
+
+`useMeshStore` owns one authority policy for the Mesh collection, so a caller can ask
+for a refresh without knowing which sidebar action, capacity editor or deletion is
+running. A `list_meshes` response may replace `meshes`/`meshesById` only while it is
+still the newest thing the store knows; three things can take that authority away
+while a read is in flight, and each is observed inside the store rather than in the
+caller:
+
+- **Request identity.** Overlapping `fetchMeshes`/`refreshMeshes` callers each get
+  their own read, and each response may commit only while it is newer than the
+  response already accepted. Resolving them in either order therefore leaves the
+  newer snapshot in place — the review's reproduction (older A resolved after newer
+  B) used to leave the *older* one.
+- **Mutation authority.** Every committed local write advances a collection
+  revision: create/add/clone, the delete commit, rename, colour, layout, and the
+  optimistic reorder. A read that observed an older revision is describing a
+  database state the user has already moved past, so an acknowledged Mesh setting
+  can no longer flicker back to the value it replaced. `deleteMesh` advances it
+  after the backend commits and before its refetch, so no late snapshot can put the
+  deleted row back.
+- **Pending optimistic reorder.** A drag's order is deliberately ahead of the
+  persisted order until `update_mesh_positions` acknowledges it, so no snapshot may
+  replace it — not even one started after the drag.
+
+An obsolete response is dropped rather than applied, and dropping never replaces a
+stale-write bug with permanently stale state: a trailing authoritative read converges the
+collection whenever a committed write no applied snapshot reflects yet, shared by every
+response that same newer write made obsolete. A read dropped for any other reason needs no
+such refresh — it lost to a *newer read* under an unchanged revision, so that newer
+snapshot already saw everything it would have, and a third read would be IPC and loading
+churn for nothing. A trailing read may re-arm exactly one further refresh if a second
+write lands while it is in flight, and no more — convergence must not become a refresh
+loop under a continuous stream of writes. It never runs during a reorder window (where it
+would be dropped the same way): a successful reorder converges it and a failed one
+refetches. `loading` follows the number of reads still outstanding, so a dropped response
+cannot mark a newer read as finished, and a failure only reaches `error` when it is still
+authoritative: an old rejection never replaces a newer success, and a newer snapshot that
+applies later clears an older failure on its way in rather than leaving an error banner
+over fresh data.
+
+`refreshMeshes` rejects for callers that must confirm the refresh (boot readiness,
+`CircuitRunCapacity`), and `fetchMeshes` records the failure without throwing. A read
+that was *superseded* resolves rather than rejects — it has no failure of its own to
+report and its snapshot was never applied — and `refreshMeshes` follows the trailing
+read it started so it resolves on an applied snapshot. One reconciliation builds both
+collection views from the same rows and keeps the previous object reference for a row
+whose fields compare equal, so `meshes` and `meshesById` cannot disagree and per-id
+selectors (`s.meshesById.get(id)`) skip a render when only other Meshes changed.
+`agentNodeStore` owns the analogous agent-node policy, including coalesced refreshes
+and its snapshot revision fence.
 
 ## GitHub list completeness
 

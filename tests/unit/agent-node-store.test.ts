@@ -117,7 +117,6 @@ describe('useAgentNodeStore', () => {
       loading: false,
       error: null,
       closingNodeIds: new Set(),
-      schedules: {},
     });
     vi.clearAllMocks();
     setWorktreeCloseActionResolverForTests();
@@ -1109,17 +1108,6 @@ describe('useAgentNodeStore', () => {
       expect(mockInvoke).toHaveBeenCalledWith('delete_agent_node', {nodeId:70,removeWorktree:false});
     });
 
-    it('preserves a scheduled prompt when worktree closure is cancelled', async () => {
-      const node=makeNode({id:71});
-      seedAgentNodes([node],71);
-      mockDeleteFlow(makeSafety({has_uncommitted:true}));
-      setWorktreeCloseActionResolverForTests(vi.fn().mockResolvedValue('cancel'));
-      useAgentNodeStore.getState().scheduleInput(71,60000,'continue','1m');
-      const scheduled = useAgentNodeStore.getState().schedules[71];
-      await useAgentNodeStore.getState().deleteAgentNode(71);
-      expect(useAgentNodeStore.getState().schedules[71]).toBe(scheduled);
-      useAgentNodeStore.getState().cancelSchedule(71);
-    });
     it('silently removes a clean worktree when closing the node', async () => {
       seedAgentNodes([makeNode({ id: 15 })], 15);
       mockDeleteFlow(makeSafety());
@@ -1625,10 +1613,11 @@ describe('useAgentNodeStore', () => {
   });
 
   describe('setNodePinned / toggleNodePinned (wayfinder #982 / #984)', () => {
-    it('setNodePinned pins optimistically and adopts the backend-returned node', async () => {
+    it('setNodePinned pins optimistically and reconciles the pin column from the backend row', async () => {
       seedAgentNodes([makeNode({ id: 21, is_pinned: false, name: 'local-name' })]);
-      // The backend's returned AgentNode is the source of truth — a
-      // concurrent column change on the backend side must survive.
+      // The backend's returned row is authoritative for `is_pinned` only
+      // (issue #2325) — the columns the pin never touched keep their
+      // current values instead of reverting to the response's snapshot.
       mockInvoke.mockResolvedValueOnce(makeNode({ id: 21, is_pinned: true, name: 'backend-name' }));
 
       await useAgentNodeStore.getState().setNodePinned(21, true);
@@ -1636,7 +1625,7 @@ describe('useAgentNodeStore', () => {
       expect(mockInvoke).toHaveBeenCalledWith('set_node_pinned', { nodeId: 21, pinned: true });
       const node = useAgentNodeStore.getState().nodesById[21]!;
       expect(node.is_pinned).toBe(true);
-      expect(node.name).toBe('backend-name');
+      expect(node.name).toBe('local-name');
     });
 
     it('toggleNodePinned flips optimistically so the Pinned grid re-renders instantly', () => {
@@ -1652,7 +1641,7 @@ describe('useAgentNodeStore', () => {
       expect(mockInvoke).toHaveBeenCalledWith('toggle_node_pinned', { nodeId: 22 });
     });
 
-    it('toggleNodePinned adopts the backend-returned node on success', async () => {
+    it('toggleNodePinned adopts the backend row\'s pin column on success', async () => {
       seedAgentNodes([makeNode({ id: 22, is_pinned: true })]);
       mockInvoke.mockResolvedValueOnce(makeNode({ id: 22, is_pinned: false }));
 
@@ -1702,6 +1691,206 @@ describe('useAgentNodeStore', () => {
 
       await expect(useAgentNodeStore.getState().toggleNodePinned(999)).rejects.toThrow('not loaded');
       expect(mockInvoke).not.toHaveBeenCalled();
+    });
+  });
+
+  // Issue #2325 — the mutation authority policy, exercised through the
+  // real store: the helper, the ledger, the event listeners and the
+  // snapshot fence together. Each case uses controlled promises so the
+  // ordering under test is the ordering the code sees.
+  describe('optimistic mutation authority (issue #2325)', () => {
+    /** A promise the test settles by hand. */
+    function deferred<T>() {
+      let resolve!: (value: T) => void;
+      let reject!: (reason: unknown) => void;
+      const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+      return { promise, resolve, reject };
+    }
+
+    it('keeps a newer rename and lifecycle event through a successful pin', async () => {
+      seedAgentNodes([makeNode({ id: 31, name: 'old', status: 'running', is_pinned: false })]);
+      const pin = deferred<AgentNode>();
+      mockInvoke.mockImplementation((command: string) => command === 'set_node_pinned'
+        ? pin.promise : Promise.resolve(undefined));
+
+      const pinning = useAgentNodeStore.getState().setNodePinned(31, true);
+      await Promise.resolve();
+
+      // An `agent-lifecycle` observation and a `node-renamed` event both
+      // land while the pin IPC is in flight. `patchAgentNode` is what
+      // `agentNodeListeners` dispatches for each.
+      useAgentNodeStore.getState().patchAgentNode(31, { status: 'awaiting_input' });
+      useAgentNodeStore.getState().patchAgentNode(31, { name: 'renamed-since' });
+      // The pin's response still carries the pre-event row.
+      pin.resolve(makeNode({ id: 31, name: 'old', status: 'running', is_pinned: true }));
+
+      await pinning;
+
+      const node = useAgentNodeStore.getState().nodesById[31]!;
+      expect(node.is_pinned).toBe(true);            // its own column reconciles
+      expect(node.status).toBe('awaiting_input');   // newer observation kept
+      expect(node.name).toBe('renamed-since');
+    });
+
+    it('does not let an older failed rename undo a newer acknowledged rename', async () => {
+      seedAgentNodes([makeNode({ id: 32, name: 'old' })]);
+      const first = deferred<void>();
+      const second = deferred<void>();
+      let calls = 0;
+      mockInvoke.mockImplementation((command: string) => {
+        if (command !== 'rename_agent_node') return Promise.resolve(undefined);
+        return ++calls === 1 ? first.promise : second.promise;
+      });
+
+      const older = useAgentNodeStore.getState().renameAgentNode(32, 'first');
+      await Promise.resolve();
+      const newer = useAgentNodeStore.getState().renameAgentNode(32, 'second');
+      await Promise.resolve();
+
+      second.resolve();
+      await newer;
+      first.reject(new Error('name too long (max 80 chars)'));
+      await expect(older).rejects.toThrow('name too long');
+
+      // The acknowledged rename survives; the failed one still reports.
+      expect(useAgentNodeStore.getState().nodesById[32]!.name).toBe('second');
+      expect(useAgentNodeStore.getState().error).toContain('name too long');
+    });
+
+    it('restores the pre-rename name when both overlapping renames fail', async () => {
+      seedAgentNodes([makeNode({ id: 33, name: 'old' })]);
+      const first = deferred<void>();
+      const second = deferred<void>();
+      let calls = 0;
+      mockInvoke.mockImplementation((command: string) => {
+        if (command !== 'rename_agent_node') return Promise.resolve(undefined);
+        return ++calls === 1 ? first.promise : second.promise;
+      });
+
+      const older = useAgentNodeStore.getState().renameAgentNode(33, 'first');
+      await Promise.resolve();
+      const newer = useAgentNodeStore.getState().renameAgentNode(33, 'second');
+      await Promise.resolve();
+
+      second.reject(new Error('second failed'));
+      await expect(newer).rejects.toThrow('second failed');
+      first.reject(new Error('first failed'));
+      await expect(older).rejects.toThrow('first failed');
+
+      // Not "first": that rename was withdrawn too, so the durable value
+      // is the pre-call name.
+      expect(useAgentNodeStore.getState().nodesById[33]!.name).toBe('old');
+    });
+
+    it('does not let a read started before an acknowledged rename revert it', async () => {
+      seedAgentNodes([makeNode({ id: 34, name: 'old' })]);
+      const rename = deferred<void>();
+      let listCalls = 0;
+      let resolveStale!: (nodes: AgentNode[]) => void;
+      const stale = new Promise<AgentNode[]>(resolve => { resolveStale = resolve; });
+      mockInvoke.mockImplementation((command: string) => {
+        if (command === 'rename_agent_node') return rename.promise;
+        if (command === 'list_agent_nodes') {
+          listCalls += 1;
+          // The first read is the pre-rename snapshot, held until after
+          // the rename is acknowledged; the trailing refresh carries it.
+          return listCalls === 1 ? stale : Promise.resolve([makeNode({ id: 34, name: 'renamed' })]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const fetching = useAgentNodeStore.getState().fetchAgentNodes();
+      await Promise.resolve();
+      const renaming = useAgentNodeStore.getState().renameAgentNode(34, 'renamed');
+      await Promise.resolve();
+      expect(useAgentNodeStore.getState().nodesById[34]!.name).toBe('renamed');
+
+      rename.resolve();
+      await renaming;
+      resolveStale([makeNode({ id: 34, name: 'old' })]);
+      await fetching;
+      await vi.waitFor(() => expect(listCalls).toBe(2));
+
+      // The stale snapshot was dropped, not painted: the acknowledged
+      // rename is still standing after the authoritative re-read.
+      expect(useAgentNodeStore.getState().nodesById[34]!.name).toBe('renamed');
+    });
+
+    it('cannot resurrect a node retired while a mutation was pending', async () => {
+      seedAgentNodes([makeNode({ id: 35, name: 'old', is_pinned: false })]);
+      const pin = deferred<AgentNode>();
+      mockInvoke.mockImplementation((command: string) => command === 'toggle_node_pinned'
+        ? pin.promise : Promise.resolve(undefined));
+
+      const pinning = useAgentNodeStore.getState().toggleNodePinned(35);
+      await Promise.resolve();
+      expect(useAgentNodeStore.getState().nodesById[35]!.is_pinned).toBe(true);
+
+      useAgentNodeStore.getState().removeAgentNode(35);
+      pin.resolve(makeNode({ id: 35, name: 'old', status: 'idle', is_pinned: true }));
+      await pinning;
+
+      expect(useAgentNodeStore.getState().nodesById[35]).toBeUndefined();
+      expect(useAgentNodeStore.getState().getAgentNodes()).toHaveLength(0);
+    });
+
+    it('does not let a retired mutation write over a row restored under the same id', async () => {
+      // The close path drops the row optimistically and restores it when
+      // `delete_agent_node` fails. A mutation that was in flight across
+      // that drop owned nothing once the row left, so the restored row
+      // stays authoritative until a fresh event, snapshot, or mutation
+      // reconciles it.
+      seedAgentNodes([makeNode({ id: 39, name: 'old', is_pinned: false })]);
+      const pin = deferred<AgentNode>();
+      mockInvoke.mockImplementation((command: string) => command === 'toggle_node_pinned'
+        ? pin.promise : Promise.resolve(undefined));
+
+      const pinning = useAgentNodeStore.getState().toggleNodePinned(39);
+      await Promise.resolve();
+      useAgentNodeStore.getState().removeAgentNode(39);
+      // Stand in for the close failure's restore of the captured row.
+      seedAgentNodes([makeNode({ id: 39, name: 'old', is_pinned: false })]);
+      pin.resolve(makeNode({ id: 39, name: 'old', status: 'idle', is_pinned: true }));
+      await pinning;
+
+      expect(useAgentNodeStore.getState().nodesById[39]!.is_pinned).toBe(false);
+    });
+
+    it('does not roll a failed rename back over a node-renamed event', async () => {
+      // The store-side half of the ownership policy: `patchAgentNode`
+      // releases the columns it carries, so an event from another window
+      // owns `name` and the local failure has nothing to restore.
+      seedAgentNodes([makeNode({ id: 38, name: 'old' })]);
+      const rename = deferred<void>();
+      mockInvoke.mockImplementation((command: string) => command === 'rename_agent_node'
+        ? rename.promise : Promise.resolve(undefined));
+
+      const renaming = useAgentNodeStore.getState().renameAgentNode(38, 'typed-here');
+      await Promise.resolve();
+      expect(useAgentNodeStore.getState().nodesById[38]!.name).toBe('typed-here');
+
+      // What `agentNodeListeners` dispatches for a `node-renamed` payload.
+      useAgentNodeStore.getState().patchAgentNode(38, { name: 'renamed-in-other-window' });
+      rename.reject(new Error('db locked'));
+      await expect(renaming).rejects.toThrow('db locked');
+
+      expect(useAgentNodeStore.getState().nodesById[38]!.name).toBe('renamed-in-other-window');
+      expect(useAgentNodeStore.getState().error).toContain('db locked');
+    });
+
+    it('leaves sibling nodes unreplaced by a pin', async () => {
+      seedAgentNodes([
+        makeNode({ id: 36, name: 'pinned', is_pinned: false }),
+        makeNode({ id: 37, name: 'sibling' }),
+      ]);
+      const siblingBefore = useAgentNodeStore.getState().nodesById[37];
+      mockInvoke.mockResolvedValueOnce(makeNode({ id: 36, is_pinned: true }));
+
+      await useAgentNodeStore.getState().setNodePinned(36, true);
+
+      // Issue #1384 identity guarantee: the pin is a per-entry write.
+      expect(useAgentNodeStore.getState().nodesById[37]).toBe(siblingBefore);
+      expect(useAgentNodeStore.getState().nodesById[36]!.is_pinned).toBe(true);
     });
   });
 
@@ -1794,156 +1983,6 @@ describe('useAgentNodeStore', () => {
       await useAgentNodeStore.getState().swapAgentNodes(1, 2);
 
       expect(mockInvoke).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('scheduleInput / cancelSchedule', () => {
-    beforeEach(() => {
-      vi.useFakeTimers();
-    });
-
-    afterEach(() => {
-      vi.useRealTimers();
-    });
-
-    it('stores schedule metadata with a computed targetTime', () => {
-      const now = Date.now();
-      useAgentNodeStore.getState().scheduleInput(1, 300_000, 'still there?', '5m');
-
-      const task = useAgentNodeStore.getState().schedules[1];
-      expect(task).toMatchObject({ nodeId: 1, message: 'still there?', label: '5m' });
-      expect(task.targetTime).toBeGreaterThanOrEqual(now + 300_000);
-      expect(task.timeoutId).toBeDefined();
-    });
-
-    it('sends the message and clears the schedule when the timeout fires', async () => {
-      // The scheduled node must be loaded — issue #1252's fire-handler
-      // guard bails if the node is missing or archived. The real
-      // SchedulingPopover only ever schedules against a node already
-      // on screen, so this is the realistic shape.
-      seedAgentNodes([makeNode({ id: 2, status: 'running' })]);
-      mockInvoke.mockResolvedValue(undefined);
-      useAgentNodeStore.getState().scheduleInput(2, 1000, 'ping', '1m');
-
-      await vi.advanceTimersByTimeAsync(1000);
-
-      expect(mockInvoke).toHaveBeenCalledWith('send_to_agent', { sessionId: 2, input: 'ping' });
-      expect(useAgentNodeStore.getState().schedules[2]).toBeUndefined();
-    });
-
-    it('writes a bare Enter instead of sendToAgent when message is empty', async () => {
-      seedAgentNodes([makeNode({ id: 3, status: 'running' })]);
-      mockInvoke.mockResolvedValue(undefined);
-      useAgentNodeStore.getState().scheduleInput(3, 1000, '', 'usage_reset');
-
-      await vi.advanceTimersByTimeAsync(1000);
-
-      expect(mockInvoke).toHaveBeenCalledWith('write_to_agent', { sessionId: 3, data: '\n' });
-    });
-
-    it('replaces an existing schedule for the same node instead of stacking', async () => {
-      seedAgentNodes([makeNode({ id: 4, status: 'running' })]);
-      mockInvoke.mockResolvedValue(undefined);
-      useAgentNodeStore.getState().scheduleInput(4, 1000, 'first', '1m');
-      useAgentNodeStore.getState().scheduleInput(4, 2000, 'second', '2m');
-
-      await vi.advanceTimersByTimeAsync(1000);
-      // The first schedule was cancelled — nothing fires at its original delay.
-      expect(mockInvoke).not.toHaveBeenCalledWith('send_to_agent', { sessionId: 4, input: 'first' });
-
-      await vi.advanceTimersByTimeAsync(1000);
-      expect(mockInvoke).toHaveBeenCalledWith('send_to_agent', { sessionId: 4, input: 'second' });
-    });
-
-    it('cancelSchedule clears the timeout and removes the entry', async () => {
-      mockInvoke.mockResolvedValue(undefined);
-      useAgentNodeStore.getState().scheduleInput(5, 1000, 'never sent', '1m');
-
-      useAgentNodeStore.getState().cancelSchedule(5);
-      expect(useAgentNodeStore.getState().schedules[5]).toBeUndefined();
-
-      await vi.advanceTimersByTimeAsync(1000);
-      expect(mockInvoke).not.toHaveBeenCalledWith('send_to_agent', { sessionId: 5, input: 'never sent' });
-    });
-
-    it('cancelSchedule is a no-op when there is no active schedule for the node', () => {
-      expect(() => useAgentNodeStore.getState().cancelSchedule(999)).not.toThrow();
-    });
-
-    it('deleteAgentNode cancels an active schedule for the node being deleted', async () => {
-      seedAgentNodes([makeNode({ id: 60 })], 60);
-      mockDeleteFlow(makeSafety());
-      useAgentNodeStore.getState().scheduleInput(60, 1000, 'ping', '1m');
-
-      await useAgentNodeStore.getState().deleteAgentNode(60);
-
-      expect(useAgentNodeStore.getState().schedules[60]).toBeUndefined();
-      mockInvoke.mockClear();
-      await vi.advanceTimersByTimeAsync(1000);
-      expect(mockInvoke).not.toHaveBeenCalledWith('send_to_agent', expect.anything());
-    });
-
-    // Issue #1252 — a scheduled prompt must not fire at an archived (or
-    // absent) node. Without the fetch-time cancellation the stale timer
-    // would call `send_to_agent` against an archived node, the backend
-    // would reject, `state.error` would be set, and App.tsx's generic
-    // "System" toast pipeline would surface a spurious error minutes
-    // after the user moved on. The `node-deleted` listener
-    // (`stores/agentNodeListeners.ts`) routes through `fetchAgentNodes`,
-    // so every archive transition sweeps schedules for free.
-    it('cancels schedules whose node comes back archived from fetchAgentNodes', async () => {
-      seedAgentNodes([makeNode({ id: 7, status: 'running' })]);
-      useAgentNodeStore.getState().scheduleInput(7, 1000, 'still there?', '5m');
-      // The next list_agent_nodes reflects node 7 as archived — the
-      // shape the node-deleted handler triggers via
-      // fetchAgentNodes.
-      mockInvoke.mockResolvedValueOnce([makeNode({ id: 7, status: 'archived' })]);
-
-      await useAgentNodeStore.getState().fetchAgentNodes();
-
-      // Schedule cleared — the timer is dead and can't fire at the
-      // archived node.
-      expect(useAgentNodeStore.getState().schedules[7]).toBeUndefined();
-      mockInvoke.mockClear();
-      await vi.advanceTimersByTimeAsync(1000);
-      expect(mockInvoke).not.toHaveBeenCalledWith('send_to_agent', expect.anything());
-    });
-
-    it('cancels schedules whose node is absent from fetchAgentNodes', async () => {
-      seedAgentNodes([makeNode({ id: 7, status: 'running' })]);
-      useAgentNodeStore.getState().scheduleInput(7, 1000, 'still there?', '5m');
-      // The next list_agent_nodes returns a different mesh's nodes —
-      // node 7 has been deleted out from under the schedule.
-      mockInvoke.mockResolvedValueOnce([makeNode({ id: 99 })]);
-
-      await useAgentNodeStore.getState().fetchAgentNodes();
-
-      expect(useAgentNodeStore.getState().schedules[7]).toBeUndefined();
-      mockInvoke.mockClear();
-      await vi.advanceTimersByTimeAsync(1000);
-      expect(mockInvoke).not.toHaveBeenCalledWith('send_to_agent', expect.anything());
-    });
-
-    it('schedule-fire handler bails silently when the node is archived in state at fire time', async () => {
-      // Belt-and-braces — even if the archive reaches state AFTER
-      // scheduleInput was called (e.g. between the timer being set
-      // and firing), the fire handler must re-check the node's
-      // presence + status before sending. The cancelSchedule path
-      // handles the common case; this guard covers the narrow race
-      // where a refetch between scheduling and firing hasn't yet
-      // completed when the timer resolves.
-      seedAgentNodes([makeNode({ id: 8, status: 'running' })]);
-      useAgentNodeStore.getState().scheduleInput(8, 1000, 'ping', '1m');
-      // Node 8 transitions to archived before the timer fires (e.g.
-      // a Circuit cleanup landed between the schedule and the tick).
-      seedAgentNodes([makeNode({ id: 8, status: 'archived' })]);
-
-      await vi.advanceTimersByTimeAsync(1000);
-
-      expect(mockInvoke).not.toHaveBeenCalledWith('send_to_agent', expect.anything());
-      // And the schedule entry is cleared so the (no-op) timer doesn't
-      // surface a stale "scheduled" chip in the UI.
-      expect(useAgentNodeStore.getState().schedules[8]).toBeUndefined();
     });
   });
 
