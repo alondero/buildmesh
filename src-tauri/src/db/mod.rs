@@ -907,10 +907,8 @@ pub(crate) fn create_canonical_indexes_after_evolution(conn: &Connection) -> Sql
         "
         CREATE INDEX IF NOT EXISTS idx_coordinator_drive_prompts_created_at
             ON coordinator_drive_prompts(created_at);
-        CREATE INDEX IF NOT EXISTS idx_warm_worktrees_mesh ON warm_worktrees(mesh_id);
         CREATE INDEX IF NOT EXISTS idx_warm_worktrees_status ON warm_worktrees(status);
         CREATE INDEX IF NOT EXISTS idx_agent_nodes_mesh ON agent_nodes(mesh_id);
-        CREATE INDEX IF NOT EXISTS idx_autopilot_runs_mesh ON autopilot_runs(mesh_id);
         CREATE INDEX IF NOT EXISTS idx_autopilot_circuits_mesh ON autopilot_circuits(mesh_id);
         CREATE INDEX IF NOT EXISTS idx_autopilot_circuits_preset_mesh ON autopilot_circuits(mesh_id, is_preset);
         CREATE UNIQUE INDEX IF NOT EXISTS uq_autopilot_circuits_preset_mesh
@@ -936,8 +934,14 @@ pub(crate) fn create_canonical_indexes_after_evolution(conn: &Connection) -> Sql
         -- INTEGER PRIMARY KEY (the rowid), already the lookup index -- and so is
         -- a bare idx_autopilot_runs_updated, since idx_autopilot_runs_state
         -- already removes the scan from list_stalled_finishing_autopilot_runs.
-        -- The pre-existing single-column idx_autopilot_runs_mesh and
-        -- idx_warm_worktrees_mesh stay in place: this change is additive-only.
+        -- Issue #2410 removed the single-column idx_autopilot_runs_mesh and
+        -- idx_warm_worktrees_mesh that survived this additive pass. Each is a
+        -- redundant leftmost prefix of the composite declared further down this
+        -- batch, so a `mesh_id`-only read seeks that composite directly (the
+        -- mesh delete's `DELETE FROM autopilot_runs WHERE mesh_id = ?1` and
+        -- list_warm_paths_for_mesh_inner). The always-run
+        -- `DropSupersededSingleColumnIndexes` step in `db::migrations` drops
+        -- the pair from databases that already have them.
         CREATE INDEX IF NOT EXISTS idx_agent_nodes_status ON agent_nodes(status);
         CREATE INDEX IF NOT EXISTS idx_agent_nodes_cli_session
             ON agent_nodes(cli_session_id)

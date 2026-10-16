@@ -194,6 +194,7 @@ credential — that produces two cards, two fetcher paths, and confusing UI.
 - `kimi_via_claude_id_does_not_exist_in_default_provider_accounts` — the literal dual-id bug.
 - `kimi_is_first_class_claude_compatible_with_moonshot_endpoint` — catalog + `first_class_surfaces` shape (not in defaults).
 - `provider_accounts_migrates_stored_kimi_via_claude_into_first_class_kimi` — one-time migration for users who picked up PR #1044.
+- `loading_preferences_never_persists_builtin_defaults_as_stored_accounts` / `loading_a_legacy_kimi_companion_file_leaves_it_byte_identical` (`src-tauri/src/preferences/tests/accounts_tests.rs`) — a load must not turn code-defined defaults into stored accounts (issue #2411).
 - `default_provider_accounts_are_self_auth_only` / `effective_pairings_stored_only_no_auto_derive` / `migrate_legacy_account_endpoint_into_claude_pairing` — ADR-0025.
 
 **Don't.** Do not add a `kimi-via-claude`-style companion row when restoring
@@ -212,6 +213,18 @@ set inside `migrate_prefs_json`, then a re-deserialise gate (`serde_json::from_v
 returning `Err` ⇒ keep the on-disk file intact rather than `unwrap_or_default()`,
 which previously overwrote a partially-unknown prefs file with defaults — a
 silent data-loss path).
+
+**A read is not a licence to persist defaults.** `provider_accounts()` resolves
+the effective list as `default_provider_accounts()` merged with the *stored*
+`provider_accounts`, and the two lists must not be confused. Anything that
+migrates the stored list (`migrate_kimi_companion` in
+`src-tauri/src/preferences/resolver/accounts.rs`) therefore runs **before** the
+merge and persists only the migrated stored list: a read that wrote the merged
+list back stored every built-in default as an account the user never chose
+(issue #2411). A legacy file on disk takes a different path — `migrate_prefs_json`
+already folds the `kimi-via-claude` companion during classification, before
+deserialization, so that migration needs no write-back of its own. (A load can
+still rewrite the file for an unrelated reason: the #830 plaintext-key scrub.)
 
 **A read failure is not a licence to write defaults.** `preferences.json` holds
 credentials, so an unreadable file must never be replaced by

@@ -74,6 +74,15 @@ missing document behind a checkbox.
 - Never include API keys, pairing tokens, cookies, private certificates,
   personal paths, or unredacted logs in examples or screenshots.
 
+## The documentation gate
+
+`npm run check:docs` collects Markdown the way git sees the repository: tracked
+files under `docs/` and `.github/`, plus untracked ones git does not ignore, and
+the root documents. A path your `.gitignore` excludes stays outside that corpus —
+a local draft, or one of the security pages listed there — so the status, heading,
+and link checks are not pointed at it. Commit a document to bring it under
+contract.
+
 ## Review checklist
 
 Before requesting review, answer:

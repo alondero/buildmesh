@@ -23,9 +23,6 @@ CREATE INDEX idx_autopilot_circuits_mesh ON autopilot_circuits(mesh_id)
 index:idx_autopilot_circuits_preset_mesh
 CREATE INDEX idx_autopilot_circuits_preset_mesh ON autopilot_circuits(mesh_id, is_preset)
 
-index:idx_autopilot_runs_mesh
-CREATE INDEX idx_autopilot_runs_mesh ON autopilot_runs(mesh_id)
-
 index:idx_autopilot_runs_mesh_state
 CREATE INDEX idx_autopilot_runs_mesh_state
             ON autopilot_runs(mesh_id, state)
@@ -54,9 +51,6 @@ CREATE INDEX idx_circuit_steps_run ON autopilot_circuit_run_steps(run_id)
 index:idx_coordinator_drive_prompts_created_at
 CREATE INDEX idx_coordinator_drive_prompts_created_at
             ON coordinator_drive_prompts(created_at)
-
-index:idx_warm_worktrees_mesh
-CREATE INDEX idx_warm_worktrees_mesh ON warm_worktrees(mesh_id)
 
 index:idx_warm_worktrees_mesh_status_created
 CREATE INDEX idx_warm_worktrees_mesh_status_created

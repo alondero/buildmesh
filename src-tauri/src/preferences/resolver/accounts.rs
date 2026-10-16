@@ -26,15 +26,18 @@ pub fn provider_accounts() -> Vec<ProviderAccount> {
         .as_deref()
         .filter(|key| !key.is_empty())
         .map(str::to_string);
-    let merged =
-        merge_provider_accounts(default_provider_accounts(), prefs.provider_accounts.clone());
-    let (mut migrated, changed) = migrate_kimi_companion(merged);
-    // One-shot persistence: if a PR #1044 `kimi-via-claude` row was carried
-    // over to the first-class `kimi` row, write the cleaned list back so the
-    // stale row stops haunting subsequent reads. Subsequent reads see no
-    // companion, so `changed` is false and the save is skipped.
+    // Issue #2411: migrate the **stored** list before it is merged with the
+    // code-defined defaults, and persist only that migrated stored list. A PR
+    // #1044 `kimi-via-claude` companion row is folded into the first-class
+    // `kimi` row and dropped, so the stale row stops haunting subsequent
+    // reads — but built-in defaults never reach the write path, because a load
+    // must not turn code-defined rows into stored accounts the user never
+    // chose. Subsequent reads see no companion, so `changed` is false and the
+    // save is skipped.
+    let stored = std::mem::take(&mut prefs.provider_accounts);
+    let (migrated_stored, changed) = migrate_kimi_companion(stored);
     if changed {
-        prefs.provider_accounts = migrated.clone();
+        prefs.provider_accounts = migrated_stored.clone();
         if let Err(e) = save(prefs) {
             tracing::warn!(
                 "preferences::provider_accounts migration save failed: {}",
@@ -42,17 +45,18 @@ pub fn provider_accounts() -> Vec<ProviderAccount> {
             );
         }
     }
+    let mut merged = merge_provider_accounts(default_provider_accounts(), migrated_stored);
     // Fold the deprecated MiniMax field into the effective in-memory account
     // snapshot without persisting it as a second account-level copy. Usage
     // polling can now resolve every keyed provider from this one snapshot.
     if let Some(legacy_key) = legacy_minimax_key {
-        if let Some(minimax) = migrated.iter_mut().find(|account| account.id == "minimax") {
+        if let Some(minimax) = merged.iter_mut().find(|account| account.id == "minimax") {
             if minimax.api_key.as_deref().is_none_or(str::is_empty) {
                 minimax.api_key = Some(legacy_key);
             }
         }
     }
-    migrated
+    merged
 }
 
 /// Provider-account ids whose API key is persisted in `preferences.json`
@@ -72,6 +76,10 @@ pub fn provider_accounts_with_keys_in_preferences() -> Vec<String> {
 /// legacy endpoint → pairing before this runs). Returns the migrated list
 /// plus a `changed` flag so the caller can persist the result when the
 /// migration actually moved state. Pure — no disk side effects.
+///
+/// Takes the **stored** list, never the merged effective list (issue #2411):
+/// the result is what the caller hands to `save`, so code-defined defaults
+/// must not be on this path.
 fn migrate_kimi_companion(mut accounts: Vec<ProviderAccount>) -> (Vec<ProviderAccount>, bool) {
     let Some(companion_idx) = accounts.iter().position(|a| a.id == "kimi-via-claude") else {
         return (accounts, false);
