@@ -929,6 +929,8 @@ fn resolve_build_run_command(mode: BuildRunMode, is_root: bool, row: &MeshRow) -
 mod tests {
     use super::*;
     use crate::models::AgentNode;
+    use std::path::{Path, PathBuf};
+    use tempfile::TempDir;
 
     fn node_fixture(use_worktree: bool, worktree_name: Option<&str>) -> AgentNode {
         AgentNode {
@@ -1007,6 +1009,186 @@ mod tests {
         assert_eq!(
             env::worktree_segment(&node_fixture(true, Some("  gentle-fox  "))),
             Some("gentle-fox"),
+        );
+    }
+
+    /// A real git repository with one initial commit, under a `TempDir`
+    /// (random-suffixed, so concurrent test binaries get distinct
+    /// directories).
+    fn init_repo(path: &Path) -> git2::Repository {
+        let mut opts = git2::RepositoryInitOptions::new();
+        opts.initial_head("main");
+        let repo = git2::Repository::init_opts(path, &opts).unwrap();
+
+        std::fs::write(path.join("file.txt"), "initial").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("file.txt")).unwrap();
+        index.write().unwrap();
+        let tree_oid = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_oid).unwrap();
+        let sig = git2::Signature::now("test", "test@example.com").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "initial commit", &tree, &[])
+            .unwrap();
+        drop(tree);
+
+        repo
+    }
+
+    /// Register `name` as a git worktree under the same `.claude/worktrees/`
+    /// layout production resolves — the layout the assertion below depends on
+    /// is only meaningful if the fixture matches what Build/Run asks for.
+    fn add_worktree(root_repo: &git2::Repository, root: &Path, name: &str) -> PathBuf {
+        let head = root_repo.head().unwrap().peel_to_commit().unwrap();
+        let branch = root_repo.branch(name, &head, false).unwrap();
+        let reference = branch.into_reference();
+        let worktree_path = root.join(".claude").join("worktrees").join(name);
+        std::fs::create_dir_all(worktree_path.parent().unwrap()).unwrap();
+        root_repo
+            .worktree(
+                name,
+                &worktree_path,
+                Some(git2::WorktreeAddOptions::new().reference(Some(&reference))),
+            )
+            .unwrap();
+        worktree_path
+    }
+
+    /// The whole Build/Run path decision, end to end: node → resolved cwd →
+    /// the git2 worktree gate that decides whether a shell is allowed to
+    /// spawn. This replaces a test-file-local `git rev-parse --show-toplevel`
+    /// helper that no production code ever called, so it stayed green while
+    /// this path changed underneath it.
+    #[test]
+    fn build_run_cwd_selects_a_registered_worktree_and_rejects_an_unknown_one() {
+        let root = TempDir::new().unwrap();
+        let repo = init_repo(root.path());
+        let worktree = add_worktree(&repo, root.path(), "wt-live");
+
+        let node = AgentNode {
+            path: root.path().to_string_lossy().to_string(),
+            worktree_name: Some("wt-live".to_string()),
+            use_worktree: true,
+            ..Default::default()
+        };
+
+        let cwd = resolve_build_run_cwd(&node);
+        // The directory the shell would spawn in IS the worktree git2
+        // confirmed — not merely a path with the right shape.
+        assert_eq!(
+            std::fs::canonicalize(&cwd.host_path).unwrap(),
+            std::fs::canonicalize(&worktree).unwrap()
+        );
+        assert!(
+            validate_worktree_exists(&cwd, env::worktree_segment(&node)).is_ok(),
+            "a registered worktree must pass the gate"
+        );
+
+        // Same node shape, a worktree name git does not know. The directory
+        // exists but is not a registered worktree, so `discover` still
+        // succeeds and the failure is the worktree-list compare — not the
+        // open below.
+        std::fs::create_dir_all(root.path().join(".claude/worktrees/wt-missing")).unwrap();
+        let stale = AgentNode {
+            worktree_name: Some("wt-missing".to_string()),
+            ..node.clone()
+        };
+        let stale_cwd = resolve_build_run_cwd(&stale);
+        let err = validate_worktree_exists(&stale_cwd, env::worktree_segment(&stale))
+            .expect_err("an unregistered worktree name must be rejected");
+        assert!(
+            err.contains("wt-missing"),
+            "the error must name the missing worktree, got: {err}"
+        );
+        assert!(
+            err.contains("not found in git worktree list"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A worktree directory that was never created is a *different* failure
+    /// from an unregistered name: `git2::Repository::discover` reports
+    /// `NotFound` for a path that does not exist, so this exits at the open
+    /// and does not reach the worktree-list compare. Both branches surface to
+    /// the user, so both are pinned below.
+    #[test]
+    fn validate_worktree_exists_reports_a_missing_worktree_directory() {
+        let root = TempDir::new().unwrap();
+        let repo = init_repo(root.path());
+        let _registered = add_worktree(&repo, root.path(), "wt-live");
+
+        let node = AgentNode {
+            path: root.path().to_string_lossy().to_string(),
+            worktree_name: Some("wt-never-created".to_string()),
+            use_worktree: true,
+            ..Default::default()
+        };
+        let cwd = resolve_build_run_cwd(&node);
+        assert!(
+            !Path::new(&cwd.host_path).exists(),
+            "fixture precondition: the worktree dir must not exist"
+        );
+
+        let err = validate_worktree_exists(&cwd, env::worktree_segment(&node))
+            .expect_err("a worktree directory that does not exist must be rejected");
+        assert!(
+            err.starts_with("Failed to open repository"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// The mesh root is the main worktree: git reports it separately from
+    /// `repo.worktrees()`, so the `.git`-on-disk fallback is what accepts it.
+    #[test]
+    fn validate_worktree_exists_accepts_the_main_worktree_directory() {
+        let root = TempDir::new().unwrap();
+        let repo = init_repo(root.path());
+        // Fixture precondition: git reports linked worktrees only, so the
+        // main worktree's own name is absent and the `.git`-on-disk fallback
+        // is the only branch that can accept it below.
+        assert_eq!(repo.worktrees().unwrap().len(), 0);
+
+        let resolved = env::resolve_raw_path(&root.path().to_string_lossy());
+        assert!(
+            validate_worktree_exists(&resolved, Some("main")).is_ok(),
+            "the main worktree is valid via its .git directory"
+        );
+    }
+
+    /// Not a repository at all. The honest failure names the step that broke,
+    /// instead of the replica's invented `Worktree not found` string.
+    #[test]
+    fn validate_worktree_exists_reports_a_non_repository_directory() {
+        let plain = TempDir::new().unwrap();
+        std::fs::write(plain.path().join("README.md"), "not a repo").unwrap();
+        // Fixture precondition: `discover` walks *up* the tree, so this test
+        // only holds when the ambient temp directory is not itself inside a
+        // repository. Assert it directly so a machine that violates it fails
+        // with that explanation instead of a confusing message mismatch.
+        assert!(
+            git2::Repository::discover(plain.path()).is_err(),
+            "fixture precondition: temp dir must not sit inside a git repository"
+        );
+        let resolved = env::resolve_raw_path(&plain.path().to_string_lossy());
+
+        let err = validate_worktree_exists(&resolved, Some("wt"))
+            .expect_err("a directory outside any repository must be rejected");
+        assert!(
+            err.starts_with("Failed to open repository"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// No worktree name at all — the exact string the frontend surfaces. Pin
+    /// it so the message cannot drift without a test noticing.
+    #[test]
+    fn validate_worktree_exists_requires_a_worktree_name() {
+        let root = TempDir::new().unwrap();
+        let _repo = init_repo(root.path());
+        let resolved = env::resolve_raw_path(&root.path().to_string_lossy());
+
+        assert_eq!(
+            validate_worktree_exists(&resolved, None).unwrap_err(),
+            "No worktree name set for this agent node. Spawn the agent first to create a worktree."
         );
     }
 
