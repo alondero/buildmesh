@@ -74,7 +74,9 @@ vi.mock('../../src/components/BuildRun/BuildRunDropdown', () => ({
 
 const summaryMock = vi.fn();
 vi.mock('../../src/hooks/useGitSummary', () => ({
-  useGitSummary: () => ({ summary: summaryMock(), loading: false, refresh: vi.fn() }),
+  // Issue #2328 — the widened result carries error/stale/unavailable so the
+  // details line can say 'unavailable' instead of rendering nothing.
+  useGitSummary: () => ({ summary: summaryMock(), loading: false, error: null, unavailable: false, stale: false, refresh: vi.fn() }),
 }));
 
 const prMock = vi.fn();

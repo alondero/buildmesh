@@ -6617,3 +6617,97 @@ fn open_pr_result_updates_context_and_cascades_to_downstream_notify() {
     );
     assert_eq!(run.state, RunState::Completed);
 }
+
+#[test]
+fn effect_persistence_is_the_only_node_and_kind_map() {
+    let cases = [
+        Effect::SpawnAgentNode {
+            node_id: "spawn".into(),
+        },
+        Effect::InjectPty {
+            node_id: "inject".into(),
+            prompt: "follow up".into(),
+            target_node_id: None,
+        },
+        Effect::ContinueAgentTurn {
+            node_id: "continue".into(),
+            target_agent_id: 7,
+            prompt: "go on".into(),
+        },
+        Effect::NudgeIdleAgent {
+            node_id: "nudge".into(),
+            target_agent_id: 8,
+            prompt: "wake".into(),
+        },
+        Effect::SetNodeStatus {
+            node_id: "status".into(),
+            status: "completed".into(),
+            target_node_id: Some("spawn".into()),
+        },
+        Effect::CloseAgentNode {
+            node_id: "close".into(),
+            target_node_id: Some("spawn".into()),
+        },
+        Effect::Notify {
+            message: "done".into(),
+        },
+        Effect::CallGithub {
+            node_id: "github".into(),
+            action: GithubActionKind::AddLabel,
+            label: Some("triaged".into()),
+            comment: None,
+        },
+    ];
+
+    for effect in &cases {
+        match effect.persistence() {
+            EffectPersistence::Journal { node_id, kind } => {
+                assert_eq!(effect.step_node_id(), Some(node_id));
+                assert_eq!(effect.journal_kind(), Some(kind));
+                assert_eq!(effect.dispatch_error_step(), Some(node_id));
+                assert!(!effect.allowed_while_completing());
+            }
+            EffectPersistence::AgentStatus { node_id, status } => {
+                assert_eq!(effect.step_node_id(), Some(node_id));
+                assert_eq!(status, "completed");
+                assert_eq!(effect.journal_kind(), None);
+                assert_eq!(effect.dispatch_error_step(), None);
+                assert!(effect.allowed_while_completing());
+            }
+            EffectPersistence::Unjournaled { node_id } => {
+                assert_eq!(effect.step_node_id(), node_id);
+                assert_eq!(effect.journal_kind(), None);
+                assert_eq!(effect.dispatch_error_step(), node_id);
+            }
+        }
+    }
+
+    assert!(matches!(
+        cases[0].turn_boundary_agent(),
+        Some(TurnBoundaryAgent::Attached("spawn"))
+    ));
+    assert!(matches!(
+        cases[1].turn_boundary_agent(),
+        Some(TurnBoundaryAgent::ResolvedTarget("inject"))
+    ));
+    assert_eq!(cases[2].delivery_prefix(), Some("continuation"));
+    assert!(matches!(
+        cases[2].turn_boundary_agent(),
+        Some(TurnBoundaryAgent::Named(7))
+    ));
+    assert_eq!(cases[3].delivery_prefix(), Some("nudge"));
+    assert!(matches!(
+        cases[3].turn_boundary_agent(),
+        Some(TurnBoundaryAgent::Named(8))
+    ));
+    assert_eq!(cases[0].journal_kind(), Some(EffectJournal::Spawn));
+    assert_eq!(cases[1].journal_kind(), Some(EffectJournal::Prompt));
+    assert_eq!(cases[7].journal_kind(), Some(EffectJournal::Github));
+    assert!(cases[4].allowed_while_completing());
+    assert!(cases[5].allowed_while_completing());
+    assert!(cases[6].allowed_while_completing());
+    assert!(!cases[0].allowed_while_completing());
+    assert!(!cases[2].allowed_while_completing());
+    assert_eq!(cases[6].step_node_id(), None);
+    assert_eq!(cases[6].dispatch_error_step(), None);
+}

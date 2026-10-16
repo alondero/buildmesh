@@ -79,6 +79,18 @@ const CHILD_TEST: &str = "retirement_crash_child";
 /// on the status alone.
 const PANIC_EXIT: i32 = 101;
 
+/// How long the fixture waits for the operating system to stop holding the
+/// SQLite files a killed child left behind. Bounded so a database that is
+/// genuinely unreadable fails the scenario with its own error rather than
+/// hanging the suite, and the same order as [`owned_process_exits`], which
+/// waits for the OS to finish killing a contained process.
+const SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// How often [`LegacyFixture::open`] re-reads the fixture database while it
+/// waits. A process's first map of the `-shm` file resizes it, so this polls
+/// for that map rather than for a fact about the durable state.
+const SETTLE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
     /// Die during startup, before the sweep reaches the cleanup intent.
@@ -198,8 +210,60 @@ impl LegacyFixture {
         }
     }
 
+    /// A connection to the fixture database, once SQLite can map its
+    /// WAL-index.
+    ///
+    /// The first statement on that connection is a bounded wait rather than
+    /// the caller's own work. A WAL database keeps its index in a `-shm` file,
+    /// and on Windows the first process to map that file *truncates it to
+    /// zero* before rebuilding it — SQLite's `winLockSharedMemory`, reached
+    /// from `winShmMap` on a connection's first read. The child this module
+    /// kills with `abort()`, and any real-time scanner that opened the files
+    /// it had just written, can still be holding that file when the parent
+    /// gets here. The OS then refuses the resize, and statements on that
+    /// connection fail with `SQLITE_IOERR_TRUNCATE` (`extended_code: 1546`,
+    /// "disk I/O error") until it lets go.
+    ///
+    /// That is a property of this machine's file handling, not of the durable
+    /// state the scenarios assert, so the fixture waits for the map the same
+    /// way [`LegacyFixture::owned_process_exits`] waits for the OS to finish
+    /// killing a contained process, rather than sampling it once. Only an I/O
+    /// error is retried: a corrupt or missing database still fails at the
+    /// caller's own `.expect`.
     fn open(&self) -> Connection {
-        Connection::open(&self.db).expect("reopen the fixture database")
+        let deadline = std::time::Instant::now() + SETTLE_TIMEOUT;
+        loop {
+            match Self::open_settled(&self.db) {
+                Ok(conn) => return conn,
+                Err(error) => {
+                    // Two failures, told apart: only an I/O error is retried, because that is
+                    // the shape this Windows file-handle race takes, and only a wait
+                    // that ran out of budget can report that budget.
+                    assert!(
+                        is_io_error(&error),
+                        "the fixture database is unreadable for a reason other than a Windows \
+                         file-handle race, so it is not retried: {error} ({})",
+                        sqlite_files(&self.db)
+                    );
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the fixture database stayed unreadable for {SETTLE_TIMEOUT:?}, retrying \
+                         every {SETTLE_INTERVAL:?}: {error} ({})",
+                        sqlite_files(&self.db)
+                    );
+                    std::thread::sleep(SETTLE_INTERVAL);
+                }
+            }
+        }
+    }
+
+    /// One attempt at a usable connection. Reading the schema version is the
+    /// first thing that maps the WAL-index, so a successful return means the
+    /// OS let go of the crashed child's files.
+    fn open_settled(db: &std::path::Path) -> rusqlite::Result<Connection> {
+        let conn = Connection::open(db)?;
+        conn.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))?;
+        Ok(conn)
     }
 
     /// Run one phase in a fresh process. The child owns the global database
@@ -570,6 +634,36 @@ fn count(conn: &Connection, table: &str) -> i64 {
         row.get(0)
     })
     .unwrap_or_else(|error| panic!("count {table}: {error}"))
+}
+
+/// An I/O failure, which for this fixture means the operating system refused
+/// an operation SQLite needed rather than that the database is damaged.
+/// `SQLITE_IOERR_TRUNCATE` (extended code 1546) is the case that matters here:
+/// the Windows VFS raises it from a failed `SetEndOfFile` rather than a failed
+/// read, so it names a refused file resize.
+fn is_io_error(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(failure, _)
+            if failure.code == rusqlite::ErrorCode::SystemIoFailure
+    )
+}
+
+/// The fixture's three SQLite files and their sizes, so a wait that times out
+/// says which file was still held rather than only that a read failed.
+fn sqlite_files(db: &std::path::Path) -> String {
+    ["", "-wal", "-shm"]
+        .iter()
+        .map(|suffix| {
+            let mut path = db.as_os_str().to_os_string();
+            path.push(suffix);
+            let size = std::fs::metadata(&path)
+                .map(|metadata| metadata.len().to_string())
+                .unwrap_or_else(|error| format!("unreadable ({error})"));
+            format!("{}={size} bytes", PathBuf::from(&path).display())
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// While the retirement is outstanding, the stop still owns the node: a

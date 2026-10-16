@@ -53,9 +53,11 @@ fun NodeScreen(node: JsonObject, vm: BuildmeshViewModel, terminal: () -> Unit, c
 }
 
 @Composable
-fun TaskScreen(state: RemoteState, vm: BuildmeshViewModel, selectedMesh: Long, selectMesh: (Long) -> Unit, openNode: (Long) -> Unit) {
+// `launch` is a menu row id, or "" for the mesh default; the Overview's spawn
+// button pre-selects it before opening this screen.
+fun TaskScreen(state: RemoteState, vm: BuildmeshViewModel, selectedMesh: Long, selectMesh: (Long) -> Unit,
+    launch: String, selectLaunch: (String) -> Unit, openNode: (Long) -> Unit) {
     var prompt by rememberSaveable(state.draftNamespace) { mutableStateOf(vm.draft("capture")) }
-    var provider by rememberSaveable(state.draftNamespace) { mutableStateOf("") }
     // Issue #2331 — one operation key per *submission*, reused for every retry
     // of it, so a retry after a lost response resolves to the same node instead
     // of creating a duplicate. Editing the prompt, the mesh, or the launch
@@ -63,31 +65,39 @@ fun TaskScreen(state: RemoteState, vm: BuildmeshViewModel, selectedMesh: Long, s
     // desktop rejects a key reused with different content as a conflict.
     var operationKey by rememberSaveable(state.draftNamespace) { mutableStateOf("") }
     var operationFor by rememberSaveable(state.draftNamespace) { mutableStateOf("") }
-    val submission = "$selectedMesh|$provider|$prompt"
+    val submission = "$selectedMesh|$launch|$prompt"
     LaunchedEffect(submission) {
         if (operationFor != submission) {
             operationKey = ""
             operationFor = submission
         }
     }
-    val options = state.providers.filter { it.text("unavailable_reason").isEmpty() && (prompt.isBlank() || it.objectAt("capabilities")?.flag("supports_prefill") == true) }
+    val options = launchOptions(state.providers, needsPrompt = false)
+    val chosen = options.firstOrNull { it.text("id") == launch }
     val mesh = state.meshes.firstOrNull { it.number("id") == selectedMesh }
+    val defaultName = meshDefaultName(mesh, state.providers)
     LaunchedEffect(state.meshes) { if (mesh == null && state.meshes.isNotEmpty()) selectMesh(state.meshes.first().number("id")) }
-    LaunchedEffect(options) { if (options.none { it.text("id") == provider }) provider = options.firstOrNull()?.text("id").orEmpty() }
+    // A row that left the menu (harness removed, now unavailable) falls back
+    // to the mesh default rather than launching something else.
+    LaunchedEffect(options, launch) { if (launch.isNotEmpty() && chosen == null && state.providers.isNotEmpty()) selectLaunch("") }
+    // An explicit choice is kept even when it cannot take the prompt, so the
+    // user sees why instead of the selection silently changing under them.
+    val promptRejected = prompt.isNotBlank() && chosen != null && !supportsPrompt(chosen)
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("Start something", style = MaterialTheme.typography.headlineSmall)
         Text("Give an agent a task, or leave the prompt empty to open a new session.", color = MeshColors.secondary)
         Selector("Mesh", state.meshes.map { it.number("id") to it.text("name") }, selectedMesh, selectMesh, enabled = !state.busy)
         OutlinedTextField(colors = buildmeshTextFieldColors(), enabled = !state.busy, value = prompt, onValueChange = { prompt = it; vm.saveDraft("capture", it) }, label = { Text("What should the agent do?") }, modifier = Modifier.fillMaxWidth(), minLines = 5, maxLines = 12)
-        Selector("Launch configuration", options.map { it.text("id") to it.text("label") }, provider, { provider = it }, enabled = !state.busy)
-        if (options.isEmpty()) Text("No available launch configuration supports this task. Configure an agent harness on the desktop.", color = MeshColors.amber)
+        Selector("Launch configuration", listOf("" to (defaultName?.let { "Mesh default ($it)" } ?: "Mesh default")) + options.map { it.text("id") to it.text("label") }, launch, selectLaunch, enabled = !state.busy)
+        if (options.isEmpty()) Text("No launch configuration is available. Configure an agent harness on the desktop.", color = MeshColors.amber)
+        if (promptRejected) Text("${chosen?.text("label")} can't take an initial prompt. Clear the prompt to open a plain session, or choose another launch configuration.", color = MeshColors.amber)
         val fits = prompt.toByteArray(Charsets.UTF_8).size <= 16_000
         if (!fits) Text("The prompt must be at most 16000 bytes.", color = MeshColors.amber)
-        Button(shape = MaterialTheme.shapes.small, enabled = !state.busy && mesh != null && provider.isNotEmpty() && fits, onClick = {
+        Button(shape = MaterialTheme.shapes.small, enabled = !state.busy && mesh != null && options.isNotEmpty() && !promptRejected && fits, onClick = {
             val key = operationKey.ifEmpty { newOperationKey() }
             operationKey = key
             vm.action { api ->
-                val outcome = readCreateNodeOutcome(api.post("/api/nodes/create", createNodeBody(selectedMesh, options.firstOrNull { it.text("id") == provider } ?: error("Choose a launch configuration."), prompt, key)).obj())
+                val outcome = readCreateNodeOutcome(api.post("/api/nodes/create", createNodeBody(selectedMesh, chosen, prompt, key)).obj())
                 when (outcome) {
                     // Running: the draft is done and the new node is the focus.
                     is CreateNodeOutcome.Active -> {

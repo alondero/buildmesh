@@ -50,7 +50,7 @@ class MeshOverviewTest {
     @Test fun overviewScreenshot() {
         compose.setContent { BuildmeshTheme {
             Surface(color = MeshColors.background) {
-                Dashboard(RemoteState(meshes = meshes, nodes = nodes), "Overview", 0, {}, {}, { _, _ -> })
+                Dashboard(RemoteState(meshes = meshes, nodes = nodes), "Overview", 0, {}, {}, { _, _ -> }, { _, _ -> })
             }
         } }
         compose.onNodeWithText("/src/empty").performScrollTo().assertIsDisplayed()
@@ -111,13 +111,80 @@ class MeshOverviewTest {
         }
     }
 
+    private val providers = Json.parseToJsonElement("""[
+        {"id":"terminal","label":"Terminal","resumable":false,"capabilities":{"supports_prefill":false}},
+        {"id":"launch/saved","label":"Saved agent","resumable":true,"capabilities":{"supports_prefill":true},"configuration":{"id":"launch/saved","spawn_option_id":"claude","name":"Saved agent"}},
+        {"id":"claude","label":"Claude Code","resumable":true,"capabilities":{"supports_prefill":true}},
+        {"id":"missing","label":"Unavailable agent","unavailable_reason":"Missing executable","resumable":true,"capabilities":{"supports_prefill":true}}
+    ]""").objects()
+
+    // Both halves of a mesh's spawn button open Capture rather than spawning:
+    // Capture is where the first prompt is written.
+    @Test fun meshSpawnButtonOpensCaptureWithTheMeshAndChosenLaunch() {
+        val pinned = Json.parseToJsonElement("""{"id":4,"name":"Pinned","path":"/src/pinned","default_provider":"claude"}""").obj()
+        val opened = mutableListOf<Pair<Long, String>>()
+        compose.setContent { BuildmeshTheme {
+            Surface(color = MeshColors.background) {
+                Dashboard(RemoteState(meshes = listOf(meshes[0], pinned), nodes = nodes, providers = providers), "Overview", 0, {}, {}, { _, _ -> },
+                    { id, option -> opened += id to option })
+            }
+        } }
+        compose.onNodeWithContentDescription("Start a task in Buildmesh with Mesh default").performClick()
+        compose.onNodeWithContentDescription("Choose how to start a task in Buildmesh").performClick()
+        compose.onNodeWithText("Unavailable agent").assertDoesNotExist()
+        compose.onNodeWithText("Terminal").performClick()
+        compose.onNodeWithContentDescription("Start a task in Pinned with Claude Code").performScrollTo().performClick()
+        compose.runOnIdle { assertEquals(listOf(1L to "", 1L to "terminal", 4L to ""), opened) }
+    }
+
+    @Test fun theOverviewSpawnMenuLandsOnCapturePrefilled() {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val store = SessionStore(app)
+        store.clear()
+        MockWebServer().use { server ->
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
+                    "/api/session" -> MockResponse().setResponseCode(204)
+                    "/api/meshes" -> MockResponse().setBody(meshes.toString())
+                    "/api/nodes" -> MockResponse().setBody(nodes.toString())
+                    "/api/providers" -> MockResponse().setBody(providers.toString())
+                    else -> MockResponse().setBody("[]")
+                }
+            }
+            server.start(java.net.InetAddress.getByName("127.0.0.1"), 0)
+            store.save(DeviceSession(server.url("/").toString(), null, "bm_session=test; Path=/; HttpOnly"))
+            lateinit var vm: BuildmeshViewModel
+            compose.runOnUiThread { vm = BuildmeshViewModel(app) }
+            try {
+                compose.setContent { BuildmeshTheme { BuildmeshApp(vm) } }
+                compose.waitUntil(10000) { !vm.state.value.restoring }
+                compose.runOnUiThread { vm.resume() }
+                compose.waitUntil(10000) { vm.state.value.meshes.size == 3 && vm.state.value.providers.isNotEmpty() }
+                compose.runOnUiThread { vm.pause() }
+                compose.onNodeWithContentDescription("Choose how to start a task in Website with a long mesh name").performScrollTo().performClick()
+                compose.onNodeWithText("Saved agent").performClick()
+                compose.onNodeWithText("New task").assertIsDisplayed()
+                compose.onNodeWithText("Mesh: Website with a long mesh name").assertIsDisplayed()
+                compose.onNodeWithText("Launch configuration: Saved agent").assertIsDisplayed()
+                saveScreenshot("capture-prefilled")
+                compose.onNodeWithContentDescription("Back").performClick()
+                compose.onNodeWithContentDescription("Start a task in Buildmesh with Mesh default").performScrollTo().performClick()
+                compose.onNodeWithText("Mesh: Buildmesh").assertIsDisplayed()
+                compose.onNodeWithText("Launch configuration: Mesh default").assertIsDisplayed()
+            } finally {
+                compose.runOnUiThread { vm.forget() }
+                store.clear()
+            }
+        }
+    }
+
     @Test fun summariesTrackOpenNodesAndKeepEmptyMeshesUsable() {
         val state = mutableStateOf(RemoteState(meshes = meshes, nodes = nodes))
         var opened = 0L
         var target = ""
         compose.setContent { BuildmeshTheme {
             Surface(color = MeshColors.background) {
-                Dashboard(state.value, "Overview", 0, {}, {}, { id, screen -> opened = id; target = screen })
+                Dashboard(state.value, "Overview", 0, {}, {}, { id, screen -> opened = id; target = screen }, { _, _ -> })
             }
         } }
         compose.onNodeWithContentDescription("2 agents: Running, Needs attention", useUnmergedTree = true).assertExists()
@@ -145,7 +212,7 @@ class MeshOverviewTest {
         }
         compose.setContent { BuildmeshTheme {
             Surface(color = MeshColors.background) {
-                Dashboard(RemoteState(meshes = listOf(meshes[1]), nodes = manyNodes), "Overview", 0, {}, {}, { _, _ -> })
+                Dashboard(RemoteState(meshes = listOf(meshes[1]), nodes = manyNodes), "Overview", 0, {}, {}, { _, _ -> }, { _, _ -> })
             }
         } }
         val title = compose.onNodeWithText("Website with a long mesh name").performScrollTo().assertHasClickAction()
