@@ -13,8 +13,17 @@ vi.mock('../../src/components/BuildRun/BuildRunDropdown', () => ({
 
 // Each test sets what the chip will see by calling summaryMock.mockReturnValue(...).
 const summaryMock = vi.fn();
+// Issue #2328 — the widened result carries error/stale/unavailable so the
+// details line can say 'unavailable' instead of rendering nothing. Driven
+// separately so the many existing tests that only care about the counts stay
+// untouched; the default is the observed-and-current state.
+const summaryStateMock = vi.fn((): { error: Error | null; unavailable: boolean; stale: boolean } => ({
+  error: null,
+  unavailable: false,
+  stale: false,
+}));
 vi.mock('../../src/hooks/useGitSummary', () => ({
-  useGitSummary: () => ({ summary: summaryMock(), loading: false, refresh: vi.fn() }),
+  useGitSummary: () => ({ summary: summaryMock(), loading: false, ...summaryStateMock(), refresh: vi.fn() }),
 }));
 
 // Each test sets what the PR chip will see by calling prMock.mockReturnValue(...)
@@ -775,5 +784,76 @@ describe('GridNodeHeader observed Muse session telemetry (issue #1680)', () => {
     expect(panel.textContent).not.toContain('remaining');
     expect(panel.textContent).not.toContain('allowance');
     expect(panel.textContent).not.toContain('$');
+  });
+});
+
+// Issue #2328 — `useGitSummary` collapsed "observed clean", "never
+// observed" and "the fetch failed" into `summary: null`, so a broken git
+// status looked identical to a clean repo. The kebab details panel is this
+// header's only summary surface, so it is where the distinction has to land.
+describe('GridNodeHeader git-summary outcomes (issue #2328)', () => {
+  beforeEach(() => {
+    seedAgentNodes([NODE], NODE.id);
+    useAgentNodeStore.setState({ circuitOwnerships: {} });
+    useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
+    summaryMock.mockReturnValue(null);
+    summaryStateMock.mockReturnValue({ error: null, unavailable: false, stale: false });
+    prMock.mockReturnValue(null);
+  });
+
+  const openDetails = () => {
+    render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Agent node actions' }));
+    return screen.getByTestId('grid-node-details');
+  };
+
+  it('says the status is unavailable instead of rendering nothing', () => {
+    summaryMock.mockReturnValue(null);
+    summaryStateMock.mockReturnValue({
+      error: new Error('index.lock'),
+      unavailable: true,
+      stale: false,
+    });
+
+    const details = openDetails();
+    const notice = screen.getByTestId('git-summary-unavailable');
+    expect(notice.textContent).toContain('Change status unavailable');
+    // No confident zero anywhere in the panel.
+    expect(details.textContent).not.toContain('changed files');
+    // The reason stays reachable without widening the 240px popover.
+    expect(notice.getAttribute('title')).toContain('index.lock');
+  });
+
+  it('marks preserved counts as last known after a failed refresh', () => {
+    summaryMock.mockReturnValue({ total: 6, added: 3, modified: 2, deleted: 1 });
+    summaryStateMock.mockReturnValue({
+      error: new Error('index.lock'),
+      unavailable: false,
+      stale: true,
+    });
+
+    const details = openDetails();
+    expect(details.textContent).toContain('6 changed files (last known)');
+    expect(screen.queryByTestId('git-summary-unavailable')).toBeNull();
+    expect(screen.getByTestId('git-summary-details').getAttribute('title'))
+      .toContain('last known');
+  });
+
+  it('renders the plain counts when the summary is current', () => {
+    summaryMock.mockReturnValue({ total: 6, added: 3, modified: 2, deleted: 1 });
+
+    const details = openDetails();
+    expect(details.textContent).toContain('6 changed files ·');
+    expect(details.textContent).not.toContain('last known');
+    expect(screen.queryByTestId('git-summary-unavailable')).toBeNull();
+  });
+
+  it('says nothing when the repo was observed clean', () => {
+    // `summary` is null for a clean repo and for a pending first fetch. Both
+    // are honest silences — the unavailable notice is reserved for a failure.
+    summaryMock.mockReturnValue(null);
+    const details = openDetails();
+    expect(details.textContent).not.toContain('unavailable');
+    expect(details.textContent).not.toContain('changed files');
   });
 });

@@ -34,6 +34,15 @@
  *    promise resolves. Without this, a failure on key A would still be
  *    visible after the user switched to key B (or after a successful
  *    refetch, the slot would hold A's error). Issue #342.
+ * 4. **Failure blanks the value** — `client.refresh` resolves to `null` on
+ *    rejection, so assigning its result unconditionally turned a transient
+ *    Git failure into a confident "nothing changed". Every refetch path now
+ *    commits through one `settle` helper that keeps the last successful
+ *    value and records the error beside it. Issue #2328.
+ * 5. **Prior key's data survives a key switch** — the needs-fetch branch
+ *    now clears `data` alongside `error`, so switching repositories cannot
+ *    paint the previous repo's rows (or its stale badge) under the new one.
+ *    Issue #2328.
  */
 
 import { useCallback, useRef, useState } from 'react';
@@ -50,6 +59,13 @@ export interface UsePathInvalidatedQueryResult<V> {
    * unless the error is surfaced separately. Consumers like
    * `useMeshGitStatus` use this to collapse the panel on real failure
    * while still rendering an empty repo as `files: []`.
+   *
+   * Issue #2328 adds the pairing rule that makes `data` honest: when this
+   * is non-null, `data` holds the last SUCCESSFUL value for the current
+   * key, not the failure. Consumers therefore have three real states —
+   * `data === null && error === null` (never observed), `error === null`
+   * (observed, possibly empty), and `error !== null` (stale or
+   * unavailable) — and never confuse the last two.
    */
   error: Error | null;
   refresh: () => void;
@@ -164,6 +180,36 @@ export function usePathInvalidatedQuery(
   // `client.lastError(key)` after the promise resolves.
   const [error, setError] = useState<Error | null>(null);
 
+  /**
+   * Commit one refetch's outcome into state. Shared by all four refetch
+   * paths (mount, subscribe, focus, imperative `refresh`) so they cannot
+   * drift apart again — issue #2328.
+   *
+   * A failed refetch must NOT overwrite `data`. `client.refresh` resolves to
+   * `null` on rejection (the cache is only written by the success branch), so
+   * committing the result unconditionally would convert a transient Git
+   * failure into a confident empty result. Instead the last successful value
+   * stays put with `error` set, which is exactly the "last known" state a
+   * consumer needs in order to say something other than "clean". A successful
+   * empty result still replaces the value, so a genuinely clean repo and a
+   * broken one remain distinguishable.
+   *
+   * `isCurrent` is the caller's staleness fence: `signal.aborted` for the
+   * three effect-driven paths, a key comparison for the imperative one.
+   */
+  const settle = useCallback(
+    (pending: Promise<unknown>, fetchKey: unknown, isCurrent: () => boolean) => {
+      pending.then((result) => {
+        if (!isCurrent()) return;
+        const failure = client.lastError(fetchKey as never);
+        if (failure === null) setData(result);
+        setLoading(false);
+        setError(failure);
+      });
+    },
+    [client],
+  );
+
   // Mount / key change: read from cache, otherwise fetch (unless the
   // caller opted out via `enabled: false`). The signal protects against
   // the classic async-race where a key changes (or the component
@@ -206,13 +252,12 @@ export function usePathInvalidatedQuery(
 
     setLoading(true);
     setError(null);
-    client.refresh(key as never).then((result) => {
-      if (signal.aborted) return;
-      setData(result);
-      setLoading(false);
-      setError(client.lastError(key as never));
-    });
-  }, [key, client, enabled]);
+    // Issue #2328 — `error` is cleared here, so `data` must be too. Without
+    // it, switching keys kept the previous repository's rows on screen while
+    // this key's first fetch was in flight (and forever, if it failed).
+    setData(null);
+    settle(client.refresh(key as never), key, () => !signal.aborted);
+  }, [key, client, enabled, settle]);
 
   // Subscribe to GIT_CHANGED invalidation. The bus already evicted the
   // cache entry for `key` by the time `notify` fires, so this refresh hits
@@ -226,16 +271,7 @@ export function usePathInvalidatedQuery(
       if (signal.aborted) return;
       setLoading(true);
       setError(null);
-      client.refresh(key as never).then((result) => {
-        if (signal.aborted) return;
-        // Keep the last good value visible when a background invalidation
-        // fetch fails. Consumers can then show a non-blocking stale-data
-        // warning instead of falling through to their first-load error state.
-        // A successful empty result still replaces the value with `null`.
-        if (client.lastError(key as never) === null) setData(result);
-        setLoading(false);
-        setError(client.lastError(key as never));
-      });
+      settle(client.refresh(key as never), key, () => !signal.aborted);
     };
     const unsubscribe = isDualKey
       ? (client as DualKeyClient<unknown, unknown>).subscribeByPath(key, path as string, onInvalidate, extraPaths)
@@ -243,7 +279,7 @@ export function usePathInvalidatedQuery(
     return () => {
       unsubscribe();
     };
-  }, [key, path, client, isDualKey, extraKey]);
+  }, [key, path, client, isDualKey, extraKey, settle]);
 
   // Optional: refetch when the window regains focus. Same signal guard as
   // the subscribe effect, so a focus event firing during a key change
@@ -256,12 +292,7 @@ export function usePathInvalidatedQuery(
         if (!focused || signal.aborted) return;
         setLoading(true);
         setError(null);
-        client.refresh(key as never).then((result) => {
-          if (signal.aborted) return;
-          setData(result);
-          setLoading(false);
-          setError(client.lastError(key as never));
-        });
+        settle(client.refresh(key as never), key, () => !signal.aborted);
       })
       .then((fn) => {
         if (signal.aborted) fn();
@@ -270,7 +301,7 @@ export function usePathInvalidatedQuery(
     return () => {
       if (unlisten) unlisten();
     };
-  }, [key, client, refetchOnFocus]);
+  }, [key, client, refetchOnFocus, settle]);
 
   // `refresh` is invoked imperatively (not tied to an effect's dep list),
   // so it has no `AbortSignal` to guard its `.then` the way the other
@@ -292,13 +323,8 @@ export function usePathInvalidatedQuery(
     client.invalidate(refreshKey as never);
     setLoading(true);
     setError(null);
-    client.refresh(refreshKey as never).then((result) => {
-      if (keyRef.current !== refreshKey) return;
-      setData(result);
-      setLoading(false);
-      setError(client.lastError(refreshKey as never));
-    });
-  }, [key, client]);
+    settle(client.refresh(refreshKey as never), refreshKey, () => keyRef.current === refreshKey);
+  }, [key, client, settle]);
 
   return { data, loading, error, refresh };
 }

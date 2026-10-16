@@ -19,28 +19,67 @@ const summaryClient = createPathKeyedCache<GitSummary>({
 });
 
 /**
+ * Outcome of one git-summary observation (issue #2328).
+ */
+export interface GitSummaryResult {
+  /**
+   * Last successful summary with at least one change, or `null`. A repo
+   * that was observed clean yields `null` exactly like one that was never
+   * observed or whose fetch failed — `error` is what separates those three,
+   * so a consumer must not read `summary === null` as "clean".
+   */
+  summary: GitSummary | null;
+  loading: boolean;
+  /** Most recent failure for this path, or `null`. Cleared by any success. */
+  error: Error | null;
+  /**
+   * `true` when the fetch failed and no summary has ever been observed for
+   * this path. Compact surfaces show this as "changes unavailable" rather
+   * than silently rendering nothing.
+   */
+  unavailable: boolean;
+  /**
+   * `true` when the fetch failed but an earlier summary is still being shown.
+   * Those counts are real but may be out of date.
+   */
+  stale: boolean;
+  refresh: () => void;
+}
+
+/**
  * Hook that fetches and caches git summary for a given path.
  *
  * Returns `summary: null` when the summary has no changes (total === 0) —
  * the consuming panel hides itself in that case. A `summary` with a positive
  * `total` is the only "visible" state.
  *
+ * Issue #2328 adds `error` / `unavailable` / `stale` so that hidden-because-
+ * clean and hidden-because-broken stop looking identical. `summary` keeps its
+ * old shape, so `summary ? <Panel /> : null` call sites still compile — they
+ * just have to decide what the other two states look like.
+ *
  * Auto-refetched on `GIT_CHANGED` for the watched path (via the shared
  * primitive in `pathInvalidatedCache.ts`).
  */
-export function useGitSummary(gitPath: string | null): {
-  summary: GitSummary | null;
-  loading: boolean;
-  refresh: () => void;
-} {
-  const { data, loading, refresh } = usePathInvalidatedQuery(
+export function useGitSummary(gitPath: string | null): GitSummaryResult {
+  const { data, loading, error, refresh } = usePathInvalidatedQuery(
     summaryClient,
     gitPath,
   );
   // Match the original hook's public shape: hide zero-total summaries as
   // `null` so consumers can render a single `summary ? <Panel /> : null`.
   const summary = data && data.total > 0 ? data : null;
-  return { summary, loading, refresh };
+  return {
+    summary,
+    loading,
+    error,
+    // `data` is null on a failed fetch and non-null once anything has been
+    // observed, so these two are exactly "never known" and "known, then
+    // the refresh broke".
+    unavailable: error !== null && data === null,
+    stale: error !== null && data !== null,
+    refresh,
+  };
 }
 
 /**

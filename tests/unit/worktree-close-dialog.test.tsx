@@ -16,10 +16,22 @@ import type { GitStatus } from '../../src/types/generated/GitStatus';
 
 // The dialog reads the uncommitted file list through the shared git-status
 // hook; stub it so these tests don't reach for a Tauri backend and can drive
-// the rendered list deterministically.
-const changed = vi.hoisted(() => ({ files: [] as GitStatus[], loading: false }));
+// the rendered list deterministically. Issue #2328 widened the contract:
+// `files` is `null` (not `[]`) while nothing has been observed, which is what
+// lets the dialog separate "unavailable" from "git reports nothing".
+const changed = vi.hoisted(() => ({
+  files: [] as GitStatus[] | null,
+  loading: false,
+  stale: false,
+}));
 vi.mock('../../src/hooks/useChangedFiles', () => ({
-  useChangedFiles: () => ({ files: changed.files, loading: changed.loading }),
+  useChangedFiles: () => ({
+    files: changed.files,
+    loading: changed.loading,
+    error: null,
+    stale: changed.stale,
+    refresh: () => {},
+  }),
 }));
 
 const SAFETY: WorktreeCloseSafety = {
@@ -34,6 +46,7 @@ describe('WorktreeCloseDialog (#643)', () => {
     useWorktreeClosePromptStore.setState({ pending: null });
     changed.files = [];
     changed.loading = false;
+    changed.stale = false;
   });
 
   it('renders nothing when no prompt is pending', () => {
@@ -117,7 +130,7 @@ describe('WorktreeCloseDialog (#643)', () => {
   });
 
   it('shows a loading placeholder while the uncommitted list is fetching', () => {
-    changed.files = [];
+    changed.files = null;
     changed.loading = true;
     useWorktreeClosePromptStore.getState().request('occluded-node', SAFETY);
 
@@ -127,11 +140,11 @@ describe('WorktreeCloseDialog (#643)', () => {
   });
 
   it('does not falsely reassure when the file list could not be loaded', () => {
-    // The backend already flagged has_uncommitted, so an empty, non-loading
-    // list means get_git_status failed (the shared hook collapses errors to
-    // []). "No uncommitted files" would wrongly imply nothing is at risk right
+    // Issue #2328 gave this case its own signal. The backend already flagged
+    // has_uncommitted and no status fetch has ever succeeded for this path,
+    // so "no uncommitted files" would wrongly imply nothing is at risk right
     // before the user clicks "Remove anyway".
-    changed.files = [];
+    changed.files = null;
     changed.loading = false;
     useWorktreeClosePromptStore.getState().request('occluded-node', SAFETY);
 
@@ -139,6 +152,36 @@ describe('WorktreeCloseDialog (#643)', () => {
 
     expect(screen.queryByText(/no uncommitted files/i)).toBeNull();
     expect(screen.getByText(/couldn.t list the changed files/i)).toBeTruthy();
+  });
+
+  it('reports an observed empty list as an observation, not as reassurance', () => {
+    // Git answered, and answered "nothing uncommitted" — a real, distinct
+    // outcome from the unavailable case above. The risk sentence above still
+    // comes from the backend snapshot and the destructive button is still the
+    // user's to press, so this narrows the evidence without softening the
+    // warning.
+    changed.files = [];
+    changed.loading = false;
+    useWorktreeClosePromptStore.getState().request('occluded-node', SAFETY);
+
+    render(<WorktreeCloseDialog />);
+
+    expect(screen.getByText(/no uncommitted files right now/i)).toBeTruthy();
+    expect(screen.queryByText(/couldn.t list the changed files/i)).toBeNull();
+    expect(screen.getByRole('button', { name: /remove anyway/i })).toBeTruthy();
+  });
+
+  it('labels preserved rows as last known when a refresh failed', () => {
+    changed.files = [
+      { path: 'src/app.ts', status: 'modified', additions: 3, deletions: 1 },
+    ];
+    changed.stale = true;
+    useWorktreeClosePromptStore.getState().request('occluded-node', SAFETY);
+
+    render(<WorktreeCloseDialog />);
+
+    expect(screen.getByText('src/app.ts')).toBeTruthy();
+    expect(screen.getByText(/last known/i)).toBeTruthy();
   });
 
   it('omits the file list when there are no uncommitted changes (unpushed-only)', () => {
