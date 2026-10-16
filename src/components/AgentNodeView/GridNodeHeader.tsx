@@ -30,6 +30,7 @@ import { InlineEditableText } from '../shared/InlineEditableText';
 import { FolderOpenIcon } from '../shared/FolderOpenIcon';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { openInFileManager } from '../../lib/tauri';
+import { formatError } from '../../lib/errorUtils';
 import { isMac } from '../../lib/platform';
 import { AgentReviewButton } from './AgentReviewButton';
 import type { ActivityStatus } from '../../lib/nodeActivities';
@@ -110,7 +111,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
   const providerList = useProviderList();
   const regen = useRegenerateAction(node, providerList);
   const gitPath = node ? getNodeGitPath(node) : null;
-  const { summary } = useGitSummary(gitPath);
+  const { summary, error: summaryError, stale: summaryStale, unavailable: summaryUnavailable } = useGitSummary(gitPath);
   const { pr: openPr } = useOpenPr(nodeId, gitPath);
   const museTelemetry = useMuseSessionTelemetry(nodeId, node?.provider ?? '');
   if (!node || !titleNode) return null;
@@ -231,11 +232,22 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
             <div className="truncate font-medium text-text-primary" title={node.name}>{node.name}</div>
             <div className="mt-1 text-text-muted">{mesh?.name} · #{node.id} · {node.provider}</div>
             <div className="truncate text-text-muted" title={gitPath ?? undefined}>{node.use_worktree ? 'Worktree' : 'Repository root'} · {node.branch}</div>
-            {summary && <div data-testid="git-summary-details" className="mt-1 text-text-muted">
-              <span>{summary.total} changed files · </span>
+            {/* Issue #2328 — the kebab details is the header's only git-summary
+                surface, so it has to name the difference between "observed
+                clean" (nothing rendered, correct) and "the status fetch is
+                broken" (one muted line, never a confident zero). The
+                failure text rides on `title` so a 240px card keeps its
+                layout while the reason stays reachable. */}
+            {summary && <div data-testid="git-summary-details" className="mt-1 text-text-muted"
+              title={summaryStale ? 'Latest refresh failed — these counts are the last known.' : undefined}>
+              <span>{summary.total} changed files{summaryStale ? ' (last known)' : ''} · </span>
               <span className={summary.added ? 'text-accent-green' : 'text-text-muted'}>+{summary.added}</span>{' '}
               <span className={summary.modified ? 'text-accent-amber' : 'text-text-muted'}>~{summary.modified}</span>{' '}
               <span className={summary.deleted ? 'text-accent-red' : 'text-text-muted'}>-{summary.deleted}</span>
+            </div>}
+            {summaryUnavailable && <div data-testid="git-summary-unavailable" className="mt-1 text-text-muted truncate"
+              title={summaryError ? formatError(summaryError) : undefined}>
+              Change status unavailable
             </div>}
             {museTelemetry && <ObservedSessionTelemetry telemetry={museTelemetry} />}
           </>} />

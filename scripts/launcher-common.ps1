@@ -1,4 +1,5 @@
-# Shared helpers for the Windows launchers (run.ps1, run-dev.ps1).
+# Shared helpers for the Windows launchers (run.ps1, run-dev.ps1) and the dev
+# log helpers that have to look at the same profile.
 #
 # Dot-sourced, not executed:
 #     . (Join-Path $PSScriptRoot "launcher-common.ps1")
@@ -130,4 +131,95 @@ function Compare-LogGrowth {
         Grew    = ($after.Lines.Count -gt $Before.Lines.Count)
         Lines   = $after.Lines
     }
+}
+
+function Get-WorktreeSlug {
+    <#
+    .SYNOPSIS
+        The per-worktree identity suffix for a dev instance, or $null.
+
+    .DESCRIPTION
+        Returns $null for the main checkout. A linked worktree is the one whose
+        `.git` is a FILE rather than a directory - `git worktree add` writes
+        `gitdir: ...` into it. Anything else (a plain checkout, an exported
+        copy, a test fixture) is the main checkout.
+
+        The leaf alone is not unique: `.worktrees/<name>` and
+        `.claude/worktrees/<name>` are both real worktree layouts, so the leaf
+        is paired with a hash of the full path, lower-cased so two spellings of
+        one path resolve to one profile directory.
+
+        Lives here rather than in run-dev.ps1 so the launcher and the log
+        helpers derive the same directory for the same worktree.
+    #>
+    param([Parameter(Mandatory = $true)][string]$RepoRoot)
+
+    if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot '.git') -PathType Leaf)) {
+        return $null
+    }
+    $leaf = Split-Path $RepoRoot -Leaf
+    $safe = $leaf -replace '[^A-Za-z0-9._-]', '-'
+    if ([string]::IsNullOrWhiteSpace($safe)) { $safe = 'worktree' }
+    if ($safe.Length -gt 48) { $safe = $safe.Substring(0, 48) }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = $sha.ComputeHash(
+            [System.Text.Encoding]::UTF8.GetBytes($RepoRoot.ToLowerInvariant())
+        )
+    } finally {
+        $sha.Dispose()
+    }
+    $hex = -join ($digest | ForEach-Object { $_.ToString('x2') })
+    return "$safe-$($hex.Substring(0, 8))"
+}
+
+function Resolve-DevProfileDir {
+    <#
+    .SYNOPSIS
+        The app-data profile this worktree's dev instance writes its logs to.
+
+    .DESCRIPTION
+        A linked worktree runs its own dev instance: run-dev.ps1 gives it its
+        own profile dir and port offset (issue #2345), so a helper that reads
+        the dev log has to read THAT instance's log. Reading the canonical dev
+        profile instead reports another worktree's, or the main checkout's,
+        build - the wrong window's lines presented as this one's.
+
+        Resolution order, most authoritative first:
+          1. .tmp\dev-instance.json - the profile the last launch opened.
+             Absent in two cases that matter: a helper that runs BEFORE the
+             first launch, and the build phase of a re-launch (the launcher
+             consumes the record before it builds).
+          2. $env:BUILDMESH_PROFILE_DIR - a profile the caller pinned.
+          3. The worktree's own directory, derived from the slug. Deterministic,
+             so it is correct before anything has been launched here.
+          4. The canonical dev profile - the main checkout, which uses it.
+
+        Never throws: a damaged record resolves to the next option instead of
+        aborting a diagnostic whose whole job is to report state.
+
+    .PARAMETER RepoRoot
+        The worktree root. Defaults to the parent of this script's directory,
+        which is the layout every caller in scripts\ sits in.
+    #>
+    param([string]$RepoRoot)
+
+    if (-not $RepoRoot) { $RepoRoot = Join-Path $PSScriptRoot '..' }
+    $recordPath = Join-Path $RepoRoot '.tmp\dev-instance.json'
+    if (Test-Path -LiteralPath $recordPath) {
+        try {
+            # ReadAllText, not Get-Content: a launcher rewriting the record at
+            # this moment would raise a sharing violation and abort the caller.
+            $record = [System.IO.File]::ReadAllText($recordPath) | ConvertFrom-Json
+            if ($record.profileDir) { return $record.profileDir }
+        } catch {
+            Write-Warning "ignoring an unreadable instance record at ${recordPath}"
+        }
+    }
+    if ($env:BUILDMESH_PROFILE_DIR) { return $env:BUILDMESH_PROFILE_DIR }
+    $slug = Get-WorktreeSlug -RepoRoot $RepoRoot
+    if ($slug) {
+        return (Join-Path (Join-Path $env:APPDATA 'com.alond.buildmesh.dev\worktrees') $slug)
+    }
+    return (Join-Path $env:APPDATA 'com.alond.buildmesh.dev')
 }

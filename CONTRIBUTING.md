@@ -157,6 +157,27 @@ If you want an autonomous agent to pick up your issue, work with the
 maintainer to get it to **`ready-for-agent`** — that's the contract for
 AFK-friendly implementation.
 
+### Good first issues
+
+Issues labelled **`good first issue`** are scoped so that you can land one
+without maintainer context: the problem, the files that hold it, an explicit
+out-of-scope list, and an acceptance check you can run yourself. They are
+ordinary `tidy`, `fix` and `chore` work — extracting a shared component,
+adding a focused tooling gate, correcting one named function.
+
+[Browse the open ones.](https://github.com/alondero/buildmesh/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+
+Comment on the issue before you start, so two people don't do the same work.
+Each issue states its own acceptance check — run that check, and report the
+real pass/fail output rather than assuming it passed. If the list is ever
+empty, treat that as an invitation rather than a dead end: file an issue
+describing something small that annoys you, following the guidance above.
+
+The label does not mean "no reading required". The reading list in [Before
+you open a PR](#before-you-open-a-pr) still applies, and if your change
+touches the backend, terminals, agent spawn or path handling, read that area's
+owner document in `docs/development/` first.
+
 ## Maintainer & SLA
 
 This repo is maintained by **[@alondero](https://github.com/alondero)** on a

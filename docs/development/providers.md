@@ -100,6 +100,21 @@ access token). It never replaces a live reading or a
 rejected-key prompt; with nothing remembered the row is hidden (or errors) as before. See
 [ADR-0037](../adr/0037-usage-last-known-fallback.md).
 
+**Antigravity (`agy`) quota request version gate.** The `agy` meter calls
+`POST daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary`
+with the Antigravity CLI User-Agent, and the API gates the response on the CLI
+version that User-Agent advertises. Below cli `1.2.0` it still answers
+`HTTP 200` but strips the "Gemini Models" (weekly + 5-hour) group, so both
+Gemini meters silently disappear — an old pin is a blank meter, not an error.
+`AGY_USER_AGENT` (`services/usage.rs`) pins the current published CLI version
+(`agy --version`), verified live 2026-10-16 at `1.4.0`: `1.1.5` returned only
+"Claude and GPT models", `1.2.0` added "Gemini Models", and `1.4.0` also returned
+the "Gemini 4 Argon" group.
+`agy_user_agent_meets_gemini_quota_version_gate` fails if the pin drifts back
+below `1.2.0`, and when a response carries no Gemini group at all
+`parse_agy_quota_summary` attaches a `detail` so a re-gate surfaces instead of
+blanking.
+
 **Claude Code authentication source.** The Anthropic meter follows Claude's
 documented credential precedence rather than always reading
 `~/.claude/.credentials.json`. Cloud flags (`CLAUDE_CODE_USE_BEDROCK`,
@@ -179,6 +194,7 @@ credential — that produces two cards, two fetcher paths, and confusing UI.
 - `kimi_via_claude_id_does_not_exist_in_default_provider_accounts` — the literal dual-id bug.
 - `kimi_is_first_class_claude_compatible_with_moonshot_endpoint` — catalog + `first_class_surfaces` shape (not in defaults).
 - `provider_accounts_migrates_stored_kimi_via_claude_into_first_class_kimi` — one-time migration for users who picked up PR #1044.
+- `loading_preferences_never_persists_builtin_defaults_as_stored_accounts` / `loading_a_legacy_kimi_companion_file_leaves_it_byte_identical` (`src-tauri/src/preferences/tests/accounts_tests.rs`) — a load must not turn code-defined defaults into stored accounts (issue #2411).
 - `default_provider_accounts_are_self_auth_only` / `effective_pairings_stored_only_no_auto_derive` / `migrate_legacy_account_endpoint_into_claude_pairing` — ADR-0025.
 
 **Don't.** Do not add a `kimi-via-claude`-style companion row when restoring
@@ -197,6 +213,18 @@ set inside `migrate_prefs_json`, then a re-deserialise gate (`serde_json::from_v
 returning `Err` ⇒ keep the on-disk file intact rather than `unwrap_or_default()`,
 which previously overwrote a partially-unknown prefs file with defaults — a
 silent data-loss path).
+
+**A read is not a licence to persist defaults.** `provider_accounts()` resolves
+the effective list as `default_provider_accounts()` merged with the *stored*
+`provider_accounts`, and the two lists must not be confused. Anything that
+migrates the stored list (`migrate_kimi_companion` in
+`src-tauri/src/preferences/resolver/accounts.rs`) therefore runs **before** the
+merge and persists only the migrated stored list: a read that wrote the merged
+list back stored every built-in default as an account the user never chose
+(issue #2411). A legacy file on disk takes a different path — `migrate_prefs_json`
+already folds the `kimi-via-claude` companion during classification, before
+deserialization, so that migration needs no write-back of its own. (A load can
+still rewrite the file for an unrelated reason: the #830 plaintext-key scrub.)
 
 **A read failure is not a licence to write defaults.** `preferences.json` holds
 credentials, so an unreadable file must never be replaced by
@@ -280,6 +308,12 @@ enumerated here**. Each harness adapter's `spawn_recipe`
 (`src-tauri/src/agent/provider/adapters/<id>.rs`) sets `SpawnRecipe::windows_shell`,
 and `spawn_environment::wrap` consumes that value. macOS and Linux always spawn
 `Direct`, so only the Windows arm of a platform match can differ.
+
+The common arms have one table, `provider::shell_for` (`Cmd` on Windows, `Direct`
+elsewhere), which the `.cmd`-shim adapters call instead of restating the match
+— seven identical copies existed before issue #2235. An adapter with a real
+reason to differ keeps its own function and documents it: Codex's `shell_for`
+returns `PowerShell`, and `anthropic` declares no value at all (see below).
 
 The three values exist for three structural reasons, which is the part worth
 remembering:
@@ -469,6 +503,80 @@ a Claude Code terminal, which no script can help with.
 Read `CLAUDE_SESSION_MARKER_ENV_VARS` before adding a variable: a new marker
 Claude Code exports belongs there, and its own test asserts none of the
 deliberately-set names above ever drift in.
+
+## Harness hook config documents
+
+Every adapter that injects a Buildmesh entry into a harness config does the same
+three things: read the user's document, merge Buildmesh's own entry into it, and
+persist the result without losing the user's content.
+`src-tauri/src/agent/managed_config.rs` owns the read and the write for every
+adapter that uses it, plus the merge wherever the document's shape fits one of
+the two shared upserts. How much each adapter shares follows its document.
+
+Claude Code, Cursor, Grok and mcode share all three: their entry is a member of
+an array of handlers or matcher groups, which is what `upsert_entry` and
+`upsert_matcher_group` are for. AGY, Muse and the workspace-trust stores share
+the read and the write but merge in their own way, because their entry is not a
+member of a handler array — AGY owns one whole namespace key, Muse sets a
+decision value keyed by workspace, and a trust store appends a path to a list of
+values. Cline and OpenCode share only the writer: a hook script and a pure
+plugin template have no document to parse and no user entries to preserve. Kimi
+shares the refusal and the writer, because its config is TOML and its
+`config.yaml` permission pin is a surgical single-line edit rather than a
+round-trip. Codex shares only the writer, and only on its native arm.
+
+**What the shared module owns.**
+
+- `atomic_write` is the single temp-file-then-rename writer for these config
+  documents. The temp file is a sibling of the target (the rename must stay on
+  one volume) named with the process id and a per-process counter, so two
+  concurrent provisions — or two `rust-test-shards` binaries writing the same
+  directory — can never land on one name. On unix it is created `0o600` and the
+  rename carries that onto the target: `File::create` would inherit
+  `0o666 & !umask`, which would have widened `.claude/settings.local.json` inside
+  the user's own repository among others.
+- `read_document` treats a missing file as an empty document and refuses a
+  malformed one through `refuse_malformed`, **one** wording for every harness and
+  every format. Before issue #2235 that answer had drifted: AGY reported
+  `invalid agy hooks.json …` where Cursor and Grok reported
+  `refusing to overwrite malformed …`, on the same corruption, in the same user
+  session. A file that cannot be read at all is a different failure and keeps
+  its own wording — an adapter whose tests pin it (AGY's non-UTF-8 and
+  directory cases) branches on `DocumentError::is_malformed`.
+- `Document` carries whether the user's file ended in a newline, so a rewrite
+  restores it instead of turning a hand-edited file into an unrelated diff.
+- `carries_anchors` is the single ownership test: an entry is Buildmesh's when
+  its stored command carries every marker the adapter declared. It decodes a
+  `powershell.exe -EncodedCommand` line first, because the WindowsInterop relay
+  base64-encodes the callback and an undecoded match would make a re-provision
+  append a duplicate of our own hook instead of replacing it. For Claude Code
+  and Grok that decode widened their predicates, which did not decode before
+  #2235: a WindowsInterop-installed config is now recognised as ours and updated
+  in place rather than duplicated beside a stale copy. Cursor and mcode already
+  decoded, so theirs is unchanged.
+- `upsert_entry` and `upsert_matcher_group` are the two merge shapes. Both
+  report whether anything changed, which is what lets a re-provision skip the
+  write entirely (issue #886's no-spurious-mtime invariant). Neither appends into
+  a matcher group the user already filtered on — that would silently scope our
+  hook to the tools they filtered.
+- `root_object` / `object_entry` / `array_entry` reject a valid-JSON value of
+  the wrong shape and name it (`got Array`), so a rejection points at the key
+  the user has to repair.
+
+**What stays with the adapter**, and must not be generalised away: which file,
+which events, which handler shape, and which markers make an entry ours. Those
+markers are what identify an already-installed config as Buildmesh's, so
+changing one would stop Buildmesh recognising its own prior installs and append
+a second copy instead of updating it.
+
+Two shapes stay outside the module because only one harness has them. Codex
+writes through the guest CLI on WSL (`read_runtime_files` / `write_runtime_files`,
+a `wsl.exe` round-trip rather than a local rename) and *retires* Buildmesh's
+entries by stripping them — a removal the merge does not model; its native arm
+still uses `atomic_write`. Codex's `materialize_native_profile_at` is also a
+separate temp-and-persist writer: it writes the Codex *profile* home rather than
+a hook document, sets its own `0o600` on unix, and cleans up legacy profiles
+afterwards.
 
 ## Saved Spawn Configurations
 

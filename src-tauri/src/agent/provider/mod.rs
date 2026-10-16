@@ -119,6 +119,23 @@ pub enum WindowsShell {
     Direct,
 }
 
+/// The default [`WindowsShell`] for a platform: `cmd.exe` on Windows (the
+/// node-shim `.cmd` batch files an adapter spawns are resolved by `cmd.exe`,
+/// not by a bare process spawn) and a direct spawn everywhere else, where no
+/// shell wrapping applies.
+///
+/// The `.cmd`-shim adapters use this table for both arms; before issue
+/// #2235 seven of them restated the identical match. An adapter with a
+/// genuine reason to differ does not call this: Codex spawns under
+/// PowerShell so ANSI escape sequences propagate correctly through ConPTY,
+/// and declares that choice in its own `shell_for`.
+pub fn shell_for(platform: Platform) -> WindowsShell {
+    match platform {
+        Platform::Macos | Platform::Linux => WindowsShell::Direct,
+        Platform::Windows => WindowsShell::Cmd,
+    }
+}
+
 /// The provider's spawn recipe for a given host platform.
 /// `spawn_environment::wrap` consumes this plus an `EnvType` to produce a `CommandBuilder`.
 ///

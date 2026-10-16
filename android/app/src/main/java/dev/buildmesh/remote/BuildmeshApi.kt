@@ -208,11 +208,12 @@ fun inputBody(sequence: String): JsonObject {
 // same transaction as the INSERT, so a retry after a lost response returns the
 // *same* node instead of creating a second node, worktree, and process. The
 // value is opaque to the server: it only has to stay equal across retries.
-fun createNodeBody(meshId: Long, option: JsonObject, prompt: String, operationKey: String): JsonObject = buildJsonObject {
-    val configuration = option.objectAt("configuration")
+//
+// A `null` option is the mesh default: no launch fields are sent and the
+// desktop resolves its own default chain.
+fun createNodeBody(meshId: Long, option: JsonObject?, prompt: String, operationKey: String): JsonObject = buildJsonObject {
     put("mesh_id", meshId)
-    put("provider", configuration?.text("spawn_option_id") ?: option.text("id"))
-    configuration?.let { put("configuration_id", it.text("id")) }
+    putLaunch(option)
     put("rows", 24); put("cols", 80)
     put("operation_key", operationKey)
     if (prompt.isNotBlank()) put("prompt", prompt.trim())
@@ -267,9 +268,44 @@ fun readCreateNodeOutcome(body: JsonObject): CreateNodeOutcome = when (val outco
     else -> error("Unsupported create outcome '$outcome'; update the app.")
 }
 
-// Issue spawn and archive resume accept a Spawn Option only; they have no
-// field that could carry a saved configuration.
+fun JsonObjectBuilder.putLaunch(option: JsonObject?) {
+    val configuration = option?.objectAt("configuration")
+    option?.let { put("provider", configuration?.text("spawn_option_id") ?: it.text("id")) }
+    configuration?.let { put("configuration_id", it.text("id")) }
+}
+
+// Archive resume accepts a Spawn Option only; it has no field that could carry
+// a saved configuration.
 fun launchableWithoutConfiguration(option: JsonObject) = option.objectAt("configuration") == null
+
+fun supportsPrompt(option: JsonObject) = option.objectAt("capabilities")?.flag("supports_prefill") == true
+
+// The backend menu in its own order (ADR-0016: no client re-sorts it), minus
+// rows that cannot launch now. Issue and PR spawns always carry a prompt.
+fun launchOptions(providers: List<JsonObject>, needsPrompt: Boolean) = providers.filter {
+    it.text("unavailable_reason").isEmpty() && (!needsPrompt || supportsPrompt(it))
+}
+
+// The row a mesh pins as its default, if the menu has it. Without one the
+// app-wide default applies, which the phone cannot see.
+fun meshDefaultName(mesh: JsonObject?, providers: List<JsonObject>): String? {
+    val id = mesh?.text("default_provider").orEmpty().ifEmpty { return null }
+    return providers.firstOrNull { it.text("id") == id && launchableWithoutConfiguration(it) }?.text("label")
+}
+
+// The desktop renders the issue prompt from its template; the phone sends
+// only a title hint for the node name.
+fun issueSpawnBody(issue: JsonObject, option: JsonObject?): JsonObject = buildJsonObject {
+    put("title", issue.text("title")); putLaunch(option)
+}
+
+// The head fields the desktop PR probe hands `create_pr_node`; the backend
+// renders the review prompt.
+fun pullSpawnBody(pr: PhonePullRequest, option: JsonObject?): JsonObject = buildJsonObject {
+    put("title", pr.title); put("head_ref", pr.head); put("head_sha", pr.headSha)
+    put("head_repo_owner", pr.headOwner); put("head_repo_clone_url", pr.headRepo)
+    putLaunch(option)
+}
 
 data class PrSource(val head: String, val base: String)
 

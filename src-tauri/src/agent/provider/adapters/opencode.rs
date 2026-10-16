@@ -65,14 +65,17 @@
 //! sandbox (macOS Seatbelt, Windows restricted-token, mesh-level toggle)
 //! is the independent OS-level containment layer.
 
-use std::io::Write;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::agent::capabilities::{PermissionModeOption, PERMISSION_MODE_UNATTENDED};
+use crate::agent::managed_config;
 use crate::agent::provider::{
-    AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell,
+    shell_for, AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta,
 };
+// The recipe tests assert the shell each platform produces; nothing outside
+// `cfg(test)` names the type now that `shell_for` is shared.
+#[cfg(test)]
+use crate::agent::provider::WindowsShell;
 use crate::env::ResolvedPath;
 use crate::models::EnvType;
 
@@ -90,51 +93,6 @@ pub static OPENCODE: OpenCodeAdapter = OpenCodeAdapter;
 /// modularisation and is the only legacy exception.
 const OPENCODE_ATTENTION_PLUGIN: &str = include_str!("opencode_attention_plugin.js");
 
-/// Counter for unique `.tmp` filenames in [`atomic_write`]. Without a
-/// counter, two concurrent provisions racing on the same path would
-/// collide on the `.tmp` filename and one's rename would clobber the
-/// other's data on Windows (which does not have atomic POSIX rename
-/// over an open target).
-static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Atomic write — temp file + fsync + rename (agy.rs pattern, which
-/// already proved out for `.agents/hooks.json`). A reader (the OpenCode
-/// ESM loader, a file watcher, anything else with the directory open)
-/// sees either the old content or the new content, never a
-/// half-written file. On rename failure the `.tmp` is cleaned up and
-/// the caller surfaces the error.
-fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
-    let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("buildmesh-attention.js");
-    let tmp = path.with_file_name(format!(
-        "{}.{}.{}.tmp",
-        file_name,
-        std::process::id(),
-        counter
-    ));
-
-    {
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(content.as_bytes())?;
-        file.sync_all()?;
-    }
-
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        if let Err(rm_err) = std::fs::remove_file(&tmp) {
-            tracing::warn!(
-                "atomic_write: failed to clean up temp file {:?}: {}",
-                tmp,
-                rm_err
-            );
-        }
-        return Err(e);
-    }
-    Ok(())
-}
-
 /// Install (or refresh) the OpenCode attention plugin. Idempotent — a
 /// re-run with the same template is a no-op, so the orchestrator's
 /// before-spawn call has zero cost once the file is in place. The
@@ -143,6 +101,11 @@ fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
 /// user-modified file overwrites back to the template — same shape as
 /// `agent::spawn::inject_attention_hook`'s ownership of
 /// `.claude/settings.local.json`.
+///
+/// The write is `managed_config::atomic_write` (temp file + fsync +
+/// rename): the OpenCode ESM loader, a file watcher, or anything else
+/// with the directory open sees either the old content or the new
+/// content, never a half-written file.
 ///
 /// Returns `Ok(())` even when the disk write is a no-op; an `Err` only
 /// surfaces a real filesystem failure (missing directory perms, full
@@ -164,21 +127,13 @@ fn inject_opencode_attention_plugin(project_path: &Path) -> Result<(), String> {
         _ => {}
     }
 
-    atomic_write(&plugin_path, OPENCODE_ATTENTION_PLUGIN)
+    managed_config::atomic_write(&plugin_path, OPENCODE_ATTENTION_PLUGIN)
         .map_err(|e| format!("failed to write OpenCode attention plugin: {e}"))?;
     tracing::info!(
         "inject_opencode_attention_plugin: wrote plugin at {:?}",
         plugin_path
     );
     Ok(())
-}
-
-/// Per-platform shell selection. Mirrors the Codex adapter's pattern.
-fn shell_for(platform: Platform) -> WindowsShell {
-    match platform {
-        Platform::Macos | Platform::Linux => WindowsShell::Direct,
-        Platform::Windows => WindowsShell::Cmd,
-    }
 }
 
 impl AgentProvider for OpenCodeAdapter {
@@ -802,8 +757,8 @@ mod tests {
 
         // Two concurrent writes would collide on a plain `<name>.tmp`
         // filename; the PID+counter disambiguates them.
-        atomic_write(&target, "first").expect("first write");
-        atomic_write(&target, "second").expect("second write");
+        managed_config::atomic_write(&target, "first").expect("first write");
+        managed_config::atomic_write(&target, "second").expect("second write");
         assert_eq!(
             std::fs::read_to_string(&target).expect("read"),
             "second",
@@ -831,7 +786,7 @@ mod tests {
         let blocker = temp.path().join("blocker");
         std::fs::write(&blocker, b"intact").expect("create blocker");
         let failing_target = blocker.join("plugin.js");
-        let err = atomic_write(&failing_target, "nope")
+        let err = managed_config::atomic_write(&failing_target, "nope")
             .expect_err("must fail because blocker is a leaf file");
         assert_eq!(
             std::fs::read(&blocker).expect("blocker readable"),

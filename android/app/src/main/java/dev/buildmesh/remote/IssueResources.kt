@@ -58,11 +58,15 @@ fun IssuesResourceScreen(api: BuildmeshApi, meshId: Long, state: RemoteState, vm
     val issues = load.data?.arrayAt("items").orEmpty()
     var filter by rememberSaveable(state.draftNamespace, meshId) { mutableStateOf("") }
     var expanded by rememberSaveable(state.draftNamespace, meshId) { mutableStateOf<Long?>(null) }
-    var launching by remember(state.draftNamespace, meshId) { mutableStateOf<JsonObject?>(null) }
     var editing by remember(state.draftNamespace, meshId) { mutableStateOf<JsonObject?>(null) }
-    var provider by remember(state.draftNamespace, meshId) { mutableStateOf("") }
-    val options = state.providers.filter { it.text("unavailable_reason").isEmpty() && launchableWithoutConfiguration(it) && it.objectAt("capabilities")?.flag("supports_prefill") == true }
-    LaunchedEffect(options) { if (options.none { it.text("id") == provider }) provider = "" }
+    val options = launchOptions(state.providers, needsPrompt = true)
+    val defaultName = meshDefaultName(state.meshes.firstOrNull { it.number("id") == meshId }, state.providers)
+    // Like the desktop Issues probe, choosing a launch starts it: the node row
+    // is committed at once and its status reports the background start.
+    fun start(issue: JsonObject, option: JsonObject?) = vm.action { client ->
+        val node = client.post("/api/meshes/$meshId/issues/${issue.number("number")}/spawn", issueSpawnBody(issue, option)).obj()
+        vm.acceptNode(node); openNode(node.number("id"))
+    }
     val filtered = filterIssues(issues, filter)
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { OutlinedTextField(colors = buildmeshTextFieldColors(), value = filter, onValueChange = { filter = it }, label = { Text("Filter issues") }, singleLine = true, modifier = Modifier.fillMaxWidth()) }
@@ -79,29 +83,16 @@ fun IssuesResourceScreen(api: BuildmeshApi, meshId: Long, state: RemoteState, vm
                     val blockers = issueBlockers(issue, issues)
                     if (blockers.isNotEmpty()) Text("Blocked by " + blockers.joinToString(", ") { "#$it" }, color = MeshColors.red)
                     if (issueLabels(issue).isNotEmpty()) Text(issueLabels(issue).joinToString(" · "), color = MeshColors.accent)
+                    SpawnSplitButton(defaultName, options, "issue #$number", !state.busy, { start(issue, null) }, { start(issue, it) })
                     TextButton(enabled = !state.busy, onClick = { editing = issue }) { Text("Edit tags for issue #$number") }
                     if (open) {
                         val body = issue.text("body").trim()
                         if (body.isNotEmpty()) Text(body.take(600) + if (body.length > 600) "…" else "", color = MeshColors.secondary, modifier = Modifier.heightIn(max = 180.dp).verticalScroll(rememberScrollState()))
-                        Button(shape = MaterialTheme.shapes.small, enabled = !state.busy, onClick = { provider = ""; launching = issue }) { Text("Start agent") }
                         if (issue.text("url").startsWith("https://")) ExternalLink(issue.text("url"), "View issue")
                     }
                 }
             }
         }
-    }
-    launching?.let { issue ->
-        AlertDialog(onDismissRequest = { if (!state.busy) launching = null }, title = { Text("Choose a launch configuration") },
-            text = { Selector("Launch configuration", listOf("" to "Mesh default") + options.map { it.text("id") to it.text("label") }, provider, { provider = it }, enabled = !state.busy) },
-            confirmButton = { TextButton(enabled = !state.busy, onClick = {
-                vm.action { client ->
-                    val node = client.post("/api/meshes/$meshId/issues/${issue.number("number")}/spawn", buildJsonObject {
-                        put("title", issue.text("title")); if (provider.isNotEmpty()) put("provider", provider)
-                    }).obj()
-                    vm.acceptNode(node); launching = null; openNode(node.number("id"))
-                }
-            }) { Text(if (state.busy) "Starting…" else "Start") } },
-            dismissButton = { TextButton(enabled = !state.busy, onClick = { launching = null }) { Text("Cancel") } })
     }
     editing?.let { issue ->
         IssueTagDialog(api, meshId, issue, state.busy, vm, onClose = { editing = null }, onChanged = { label, present ->

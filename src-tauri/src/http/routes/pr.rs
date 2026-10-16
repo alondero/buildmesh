@@ -88,6 +88,85 @@ pub async fn merge(req: &ParsedRequest) -> Response {
     }
 }
 
+/// Body for `POST /api/meshes/{id}/pulls/{n}/spawn`: the head fields come
+/// from the phone's `GitHubPullRequest` row, exactly what the desktop PR probe
+/// hands `create_pr_node`. There is no prompt field: the backend renders the
+/// review prompt from the user's template, the same render the desktop uses.
+/// Unknown fields are rejected so a client that tries to send one is told.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PullSpawnRequest {
+    title: String,
+    head_ref: String,
+    #[serde(default)]
+    head_sha: String,
+    #[serde(default)]
+    head_repo_owner: Option<String>,
+    #[serde(default)]
+    head_repo_clone_url: Option<String>,
+    /// Spawn Option; absent means the mesh default.
+    #[serde(default)]
+    provider: Option<String>,
+    /// Saved Launch Configuration under `provider`.
+    #[serde(default)]
+    configuration_id: Option<String>,
+}
+
+/// `POST /api/meshes/{id}/pulls/{n}/spawn` — start an agent on the PR's head
+/// branch through the desktop PR probe's `create_pr_node`. The node row is
+/// committed and returned at once; the worktree and process start in the
+/// background and report through the node's status.
+pub async fn spawn(req: &ParsedRequest) -> Response {
+    let Some(app) = crate::http::state::app_handle() else {
+        return Response::json_error("503 Service Unavailable", "App not ready");
+    };
+    spawn_with(req, |mesh_id, pr_number, body| async move {
+        crate::commands::run_blocking("http_spawn_pull_request", move || {
+            crate::commands::agent::create_pr_node(
+                app.clone(),
+                mesh_id,
+                pr_number,
+                body.title,
+                body.head_ref,
+                body.head_sha,
+                body.provider,
+                body.head_repo_owner,
+                body.head_repo_clone_url,
+                body.configuration_id,
+                None,
+            )
+            .map(|draft| draft.node)
+        })
+        .await
+    })
+    .await
+}
+
+async fn spawn_with<F, Fut, T>(req: &ParsedRequest, create: F) -> Response
+where
+    F: FnOnce(i64, i64, PullSpawnRequest) -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+    T: serde::Serialize,
+{
+    let parsed: PullSpawnRequest = match serde_json::from_slice(&req.body) {
+        Ok(value) => value,
+        Err(e) => return Response::json_error("400 Bad Request", &format!("Invalid JSON: {e}")),
+    };
+    if req.id0() <= 0 || req.id1() <= 0 {
+        return Response::json_error(
+            "400 Bad Request",
+            "A positive mesh and pull request number are required",
+        );
+    }
+    match create(req.id0(), req.id1(), parsed).await {
+        Ok(node) => match serde_json::to_string(&node) {
+            Ok(body) => Response::json("200 OK", body),
+            Err(e) => Response::json_error("500 Internal Server Error", &e.to_string()),
+        },
+        Err(e) => Response::json_error("500 Internal Server Error", &e),
+    }
+}
+
 /// `GET /api/meshes/{id}/pr/source?node_id=N` — preview the branches a
 /// create-PR would use.
 ///
@@ -418,5 +497,107 @@ mod tests {
         )));
 
         assert_eq!(response.status, "400 Bad Request");
+    }
+
+    fn pull_spawn_request(mesh_id: i64, pr_number: i64, body: &str) -> ParsedRequest {
+        ParsedRequest::test_post(
+            &format!("/api/meshes/{mesh_id}/pulls/{pr_number}/spawn"),
+            body.as_bytes(),
+        )
+        .with_ids(Some(mesh_id), Some(pr_number))
+    }
+
+    async fn never_create(
+        _: i64,
+        _: i64,
+        _: PullSpawnRequest,
+    ) -> Result<serde_json::Value, String> {
+        panic!("a rejected body must not create a node")
+    }
+
+    #[test]
+    fn pull_spawn_rejects_malformed_bodies_before_creating_a_node() {
+        for (mesh, pr, body) in [
+            (3, 42, r#"{}"#),
+            (3, 42, r#"{"title":"t"}"#),
+            (3, 42, r#"{"title":"t","head_ref":7}"#),
+            (
+                3,
+                42,
+                r#"{"title":"t","head_ref":"feat/x","prompt":"review it"}"#,
+            ),
+            (3, 0, r#"{"title":"t","head_ref":"feat/x"}"#),
+            (0, 42, r#"{"title":"t","head_ref":"feat/x"}"#),
+        ] {
+            let response = block_on(spawn_with(
+                &pull_spawn_request(mesh, pr, body),
+                never_create,
+            ));
+            assert_eq!(
+                response.status, "400 Bad Request",
+                "body {body} on {mesh}/{pr}"
+            );
+        }
+    }
+
+    #[test]
+    fn pull_spawn_forwards_the_phone_body_and_answers_the_created_node() {
+        // The literal body the Android client sends for a saved Launch
+        // Configuration row (`PullSpawnTest` pins the client half).
+        let body = r#"{"title":"Fix deadline","head_ref":"feat/deadline","head_sha":"abc123","head_repo_owner":"octo","head_repo_clone_url":"https://github.com/octo/r.git","provider":"claude","configuration_id":"launch/saved"}"#;
+        let response = block_on(spawn_with(
+            &pull_spawn_request(3, 42, body),
+            |mesh, pr, request| async move {
+                assert_eq!((mesh, pr), (3, 42));
+                assert_eq!(
+                    request,
+                    PullSpawnRequest {
+                        title: "Fix deadline".into(),
+                        head_ref: "feat/deadline".into(),
+                        head_sha: "abc123".into(),
+                        head_repo_owner: Some("octo".into()),
+                        head_repo_clone_url: Some("https://github.com/octo/r.git".into()),
+                        provider: Some("claude".into()),
+                        configuration_id: Some("launch/saved".into()),
+                    }
+                );
+                Ok(serde_json::json!({"id": 17, "mesh_id": 3, "status": "pending"}))
+            },
+        ));
+        assert_eq!(response.status, "200 OK");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(response.body()).unwrap(),
+            serde_json::json!({"id": 17, "mesh_id": 3, "status": "pending"})
+        );
+    }
+
+    #[test]
+    fn pull_spawn_mesh_default_omits_provider_and_configuration() {
+        let response = block_on(spawn_with(
+            &pull_spawn_request(3, 42, r#"{"title":"t","head_ref":"feat/x"}"#),
+            |_, _, request| async move {
+                assert_eq!(
+                    (request.provider, request.configuration_id, request.head_sha),
+                    (None, None, String::new())
+                );
+                Ok(serde_json::json!({"id": 1}))
+            },
+        ));
+        assert_eq!(response.status, "200 OK");
+    }
+
+    #[test]
+    fn pull_spawn_creation_failure_is_reported_with_its_message() {
+        let response = block_on(spawn_with(
+            &pull_spawn_request(3, 42, r#"{"title":"t","head_ref":"feat/x"}"#),
+            |_, _, _| async {
+                Err::<serde_json::Value, _>("Terminal cannot take an initial prompt".to_string())
+            },
+        ));
+        assert_eq!(response.status, "500 Internal Server Error");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(response.body()).unwrap()["error"],
+            "Terminal cannot take an initial prompt"
+        );
     }
 }

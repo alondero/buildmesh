@@ -647,7 +647,10 @@ async function hook(root, payload) {
     if (full.startsWith(protectedRoot)) {
       console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'Update task state through npm run harness -- update; verification receipts are written by npm run verify.' } }));
     }
-  } else if (payload.hook_event_name === 'Stop' && taskAt(root)) {
+  } else if (payload.hook_event_name === 'Stop' && taskAt(root)?.phase !== 'complete' && taskAt(root)) {
+    // A complete task is finished, not pending, so the guard skips it exactly as
+    // PostToolUse does (#2407): evidence a later run invalidated -- a different
+    // CARGO_TARGET_DIR changes the run fingerprint -- must not re-block it.
     const result = completion(root);
     if (result.outcome !== 'PASS') {
       const task = taskAt(root);
@@ -692,7 +695,7 @@ async function internalGate(root, name) {
     const entries = knownFlakes(root);
     try { await validateFlakeIssues(entries); }
     catch (error) {
-      if (!error.message.includes('must be an open issue')) throw new Error(`BLOCKED: Cannot verify known-flake issues: ${error.message}`);
+      if (!error.message.includes('must be an open issue')) throw new Error(`BLOCKED: Cannot verify known-flake issues: ${error.message}`, { cause: error });
       throw error;
     }
     return;

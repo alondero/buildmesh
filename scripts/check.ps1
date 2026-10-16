@@ -309,6 +309,20 @@ function Invoke-BundleBudget {
   if ($LASTEXITCODE -ne 0) { $script:failed += 'bundle-budget' }
 }
 
+function Invoke-BundleComposition {
+  # Issue #2409 — gate the *composition* of the desktop entry chunk, not just
+  # its size. The budget can absorb a heavy module being re-imported eagerly,
+  # so this asserts the xterm addons and the Probe tabs are still split into
+  # their own lazy chunks and are not reachable through a static import. Same
+  # dist/ precondition and same `all` / `all-ts` modes as the budget gate.
+  Write-Host '== bundle composition (issue #2409) ==' -ForegroundColor Cyan
+  Push-Location $repo
+  try {
+    & node scripts/check-bundle-composition.mjs --dist dist
+  } finally { Pop-Location }
+  if ($LASTEXITCODE -ne 0) { $script:failed += 'bundle-composition' }
+}
+
 function Invoke-Rust {
   Write-Host '== rust (shard runner) ==' -ForegroundColor Cyan
   # BUILDMESH_PREFILL is cleared once, for this process, by Clear-LeakedEnv
@@ -423,6 +437,9 @@ if ($Target -in @('rust', 'all')) { Invoke-Rust }
 # the budget check because the TS green bar is what we run on every PR;
 # leaving it out would let a 50 KB regression slip through unnoticed.
 if ($Target -in @('all', 'all-ts')) { Invoke-BundleBudget }
+# Issue #2409 — the composition gate reads the same `dist/` the budget just
+# measured, so it runs immediately after in the same modes.
+if ($Target -in @('all', 'all-ts')) { Invoke-BundleComposition }
 
 if ($failed.Count -gt 0) {
   Write-Host ("== FAIL: " + ($failed -join ', ') + " ==") -ForegroundColor Red

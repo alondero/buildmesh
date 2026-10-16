@@ -41,19 +41,15 @@
 use crate::agent::capabilities::{
     EffortControlKind, PermissionModeOption, COMMANDCODE_EFFORT_ALLOWED, PERMISSION_MODE_UNATTENDED,
 };
-use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
+use crate::agent::provider::{shell_for, AgentProvider, Platform, SpawnRecipe, UiMeta};
+// The recipe tests assert the shell each platform produces; nothing outside
+// `cfg(test)` names the type now that `shell_for` is shared.
+#[cfg(test)]
+use crate::agent::provider::WindowsShell;
 use crate::models::EnvType;
 
 pub struct CommandCodeAdapter;
 pub static COMMANDCODE: CommandCodeAdapter = CommandCodeAdapter;
-
-/// Per-platform shell selection. Mirrors the OpenCode / MiniMax pattern.
-fn shell_for(platform: Platform) -> WindowsShell {
-    match platform {
-        Platform::Macos | Platform::Linux => WindowsShell::Direct,
-        Platform::Windows => WindowsShell::Cmd,
-    }
-}
 
 /// Binary name selection per platform and runtime environment.
 /// On Windows native, Command Code installs as `cmdc` to avoid colliding with

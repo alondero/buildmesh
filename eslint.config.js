@@ -85,6 +85,21 @@ export default [
 
   // ---------- baseline: JS recommended + TS recommended ----------------------
   js.configs.recommended,
+  // ESLint 10's `recommended` set adds `no-useless-assignment` (dead stores).
+  // Deliberately not adopted, for the reason principle 1 above states. Its
+  // findings here are initial values that a later assignment replaces before
+  // any read — `let text = ''` in the updater's error sanitizer, `let raw: string
+  // | null = null` in the grid-controls boot read, `let removeWorktree = false`
+  // in the agent-node worktree-close path, and the same shape in three scripts.
+  // Satisfying them means restructuring control flow (a defaulted flag, a
+  // try/catch that assigns or returns) to buy a check the compiler already
+  // makes. That is churn a correctness gate should not buy.
+  //
+  // The other rule ESLint 10 adds to `recommended` — `preserve-caught-error` —
+  // IS adopted: a discarded `cause` is a real diagnostic loss, and the fix at
+  // each site is additive (it attaches context to an error that was already
+  // being thrown) rather than a control-flow change.
+  { rules: { 'no-useless-assignment': 'off' } },
   { files: ['android/terminal/*.js'], languageOptions: { globals: globals.browser } },
   ...tseslint.configs.recommended,
 

@@ -148,9 +148,17 @@ fails the launch and cleans up its PID. Success prints the PID and app log path
 and leaves the app running. Windows uses an independent ShellExecute launch
 with normal GUI visibility; macOS/Linux redirect console output to
 `.harness/logs/dev-app.*.log` with nohup.
-Stop the printed dev PID when finished. Existing dev instances are replaced
-as before; the stable hub is unaffected. Without detach, the existing launch
-check retains its process-alive fallback.
+Stop the printed dev PID when finished. A dev instance belongs to the worktree
+that launched it: the launcher records it in `.tmp/dev-instance.json` and stops
+only that PID, plus any `buildmesh-dev` running *this* worktree's executable.
+A linked worktree also gets its own app-data profile and port range, so two
+worktrees can each hold a dev instance without touching each other's ports or
+agents; the stable hub is unaffected either way. See
+[startup-and-profiles](../development/startup-and-profiles.md) for the identity
+rules and the `BUILDMESH_PROFILE_DIR` / `BUILDMESH_PORT_OFFSET` overrides. Each
+launch prints its `Dev ports:` and `Dev profile:` lines, so a check can name the
+ports it expects. Without detach, the existing launch check retains its
+process-alive fallback.
 
 UI-only checks use `ui-shot --mock` first on every host, with functional
 assertions, inspected screenshots and elapsed time recorded in the PR. This
@@ -332,6 +340,14 @@ again. Registry dependency artifacts stay. `scripts/check.ps1` uses this
 runner. A direct `cargo test` against the shared target can still execute the
 other worktree's binary. Doctests stay on `cargo test --doc`, which holds the
 target lock for that whole invocation.
+
+A test process counts as finished when it exits, and its stdout and stderr are
+collected for a bounded drain after that — the same cap `scripts/ci/run-guarded.mjs`
+drains with, shared as `drainBounded`. A descendant that inherited those pipes
+(a lingering `conhost.exe`, a stray cargo child) keeps them open past the child's
+exit, and waiting for them left a process that was already gone reading as still
+running (issue #2374). Reporting on `exit` settles a process the runner is no
+longer waiting for; `tests/agent-infra/rust-test-shards.test.mjs` pins it.
 Rust tests compile the desktop target as well as executing tests; this is a
 compile smoke, not a packaged Tauri or real-window smoke. Playwright smoke uses
 mock IPC. Visible UI or backend acceptance still requires the relevant real
@@ -364,15 +380,37 @@ rather than auditing the script's source text, which could not see a phase in
 neither copy and matched the first occurrence of a call string.
 
 Phases Playwright cannot bound itself are bounded in `scripts/ui-shot-deadline.mjs`:
-the step script, importing the steps module, reading the mock fixtures, both
-`browser.close()` call sites, and page setup (`browser.newPage` and
-`page.addInitScript`) — none of which accept a timeout argument. A hanging step
-script is reported as the step script phase with the offending steps file named.
+the step script, importing the steps module, reading the mock fixtures, page setup
+(`browser.newPage` and `page.addInitScript`) — none of which accept a timeout
+argument. A hanging step script is reported as the step script phase with the
+offending steps file named.
+
+Both `browser.close()` call sites are different: they are bounded by
+`scripts/ui-shot-close.mjs`, which bounds how long the run *waits* without
+letting a slow browser decide the run's verdict. The close resolves only once
+Chromium has exited and Playwright has removed the profile directory it created,
+which is work this repo does not own: measured on Windows it costs 2-3s on a
+quiet host and 24-50s while a full suite saturates the machine, because
+Playwright force-kills the browser it launched 30s into the close
+(`DEFAULT_PLAYWRIGHT_TIMEOUT`) and the profile removal follows that. Racing that
+at 15s and failing the run reported host contention as a product failure, for a
+screenshot already written — the four `ui-shot` tests that carried this in
+`scripts/known-flakes.json` each failed with that same close-timeout error
+(#2245). An overrun is now reported on stderr and handed off;
+`BROWSER_CLOSE_GRACE_MS` keeps the process alive to Playwright's own 30s kill
+point so its profile cleanup runs in-process instead of losing to the exit
+handler, whose synchronous removal runs against a browser that has not finished
+dying and fails with EPERM (each occurrence observed under load left a
+`playwright_chromiumdev_profile-*` directory behind; the four load runs after
+this change left none). A close that *errors* is still the run's failure: slow
+teardown is host contention, a broken one is not.
+
 The step budgets and the teardown deadlines apply to `--mock` only. `--url` and
 CDP-attach drive a real app with no supervising wrapper and no priced budget, so
 their step phases and teardown stay unbounded rather than being cut off by a
-number nothing accounts for. Their navigation is bounded, but by Playwright's own
-default rather than by a priced budget.
+number nothing accounts for: they pass a null close budget and keep the
+unbounded close they used before the close budget existed. Their navigation is
+bounded, but by Playwright's own default rather than by a priced budget.
 
 `startDevServer` decides whether the URL is already served with a TCP connect, not
 an HTTP request, and waits for readiness afterwards. A live dev server whose first
@@ -522,10 +560,13 @@ asynchronous changed-file lint and source type checks plus the portable agent
 rules; unchanged fast evidence is reused. Existing edit/commit guards remain.
 PreToolUse protects direct edits of `.harness` state; use the CLI instead.
 Stop checks the current receipt and evidence rather than rerunning expensive
-suites at every turn. A first nonpassing stop presents the diagnostic. A
-recursive BLOCKED/TIMEOUT stop permits an incomplete handoff. Once recorded
-blockers exist, the very first stop of every later turn is released, so the
-diagnostic is not repeated once per turn. A FAIL is never
+suites at every turn. A task whose phase is already `complete` is not
+re-checked, so a later run that invalidated its recorded evidence does not
+re-block finished work; start a new task for new work instead. A first
+nonpassing stop presents the diagnostic. A recursive BLOCKED/TIMEOUT stop
+permits an incomplete handoff. Once recorded
+blockers exist, the very first stop of every later turn is released, so
+the diagnostic is not repeated once per turn. A FAIL is never
 released by a written report, however many times it is repeated. For a failed
 implementation that cannot be repaired, write
 `{"phase": "blocked", "blockers": ["<why>"]}` to a JSON file and run

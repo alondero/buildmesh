@@ -158,6 +158,94 @@ fn provider_accounts_folds_legacy_minimax_key_into_effective_snapshot() {
     });
 }
 
+/// The `id`s actually stored in `preferences.json` — the list a load must not
+/// grow on its own.
+fn stored_account_ids() -> Vec<String> {
+    let path = super::super::storage::preferences_path().unwrap();
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    value["provider_accounts"]
+        .as_array()
+        .expect("provider_accounts array")
+        .iter()
+        .map(|account| account["id"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// Issue #2411: loading preferences must never persist a built-in default
+/// account into the user's stored `provider_accounts`. The companion migration
+/// used to write back the **merged** list, so folding a PR #1044
+/// `kimi-via-claude` row also stored every code-defined self-auth default as an
+/// account the user had never chosen.
+#[test]
+fn loading_preferences_never_persists_builtin_defaults_as_stored_accounts() {
+    with_temp_dir(|_| {
+        super::super::storage::update(|prefs| {
+            prefs.provider_accounts = vec![ProviderAccount {
+                id: "kimi-via-claude".to_string(),
+                name: "Kimi (via Claude)".to_string(),
+                enabled: true,
+                billing_mode: crate::preferences::BillingMode::PayAsYouGo,
+                claude_compatible: true,
+                api_key: Some("key-from-companion".to_string()),
+            }];
+        })
+        .unwrap();
+
+        let accounts = crate::preferences::provider_accounts();
+        assert!(
+            !accounts.iter().any(|a| a.id == "kimi-via-claude"),
+            "the stale companion row survived the load"
+        );
+        let kimi = accounts
+            .iter()
+            .find(|a| a.id == "kimi")
+            .expect("materialized kimi account");
+        assert_eq!(kimi.api_key.as_deref(), Some("key-from-companion"));
+
+        // The migration owns exactly one stored row: the kimi row the
+        // companion's key was folded into. Whatever `default_provider_accounts()`
+        // contributes stays code-defined and out of the file.
+        assert_eq!(
+            stored_account_ids(),
+            vec!["kimi"],
+            "a read wrote built-in defaults into the user's stored accounts"
+        );
+    });
+}
+
+/// Issue #2411: the companion migration must not need a write-back. A legacy
+/// file carrying the companion row is folded into the first-class `kimi` row in
+/// memory by `migrate_prefs_json` on load, so reading it leaves the bytes on
+/// disk exactly as it found them.
+#[test]
+fn loading_a_legacy_kimi_companion_file_leaves_it_byte_identical() {
+    with_temp_dir(|tmp| {
+        // No plaintext key, so the #830 scrub (which legitimately rewrites the
+        // file on load) is not what this assertion is measuring.
+        let path = tmp.join("preferences.json");
+        std::fs::write(
+            &path,
+            r#"{"provider_accounts": [{"id": "kimi-via-claude", "name": "Kimi (via Claude)", "enabled": true, "billing_mode": "pay_as_you_go", "claude_compatible": true}], "provider_pairings": []}"#,
+        )
+        .unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let accounts = crate::preferences::provider_accounts();
+        assert!(!accounts.iter().any(|a| a.id == "kimi-via-claude"));
+        assert!(
+            accounts.iter().any(|a| a.id == "kimi"),
+            "the legacy companion row was not folded into kimi"
+        );
+
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "a read rewrote preferences.json"
+        );
+    });
+}
+
 #[test]
 fn upsert_account_stores_it_without_a_paired_profile() {
     let mut prefs = AppPreferences::default();

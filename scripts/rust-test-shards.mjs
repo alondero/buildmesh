@@ -34,6 +34,11 @@
 // its full output. Exit code: 0 when every process passed, otherwise the first
 // failing process's code (1 when it reported none).
 //
+// A process counts as finished when it exits. A descendant that inherited its
+// stdout/stderr keeps those pipes open, and waiting for them would leave a test
+// process that is already gone looking like it were still running (issue #2374),
+// so each process's output is collected for a bounded drain after its `exit`.
+//
 // Usage: node scripts/rust-test-shards.mjs   (from anywhere in the repository)
 
 import { spawn } from 'node:child_process';
@@ -41,6 +46,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { drainBounded } from './ci/run-guarded.mjs';
 import { readShards, repoRoot } from './ci/rust-shards.mjs';
 import { rustFailures } from './harness-test-failures.mjs';
 
@@ -174,21 +180,46 @@ delete cargoEnv.BUILDMESH_PREFILL;
 // What `cargo test` gives a test binary it runs.
 const testEnv = { ...cargoEnv, ...cargoConfigEnv(), CARGO_MANIFEST_DIR: crateDir };
 
-function run(label, command, args, { stream = false, env = cargoEnv, cwd = crateDir } = {}) {
+// How long a finished child's output is still collected after it exits. Long
+// enough for the last of its output to cross the pipe, short enough that a
+// lingering descendant cannot hold up the suite. Same cap the CI guard drains
+// its pipes with (issue #1961, reused by `drainBounded`).
+const DRAIN_CAP_MS = 3_000;
+
+export function run(label, command, args, { stream = false, env = cargoEnv, cwd = crateDir, drainCapMs = DRAIN_CAP_MS } = {}) {
   return new Promise((resolve) => {
     const started = Date.now();
     const child = spawn(command, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '';
     let stdout = '';
+    let drainTimer = null;
+    let settled = false;
     const collect = (chunk, isStdout) => {
       output += chunk;
       if (isStdout) stdout += chunk;
       if (stream && !isStdout) process.stdout.write(chunk);
     };
+    const finish = (code, overrides = {}) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(drainTimer);
+      // The child is gone, so these read ends are the only handles left on its
+      // pipes. Releasing them lets the runner exit once the child's result is
+      // known, whatever a descendant that inherited them still does with them.
+      if (!child.stdout.destroyed) child.stdout.destroy();
+      if (!child.stderr.destroyed) child.stderr.destroy();
+      resolve({ label, code, output, stdout, seconds: Math.round((Date.now() - started) / 1000), ...overrides });
+    };
     child.stdout.on('data', (chunk) => collect(chunk, true));
     child.stderr.on('data', (chunk) => collect(chunk, false));
-    child.on('error', (error) => resolve({ label, code: 127, output: `${output}\n${error.message}\n`, stdout, seconds: 0 }));
-    child.on('close', (code) => resolve({ label, code: code ?? 1, output, stdout, seconds: Math.round((Date.now() - started) / 1000) }));
+    child.on('error', (error) => finish(127, { output: `${output}\n${error.message}\n`, seconds: 0 }));
+    // The child's `exit` is its result; the drain only collects what it left in
+    // the pipes. Node's `close` waits for every descendant holding an inherited
+    // pipe, so a finished test process would otherwise read as still running
+    // until a stray conhost or cargo child let go (issue #2374).
+    child.on('exit', (code) => {
+      drainTimer = drainBounded([child.stdout, child.stderr], drainCapMs, () => finish(code ?? 1));
+    });
   });
 }
 
@@ -231,6 +262,7 @@ export async function compileOwnedTestBinaries(crateDir, { targetDir, env = proc
       if (attempt === attempts || !foreign) throw error;
       console.error(`Shared Cargo target returned another worktree's test binary. Rebuilding ${localPackages.join(', ')} from this worktree; registry dependency artifacts stay.`);
       const clean = await run('clean', 'cargo', ['clean', ...localPackages.flatMap((name) => ['-p', name])], { cwd: manifestDir, env: compileEnv, stream });
+      // eslint-disable-next-line preserve-caught-error -- the caught error is the foreign artifact stamp that triggered the `cargo clean` retry, not what made the clean itself fail. `lastError` (set above) is the error this loop ultimately rethrows if the retries run out.
       if (clean.code !== 0) throw new Error(`cargo clean failed (exit ${clean.code}):\n${clean.output}`);
     }
   }

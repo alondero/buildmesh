@@ -14,8 +14,16 @@ import { addToast } from './toastStore';
 // Issue #1054 — the event-driven half of the store moved to a typed
 // listeners module (`agentNodeListeners.ts`); the optimistic-with-
 // rollback pattern that `renameAgentNode` / `setNodePinned` /
-// `toggleNodePinned` hand-rolled is now a generic helper.
-import { withOptimistic, type OptimisticSurface } from '../lib/optimistic';
+// `toggleNodePinned` hand-rolled is now a generic helper. Issue #2325
+// — the helper's ledger gives each mutation ownership of its columns, so
+// a pin completion can no longer adopt a stale full row and a stale
+// failure can no longer roll back over a newer write.
+import {
+  createOptimisticFieldLedger,
+  withOptimistic,
+  type AgentNodeField,
+  type OptimisticSurface,
+} from '../lib/optimistic';
 import { attachAgentNodeListeners } from './agentNodeListeners';
 
 // `AgentNode` is generated from the Rust `models::AgentNode` struct (issue
@@ -267,19 +275,6 @@ export function resetAgentNodeListenersForTests(): void {
   resetAgentNodeListenerAttachment?.();
 }
 
-// A pending "send input at time T" schedule (issue #785), e.g. the
-// SchedulingPopover's "remind me in 5m" / "at usage reset" actions. Keyed by
-// node ID in `schedules` — one active schedule per node.
-export interface ScheduledTask {
-  nodeId: number;
-  targetTime: number;
-  // Empty string is the "just hit Enter" sentinel — the SchedulingPopover uses
-  // it for the "at usage reset" preset to wake the agent without new content.
-  message: string;
-  label: string;
-  timeoutId: ReturnType<typeof setTimeout>;
-}
-
 export interface SpawnAgentOptions {
   rows?: number;
   cols?: number;
@@ -339,15 +334,6 @@ interface AgentNodeState {
   // exist only while a node is actually stalled, so the map is empty in the
   // normal case and the UI footprint is unchanged.
   stalledInputs: Record<number, InputStall>;
-  // Pending "send input at time T" schedules (issue #785), keyed by node ID.
-  // One active schedule per node — a new `scheduleInput` cancels the prior
-  // timer, and `deleteAgentNode` cancels the schedule outright so a stray
-  // timeout can't fire `sendToAgent` against a deleted node. `fetchAgentNodes`
-  // additionally cancels any schedule whose target node is absent from the
-  // refreshed list OR has `status === 'archived'` (issue #1252) — otherwise
-  // the node-deleted path would let a stale timer fire against an
-  // archived node, surfacing a spurious "System" error toast minutes later.
-  schedules: Record<number, ScheduledTask>;
 
   // Derived getters
   /// Returns the ordered array of agent nodes (mesh_id, position) for code
@@ -484,11 +470,6 @@ interface AgentNodeState {
   /// stalled-input reports into [`stalledInput`]. Idempotent, and called by
   /// `initAttentionListeners` so the app's existing init path is enough.
   initTerminalInputWatch: () => void;
-  /// Schedule `message` (or a bare Enter if empty) to be sent to `nodeId`
-  /// after `delayMs`. Replaces any existing schedule for the node — only one
-  /// pending send per node at a time (issue #785).
-  scheduleInput: (nodeId: number, delayMs: number, message: string, label: string) => void;
-  cancelSchedule: (nodeId: number) => void;
 }
 
 /// Issue #2021 — the derived full node array, memoized once per store
@@ -508,7 +489,7 @@ interface AgentNodeState {
 /// delete replaces `nodeIds`), so a changed reference means the derivation must
 /// re-run; an unchanged pair means nothing that feeds it moved, and the cached
 /// array is returned as-is. Writes that do NOT touch nodes — a Circuit
-/// ownership patch, `loading`, `error`, `stalledInputs`, `schedules` — keep both
+/// ownership patch, `loading`, `error`, `stalledInputs` — keep both
 /// references identical and now cost one `Object.is` pair instead of N
 /// dereferences per subscriber.
 ///
@@ -604,6 +585,43 @@ export function useAllAgentNodes(): readonly AgentNode[] {
 /// failure does not refresh the stamp, so the next event retries.
 export const REFRESH_IF_STALE_MS = 10_000;
 
+/// Issue #2242 — the row-removal transition, shared by the two paths that drop
+/// a node: the user close (`deleteAgentNode`, optimistically, before the
+/// delete IPC commits) and the circuit-driven reconcile (`removeAgentNode`).
+///
+/// Both must evaporate the row from the SAME set of containers. A row left in
+/// `nodeIds` but missing from `nodesById` reappears on the next derivation;
+/// a row left in `activeNodeId` points at nothing; and issue #1384's
+/// `semanticTurns` is keyed by id, so turn metadata that outlives the row
+/// re-attaches to whatever id the DB hands out next. Keeping the four writes
+/// in one function makes that a property of the transition rather than
+/// something two call sites have to remember to keep in step.
+///
+/// Returns `null` when the store does not hold the row: the optimistic close
+/// and the reconcile can both race a fetch that already dropped it, and
+/// neither may resurrect it by writing stale containers.
+type RowRemoval = Pick<
+  AgentNodeState,
+  'nodesById' | 'nodeIds' | 'activeNodeId' | 'semanticTurns'
+>;
+
+function withoutRow(state: AgentNodeState, id: number): RowRemoval | null {
+  if (!(id in state.nodesById)) return null;
+  const nodesById = { ...state.nodesById };
+  delete nodesById[id];
+  // Issue #1384 — `semanticTurns` keyed by id, so the row's turn metadata
+  // evaporates with the row. The listener re-keys when a node with the same
+  // id returns, but id stability is enforced by the DB autoincrement.
+  const semanticTurns = { ...state.semanticTurns };
+  delete semanticTurns[id];
+  return {
+    nodesById,
+    nodeIds: state.nodeIds.filter((nodeId) => nodeId !== id),
+    activeNodeId: state.activeNodeId === id ? null : state.activeNodeId,
+    semanticTurns,
+  };
+}
+
 export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   // Monotonic revision of the ownership ledger. Every newer authoritative
   // write bumps it: a `circuit-run-updated` patch, or a full `fetchAgentNodes`
@@ -612,7 +630,10 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   // older than the state already applied. Coalescing is not sufficient on its
   // own: it orders the queue, but a stale in-flight response still lands after
   // the newer event (spec `circuit-node-indicators.md` step 7: "an older
-  // response cannot overwrite newer event state").
+  // response cannot overwrite newer event state"). Issue #2325 — an optimistic
+  // mutation's writes count too (see `optimisticLedger`'s `onFieldWrite`), so
+  // a read that began before an acknowledged pin or rename is discarded and
+  // re-read rather than painted over it.
   let circuitOwnershipsRevision = 0;
   let nodeRevision = 0;
   const spawnRequests = new Map<number, symbol>();
@@ -630,7 +651,18 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   // shape. Issue #1384 — the surface now operates per-node via the
   // normalized `nodesById` map; the helper writes a single node at a
   // time, never the whole list, so subscribers to other nodes are not
-  // disturbed.
+  // disturbed. Issue #2325 — the ledger lives beside it rather than in
+  // the helper module: it is per-store state, and every store (and every
+  // test) must start with no claims.
+  const optimisticLedger = createOptimisticFieldLedger({
+    // An optimistic write — the patch itself, or the reconciliation of
+    // its columns — is a newer write than any `list_agent_nodes`
+    // snapshot that began before it, so the snapshot fence has to see
+    // it. Without this an acknowledged pin or rename was silently
+    // reverted by an in-flight read, which then discarded itself and
+    // re-read: the fence existed but did not observe optimistic writes.
+    onFieldWrite: () => { nodeRevision += 1; },
+  });
   const optimisticSurface: OptimisticSurface = {
     getAgentNode: (nodeId) => get().nodesById[nodeId],
     setAgentNode: (nodeId, next) => {
@@ -696,34 +728,6 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       for (const id of failedAutoSpawns) {
         if (!newById[id] || newById[id].status === 'archived') failedAutoSpawns.delete(id);
       }
-      // Issue #1252 — a schedule that outlives its target node would
-      // fire `send_to_agent` (or `write_to_agent` for the empty-message
-      // "hit Enter" sentinel) at an archived node, the backend would
-      // reject, and App.tsx's generic "System" toast pipeline would
-      // surface a spurious error minutes after the user moved on. The
-      // `node-deleted` listener (`stores/agentNodeListeners.ts`)
-      // routes through here, so every archive transition sweeps
-      // schedules for free — without this, the only cancellation path
-      // was `deleteAgentNode`, which the archive path never invokes.
-      //
-      // Compute cancellations OUTSIDE the `set` updater — `clearTimeout`
-      // is a side effect we don't want running twice under React
-      // StrictMode. We keep the same object reference when nothing was
-      // cancelled, so subscribers that read `state.schedules` don't
-      // re-render on every fetch (the steady-state Circuit case).
-      const oldSchedules = get().schedules;
-      const keptSchedules: Record<number, ScheduledTask> = {};
-      for (const idStr of Object.keys(oldSchedules)) {
-        const id = Number(idStr);
-        const node = newById[id];
-        if (node && node.status !== 'archived') {
-          keptSchedules[id] = oldSchedules[id];
-        } else {
-          clearTimeout(oldSchedules[id].timeoutId);
-        }
-      }
-      const schedulesChanged =
-        Object.keys(keptSchedules).length !== Object.keys(oldSchedules).length;
       // A live event patched the ledger while this snapshot was in flight, so
       // this ownership list is older than what the store already holds. Keep
       // the newer state and leave the revision alone — the event's own
@@ -743,7 +747,6 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
           ? get().semanticTurns
           : Object.fromEntries(semanticTurns.map((turn) => [turn.node_id, turn])),
         loading: false,
-        ...(schedulesChanged && { schedules: keptSchedules }),
       });
       // Success stamps the freshness clock `refreshIfStale` reads. A
       // rejection below skips the stamp so the next event retries rather
@@ -807,7 +810,6 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   error: null,
   closingNodeIds: new Set(),
   stalledInputs: {},
-  schedules: {},
 
   getAgentNodes: () => {
     const { nodesById, nodeIds } = get();
@@ -837,6 +839,14 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     if (patch.status === 'idle' && failedAutoSpawns.has(id)) return;
     if (patch.status === 'error' && get().nodesById[id]) failedAutoSpawns.add(id);
     nodeRevision += 1;
+    // Issue #2325 — a delivered event is the newest observation of the
+    // columns it carries, including one another window's `node-renamed`.
+    // Hand those columns over: an in-flight rename must neither roll its
+    // own failure back over the event nor adopt anything afterwards. The
+    // full-snapshot path deliberately does NOT release, because a
+    // snapshot can predate the mutation it would otherwise retire — the
+    // mutation's own settlement reconciles its columns afterwards.
+    optimisticLedger.release(id, Object.keys(patch) as AgentNodeField[]);
     if (patch.status && !['idle', 'spawning', 'error'].includes(patch.status)) {
       spawnRequests.delete(id);
       failedAutoSpawns.delete(id);
@@ -1063,9 +1073,6 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       return;
     }
 
-    // Cancellation keeps scheduled work intact; cancel only after acceptance.
-    get().cancelSchedule(id);
-
     // Re-capture the row RIGHT BEFORE the optimistic remove so the restore
     // path below sees the version of the node that's actually being dropped
     // (Phase 1 awaited `getWorktree_close_safety`, and a `node-renamed`
@@ -1092,23 +1099,12 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     set((state) => {
       const closing = new Set(state.closingNodeIds);
       closing.delete(id);
-      if (!(id in state.nodesById)) return { closingNodeIds: closing };
-      const nextById = { ...state.nodesById };
-      delete nextById[id];
-      // Issue #1384 — `semanticTurns` keyed by id, so the row's turn
-      // metadata evaporates with the row on optimistic remove. The
-      // listener re-keys when a node with the same id returns, but
-      // id stability is enforced by the DB autoincrement.
-      const semanticTurns = { ...state.semanticTurns };
-      delete semanticTurns[id];
-      return {
-        nodesById: nextById,
-        nodeIds: state.nodeIds.filter(nid => nid !== id),
-        activeNodeId: state.activeNodeId === id ? null : state.activeNodeId,
-        closingNodeIds: closing,
-        semanticTurns,
-      };
+      const removed = withoutRow(state, id);
+      return removed ? { ...removed, closingNodeIds: closing } : { closingNodeIds: closing };
     });
+    // Issue #2325 — the row is gone, so any mutation still in flight for it
+    // owns nothing and must not write it back when it settles.
+    optimisticLedger.forget(id);
 
     // kill_agent tears the process down before its bookkeeping (a DB status
     // update) can fail, and the node is being deleted anyway — so never let
@@ -1181,23 +1177,13 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   removeAgentNode: (id) => {
     spawnRequests.delete(id);
     failedAutoSpawns.delete(id);
+    // Issue #2325 — same reasoning as the close path: a retired row owns
+    // no field, so a mutation still in flight cannot write it back.
+    optimisticLedger.forget(id);
     // A user-initiated close already dropped the row optimistically and owns
     // its terminal disposal; only act when the store still holds the row.
     if (!(id in get().nodesById)) return;
-    get().cancelSchedule(id);
-    set((state) => {
-      if (!(id in state.nodesById)) return state;
-      const nodesById = { ...state.nodesById };
-      delete nodesById[id];
-      const semanticTurns = { ...state.semanticTurns };
-      delete semanticTurns[id];
-      return {
-        nodesById,
-        nodeIds: state.nodeIds.filter(nodeId => nodeId !== id),
-        activeNodeId: state.activeNodeId === id ? null : state.activeNodeId,
-        semanticTurns,
-      };
-    });
+    set((state) => withoutRow(state, id) ?? state);
     // The backend row is gone — the only case the terminal-persistence rule
     // allows disposal. This is the circuit-driven counterpart of
     // `deleteAgentNode`'s success-path dispose.
@@ -1212,12 +1198,17 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     if (!prior) return;
     // Optimistic update so the UI reflects the new name before the
     // round-trip. The backend emits `node-renamed` on success, which
-    // is a no-op for us (already matches) and keeps other windows in
-    // sync. We do NOT adopt the mutation's resolved value (rename
-    // returns `void`) — that would race against the `node-renamed`
-    // listener that arrives separately.
+    // keeps other windows in sync. We do NOT read the mutation's
+    // resolved value (rename returns `void`): the name this operation
+    // asked for IS the acknowledged value, so the ledger settles it
+    // against the value already on screen and writes nothing. What the
+    // ledger does provide is ownership — a rename that fails after a
+    // newer rename succeeded no longer restores its own stale prior,
+    // and the same holds when another window's `node-renamed` lands
+    // while this one is in flight.
     await withOptimistic({
       surface: optimisticSurface,
+      ledger: optimisticLedger,
       nodeId: id,
       optimisticPatch: { name },
       mutation: () => api.renameAgentNode(id, name),
@@ -1226,14 +1217,16 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
 
   setNodePinned: async (nodeId, pinned) => {
     // Optimistic patch so the Pinned Grid view re-renders instantly on
-    // a click. The backend's returned `AgentNode` is the source of truth
-    // — a future refactor that mutates other columns on the way back
-    // would otherwise be invisible. On rejection `withOptimistic`
-    // reverts only the `is_pinned` column to its pre-call value, so a
-    // concurrent update to any other column (e.g. status from the
-    // orchestrator) is preserved.
+    // a click. The backend's returned row is authoritative for `is_pinned`
+    // and for nothing else (issue #2325): its `status`/`name`/session
+    // columns are read at response time and are routinely older than the
+    // lifecycle and rename observations that landed while the IPC was in
+    // flight, so adopting the whole row erased them. On rejection the
+    // ledger restores the last acknowledged pin value, and only when no
+    // newer pin operation or event owns that column.
     return withOptimistic({
       surface: optimisticSurface,
+      ledger: optimisticLedger,
       nodeId,
       optimisticPatch: { is_pinned: pinned },
       mutation: () => api.setNodePinned(nodeId, pinned),
@@ -1243,16 +1236,17 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
 
   toggleNodePinned: async (nodeId) => {
     // Optimistic flip — the visible state is `!prior.is_pinned` until
-    // the backend confirms. Same source-of-truth-from-response pattern
-    // as `setNodePinned`. Compute the flipped value up front so
-    // `withOptimistic` has a single `optimisticPatch` to roll back;
-    // the helper's `prior` capture handles the "node not loaded" throw.
+    // the backend confirms. Same ownership and scoped-adoption policy as
+    // `setNodePinned` (issue #2325). Compute the flipped value up front so
+    // the ledger claims one value to reconcile against; the helper's
+    // `prior` capture handles the "node not loaded" throw.
     const prior = get().nodesById[nodeId];
     if (!prior) {
       throw new Error(`toggleNodePinned: node ${nodeId} is not loaded`);
     }
     return withOptimistic({
       surface: optimisticSurface,
+      ledger: optimisticLedger,
       nodeId,
       optimisticPatch: { is_pinned: !prior.is_pinned },
       mutation: () => api.toggleNodePinned(nodeId),
@@ -1497,50 +1491,6 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
         return {};
       }
       return { stalledInputs: { ...state.stalledInputs, [nodeId]: stall } };
-    });
-  },
-
-  scheduleInput: (nodeId, delayMs, message, label) => {
-    get().cancelSchedule(nodeId);
-
-    const timeoutId = setTimeout(() => {
-      set((state) => {
-        const next = { ...state.schedules };
-        delete next[nodeId];
-        return { schedules: next };
-      });
-      // Issue #1252 — belt-and-braces guard. The fetch-time cancellation
-      // in `fetchAgentNodes` is the common path: a `node-deleted` event
-      // archives the node, the listener refetches, and
-      // any pending schedule is dropped. This guard covers the narrow
-      // race where the timer resolves AFTER the schedule was created
-      // but BEFORE the refetch lands — bail silently rather than call
-      // `send_to_agent` on a node the backend would reject.
-      const node = get().findAgentNode(nodeId);
-      if (!node || node.status === 'archived') return;
-      if (message === '') {
-        get().writeToAgent(nodeId, '\n');
-      } else {
-        get().sendToAgent(nodeId, message);
-      }
-    }, delayMs);
-
-    set((state) => ({
-      schedules: {
-        ...state.schedules,
-        [nodeId]: { nodeId, targetTime: Date.now() + delayMs, message, label, timeoutId },
-      },
-    }));
-  },
-
-  cancelSchedule: (nodeId) => {
-    const existing = get().schedules[nodeId];
-    if (!existing) return;
-    clearTimeout(existing.timeoutId);
-    set((state) => {
-      const next = { ...state.schedules };
-      delete next[nodeId];
-      return { schedules: next };
     });
   },
   };

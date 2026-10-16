@@ -89,7 +89,7 @@ fn unsupported_github_mutations_stay_uncertain_without_replay_on_recovery() {
         let mut view = fixture.view.clone();
         view.context.set("node.open_pr.recheck_only", "1");
 
-        let mut events = super::execute_call_github_effect(
+        let mut events = super::dispatch::execute_call_github_effect(
             &fixture.active,
             &mut view,
             "open_pr",
@@ -593,10 +593,9 @@ fn open_pr_late_lookup_after_cancellation_is_rejected_through_worker_handoff() {
     let lookup_db = fixture._db.handle();
     let lookup = std::thread::spawn(move || {
         let _adopted = crate::db::test_support::adopt(&lookup_db);
-        // Production orchestration only: `run_github_effect_pass` runs the
-        // same batch, snapshot, gates, and dispatch the `execute_effects`
-        // loop delegates to (`execute_effects` itself needs a Tauri
-        // `AppHandle`, which unit tests cannot construct).
+        // Production orchestration: `dispatch_effects` runs the same batch,
+        // snapshot, gates, and dispatch as `execute_effects`. The fake host
+        // stands in for the Tauri handle, which unit tests cannot construct.
         let effect = Effect::CallGithub {
             node_id: "open_pr".to_string(),
             action: GithubActionKind::OpenPr,
@@ -605,9 +604,15 @@ fn open_pr_late_lookup_after_cancellation_is_rejected_through_worker_handoff() {
         };
         let client = crate::services::github::GitHubClient::for_test(&base_url, "fake-token")
             .expect("test client");
-        let (outcomes, worker_saw_cancellation) =
-            super::run_github_effect_pass(&thread_active, &mut view, &effect, Some(&client))
-                .expect("dispatch runs");
+        let pass = super::dispatch::dispatch_effects(
+            &super::dispatch::FakeHost::default(),
+            &thread_active,
+            &mut view,
+            std::slice::from_ref(&effect),
+            Some(&client),
+        )
+        .expect("dispatch runs");
+        let (outcomes, worker_saw_cancellation) = (pass.outcomes, pass.batch_cancelled);
         order_worker.lock().unwrap().push("lookup_returned");
         (view, outcomes, worker_saw_cancellation)
     });
@@ -717,9 +722,15 @@ fn open_pr_late_lookup_after_cancellation_is_rejected_through_worker_handoff() {
     let retry_client =
         crate::services::github::GitHubClient::for_test(&endpoint.base_url, "fake-token")
             .expect("test client");
-    let (retry_outcomes, _) =
-        super::run_github_effect_pass(&active, &mut restarted, &effect, Some(&retry_client))
-            .expect("retry runs");
+    let retry = super::dispatch::dispatch_effects(
+        &super::dispatch::FakeHost::default(),
+        &active,
+        &mut restarted,
+        std::slice::from_ref(&effect),
+        Some(&retry_client),
+    )
+    .expect("retry runs");
+    let retry_outcomes = retry.outcomes;
     assert!(
         retry_outcomes.is_empty(),
         "a retry on the cancelled run dispatches nothing"
@@ -1269,7 +1280,7 @@ fn open_pr_create_dispatch_crash_reconciles_found_pr_after_restart_without_secon
     assert_eq!(transition.effects.len(), 1);
     persist_transition(fixture.run_id, &mut resumed, &transition).unwrap();
     let active = active_run(fixture.run_id);
-    let event = super::execute_call_github_effect(
+    let event = super::dispatch::execute_call_github_effect(
         &active,
         &mut resumed,
         "open_pr",

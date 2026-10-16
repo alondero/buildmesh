@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { diffFileAgainstHead, type DiffResult } from '../../lib/tauri';
 import { useChangedFiles } from '../../hooks/useChangedFiles';
 import { fileDiffStatusMeta } from '../../lib/status';
+import { ChangedFileRow } from './ChangedFileRow';
 import { addToast } from '../../stores/toastStore';
 import { formatError } from '../../lib/errorUtils';
 
@@ -44,9 +45,10 @@ export function ChangedFilesSection({
 }: ChangedFilesSectionProps) {
   // Shared git-status cache: dedupes the fetch with FileTree / useMeshGitStatus
   // and refreshes on GIT_CHANGED (the old hand-rolled fetch did neither — it
-  // went stale until remount). A fetch failure surfaces as an empty list, the
-  // same as a clean repo, matching the rest of the git-status consumers.
-  const { files, loading } = useChangedFiles(rootPath || null);
+  // went stale until remount). Issue #2328: the hook now reports the three
+  // outcomes separately instead of collapsing "nothing known" into `[]`, so a
+  // failed status fetch can no longer render as a confident "No changes".
+  const { files, loading, error, stale, refresh } = useChangedFiles(rootPath || null);
   const [expanded, setExpanded] = useState(true);
 
   // get_git_status returns paths relative to the repo root, which is exactly
@@ -84,12 +86,62 @@ export function ChangedFilesSection({
           <ChevronRightIcon className="w-3 h-3" />
         </span>
         <span className="flex-1 text-left">Changed Files</span>
-        <span className="text-text-muted text-2xs">{files.length}</span>
+        {/* Never print a count the app has not observed. `files === null`
+            means no successful status has ever landed for this path, so the
+            header shows an em dash instead of an authoritative-looking 0. */}
+        <span
+          className="text-text-muted text-2xs"
+          data-testid="changed-files-count"
+          title={
+            files === null
+              ? 'Change status unavailable'
+              : stale
+                ? 'Last known change count — the latest refresh failed'
+                : undefined
+          }
+        >
+          {files === null ? '—' : files.length}
+        </span>
       </button>
       {expanded && (
         <div className="pb-1">
-          {loading ? (
+          {/* Last known rows are still useful after a background refresh
+              fails, but they must not read as current. The label plus Retry
+              lives here rather than in the toast stream so it stays attached
+              to the list it describes. */}
+          {error && stale && (
+            <div role="alert" className="px-3 py-1.5 text-xs text-status-error">
+              <p className="break-all">
+                {formatError(error)} — showing last known changes.
+              </p>
+              <button
+                type="button"
+                disabled={loading}
+                onClick={refresh}
+                className="mt-1 min-h-[24px] rounded-md border border-border-default px-2 text-text-primary hover:bg-bg-card-hover disabled:opacity-60"
+              >
+                Retry
+              </button>
+            </div>
+          )}
+          {loading && files === null ? (
             <div className="px-3 py-1.5 text-text-muted text-xs">Loading…</div>
+          ) : files === null ? (
+            <div role="alert" className="px-3 py-1.5 text-xs">
+              <p className="break-all text-status-error">
+                {error
+                  ? `${formatError(error)} — changes unavailable.`
+                  : 'Change status is unavailable.'}
+              </p>
+              <button
+                type="button"
+                disabled={loading}
+                onClick={refresh}
+                className="mt-1 min-h-[24px] rounded-md border border-border-default px-2 text-text-primary hover:bg-bg-card-hover disabled:opacity-60"
+              >
+                Retry
+              </button>
+            </div>
           ) : files.length === 0 ? (
             <div className="px-3 py-1.5 text-text-muted text-xs">No changes</div>
           ) : (
@@ -107,12 +159,7 @@ export function ChangedFilesSection({
                 `}
                 style={{ paddingLeft: 20 }}
               >
-                <span className={`font-bold w-3 flex-shrink-0 ${meta.color}`} title={meta.label}>
-                  {meta.letter}
-                </span>
-                <span className="flex-1 truncate text-text-secondary">{file.path}</span>
-                <span className="text-accent-green flex-shrink-0">+{file.additions}</span>
-                <span className="text-accent-red flex-shrink-0">-{file.deletions}</span>
+                <ChangedFileRow file={file} meta={meta} />
               </button>
               );
             })

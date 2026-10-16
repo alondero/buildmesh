@@ -74,10 +74,63 @@ pub(crate) const HTTP_PORT_END: u16 = 1994;
 /// silently no-op on the wrong port since `|| true` is appended.
 pub const HTTP_PORT_DEFAULT: u16 = HTTP_PORT_START;
 
+/// Environment variable a debug or `dev-tools` build reads to override the
+/// identifier-derived port offset, so two dev instances can each bind their own
+/// range (issue #2345). A shipped release build does not compile the read, for
+/// the same reason the profile-dir override is gated: a user launch is not
+/// steerable by an environment variable it inherited.
+#[cfg(any(test, debug_assertions, feature = "dev-tools"))]
+pub(crate) const PORT_OFFSET_ENV: &str = "BUILDMESH_PORT_OFFSET";
+
+/// Largest offset whose whole range still fits a port: the highest listener is
+/// `HTTP_PORT_END + offset` (1994), and the test bridge adds 1991.
+#[cfg(any(test, debug_assertions, feature = "dev-tools"))]
+const MAX_PORT_OFFSET: u16 = u16::MAX - HTTP_PORT_END;
+
+/// Parse a `BUILDMESH_PORT_OFFSET` value. `None` for anything that is not a
+/// plain in-range integer, including an empty value: a value that cannot be
+/// read as an offset must not become one.
+#[cfg(any(test, debug_assertions, feature = "dev-tools"))]
+fn parse_port_offset(raw: &str) -> Option<u16> {
+    let offset = raw.trim().parse::<u16>().ok()?;
+    (offset <= MAX_PORT_OFFSET).then_some(offset)
+}
+
+/// The offset this process was launched with, or `None` to use the
+/// identifier-derived one.
+///
+/// An unusable value warns rather than aborting: the offset is an ergonomic
+/// choice, not a data-safety one, and a dev launcher that misspelled it should
+/// still get a running app. The warning names the value and the fallback
+/// because ignoring it silently would put this instance back on the range the
+/// override exists to move it off.
+#[cfg(any(test, debug_assertions, feature = "dev-tools"))]
+fn port_offset_override() -> Option<u16> {
+    let raw = std::env::var(PORT_OFFSET_ENV).ok()?;
+    match parse_port_offset(&raw) {
+        Some(offset) => Some(offset),
+        None => {
+            tracing::warn!(
+                "{PORT_OFFSET_ENV}={raw:?} is not a port offset in 0..={MAX_PORT_OFFSET}; \
+                 falling back to the offset derived from the bundle identifier"
+            );
+            None
+        }
+    }
+}
+
 /// Port offset applied to every server so a dev build (identifier `*.dev`) can
 /// run side-by-side with the stable hub without contending on 1991/1992.
 /// Stable → 0, dev → 1000 (test 2991, HTTP 2992-2994).
+///
+/// A debug or `dev-tools` build launched with `BUILDMESH_PORT_OFFSET` uses that
+/// offset instead, which is how two dev instances — two worktrees verifying
+/// their own build — each get their own ports without a second config overlay.
 pub fn port_offset(identifier: &str) -> u16 {
+    #[cfg(any(test, debug_assertions, feature = "dev-tools"))]
+    if let Some(offset) = port_offset_override() {
+        return offset;
+    }
     if identifier.ends_with(".dev") {
         1000
     } else {
@@ -428,6 +481,11 @@ mod tests {
 
     #[test]
     fn port_offset_is_zero_for_stable_and_1000_for_dev() {
+        // `port_offset` reads BUILDMESH_PORT_OFFSET, so this test shares the
+        // process environment with the tests that set it.
+        let _env_guard = crate::env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         assert_eq!(port_offset("com.alond.buildmesh"), 0);
         assert_eq!(port_offset("com.alond.buildmesh.dev"), 1000);
         assert_eq!(
@@ -443,6 +501,99 @@ mod tests {
         assert_eq!(port_profile_label("com.alond.buildmesh.dev"), "dev");
         assert_eq!(port_profile_label("com.alond.buildmesh.prod"), "prod");
         assert_eq!(port_profile_label("com.example.other"), "custom");
+    }
+
+    #[test]
+    fn port_offset_override_accepts_a_plain_in_range_integer() {
+        assert_eq!(parse_port_offset("0"), Some(0));
+        assert_eq!(parse_port_offset("1100"), Some(1100));
+        assert_eq!(
+            parse_port_offset(&MAX_PORT_OFFSET.to_string()),
+            Some(MAX_PORT_OFFSET)
+        );
+        // A launcher may hand the value through a shell, so whitespace and an
+        // explicit sign are not a reason to fall back to the identifier's range.
+        assert_eq!(parse_port_offset(" 2200\n"), Some(2200));
+        assert_eq!(parse_port_offset("+2200"), Some(2200));
+    }
+
+    #[test]
+    fn port_offset_override_rejects_anything_that_is_not_one() {
+        // In range as a number, but past the point where 1994 + offset is still
+        // a port.
+        let past_max = MAX_PORT_OFFSET.saturating_add(1).to_string();
+        for raw in [
+            "",
+            "   ",
+            "abc",
+            "1100abc",
+            "-1",
+            "1_100",
+            "70000",
+            past_max.as_str(),
+        ] {
+            assert_eq!(
+                parse_port_offset(raw),
+                None,
+                "{raw:?} must not be an offset"
+            );
+        }
+    }
+
+    /// The override exists so a second dev instance can move off the ports the
+    /// identifier already claims. It therefore has to win over the identifier,
+    /// and the whole listener range has to move with it.
+    #[test]
+    fn port_offset_override_wins_over_the_identifier() {
+        let _env_guard = crate::env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let restore = PortOffsetEnv::set("2200");
+        assert_eq!(port_offset("com.alond.buildmesh.dev"), 2200);
+        assert_eq!(
+            HTTP_PORT_START + port_offset("com.alond.buildmesh.dev"),
+            4192
+        );
+        assert_eq!(HTTP_PORT_END + port_offset("com.alond.buildmesh.dev"), 4194);
+        drop(restore);
+        assert_eq!(port_offset("com.alond.buildmesh.dev"), 1000);
+    }
+
+    #[test]
+    fn an_unusable_port_offset_override_falls_back_to_the_identifier() {
+        let _env_guard = crate::env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let restore = PortOffsetEnv::set("not-a-port");
+        assert_eq!(port_offset("com.alond.buildmesh.dev"), 1000);
+        assert_eq!(port_offset("com.alond.buildmesh"), 0);
+        drop(restore);
+    }
+
+    /// Sets `BUILDMESH_PORT_OFFSET` for one test and restores whatever the
+    /// runner's own environment held, so a test cannot leak an offset into the
+    /// tests that share this binary.
+    struct PortOffsetEnv;
+
+    impl PortOffsetEnv {
+        fn set(value: &str) -> PortOffsetEnvRestore {
+            let previous = std::env::var_os(PORT_OFFSET_ENV);
+            // SAFETY: the ENV_LOCK guard above is held for the whole window, so
+            // no other test reads or writes the process environment here.
+            unsafe { std::env::set_var(PORT_OFFSET_ENV, value) };
+            PortOffsetEnvRestore(previous)
+        }
+    }
+
+    struct PortOffsetEnvRestore(Option<std::ffi::OsString>);
+
+    impl Drop for PortOffsetEnvRestore {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(previous) => unsafe { std::env::set_var(PORT_OFFSET_ENV, previous) },
+                None => unsafe { std::env::remove_var(PORT_OFFSET_ENV) },
+            }
+        }
     }
 
     #[test]

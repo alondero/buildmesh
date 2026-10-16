@@ -37,6 +37,7 @@ fun BuildmeshApp(vm: BuildmeshViewModel, invitation: String = "") {
     var tab by rememberSaveable { mutableStateOf("Overview") }
     var meshId by rememberSaveable { mutableLongStateOf(0) }
     var nodeId by rememberSaveable { mutableLongStateOf(0) }
+    var launch by rememberSaveable { mutableStateOf("") }
     var file by rememberSaveable { mutableStateOf("") }
     LaunchedEffect(state.paired) { if (!state.paired) screen = "home" }
     fun back() { screen = when (screen) { "terminal", "changes", "pr" -> "node"; "diff" -> "changes"; else -> "home" } }
@@ -93,15 +94,15 @@ fun BuildmeshApp(vm: BuildmeshViewModel, invitation: String = "") {
                         { id, target ->
                             meshId = id
                             if (target == "work") tab = "Work" else screen = target
-                        })
+                        }, { id, option -> meshId = id; launch = option; screen = "capture" })
                     "node" -> if (selected != null) NodeScreen(selected, vm, { screen = "terminal" }, { screen = "changes" }, { screen = "pr" })
                         else EmptyMessage("This node is no longer available.")
                     "terminal" -> vm.api?.let { TerminalPane(it, nodeId, vm) }
                     "changes" -> vm.api?.let { ChangesScreen(it, nodeId, vm, { file = it; screen = "diff" }) }
                     "diff" -> vm.api?.let { DiffScreen(it, nodeId, file, vm) }
-                    "capture" -> TaskScreen(state, vm, meshId, { meshId = it }, { id -> nodeId = id; screen = "node" })
+                    "capture" -> TaskScreen(state, vm, meshId, { meshId = it }, launch, { launch = it }, { id -> nodeId = id; screen = "node" })
                     "issues", "archive" -> vm.api?.let { ResourceScreen(it, meshId, screen, state, vm, { id -> nodeId = id; screen = "node" }) }
-                    "pulls" -> vm.api?.let { PullRequestsScreen(it, meshId, vm) }
+                    "pulls" -> vm.api?.let { PullRequestsScreen(it, meshId, vm, { id -> nodeId = id; screen = "node" }) }
                     "pr" -> if (selected != null) vm.api?.let { CreatePrScreen(it, selected.number("mesh_id"), nodeId, vm) }
                         else EmptyMessage("This node is no longer available.")
                     "connection" -> ConnectionScreen(state.origin, vm, {
@@ -153,7 +154,8 @@ fun PairScreen(invitation: String, busy: Boolean, pair: (String, String) -> Unit
 }
 
 @Composable
-fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) -> Unit, openNode: (Long) -> Unit, openMesh: (Long, String) -> Unit) {
+fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) -> Unit, openNode: (Long) -> Unit, openMesh: (Long, String) -> Unit,
+    openCapture: (Long, String) -> Unit) {
     var query by rememberSaveable { mutableStateOf("") }
     var attentionOnly by rememberSaveable { mutableStateOf(false) }
     val openNodes = state.nodes.filter { it.text("status") != "archived" }
@@ -190,6 +192,12 @@ fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) 
                     Text(mesh.text("path"), style = MaterialTheme.typography.bodySmall,
                         color = if (members.isEmpty()) MeshColors.muted else MeshColors.secondary,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    // Both halves open Capture pre-filled, where the first
+                    // prompt is written; an empty prompt opens a plain session.
+                    Spacer(Modifier.height(8.dp))
+                    SpawnSplitButton(meshDefaultName(mesh, state.providers), launchOptions(state.providers, needsPrompt = false),
+                        "a task in ${mesh.text("name")}", true,
+                        { openCapture(mesh.number("id"), "") }, { openCapture(mesh.number("id"), it.text("id")) })
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         TextButton(onClick = { openMesh(mesh.number("id"), "pulls") }) { Text("Pull requests") }
                         TextButton(onClick = { openMesh(mesh.number("id"), "issues") }) { Text("Issues") }

@@ -143,7 +143,7 @@ To upgrade manually, install the new `.msi` or `-setup.exe` over the existing in
 
 ### Power features
 - **Remote access**: pair a phone over HTTPS with a single-use QR code or pairing code. The browser remembers its device session and reconnects automatically; revoke individual phones in Authorized Devices. Disabling LAN access closes active remote connections. WebSocket PTY relay streams terminals to your phone, with port fallback (1992→1993→1994).
-- **Native Android client**: manage agents, capture tasks, triage issues and their labels (including Autopilot tags), browse archives, inspect diffs, create pull requests and use live terminals. Pair with the desktop QR; device credentials are encrypted on the phone. A signed `Buildmesh_<version>_android.apk` is published on each [release](https://github.com/alondero/buildmesh/releases) next to the Windows installers — download and sideload it, or [build one yourself](docs/development/android.md#build-and-install).
+- **Native Android client**: manage agents, capture tasks, triage issues and their labels (including Autopilot tags), start agents from a mesh, an issue or a pull request with the same launch menu as the desktop, browse archives, inspect diffs, create pull requests and use live terminals. Pair with the desktop QR; device credentials are encrypted on the phone. A signed `Buildmesh_<version>_android.apk` is published on each [release](https://github.com/alondero/buildmesh/releases) next to the Windows installers — download and sideload it, or [build one yourself](docs/development/android.md#build-and-install).
 - **AI context portability**: share `CLAUDE.md`, `.claude/skills`, and friends with Codex, OpenCode, and Antigravity via `AGENTS.md` + `.agents/skills` git symlinks — no per-provider duplication.
 - **Dev / Stable side-by-side profiles**: run an in-development build (`buildmesh-dev`) without interrupting the stable hub you orchestrate agents from.
 
@@ -295,7 +295,7 @@ Binaries land in `src-tauri/target/release/`:
 
 The development test bridge is a separate loopback listener on port 1991 (2991 for the dev profile). The release entry points do not pass the `dev-tools` feature that compiles it. A debug or dev-tools build listens only when started with `BUILDMESH_TEST_BRIDGE=1` and a per-launch token (`scripts/run-dev.ps1 -TestBridge` or `scripts/run-dev.sh --test-bridge`).
 
-The dev profile is what `/use` and `/verify` use — it never touches the stable hub.
+The dev profile is what `/use` and `/verify` use — it never touches the stable hub. Run from a linked worktree, the launcher gives that worktree its own ports and its own app-data profile, and stops only the instance it launched before, so several worktrees can each verify their own build at once. It prints the `Dev ports:` and `Dev profile:` it chose; set `BUILDMESH_PORT_OFFSET` or `BUILDMESH_PROFILE_DIR` to pin either.
 
 ## Test
 
@@ -336,12 +336,27 @@ npm run build           # produces dist/
 npm run check:bundle    # reads dist/ and compares against scripts/bundle-budget.json
 ```
 
-`scripts/check.ps1 all-ts` (and `all`) runs the budget check as part of
-the green bar — `unit` / `integration` / `rust` skip it because they
-don't produce a build. The quality job on CI runs it after
-`npm run build` so a regression on the entry chunk fails the build.
-Bump the budget values intentionally — every visible CI failure costs a
-hot path; don't paper over a real growth by raising the ceiling.
+The budget says how large the entry chunk may get, but not what belongs in
+it. [`scripts/check-bundle-composition.mjs`](scripts/check-bundle-composition.mjs)
+is the second half of the gate: it asserts that xterm + its addons and every
+Probe tab are still split into their own lazy chunks, so re-importing one
+eagerly fails the build instead of quietly re-growing the entry chunk under a
+raised budget. It reads the same `dist/` and fails with the offending import and the
+file that pulled it in.
+
+```bash
+npm run check:bundle-composition   # reads dist/ and fails if a lazy chunk was inlined
+```
+
+`scripts/check.ps1 all-ts` (and `all`) runs both checks as part of the green
+bar — `unit` / `integration` / `rust` skip them because they don't produce a
+build. `npm run verify` runs both too, as the `bundle` and `bundle-composition`
+harness gates. The quality job on CI runs them after `npm run build` so a
+regression on the entry chunk fails the build. Bump the budget values
+intentionally — every visible CI failure costs a hot path; don't paper over a
+real growth by raising the ceiling. If the gate instead reports that a lazy chunk has gone
+missing after a deliberate build-config change, update its forbidden list
+rather than deleting the check.
 
 ## Project structure
 

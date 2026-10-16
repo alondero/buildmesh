@@ -3,6 +3,7 @@ import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { useWorktreeClosePromptStore } from '../../stores/worktreeClosePromptStore';
 import { useChangedFiles } from '../../hooks/useChangedFiles';
 import { fileDiffStatusMeta } from '../../lib/status';
+import { ChangedFileRow } from '../FileTree/ChangedFileRow';
 
 export function WorktreeCloseDialog() {
   const pending = useWorktreeClosePromptStore(state => state.pending);
@@ -14,9 +15,15 @@ export function WorktreeCloseDialog() {
   // and refreshes on GIT_CHANGED. Passing `null` (no prompt, or an
   // unpushed-only risk) disables the hook — it must be called unconditionally
   // here, before the early return below, to satisfy the rules of hooks.
+  //
+  // Issue #2328: `files` is `null` until a fetch succeeds, so the dialog can
+  // now tell "the status is unavailable" apart from "git reports nothing
+  // uncommitted". Neither branch is allowed to imply the worktree is safe —
+  // the risk sentence and the buttons below come from the backend's
+  // `pending.safety` snapshot and are deliberately left untouched.
   const worktreePath = pending?.safety.worktree_path ?? null;
   const showFiles = Boolean(pending?.safety.has_uncommitted && worktreePath);
-  const { files, loading } = useChangedFiles(showFiles ? worktreePath : null);
+  const { files, loading, stale } = useChangedFiles(showFiles ? worktreePath : null);
 
   // Escape-to-cancel comes from <Modal> (issue #643: Esc is the dismiss path
   // that works even when the WebView is occluded and backdrop clicks never
@@ -52,15 +59,22 @@ export function WorktreeCloseDialog() {
       {pending.safety.has_uncommitted && (
         <div className="mb-5">
           <div className="text-2xs uppercase tracking-wide text-text-muted mb-1">
-            Uncommitted files{files.length > 0 ? ` (${files.length})` : ''}
+            Uncommitted files{files !== null && files.length > 0 ? ` (${files.length})` : ''}
+            {stale && <span className="normal-case tracking-normal"> · last known</span>}
           </div>
           <div className="max-h-40 overflow-y-auto rounded-md border border-border-subtle bg-bg-card">
-            {loading && files.length === 0 ? (
+            {loading && files === null ? (
               <div className="px-2 py-1 text-xs text-text-muted">Loading…</div>
-            ) : files.length === 0 ? (
-              // has_uncommitted was already true, so an empty list here means
-              // the status fetch failed — don't imply the worktree is clean.
+            ) : files === null ? (
+              // No successful observation for this path: say the listing is
+              // unavailable rather than implying the worktree is clean.
               <div className="px-2 py-1 text-xs text-text-muted">Couldn&apos;t list the changed files.</div>
+            ) : files.length === 0 ? (
+              // Git itself reported nothing uncommitted. Scoped to this
+              // moment on purpose: it must not read as "nothing is at risk",
+              // because the risk sentence above still reflects the backend's
+              // safety snapshot and the user still has to confirm.
+              <div className="px-2 py-1 text-xs text-text-muted">Git reports no uncommitted files right now.</div>
             ) : (
               files.map((file) => {
                 const meta = fileDiffStatusMeta(file.status);
@@ -70,12 +84,7 @@ export function WorktreeCloseDialog() {
                     title={file.path}
                     className="flex items-center gap-2 px-2 py-0.5 text-xs font-mono"
                   >
-                    <span className={`font-bold w-3 flex-shrink-0 ${meta.color}`} title={meta.label}>
-                      {meta.letter}
-                    </span>
-                    <span className="flex-1 truncate text-text-secondary">{file.path}</span>
-                    <span className="text-accent-green flex-shrink-0">+{file.additions}</span>
-                    <span className="text-accent-red flex-shrink-0">-{file.deletions}</span>
+                    <ChangedFileRow file={file} meta={meta} />
                   </div>
                 );
               })

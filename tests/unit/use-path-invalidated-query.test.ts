@@ -81,10 +81,38 @@ describe('usePathInvalidatedQuery — error field (issue #342)', () => {
       result.current.refresh();
     });
     await waitFor(() => expect(result.current.error).toBeInstanceOf(Error));
-    // The second fetcher rejection is captured, data stays as the previous
-    // success because `invalidate` wiped the cache and refresh collapsed
-    // to null on rejection.
-    expect(result.current.data).toBeNull();
+    // Issue #2328 — a failed refetch keeps the last successful value.
+    // `refresh()` invalidates the cache entry, so the failure arrives as a
+    // `null` resolution; committing that unconditionally (the pre-#2328
+    // behaviour, asserted here before the fix) would tell a consumer the
+    // value is empty when in fact nothing has been observed since 'ok'.
+    expect(result.current.data).toBe('ok');
+  });
+
+  it('clears error and replaces the value when a retried refresh() succeeds', async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce('first')
+      .mockRejectedValueOnce(new Error('refresh-fail'))
+      .mockResolvedValueOnce('third');
+    const client = createPathKeyedCache<string>({ fetcher });
+    const { result } = renderHook(() =>
+      usePathInvalidatedQuery(client, 'k'),
+    );
+    await waitFor(() => expect(result.current.data).toBe('first'));
+
+    await act(async () => {
+      result.current.refresh();
+    });
+    await waitFor(() => expect(result.current.error).toBeInstanceOf(Error));
+
+    await act(async () => {
+      result.current.refresh();
+    });
+    await waitFor(() => expect(result.current.data).toBe('third'));
+    // The retry must clear the error, not just overwrite the value — a
+    // consumer that keys "stale" off `error` depends on this.
+    expect(result.current.error).toBeNull();
   });
 
   it('populates error when a GIT_CHANGED event triggers a failed refetch', async () => {
@@ -170,6 +198,65 @@ describe('usePathInvalidatedQuery — error field (issue #342)', () => {
     await waitFor(() => expect(result.current.data).toBeNull());
     // data is null AND no fetch error — these are two distinct states that
     // pre-#342 the hook could not disambiguate.
+    expect(result.current.error).toBeNull();
+  });
+});
+
+// Issue #2328. A key switch has to clear `data`, not just `error`: #342
+// already stopped an error from key A bleeding into key B, but the value
+// itself survived, so switching repositories painted the previous repo's
+// rows (and badges) under the new one until its first fetch resolved.
+describe('usePathInvalidatedQuery — data is cleared on a key switch (issue #2328)', () => {
+  it('drops the previous key value while the new key is still loading', async () => {
+    const resolvers = new Map<string, (value: string) => void>();
+    const fetcher = vi.fn(
+      (key: string) =>
+        new Promise<string>((resolve) => {
+          resolvers.set(key, resolve);
+        }),
+    );
+    const client = createPathKeyedCache<string>({ fetcher });
+    const { result, rerender } = renderHook(
+      ({ key }: { key: string }) => usePathInvalidatedQuery(client, key),
+      { initialProps: { key: 'a' } },
+    );
+    await act(async () => {
+      resolvers.get('a')?.('a-value');
+    });
+    await waitFor(() => expect(result.current.data).toBe('a-value'));
+
+    // 'b' has nothing cached, so the hook is mid-fetch. Nothing about 'a'
+    // may still be on screen — not the value, not the error.
+    rerender({ key: 'b' });
+    expect(result.current.data).toBeNull();
+    expect(result.current.error).toBeNull();
+    expect(result.current.loading).toBe(true);
+
+    await act(async () => {
+      resolvers.get('b')?.('b-value');
+    });
+    await waitFor(() => expect(result.current.data).toBe('b-value'));
+  });
+
+  it('keeps a failed key\'s error off the next key', async () => {
+    const client = createPathKeyedCache<string>({
+      fetcher: vi
+        .fn()
+        .mockImplementation(async (key: string) => {
+          if (key === 'a') throw new Error('a-fail');
+          return 'b-value';
+        }),
+    });
+    const { result, rerender } = renderHook(
+      ({ key }: { key: string }) => usePathInvalidatedQuery(client, key),
+      { initialProps: { key: 'a' } },
+    );
+    await waitFor(() => expect(result.current.error).toBeInstanceOf(Error));
+    // 'a' never produced a value, so the switch has nothing to clear.
+    expect(result.current.data).toBeNull();
+
+    rerender({ key: 'b' });
+    await waitFor(() => expect(result.current.data).toBe('b-value'));
     expect(result.current.error).toBeNull();
   });
 });
@@ -263,10 +350,10 @@ describe('usePathInvalidatedQuery — refresh() race on key change (issue #392)'
     });
 
     // Must NOT clobber the still-loading key-8 render with key 7's stale
-    // refresh result — state should be untouched (still key 7's last data,
-    // since the "needs a fetch" mount-effect branch doesn't reset `data`
-    // until its own fetch resolves).
-    expect(result.current.data).toBe('seven-initial');
+    // refresh result. Issue #2328 also clears `data` on the key switch, so
+    // the correct settled state is key 8's empty placeholder: key 7's value
+    // is gone, and 'seven-refreshed' must not creep back under key 8.
+    expect(result.current.data).toBeNull();
     expect(result.current.loading).toBe(true);
 
     // Resolve key 8's own fetch and confirm the hook still works normally.

@@ -216,6 +216,7 @@ enum Handler {
     PrMerge,
     ImportResume,
     IssuesSpawn,
+    PullsSpawn,
     IssueLabels,
     IssueSetLabel,
     CircuitRuns,
@@ -416,6 +417,17 @@ const ROUTES: &[Route] = &[
         scope: RouteScope::Admin,
         body: BodyPolicy::Cap(8 * 1024),
         handler: Handler::PrMerge,
+    },
+    Route {
+        method: "POST",
+        m: RouteMatch::TwoId {
+            prefix: "/api/meshes/",
+            mid: "/pulls/",
+            suffix: "/spawn",
+        },
+        scope: RouteScope::Admin,
+        body: BodyPolicy::Cap(16 * 1024),
+        handler: Handler::PullsSpawn,
     },
     Route {
         method: "POST",
@@ -832,6 +844,7 @@ async fn run_handler(handler: Handler, req: &ParsedRequest) -> DispatchResult {
         Handler::PrMerge => Http(routes::pr::merge(req).await),
         Handler::ImportResume => Http(routes::agent_nodes::import_and_resume(req).await),
         Handler::IssuesSpawn => Http(routes::issues::spawn(req).await),
+        Handler::PullsSpawn => Http(routes::pr::spawn(req).await),
         Handler::IssueLabels => Http(routes::issues::labels(req).await),
         Handler::IssueSetLabel => Http(routes::issues::set_label(req).await),
         Handler::CircuitRuns => Http(routes::circuit::list(req).await),
@@ -1154,6 +1167,7 @@ POST /api/nodes/{id}/input -> Admin
 POST /api/meshes/{id}/pr -> Admin
 GET /api/meshes/{id}/pr/source -> Admin
 POST /api/meshes/{mesh_id}/pulls/{pr_number}/merge -> Admin
+POST /api/meshes/{mesh_id}/pulls/{pr_number}/spawn -> Admin
 POST /api/meshes/{id}/agent-nodes/import-and-resume -> Admin
 POST /api/meshes/{mesh_id}/issues/{issue_number}/spawn -> Admin
 GET /api/meshes/{id}/issue-labels -> Admin

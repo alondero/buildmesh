@@ -201,13 +201,12 @@
 use crate::agent::capabilities::{
     EffortControlKind, PermissionModeOption, MUSE_EFFORT_ALLOWED, PERMISSION_MODE_UNATTENDED,
 };
+use crate::agent::managed_config;
 use crate::agent::provider::{
     AgentProvider, LaunchRuntime, Platform, ResolvedPath, SpawnRecipe, UiMeta, WindowsShell,
 };
 use crate::models::EnvType;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 pub struct MuseAdapter;
@@ -256,10 +255,6 @@ const MUSE_TRUST_DECISION: &str = "trusted";
 /// read-modify-write could atomically replace a sibling's freshly added entry
 /// with our own (a lost update — atomic write only prevents torn reads).
 static TRUST_WRITE_LOCK: Mutex<()> = Mutex::new(());
-
-/// Counter backing the PID+counter `.tmp` suffix for atomic writes
-/// (Cursor / AGY / mcode precedent).
-static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Post-spawn session-index capture window (issue #1794).
 ///
@@ -317,57 +312,6 @@ where
         }
     }
     CaptureOutcome::GaveUp
-}
-
-/// Atomically persist `content` to `path` via a PID+counter `.tmp` file and a
-/// rename, so a concurrent reader of the trust store sees either the previous
-/// file or the new one — never a partial write. A `.tmp` left by an earlier
-/// crash is overwritten. Mirrors `mcode::atomic_write` (the Cursor / AGY
-/// shape).
-fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
-    let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("trust.json");
-    let tmp = path.with_file_name(format!(
-        "{}.{}.{}.tmp",
-        file_name,
-        std::process::id(),
-        counter
-    ));
-
-    {
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(content.as_bytes())?;
-        file.sync_all()?;
-    }
-
-    if let Err(error) = std::fs::rename(&tmp, path) {
-        if let Err(cleanup) = std::fs::remove_file(&tmp) {
-            tracing::warn!(
-                "muse atomic_write: failed to clean up temp file {:?}: {}",
-                tmp,
-                cleanup
-            );
-        }
-        return Err(error);
-    }
-    Ok(())
-}
-
-/// Human-readable JSON kind tag for malformed-file rejections, mirroring
-/// `mcode::settings_kind` — the rejection names the actual shape rather than
-/// `serde_json::Value`.
-fn settings_kind(value: &serde_json::Value) -> &'static str {
-    match value {
-        serde_json::Value::Object(_) => "Object",
-        serde_json::Value::Array(_) => "Array",
-        serde_json::Value::String(_) => "String",
-        serde_json::Value::Number(_) => "Number",
-        serde_json::Value::Bool(_) => "Boolean",
-        serde_json::Value::Null => "Null",
-    }
 }
 
 /// The path the spawned Muse process treats as its workspace: the CWD
@@ -464,35 +408,12 @@ fn resolve_config_dir(resolved: &ResolvedPath) -> Option<PathBuf> {
 /// `schema_version` first). Values — including every entry Buildmesh does not
 /// own — are untouched; only the idempotent no-op path leaves the bytes alone.
 fn ensure_trust_file(path: &Path, workspace: &str) -> Result<(), String> {
-    let (mut trust, trailing_newline): (serde_json::Value, bool) =
-        match std::fs::read_to_string(path) {
-            Ok(content) => (
-                serde_json::from_str(&content).map_err(|error| {
-                    format!(
-                        "refusing to overwrite malformed {path:?}: {error}. \
-                         Repair or remove the file and retry"
-                    )
-                })?,
-                content.ends_with('\n'),
-            ),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                (serde_json::json!({}), false)
-            }
-            Err(error) => return Err(format!("failed to read {path:?}: {error}")),
-        };
-    if !trust.is_object() {
-        return Err(format!(
-            "muse trust.json top-level must be a JSON object; got {}",
-            settings_kind(&trust)
-        ));
-    }
+    let mut document = managed_config::read_document(path).map_err(|error| error.to_string())?;
+    let entry = managed_config::root_object(&mut document, "muse trust.json top-level")?;
 
     let key = trust_key(workspace);
     let mut changed = false;
     {
-        let entry = trust
-            .as_object_mut()
-            .expect("trust.json verified object above");
         if entry.get("schema_version").is_none() {
             entry.insert(
                 "schema_version".to_string(),
@@ -501,18 +422,8 @@ fn ensure_trust_file(path: &Path, workspace: &str) -> Result<(), String> {
             changed = true;
         }
 
-        let projects = entry
-            .entry("projects")
-            .or_insert_with(|| serde_json::json!({}));
-        if !projects.is_object() {
-            return Err(format!(
-                "muse trust.json `projects` must be a JSON object; got {}",
-                settings_kind(projects)
-            ));
-        }
-        let projects = projects
-            .as_object_mut()
-            .expect("projects verified object above");
+        let projects =
+            managed_config::object_entry(entry, "projects", "muse trust.json `projects`")?;
         match projects.get_mut(&key) {
             Some(serde_json::Value::Object(record)) => match record.get("decision") {
                 // Already what we would write — leave the bytes alone.
@@ -546,7 +457,7 @@ fn ensure_trust_file(path: &Path, workspace: &str) -> Result<(), String> {
             Some(other) => {
                 return Err(format!(
                     "muse trust.json entry for {key:?} must be a JSON object; got {}",
-                    settings_kind(other)
+                    managed_config::json_kind(other)
                 ));
             }
             None => {
@@ -562,12 +473,10 @@ fn ensure_trust_file(path: &Path, workspace: &str) -> Result<(), String> {
     if !changed {
         return Ok(());
     }
-    let mut content = serde_json::to_string_pretty(&trust)
+    let content = document
+        .to_pretty_json()
         .map_err(|error| format!("serialize muse trust.json failed: {error}"))?;
-    if trailing_newline {
-        content.push('\n');
-    }
-    atomic_write(path, &content)
+    managed_config::atomic_write(path, &content)
         .map_err(|error| format!("failed to write muse trust.json: {error}"))?;
     tracing::info!("muse ensure_workspace_trusted: trusted {:?}", key);
     Ok(())

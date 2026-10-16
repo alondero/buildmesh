@@ -67,7 +67,7 @@ vi.mock('../../src/components/BuildRun/BuildRunDropdown', () => ({
   BuildRunDropdown: () => <span data-testid="build-run">Build</span>,
 }));
 vi.mock('../../src/hooks/useGitSummary', () => ({
-  useGitSummary: () => ({ summary: null, loading: false, refresh: vi.fn() }),
+  useGitSummary: () => ({ summary: null, loading: false, error: null, unavailable: false, stale: false, refresh: vi.fn() }),
 }));
 vi.mock('../../src/hooks/useOpenPr', () => ({
   useOpenPr: () => ({ pr: null, loading: false, refresh: vi.fn() }),

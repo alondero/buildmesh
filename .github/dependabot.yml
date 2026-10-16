@@ -32,14 +32,77 @@ updates:
       time: "06:00"
       timezone: Europe/London
     open-pull-requests-limit: 5
+    ignore:
+      # TypeScript's major line is gated on the lint toolchain, not on npm
+      # (issue #2247). `typescript-eslint` publishes
+      # `typescript: ">=4.8.4 <6.1.0"`, so a TypeScript 7 bump inside the
+      # weekly batch made `npm ci` fail with ERESOLVE before tsc, ESLint, or
+      # Vitest could run. The grouped bump also rewrote the manifest's own
+      # `~5.8.3` pin to `~7.0.2`, so the range did not hold it back.
+      # Lift this when typescript-eslint's declared peer range admits the
+      # target TypeScript release.
+      - dependency-name: "typescript"
+        update-types:
+          - "version-update:semver-major"
     groups:
-      # Runtime dependencies and the toolchain (Vite/Vitest/ESLint/Tailwind) are
-      # the two sets that move together and break together. Splitting them
-      # produced PRs that could not typecheck or build on their own.
       production-dependencies:
         dependency-type: production
-      development-toolchain:
+      # Splitting runtime from toolchain once produced pull requests that
+      # could not typecheck or build on their own, which is why the toolchain
+      # is grouped at all. Dependency *type* was too coarse a key, though: the
+      # previous `dependency-type: development` group swept TypeScript, ESLint,
+      # Vite, and Vitest majors into one 19-update pull request (#2166) whose
+      # `npm ci` failed with ERESOLVE. So the key is semver level first and
+      # toolchain family second.
+      #
+      # Dependabot applies the first group a dependency matches, so the family
+      # groups precede the catch-all.
+      development-patches-minors:
         dependency-type: development
+        update-types:
+          - patch
+          - minor
+      # A major bump is a migration with its own peer and runtime fallout, so
+      # it arrives alone for its own family rather than hidden in a batch.
+      # `groups.update-types` takes the bare semver levels (`major`, `minor`,
+      # `patch`, as the cargo groups below use); the `version-update:semver-*`
+      # spelling belongs to `ignore` and `allow` alone.
+      eslint-toolchain-majors:
+        dependency-type: development
+        update-types:
+          - major
+        patterns:
+          - "eslint"
+          - "@eslint/*"
+          - "eslint-plugin-*"
+          - "typescript-eslint"
+          - "@typescript-eslint/*"
+          - "globals"
+      vite-toolchain-majors:
+        dependency-type: development
+        update-types:
+          - major
+        patterns:
+          - "vite"
+          - "@vitejs/*"
+          - "tailwindcss"
+          - "@tailwindcss/*"
+          - "postcss"
+          - "autoprefixer"
+      vitest-toolchain-majors:
+        dependency-type: development
+        update-types:
+          - major
+        patterns:
+          - "vitest"
+          - "@vitest/*"
+          - "jsdom"
+          - "@testing-library/*"
+          - "@playwright/test"
+      development-majors:
+        dependency-type: development
+        update-types:
+          - major
 
   - package-ecosystem: cargo
     directory: /src-tauri
