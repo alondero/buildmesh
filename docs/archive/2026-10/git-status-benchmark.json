@@ -1,0 +1,264 @@
+{
+  "date": "2026-10-16",
+  "baseline": "1ffe0adda661f49694ec433aaa3905c7c040d7b9",
+  "platform": "win32",
+  "arch": "x64",
+  "cpu": "AMD Ryzen 9 3900X 12-Core Processor            ",
+  "profile": "debug test, unoptimized",
+  "reads_per_worker": 5,
+  "steady_samples": "excludes first read per worker",
+  "summaries": [
+    {
+      "case": "clean",
+      "before": {
+        "steady_median_ms": 9.7424,
+        "peak_private_bytes": 3207168,
+        "status_diff_patch_invocations": [
+          5,
+          5,
+          0
+        ]
+      },
+      "after": {
+        "steady_median_ms": 7.73855,
+        "peak_private_bytes": 3215360,
+        "status_diff_patch_invocations": [
+          5,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "case": "small",
+      "before": {
+        "steady_median_ms": 12.3124,
+        "peak_private_bytes": 3219456,
+        "status_diff_patch_invocations": [
+          5,
+          5,
+          5
+        ]
+      },
+      "after": {
+        "steady_median_ms": 11.861450000000001,
+        "peak_private_bytes": 3211264,
+        "status_diff_patch_invocations": [
+          5,
+          5,
+          5
+        ]
+      }
+    },
+    {
+      "case": "generated-1MiB",
+      "before": {
+        "steady_median_ms": 65.5336,
+        "peak_private_bytes": 7110656,
+        "status_diff_patch_invocations": [
+          5,
+          5,
+          5
+        ]
+      },
+      "after": {
+        "steady_median_ms": 35.28829999999999,
+        "peak_private_bytes": 4349952,
+        "status_diff_patch_invocations": [
+          5,
+          5,
+          0
+        ]
+      }
+    },
+    {
+      "case": "generated-10MiB",
+      "before": {
+        "steady_median_ms": 439.17955,
+        "peak_private_bytes": 41672704,
+        "status_diff_patch_invocations": [
+          5,
+          5,
+          5
+        ]
+      },
+      "after": {
+        "steady_median_ms": 166.9484,
+        "peak_private_bytes": 13836288,
+        "status_diff_patch_invocations": [
+          5,
+          5,
+          0
+        ]
+      }
+    },
+    {
+      "case": "generated-10MiB-interior",
+      "before": {
+        "steady_median_ms": 371.0708,
+        "peak_private_bytes": 41656320,
+        "status_diff_patch_invocations": [
+          5,
+          5,
+          5
+        ]
+      },
+      "after": {
+        "steady_median_ms": 543.0088000000001,
+        "peak_private_bytes": 41680896,
+        "status_diff_patch_invocations": [
+          5,
+          5,
+          5
+        ]
+      }
+    },
+    {
+      "case": "generated-100MiB",
+      "before": {
+        "steady_median_ms": 3463.7704999999996,
+        "peak_private_bytes": 372883456,
+        "status_diff_patch_invocations": [
+          5,
+          5,
+          5
+        ]
+      },
+      "after": {
+        "steady_median_ms": 1355.46515,
+        "peak_private_bytes": 112717824,
+        "status_diff_patch_invocations": [
+          5,
+          5,
+          0
+        ]
+      }
+    },
+    {
+      "case": "untracked-100MiB",
+      "before": {
+        "steady_median_ms": 1857.4035999999999,
+        "peak_private_bytes": 239468544,
+        "status_diff_patch_invocations": [
+          5,
+          5,
+          5
+        ]
+      },
+      "after": {
+        "steady_median_ms": 1344.7185,
+        "peak_private_bytes": 3272704,
+        "status_diff_patch_invocations": [
+          5,
+          5,
+          0
+        ]
+      }
+    },
+    {
+      "case": "many-2000",
+      "before": {
+        "steady_median_ms": 2444.8984,
+        "peak_private_bytes": 5533696,
+        "status_diff_patch_invocations": [
+          5,
+          5,
+          10000
+        ]
+      },
+      "after": {
+        "steady_median_ms": 2475.65635,
+        "peak_private_bytes": 5902336,
+        "status_diff_patch_invocations": [
+          5,
+          5,
+          10000
+        ]
+      }
+    },
+    {
+      "case": "many-status-summary-overlap",
+      "before": {
+        "steady_median_ms": 2378.6958999999997,
+        "peak_private_bytes": 6905856,
+        "status_diff_patch_invocations": [
+          10,
+          5,
+          10000
+        ]
+      },
+      "after": {
+        "steady_median_ms": 2480.1363499999998,
+        "peak_private_bytes": 6569984,
+        "status_diff_patch_invocations": [
+          10,
+          5,
+          10000
+        ]
+      }
+    },
+    {
+      "case": "many-generated-100x1MiB",
+      "before": {
+        "steady_median_ms": 4227.8538,
+        "peak_private_bytes": 7335936,
+        "status_diff_patch_invocations": [
+          5,
+          5,
+          500
+        ]
+      },
+      "after": {
+        "steady_median_ms": 1485.0883,
+        "peak_private_bytes": 4386816,
+        "status_diff_patch_invocations": [
+          5,
+          5,
+          0
+        ]
+      }
+    },
+    {
+      "case": "four-worktrees-10MiB",
+      "before": {
+        "steady_median_ms": 152.97125,
+        "peak_private_bytes": 82493440,
+        "status_diff_patch_invocations": [
+          20,
+          20,
+          20
+        ]
+      },
+      "after": {
+        "steady_median_ms": 127.54925,
+        "peak_private_bytes": 4624384,
+        "status_diff_patch_invocations": [
+          20,
+          20,
+          0
+        ]
+      }
+    },
+    {
+      "case": "four-worktrees-status-summary-overlap",
+      "before": {
+        "steady_median_ms": 179.64600000000002,
+        "peak_private_bytes": 83030016,
+        "status_diff_patch_invocations": [
+          40,
+          20,
+          20
+        ]
+      },
+      "after": {
+        "steady_median_ms": 154.93079999999998,
+        "peak_private_bytes": 5386240,
+        "status_diff_patch_invocations": [
+          40,
+          20,
+          0
+        ]
+      }
+    }
+  ]
+}
