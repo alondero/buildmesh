@@ -1,5 +1,6 @@
 use super::hook_contract;
 use crate::agent::capabilities::{EffortControlKind, CODEX_EFFORT_ALLOWED, CODEX_EFFORT_KEY};
+use crate::agent::managed_config;
 use crate::agent::provider::{
     AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell,
 };
@@ -13,7 +14,6 @@ use base64::Engine;
 use once_cell::sync::Lazy;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -742,9 +742,17 @@ fn read_runtime_files(paths: &[&Path], distro: Option<&str>) -> Result<Vec<Strin
 
 fn write_runtime_files(files: &[(&Path, &str)], distro: Option<&str>) -> Result<(), String> {
     match distro {
+        // A WSL guest's files are written through the guest CLI, so the host's
+        // atomic rename cannot reach them. The native arm uses the shared
+        // writer; the directory is created first because Codex expects
+        // `.codex/` to exist before it will read a config from it.
         Some(distro) => wsl_write_files(distro, files),
         None => files.iter().try_for_each(|(path, content)| {
-            write_atomic(path, content)
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("failed to create Codex dir {}: {e}", parent.display()))?;
+            }
+            managed_config::atomic_write(path, content)
                 .map_err(|e| format!("failed to write Codex file {}: {e}", path.display()))
         }),
     }
@@ -1581,15 +1589,6 @@ fn linked_worktree_main_checkout(dir: &Path, distro: Option<&str>) -> Option<Pat
         .replace('\\', "/");
     let (main, _) = git_dir.rsplit_once("/.git/worktrees/")?;
     Some(PathBuf::from(main))
-}
-
-fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)?;
-    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-    temp.write_all(content.as_bytes())?;
-    temp.as_file().sync_all()?;
-    temp.persist(path).map(|_| ()).map_err(|error| error.error)
 }
 
 /// Clear Buildmesh's file-based hooks from the spawn directory and, for a

@@ -86,13 +86,46 @@ export const ELEMENT_VISIBLE_TIMEOUT_MS = 10000;
 export const SCREENSHOT_TIMEOUT_MS = 30000;
 
 /**
- * Shutting the browser down in the CLI's `finally`.
+ * How long the run waits for a browser it launched to close.
  *
- * Priced for the same reason, but it is enforced by racing the close rather than
- * by a timeout argument: `browser.close()` accepts no timeout, so a hung close
- * would otherwise be the one phase nothing bounds.
+ * `browser.close()` accepts no timeout argument, so this is enforced by racing
+ * the close rather than by handing Playwright a number — the same reason the
+ * page-setup calls are raced (#2063).
+ *
+ * What it bounds is the *wait*, not the run's verdict. The close resolves only
+ * once Chromium has exited and Playwright has removed the profile directory it
+ * created, and on a Windows host running a full suite that takes 2-3s quietly
+ * and 24-50s under load, because Playwright force-kills the browser 30s into the
+ * close and the profile removal follows it (issue #2245). Racing that at 15s and
+ * failing the run reported host contention as a product failure, after the
+ * screenshot had already been written. An overrun is now reported on stderr and
+ * handed off; see `BROWSER_CLOSE_GRACE_MS` and `scripts/ui-shot-close.mjs`.
+ *
+ * Not a budget the run is expected to consume: on a quiet host the close
+ * resolves in a fraction of it.
  */
 export const BROWSER_CLOSE_TIMEOUT_MS = 15000;
+
+/**
+ * How much longer to stay alive after `BROWSER_CLOSE_TIMEOUT_MS` expires, for a
+ * close that is still running.
+ *
+ * The two sum to 30s, which is the point at which Playwright gives up waiting
+ * for its own browser process and force-kills the tree
+ * (`DEFAULT_PLAYWRIGHT_TIMEOUT` in playwright-core). Staying alive that long
+ * lets Playwright finish reaping that process *and* remove its profile
+ * directory in-process, which is the whole reason for the window: a close
+ * abandoned at the first budget leaves the cleanup to the exit handler, whose
+ * synchronous removal runs against a browser that has not finished dying and
+ * fails with EPERM. In the load reproduction for #2245 each such occurrence
+ * left a `playwright_chromiumdev_profile-*` directory behind, and the four runs
+ * re-run after this change left none.
+ *
+ * A run whose close settles pays no wall-clock time for it: the grace timer is
+ * unref'd, so it never holds the process open, and the worst case for a run that
+ * does overrun is the 30s Playwright would have spent inside the close anyway.
+ */
+export const BROWSER_CLOSE_GRACE_MS = 15000;
 
 /**
  * The whole step script, spent after the app has mounted.
@@ -126,6 +159,9 @@ export const STEP_SCRIPT_TIMEOUT_MS = 240000;
  * the child fails with a *named* phase long before any wrapper needs to act.
  * What a wrapper still wants is one deadline above every phase, so a child that
  * somehow exceeds all of them is caught rather than running forever.
+ *
+ * The browser close is priced as its wait plus its grace window, because that
+ * is the span one call site can be in; a single term is not the whole phase.
  */
 export const UI_SHOT_SLOWEST_PHASE_MS = Math.max(
   DEV_SERVER_STARTUP_MS,
@@ -138,7 +174,7 @@ export const UI_SHOT_SLOWEST_PHASE_MS = Math.max(
   STEP_MODULE_LOAD_TIMEOUT_MS,
   ELEMENT_VISIBLE_TIMEOUT_MS,
   SCREENSHOT_TIMEOUT_MS,
-  BROWSER_CLOSE_TIMEOUT_MS,
+  BROWSER_CLOSE_TIMEOUT_MS + BROWSER_CLOSE_GRACE_MS,
   DEV_SERVER_STOP_MS,
 );
 

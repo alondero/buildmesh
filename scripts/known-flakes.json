@@ -1,9 +1,5 @@
 {
   "tests/unit/omnibar-fuzzy-search.test.ts > performance budget (issue #1410 §3) searches 500+ items in under 5ms per query": 1833,
   "commands::prune::prune_tests::remove_worktree_succeeds_after_killing_process_tree": 2220,
-  "tests/integration/ui-shot.test.ts > ui-shot mock mode serves the fixture UI, drives a circuit, and writes a screenshot": 2245,
-  "test:pty_spawn > windows_natural_child_exit_unblocks_reader_via_watcher": 2371,
-  "tests/integration/ui-shot.test.ts > ui-shot mock mode runs the step script through the CLI, so dropping the step phase cannot stay green": 2245,
-  "tests/integration/ui-shot.test.ts > ui-shot mock mode groups, reloads, swaps and ungroups nodes through pointer and keyboard interactions": 2245,
-  "tests/integration/ui-shot.test.ts > ui-shot mock mode keeps the node title and trailing close visible in a 240px pane": 2245
+  "test:pty_spawn > windows_natural_child_exit_unblocks_reader_via_watcher": 2371
 }

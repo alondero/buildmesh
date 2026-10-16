@@ -16,6 +16,7 @@ import {
   STEP_SCRIPT_TIMEOUT_MS,
   SCREENSHOT_TIMEOUT_MS,
   BROWSER_CLOSE_TIMEOUT_MS,
+  BROWSER_CLOSE_GRACE_MS,
   BROWSER_SETUP_TIMEOUT_MS,
   FIXTURES_LOAD_TIMEOUT_MS,
   STEP_MODULE_LOAD_TIMEOUT_MS,
@@ -25,6 +26,7 @@ import {
 } from '../../scripts/ui-shot-budgets.mjs';
 import { runSteps } from '../../scripts/ui-shot-steps.mjs';
 import { withDeadline } from '../../scripts/ui-shot-deadline.mjs';
+import { closeBrowser } from '../../scripts/ui-shot-close.mjs';
 import { startDevServer, stopDevServer } from '../../scripts/ui-shot-server.mjs';
 import {
   PHASE_FILE_ENV,
@@ -379,6 +381,7 @@ it('derives the wrapper deadline from the phase budgets instead of hand-summing 
       + ELEMENT_VISIBLE_TIMEOUT_MS
       + SCREENSHOT_TIMEOUT_MS
       + BROWSER_CLOSE_TIMEOUT_MS
+      + BROWSER_CLOSE_GRACE_MS
       + DEV_SERVER_STOP_MS;
     expect(UI_SHOT_WATCHDOG_DEADLINE_MS).toBeGreaterThan(wholeRunMs);
   });
@@ -489,6 +492,83 @@ it('derives the wrapper deadline from the phase budgets instead of hand-summing 
     // process scheduling without making the bound itself vague.
     expect(elapsed).toBeGreaterThanOrEqual(DEV_SERVER_STOP_MS / 2);
     expect(elapsed).toBeLessThan(DEV_SERVER_STOP_MS * 5);
+  }, 60000);
+
+  it('reports a slow browser close instead of failing the run that already saved its screenshot', async () => {
+    // What a close is: it resolves only once Chromium has exited AND Playwright
+    // has removed the profile directory it created. On Windows that costs 2-3s
+    // on a quiet host and 24-50s while a full suite saturates the machine,
+    // because Playwright force-kills the browser 30s into the close and the
+    // profile removal follows it (issue #2245). Racing that at 15s and failing
+    // the run reported host contention as a product failure, for a screenshot
+    // already written — the four `ui-shot` tests that carried this in
+    // `scripts/known-flakes.json` each failed with that same close-timeout error.
+    //
+    // The budget therefore bounds the wait, not the verdict. Both outcomes are
+    // driven here through the real teardown with a fake browser: a real
+    // Chromium cannot be made slow on demand, since the 24-50s above took a
+    // saturated host to reach. A never-settling close is the case the budget
+    // exists for, and its measured wait is what keeps the hand-off bounded.
+    const neverCloses = { close: () => new Promise<never>(() => {}) };
+    const warnings: string[] = [];
+    const startedAt = Date.now();
+    const result = await closeBrowser(neverCloses as never, {
+      timeoutMs: 100,
+      graceMs: 100,
+      warn: message => warnings.push(message),
+    });
+    const elapsed = Date.now() - startedAt;
+
+    // It reported the overrun and handed off rather than throwing: the run that
+    // called it has a screenshot on disk, so a browser still shutting down is
+    // not a failed render.
+    expect(result.overran).toBe(true);
+    expect(result.reaped).toBe(false);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('Closing the browser did not finish within 200ms');
+    // It waited both windows and no more, so the hand-off is bounded too.
+    expect(elapsed).toBeGreaterThanOrEqual(200);
+    expect(elapsed).toBeLessThan(5000);
+  }, 60000);
+
+  it('reaps a close that lands inside the grace window, so its profile cleanup still runs', async () => {
+    // The grace window is what stops the abandoned-close leak: a close left
+    // running when the process exits loses Playwright's profile removal to its
+    // exit handler, whose synchronous removal runs against a browser that has
+    // not finished dying and fails with EPERM. All four load runs before this
+    // change ended that way, each leaving a `playwright_chromiumdev_profile-*`
+    // directory behind; the four after it left none.
+    const slow = { close: () => new Promise<void>(resolve => setTimeout(resolve, 120)) };
+    const warnings: string[] = [];
+    const result = await closeBrowser(slow as never, {
+      timeoutMs: 20,
+      graceMs: 5000,
+      warn: message => warnings.push(message),
+    });
+
+    expect(result).toMatchObject({ overran: true, reaped: true });
+    // The overrun is still reported — it is a fact about the host, and the next
+    // occurrence of this should be visible in the log rather than inferred.
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('did not finish within 20ms');
+    expect(warnings[0]).toContain('5000ms teardown grace window');
+  }, 60000);
+
+  it('keeps an unbounded close for the real-app modes and still fails on a close that errors', async () => {
+    // `--url` and CDP-attach have no supervising wrapper and no priced budget,
+    // so they pass a null budget and keep the unbounded close they used before
+    // the close budget existed — a screenshot is already on disk in those modes
+    // too, and no number the wrapper does not account for should cut them off.
+    const realApp = { close: () => new Promise<void>(resolve => setTimeout(resolve, 120)) };
+    await expect(closeBrowser(realApp as never, { timeoutMs: null, warn: () => {} }))
+      .resolves.toMatchObject({ overran: false, reaped: true });
+
+    // A close that fails is not slow teardown, it is a teardown that could not
+    // happen: that stays the run's failure, or a broken close would report as a
+    // healthy run.
+    const exploding = { close: () => Promise.reject(new Error('close exploded')) };
+    await expect(closeBrowser(exploding as never, { timeoutMs: 5000, warn: () => {} }))
+      .rejects.toThrow('close exploded');
   }, 60000);
 
   it('runs real-app steps through the CLI, proving that path still executes', async () => {
