@@ -2738,7 +2738,7 @@ mod tests {
     /// list_warm_paths_for_mesh_droppable_inner); the `status !=` form cannot
     /// use the composite's second column but still rides its `mesh_id` prefix.
     /// The plan must name the composite, never a scan — a scan here means the
-    /// removal traded a redundant index for a per-launch table scan.
+    /// removal traded a redundant index for a full scan of the whole table.
     #[test]
     fn mesh_id_only_readers_keep_seeking_an_index_after_the_prefix_drop() {
         let conn = Connection::open_in_memory().unwrap();
