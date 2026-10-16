@@ -700,8 +700,7 @@ mod tests {
         let first = temp_path(&path);
         std::fs::write(&first, "stale").unwrap();
 
-        let (used, _file) = open_temp(&path, first.clone())
-            .expect("must skip the occupied name");
+        let (used, _file) = open_temp(&path, first.clone()).expect("must skip the occupied name");
 
         assert_ne!(used, first, "the occupied name must not be reused");
         assert_eq!(
