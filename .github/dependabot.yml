@@ -49,9 +49,9 @@ updates:
         dependency-type: production
       # Splitting runtime from toolchain once produced pull requests that
       # could not typecheck or build on their own, which is why the toolchain
-      # is grouped at all. Dependency *type* was too coarse a key, though:
-      # grouping every development dependency together put TypeScript, ESLint,
-      # Vite, and Vitest majors in one 19-update pull request (#2166) whose
+      # is grouped at all. Dependency *type* was too coarse a key, though: the
+      # previous `dependency-type: development` group swept TypeScript, ESLint,
+      # Vite, and Vitest majors into one 19-update pull request (#2166) whose
       # `npm ci` failed with ERESOLVE. So the key is semver level first and
       # toolchain family second.
       #
