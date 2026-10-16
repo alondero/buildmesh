@@ -250,7 +250,8 @@ export async function installUpdate(update: Update): Promise<void> {
     await update.install();
   } catch (e) {
     console.error('[updater] install failed:', e);
-    // As above: the unsanitized plugin error rides the chain, never the UI.
+    // As above: `updaterStore` records the failure from `e.message` alone, so the
+    // unsanitized plugin error stays on the chain and off the UI.
     throw new Error(sanitizeUpdaterError(e), { cause: e });
   }
 }

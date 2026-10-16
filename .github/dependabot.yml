@@ -51,9 +51,9 @@ updates:
       # could not typecheck or build on their own, which is why the toolchain
       # is grouped at all. Dependency *type* was too coarse a key, though:
       # grouping every development dependency together put TypeScript, ESLint,
-      # Vite, and Vitest majors in one 19-update pull request that no single
-      # reviewer could install. So the key is semver level first and toolchain
-      # family second.
+      # Vite, and Vitest majors in one 19-update pull request (#2166) whose
+      # `npm ci` failed with ERESOLVE. So the key is semver level first and
+      # toolchain family second.
       #
       # Dependabot applies the first group a dependency matches, so the family
       # groups precede the catch-all.
