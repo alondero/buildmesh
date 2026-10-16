@@ -773,11 +773,16 @@ MiniMax Code has no configurable effort control. See the [MiniMax CLI model refe
 
 Adding or enabling a known provider creates compatible routes; configurations
 are only the recipes you save, so each harness submenu starts with none.
-**Clone** creates an independent recipe. Deleted configurations are not recreated
-automatically. In the desktop spawn menu, choose a harness directly for its
-defaults or open its configurations submenu for a named recipe, including
-provider routes such as MiniMax via Claude Code. Mobile groups the same recipes
-under each harness.
+**Clone** creates an independent recipe from the one you click. **Settings →
+Launch Configurations** offers it on each saved configuration, and a harness's
+spawn submenu offers it beside **Edit**. The editor opens pre-filled from the
+recipe you cloned, with a `copy` suffix on the name, so you only change what
+differs — a different effort level, a different model version. Saving stores a
+separate configuration and leaves the original untouched. Deleted configurations
+are not recreated automatically. In the desktop spawn menu, choose a harness
+directly for its defaults or open its configurations submenu for a named recipe,
+including provider routes such as MiniMax via Claude Code. Mobile groups the same
+recipes under each harness.
 Unavailable entries explain whether a harness, key, route, or verification needs
 attention. Codex proxy routes still require verification for their exact model
 and runtime before launch. Use **Verify provider and model** in the configuration

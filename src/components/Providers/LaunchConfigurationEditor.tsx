@@ -11,6 +11,13 @@ import { Spinner } from '../shared/Spinner';
 // Verify, save, and delete share the fieldset lock; status text is derived separately.
 type BusyAction = 'save' | 'verify' | 'delete';
 
+// A clone is a new recipe seeded from an existing one: the empty id makes the
+// save insert rather than overwrite, and the generated ownership and resolved
+// snapshot belong to the original.
+export function cloneConfiguration(value: SpawnConfiguration): SpawnConfiguration {
+  return { ...value, id: '', name: `${value.name} copy`, generated: undefined, resolved: undefined };
+}
+
 export function LaunchConfigurationEditor({ value, targets, onSave, onCancel, onDelete, onDirtyChange, onVerify }: {
   value: SpawnConfiguration;
   targets: LaunchTarget[];
