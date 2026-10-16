@@ -126,13 +126,16 @@ export const useMeshStore = create<MeshState>((set, get) => {
   //
   // `readsInFlight` owns `loading`: a read that is dropped must not mark a
   // newer outstanding read as finished. `trailingRead` is the single refresh that
-  // converges a discarded read, shared by every discard of the same newer state
-  // and released the moment it settles; `MAX_TRAILING_REARMS` bounds how many
-  // replacements one discard chain may spend, so convergence never becomes a
-  // retry loop.
+  // converges a discarded read whose committed write no applied snapshot has
+  // seen yet, shared by every discard of the same newer state and released the
+  // moment it settles; `MAX_TRAILING_REARMS` bounds how many replacements one
+  // discard chain may spend, so convergence never becomes a retry loop.
   const MAX_TRAILING_REARMS = 1;
   let nextRequestId = 1;
   let acceptedRequestId = 0;
+  // The revision the newest applied snapshot observed. Equal to
+  // `collectionRevision` means every committed mutation is already on screen.
+  let acceptedRevision = -1;
   let collectionRevision = 0;
   let pendingReorders = 0;
   let readsDroppedDuringReorder = 0;
@@ -177,6 +180,14 @@ export const useMeshStore = create<MeshState>((set, get) => {
       readsDroppedDuringReorder += 1;
       return { status: 'superseded', followUp: null };
     }
+    // A trailing read exists to pick up a committed write that no applied
+    // snapshot reflects yet. When the newest applied read already observed the
+    // current revision, convergence has happened — the read that beat this one
+    // was newer and saw everything this one would have — so a refresh here
+    // would be pure IPC and loading churn.
+    if (acceptedRevision === collectionRevision) {
+      return { status: 'superseded', followUp: null };
+    }
     return { status: 'superseded', followUp: scheduleTrailingRead(requestId, trailingDepth) };
   }
 
@@ -194,7 +205,11 @@ export const useMeshStore = create<MeshState>((set, get) => {
         return discardRead(requestId, trailingDepth);
       }
       acceptedRequestId = requestId;
-      set(reconcileMeshes(get().meshesById, incoming));
+      acceptedRevision = observedRevision;
+      // Clear `error` here as well as at the start of the read: an older failure
+      // that was still authoritative when it landed (its newer rival had not
+      // answered yet) must not outlive the snapshot that supersedes it.
+      set({ ...reconcileMeshes(get().meshesById, incoming), error: null });
       return { status: 'applied' };
     } catch (e) {
       // An obsolete failure must not replace a newer success with an error.

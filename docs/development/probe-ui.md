@@ -175,16 +175,20 @@ caller:
   replace it — not even one started after the drag.
 
 An obsolete response is dropped rather than applied, and dropping never replaces a
-stale-write bug with permanently stale state: one trailing authoritative read
-converges the collection, shared by every response the same newer write made
-obsolete. That trailing read may re-arm exactly one further refresh if a second
-write lands while it is in flight, and no more — convergence must not become a
-refresh loop under a continuous stream of writes. It never runs during a reorder
-window (where it would be dropped the same way): a successful reorder converges it
-and a failed one refetches. `loading` follows the number of reads still
-outstanding, so a dropped response cannot mark a newer read as finished, and a
-failure only reaches `error` when it is still authoritative: an old rejection
-never replaces a newer success.
+stale-write bug with permanently stale state: a trailing authoritative read converges the
+collection whenever a committed write no applied snapshot reflects yet, shared by every
+response that same newer write made obsolete. A read dropped for any other reason needs no
+such refresh — it lost to a *newer read* under an unchanged revision, so that newer
+snapshot already saw everything it would have, and a third read would be IPC and loading
+churn for nothing. A trailing read may re-arm exactly one further refresh if a second
+write lands while it is in flight, and no more — convergence must not become a refresh
+loop under a continuous stream of writes. It never runs during a reorder window (where it
+would be dropped the same way): a successful reorder converges it and a failed one
+refetches. `loading` follows the number of reads still outstanding, so a dropped response
+cannot mark a newer read as finished, and a failure only reaches `error` when it is still
+authoritative: an old rejection never replaces a newer success, and a newer snapshot that
+applies later clears an older failure on its way in rather than leaving an error banner
+over fresh data.
 
 `refreshMeshes` rejects for callers that must confirm the refresh (boot readiness,
 `CircuitRunCapacity`), and `fetchMeshes` records the failure without throwing. A read

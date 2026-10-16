@@ -629,11 +629,11 @@ describe('useMeshStore', () => {
     it('does not let an older read replace a newer accepted one', async () => {
       const older = deferred<Mesh[]>();
       const newer = deferred<Mesh[]>();
-      const trailing = deferred<Mesh[]>();
+      // No third value is queued: if the store opens a replacement read here it
+      // would fall through to the mock default and corrupt this test.
       mockInvoke
-        .mockReturnValueOnce(older.promise)     // read A, started first
-        .mockReturnValueOnce(newer.promise)     // read B, started second
-        .mockReturnValueOnce(trailing.promise); // the read A's discard starts
+        .mockReturnValueOnce(older.promise)  // read A, started first
+        .mockReturnValueOnce(newer.promise); // read B, started second
 
       const readA = useMeshStore.getState().fetchMeshes();
       const readB = useMeshStore.getState().fetchMeshes();
@@ -643,25 +643,23 @@ describe('useMeshStore', () => {
       await readB;
       expect(useMeshStore.getState().meshesById.get(2)?.name).toBe('newer');
 
-      // ...then the older response lands and must be dropped, leaving a
-      // replacement read outstanding rather than the older snapshot.
+      // ...then the older response lands and must be dropped, with the accepted
+      // snapshot left alone.
       older.resolve([mesh({ id: 1, name: 'older' })]);
       await readA;
-      await vi.waitFor(() => expect(useMeshStore.getState().loading).toBe(true));
 
       const state = useMeshStore.getState();
       expect(state.meshesById.has(1)).toBe(false);
       expect(state.meshesById.get(2)?.name).toBe('newer');
       expect(state.error).toBeNull();
 
-      // Discarding converges, and converges once: the trailing read applies and
-      // starts no refresh of its own.
-      trailing.resolve([mesh({ id: 2, name: 'newer' })]);
+      // Nothing mutated, so the accepted snapshot already reflects every
+      // committed write: dropping A converges it without a third IPC read, and
+      // without re-entering `loading`.
       await settleReads();
+      expect(useMeshStore.getState().loading).toBe(false);
       expect(useMeshStore.getState().meshesById.get(2)?.name).toBe('newer');
-      const readsAfterConvergence = listMeshesCalls();
-      await vi.waitFor(() => expect(useMeshStore.getState().loading).toBe(false));
-      expect(listMeshesCalls()).toBe(readsAfterConvergence);
+      expect(listMeshesCalls()).toBe(2);
     });
 
     it('applies both reads in order when the older one answers first', async () => {
@@ -768,39 +766,34 @@ describe('useMeshStore', () => {
 
     it('does not let a late snapshot resurrect a deleted Mesh', async () => {
       const stale = deferred<Mesh[]>();
-      const trailing = deferred<Mesh[]>();
       seedMeshes([DELETED_MESH, OTHER_MESH]);
+      // No trailing value is queued: the post-delete refetch already applied the
+      // revision this drop would have converged, so a replacement read would be
+      // spurious IPC (and a leak into the next test's queue).
       mockInvoke
-        .mockReturnValueOnce(stale.promise)        // read started before the delete
-        .mockResolvedValueOnce(undefined)          // delete_mesh
-        .mockResolvedValueOnce([OTHER_MESH])       // post-delete refetch
-        .mockReturnValueOnce(trailing.promise);    // the read stale's discard starts
+        .mockReturnValueOnce(stale.promise)   // read started before the delete
+        .mockResolvedValueOnce(undefined)     // delete_mesh
+        .mockResolvedValueOnce([OTHER_MESH]); // post-delete refetch
 
       const read = useMeshStore.getState().fetchMeshes();
       await expect(useMeshStore.getState().deleteMesh(1)).resolves.toBe(true);
 
       stale.resolve([DELETED_MESH, OTHER_MESH]);
       await read;
-      await vi.waitFor(() => expect(useMeshStore.getState().loading).toBe(true));
 
+      await settleReads();
       const state = useMeshStore.getState();
       expect(state.meshes.map((m) => m.id)).toEqual([2]);
       expect(state.meshesById.has(1)).toBe(false);
-
-      trailing.resolve([OTHER_MESH]);
-      await settleReads();
-      expect(useMeshStore.getState().meshesById.has(1)).toBe(false);
-      expect(useMeshStore.getState().meshes.map((m) => m.id)).toEqual([2]);
+      expect(state.loading).toBe(false);
     });
 
     it('does not let an older rejection replace a newer success with an error', async () => {
       const older = deferred<Mesh[]>();
       const newer = deferred<Mesh[]>();
-      const trailing = deferred<Mesh[]>();
       mockInvoke
         .mockReturnValueOnce(older.promise)
-        .mockReturnValueOnce(newer.promise)
-        .mockReturnValueOnce(trailing.promise);
+        .mockReturnValueOnce(newer.promise);
 
       const readA = useMeshStore.getState().fetchMeshes();
       const readB = useMeshStore.getState().fetchMeshes();
@@ -811,27 +804,22 @@ describe('useMeshStore', () => {
       await readA;
 
       // The obsolete failure is dropped: it never reaches `error`, and the
-      // accepted snapshot it was racing stays on screen.
-      expect(useMeshStore.getState().error).toBeNull();
-      expect(useMeshStore.getState().meshesById.get(2)?.name).toBe('newer');
-
-      // Dropping still converges: the refresh it started lands the newest state
-      // and records no error of its own.
-      trailing.resolve([mesh({ id: 2, name: 'newer' })]);
+      // accepted snapshot it was racing stays on screen. The accepted snapshot
+      // already reflects every committed write, so the drop converges without a
+      // replacement read.
       await settleReads();
       expect(useMeshStore.getState().error).toBeNull();
       expect(useMeshStore.getState().meshesById.get(2)?.name).toBe('newer');
       expect(useMeshStore.getState().loading).toBe(false);
+      expect(listMeshesCalls()).toBe(2);
     });
 
     it('keeps loading true while a newer read is outstanding, then settles it', async () => {
       const older = deferred<Mesh[]>();
       const newer = deferred<Mesh[]>();
-      const trailing = deferred<Mesh[]>();
       mockInvoke
         .mockReturnValueOnce(older.promise)
-        .mockReturnValueOnce(newer.promise)
-        .mockReturnValueOnce(trailing.promise);
+        .mockReturnValueOnce(newer.promise);
 
       const readA = useMeshStore.getState().fetchMeshes();
       const readB = useMeshStore.getState().fetchMeshes();
@@ -844,15 +832,42 @@ describe('useMeshStore', () => {
       expect(useMeshStore.getState().loading).toBe(true);
       expect(useMeshStore.getState().meshesById.get(2)?.name).toBe('newer');
 
-      // The older read is dropped, and the trailing read it starts keeps loading
-      // true — a dropped response must not report the store as settled.
+      // The older read is dropped. Nothing mutated, so the newer snapshot already
+      // converged the collection: loading settles and the store stays quiet
+      // rather than opening a replacement read.
       older.resolve([mesh({ id: 1, name: 'older' })]);
       await readA;
-      expect(useMeshStore.getState().loading).toBe(true);
-      expect(useMeshStore.getState().meshesById.has(1)).toBe(false);
 
-      trailing.resolve([mesh({ id: 2, name: 'newer' })]);
       await settleReads();
+      expect(useMeshStore.getState().loading).toBe(false);
+      expect(useMeshStore.getState().meshesById.has(1)).toBe(false);
+      expect(useMeshStore.getState().meshesById.get(2)?.name).toBe('newer');
+      expect(listMeshesCalls()).toBe(2);
+    });
+
+    it('clears an older failure when the newer snapshot applies after it', async () => {
+      const older = deferred<Mesh[]>();
+      const newer = deferred<Mesh[]>();
+      mockInvoke
+        .mockReturnValueOnce(older.promise)
+        .mockReturnValueOnce(newer.promise);
+
+      const readA = useMeshStore.getState().fetchMeshes();
+      const readB = useMeshStore.getState().fetchMeshes();
+
+      // The older read fails while the newer one is still outstanding, so at
+      // that moment it is still authoritative and owns the error.
+      older.reject(new Error('older read failed'));
+      await readA;
+      expect(useMeshStore.getState().error).toContain('older read failed');
+
+      // The newer snapshot then applies: it must take the error with it, or the
+      // store shows a failure banner over fresh data for the rest of the session.
+      newer.resolve([mesh({ id: 2, name: 'newer' })]);
+      await readB;
+
+      await settleReads();
+      expect(useMeshStore.getState().error).toBeNull();
       expect(useMeshStore.getState().meshesById.get(2)?.name).toBe('newer');
     });
 
