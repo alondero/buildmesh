@@ -14,8 +14,16 @@ import { addToast } from './toastStore';
 // Issue #1054 — the event-driven half of the store moved to a typed
 // listeners module (`agentNodeListeners.ts`); the optimistic-with-
 // rollback pattern that `renameAgentNode` / `setNodePinned` /
-// `toggleNodePinned` hand-rolled is now a generic helper.
-import { withOptimistic, type OptimisticSurface } from '../lib/optimistic';
+// `toggleNodePinned` hand-rolled is now a generic helper. Issue #2325
+// — the helper's ledger gives each mutation ownership of its columns, so
+// a pin completion can no longer adopt a stale full row and a stale
+// failure can no longer roll back over a newer write.
+import {
+  createOptimisticFieldLedger,
+  withOptimistic,
+  type AgentNodeField,
+  type OptimisticSurface,
+} from '../lib/optimistic';
 import { attachAgentNodeListeners } from './agentNodeListeners';
 
 // `AgentNode` is generated from the Rust `models::AgentNode` struct (issue
@@ -612,7 +620,10 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   // older than the state already applied. Coalescing is not sufficient on its
   // own: it orders the queue, but a stale in-flight response still lands after
   // the newer event (spec `circuit-node-indicators.md` step 7: "an older
-  // response cannot overwrite newer event state").
+  // response cannot overwrite newer event state"). Issue #2325 — an optimistic
+  // mutation's writes count too (see `optimisticLedger`'s `onFieldWrite`), so
+  // a read that began before an acknowledged pin or rename is discarded and
+  // re-read rather than painted over it.
   let circuitOwnershipsRevision = 0;
   let nodeRevision = 0;
   const spawnRequests = new Map<number, symbol>();
@@ -630,7 +641,18 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   // shape. Issue #1384 — the surface now operates per-node via the
   // normalized `nodesById` map; the helper writes a single node at a
   // time, never the whole list, so subscribers to other nodes are not
-  // disturbed.
+  // disturbed. Issue #2325 — the ledger lives beside it rather than in
+  // the helper module: it is per-store state, and every store (and every
+  // test) must start with no claims.
+  const optimisticLedger = createOptimisticFieldLedger({
+    // An optimistic write — the patch itself, or the reconciliation of
+    // its columns — is a newer write than any `list_agent_nodes`
+    // snapshot that began before it, so the snapshot fence has to see
+    // it. Without this an acknowledged pin or rename was silently
+    // reverted by an in-flight read, which then discarded itself and
+    // re-read: the fence existed but did not observe optimistic writes.
+    onFieldWrite: () => { nodeRevision += 1; },
+  });
   const optimisticSurface: OptimisticSurface = {
     getAgentNode: (nodeId) => get().nodesById[nodeId],
     setAgentNode: (nodeId, next) => {
@@ -837,6 +859,14 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     if (patch.status === 'idle' && failedAutoSpawns.has(id)) return;
     if (patch.status === 'error' && get().nodesById[id]) failedAutoSpawns.add(id);
     nodeRevision += 1;
+    // Issue #2325 — a delivered event is the newest observation of the
+    // columns it carries, including one another window's `node-renamed`.
+    // Hand those columns over: an in-flight rename must neither roll its
+    // own failure back over the event nor adopt anything afterwards. The
+    // full-snapshot path deliberately does NOT release, because a
+    // snapshot can predate the mutation it would otherwise retire — the
+    // mutation's own settlement reconciles its columns afterwards.
+    optimisticLedger.release(id, Object.keys(patch) as AgentNodeField[]);
     if (patch.status && !['idle', 'spawning', 'error'].includes(patch.status)) {
       spawnRequests.delete(id);
       failedAutoSpawns.delete(id);
@@ -1109,6 +1139,9 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
         semanticTurns,
       };
     });
+    // Issue #2325 — the row is gone, so any mutation still in flight for it
+    // owns nothing and must not write it back when it settles.
+    optimisticLedger.forget(id);
 
     // kill_agent tears the process down before its bookkeeping (a DB status
     // update) can fail, and the node is being deleted anyway — so never let
@@ -1181,6 +1214,9 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   removeAgentNode: (id) => {
     spawnRequests.delete(id);
     failedAutoSpawns.delete(id);
+    // Issue #2325 — same reasoning as the close path: a retired row owns
+    // no field, so a mutation still in flight cannot write it back.
+    optimisticLedger.forget(id);
     // A user-initiated close already dropped the row optimistically and owns
     // its terminal disposal; only act when the store still holds the row.
     if (!(id in get().nodesById)) return;
@@ -1212,12 +1248,17 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     if (!prior) return;
     // Optimistic update so the UI reflects the new name before the
     // round-trip. The backend emits `node-renamed` on success, which
-    // is a no-op for us (already matches) and keeps other windows in
-    // sync. We do NOT adopt the mutation's resolved value (rename
-    // returns `void`) — that would race against the `node-renamed`
-    // listener that arrives separately.
+    // keeps other windows in sync. We do NOT read the mutation's
+    // resolved value (rename returns `void`): the name this operation
+    // asked for IS the acknowledged value, so the ledger settles it
+    // against the value already on screen and writes nothing. What the
+    // ledger does provide is ownership — a rename that fails after a
+    // newer rename succeeded no longer restores its own stale prior,
+    // and the same holds when another window's `node-renamed` lands
+    // while this one is in flight.
     await withOptimistic({
       surface: optimisticSurface,
+      ledger: optimisticLedger,
       nodeId: id,
       optimisticPatch: { name },
       mutation: () => api.renameAgentNode(id, name),
@@ -1226,14 +1267,16 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
 
   setNodePinned: async (nodeId, pinned) => {
     // Optimistic patch so the Pinned Grid view re-renders instantly on
-    // a click. The backend's returned `AgentNode` is the source of truth
-    // — a future refactor that mutates other columns on the way back
-    // would otherwise be invisible. On rejection `withOptimistic`
-    // reverts only the `is_pinned` column to its pre-call value, so a
-    // concurrent update to any other column (e.g. status from the
-    // orchestrator) is preserved.
+    // a click. The backend's returned row is authoritative for `is_pinned`
+    // and for nothing else (issue #2325): its `status`/`name`/session
+    // columns are read at response time and are routinely older than the
+    // lifecycle and rename observations that landed while the IPC was in
+    // flight, so adopting the whole row erased them. On rejection the
+    // ledger restores the last acknowledged pin value, and only when no
+    // newer pin operation or event owns that column.
     return withOptimistic({
       surface: optimisticSurface,
+      ledger: optimisticLedger,
       nodeId,
       optimisticPatch: { is_pinned: pinned },
       mutation: () => api.setNodePinned(nodeId, pinned),
@@ -1243,16 +1286,17 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
 
   toggleNodePinned: async (nodeId) => {
     // Optimistic flip — the visible state is `!prior.is_pinned` until
-    // the backend confirms. Same source-of-truth-from-response pattern
-    // as `setNodePinned`. Compute the flipped value up front so
-    // `withOptimistic` has a single `optimisticPatch` to roll back;
-    // the helper's `prior` capture handles the "node not loaded" throw.
+    // the backend confirms. Same ownership and scoped-adoption policy as
+    // `setNodePinned` (issue #2325). Compute the flipped value up front so
+    // the ledger claims one value to reconcile against; the helper's
+    // `prior` capture handles the "node not loaded" throw.
     const prior = get().nodesById[nodeId];
     if (!prior) {
       throw new Error(`toggleNodePinned: node ${nodeId} is not loaded`);
     }
     return withOptimistic({
       surface: optimisticSurface,
+      ledger: optimisticLedger,
       nodeId,
       optimisticPatch: { is_pinned: !prior.is_pinned },
       mutation: () => api.toggleNodePinned(nodeId),
