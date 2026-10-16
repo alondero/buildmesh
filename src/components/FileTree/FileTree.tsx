@@ -157,7 +157,14 @@ export function FileTree({
   // ChangedFilesSection + useMeshGitStatus, and refreshes on GIT_CHANGED — the
   // old combined fetch did neither). Gate the loading view on both so a file's
   // changed/unchanged state is settled before the user can click it.
-  const { files: gitFiles, loading: gitLoading } = useChangedFiles(
+  //
+  // Issue #2328: `files` is `null` until a status fetch succeeds, so an
+  // unavailable or never-observed status resolves to "no badges" here. That is
+  // deliberate — the tree annotates rows, it never asserts a repo is clean, so
+  // withholding a badge cannot make a false claim. Surfaces that DO make such a
+  // claim (ChangedFilesSection, the node header) render the unavailable state
+  // explicitly instead.
+  const { files: changedFiles, loading: gitLoading } = useChangedFiles(
     showGitStatus ? gitRootPath || null : null,
   );
 
@@ -166,17 +173,19 @@ export function FileTree({
   // each node by stripping rootPath, so changed files are badged correctly.
   // Declared before `handleKeyDown` so the keyboard handler's closure can
   // read it on every render without tripping the TDZ (issue #728). Wrapped
-  // in `useMemo` keyed on `gitFiles` so the downstream `useCallback` (line
-  // 335) sees a stable reference; otherwise the inline construction makes
+  // in `useMemo` keyed on `changedFiles` so the downstream `useCallback`
+  // (line 335) sees a stable reference; otherwise the inline construction makes
   // the deps list change on every render (issue #1542 — `exhaustive-deps`
   // would warn and any consumer re-running on identity churn would defeat
-  // `gitFiles` deduplication in `pathInvalidatedCache.ts`).
+  // `changedFiles` deduplication in `pathInvalidatedCache.ts`). The `?? []`
+  // for an unknown status lives INSIDE the callback for the same reason: a
+  // fresh array on every render would defeat the memo it feeds.
   const gitStatusMap = useMemo(
-    () => new Map(gitFiles.flatMap(s => {
+    () => new Map((changedFiles ?? []).flatMap(s => {
       const path = gitRootPath === rootPath ? (s.project_path === undefined ? s.path : s.project_path) : s.path;
       return path === null ? [] : [[normalizePath(path), s] as const];
     })),
-    [gitFiles, gitRootPath, rootPath],
+    [changedFiles, gitRootPath, rootPath],
   );
 
   const handleFileClick = useCallback(
@@ -381,7 +390,7 @@ export function FileTree({
   // `treeState` exists, a background GIT_CHANGED refresh must NOT blank
   // the tree — re-mounting the whole list would reset the lifted
   // `expandedPaths` set and snap shut every folder the user had opened
-  // (issue #804). `gitFiles` keeps its last value during the refresh
+  // (issue #804). `changedFiles` keeps its last value during the refresh
   // (see `pathInvalidatedCache.ts`), so badges just update in place once
   // the new status resolves.
   if (loadingState || (gitLoading && !treeState)) {
