@@ -36,7 +36,7 @@ function fixture() {
   mkdirSync(join(root, '.tmp'), { recursive: true });
   const dir = mkdtempSync(join(root, '.tmp', `bm-dev-launch-${process.pid}-`));
   mkdirSync(join(dir, 'scripts'));
-  for (const name of ['dev-server.mjs', 'run-dev.ps1', 'run-dev.sh', 'launcher-common.ps1']) {
+  for (const name of ['dev-server.mjs', 'run-dev.ps1', 'run-dev.sh', 'launcher-common.ps1', 'check-dev-state.ps1']) {
     copyFileSync(join(root, 'scripts', name), join(dir, 'scripts', name));
   }
   symlinkSync(join(root, 'node_modules'), join(dir, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir');
@@ -350,6 +350,42 @@ test('a pinned BUILDMESH_PORT_OFFSET is used verbatim and recorded', { timeout: 
   }
   if (failure) throw failure;
 });
+
+// A diagnostic that crashes is worse than one that says nothing: this is what a
+// developer runs when the dev instance is NOT up, including before the first
+// dev build, when src-tauri\target\release-dev does not exist on disk. A
+// Resolve-Path on that directory threw ItemNotFoundException and aborted the
+// script, so the clean-tree case is pinned here rather than left to review.
+test('check-dev-state runs before the first dev build and resolves this worktree profile', { timeout: 60000, skip: process.platform === 'win32' ? false : 'check-dev-state.ps1 is the Windows diagnostic' }, async () => {
+  const dir = worktreeFixture();
+  const dataRoot = mkdtempSync(join(root, '.tmp', `bm-dev-appdata-${process.pid}-`));
+  try {
+    assert.equal(existsSync(join(dir, 'src-tauri', 'target', 'release-dev')), false, 'the fixture must have no build output');
+    const result = await run(ps, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(dir, 'scripts', 'check-dev-state.ps1')], {
+      env: { ...environment, APPDATA: dataRoot },
+      // cwd is the fixture, not the runner's directory: the whole point is that
+      // the script must work where the build output does not exist, and a
+      // repo-root cwd would hide a cwd-relative lookup behind this repo's own
+      // target directory.
+      cwd: dir,
+    });
+    assert.equal(result.code, 0, result.output);
+    assert.doesNotMatch(result.output, /Resolve-Path|Cannot find path|Exception/, result.output);
+    // No record, no pinned env var: the worktree's own profile is still derived,
+    // which is the window a helper runs in before the first launch.
+    assert.match(result.output, /=== DEV PROFILE: .*com\.alond\.buildmesh\.dev[\\/]worktrees[\\/]/, result.output);
+    assert.match(result.output, new RegExp(escapeForRegExp(join(dataRoot, 'com.alond.buildmesh.dev'))));
+    assert.match(result.output, /NO buildmesh-dev from this worktree running/);
+  } finally {
+    for (const target of [dir, dataRoot]) {
+      await rm(target, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    }
+  }
+});
+
+function escapeForRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 test('a recorded PID that is not this worktree binary is reported and left running', { timeout: 120000 }, async () => {
   const dir = worktreeFixture();
