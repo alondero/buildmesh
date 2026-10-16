@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { createServer as createHttpServer } from 'node:http';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -140,9 +140,34 @@ function worktreeFixture() {
 // A long-lived fixture app that binds the ports the launcher assigned it. The
 // ports are held before it reports ready, so a second worktree's probe meets a
 // real listener rather than an assumption.
+//
+// The fixture has to BE the worktree's executable on every platform, because
+// that is how each launcher recognises its own instance: run-dev.ps1 compares
+// `Get-Process .Path` and run-dev.sh greps `ps -o command=` for the binary path.
+// A wrapper script that execs another binary leaves the live process naming the
+// interpreter instead, and every ownership assertion then passes vacuously -
+// the launcher reports its own instance as foreign and stops nothing. Copying
+// node under the binary's name is the faithful stand-in; the Windows branch
+// already did this, which is why the defect only ever showed up on POSIX.
+function prepareFixtureBinary(binaryDir) {
+  const binary = join(binaryDir, process.platform === 'win32' ? 'buildmesh-dev.exe' : 'buildmesh-dev');
+  // Copied once per fixture: a re-launch stops the previous instance inside the
+  // launcher, which runs after this fixture is prepared, and Windows refuses to
+  // overwrite the image file of a running process.
+  if (!existsSync(binary)) copyFileSync(process.execPath, binary);
+  // copyFileSync does not carry an executable bit onto the copy on POSIX.
+  if (process.platform !== 'win32') chmodSync(binary, 0o755);
+}
+
 function stubApp(dir, dataRoot, extraEnv = {}) {
   const binaryDir = join(dir, 'src-tauri', 'target', 'release-dev', 'release');
   mkdirSync(binaryDir, { recursive: true });
+  prepareFixtureBinary(binaryDir);
+  // node is launched with no script argument, exactly as the real launcher
+  // launches the real binary. The preload comes through NODE_OPTIONS and its
+  // setInterval holds the event loop open, so the process behaves like a
+  // long-running app rather than a REPL that exits on an empty stdin.
+  const preloadOption = `--require "${join(dir, 'app.cjs').replaceAll('\\', '/')}"`;
   const envPath = join(dir, 'launch-env.json');
   const preload = join(dir, 'app.cjs');
   writeFileSync(preload, `if (process.execPath.includes('buildmesh-dev') || process.platform !== 'win32') {
@@ -169,11 +194,6 @@ Promise.all(listening).then(bound => {
 }
 `);
   if (process.platform === 'win32') {
-    // Copied once per fixture. A re-launch stops the previous instance *inside*
-    // the launcher, which runs after this fixture is prepared, and Windows
-    // refuses to overwrite the image file of a running process.
-    const binary = join(binaryDir, 'buildmesh-dev.exe');
-    if (!existsSync(binary)) copyFileSync(process.execPath, binary);
     // Build stubbed at the npm boundary; Start-Process/Get-Process adapted so the
     // console fixture does not open a visible window. Get-Process answers BOTH
     // -Id and -Name: the launcher's name sweep is how it finds an instance whose
@@ -186,7 +206,7 @@ Promise.all(listening).then(bound => {
       env: {
         ...environment,
         APPDATA: dataRoot,
-        NODE_OPTIONS: `--require "${preload.replaceAll('\\', '/')}"`,
+        NODE_OPTIONS: preloadOption,
         // A caller who pins the identity must not have it re-derived.
         BUILDMESH_PORT_OFFSET: '',
         BUILDMESH_PROFILE_DIR: '',
@@ -194,9 +214,7 @@ Promise.all(listening).then(bound => {
       },
     });
   }
-  const binary = join(binaryDir, 'buildmesh-dev');
   const shellQuote = value => "'" + value.replaceAll("'", "'\\''") + "'";
-  writeFileSync(binary, `#!/usr/bin/env bash\nexec ${shellQuote(process.execPath)} --require ${shellQuote(preload)}\n`, { mode: 0o755 });
   const wrapper = join(dir, 'launch.sh');
   writeFileSync(wrapper, `function npm() { return 0; }; export -f npm\nexec bash ${shellQuote(join(dir, 'scripts', 'run-dev.sh'))} --detach --readiness-timeout-seconds 8\n`);
   return run('bash', [wrapper], {
@@ -204,6 +222,7 @@ Promise.all(listening).then(bound => {
       ...environment,
       HOME: join(dataRoot, 'home'),
       XDG_DATA_HOME: dataRoot,
+      NODE_OPTIONS: preloadOption,
       BUILDMESH_PORT_OFFSET: '',
       BUILDMESH_PROFILE_DIR: '',
       ...extraEnv,
@@ -523,13 +542,20 @@ for (const outcome of launchOutcomes) {
         });
       } else {
         // npm is a shell function so the build is replaced at the executable boundary.
-        const binary = join(binaryDir, 'buildmesh-dev');
+        // A copied executable, not a wrapper script: see prepareFixtureBinary -
+        // the launcher recognises its own instance by that path.
+        prepareFixtureBinary(binaryDir);
         const shellQuote = value => "'" + value.replaceAll("'", "'\\''") + "'";
-        writeFileSync(binary, `#!/usr/bin/env bash\nexec ${shellQuote(process.execPath)} --require ${shellQuote(preload)}\n`, { mode: 0o755 });
         const wrapper = join(dir, 'launch.sh');
         writeFileSync(wrapper, `function npm() { return 0; }; export -f npm\nexec bash ${shellQuote(join(dir, 'scripts', 'run-dev.sh'))} --detach --readiness-timeout-seconds ${readinessSeconds}\n`);
         result = await run('bash', [wrapper], {
-          env: { ...environment, HOME: fixtureHome, XDG_DATA_HOME: dataDir, CLAUDE_CODE_CHILD_SESSION: 'must-be-cleared' },
+          env: {
+            ...environment,
+            HOME: fixtureHome,
+            XDG_DATA_HOME: dataDir,
+            NODE_OPTIONS: `--require "${preload.replaceAll('\\', '/')}"`,
+            CLAUDE_CODE_CHILD_SESSION: 'must-be-cleared',
+          },
         });
       }
       assert.match(result.output, /Launched PID: /);
