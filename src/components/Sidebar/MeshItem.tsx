@@ -597,17 +597,17 @@ function MeshItemView({
                   })}
                 </span>
               ) : (
-                <span className="text-2xs text-text-muted">No agents yet</span>
+                <span className="min-w-0 truncate text-2xs text-text-muted" title="No agents yet">No agents yet</span>
               )}
               {members.length > 0 && (
                 <span className="text-2xs text-text-muted tabular-nums">{members.length}</span>
               )}
-              <span aria-hidden="true" className={`inline-block text-2xs text-text-muted transition-transform ${expanded ? 'rotate-90' : ''}`}>▸</span>
+              <span aria-hidden="true" className={`inline-block shrink-0 text-2xs text-text-muted transition-transform ${expanded ? 'rotate-90' : ''}`}>▸</span>
             </button>
           </div>
           {/* Spawn sits outside the text column so it centres on the full
               two-line header height. */}
-          <div className="flex shrink-0 items-center">
+          <div className="flex min-w-0 max-w-1/2 shrink-0 items-center">
             <NodeCreationForm
               mesh={mesh}
               isDropdownOpen={isDropdownOpen}

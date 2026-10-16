@@ -424,8 +424,12 @@ expanded, so a mesh asking for you is never buried behind a click.
 The rest of the header carries the badges: `!` when the mesh has drifted or its
 base branch is held hostage (click it to open the Worktree Manager), `↓N` when
 the branch is that many commits behind upstream, and a sync icon only when a
-sync from upstream has failed — click it to retry. The `+` button spawns an
-agent. Right-click the card for Properties, File Explorer, Force sync from
+sync from upstream has failed — click it to retry. Click the spawn button to
+start an agent with the default launch configuration. The button shows the
+harness icon; hover or focus it to reveal the configuration name. Long names
+shorten with an ellipsis to fit narrow sidebars; the tooltip shows the full name.
+The empty-mesh status stays on one line so revealing the name keeps the button
+in place. Right-click the card for Properties, File Explorer, Force sync from
 upstream, Archive, GitHub Issues, and — for a mesh with a GitHub origin — View
 on GitHub.
 

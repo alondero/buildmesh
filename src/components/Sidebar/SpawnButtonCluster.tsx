@@ -244,7 +244,7 @@ export function SpawnButtonCluster({
     // shared `useClickOutside` mousedown handler to the whole cluster: a
     // second chevron click must toggle via `onToggleDropdown`, not get
     // pre-closed by mousedown and re-opened by the click that follows it.
-    <div className="relative" data-dropdown-for={dropdownKey}>
+    <div className="relative min-w-0 max-w-full" data-dropdown-for={dropdownKey}>
       <div className={`flex items-center rounded-md border overflow-hidden transition-colors ${isOpen ? 'border-accent-cyan shadow-glow-cyan' : 'border-accent-cyan/30'}`}>
         <button
           data-testid="spawn-default"
@@ -262,19 +262,19 @@ export function SpawnButtonCluster({
           className="group flex items-center justify-center px-2 min-w-[34px] h-[28px] text-xs font-medium text-accent-cyan hover:bg-accent-cyan/15 active:translate-y-px disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           title={isSpawning ? busyLabel : primaryTitle}
         >
-          {isSpawning ? busyLabel : iconMode && defaultOption ? (
+          {isSpawning ? <span className="truncate">{busyLabel}</span> : iconMode && defaultOption ? (
             <>
               <ProviderIcon
                 providerId={defaultOption.provider_id ?? defaultOption.harness_id}
                 className="h-3.5 w-3.5 shrink-0"
               />
-              <span className="max-w-0 overflow-hidden whitespace-nowrap opacity-0 transition-all group-hover:max-w-[120px] group-hover:opacity-100 group-hover:ml-1.5 group-focus-visible:max-w-[120px] group-focus-visible:opacity-100 group-focus-visible:ml-1.5">
+              <span className="max-w-0 truncate opacity-0 transition-all group-hover:max-w-[120px] group-hover:opacity-100 group-hover:ml-1.5 group-focus-visible:max-w-[120px] group-focus-visible:opacity-100 group-focus-visible:ml-1.5">
                 {defaultOptionLabel}
               </span>
             </>
-          ) : primaryLabel}
+          ) : <span className="truncate">{primaryLabel}</span>}
         </button>
-        <span className="w-px h-5 bg-accent-cyan/30" />
+        <span className="w-px h-5 shrink-0 bg-accent-cyan/30" />
         <button
           ref={triggerRef}
           data-testid="spawn-dropdown-toggle"
@@ -294,7 +294,7 @@ export function SpawnButtonCluster({
           aria-label={primaryAriaLabel
             ? `Choose provider to ${primaryAriaLabel.toLowerCase()} with`
             : 'Choose provider'}
-          className={`flex items-center justify-center w-[30px] h-[28px] hover:bg-bg-card-hover active:translate-y-px disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${isOpen ? 'text-accent-cyan bg-bg-card' : 'text-text-secondary'}`}
+          className={`flex shrink-0 items-center justify-center w-[30px] h-[28px] hover:bg-bg-card-hover active:translate-y-px disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${isOpen ? 'text-accent-cyan bg-bg-card' : 'text-text-secondary'}`}
           title="Choose provider"
         >
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true" className={`transition-transform ${isOpen ? 'rotate-180' : ''}`}>
