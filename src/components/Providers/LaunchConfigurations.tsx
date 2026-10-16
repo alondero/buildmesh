@@ -3,7 +3,7 @@ import type { SpawnConfiguration } from '../../types/generated/SpawnConfiguratio
 import type { LaunchTarget } from '../../types/generated/LaunchTarget';
 import type { ProviderPairing } from '../../types/generated/ProviderPairing';
 import type { PairingVerification } from '../../types/generated/PairingVerification';
-import { LaunchConfigurationEditor } from './LaunchConfigurationEditor';
+import { LaunchConfigurationEditor, cloneConfiguration } from './LaunchConfigurationEditor';
 
 export interface LaunchConfigurationApi {
   list: () => Promise<SpawnConfiguration[]>;
@@ -42,7 +42,7 @@ export function LaunchConfigurations({ api, onDirtyChange, onChanged, refreshTok
       <p>{value.name} · {value.generated && !value.generated.user_owned ? 'Generated' : 'User-owned'}</p>
       <div className="launch-config-actions">
         <button onClick={() => setDraft(value)} aria-label={`Edit ${value.name}`}>Edit</button>
-        <button onClick={() => setDraft({ ...value, id: '', name: `${value.name} copy`, generated: undefined, resolved: undefined })} aria-label={`Clone ${value.name}`}>Clone</button>
+        <button onClick={() => setDraft(cloneConfiguration(value))} aria-label={`Clone ${value.name}`}>Clone</button>
       </div>
     </div>)}
     <button disabled={loading || !targets.length} onClick={() => setDraft({ id: '', name: '', spawn_option_id: targets[0].id, model: null, effort: null, extra_args: null })}>New Launch Configuration</button>
