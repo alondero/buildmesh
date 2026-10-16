@@ -500,7 +500,7 @@ function repo(t) {
   put('src/owner.ts', 'export const owner = 1;\n');
   const base = commit();
   const cli = (...args) => spawnSync(process.execPath, [script, ...args], { cwd, encoding: 'utf8', timeout: 30000 });
-  const hook = payload => spawnSync(process.execPath, [script, 'hook'], { cwd, encoding: 'utf8', input: JSON.stringify(payload), timeout: 15000 });
+  const hook = (payload, env) => spawnSync(process.execPath, [script, 'hook'], { cwd, encoding: 'utf8', input: JSON.stringify(payload), timeout: 15000, env: env ? { ...process.env, ...env } : process.env });
   const start = () => {
     put('.task.json', JSON.stringify({ goal: 'Preserve owner state', criteria: ['Switches preserve state'], plannedEdits: ['src/owner.ts'], base }));
     const result = cli('start', '--spec', '.task.json');
@@ -1152,6 +1152,33 @@ test('a failed gate keeps blocking Stop, names the way out, and releases once up
   fixture.put('.task.json', JSON.stringify({ phase: 'verify', blockers: [] }));
   assert.equal(fixture.cli('update', '--spec', '.task.json').status, 0);
   assert.equal(JSON.parse(fixture.hook({ hook_event_name: 'Stop' }).stdout).decision, 'block');
+});
+test('Stop does not re-block a task whose phase is already complete (#2407)', t => {
+  // CARGO_TARGET_DIR is part of the run identity, so verifying under a different
+  // target directory invalidates the recorded tree.
+  const stale = fixture => ({ CARGO_TARGET_DIR: join(fixture.cwd, 'other-target') });
+  // Control: the same environment change does re-block an unfinished task, so the
+  // silence below is the phase guard and not an environment override that failed
+  // to reach the child process.
+  const pending = repo(t);
+  passingReceipt(pending, pending.start());
+  const blocked = JSON.parse(pending.hook({ hook_event_name: 'Stop' }, stale(pending)).stdout);
+  assert.equal(blocked.decision, 'block');
+  assert.match(blocked.reason, /Verification is missing or stale/);
+
+  const fixture = repo(t);
+  const task = fixture.start();
+  passingReceipt(fixture, task);
+  assert.equal(fixture.cli('finish').status, 0, 'a recorded PASS receipt, evidence and approval finish the task');
+  assert.equal(JSON.parse(fixture.cli('status').stdout).task.phase, 'complete');
+  // Evidence that a later run invalidated must read as finished work, not as a
+  // turn that needs another verify, or the agent is re-blocked on every later
+  // stop for a task it already completed.
+  for (const payload of [{ hook_event_name: 'Stop' }, { hook_event_name: 'Stop', stop_hook_active: true }]) {
+    const stop = fixture.hook(payload, stale(fixture));
+    assert.equal(stop.stdout, '', `a complete task must not emit a block decision for ${JSON.stringify(payload)}`);
+  }
+  assert.equal(JSON.parse(readFileSync(join(fixture.cwd, '.harness/active-task.json'))).phase, 'complete');
 });
 test('the operation lock blocks a live owner, and a lock left by a dead process is reclaimed', t => {
   const fixture = repo(t);
