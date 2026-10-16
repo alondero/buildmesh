@@ -435,19 +435,16 @@ attention** in the Notifications probe (the bell in the title bar), naming the
 mesh, the reason, and its path. That card stays until a later sync succeeds, and
 its **Retry sync** button re-runs the sync for you.
 
-What the card claims depends on how far the sync got, because those are three
-different claims and only one of them is about being behind:
+What the card claims depends on how far the sync got. Only one case supports a
+claim about being behind: the commits were fetched and the fast-forward did not
+apply, so the card says the mesh is behind. Everything else — the fetch failed
+partway, the comparison could not be made, the branch has no upstream to
+compare against — supports no claim at all, so the card says the upstream state
+is unknown. A failed fetch in particular does *not* mean upstream was never
+contacted: the sync was attempted, so the app will not tell you it wasn't.
 
-- the commits were fetched but the fast-forward did not apply — the mesh is
-  definitely behind, and the card says so;
-- the fetch never reached the remote — upstream was not checked at all;
-- the fetch worked but could not be compared against upstream — the fetch
-  succeeded, so the references are current, but nothing established how far
-  behind the mesh is, so the card says the state is unknown.
-
-A fetch that never reached the remote never makes the app claim your mesh fell
-behind. A pull that times out is a different case: by then the commits were
-fetched and counted, so the mesh really is behind and the card says so.
+A pull that times out is the opposite case: the fetch already succeeded and the
+commits were counted, so the mesh really is behind and the card says so.
 
 A mesh whose sync could not finish also shows the sync retry icon next to its
 name, and that icon stays until a sync succeeds — click it to retry. It is

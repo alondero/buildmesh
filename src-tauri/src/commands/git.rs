@@ -352,18 +352,28 @@ pub(crate) fn get_default_branch_blocking(path: String) -> Result<String, String
 
 /// How a manual `git_sync` ended, as the *user* experiences it. This is the
 /// one field the frontend needs and cannot infer from the flags: a failed
-/// fetch and a Mesh with no remote both report `fetched: false` with zero new
-/// commits, and only the wording of `message` distinguishes them — so a UI
-/// that classified outcomes from the flags had to either shout "error" at a
-/// purely local Mesh or stay silent about a real network failure.
+/// fetch, a Mesh with no remote, and a branch with no upstream all report
+/// `fetched: false` with zero new commits, and only the wording of `message`
+/// distinguishes them — so a UI that classified outcomes from the flags had to
+/// either shout "error" at a purely local Mesh or stay silent about a real
+/// network failure.
+///
+/// `fetched` means the fetch COMPLETED SUCCESSFULLY, never that it was
+/// attempted: `FetchFailed` is returned after `git fetch` was launched and
+/// failed or timed out, so it reports `fetched: false` even though upstream may
+/// have been contacted. The status is therefore the only reliable statement
+/// about what happened, which is why this enum exists at all — and why
+/// `NoUpstream` is separate from `Skipped` even though both are non-failures:
+/// one proves nothing was ever fetched, the other proves a fetch ran.
 ///
 /// `Partial` is the outcome that motivated this field: the fetch succeeded
 /// but the working-tree fast-forward did not apply (dirty overlap, diverged
 /// history, or a pull timeout). The mesh is *not* up to date, so the behind
 /// marker stays — the user needs to be told why rather than left staring at
-/// an unchanged count. `Partial` and `Failed` are the two statuses that leave
-/// the mesh behind; which of them earns a "Needs attention" notification is
-/// decided once on the frontend, in `src/lib/meshSyncFeedback.ts`.
+/// an unchanged count. `Partial`, `Unverified` and `Failed` are the statuses
+/// that leave the mesh in an unknown or behind state; which earn a "Needs
+/// attention" notification is decided once on the frontend, in
+/// `src/lib/meshSyncFeedback.ts`.
 ///
 /// Generated to src/types/generated/GitSyncStatus.ts (issue #404).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -372,19 +382,29 @@ pub(crate) fn get_default_branch_blocking(path: String) -> Result<String, String
 pub enum GitSyncStatus {
     /// Fast-forward applied; the local branch moved onto upstream.
     Synced,
-    /// The fetch ran and there was nothing new to pull.
+    /// A comparison ran and found nothing new to pull.
     UpToDate,
-    /// No remote configured — a purely local Mesh. Not a failure.
+    /// No remote configured — a purely local Mesh, and the only status that
+    /// proves no fetch was ever attempted. Not a failure.
     Skipped,
+    /// A remote was fetched, but the branch has no upstream to compare
+    /// against, so no comparison ran. Not a failure either — common for a
+    /// branch that gained a remote but has never been pushed — but unlike
+    /// `Skipped` this says nothing about whether the mesh is behind, so the
+    /// UI must not report "no remote".
+    NoUpstream,
     /// Commits were fetched but the fast-forward did not apply.
     Partial,
     /// The fetch ran, but comparing the local branch against upstream failed,
     /// so the mesh's position is unknown. Distinct from `UpToDate` — which
     /// asserts "verified in sync" and would resolve attention cards and clear
-    /// failure badges — and from `Failed`, which asserts the fetch never
-    /// reached the remote. Reports `fetched: true`: the refs did move.
+    /// failure badges — and from `Failed`, which reports a fetch that did not
+    /// complete. Reports `fetched: true`: the refs did move.
     Unverified,
-    /// The fetch failed, or the path is not a usable repository.
+    /// The fetch was attempted and did not complete successfully (network,
+    /// auth, remote deleted mid-flight, or the command timing out), or the
+    /// path is not a usable repository. Reports `fetched: false`, which means
+    /// "did not complete" — not "was never attempted".
     Failed,
 }
 
@@ -584,17 +604,17 @@ fn sync_outcome_to_git_sync_result(outcome: crate::git::sync::SyncOutcome) -> Gi
             status: GitSyncStatus::UpToDate,
         },
         // The remote was fetched, but this branch tracks nothing, so no
-        // comparison ran. Reported as `skipped` — the same "there is nothing
-        // to compare against, and nothing is wrong" reading as a mesh with no
-        // remote — rather than `UpToDate`, which the frontend treats as
-        // verified and would use to resolve cards and clear badges. The
-        // message says which case this is.
+        // comparison ran. Its own status rather than `Skipped`: a mesh with no
+        // *remote* is a different situation, and the frontend tells them apart
+        // — one says "no remote configured", the other says there was nothing
+        // to compare against. Neither is `UpToDate`, which the frontend treats
+        // as verified and would use to resolve cards and clear badges.
         SyncOutcome::NoUpstream => GitSyncResult {
             fetched: true,
             pulled: false,
             new_commits: 0,
             message: "Fetched, but this branch has no upstream to compare against".to_string(),
-            status: GitSyncStatus::Skipped,
+            status: GitSyncStatus::NoUpstream,
         },
         SyncOutcome::ComparisonFailed { reason } => GitSyncResult {
             // `fetched: true` because the fetch ran and moved the
@@ -1232,7 +1252,7 @@ mod sync_status_mapping_tests {
             // Remote fetched, branch tracks nothing: nothing was compared, and
             // nothing is wrong. Must NOT be `UpToDate`, which the frontend
             // reads as verified and uses to resolve cards and clear badges.
-            (SyncOutcome::NoUpstream, GitSyncStatus::Skipped, true),
+            (SyncOutcome::NoUpstream, GitSyncStatus::NoUpstream, true),
             (
                 SyncOutcome::ComparisonFailed {
                     reason: "reference is locked".to_string(),

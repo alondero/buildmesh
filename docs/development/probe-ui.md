@@ -128,26 +128,30 @@ this probe's Retry button, or from the omnibar's bulk command.
 
 A run that neither verified nor fetched publishes nothing, so every row keeps
 the state it already had. There are three such cases, and they differ in what
-the user is told: a `failed` result that came back from the backend with
-`fetched: false` (the fetch itself failed, or the path was not a usable
-repository) raises a Needs-attention card and a toast; so does an IPC that never
-reached the backend at all. A `skipped` mesh raises neither — it gets an
-informational toast only, because a Mesh with no remote is a valid local-only
-setup rather than a problem. None of the three touches another mesh's row.
+the user is told: a `failed` result (the fetch was attempted and did not
+complete) raises a Needs-attention card and a toast; so does an IPC that never
+reached the backend at all. A mesh with no remote (`skipped`) and a branch with
+no upstream (`no_upstream`) raise neither — they get an informational toast
+only, because neither is a problem. None of the four touches another mesh's
+row.
 
 What the card may *claim* is a third thing again, and the distinction is
 recorded per notification as `evidence`. A `partial` run establishes that the
-mesh is behind, so the card says so. A result reporting `fetched: false`
-establishes that the remote was never contacted. Everything else establishes
-nothing either way — a fetch whose comparison failed (`Unverified`), an IPC that
-rejected, or a record written before this field existed — and the card says the
-state is unknown rather than choosing a reading.
+mesh is behind, so the card says so. Everything else establishes nothing either
+way — a fetch that did not complete, a comparison that could not be made, an
+IPC that rejected, a record written before the field existed — and the card
+says the state is unknown rather than choosing a reading. Note what is *not* a
+claim: `fetched: false` means the fetch did not complete, never that it was
+never attempted, because Rust reports the failure after launching `git fetch`.
+Only `skipped` — no remote at all — proves nothing was ever fetched, and that
+one raises no card to make the claim.
 
 A command that syncs many meshes at once records its per-mesh problems silently
 — they land in Needs attention and nowhere else — and shows one summary toast,
 because N problem toasts would overflow the three-toast stack. That summary
-names skipped meshes as well as failing ones: a mesh with no remote raises no
-attention item, so a problem-only summary would report that outcome nowhere.
+names the two kinds of nothing-to-do too, and keeps them apart: `no remote` and
+`nothing to compare` are different facts, and a mesh that has a remote must not
+be told it has none.
 
 The destination uses the standard Probe shell, tool rail and 240–720px resize
 bounds. Its toolbar and footer stay pinned around one inner scroller; diagnostic

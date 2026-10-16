@@ -95,18 +95,22 @@ describe('sync failures in Needs attention', () => {
     expect(within(card).getByText('Behind upstream — the fetched commits were not applied')).toBeTruthy();
   });
 
-  it('does not claim the mesh is behind when the fetch never ran', async () => {
-    // A network outage on an already-current mesh must not be reported as
-    // confirmed lag: the backend never contacted upstream, so it established
-    // nothing about this mesh's position.
+  it('claims nothing about the position when the fetch did not complete', async () => {
+    // A failed fetch is NOT a fetch that never ran: Rust launches `git fetch`
+    // and reports the failure afterwards, so upstream may have been contacted.
+    // The card must not assert lag, and must not assert the opposite either —
+    // it supports no claim at all. This is the same wording the `unverified`
+    // and legacy-record cases render, which is the point: one honest reading
+    // for every "we don't know" outcome.
     addToast('Git sync', 'mesh-a: Fetch failed: could not resolve host', 'error',
-      { ...SYNC_ACTION, detail: 'Fetch failed: could not resolve host', evidence: 'not-fetched' });
+      { ...SYNC_ACTION, detail: 'Fetch failed: could not resolve host', evidence: 'unknown' });
     render(<><NotificationButton /><ProbePanel /></>);
     fireEvent.click(screen.getByRole('button', { name: 'Open Notifications' }));
 
     const card = await screen.findByTestId('sync-attention-/repos/mesh-a');
-    expect(within(card).getByText('Upstream not checked — the fetch did not run')).toBeTruthy();
+    expect(within(card).getByText('Upstream state unknown — this sync could not be verified')).toBeTruthy();
     expect(within(card).queryByText(/Behind upstream/)).toBeNull();
+    expect(within(card).queryByText(/fetch did not run/)).toBeNull();
   });
 
   it('claims nothing when a fetch happened but the comparison failed', async () => {

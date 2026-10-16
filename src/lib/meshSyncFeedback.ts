@@ -79,31 +79,45 @@ export interface SyncFeedback {
 const FEEDBACK: Record<GitSyncStatus, SyncFeedback> = {
   synced: { severity: 'success', unresolved: false, verified: true },
   up_to_date: { severity: 'info', unresolved: false, verified: true },
+  // No remote at all: nothing was ever fetched, and nothing is wrong.
   skipped: { severity: 'info', unresolved: false, verified: false },
+  // A remote was fetched but the branch tracks nothing, so no comparison ran.
+  // Also nothing wrong — and also not evidence the mesh is up to date.
+  no_upstream: { severity: 'info', unresolved: false, verified: false },
   partial: { severity: 'warning', unresolved: true, verified: false },
   // Fetched, but the backend never established where this mesh stands. It is
   // a problem — the mesh may be arbitrarily far behind — and it is emphatically
   // not a verified success, so it must not resolve a card or clear a badge.
   unverified: { severity: 'warning', unresolved: true, verified: false },
+  // The fetch was attempted and did not complete. `fetched: false` here means
+  // "did not finish", NOT "was never tried" — `git fetch` had already been
+  // launched and may have contacted upstream before failing.
   failed: { severity: 'error', unresolved: true, verified: false },
 };
 
 /** What a stored failure record may claim about the mesh's position. Total by
  *  construction: any status this build does not recognise falls to `unknown`
- *  rather than defaulting to a claim. */
+ *  rather than defaulting to a claim.
+ *
+ *  The single thing this must not do is treat `fetched: false` as "no fetch
+ *  was attempted". That flag means the fetch did not *complete*, and Rust
+ *  returns `failed` after launching `git fetch` — so a network failure proves
+ *  nothing about whether upstream was contacted. Only `skipped` (no remote
+ *  configured) proves nothing was ever fetched. */
 export function evidenceOf(result: GitSyncResult): SyncEvidence {
   switch (result.status) {
     // Fetched, commits arrived, the fast-forward did not apply: the mesh is
     // behind, and that much is established.
     case 'partial':
       return 'behind';
-    // The result itself reports `fetched: false`, so "no fetch ran" is a fact
-    // here rather than an inference.
-    case 'failed':
+    // The one case where "nothing was fetched" is a fact rather than an
+    // inference: there is no remote to fetch from.
     case 'skipped':
-      return result.fetched ? 'unknown' : 'not-fetched';
-    // `unverified` fetched but nobody compared it; an unrecognised status is
-    // not this build's to interpret.
+      return 'not-fetched';
+    // `no_upstream` fetched but nobody compared it; `unverified` fetched and
+    // the comparison failed; `failed` attempted a fetch that did not complete.
+    // An unrecognised status is not this build's to interpret. None of them
+    // supports a claim about the mesh's position.
     default:
       return 'unknown';
   }

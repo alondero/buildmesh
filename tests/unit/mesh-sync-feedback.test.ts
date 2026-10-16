@@ -13,18 +13,30 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
 const MESH = { name: 'lambo-recomp', path: '/repos/lambo-recomp' };
 
-/** Mirrors the backend's own mapping (see `sync_outcome_to_git_sync_result`):
- *  a `skipped` or `failed` run never reached the remote, so it reports
- *  `fetched: false`. A helper that defaulted `fetched: true` would make the
- *  "no completion was published" and "reads the flag, not the status" cases
- *  assert against a shape the backend cannot produce. */
-const FETCHED_BY_STATUS: Record<GitSyncStatus, boolean> = {
-  synced: true, up_to_date: true, skipped: false, partial: true, unverified: true, failed: false,
-};
+/** One constructor per wire shape the backend actually emits, with every
+ *  field written out.
+ *
+ *  Deliberately NOT a `status → fetched` table: that would be production
+ *  mapping logic living in a test file, and it goes stale the moment an
+ *  outcome is added (it already had once — `no_upstream` is fetched, while
+ *  `skipped` is not, and a per-status table hides that difference). Spelling
+ *  each shape out also keeps `fetched: false` honest: it means the fetch did
+ *  not COMPLETE, not that it was never attempted. */
+const wire = (over: Partial<GitSyncResult> & Pick<GitSyncResult, 'status' | 'fetched'>): GitSyncResult => ({
+  pulled: false, new_commits: 0, message: `${over.status}`, ...over,
+});
 
-function result(status: GitSyncStatus, message: string, overrides: Partial<GitSyncResult> = {}): GitSyncResult {
-  return { fetched: FETCHED_BY_STATUS[status], pulled: false, new_commits: 0, message, status, ...overrides };
-}
+const SYNCED = (message = 'Pulled 3 new commits') => wire({ status: 'synced', fetched: true, pulled: true, new_commits: 3, message });
+const UP_TO_DATE = (message = 'Already up to date') => wire({ status: 'up_to_date', fetched: true, message });
+/** No remote configured — the only outcome that proves nothing was fetched. */
+const NO_REMOTE = (message = 'No remote configured') => wire({ status: 'skipped', fetched: false, message });
+/** A remote was fetched; the branch tracks nothing, so no comparison ran. */
+const NO_UPSTREAM = (message = 'Fetched, but this branch has no upstream to compare against') => wire({ status: 'no_upstream', fetched: true, message });
+const PARTIAL = (message = 'Fetched 1 new commit but fast-forward failed: diverged') => wire({ status: 'partial', fetched: true, new_commits: 1, message });
+const UNVERIFIED = (message = 'Fetched, but could not compare with upstream: locked') => wire({ status: 'unverified', fetched: true, message });
+/** The fetch was launched and did not complete — `fetched: false` says
+ *  "did not finish", not "was never tried". */
+const FAILED = (message = 'Fetch failed: could not resolve host') => wire({ status: 'failed', fetched: false, message });
 
 beforeEach(() => {
   vi.mocked(invoke).mockReset();
@@ -34,44 +46,48 @@ beforeEach(() => {
 
 describe('sync result classification', () => {
   // The severity table is the whole feature: `MeshItem` used to discard this
-  // result entirely, so nothing pinned it. `partial` and `failed` are the two
-  // that must reach the user as a problem rather than a neutral notice.
+  // result entirely, so nothing pinned it. `partial`, `unverified` and
+  // `failed` are the three that must reach the user as a problem rather than
+  // a neutral notice.
   it.each([
-    ['synced', 'success', false, true],
-    ['up_to_date', 'info', false, true],
-    ['skipped', 'info', false, false],
-    ['partial', 'warning', true, false],
-    ['failed', 'error', true, false],
-  ] as const)('maps %s to %s (unresolved: %s, verified: %s)', (status, severity, unresolved, verified) => {
-    expect(classifySyncResult(result(status, 'x'))).toEqual({ severity, unresolved, verified });
+    ['synced', SYNCED, 'success', false, true],
+    ['up_to_date', UP_TO_DATE, 'info', false, true],
+    ['skipped (no remote)', NO_REMOTE, 'info', false, false],
+    ['no_upstream', NO_UPSTREAM, 'info', false, false],
+    ['partial', PARTIAL, 'warning', true, false],
+    ['unverified', UNVERIFIED, 'warning', true, false],
+    ['failed', FAILED, 'error', true, false],
+  ] as const)('maps %s to %s (unresolved: %s, verified: %s)', (_name, shape, severity, unresolved, verified) => {
+    expect(classifySyncResult(shape())).toEqual({ severity, unresolved, verified });
   });
 
   it('treats a remote-less mesh as resolved, not as a problem to nag about', () => {
-    // `skipped` and `failed` share `fetched: false, new_commits: 0`; only the
+    // `no_remote` and `failed` share `fetched: false, new_commits: 0`; only the
     // status separates a valid local-only repo from a real failure.
-    expect(classifySyncResult(result('skipped', 'No remote configured')).unresolved).toBe(false);
-    expect(classifySyncResult(result('failed', 'Fetch failed: network down')).unresolved).toBe(true);
+    expect(classifySyncResult(NO_REMOTE()).unresolved).toBe(false);
+    expect(classifySyncResult(FAILED()).unresolved).toBe(true);
   });
 
   it('distinguishes "checked and in sync" from "checked nothing"', () => {
-    // A skipped sync contacted no remote. Treating it as verified would let it
-    // resolve a real failure it never retested, and would let a bulk summary
-    // count it as a success the run never achieved.
-    expect(classifySyncResult(result('up_to_date', 'Already up to date')).verified).toBe(true);
-    expect(classifySyncResult(result('skipped', 'No remote configured')).verified).toBe(false);
+    // Neither `skipped` nor `no_upstream` verified anything. Treating either as
+    // verified would let it resolve a real failure it never retested, and would
+    // let a bulk summary count it as a success the run never achieved.
+    expect(classifySyncResult(UP_TO_DATE()).verified).toBe(true);
+    expect(classifySyncResult(NO_REMOTE()).verified).toBe(false);
+    expect(classifySyncResult(NO_UPSTREAM()).verified).toBe(false);
   });
 });
 
 describe('reporting a manual sync', () => {
   it('always raises a toast naming the mesh, whatever the outcome', () => {
-    reportMeshSync(MESH, result('synced', 'Pulled 3 new commits', { pulled: true, new_commits: 3 }));
+    reportMeshSync(MESH, SYNCED());
     const [toast] = useToastStore.getState().toasts;
     expect(toast).toMatchObject({ provider: SYNC_PROVIDER, message: 'lambo-recomp: Pulled 3 new commits', severity: 'success' });
   });
 
   it('puts a partial sync into Needs attention with the backend\'s own reason', () => {
     const detail = 'Fetched 1 new commit but fast-forward failed: not possible to fast-forward';
-    reportMeshSync(MESH, result('partial', detail));
+    reportMeshSync(MESH, PARTIAL(detail));
     const [notice] = useToastStore.getState().notifications;
     expect(needsAttention(notice)).toBe(true);
     expect(notice.action).toEqual({ kind: 'mesh-sync-failure', path: MESH.path, meshName: MESH.name, detail, evidence: 'behind' });
@@ -81,20 +97,20 @@ describe('reporting a manual sync', () => {
   });
 
   it('puts a failed fetch into Needs attention', () => {
-    reportMeshSync(MESH, result('failed', 'Fetch failed: could not resolve host'));
+    reportMeshSync(MESH, FAILED());
     expect(needsAttention(useToastStore.getState().notifications[0])).toBe(true);
   });
 
   it('does not put a successful or up-to-date sync into Needs attention', () => {
-    reportMeshSync(MESH, result('up_to_date', 'Already up to date'));
+    reportMeshSync(MESH, UP_TO_DATE());
     expect(useToastStore.getState().notifications.some(needsAttention)).toBe(false);
   });
 
   it('resolves an earlier failure once a later sync succeeds', () => {
-    reportMeshSync(MESH, result('failed', 'Fetch failed: network down'));
+    reportMeshSync(MESH, FAILED('Fetch failed: network down'));
     expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1);
 
-    reportMeshSync(MESH, result('synced', 'Pulled 1 new commit', { pulled: true, new_commits: 1 }));
+    reportMeshSync(MESH, SYNCED('Pulled 1 new commit'));
     expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(0);
     // The problem's record survives as history, marked resolved — it is not
     // deleted, so the user can still see what happened. (The successful sync's
@@ -104,8 +120,8 @@ describe('reporting a manual sync', () => {
   });
 
   it('does not resolve another mesh\'s failure', () => {
-    reportMeshSync(MESH, result('failed', 'Fetch failed: network down'));
-    reportMeshSync({ name: 'other', path: '/repos/other' }, result('synced', 'Pulled 1 new commit', { pulled: true, new_commits: 1 }));
+    reportMeshSync(MESH, FAILED('Fetch failed: network down'));
+    reportMeshSync({ name: 'other', path: '/repos/other' }, SYNCED('Pulled 1 new commit'));
     expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1);
   });
 
@@ -116,14 +132,16 @@ describe('reporting a manual sync', () => {
     expect(notice.action).toMatchObject({ kind: 'mesh-sync-failure', detail: 'failed to open repo' });
   });
 
-  it('does not let a skipped sync resolve an earlier failure', () => {
-    // The mesh was never contacted, so the earlier failure is still the current
+  it('does not let a sync that checked nothing resolve an earlier failure', () => {
+    // Neither mesh was compared, so the earlier failure is still the current
     // truth. Clearing it here would silently drop the user's one real problem.
-    reportMeshSync(MESH, result('failed', 'Fetch failed: network down'));
+    reportMeshSync(MESH, FAILED('Fetch failed: network down'));
     expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1);
 
-    reportMeshSync(MESH, result('skipped', 'No remote configured'));
-    expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1);
+    for (const shape of [NO_REMOTE, NO_UPSTREAM]) {
+      reportMeshSync(MESH, shape());
+      expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1);
+    }
   });
 
   it('publishes a completion only for a verified sync', () => {
@@ -131,12 +149,12 @@ describe('reporting a manual sync', () => {
     expect(revisions()).toBe(0);
 
     reportSyncError(MESH, new Error('boom'));
-    reportMeshSync(MESH, result('skipped', 'No remote configured'));
+    reportMeshSync(MESH, NO_REMOTE());
     expect(revisions()).toBe(0);
 
-    reportMeshSync(MESH, result('synced', 'Pulled 1 new commit', { pulled: true, new_commits: 1 }));
+    reportMeshSync(MESH, SYNCED('Pulled 1 new commit'));
     expect(revisions()).toBe(1);
-    reportMeshSync(MESH, result('up_to_date', 'Already up to date'));
+    reportMeshSync(MESH, UP_TO_DATE());
     // A counter, not a boolean: a repeat must still wake a subscriber up.
     expect(revisions()).toBe(2);
   });
@@ -146,43 +164,52 @@ describe('reporting a manual sync', () => {
     // ref the behind-count is measured against has moved and every row for this
     // mesh must re-read it — while the failure itself stays unresolved.
     const entry = () => useMeshSyncCompletion.getState().completions[MESH.path];
-    reportMeshSync(MESH, result('partial', 'Fetched 1 new commit but fast-forward failed: diverged'));
+    reportMeshSync(MESH, PARTIAL());
     expect(entry()).toMatchObject({ verified: false, refsFetched: true });
     expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1);
   });
 
   it('publishes no completion for a result that neither verified nor fetched', () => {
     // Publishing nothing and raising a card are separate questions, and this
-    // pins the difference so the documented contract cannot drift from it: a
-    // failed fetch that never reached the remote is a completed `git_sync`
-    // result — the backend answered — that still moved no refs and established
-    // nothing, so no row's cached state changes.
-    reportMeshSync(MESH, result('failed', 'Fetch failed: could not resolve host'));
+    // pins the difference so the documented contract cannot drift from it. A
+    // failed fetch is a completed `git_sync` result — the backend answered —
+    // that moved no refs and established nothing, so no row's cached state
+    // changes.
+    reportMeshSync(MESH, FAILED());
     expect(useMeshSyncCompletion.getState().completions[MESH.path]).toBeUndefined();
     // …but the user still has to be told, so it raises an unresolved card.
     expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1);
     // A mesh with no remote neither publishes nor raises: there is nothing to
     // report and nothing that is wrong.
-    reportMeshSync(MESH, result('skipped', 'No remote configured'));
+    reportMeshSync(MESH, NO_REMOTE());
     expect(useMeshSyncCompletion.getState().completions[MESH.path]).toBeUndefined();
     expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1);
   });
 
+  it('publishes a fetch for a no-upstream sync — the remote was contacted', () => {
+    // The refs moved, so the row's cached behind-count is stale and must be
+    // re-read, even though nothing was compared and nothing resolved.
+    reportMeshSync(MESH, NO_UPSTREAM());
+    expect(useMeshSyncCompletion.getState().completions[MESH.path])
+      .toMatchObject({ verified: false, refsFetched: true });
+  });
+
   it('reads the fetch signal from the backend flag, not the status', () => {
-    // `skipped` and `failed` both carry fetched:false upstream; only a partial
-    // run reports fetched:true without verifying. Deriving the signal from the
-    // status instead would miss exactly that case.
-    expect(outcomeOf(result('partial', 'x'))).toEqual({ verified: false, refsFetched: true });
-    expect(outcomeOf(result('skipped', 'x'))).toEqual({ verified: false, refsFetched: false });
-    expect(outcomeOf(result('synced', 'x', { pulled: true }))).toEqual({ verified: true, refsFetched: true });
+    // Two non-verified outcomes disagree about `fetched`: a partial and a
+    // no-upstream run fetched, a failed fetch did not complete. Deriving the
+    // signal from the status instead would miss exactly that difference.
+    expect(outcomeOf(PARTIAL())).toEqual({ verified: false, refsFetched: true });
+    expect(outcomeOf(NO_UPSTREAM())).toEqual({ verified: false, refsFetched: true });
+    expect(outcomeOf(FAILED())).toEqual({ verified: false, refsFetched: false });
+    expect(outcomeOf(SYNCED())).toEqual({ verified: true, refsFetched: true });
   });
 
   it('publishes a fetch for an unverified comparison so the row re-reads its count', () => {
     // `Unverified` fetched — the remote-tracking refs DID move — so the row's
     // cached behind-count is stale and must be re-read, even though nothing
     // was verified and nothing was resolved.
-    expect(outcomeOf(result('unverified', 'Fetched, but could not compare with upstream'))).toEqual({ verified: false, refsFetched: true });
-    reportMeshSync(MESH, result('unverified', 'Fetched, but could not compare with upstream'));
+    expect(outcomeOf(UNVERIFIED())).toEqual({ verified: false, refsFetched: true });
+    reportMeshSync(MESH, UNVERIFIED());
     expect(useMeshSyncCompletion.getState().completions[MESH.path])
       .toMatchObject({ verified: false, refsFetched: true });
   });
@@ -190,7 +217,7 @@ describe('reporting a manual sync', () => {
 
 describe('runMeshSync', () => {
   it('invokes git_sync and reports the result it gets back', async () => {
-    vi.mocked(invoke).mockResolvedValue(result('partial', 'Fetched 2 new commits; fast-forward skipped: changes to a.txt would be overwritten'));
+    vi.mocked(invoke).mockResolvedValue(PARTIAL('Fetched 2 new commits; fast-forward skipped: changes to a.txt would be overwritten'));
     const { feedback, answered } = await runMeshSync(MESH);
     expect(invoke).toHaveBeenCalledWith('git_sync', { path: MESH.path });
     // `answered` means only that the backend replied — it does NOT mean the
@@ -226,12 +253,9 @@ describe('runMeshSync', () => {
 });
 
 describe('raiseSyncAttention', () => {
-  const failed = (message: string) => result('failed', message);
-  const partial = (message: string) => result('partial', message);
-
   it('reuses the existing unresolved card for the same mesh instead of stacking duplicates', () => {
-    raiseSyncAttention(MESH, failed('Fetch failed: network down'));
-    raiseSyncAttention(MESH, failed('Fetch failed: still down'));
+    raiseSyncAttention(MESH, FAILED('Fetch failed: network down'));
+    raiseSyncAttention(MESH, FAILED('Fetch failed: still down'));
     const attention = useToastStore.getState().notifications.filter(needsAttention);
     expect(attention).toHaveLength(1);
     expect(attention[0].action).toMatchObject({ detail: 'Fetch failed: still down' });
@@ -240,33 +264,35 @@ describe('raiseSyncAttention', () => {
   it('records the problem without a visible toast when asked to be silent', () => {
     // The bulk command shows ONE summary toast; the per-mesh problems exist in
     // Needs attention only, or a dozen of them would overflow the toast stack.
-    raiseSyncAttention(MESH, failed('Fetch failed: network down'), { silent: true });
+    raiseSyncAttention(MESH, FAILED(), { silent: true });
     expect(useToastStore.getState().toasts).toHaveLength(0);
     expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1);
   });
 
-  it('records whether the fetch ran, so the card need not overclaim', () => {
-    // A partial run fetched, so upstream state IS known and the card may say
-    // the mesh is behind. A failed fetch never reached the remote, so it must
-    // not claim lag it never established.
-    raiseSyncAttention(MESH, partial('Fetched 1 new commit but fast-forward failed: diverged'));
-    raiseSyncAttention({ name: 'other', path: '/repos/other' }, failed('Fetch failed: network down'));
+  it('claims lag only where it was established', () => {
+    // A partial run fetched and counted, so upstream state IS known and the
+    // card may say the mesh is behind.
+    raiseSyncAttention(MESH, PARTIAL());
+    // A failed fetch was ATTEMPTED and did not complete — `git fetch` had
+    // already been launched and may have contacted upstream — so it supports
+    // no claim at all, not even "nothing was fetched".
+    raiseSyncAttention({ name: 'other', path: '/repos/other' }, FAILED());
     const byName = new Map(useToastStore.getState().notifications
       .filter(needsAttention).map(n => [n.action?.kind === 'mesh-sync-failure' ? n.action.meshName : '', n.action]));
     expect(byName.get(MESH.name)).toMatchObject({ evidence: 'behind' });
-    expect(byName.get('other')).toMatchObject({ evidence: 'not-fetched' });
+    expect(byName.get('other')).toMatchObject({ evidence: 'unknown' });
   });
 
   it('records unknown evidence for a fetch whose comparison failed', () => {
     // The backend fetched, so refs moved, but it never established where this
     // mesh stands. Neither "behind" nor "did not fetch" is supported.
-    raiseSyncAttention(MESH, result('unverified', 'Fetched, but could not compare with upstream: lock contention'));
+    raiseSyncAttention(MESH, UNVERIFIED());
     expect(useToastStore.getState().notifications[0].action)
       .toMatchObject({ evidence: 'unknown' });
   });
 
   it('never claims lag for a status this build does not recognise', () => {
-    const invented = { ...result('failed', 'x'), status: 'invented' } as unknown as GitSyncResult;
+    const invented = { ...FAILED(), status: 'invented' } as unknown as GitSyncResult;
     raiseSyncAttention(MESH, invented);
     expect(useToastStore.getState().notifications[0].action)
       .toMatchObject({ evidence: 'unknown' });

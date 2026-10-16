@@ -20,9 +20,12 @@ export interface WorktreeNotificationAction {
 export type SyncEvidence =
   /** The fetch ran and the fast-forward did not apply: the mesh is behind. */
   | 'behind'
-  /** The result proves no fetch ran, so upstream was never contacted. */
+  /** Nothing was ever fetched, because there is no remote to fetch from.
+   *  Only a mesh with no remote can carry this, and that outcome raises no
+   *  card at all — so in practice it survives on records written by earlier
+   *  builds, and the card still has to render it. */
   | 'not-fetched'
-  /** Nothing in the stored record establishes whether a fetch ran. */
+  /** Nothing in the stored record establishes the mesh's position. */
   | 'unknown';
 
 /** A manual mesh sync that did not leave the mesh in sync with upstream —

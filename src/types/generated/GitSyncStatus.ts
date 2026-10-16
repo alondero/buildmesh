@@ -3,19 +3,29 @@
 /**
  * How a manual `git_sync` ended, as the *user* experiences it. This is the
  * one field the frontend needs and cannot infer from the flags: a failed
- * fetch and a Mesh with no remote both report `fetched: false` with zero new
- * commits, and only the wording of `message` distinguishes them — so a UI
- * that classified outcomes from the flags had to either shout "error" at a
- * purely local Mesh or stay silent about a real network failure.
+ * fetch, a Mesh with no remote, and a branch with no upstream all report
+ * `fetched: false` with zero new commits, and only the wording of `message`
+ * distinguishes them — so a UI that classified outcomes from the flags had to
+ * either shout "error" at a purely local Mesh or stay silent about a real
+ * network failure.
+ *
+ * `fetched` means the fetch COMPLETED SUCCESSFULLY, never that it was
+ * attempted: `FetchFailed` is returned after `git fetch` was launched and
+ * failed or timed out, so it reports `fetched: false` even though upstream may
+ * have been contacted. The status is therefore the only reliable statement
+ * about what happened, which is why this enum exists at all — and why
+ * `NoUpstream` is separate from `Skipped` even though both are non-failures:
+ * one proves nothing was ever fetched, the other proves a fetch ran.
  *
  * `Partial` is the outcome that motivated this field: the fetch succeeded
  * but the working-tree fast-forward did not apply (dirty overlap, diverged
  * history, or a pull timeout). The mesh is *not* up to date, so the behind
  * marker stays — the user needs to be told why rather than left staring at
- * an unchanged count. `Partial` and `Failed` are the two statuses that leave
- * the mesh behind; which of them earns a "Needs attention" notification is
- * decided once on the frontend, in `src/lib/meshSyncFeedback.ts`.
+ * an unchanged count. `Partial`, `Unverified` and `Failed` are the statuses
+ * that leave the mesh in an unknown or behind state; which earn a "Needs
+ * attention" notification is decided once on the frontend, in
+ * `src/lib/meshSyncFeedback.ts`.
  *
  * Generated to src/types/generated/GitSyncStatus.ts (issue #404).
  */
-export type GitSyncStatus = "synced" | "up_to_date" | "skipped" | "partial" | "unverified" | "failed";
+export type GitSyncStatus = "synced" | "up_to_date" | "skipped" | "no_upstream" | "partial" | "unverified" | "failed";

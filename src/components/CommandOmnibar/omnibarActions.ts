@@ -129,30 +129,32 @@ export async function gitSyncAllMeshes(meshes: Mesh[]): Promise<void> {
   if (meshes.length === 0) return;
   const SILENT = { silent: true };
   const failed: string[] = [];
-  const behind: string[] = [];
-  const skipped: string[] = [];
-  let synced = 0;
+  // Left behind or unknown — the states that earn a Needs-attention card.
+  const unresolved: string[] = [];
+  // Two different non-failures, kept apart because they are different facts:
+  // no remote means nothing was ever fetched; no upstream means a fetch ran
+  // and there was nothing to compare it against. Reporting either as the
+  // other would tell a user their mesh has no remote when it has one.
+  const noRemote: string[] = [];
+  const noComparison: string[] = [];
   for (const mesh of meshes) {
     const target = { name: mesh.name, path: mesh.path };
     try {
       const result = await api.gitSync(mesh.path);
       const feedback = classifySyncResult(result);
       if (feedback.unresolved) {
-        (result.status === 'failed' ? failed : behind).push(mesh.name);
+        (result.status === 'failed' ? failed : unresolved).push(mesh.name);
         raiseSyncAttention(target, result, SILENT);
         // A partial run fetches without fast-forwarding, so the row's cached
         // behind-count is stale even though nothing was verified or resolved.
         noteSyncOutcome(target, outcomeOf(result));
         continue;
       }
-      // A mesh with no remote was never contacted. It is neither synced nor
-      // behind, so it is counted separately instead of being reported as a
-      // success the command never achieved.
+      // Neither synced nor a problem: say which of the two it is.
       if (!feedback.verified) {
-        skipped.push(mesh.name);
+        (result.status === 'skipped' ? noRemote : noComparison).push(mesh.name);
         continue;
       }
-      synced += 1;
       noteSyncOutcome(target, outcomeOf(result));
     } catch (error) {
       failed.push(mesh.name);
@@ -161,19 +163,20 @@ export async function gitSyncAllMeshes(meshes: Mesh[]): Promise<void> {
       reportSyncError(target, error, SILENT);
     }
   }
-  const problems = [...failed, ...behind];
+  const problems = [...failed, ...unresolved];
+  // Both non-failure buckets raise no Needs-attention item, so a summary that
+  // mentioned only the problems would report them nowhere at all.
+  const aside = [
+    noRemote.length > 0 ? `no remote: ${noRemote.join(', ')}` : '',
+    noComparison.length > 0 ? `nothing to compare: ${noComparison.join(', ')}` : '',
+  ].filter(Boolean).join('; ');
+  const asideNote = aside ? `; ${aside}` : '';
   if (problems.length > 0) {
-    // A skipped mesh raises no Needs-attention item, so a problem-only summary
-    // would leave the no-remote outcome reported nowhere at all. Name them here
-    // rather than dropping them from the one toast this run produces.
-    const skippedNote = skipped.length > 0 ? `; skipped (no remote): ${skipped.join(', ')}` : '';
     addToast(SYNC_PROVIDER, (problems.length === meshes.length
       ? `No mesh synced: ${problems.join(', ')}`
-      : `Sync incomplete for: ${problems.join(', ')}`) + skippedNote, 'warning');
-  } else if (skipped.length > 0) {
-    addToast(SYNC_PROVIDER, skipped.length === meshes.length
-      ? `No mesh synced — no remote configured: ${skipped.join(', ')}`
-      : `Synced ${synced} of ${meshes.length} meshes; skipped with no remote: ${skipped.join(', ')}`, 'info');
+      : `Sync incomplete for: ${problems.join(', ')}`) + asideNote, 'warning');
+  } else if (aside) {
+    addToast(SYNC_PROVIDER, aside, 'info');
   } else {
     addToast(SYNC_PROVIDER, `Synced ${meshes.length} mesh${meshes.length === 1 ? '' : 'es'}`, 'success');
   }
