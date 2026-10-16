@@ -75,40 +75,38 @@ pub fn drain_batched_with(
             Ok(chunk) => chunk,
             Err(_) => return,
         };
-        // Take ownership of the first Vec — no extra alloc for a single
-        // fill. Reserve up to `max_bytes` so coalesced extends don't
-        // reallocate on the storm path.
+        // An isolated echo keeps its small read buffer. Reserve the bulk
+        // budget only when another chunk actually arrives to coalesce.
         let mut buf = first;
-        buf.reserve(max_bytes.saturating_sub(buf.len()));
         let deadline = Instant::now() + window;
 
         loop {
             if buf.len() >= max_bytes {
                 break;
             }
-            match rx.try_recv() {
-                Ok(chunk) => {
-                    buf.extend_from_slice(&chunk);
-                    continue;
-                }
+            let chunk = match rx.try_recv() {
+                Ok(chunk) => chunk,
                 Err(TryRecvError::Disconnected) => {
                     on_batch(buf);
                     return;
                 }
-                Err(TryRecvError::Empty) => {}
-            }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            match rx.recv_timeout(remaining) {
-                Ok(chunk) => buf.extend_from_slice(&chunk),
-                Err(RecvTimeoutError::Timeout) => break,
-                Err(RecvTimeoutError::Disconnected) => {
-                    on_batch(buf);
-                    return;
+                Err(TryRecvError::Empty) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    match rx.recv_timeout(remaining) {
+                        Ok(chunk) => chunk,
+                        Err(RecvTimeoutError::Timeout) => break,
+                        Err(RecvTimeoutError::Disconnected) => {
+                            on_batch(buf);
+                            return;
+                        }
+                    }
                 }
-            }
+            };
+            buf.reserve(max_bytes.saturating_sub(buf.len()));
+            buf.extend_from_slice(&chunk);
         }
         on_batch(buf);
     }
@@ -136,6 +134,20 @@ mod tests {
 
         let batches = collect(rx, Duration::from_millis(50), 64);
         assert_eq!(batches, vec![b"hello world".to_vec()]);
+    }
+
+    #[test]
+    fn isolated_echo_reuses_its_small_read_buffer() {
+        let (tx, rx) = mpsc::channel();
+        let echo = b"x".to_vec();
+        let pointer = echo.as_ptr();
+        let capacity = echo.capacity();
+        tx.send(echo).unwrap();
+        drop(tx);
+        let batches = collect(rx, FLUSH_WINDOW, FLUSH_BYTES);
+        assert_eq!(batches, vec![b"x".to_vec()]);
+        assert_eq!(batches[0].capacity(), capacity);
+        assert_eq!(batches[0].as_ptr(), pointer);
     }
 
     #[test]
@@ -221,11 +233,18 @@ mod tests {
     }
 
     #[test]
-    fn production_flush_bytes_is_several_pty_fills() {
-        assert!(
-            FLUSH_BYTES > PTY_READ_BUF,
-            "FLUSH_BYTES ({FLUSH_BYTES}) must exceed one PTY fill ({PTY_READ_BUF}) or a build storm never batches"
-        );
+    fn production_threshold_flushes_four_full_reads_then_the_remainder() {
+        let (tx, rx) = mpsc::sync_channel(8);
+        for byte in 1..=5 {
+            tx.send(vec![byte; PTY_READ_BUF]).unwrap();
+        }
+        drop(tx);
+        let batches = collect(rx, FLUSH_WINDOW, FLUSH_BYTES);
+        let first = [1, 2, 3, 4]
+            .into_iter()
+            .flat_map(|byte| vec![byte; PTY_READ_BUF])
+            .collect::<Vec<_>>();
+        assert_eq!(batches, vec![first, vec![5; PTY_READ_BUF]]);
     }
 
     #[test]

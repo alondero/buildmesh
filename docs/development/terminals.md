@@ -82,6 +82,18 @@ wire needs costs the gate nothing, and no custom burst-boundary handling is need
 
 ## PTY output streaming (issue #1385 / #1393)
 
+The backend avoids eager payload allocations in the PTY hot path. After session
+capture is complete or preassigned, `ChunkCapture::feed` borrows valid UTF-8 from
+the current read buffer; malformed bytes retain the per-chunk lossy decoding
+behavior. Text released from the capture carry-over remains owned. The evaluator
+consumes the text synchronously before the next read. The batcher keeps an
+isolated chunk's original allocation and reserves the bulk budget when a second
+chunk arrives. Both the size threshold and flush window still govern dispatch.
+Run `node scripts/bench-session-capture.mjs` to measure decoder allocations and
+batch capacity against the production modules, or pass `--baseline <commit>` for
+a comparison. The standalone harness uses Cargo's cached dependencies offline.
+Allocated bytes measure cumulative allocator traffic, not retained memory or app RSS.
+
 Windows builds ship a pinned Microsoft ConPTY DLL and its matching native console
 hosts. `build.rs` runs `scripts/prepare-conpty.mjs` to verify the NuGet package
 checksum and stage the runtime beside Cargo binaries (including test binaries);

@@ -30,6 +30,7 @@
 
 use once_cell::sync::Lazy;
 use regex::Regex;
+use std::borrow::Cow;
 
 // Captures a UUID preceded by a provider-printed label like `session:`,
 // `session id:`, `conversation:`, or `conversation id:`. `(?:\s+id)?` is
@@ -115,8 +116,8 @@ fn is_utf8_continuation_byte(byte: u8) -> bool {
 /// [`tests::chunk_capture_releases_in_order_without_duplication`].
 ///
 /// Once `captured` is set, subsequent calls short-circuit: no regex work,
-/// no carry-over bookkeeping — the chunk's bytes are returned verbatim
-/// (lossy-decoded, the same U+FFFD-on-split-UTF-8 the rest of the codebase
+/// no carry-over bookkeeping — valid UTF-8 borrows the chunk's read buffer;
+/// invalid UTF-8 is lossy-decoded with the same U+FFFD-on-split-UTF-8 the codebase
 /// tolerated before issue #1221; harmless at that point because the
 /// session ID has been written). Pinned by
 /// [`tests::chunk_capture_short_circuits_after_latch`].
@@ -144,13 +145,13 @@ impl ChunkCapture {
     ///   tail + this chunk) matched the regex. Once non-`None`, the
     ///   internal latch fires and subsequent calls return `None` for the
     ///   UUID even if more chunks arrive.
-    pub fn feed(&mut self, chunk: &[u8]) -> (String, Option<String>) {
+    pub fn feed<'a>(&mut self, chunk: &'a [u8]) -> (Cow<'a, str>, Option<String>) {
         if self.captured {
             // Post-latch: the session ID has been captured. Don't bother
             // with carry-over bookkeeping — just hand the bytes through.
             // Lossy decoding here matches the pre-#1221 behaviour for the
             // remainder of the session; no functional impact.
-            return (String::from_utf8_lossy(chunk).into_owned(), None);
+            return (String::from_utf8_lossy(chunk), None);
         }
 
         // 1. Append the new chunk to the carry-over.
@@ -176,7 +177,10 @@ impl ChunkCapture {
             // would round-trip through from_utf8_lossy as U+FFFD — but
             // the latch has fired so the downstream consumers no longer
             // matter, and the captured UUID is already an owned String.
-            return (String::from_utf8_lossy(&text).into_owned(), Some(uuid));
+            return (
+                Cow::Owned(String::from_utf8_lossy(&text).into_owned()),
+                Some(uuid),
+            );
         }
 
         // 3. No match. Decide what to hold back vs. release.
@@ -184,7 +188,7 @@ impl ChunkCapture {
             // Everything fits in the carry-over — wait for more chunks.
             // No downstream text yet; the regex still has the whole
             // buffer to scan on the next call.
-            return (String::new(), None);
+            return (Cow::Borrowed(""), None);
         }
 
         // 4. Trim oldest bytes off `pending` so the kept tail is at most
@@ -215,7 +219,7 @@ impl ChunkCapture {
         // reader thread.
         let released_text = String::from_utf8_lossy(&released).into_owned();
 
-        (released_text, None)
+        (Cow::Owned(released_text), None)
     }
 }
 
@@ -465,6 +469,46 @@ mod tests {
         assert!(text.contains("some more output"));
     }
 
+    #[test]
+    fn chunk_capture_post_latch_borrows_valid_output() {
+        for captured_banner in [false, true] {
+            let mut cap = ChunkCapture::default();
+            if captured_banner {
+                let (_, uuid) = cap.feed(b"session id: 01a024d2-7cd6-7ea2-b907-531b0d261be7\n");
+                assert!(uuid.is_some());
+            } else {
+                cap.mark_captured();
+            }
+            let bulk = "\u{2588}".repeat(2730);
+            for chunk in [b"echo\r\n".as_slice(), bulk.as_bytes()] {
+                let (text, uuid) = cap.feed(chunk);
+                assert!(uuid.is_none());
+                assert_eq!(text.as_bytes(), chunk);
+                assert_eq!(
+                    text.as_ptr(),
+                    chunk.as_ptr(),
+                    "decoded output must borrow the PTY read buffer"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn chunk_capture_post_latch_preserves_invalid_utf8_output() {
+        let mut cap = ChunkCapture::default();
+        cap.mark_captured();
+        for (chunk, expected) in [
+            (b"".as_slice(), ""),
+            (&[0xe2, 0x96], "\u{fffd}"),
+            (&[0x88, b'h', b'i'], "\u{fffd}hi"),
+            (&[b'x', 0xff, b'y'], "x\u{fffd}y"),
+        ] {
+            let (text, uuid) = cap.feed(chunk);
+            assert_eq!(text, expected);
+            assert!(uuid.is_none());
+        }
+    }
+
     /// Post-latch the wrapper reverts to per-chunk lossy decoding (the
     /// carry-over bookkeeping has been dropped; the regex has already
     /// fired). Pin the trade-off: split UTF-8 in later chunks WILL be
@@ -539,11 +583,13 @@ mod tests {
     fn chunk_capture_releases_text_when_carry_over_grows() {
         let mut cap = ChunkCapture::default();
         // First 60 bytes: fits in carry-over, returns "".
-        let (t1, _) = cap.feed(&b"x".repeat(60));
+        let first = b"x".repeat(60);
+        let (t1, _) = cap.feed(&first);
         assert!(t1.is_empty());
         // Next 20 bytes: pending now 80 bytes; carry-over trims to 64,
         // releasing 16 bytes of "x".
-        let (t2, _) = cap.feed(&b"y".repeat(20));
+        let second = b"y".repeat(20);
+        let (t2, _) = cap.feed(&second);
         assert_eq!(t2.len(), 16);
         assert!(t2.chars().all(|c| c == 'x'));
     }
