@@ -128,6 +128,7 @@ export function planGates(paths, { full = false } = {}) {
   if (frontend) {
     npm('frontend-build', 'build', { minutes: 10, ignores: FRONTEND_BUILD_IGNORES, lane: 'frontend', nodeEnv: 'production' });
     npm('bundle', 'check:bundle', { ignores: FRONTEND_BUILD_IGNORES, lane: 'frontend' });
+    npm('bundle-composition', 'check:bundle-composition', { ignores: FRONTEND_BUILD_IGNORES, lane: 'frontend' });
     npm('frontend-tests', 'test', { tests: 'vitest', minutes: 10, ignores: FRONTEND_TEST_IGNORES, lane: 'frontend', heavy: true });
     node('browser-smoke', ['node_modules/@playwright/test/cli.js', 'test', '--project=verify-smoke', '--reporter=line'], { tests: 'playwright', browser: true, ignores: FRONTEND_BUILD_IGNORES, lane: 'frontend' });
   } else if (rust) {

@@ -210,7 +210,7 @@ test('isolation shares a total deadline across gates and leaves remaining failur
 test('product runner and shared failure parser edits select product verification', () => {
   for (const path of ['scripts/rust-test-shards.mjs', 'scripts/harness-test-failures.mjs']) {
     const ids = planGates([path]).map(gate => gate.id);
-    for (const id of ['rust-format', 'rust-clippy', 'rust-tests', 'binding-drift', 'frontend-build', 'bundle', 'frontend-tests', 'browser-smoke']) assert.ok(ids.includes(id), `${path}: ${id}`);
+    for (const id of ['rust-format', 'rust-clippy', 'rust-tests', 'binding-drift', 'frontend-build', 'bundle', 'bundle-composition', 'frontend-tests', 'browser-smoke']) assert.ok(ids.includes(id), `${path}: ${id}`);
   }
 });
 
@@ -1212,7 +1212,7 @@ test('the product plan splits into frontend and Rust lanes that wait for the bui
   const both = planGates(['unknown/input']);
   const byId = id => both.find(row => row.id === id);
   assert.deepEqual(both.filter(row => !row.lane).map(row => row.id).slice(0, 3), ['whitespace', 'staged-content', 'agent-rules']);
-  assert.deepEqual(both.filter(row => row.lane === 'frontend').map(row => row.id), ['frontend-build', 'bundle', 'frontend-tests', 'browser-smoke']);
+  assert.deepEqual(both.filter(row => row.lane === 'frontend').map(row => row.id), ['frontend-build', 'bundle', 'bundle-composition', 'frontend-tests', 'browser-smoke']);
   assert.deepEqual(both.filter(row => row.lane === 'rust').map(row => row.id), ['rust-format', 'rust-clippy', 'rust-tests', 'binding-drift']);
   // vite build empties dist/mobile, which the Rust crate embeds.
   assert.deepEqual(byId('rust-clippy').after, ['frontend-build']);
@@ -1681,7 +1681,7 @@ test('completion needs every gate PASS on the current tree, cached or fresh', t 
 test('the real plan reuses frontend gates after a Rust-only edit and docs-only edits skip code gates', () => {
   const plan = planGates(['src/owner.ts', 'src-tauri/src/lib.rs']);
   const rerun = path => plan.filter(row => gateReads(row, path)).map(row => row.id);
-  const frontend = ['frontend-build', 'bundle', 'frontend-tests', 'browser-smoke'];
+  const frontend = ['frontend-build', 'bundle', 'bundle-composition', 'frontend-tests', 'browser-smoke'];
   const rust = ['rust-format', 'rust-clippy', 'rust-tests', 'binding-drift'];
 
   const rustOnly = rerun('src-tauri/src/secret_scrubber.rs');

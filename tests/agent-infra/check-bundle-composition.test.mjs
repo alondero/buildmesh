@@ -70,12 +70,23 @@ test('the forbidden list covers the xterm packages and the Probe tabs', () => {
     '@xterm/addon-search',
     '@xterm/addon-web-links',
     '@xterm/addon-webgl',
-    '@xterm/addon-unicode11',
   ]) {
     assert.ok(specifiers.includes(pkg), `${pkg} must be gated`);
   }
   for (const tab of ['ProjectFilesTab', 'RepositoryTab', 'UsageTab', 'NotificationsTab']) {
     assert.ok(specifiers.includes(`./${tab}`), `./${tab} must be gated`);
+  }
+  // `@xterm/addon-unicode11` is never dynamically imported, so it has no chunk
+  // of its own; the lazy wrapper that carries it is what must stay split.
+  assert.ok(specifiers.includes('./loadUnicode11Widths'), './loadUnicode11Widths must be gated');
+});
+
+test('every forbidden entry pairs a specifier with the chunk of that same module', () => {
+  // A specifier whose stem names a different module both misses that module's
+  // own leak and blames the wrong file, so the two must describe one module.
+  for (const item of FORBIDDEN) {
+    const stemOf = item.specifier.replace(/^.*\//, '');
+    assert.equal(item.stem, stemOf, `${item.specifier} is gated against the wrong chunk stem`);
   }
 });
 
@@ -105,8 +116,8 @@ test('the rejection names the file holding the eager import', () => {
   const [violation] = report.violations;
   assert.equal(violation.specifier, '@xterm/addon-fit');
   assert.deepEqual(
-    violation.sites.map((s) => s.split('/').slice(-2).join('/')),
-    ['Terminal/TerminalRegistry.ts:2'],
+    violation.sites,
+    ['src/components/Terminal/TerminalRegistry.ts:2'],
     'the gate must point at the eager import, by file and line',
   );
 });
@@ -139,6 +150,29 @@ test('the two failure reasons stay distinct', () => {
   assert.equal(lazy.ok, true);
 });
 
+test('a relative --dist still catches a static import edge', () => {
+  // `staticClosure` keys are absolute, so a relative dist used to make every
+  // `closure.get(chunk)` miss and report the edge as lazy — a silent pass on
+  // exactly the build shape the gate exists to catch.
+  const { tmp, dist, src } = makeDist({ static: ['@xterm/addon-webgl'] });
+  const previous = process.cwd();
+  process.chdir(tmp);
+  try {
+    const relativeReport = evaluateComposition(path.join('dist', 'assets'), src);
+    const absoluteReport = evaluateComposition(dist, src);
+    assert.equal(relativeReport.violations.length, 1, 'a relative dist must not hide the violation');
+    assert.equal(relativeReport.violations[0].specifier, '@xterm/addon-webgl');
+    assert.equal(relativeReport.violations[0].reason, 'static-edge');
+    assert.deepEqual(
+      relativeReport.violations.map((v) => v.specifier),
+      absoluteReport.violations.map((v) => v.specifier),
+      'relative and absolute paths must agree',
+    );
+  } finally {
+    process.chdir(previous);
+  }
+});
+
 // ------------------------------------------------------ the parsing it relies on
 
 test('a dynamic import is not mistaken for a static one', () => {
@@ -166,14 +200,43 @@ test('the attribution scan ignores the lazy sites that keep a module split', () 
       "const [Terminal, FitAddon] = await Promise.all([import('@xterm/xterm'), import('@xterm/addon-fit')]);",
       "import type { Terminal } from '@xterm/xterm';",
       "import type { FitAddon } from '@xterm/addon-fit';",
+      "import { type Terminal as T2 } from '@xterm/xterm';",
+      "import { type FitAddon as F2 } from '@xterm/addon-fit';",
       '',
     ].join('\n'),
   );
-  // `import type` is erased by the compiler, and `import()` is the whole point
-  // of the code split, so neither is the file that pulled the module in.
+  // `import type` and its inline `import { type X }` spelling are erased by the
+  // compiler, and `import()` is the whole point of the code split, so none of
+  // them is the file that pulled the module in.
   for (const specifier of ['@xterm/xterm', '@xterm/addon-fit']) {
     assert.deepEqual(findStaticImportSites(src, [specifier]), [], `${specifier} must not be attributed to a lazy site`);
   }
+});
+
+test('a side-effect static import is attributed to the file that pulled it in', () => {
+  // `import '@xterm/xterm';` inlines the chunk exactly like a named import, so
+  // it must be found; reporting "inlined through another lazy chunk" here would
+  // send the reviewer looking in the wrong place.
+  const src = fs.mkdtempSync(path.join(os.tmpdir(), 'bundle-composition-src-'));
+  fs.writeFileSync(path.join(src, 'App.tsx'), "import '@xterm/addon-webgl';\nimport '@xterm/xterm';\n");
+  assert.deepEqual(
+    findStaticImportSites(src, ['@xterm/xterm']).map((s) => s.split('/').pop()),
+    ['App.tsx:2'],
+  );
+  assert.deepEqual(
+    findStaticImportSites(src, ['@xterm/addon-webgl']).map((s) => s.split('/').pop()),
+    ['App.tsx:1'],
+  );
+});
+
+test('attribution paths are relative to the tree that owns the source root', () => {
+  // Reported against the module-level repo root these came back absolute,
+  // because a fixture in os.tmpdir() cannot be reached from the repo's drive.
+  // Paths stay `src/…`-shaped for the default root and for a fixture alike.
+  const { src } = makeDist();
+  fs.mkdirSync(path.join(src, 'components'), { recursive: true });
+  fs.writeFileSync(path.join(src, 'components', 'Terminal.ts'), "import '@xterm/xterm';\n");
+  assert.deepEqual(findStaticImportSites(src, ['@xterm/xterm']), ['src/components/Terminal.ts:1']);
 });
 
 test('a missing dist is an error, not a silent pass', () => {

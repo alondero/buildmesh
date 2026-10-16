@@ -14,8 +14,8 @@
 //   - `src/components/Terminal/TerminalRegistry.ts` and
 //     `src/components/Terminal/BuildRunTerminalRegistry.ts` `await import()`
 //     `@xterm/xterm` plus the addons; `loadWebglRenderer.ts` dynamic-imports
-//     `@xterm/addon-webgl`; `loadUnicode11Widths.ts` carries
-//     `@xterm/addon-unicode11` behind its own lazy wrapper.
+//     `@xterm/addon-webgl`; and the lazy `./loadUnicode11Widths` wrapper, which
+//     statically imports `@xterm/addon-unicode11` and so carries it.
 //   - `src/components/Probe/ProbePanel.tsx` `lazy()`s every Probe tab.
 //
 // How the gate reads the build. Rollup erases bare module specifiers when it
@@ -63,9 +63,13 @@ const defaultDistDir = join(root, 'dist');
  * module (the emitted file is `<stem>-<hash>.js`) - that is what the built
  * output is actually matched against.
  *
- * `@xterm/addon-unicode11` is the one entry whose stem is not its own package
- * name: `loadUnicode11Widths.ts` imports it statically, and *that* module is
- * the dynamic-import entry, so the addon rides along in the wrapper's chunk.
+ * Every entry is a module reached through `import()`, so specifier and stem
+ * always describe the same module and the failure message points at the import
+ * that has to change. `@xterm/addon-unicode11` is therefore listed as the lazy
+ * `./loadUnicode11Widths` wrapper that carries it: the addon itself is never
+ * dynamically imported, so it has no chunk of its own to gate, and pairing its
+ * specifier with the wrapper's stem would both miss an entry-level import of the
+ * package and blame the wrapper for someone else's eager import.
  */
 export const FORBIDDEN = [
   {
@@ -91,9 +95,9 @@ export const FORBIDDEN = [
     why: 'carried by loadWebglRenderer, which WebglRendererPool dynamic-imports',
   },
   {
-    specifier: '@xterm/addon-unicode11',
+    specifier: './loadUnicode11Widths',
     stem: 'loadUnicode11Widths',
-    why: 'carried by the lazy loadUnicode11Widths wrapper, not by its own chunk',
+    why: 'carries @xterm/addon-unicode11; the wrapper is the lazy import, so it is what stays split',
   },
   ...[
     'ProjectFilesTab',
@@ -219,11 +223,41 @@ export function staticClosure(entryPath) {
   return reached;
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function findChunk(chunks, stem) {
-  const escaped = stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   // Rollup emits `<stem>-<hash>.js` with a base64url-ish hash.
-  const re = new RegExp(`^${escaped}-[A-Za-z0-9_-]{6,}\\.js$`);
-  return chunks.find((p) => re.test(p.split(/[\\/]/).pop())) ?? null;
+  const re = new RegExp(`^${escapeRegExp(stem)}-[A-Za-z0-9_-]{6,}\\.js$`);
+  const matches = chunks.filter((p) => re.test(p.split(/[\\/]/).pop()));
+  if (matches.length > 1) {
+    // Two chunks for one stem means the build shape changed under us; picking
+    // the first would silently check the wrong file.
+    throw new Error(`Multiple chunks matched "${stem}-*.js": ${matches.map((p) => p.split(/[\\/]/).pop()).join(', ')}\nUpdate the FORBIDDEN list in scripts/check-bundle-composition.mjs.`);
+  }
+  return matches[0] ?? null;
+}
+
+/**
+ * Whether an import clause pulls values at runtime, or is erased by the compiler.
+ *
+ * Covers both erased spellings: `import type { X } from 'y'` and the inline
+ * `import { type X } from 'y'`. An empty clause is the bare `import 'y'` form,
+ * which is a real side-effect import and is kept.
+ */
+function isValueImportClause(clause) {
+  const trimmed = String(clause).trim();
+  if (trimmed === '') return true;
+  if (/^type\b/.test(trimmed)) return false;
+  const bindings = trimmed
+    .replace(/^\{/, '')
+    .replace(/\}$/, '')
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (bindings.length === 0) return true;
+  return bindings.some((binding) => !/^type\b/.test(binding));
 }
 
 /**
@@ -231,15 +265,22 @@ function findChunk(chunks, stem) {
  *
  * Used only to explain a failure: when a forbidden module's chunk has vanished,
  * some file must have imported it eagerly, and the reviewer needs to be told
- * which. `\s+` rejects `import(` and `(?!type\b)` rejects `import type`, so
- * neither the lazy sites that keep the module split nor the erased type-only
- * imports this codebase uses at module scope are reported as the culprits.
+ * which. Both eager spellings are matched — `import … from 'y'` and the bare
+ * side-effect `import 'y'` — and erased type imports are skipped, so neither the
+ * lazy sites that keep the module split nor the `import type` declarations this
+ * codebase uses at module scope are reported as the culprits.
+ *
+ * Paths are reported relative to the directory that owns `srcRoot`, so the
+ * default gives repo-relative `src/components/...` and a fixture tree gives a
+ * stable path of its own. Using the module-level repo root instead would return
+ * an absolute path whenever the two live on different Windows drives.
  */
 export function findStaticImportSites(srcRoot, specifiers) {
   const sites = [];
   if (!existsSync(srcRoot)) return sites;
+  const base = dirname(resolve(srcRoot));
   const stems = specifiers.map((s) => s.replace(/^\.\//, ''));
-  const stack = [srcRoot];
+  const stack = [resolve(srcRoot)];
   while (stack.length > 0) {
     const dir = stack.pop();
     for (const name of readdirSync(dir)) {
@@ -251,22 +292,35 @@ export function findStaticImportSites(srcRoot, specifiers) {
       if (!/\.tsx?$/.test(name)) continue;
       const source = readFileSync(full, 'utf8');
       for (const stem of stems) {
-        const tail = stem.startsWith('@') ? stem : `[^'"]*${stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`;
-        const re = new RegExp(`\\b(?:import|export)\\s+(?!\\(|type\\b)[^;'"]*?\\bfrom\\s*['"]${tail}['"]`, 'g');
-        for (const m of source.matchAll(re)) {
-          const line = source.slice(0, m.index).split('\n').length;
-          sites.push(`${relative(root, full).replace(/\\/g, '/')}:${line}`);
+        const tail = stem.startsWith('@') ? stem : `[^'"]*${escapeRegExp(stem)}`;
+        const patterns = [
+          // `import … from 'y'` / `export … from 'y'`
+          new RegExp(`\\b(?:import|export)\\s+([^;'"]*?)\\bfrom\\s*['"]${tail}['"]`, 'g'),
+          // bare side-effect `import 'y'`, which has no clause to inspect
+          new RegExp(`\\bimport\\s*['"]${tail}['"]`, 'g'),
+        ];
+        for (const re of patterns) {
+          for (const m of source.matchAll(re)) {
+            if (!isValueImportClause(m[1])) continue;
+            const line = source.slice(0, m.index).split('\n').length;
+            sites.push(`${relative(base, full).replace(/\\/g, '/')}:${line}`);
+          }
         }
       }
     }
   }
-  return sites.sort();
+  return [...new Set(sites)].sort();
 }
 
 export function evaluateComposition(distDir, srcRoot = join(root, 'src')) {
-  const entryPath = findEntryChunk(distDir);
+  // `staticClosure` keys are absolute (it resolves each import target), so the
+  // chunk paths this function compares against them must be absolute too. A
+  // relative `--dist dist` would otherwise make every `closure.get(chunk)` miss
+  // and report a static import edge as lazy — a silent pass on broken code.
+  const distRoot = resolve(distDir);
+  const entryPath = findEntryChunk(distRoot);
   const entry = entryPath.split(/[\\/]/).pop();
-  const chunks = listJsChunks(distDir);
+  const chunks = listJsChunks(distRoot);
   const closure = staticClosure(entryPath);
 
   const checks = FORBIDDEN.map((item) => {

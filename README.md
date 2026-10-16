@@ -350,10 +350,11 @@ npm run check:bundle-composition   # reads dist/ and fails if a lazy chunk was i
 
 `scripts/check.ps1 all-ts` (and `all`) runs both checks as part of the green
 bar — `unit` / `integration` / `rust` skip them because they don't produce a
-build. The quality job on CI runs them after `npm run build` so a regression
-on the entry chunk fails the build. Bump the budget values intentionally —
-every visible CI failure costs a hot path; don't paper over a real growth by
-raising the ceiling. If the gate instead reports that a lazy chunk has gone
+build. `npm run verify` runs both too, as the `bundle` and `bundle-composition`
+harness gates. The quality job on CI runs them after `npm run build` so a
+regression on the entry chunk fails the build. Bump the budget values
+intentionally — every visible CI failure costs a hot path; don't paper over a
+real growth by raising the ceiling. If the gate instead reports that a lazy chunk has gone
 missing after a deliberate build-config change, update its forbidden list
 rather than deleting the check.
 
