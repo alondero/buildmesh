@@ -75,15 +75,18 @@
 //! the archived-node resume picker, and circuit assistant reports all work.
 
 use crate::agent::capabilities::{AttentionCapability, AttentionLaunchMode, PermissionModeOption};
+use crate::agent::managed_config;
 use crate::agent::provider::{
-    AgentProvider, LaunchRuntime, Platform, ResolvedPath, SpawnRecipe, UiMeta, WindowsShell,
+    shell_for, AgentProvider, LaunchRuntime, Platform, ResolvedPath, SpawnRecipe, UiMeta,
 };
+// The recipe tests assert the shell each platform produces; nothing outside
+// `cfg(test)` names the type now that `shell_for` is shared.
+#[cfg(test)]
+use crate::agent::provider::WindowsShell;
 use crate::agent::session_lifecycle::LifecycleKind;
 use crate::env::windows_attention_command;
 use crate::models::EnvType;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct McodeAdapter;
 pub static MCODE: McodeAdapter = McodeAdapter;
@@ -161,20 +164,6 @@ const MCODE_PROVISIONED_EVENTS: &[&str] = &["SessionStart", "Stop", "PermissionR
 /// fresh one, and a re-run that already carries the exact handler leaves the
 /// file untouched.
 const BUILDMESH_HOOK_MARKER: &str = "/api/attention/";
-
-/// Counter backing the PID+counter `.tmp` suffix for atomic writes
-/// (Cursor / AGY precedent — `agy.rs:14-39`, `cursor.rs:62`). Two
-/// concurrent writes in the same process would otherwise collide on a
-/// fixed tmp name.
-static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Per-platform shell selection. Mirrors the OpenCode / Antigravity pattern.
-fn shell_for(platform: Platform) -> WindowsShell {
-    match platform {
-        Platform::Macos | Platform::Linux => WindowsShell::Direct,
-        Platform::Windows => WindowsShell::Cmd,
-    }
-}
 
 /// Build the `(command, args)` pair mcode's hook runner executes for one
 /// event. mcode passes `args` to `command` **without shell interpretation**
@@ -360,43 +349,6 @@ fn wsl_networking_is_mirrored(mode: Option<&str>) -> bool {
     mode.is_some_and(|mode| mode.trim().eq_ignore_ascii_case("mirrored"))
 }
 
-/// Atomically persist `content` to `path` via a PID+counter `.tmp`
-/// file + rename. Mirrors `cursor.rs:127-157` / `agy.rs:14-40`. A
-/// pre-existing `.tmp` from an earlier crash is overwritten; the final
-/// rename is a single filesystem operation so partial reads of the
-/// manifest see either the old file or the new one.
-fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
-    let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("plugin.json");
-    let tmp = path.with_file_name(format!(
-        "{}.{}.{}.tmp",
-        file_name,
-        std::process::id(),
-        counter
-    ));
-
-    {
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(content.as_bytes())?;
-        file.sync_all()?;
-    }
-
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        if let Err(rm_err) = std::fs::remove_file(&tmp) {
-            tracing::warn!(
-                "mcode atomic_write: failed to clean up temp file {:?}: {}",
-                tmp,
-                rm_err
-            );
-        }
-        return Err(e);
-    }
-    Ok(())
-}
-
 /// Best-effort Full Access pin, run on every mcode spawn.
 ///
 /// Failure is logged, never propagated. A node that starts in mcode's own
@@ -559,7 +511,8 @@ fn already_pinned(line: &str, comment: &str, value: &str) -> bool {
 
 /// Persist the pinned config and report that the write happened.
 fn write_pinned_config(path: &Path, contents: &str) -> Result<bool, String> {
-    atomic_write(path, contents).map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+    managed_config::atomic_write(path, contents)
+        .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
     tracing::info!(
         "mcode pin_permission_mode: set {MCODE_PERMISSION_MODE_KEY}={MCODE_PERMISSION_MODE_VALUE} in {:?}",
         path
@@ -585,9 +538,7 @@ fn handler_entry_targets_attention(entry: &serde_json::Value) -> bool {
             }
         }
     }
-    let decoded = crate::env::decode_powershell_command(haystack.trim_end());
-    let candidate = decoded.as_deref().unwrap_or(&haystack);
-    candidate.contains(BUILDMESH_HOOK_MARKER)
+    managed_config::carries_anchors(haystack.trim_end(), &[BUILDMESH_HOOK_MARKER])
 }
 
 /// True when `handler` is a Buildmesh-owned entry. Accepts the 0.4.0+ nested
@@ -611,107 +562,50 @@ fn is_buildmesh_handler(handler: &serde_json::Value) -> bool {
 /// ever merged additively.
 ///
 /// A missing file is the happy path (fresh install). A malformed existing file
-/// (trailing comma, partial edit, syntax error) is treated as an explicit
-/// `Err` rather than silently clobbered — the Cursor precedent at
-/// `cursor.rs:194-198`: the user's data must surface to the spawn path as a
-/// provision failure so it can be repaired.
+/// (trailing comma, partial edit, syntax error) is refused through the shared
+/// `managed_config::read_document` refusal rather than silently clobbered:
+/// the user's data must surface to the spawn path as a provision failure so it
+/// can be repaired.
 ///
 /// Returns `Ok(())` without rewriting the file when every event already
 /// carries the expected handler (the issue #886 idempotency invariant — no
 /// spurious mtime bumps).
 fn ensure_plugin_manifest(path: &Path, handler: &serde_json::Value) -> Result<(), String> {
-    let mut settings: serde_json::Value = match std::fs::read_to_string(path) {
-        Ok(content) => serde_json::from_str(&content).map_err(|e| {
-            format!(
-                "refusing to overwrite malformed {path:?}: {e}. \
-                 Repair or remove the file and retry"
-            )
-        })?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
-        Err(e) => return Err(format!("failed to read {path:?}: {e}")),
-    };
-    if !settings.is_object() {
-        return Err(format!(
-            "mcode plugin manifest top-level must be a JSON object; got {}",
-            settings_kind(&settings)
-        ));
-    }
+    let mut document = managed_config::read_document(path).map_err(|error| error.to_string())?;
+    let object = managed_config::root_object(&mut document, "mcode plugin manifest top-level")?;
 
     let mut changed = false;
-    {
-        let object = settings
-            .as_object_mut()
-            .expect("manifest verified object above");
-        for (key, value) in [
-            ("name", serde_json::json!(MCODE_PLUGIN_NAME)),
-            ("version", serde_json::json!(MCODE_PLUGIN_VERSION)),
-            ("description", serde_json::json!(MCODE_PLUGIN_DESCRIPTION)),
-        ] {
-            if object.get(key) != Some(&value) {
-                object.insert(key.to_string(), value);
-                changed = true;
-            }
+    for (key, value) in [
+        ("name", serde_json::json!(MCODE_PLUGIN_NAME)),
+        ("version", serde_json::json!(MCODE_PLUGIN_VERSION)),
+        ("description", serde_json::json!(MCODE_PLUGIN_DESCRIPTION)),
+    ] {
+        if object.get(key) != Some(&value) {
+            object.insert(key.to_string(), value);
+            changed = true;
         }
+    }
 
-        let hooks = object
-            .entry("hooks")
-            .or_insert_with(|| serde_json::json!({}));
-        if !hooks.is_object() {
-            return Err(format!(
-                "mcode plugin manifest `hooks` must be a JSON object; got {}",
-                settings_kind(hooks)
-            ));
-        }
-        for event in MCODE_PROVISIONED_EVENTS {
-            let group = hooks
-                .as_object_mut()
-                .expect("hooks verified object above")
-                .entry(*event)
-                .or_insert_with(|| serde_json::json!([]));
-            // Capture the kind tag for the error path before taking the
-            // mutable borrow — `group.as_array_mut()` borrows the whole
-            // entry, so calling `settings_kind(group)` inside the closure
-            // would conflict with the live mutable borrow.
-            let group_kind = settings_kind(group);
-            let group_array = group.as_array_mut().ok_or_else(|| {
-                format!("mcode plugin manifest `hooks.{event}` must be an array; got {group_kind}")
-            })?;
-            if let Some(existing) = group_array.iter_mut().find(|h| is_buildmesh_handler(h)) {
-                if *existing != *handler {
-                    *existing = handler.clone();
-                    changed = true;
-                }
-            } else {
-                group_array.push(handler.clone());
-                changed = true;
-            }
-        }
+    let hooks = managed_config::object_entry(object, "hooks", "mcode plugin manifest `hooks`")?;
+    for event in MCODE_PROVISIONED_EVENTS {
+        let group_array = managed_config::array_entry(
+            hooks,
+            event,
+            &format!("mcode plugin manifest `hooks.{event}`"),
+        )?;
+        changed |= managed_config::upsert_entry(group_array, &is_buildmesh_handler, handler);
     }
 
     if !changed {
         return Ok(());
     }
-    let content = serde_json::to_string_pretty(&settings)
+    let content = document
+        .to_pretty_json()
         .map_err(|e| format!("serialize mcode plugin manifest failed: {e}"))?;
-    atomic_write(path, &content)
+    managed_config::atomic_write(path, &content)
         .map_err(|e| format!("failed to write mcode plugin manifest: {e}"))?;
     tracing::info!("mcode provision_attention_hooks: wrote {:?}", path);
     Ok(())
-}
-
-/// Human-readable JSON kind tag for malformed-file rejections.
-/// Mirrors `cursor.rs:280-289` / `grok.rs:146-155` — distinguishes
-/// `Object`, `Array`, `String`, `Number`, `Boolean`, `Null` so the
-/// rejection names the actual shape rather than `serde_json::Value`.
-fn settings_kind(value: &serde_json::Value) -> &'static str {
-    match value {
-        serde_json::Value::Object(_) => "Object",
-        serde_json::Value::Array(_) => "Array",
-        serde_json::Value::String(_) => "String",
-        serde_json::Value::Number(_) => "Number",
-        serde_json::Value::Bool(_) => "Boolean",
-        serde_json::Value::Null => "Null",
-    }
 }
 
 /// Inner provisioner used by `AgentProvider::provision_attention_hooks`.
