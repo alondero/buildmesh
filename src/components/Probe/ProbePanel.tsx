@@ -74,6 +74,9 @@ import {
 // opening, only the active tab's chunk is fetched — switching tabs brings
 // the next one down on demand. The lazy components are intentionally
 // defined at module scope so they're not recreated on every render.
+// Issue #2409 — `scripts/check-bundle-composition.mjs` gates this split: if a
+// tab is ever imported statically it loses its lazy chunk and the gate fails
+// with the offending import. Add a new tab to its forbidden list too.
 const ProjectFilesTab = lazy(() => import('./ProjectFilesTab').then((m) => ({ default: m.ProjectFilesTab })));
 const AgentChangesTab = lazy(() => import('./AgentChangesTab').then((m) => ({ default: m.AgentChangesTab })));
 const ProjectSettingsTab = lazy(() => import('./ProjectSettingsTab').then((m) => ({ default: m.ProjectSettingsTab })));

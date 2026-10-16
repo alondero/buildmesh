@@ -375,6 +375,14 @@ jobs:
       - name: Check desktop initial bundle budget (issue #1568)
         run: npm run check:bundle
 
+      # Issue #2409 - the budget above says how big the entry chunk may get,
+      # not what belongs in it. This gate asserts xterm + its addons and the
+      # Probe tabs are still split into their own lazy chunks, so an eager
+      # re-import fails the build instead of quietly re-growing the entry
+      # chunk. It reads the same `dist/` the budget step just measured.
+      - name: Check desktop bundle composition (issue #2409)
+        run: npm run check:bundle-composition
+
       # `tests/integration/ui-shot.test.ts` drives the fixture UI in headless
       # Chromium (scripts/ui-shot.mjs) and is the one suite that needs a
       # browser build. It now runs in the `quality-tests` leg that owns the

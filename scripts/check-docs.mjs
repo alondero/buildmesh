@@ -52,6 +52,8 @@ export const ALWAYS_LOADED_DOC_BUDGETS = {
   'docs/knowledge-primer.md': 16 * 1024,
 };
 
+// The plain filesystem walk, kept for the skill corpus (tracked tooling rather
+// than documents). The Markdown collector below reads git's view instead.
 function walkMarkdown(dir) {
   if (!existsSync(dir)) return [];
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -61,10 +63,42 @@ function walkMarkdown(dir) {
   });
 }
 
+// The corpus is the Markdown git does not ignore. A local, gitignored draft
+// under docs/ -- a security page kept off the public tree, session scratch -- is
+// not a document this gate owns, and failing the status contract over work
+// nobody committed is a false alarm (issue #2408). The listing flags are the
+// ones harness.mjs fingerprints a worktree with (treePaths), reused here so
+// both gates ask git the same question. Returns null when git declines to
+// answer -- it fails outside a work tree, and a non-empty `--show-prefix` means
+// `root` is not the top, where the path prefixes below would mean something
+// else -- so the caller falls back to the walk.
+function gitVisibleMarkdown(root) {
+  const options = { cwd: root, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 };
+  try {
+    const prefix = execFileSync('git', ['rev-parse', '--show-prefix'], { ...options, stdio: ['ignore', 'pipe', 'ignore'] });
+    if (prefix.trim() !== '') return null;
+    return execFileSync(
+      'git',
+      ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', 'docs', '.github'],
+      { ...options, stdio: ['ignore', 'pipe', 'ignore'] },
+    )
+      .split('\0')
+      .filter(Boolean)
+      .filter((path) => path.toLowerCase().endsWith('.md'))
+      .map((path) => resolve(root, ...path.split('/')))
+      .filter(existsSync);
+  } catch {
+    return null;
+  }
+}
+
 export function collectMarkdownFiles(root = repoRoot) {
-  return [
+  const collected = gitVisibleMarkdown(root) ?? [
     ...walkMarkdown(resolve(root, 'docs')),
     ...walkMarkdown(resolve(root, '.github')),
+  ];
+  return [
+    ...collected,
     ...['README.md', 'CONTRIBUTING.md', 'CONTEXT.md', 'SECURITY.md', 'CODE_OF_CONDUCT.md']
       .map((file) => resolve(root, file))
       .filter(existsSync),
