@@ -138,7 +138,6 @@ describe('useAllAgentNodes derived selector (issue #2021)', () => {
       error: null,
       closingNodeIds: new Set(),
       stalledInputs: {},
-      schedules: {},
     });
     vi.clearAllMocks();
   });

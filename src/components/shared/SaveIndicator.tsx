@@ -4,7 +4,7 @@
  * out of `ProjectSettingsTab` (issue #729) so `ScratchpadTab` adopts
  * the same surface (issue #813).
  */
-import type { SaveStatus } from '../../hooks/useSaveStatus';
+import type { SaveStatus } from '../../stores/meshSettingsStore';
 
 export interface SaveIndicatorProps {
   status: SaveStatus;
