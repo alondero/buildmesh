@@ -1185,8 +1185,12 @@ const AGY_HOST: &str = "https://daily-cloudcode-pa.googleapis.com";
 /// returns HTTP 200 for an older version, it just silently strips that group —
 /// so the Gemini Usage Meters disappear with no error (regression 2026-10-16: an
 /// `antigravity/cli/1.0.3` UA was served only the "Claude and GPT models" group).
-/// Verified live 2026-10-16: `1.1.5` omits the group, `1.2.0` includes it. Keep
-/// the pin at or above the gate in
+///
+/// Pin provenance — `1.4.0` is the current published Antigravity CLI version
+/// (`agy --version`), and was exercised live against the real endpoint on
+/// 2026-10-16 varying only this string: `1.1.5` returns only "Claude and GPT
+/// models"; `1.2.0` adds "Gemini Models"; `1.4.0` returns "Gemini Models" too,
+/// plus the newer "Gemini 4 Argon" group. Keep the pin at or above the gate in
 /// `agy_user_agent_meets_gemini_quota_version_gate`.
 const AGY_USER_AGENT: &str = "antigravity/cli/1.4.0 windows/amd64";
 
@@ -1447,7 +1451,11 @@ fn parse_agy_quota_summary(body: &str) -> Result<(Vec<UsageWindow>, Option<Strin
         serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
 
     let mut windows = Vec::new();
+    let mut saw_gemini_group = false;
     for group in resp.groups {
+        if group.display_name.starts_with(GEMINI_DISPLAY_PREFIX) {
+            saw_gemini_group = true;
+        }
         let mut buckets = group.buckets;
         buckets.sort_by_key(|bucket| agy_window_rank(&bucket.window));
         for bucket in buckets {
@@ -1469,7 +1477,21 @@ fn parse_agy_quota_summary(body: &str) -> Result<(Vec<UsageWindow>, Option<Strin
             "retrieveUserQuotaSummary returned no quota buckets".to_string(),
         ));
     }
-    Ok((windows, None))
+    // A below-gate User-Agent is served HTTP 200 with the Gemini group silently
+    // stripped, so the meters just vanish. Keep the surviving windows, but attach
+    // a detail when no Gemini group came back at all, so a re-gate (or a stale
+    // pin) is visible rather than silent — the failure mode this module exists to
+    // avoid.
+    let detail = if saw_gemini_group {
+        None
+    } else {
+        Some(
+            "retrieveUserQuotaSummary returned no Gemini quota group — the API \
+             may require a newer Antigravity CLI User-Agent"
+                .to_string(),
+        )
+    };
+    Ok((windows, detail))
 }
 
 fn agy_quota_summary(
@@ -1837,6 +1859,33 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn parse_agy_quota_summary_flags_a_missing_gemini_group() {
+        // Regression 2026-10-16: a below-gate User-Agent is served HTTP 200 with
+        // the "Gemini Models" group silently stripped, so the Gemini meters
+        // vanish with no error. Keep the surviving windows, but attach a detail
+        // so a re-gate (or a stale pin) is visible instead of silent.
+        let json = r#"{
+            "groups": [
+                {
+                    "displayName": "Claude and GPT models",
+                    "buckets": [
+                        {"bucketId":"3p-5h","window":"5h","remainingFraction":0.5,"resetTime":"2026-10-16T14:03:39Z"}
+                    ]
+                }
+            ]
+        }"#;
+        let (windows, detail) = parse_agy_quota_summary(json).unwrap();
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].label, "Claude and GPT models — 5-hour");
+        assert!(
+            detail
+                .as_deref()
+                .is_some_and(|d| d.contains("no Gemini quota group")),
+            "expected a missing-Gemini detail, got {detail:?}"
+        );
+    }
+
+    #[test]
     fn agy_usage_does_not_spawn_cli() {
         // #1324 spawned `agy --print /usage` (≈6s CLI boot) to reach the weekly
         // Gemini bucket. retrieveUserQuotaSummary is the same payload over HTTP
@@ -1858,8 +1907,11 @@ pub(crate) mod tests {
         // "Gemini Models" (weekly + 5-hour) group on the CLI version advertised
         // in the User-Agent. An `antigravity/cli/1.0.3` UA still got HTTP 200
         // but with the Gemini group stripped, so both Gemini Usage Meters
-        // vanished. Verified live: `1.1.5` omits the group, `1.2.0` includes
-        // it. Guard the pin against drifting back below the gate.
+        // vanished. Bisected live 2026-10-16 varying only the UA: `1.1.5`
+        // returns only "Claude and GPT models", `1.2.0` adds "Gemini Models".
+        // The pin is `1.4.0` — the current `agy --version`, also exercised live
+        // (it additionally returns the "Gemini 4 Argon" group). Guard the pin
+        // against drifting back below the gate.
         let version_token = AGY_USER_AGENT
             .strip_prefix("antigravity/cli/")
             .and_then(|rest| rest.split_whitespace().next())
