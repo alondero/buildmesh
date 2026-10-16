@@ -67,13 +67,13 @@
     "@xterm/addon-web-links": "^0.12.0",
     "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^6.0.0",
-    "@xyflow/react": "^12.11.3",
+    "@xyflow/react": "^12.12.0",
     "qrcode": "^1.5.4",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
-    "zustand": "^5.0.12"
+    "zustand": "^5.0.15"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -83,8 +83,8 @@
     "@testing-library/react": "^16.3.3",
     "@testing-library/user-event": "^14.6.7",
     "@types/qrcode": "^1.5.6",
-    "@types/react": "^19.1.8",
-    "@types/react-dom": "^19.1.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
     "@vitest/coverage-v8": "^4.1.11",
     "autoprefixer": "^10.6.1",
