@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useToastStore } from '../../src/stores/toastStore';
@@ -109,6 +109,71 @@ function seedAgentNodes(nodes: AgentNode[]) {
   agentStoreMock.state.nodeIds = nodeIds;
 }
 
+/** Issue #2326 — seed `meshes` and `meshesById` from the same rows. */
+function seedMeshes(meshes: Mesh[]) {
+  useMeshStore.setState({
+    meshes,
+    meshesById: new Map(meshes.map((m) => [m.id, m])),
+  });
+}
+
+/**
+ * A promise the test settles by hand, so read and mutation order is explicit.
+ *
+ * Every deferred is also registered so `afterEach` can settle whatever a failing
+ * test left pending: `vi.clearAllMocks` does not clear the one-time queue, so an
+ * unresolved promise left there would be handed to the NEXT test and hang it,
+ * turning one real failure into a screen of timeouts.
+ */
+const pendingDeferreds: { settle: (value: unknown) => void }[] = [];
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  pendingDeferreds.push({ settle: (value) => resolve(value as T) });
+  return { promise, resolve, reject };
+}
+
+function settlePendingReads() {
+  while (pendingDeferreds.length > 0) pendingDeferreds.pop()!.settle([]);
+}
+
+/** Issue #2326 — `list_meshes` calls made so far, in order. */
+function listMeshesCalls(): number {
+  return mockInvoke.mock.calls.filter((call) => call[0] === 'list_meshes').length;
+}
+
+/**
+ * Issue #2326 — wait until the store is genuinely quiet.
+ *
+ * "No read outstanding" is not the same as "`loading` is false right now": a
+ * discarded response schedules its trailing refresh in the microtask that
+ * follows, so a single check can observe the store in the gap. Requiring two
+ * consecutive observations of the same read count, with no read outstanding,
+ * waits out that gap instead of racing it.
+ */
+async function settleReads() {
+  let previous = -1;
+  await vi.waitFor(() => {
+    const reads = listMeshesCalls();
+    const stable = reads === previous;
+    previous = reads;
+    expect({ stable, loading: useMeshStore.getState().loading })
+      .toEqual({ stable: true, loading: false });
+  });
+}
+
+function mesh(overrides: Partial<Mesh> & { id: number }): Mesh {
+  return {
+    name: `mesh-${overrides.id}`, path: `/repo/${overrides.id}`, branch: 'main',
+    position: overrides.id - 1, color: null, layout: 'grid', use_worktree: false,
+    created_at: '2026-01-01', github_owner: null, github_repo: null,
+    github_last_synced: null, pre_spawn_pool_size: 0,
+    ...overrides,
+  };
+}
+
 describe('useMeshStore', () => {
   beforeEach(() => {
     useMeshStore.setState({
@@ -126,6 +191,19 @@ describe('useMeshStore', () => {
     agentStoreMock.state.activeNodeId = null;
     useToastStore.setState({ toasts: [] });
     vi.clearAllMocks();
+  });
+
+  afterEach(async () => {
+    settlePendingReads();
+    // Let every read this test started reach a verdict before the next one
+    // begins, so a trailing refresh cannot land in the next test's mock queue.
+    await settleReads();
+    // `vi.clearAllMocks` keeps unconsumed one-time values, and a leftover would
+    // be handed to the NEXT test — one shifted mock and every later assertion
+    // reports a failure it did not cause. Reset the queue, then restore the
+    // permissive default the setup file installs for unmocked commands.
+    mockInvoke.mockReset();
+    mockInvoke.mockResolvedValue({});
   });
 
   describe('fetchMeshes', () => {
@@ -537,6 +615,389 @@ describe('useMeshStore', () => {
       await useMeshStore.getState().updateMeshLayout(999, 'grid');
 
       expect(useMeshStore.getState().meshes).toEqual([]);
+    });
+  });
+
+  // ---- Issue #2326: Mesh snapshot request and mutation authority ----
+  //
+  // Every case drives the real store methods with hand-settled promises, so the
+  // assertion is about the collection a caller would render, not about which
+  // IPC calls were made. A `list_meshes` response is one of three things: the
+  // newest thing the store knows (it applies), an obsolete thing (it is dropped
+  // and a single trailing read converges), or an outstanding thing (it waits).
+  describe('snapshot authority (#2326)', () => {
+    it('does not let an older read replace a newer accepted one', async () => {
+      const older = deferred<Mesh[]>();
+      const newer = deferred<Mesh[]>();
+      const trailing = deferred<Mesh[]>();
+      mockInvoke
+        .mockReturnValueOnce(older.promise)     // read A, started first
+        .mockReturnValueOnce(newer.promise)     // read B, started second
+        .mockReturnValueOnce(trailing.promise); // the read A's discard starts
+
+      const readA = useMeshStore.getState().fetchMeshes();
+      const readB = useMeshStore.getState().fetchMeshes();
+
+      // Newer accepted first...
+      newer.resolve([mesh({ id: 2, name: 'newer' })]);
+      await readB;
+      expect(useMeshStore.getState().meshesById.get(2)?.name).toBe('newer');
+
+      // ...then the older response lands and must be dropped, leaving a
+      // replacement read outstanding rather than the older snapshot.
+      older.resolve([mesh({ id: 1, name: 'older' })]);
+      await readA;
+      await vi.waitFor(() => expect(useMeshStore.getState().loading).toBe(true));
+
+      const state = useMeshStore.getState();
+      expect(state.meshesById.has(1)).toBe(false);
+      expect(state.meshesById.get(2)?.name).toBe('newer');
+      expect(state.error).toBeNull();
+
+      // Discarding converges, and converges once: the trailing read applies and
+      // starts no refresh of its own.
+      trailing.resolve([mesh({ id: 2, name: 'newer' })]);
+      await settleReads();
+      expect(useMeshStore.getState().meshesById.get(2)?.name).toBe('newer');
+      const readsAfterConvergence = listMeshesCalls();
+      await vi.waitFor(() => expect(useMeshStore.getState().loading).toBe(false));
+      expect(listMeshesCalls()).toBe(readsAfterConvergence);
+    });
+
+    it('applies both reads in order when the older one answers first', async () => {
+      const older = deferred<Mesh[]>();
+      const newer = deferred<Mesh[]>();
+      mockInvoke
+        .mockReturnValueOnce(older.promise)
+        .mockReturnValueOnce(newer.promise);
+
+      const readA = useMeshStore.getState().fetchMeshes();
+      const readB = useMeshStore.getState().fetchMeshes();
+
+      older.resolve([mesh({ id: 1, name: 'older' })]);
+      await readA;
+      expect(useMeshStore.getState().meshesById.get(1)?.name).toBe('older');
+
+      newer.resolve([mesh({ id: 1, name: 'newer' })]);
+      await readB;
+
+      await settleReads();
+      expect(useMeshStore.getState().meshesById.get(1)?.name).toBe('newer');
+      expect(useMeshStore.getState().meshes[0].name).toBe('newer');
+    });
+
+    it('keeps an acknowledged rename when the snapshot that predates it lands', async () => {
+      const stale = deferred<Mesh[]>();
+      const trailing = deferred<Mesh[]>();
+      seedMeshes([mesh({ id: 1, name: 'old' })]);
+      mockInvoke
+        .mockReturnValueOnce(stale.promise)   // read started before the rename
+        .mockResolvedValueOnce(undefined)     // update_mesh_name
+        .mockReturnValueOnce(trailing.promise);
+
+      const refresh = useMeshStore.getState().refreshMeshes();
+      await useMeshStore.getState().updateMeshName(1, 'saved-new-name');
+      expect(useMeshStore.getState().meshesById.get(1)?.name).toBe('saved-new-name');
+
+      stale.resolve([mesh({ id: 1, name: 'old' })]);
+      await vi.waitFor(() => expect(useMeshStore.getState().loading).toBe(true));
+
+      const state = useMeshStore.getState();
+      expect(state.meshesById.get(1)?.name).toBe('saved-new-name');
+      expect(state.meshes[0].name).toBe('saved-new-name');
+
+      // `refreshMeshes` waits for the trailing read it caused, so it resolves
+      // on an applied snapshot rather than on the discarded one.
+      trailing.resolve([mesh({ id: 1, name: 'saved-new-name' })]);
+      await refresh;
+      await settleReads();
+      expect(useMeshStore.getState().meshesById.get(1)?.name).toBe('saved-new-name');
+      expect(useMeshStore.getState().loading).toBe(false);
+    });
+
+    it('keeps acknowledged colour and layout writes against a stale snapshot', async () => {
+      const stale = deferred<Mesh[]>();
+      const trailing = deferred<Mesh[]>();
+      seedMeshes([mesh({ id: 1, name: 'alpha' })]);
+      mockInvoke
+        .mockReturnValueOnce(stale.promise)
+        .mockResolvedValueOnce(undefined) // update_mesh_color
+        .mockResolvedValueOnce(undefined) // update_mesh_layout
+        .mockReturnValueOnce(trailing.promise);
+
+      const read = useMeshStore.getState().fetchMeshes();
+      await useMeshStore.getState().updateMeshColor(1, '#a78bfa');
+      await useMeshStore.getState().updateMeshLayout(1, 'single');
+
+      stale.resolve([mesh({ id: 1, name: 'alpha' })]);
+      await read;
+      await vi.waitFor(() => expect(useMeshStore.getState().loading).toBe(true));
+
+      const row = useMeshStore.getState().meshesById.get(1);
+      expect(row?.color).toBe('#a78bfa');
+      expect(row?.layout).toBe('single');
+
+      trailing.resolve([mesh({ id: 1, name: 'alpha', color: '#a78bfa', layout: 'single' })]);
+      await settleReads();
+    });
+
+    it('keeps a created Mesh against a snapshot that predates it', async () => {
+      const stale = deferred<Mesh[]>();
+      const trailing = deferred<Mesh[]>();
+      const created = mesh({ id: 2, name: 'fresh' });
+      seedMeshes([mesh({ id: 1, name: 'alpha' })]);
+      mockInvoke
+        .mockReturnValueOnce(stale.promise)
+        .mockResolvedValueOnce(created)      // create_mesh
+        .mockReturnValueOnce(trailing.promise);
+
+      const read = useMeshStore.getState().fetchMeshes();
+      const result = await useMeshStore.getState().createMesh('fresh', '/repo/2');
+      expect(result?.id).toBe(2);
+
+      stale.resolve([mesh({ id: 1, name: 'alpha' })]);
+      await read;
+      await vi.waitFor(() => expect(useMeshStore.getState().loading).toBe(true));
+      expect(useMeshStore.getState().meshes.map((m) => m.id)).toEqual([1, 2]);
+      expect(useMeshStore.getState().meshesById.has(2)).toBe(true);
+
+      trailing.resolve([mesh({ id: 1, name: 'alpha' }), created]);
+      await settleReads();
+      expect(useMeshStore.getState().meshesById.has(2)).toBe(true);
+    });
+
+    it('does not let a late snapshot resurrect a deleted Mesh', async () => {
+      const stale = deferred<Mesh[]>();
+      const trailing = deferred<Mesh[]>();
+      seedMeshes([DELETED_MESH, OTHER_MESH]);
+      mockInvoke
+        .mockReturnValueOnce(stale.promise)        // read started before the delete
+        .mockResolvedValueOnce(undefined)          // delete_mesh
+        .mockResolvedValueOnce([OTHER_MESH])       // post-delete refetch
+        .mockReturnValueOnce(trailing.promise);    // the read stale's discard starts
+
+      const read = useMeshStore.getState().fetchMeshes();
+      await expect(useMeshStore.getState().deleteMesh(1)).resolves.toBe(true);
+
+      stale.resolve([DELETED_MESH, OTHER_MESH]);
+      await read;
+      await vi.waitFor(() => expect(useMeshStore.getState().loading).toBe(true));
+
+      const state = useMeshStore.getState();
+      expect(state.meshes.map((m) => m.id)).toEqual([2]);
+      expect(state.meshesById.has(1)).toBe(false);
+
+      trailing.resolve([OTHER_MESH]);
+      await settleReads();
+      expect(useMeshStore.getState().meshesById.has(1)).toBe(false);
+      expect(useMeshStore.getState().meshes.map((m) => m.id)).toEqual([2]);
+    });
+
+    it('does not let an older rejection replace a newer success with an error', async () => {
+      const older = deferred<Mesh[]>();
+      const newer = deferred<Mesh[]>();
+      const trailing = deferred<Mesh[]>();
+      mockInvoke
+        .mockReturnValueOnce(older.promise)
+        .mockReturnValueOnce(newer.promise)
+        .mockReturnValueOnce(trailing.promise);
+
+      const readA = useMeshStore.getState().fetchMeshes();
+      const readB = useMeshStore.getState().fetchMeshes();
+
+      newer.resolve([mesh({ id: 2, name: 'newer' })]);
+      await readB;
+      older.reject(new Error('old read failed'));
+      await readA;
+
+      // The obsolete failure is dropped: it never reaches `error`, and the
+      // accepted snapshot it was racing stays on screen.
+      expect(useMeshStore.getState().error).toBeNull();
+      expect(useMeshStore.getState().meshesById.get(2)?.name).toBe('newer');
+
+      // Dropping still converges: the refresh it started lands the newest state
+      // and records no error of its own.
+      trailing.resolve([mesh({ id: 2, name: 'newer' })]);
+      await settleReads();
+      expect(useMeshStore.getState().error).toBeNull();
+      expect(useMeshStore.getState().meshesById.get(2)?.name).toBe('newer');
+      expect(useMeshStore.getState().loading).toBe(false);
+    });
+
+    it('keeps loading true while a newer read is outstanding, then settles it', async () => {
+      const older = deferred<Mesh[]>();
+      const newer = deferred<Mesh[]>();
+      const trailing = deferred<Mesh[]>();
+      mockInvoke
+        .mockReturnValueOnce(older.promise)
+        .mockReturnValueOnce(newer.promise)
+        .mockReturnValueOnce(trailing.promise);
+
+      const readA = useMeshStore.getState().fetchMeshes();
+      const readB = useMeshStore.getState().fetchMeshes();
+      expect(useMeshStore.getState().loading).toBe(true);
+
+      // The newer read answers while the older is still outstanding: its own
+      // completion must not report loading finished for the one still running.
+      newer.resolve([mesh({ id: 2, name: 'newer' })]);
+      await readB;
+      expect(useMeshStore.getState().loading).toBe(true);
+      expect(useMeshStore.getState().meshesById.get(2)?.name).toBe('newer');
+
+      // The older read is dropped, and the trailing read it starts keeps loading
+      // true — a dropped response must not report the store as settled.
+      older.resolve([mesh({ id: 1, name: 'older' })]);
+      await readA;
+      expect(useMeshStore.getState().loading).toBe(true);
+      expect(useMeshStore.getState().meshesById.has(1)).toBe(false);
+
+      trailing.resolve([mesh({ id: 2, name: 'newer' })]);
+      await settleReads();
+      expect(useMeshStore.getState().meshesById.get(2)?.name).toBe('newer');
+    });
+
+    it('does not let a snapshot overwrite an optimistic reorder still pending', async () => {
+      const stale = deferred<Mesh[]>();
+      const positions = deferred<void>();
+      const trailing = deferred<Mesh[]>();
+      seedMeshes([mesh({ id: 1, name: 'a' }), mesh({ id: 2, name: 'b' }), mesh({ id: 3, name: 'c' })]);
+      mockInvoke
+        .mockReturnValueOnce(stale.promise)      // read started before the drag
+        .mockReturnValueOnce(positions.promise)  // update_mesh_positions, held open
+        .mockReturnValueOnce(trailing.promise);  // convergence read after the drag settles
+
+      const read = useMeshStore.getState().fetchMeshes();
+      const reorder = useMeshStore.getState().reorderMeshes(3, 0);
+      expect(useMeshStore.getState().meshes.map((m) => m.id)).toEqual([3, 1, 2]);
+
+      stale.resolve([mesh({ id: 1, name: 'a' }), mesh({ id: 2, name: 'b' }), mesh({ id: 3, name: 'c' })]);
+      await read;
+      await settleReads();
+      expect(useMeshStore.getState().meshes.map((m) => m.id)).toEqual([3, 1, 2]);
+      expect(useMeshStore.getState().meshes.map((m) => m.position)).toEqual([0, 1, 2]);
+      // No trailing read during the reorder window — it would be dropped too,
+      // so the drag's own acknowledgement is what converges the order.
+      expect(useMeshStore.getState().loading).toBe(false);
+
+      positions.resolve();
+      await reorder;
+      await vi.waitFor(() => expect(useMeshStore.getState().loading).toBe(true));
+
+      trailing.resolve([
+        mesh({ id: 3, name: 'c', position: 0 }),
+        mesh({ id: 1, name: 'a', position: 1 }),
+        mesh({ id: 2, name: 'b', position: 2 }),
+      ]);
+      await settleReads();
+      expect(useMeshStore.getState().meshes.map((m) => m.id)).toEqual([3, 1, 2]);
+    });
+
+    it('converges a trailing refresh that a second write supersedes, then stops', async () => {
+      const stale = deferred<Mesh[]>();
+      const firstTrailing = deferred<Mesh[]>();
+      const secondTrailing = deferred<Mesh[]>();
+      seedMeshes([mesh({ id: 1, name: 'old' })]);
+      mockInvoke
+        .mockReturnValueOnce(stale.promise)            // read started before both writes
+        .mockResolvedValueOnce(undefined)              // update_mesh_name
+        .mockReturnValueOnce(firstTrailing.promise)    // the refresh the drop starts
+        .mockResolvedValueOnce(undefined)              // update_mesh_color, while it runs
+        .mockReturnValueOnce(secondTrailing.promise);  // its one replacement
+
+      const read = useMeshStore.getState().fetchMeshes();
+      await useMeshStore.getState().updateMeshName(1, 'first');
+
+      stale.resolve([mesh({ id: 1, name: 'old' })]);
+      await read;
+      await vi.waitFor(() => expect(useMeshStore.getState().loading).toBe(true));
+      expect(useMeshStore.getState().meshesById.get(1)?.name).toBe('first');
+
+      // A second write lands while the trailing refresh is in flight, so that
+      // refresh is dropped too — and the acknowledged colour must survive it.
+      await useMeshStore.getState().updateMeshColor(1, '#a78bfa');
+      firstTrailing.resolve([mesh({ id: 1, name: 'first' })]);
+      await vi.waitFor(() => expect(listMeshesCalls()).toBe(3));
+      expect(useMeshStore.getState().meshesById.get(1)?.color).toBe('#a78bfa');
+
+      secondTrailing.resolve([mesh({ id: 1, name: 'first', color: '#a78bfa' })]);
+      await settleReads();
+      const row = useMeshStore.getState().meshesById.get(1);
+      expect(row?.name).toBe('first');
+      expect(row?.color).toBe('#a78bfa');
+
+      // The chain is bounded: a settled chain starts no further refresh.
+      const readsAfterConvergence = listMeshesCalls();
+      await vi.waitFor(() => expect(useMeshStore.getState().loading).toBe(false));
+      expect(listMeshesCalls()).toBe(readsAfterConvergence);
+    });
+
+    it('recovers the persisted order when a reorder fails', async () => {
+      seedMeshes([mesh({ id: 1, name: 'a' }), mesh({ id: 2, name: 'b' })]);
+      // Keyed by command rather than by call order: this case is about what the
+      // recovery read is allowed to do, so it must not depend on how many reads
+      // reached the IPC seam first.
+      mockInvoke.mockImplementation(async (cmd: string) => {
+        if (cmd === 'update_mesh_positions') throw new Error('Constraint violation');
+        if (cmd === 'list_meshes') return [mesh({ id: 1, name: 'a' }), mesh({ id: 2, name: 'b' })];
+        return undefined;
+      });
+
+      await useMeshStore.getState().reorderMeshes(2, 0);
+
+      await settleReads();
+      // The recovery read starts outside the reorder window, so it is
+      // authoritative and applies: the failed drag does not survive.
+      expect(useMeshStore.getState().meshes.map((m) => m.id)).toEqual([1, 2]);
+      expect(useMeshStore.getState().meshesById.get(2)?.position).toBe(1);
+      expect(useMeshStore.getState().loading).toBe(false);
+    });
+
+    it('ignores a reorder of a Mesh this store never loaded', async () => {
+      seedMeshes([mesh({ id: 1, name: 'a' })]);
+
+      await useMeshStore.getState().reorderMeshes(99, 0);
+
+      // Nothing moved, so there is nothing to persist: the previous code read
+      // `updatedMeshes.map` on `undefined` and reported the TypeError as a
+      // failed drag. No invoke is queued, so a rejection here would leak into
+      // the next test's one-time mock queue.
+      expect(mockInvoke).not.toHaveBeenCalled();
+      expect(useMeshStore.getState().error).toBeNull();
+      expect(useMeshStore.getState().meshes.map((m) => m.id)).toEqual([1]);
+    });
+
+    it('rejects refreshMeshes on failure and keeps fetchMeshes non-throwing', async () => {
+      mockInvoke.mockRejectedValueOnce(new Error('DB unavailable'));
+
+      await expect(useMeshStore.getState().refreshMeshes()).rejects.toThrow('DB unavailable');
+      expect(useMeshStore.getState().error).toContain('DB unavailable');
+      expect(useMeshStore.getState().loading).toBe(false);
+
+      mockInvoke.mockRejectedValueOnce(new Error('still down'));
+
+      await expect(useMeshStore.getState().fetchMeshes()).resolves.toBeUndefined();
+      expect(useMeshStore.getState().error).toContain('still down');
+      expect(useMeshStore.getState().loading).toBe(false);
+    });
+
+    it('keeps the previous row reference for a Mesh a refresh did not change', async () => {
+      const alpha = mesh({ id: 1, name: 'alpha' });
+      const beta = mesh({ id: 2, name: 'beta' });
+      seedMeshes([alpha, beta]);
+      mockInvoke.mockResolvedValueOnce([
+        mesh({ id: 1, name: 'alpha' }),
+        mesh({ id: 2, name: 'beta', color: '#fff' }),
+      ]);
+
+      await useMeshStore.getState().fetchMeshes();
+
+      const state = useMeshStore.getState();
+      // Both views hold the same reconciled objects, so a per-id selector skips
+      // the render for a Mesh nothing changed on.
+      expect(state.meshesById.get(1)).toBe(alpha);
+      expect(state.meshes[0]).toBe(alpha);
+      expect(state.meshesById.get(2)).not.toBe(beta);
+      expect(state.meshesById.get(2)?.color).toBe('#fff');
     });
   });
 });

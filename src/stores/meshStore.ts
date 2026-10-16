@@ -15,14 +15,70 @@ type AgentNodeStoreModule = typeof import('./agentNodeStore');
 // not the 6-field subset this store used to hand-declare.
 export type { Mesh };
 
+/**
+ * What one snapshot read did, reported to the caller that started it.
+ */
+type SnapshotOutcome =
+  /** Applied: this read is the newest state the store holds. */
+  | { status: 'applied' }
+  /**
+   * Obsolete: a newer read was already accepted, or a mutation landed while this
+   * one was in flight. Its response was dropped, so `error`/`loading` were left
+   * to the newer owner. `followUp` is the trailing authoritative read that will
+   * converge the collection, or `null` when convergence belongs to the operation
+   * that superseded this read.
+   */
+  | { status: 'superseded'; followUp: Promise<SnapshotOutcome> | null }
+  /** Failed while still authoritative, so the caller owns the rejection. */
+  | { status: 'failed'; error: unknown };
+
+/**
+ * Build both collection views from one pass over the incoming rows, keeping the
+ * previous object reference for every row whose fields compare equal. Callers
+ * that select one Mesh (`s.meshesById.get(id)`) then skip a render when only
+ * other Meshes changed, and `meshes`/`meshesById` can never disagree about a
+ * row because they share the same reconciled objects.
+ */
+function reconcileMeshes(
+  previous: Map<number, Mesh>,
+  incoming: Mesh[]
+): { meshes: Mesh[]; meshesById: Map<number, Mesh> } {
+  const meshes: Mesh[] = [];
+  const meshesById = new Map<number, Mesh>();
+  for (const row of incoming) {
+    const old = previous.get(row.id);
+    const reconciled = old && shallowEqualMesh(old, row) ? old : row;
+    meshes.push(reconciled);
+    meshesById.set(row.id, reconciled);
+  }
+  return { meshes, meshesById };
+}
+
+/** Every `Mesh` field is a primitive, so a key-wise compare is a shallow compare. */
+function shallowEqualMesh(a: Mesh, b: Mesh): boolean {
+  const keys = Object.keys(a) as (keyof Mesh)[];
+  if (keys.length !== Object.keys(b).length) return false;
+  return keys.every((key) => a[key] === b[key]);
+}
+
 interface MeshState {
   meshes: Mesh[];
   meshesById: Map<number, Mesh>;
   selectedMeshId: number | null;
   loading: boolean;
   error: string | null;
+  /**
+   * Record a snapshot failure in `state.error` and resolve either way. Callers
+   * that need the outcome (boot readiness, the capacity editor) use
+   * `refreshMeshes`.
+   */
   fetchMeshes: () => Promise<void>;
-  /** Refresh the mesh snapshot and reject on failure for callers that must confirm it succeeded. */
+  /**
+   * Refresh the mesh snapshot and reject on failure for callers that must
+   * confirm it succeeded. A read superseded by a newer write resolves once the
+   * trailing refresh it started lands: the superseded read itself has no failure
+   * to report, and its snapshot was never applied.
+   */
   refreshMeshes: () => Promise<void>;
   addMesh: () => Promise<void>;
   createMesh: (name: string, path: string, color?: string | null) => Promise<Mesh | null>;
@@ -50,18 +106,124 @@ interface MeshState {
   getDefaultProvider: (meshId: number) => Promise<string>;
 }
 
-export const useMeshStore = create<MeshState>((set) => {
-  const loadMeshes = async (rejectOnError: boolean) => {
+export const useMeshStore = create<MeshState>((set, get) => {
+  // ---- Collection authority ledger (issue #2326) ---------------------------
+  // A snapshot read may replace the collection only while it is still the
+  // store's authority. Three things can take that authority away while it is in
+  // flight, and all three are observed here rather than in the caller:
+  //
+  //  * `nextRequestId` / `acceptedRequestId` — request identity. Two overlapping
+  //    callers each get their own read; whichever response lands second may only
+  //    commit if it is newer than the one already accepted. Without it the older
+  //    snapshot simply overwrote the newer one.
+  //  * `collectionRevision` — mutation authority. Every committed local write
+  //    (create/add/clone, delete commit, rename/color/layout, the optimistic
+  //    reorder) advances it, so a read that observed an older revision is
+  //    describing a database state the user has already moved past.
+  //  * `pendingReorders` — an optimistic reorder is deliberately ahead of the
+  //    persisted order until it is acknowledged, so no snapshot may replace it,
+  //    not even one started after the optimistic write.
+  //
+  // `readsInFlight` owns `loading`: a read that is dropped must not mark a
+  // newer outstanding read as finished. `trailingRead` is the single refresh that
+  // converges a discarded read, shared by every discard of the same newer state
+  // and released the moment it settles; `MAX_TRAILING_REARMS` bounds how many
+  // replacements one discard chain may spend, so convergence never becomes a
+  // retry loop.
+  const MAX_TRAILING_REARMS = 1;
+  let nextRequestId = 1;
+  let acceptedRequestId = 0;
+  let collectionRevision = 0;
+  let pendingReorders = 0;
+  let readsDroppedDuringReorder = 0;
+  let readsInFlight = 0;
+  let trailingRead: Promise<SnapshotOutcome> | null = null;
+  let trailingOwnerId = 0;
+
+  /** A response may commit only while nothing newer has taken authority. */
+  function stillAuthoritative(requestId: number, observedRevision: number): boolean {
+    return requestId > acceptedRequestId
+      && observedRevision === collectionRevision
+      && pendingReorders === 0;
+  }
+
+  /**
+   * One trailing authoritative read after an obsolete response was dropped.
+   * `selfId` is the discarded read, or `null` when the caller is not a read (a
+   * settled reorder). `trailingDepth` counts the replacements this chain has
+   * already spent: a dropped read converges through one, and a second write
+   * landing while that one is in flight may replace it once more. Past that the
+   * chain stops, so a continuous stream of writes cannot turn convergence into a
+   * refresh loop.
+   */
+  function scheduleTrailingRead(selfId: number | null, trailingDepth: number): Promise<SnapshotOutcome> | null {
+    // While a reorder is outstanding the local order is ahead of the persisted
+    // one, and the trailing read would be dropped exactly like the read that
+    // asked for it. The reorder's acknowledgement converges instead.
+    if (pendingReorders > 0) return null;
+    if (trailingDepth > MAX_TRAILING_REARMS) return null;
+    // Another read's trailing refresh is already outstanding and will observe
+    // the same newer state, so share it rather than open a competing snapshot.
+    if (trailingRead && trailingOwnerId !== selfId) return trailingRead;
+    const ownerId = nextRequestId++;
+    trailingOwnerId = ownerId;
+    trailingRead = readSnapshot(ownerId, trailingDepth + 1);
+    return trailingRead;
+  }
+
+  /** Keep the newer state, and record how this read lost authority. */
+  function discardRead(requestId: number, trailingDepth: number): SnapshotOutcome {
+    if (pendingReorders > 0) {
+      readsDroppedDuringReorder += 1;
+      return { status: 'superseded', followUp: null };
+    }
+    return { status: 'superseded', followUp: scheduleTrailingRead(requestId, trailingDepth) };
+  }
+
+  /**
+   * One snapshot read. Never throws: the reject/non-throwing split lives in the
+   * two public actions, which report this read's own outcome.
+   */
+  async function readSnapshot(requestId: number, trailingDepth = 0): Promise<SnapshotOutcome> {
+    const observedRevision = collectionRevision;
+    readsInFlight += 1;
     set({ loading: true, error: null });
     try {
-      const meshes = await api.listMeshes();
-      const meshesById = new Map(meshes.map((p) => [p.id, p]));
-      set({ meshes, meshesById, loading: false });
+      const incoming = await api.listMeshes();
+      if (!stillAuthoritative(requestId, observedRevision)) {
+        return discardRead(requestId, trailingDepth);
+      }
+      acceptedRequestId = requestId;
+      set(reconcileMeshes(get().meshesById, incoming));
+      return { status: 'applied' };
     } catch (e) {
-      set({ error: formatError(e), loading: false });
-      if (rejectOnError) throw e;
+      // An obsolete failure must not replace a newer success with an error.
+      if (!stillAuthoritative(requestId, observedRevision)) {
+        return discardRead(requestId, trailingDepth);
+      }
+      set({ error: formatError(e) });
+      return { status: 'failed', error: e };
+    } finally {
+      readsInFlight -= 1;
+      // Release the trailing slot in THIS tick, not in a later microtask: a
+      // discard that lands right after this read settled must start its own
+      // refresh instead of joining an already-settled one and skipping
+      // convergence entirely.
+      if (trailingOwnerId === requestId) {
+        trailingRead = null;
+        trailingOwnerId = 0;
+      }
+      // `loading` belongs to whatever read is still outstanding, so a dropped
+      // response cannot mark a newer read — or the trailing refresh it started
+      // — as finished.
+      if (readsInFlight === 0) set({ loading: false });
     }
-  };
+  }
+
+  /** Advance the ledger when a committed write lands on a row this store holds. */
+  function commitRowMutation(id: number): void {
+    if (get().meshesById.has(id)) collectionRevision += 1;
+  }
 
   return ({
   meshes: [],
@@ -70,12 +232,26 @@ export const useMeshStore = create<MeshState>((set) => {
   loading: false,
   error: null,
 
-  fetchMeshes: () => loadMeshes(false),
-  refreshMeshes: () => loadMeshes(true),
+  fetchMeshes: async () => {
+    await readSnapshot(nextRequestId++);
+  },
+
+  refreshMeshes: async () => {
+    // Follow this caller's read through the trailing refresh a superseded read
+    // starts, so it settles on an applied snapshot rather than on a discarded
+    // one. An obsolete read has no failure of its own to report: the trailing
+    // read, or the newer success that replaced it, is what this resolves on.
+    let outcome = await readSnapshot(nextRequestId++);
+    while (outcome.status === 'superseded' && outcome.followUp) {
+      outcome = await outcome.followUp;
+    }
+    if (outcome.status === 'failed') throw outcome.error;
+  },
 
   addMesh: async () => {
     try {
       const mesh = await api.addMesh();
+      collectionRevision += 1;
       set((state) => ({
         meshes: [...state.meshes, mesh],
         meshesById: new Map([...state.meshesById, [mesh.id, mesh]])
@@ -88,6 +264,7 @@ export const useMeshStore = create<MeshState>((set) => {
   createMesh: async (name, path, color) => {
     try {
       const mesh = await api.createMesh(name, path, color);
+      collectionRevision += 1;
       set((state) => ({
         meshes: [...state.meshes, mesh],
         meshesById: new Map([...state.meshesById, [mesh.id, mesh]]),
@@ -102,6 +279,7 @@ export const useMeshStore = create<MeshState>((set) => {
   cloneMesh: async (url, parentDir, color) => {
     try {
       const mesh = await api.cloneMeshRepo(url, parentDir, color);
+      collectionRevision += 1;
       set((state) => ({
         meshes: [...state.meshes, mesh],
         meshesById: new Map([...state.meshesById, [mesh.id, mesh]]),
@@ -161,6 +339,11 @@ export const useMeshStore = create<MeshState>((set) => {
       return false;
     }
 
+    // The backend committed the removal, and this store applies it through the
+    // refetch below. Advance the ledger first so a snapshot taken before the
+    // delete is dropped instead of putting the row back into both views.
+    collectionRevision += 1;
+
     // Backend committed — fan out the post-delete cleanup. Refetch
     // BEFORE disposing so the agent-node store's invariant ("never
     // dispose unless the row is deleted", issue #647) holds when we
@@ -218,6 +401,7 @@ export const useMeshStore = create<MeshState>((set) => {
   updateMeshLayout: async (id, layout) => {
     try {
       await api.updateMeshLayout(id, layout);
+      commitRowMutation(id);
       set((state) => {
         const existing = state.meshesById.get(id);
         if (!existing) return state;
@@ -233,7 +417,7 @@ export const useMeshStore = create<MeshState>((set) => {
   },
 
   reorderMeshes: async (meshId, newPosition) => {
-    let updatedMeshes: Mesh[];
+    let updatedMeshes: Mesh[] | undefined;
     set((state) => {
       const meshes = [...state.meshes];
       const draggedIdx = meshes.findIndex((p) => p.id === meshId);
@@ -244,14 +428,41 @@ export const useMeshStore = create<MeshState>((set) => {
       const meshesById = new Map(updatedMeshes.map((p) => [p.id, p]));
       return { meshes: updatedMeshes, meshesById };
     });
+    // A Mesh this store never loaded moves nothing, so there is nothing to
+    // persist. Reading `updatedMeshes.map` here instead threw a TypeError that
+    // the catch below reported as a save error for a no-op drag.
+    if (!updatedMeshes) return;
+
+    // The optimistic order is now ahead of the persisted one, so it owns the
+    // collection until the write is acknowledged: a read resolving in this
+    // window must not undo a drag the user can see.
+    collectionRevision += 1;
+    pendingReorders += 1;
+    let failed = false;
     try {
       // Send ALL meshes' positions so DB stays in sync with optimistic update
-      const currentMeshes = updatedMeshes!;
+      const currentMeshes = updatedMeshes;
       const updates = currentMeshes.map((p) => [p.id, p.position] as [number, number]);
       await api.updateMeshPositions(updates);
     } catch (e) {
       set({ error: formatError(e) });
+      failed = true;
+    } finally {
+      pendingReorders -= 1;
+    }
+    if (failed) {
+      // The recovery read starts outside the reorder window, so it is
+      // authoritative again and converges the order on its own.
+      readsDroppedDuringReorder = 0;
       await useMeshStore.getState().fetchMeshes();
+      return;
+    }
+    // Reads dropped during the window (a deletion's refetch, a capacity save)
+    // never got a trailing refresh. The acknowledged order is authoritative by
+    // itself, but whatever those reads still owed the collection is not.
+    if (pendingReorders === 0 && readsDroppedDuringReorder > 0) {
+      readsDroppedDuringReorder = 0;
+      void scheduleTrailingRead(null, 0);
     }
   },
 
@@ -269,6 +480,7 @@ export const useMeshStore = create<MeshState>((set) => {
       set({ error: formatError(e) });
       throw e;
     }
+    commitRowMutation(id);
     set((state) => {
       const existing = state.meshesById.get(id);
       if (!existing) return state;
@@ -283,6 +495,7 @@ export const useMeshStore = create<MeshState>((set) => {
   updateMeshColor: async (id, color) => {
     try {
       await api.updateMeshColor(id, color);
+      commitRowMutation(id);
       set((state) => {
         const existing = state.meshesById.get(id);
         if (!existing) return state;

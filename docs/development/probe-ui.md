@@ -149,6 +149,54 @@ rethrows after recording the error, so the caller shows the real rejection and t
 draft the user typed survives for a retry. The pattern generalises: a store action
 that swallows a failure makes every success indicator above it a lie.
 
+## Mesh snapshot authority (issue #2326)
+
+`useMeshStore` owns one authority policy for the Mesh collection, so a caller can ask
+for a refresh without knowing which sidebar action, capacity editor or deletion is
+running. A `list_meshes` response may replace `meshes`/`meshesById` only while it is
+still the newest thing the store knows; three things can take that authority away
+while a read is in flight, and each is observed inside the store rather than in the
+caller:
+
+- **Request identity.** Overlapping `fetchMeshes`/`refreshMeshes` callers each get
+  their own read, and each response may commit only while it is newer than the
+  response already accepted. Resolving them in either order therefore leaves the
+  newer snapshot in place — the review's reproduction (older A resolved after newer
+  B) used to leave the *older* one.
+- **Mutation authority.** Every committed local write advances a collection
+  revision: create/add/clone, the delete commit, rename, colour, layout, and the
+  optimistic reorder. A read that observed an older revision is describing a
+  database state the user has already moved past, so an acknowledged Mesh setting
+  can no longer flicker back to the value it replaced. `deleteMesh` advances it
+  after the backend commits and before its refetch, so no late snapshot can put the
+  deleted row back.
+- **Pending optimistic reorder.** A drag's order is deliberately ahead of the
+  persisted order until `update_mesh_positions` acknowledges it, so no snapshot may
+  replace it — not even one started after the drag.
+
+An obsolete response is dropped rather than applied, and dropping never replaces a
+stale-write bug with permanently stale state: one trailing authoritative read
+converges the collection, shared by every response the same newer write made
+obsolete. That trailing read may re-arm exactly one further refresh if a second
+write lands while it is in flight, and no more — convergence must not become a
+refresh loop under a continuous stream of writes. It never runs during a reorder
+window (where it would be dropped the same way): a successful reorder converges it
+and a failed one refetches. `loading` follows the number of reads still
+outstanding, so a dropped response cannot mark a newer read as finished, and a
+failure only reaches `error` when it is still authoritative: an old rejection
+never replaces a newer success.
+
+`refreshMeshes` rejects for callers that must confirm the refresh (boot readiness,
+`CircuitRunCapacity`), and `fetchMeshes` records the failure without throwing. A read
+that was *superseded* resolves rather than rejects — it has no failure of its own to
+report and its snapshot was never applied — and `refreshMeshes` follows the trailing
+read it started so it resolves on an applied snapshot. One reconciliation builds both
+collection views from the same rows and keeps the previous object reference for a row
+whose fields compare equal, so `meshes` and `meshesById` cannot disagree and per-id
+selectors (`s.meshesById.get(id)`) skip a render when only other Meshes changed.
+`agentNodeStore` owns the analogous agent-node policy, including coalesced refreshes
+and its snapshot revision fence.
+
 ## GitHub list completeness
 
 Every GitHub list read goes through one paginator,
