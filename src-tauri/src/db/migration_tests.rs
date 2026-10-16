@@ -2516,10 +2516,8 @@ mod tests {
 
         for index in [
             "idx_coordinator_drive_prompts_created_at",
-            "idx_warm_worktrees_mesh",
             "idx_warm_worktrees_status",
             "idx_agent_nodes_mesh",
-            "idx_autopilot_runs_mesh",
             "idx_autopilot_circuits_mesh",
             "idx_autopilot_circuit_runs_circuit",
             "idx_autopilot_circuit_runs_state",
@@ -2534,6 +2532,15 @@ mod tests {
             assert!(
                 index_present(&conn, index),
                 "{index} must exist after schema initialization"
+            );
+        }
+
+        // Issue #2410 — a fresh database never creates the superseded
+        // single-column indexes in the first place.
+        for dropped in ["idx_autopilot_runs_mesh", "idx_warm_worktrees_mesh"] {
+            assert!(
+                !index_present(&conn, dropped),
+                "{dropped} is a redundant prefix of its composite and must not be created"
             );
         }
     }
@@ -2627,6 +2634,165 @@ mod tests {
             canonical_index_names(&fresh),
             "legacy and fresh databases must converge on the canonical indexes"
         );
+    }
+
+    /// Issue #2410 — the removal half of the #1747 pass. A database created
+    /// before it still carries both single-column indexes, and the drop is
+    /// index-only DDL with no `SCHEMA_VERSION` bump, so the faithful simulation
+    /// is that shape: a current-schema database holding the superseded indexes
+    /// plus the rows its readers answer from. The always-run migration step must
+    /// drop the pair on the next launch, leave the rows and the composites
+    /// alone, and stay dropped on a second pass.
+    #[test]
+    fn init_schema_drops_the_superseded_single_column_indexes_from_legacy_dbs() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::super::init_schema(&conn).unwrap();
+        conn.execute_batch(
+            "
+            CREATE INDEX idx_autopilot_runs_mesh ON autopilot_runs(mesh_id);
+            CREATE INDEX idx_warm_worktrees_mesh ON warm_worktrees(mesh_id);
+            INSERT INTO meshes (id, name, path) VALUES (1, 'legacy', 'C:/legacy');
+            INSERT INTO agent_nodes (id, mesh_id, name, path, status)
+                VALUES (1, 1, 'legacy-node', 'C:/legacy', 'awaiting_input');
+            INSERT INTO autopilot_runs (node_id, mesh_id, issue_number, state)
+                VALUES (1, 1, 2410, 'implementing');
+            INSERT INTO warm_worktrees (mesh_id, path, preassigned_name, status)
+                VALUES (1, 'C:/legacy/warm', 'warm-one', 'available');
+            ",
+        )
+        .unwrap();
+        // The scenario only means anything if the connection really is at the
+        // current version with the superseded indexes present.
+        assert_eq!(
+            conn.query_row(
+                "SELECT value FROM app_settings WHERE key = 'schema_version'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            crate::db::migrations::SCHEMA_VERSION.to_string()
+        );
+        for superseded in ["idx_autopilot_runs_mesh", "idx_warm_worktrees_mesh"] {
+            assert!(
+                index_present(&conn, superseded),
+                "{superseded} must be present before the upgrade or this proves nothing"
+            );
+        }
+
+        for pass in 1..=2 {
+            super::super::init_schema(&conn).unwrap();
+
+            for superseded in ["idx_autopilot_runs_mesh", "idx_warm_worktrees_mesh"] {
+                assert!(
+                    !index_present(&conn, superseded),
+                    "{superseded} must be gone after initializer pass {pass}"
+                );
+            }
+            for composite in [
+                "idx_autopilot_runs_mesh_state",
+                "idx_warm_worktrees_mesh_status_created",
+            ] {
+                assert!(
+                    index_present(&conn, composite),
+                    "{composite} must survive initializer pass {pass}"
+                );
+            }
+            // DROP INDEX only removes the index — the rows its readers answer
+            // from must still be there after every pass.
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM autopilot_runs WHERE node_id = 1 AND mesh_id = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                1,
+                "autopilot_runs rows must survive pass {pass}"
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM warm_worktrees \
+                     WHERE mesh_id = 1 AND preassigned_name = 'warm-one'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                1,
+                "warm_worktrees rows must survive pass {pass}"
+            );
+        }
+
+        let fresh = Connection::open_in_memory().unwrap();
+        super::super::init_schema(&fresh).unwrap();
+        assert_eq!(
+            canonical_index_names(&conn),
+            canonical_index_names(&fresh),
+            "upgraded and fresh databases must converge on the canonical indexes"
+        );
+    }
+
+    /// Issue #2410 — dropping the prefix indexes is only safe while the readers
+    /// that filtered on `mesh_id` alone still seek an index. These are the
+    /// production statements (`db::mesh`'s mesh delete,
+    /// list_warm_paths_for_mesh_inner, delete_warm_worktrees_for_mesh_inner,
+    /// list_warm_paths_for_mesh_droppable_inner); the `status !=` form cannot
+    /// use the composite's second column but still rides its `mesh_id` prefix.
+    /// The plan must name the composite, never a scan — a scan here means the
+    /// removal traded a redundant index for a full scan of the whole table.
+    #[test]
+    fn mesh_id_only_readers_keep_seeking_an_index_after_the_prefix_drop() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::super::init_schema(&conn).unwrap();
+        conn.execute_batch(
+            "
+            INSERT INTO meshes (id, name, path) VALUES (1, 'mesh', 'C:/mesh');
+            INSERT INTO agent_nodes (id, mesh_id, name, path, status)
+                VALUES (1, 1, 'node', 'C:/mesh', 'awaiting_input');
+            INSERT INTO autopilot_runs (node_id, mesh_id, issue_number, state)
+                VALUES (1, 1, 2410, 'implementing');
+            INSERT INTO warm_worktrees (mesh_id, path, preassigned_name, status)
+                VALUES (1, 'C:/mesh/warm', 'warm-one', 'available');
+            ",
+        )
+        .unwrap();
+
+        for (reader, sql, expected_index) in [
+            (
+                "delete_mesh",
+                "DELETE FROM autopilot_runs WHERE mesh_id = ?1",
+                "idx_autopilot_runs_mesh_state",
+            ),
+            (
+                "list_warm_paths_for_mesh_inner",
+                "SELECT path FROM warm_worktrees WHERE mesh_id = ?1",
+                "idx_warm_worktrees_mesh_status_created",
+            ),
+            (
+                "delete_warm_worktrees_for_mesh_inner",
+                "DELETE FROM warm_worktrees WHERE mesh_id = ?1",
+                "idx_warm_worktrees_mesh_status_created",
+            ),
+            (
+                "list_warm_paths_for_mesh_droppable_inner",
+                "SELECT path FROM warm_worktrees WHERE mesh_id = ?1 AND status != 'claimed'",
+                "idx_warm_worktrees_mesh_status_created",
+            ),
+        ] {
+            let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let plan = statement
+                .query_map(rusqlite::params![1_i64], |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<SqlResult<Vec<String>>>()
+                .unwrap();
+            assert!(
+                plan.iter().any(|line| line.contains(expected_index)),
+                "{reader} must seek {expected_index}, got plan: {plan:?}"
+            );
+            assert!(
+                !plan.iter().any(|line| line.contains("SCAN")),
+                "{reader} must not scan its table, got plan: {plan:?}"
+            );
+        }
     }
 
     /// Issue #1932 — the submission-ordinal index is index-only DDL with no

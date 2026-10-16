@@ -336,12 +336,27 @@ npm run build           # produces dist/
 npm run check:bundle    # reads dist/ and compares against scripts/bundle-budget.json
 ```
 
-`scripts/check.ps1 all-ts` (and `all`) runs the budget check as part of
-the green bar — `unit` / `integration` / `rust` skip it because they
-don't produce a build. The quality job on CI runs it after
-`npm run build` so a regression on the entry chunk fails the build.
-Bump the budget values intentionally — every visible CI failure costs a
-hot path; don't paper over a real growth by raising the ceiling.
+The budget says how large the entry chunk may get, but not what belongs in
+it. [`scripts/check-bundle-composition.mjs`](scripts/check-bundle-composition.mjs)
+is the second half of the gate: it asserts that xterm + its addons and every
+Probe tab are still split into their own lazy chunks, so re-importing one
+eagerly fails the build instead of quietly re-growing the entry chunk under a
+raised budget. It reads the same `dist/` and fails with the offending import and the
+file that pulled it in.
+
+```bash
+npm run check:bundle-composition   # reads dist/ and fails if a lazy chunk was inlined
+```
+
+`scripts/check.ps1 all-ts` (and `all`) runs both checks as part of the green
+bar — `unit` / `integration` / `rust` skip them because they don't produce a
+build. `npm run verify` runs both too, as the `bundle` and `bundle-composition`
+harness gates. The quality job on CI runs them after `npm run build` so a
+regression on the entry chunk fails the build. Bump the budget values
+intentionally — every visible CI failure costs a hot path; don't paper over a
+real growth by raising the ceiling. If the gate instead reports that a lazy chunk has gone
+missing after a deliberate build-config change, update its forbidden list
+rather than deleting the check.
 
 ## Project structure
 

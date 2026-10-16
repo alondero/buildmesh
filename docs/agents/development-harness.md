@@ -560,10 +560,13 @@ asynchronous changed-file lint and source type checks plus the portable agent
 rules; unchanged fast evidence is reused. Existing edit/commit guards remain.
 PreToolUse protects direct edits of `.harness` state; use the CLI instead.
 Stop checks the current receipt and evidence rather than rerunning expensive
-suites at every turn. A first nonpassing stop presents the diagnostic. A
-recursive BLOCKED/TIMEOUT stop permits an incomplete handoff. Once recorded
-blockers exist, the very first stop of every later turn is released, so the
-diagnostic is not repeated once per turn. A FAIL is never
+suites at every turn. A task whose phase is already `complete` is not
+re-checked, so a later run that invalidated its recorded evidence does not
+re-block finished work; start a new task for new work instead. A first
+nonpassing stop presents the diagnostic. A recursive BLOCKED/TIMEOUT stop
+permits an incomplete handoff. Once recorded
+blockers exist, the very first stop of every later turn is released, so
+the diagnostic is not repeated once per turn. A FAIL is never
 released by a written report, however many times it is repeated. For a failed
 implementation that cannot be repaired, write
 `{"phase": "blocked", "blockers": ["<why>"]}` to a JSON file and run
