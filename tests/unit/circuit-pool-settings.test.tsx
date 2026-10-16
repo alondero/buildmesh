@@ -123,10 +123,19 @@ describe('Settings — Circuit agent pool size', () => {
 
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).not.toHaveBeenCalled();
-    screen.getByTestId('modal-discard-banner');
-    // Opening the banner focuses its Cancel button, which blurs the input —
-    // and blur commits. So by the time the banner is visible the draft is
-    // already saved (nothing can be lost) and the dirty dot clears.
+    // The banner's presence is deliberately NOT probed here. Opening it focuses
+    // its Cancel button, which blurs the input, and blur commits the draft —
+    // so `dirty` flips false and Modal auto-dismisses the banner
+    // (src/components/shared/Modal.tsx, "Auto-dismiss on the dirty→false
+    // transition"). The banner is therefore up for less time than one React
+    // commit, and whether a DOM query can observe it depends on whether
+    // `fireEvent` happened to flush inside `act()`.
+    // `@testing-library/react` 16.3.3 stopped wrapping each dispatch in its own
+    // `act()`, and this probe started missing a banner that genuinely opened.
+    // `modal.test.tsx` owns the banner-presence contract against a permanently
+    // dirty modal; what is unique to this test is the commit — and the commit
+    // is itself the proof the banner opened, because focusing its Cancel button
+    // is the only thing that moves focus off the input.
     await waitFor(() => expect(calls['set_app_circuit_agent_pool_size']).toBeTruthy());
     expect(calls['set_app_circuit_agent_pool_size']![0]).toEqual({ size: 8 });
     expect(screen.queryByTestId('settings-tab-dirty-autopilot')).toBeNull();
