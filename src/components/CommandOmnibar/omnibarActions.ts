@@ -142,20 +142,20 @@ export async function gitSyncAllMeshes(meshes: Mesh[]): Promise<void> {
     try {
       const result = await api.gitSync(mesh.path);
       const feedback = classifySyncResult(result);
+      // Publish for every outcome except a provable no-fetch, in one place, so
+      // this loop cannot drift from the single-mesh path: a no_upstream mesh
+      // fetched without being compared and its row still has to re-read the
+      // behind-count, and a failed fetch may have moved a ref before it failed.
+      if (result.status !== 'skipped') noteSyncOutcome(target, outcomeOf(result));
       if (feedback.unresolved) {
         (result.status === 'failed' ? failed : unresolved).push(mesh.name);
         raiseSyncAttention(target, result, SILENT);
-        // A partial run fetches without fast-forwarding, so the row's cached
-        // behind-count is stale even though nothing was verified or resolved.
-        noteSyncOutcome(target, outcomeOf(result));
         continue;
       }
       // Neither synced nor a problem: say which of the two it is.
       if (!feedback.verified) {
         (result.status === 'skipped' ? noRemote : noComparison).push(mesh.name);
-        continue;
       }
-      noteSyncOutcome(target, outcomeOf(result));
     } catch (error) {
       failed.push(mesh.name);
       // The thrown reason goes into the card, not just the summary: "sync

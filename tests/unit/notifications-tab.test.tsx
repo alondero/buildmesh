@@ -142,6 +142,32 @@ describe('sync failures in Needs attention', () => {
     expect(within(card).queryByText(/fetch did not run/)).toBeNull();
   });
 
+  it('disables Retry while a sync is in flight', async () => {
+    // The control must read as unavailable, not merely refuse clicks: the
+    // style rule keys off `disabled` (probe-ui-checklist §4), and a
+    // long-running action that stays visually prominent invites a double-click
+    // that fires two syncs.
+    let release: (v: unknown) => void = () => {};
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'list_pending_worktree_removals') return Promise.resolve([entry]);
+      if (cmd === 'git_sync') return new Promise(resolve => { release = resolve; });
+      return Promise.resolve([]);
+    });
+    addToast('Git sync', 'mesh-a: Fetch failed', 'error', SYNC_ACTION);
+    render(<><NotificationButton /><ProbePanel /></>);
+    fireEvent.click(screen.getByRole('button', { name: 'Open Notifications' }));
+
+    const retry = await screen.findByRole('button', { name: 'Retry sync for mesh-a' });
+    expect((retry as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(retry);
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Retry sync for mesh-a' }) as HTMLButtonElement).disabled).toBe(true));
+    expect(screen.getByText('Retrying…')).toBeTruthy();
+
+    release({ fetched: true, pulled: true, new_commits: 2, message: 'Pulled 2 new commits', status: 'synced' });
+    await waitFor(() => expect(screen.queryByTestId('sync-attention-/repos/mesh-a')).toBeNull());
+  });
+
   it('retries the sync from the card and clears it once the mesh syncs', async () => {
     vi.mocked(invoke).mockImplementation(async cmd => {
       if (cmd === 'list_pending_worktree_removals') return [entry];

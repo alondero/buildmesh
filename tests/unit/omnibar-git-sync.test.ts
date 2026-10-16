@@ -126,7 +126,25 @@ describe('omnibar Git sync across meshes', () => {
     await gitSyncAllMeshes([mesh(1, 'a')]);
 
     expect(useMeshSyncCompletion.getState().completions['/repos/a'])
-      .toMatchObject({ verified: false, refsFetched: true });
+      .toMatchObject({ verified: false, refsMayHaveChanged: true });
+  });
+
+  it('publishes a fetch for a mesh that fetched without being compared', async () => {
+    // The bulk path must publish the same outcomes the single-mesh path does.
+    // Skipping this one is how a `no_upstream` mesh kept a stale behind-count
+    // even though its remote-tracking ref had moved.
+    vi.mocked(invoke).mockResolvedValue(sync('Fetched, but this branch has no upstream', { status: 'no_upstream', fetched: true }));
+    await gitSyncAllMeshes([mesh(1, 'a')]);
+
+    expect(useMeshSyncCompletion.getState().completions['/repos/a'])
+      .toMatchObject({ verified: false, refsMayHaveChanged: true });
+  });
+
+  it('publishes nothing for a mesh with no remote — no fetch was launched', async () => {
+    vi.mocked(invoke).mockResolvedValue(sync('No remote configured', { status: 'skipped', fetched: false }));
+    await gitSyncAllMeshes([mesh(1, 'a')]);
+
+    expect(useMeshSyncCompletion.getState().completions['/repos/a']).toBeUndefined();
   });
 
   it('publishes nothing for a mesh that only skipped', async () => {

@@ -3,11 +3,11 @@
 /**
  * How a manual `git_sync` ended, as the *user* experiences it. This is the
  * one field the frontend needs and cannot infer from the flags: a failed
- * fetch, a Mesh with no remote, and a branch with no upstream all report
- * `fetched: false` with zero new commits, and only the wording of `message`
- * distinguishes them — so a UI that classified outcomes from the flags had to
- * either shout "error" at a purely local Mesh or stay silent about a real
- * network failure.
+ * fetch and a Mesh with no remote both report `fetched: false` with zero new
+ * commits, and a comparison that never ran is indistinguishable from one that
+ * found zero — so a UI that classified outcomes from the flags had to either
+ * shout "error" at a purely local Mesh or stay silent about a real network
+ * failure.
  *
  * `fetched` means the fetch COMPLETED SUCCESSFULLY, never that it was
  * attempted: `FetchFailed` is returned after `git fetch` was launched and

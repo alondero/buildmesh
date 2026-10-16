@@ -17,7 +17,7 @@ import type { GitSyncStatus } from '../types/generated/GitSyncStatus';
 import type { MeshSyncNotificationAction, SyncEvidence } from './notifications';
 import type { ToastSeverity } from './toastUtils';
 
-/** Per-mesh record of what the last completed sync did, with a counter so a
+/** Per-mesh record of what the last sync attempt did, with a counter so a
  *  repeat is a new event rather than an equal one.
  *
  *  The sidebar row's failure badge and cached behind-count are component-local,
@@ -26,23 +26,29 @@ import type { ToastSeverity } from './toastUtils';
  *  to be published for rows to react to.
  *
  *  The two signals are separate because they end different things. `verified`
- *  ends the problem: it clears the failure badge and resolves the card. A
- *  `Partial` result verifies nothing but still fetches, so the remote-tracking
- *  ref the behind-count is measured against has moved and the count is stale
- *  even though nothing was resolved — the original reported symptom (commits
- *  arrive, the working tree does not move, the marker does not budge). */
+ *  ends the problem: it clears the failure badge and resolves the card.
+ *  `refsMayHaveChanged` ends staleness: it re-reads the cached behind-count.
+ *
+ *  That second signal is deliberately "may have", not "did". The manual fetch
+ *  runs without `--atomic`, so it can update some remote-tracking refs before
+ *  failing on another — meaning a `failed` result leaves the behind-count
+ *  possibly stale, and a row that trusted `fetched: false` to mean "nothing
+ *  moved" would show a number the last sync invalidated. Being wrong in the
+ *  refresh direction costs one redundant read; being wrong the other way is
+ *  the original reported symptom. So everything except a provable no-fetch is
+ *  treated as "may have changed". */
 interface MeshSyncCompletion {
   revision: number;
   /** The mesh is confirmed in sync with upstream. */
   verified: boolean;
-  /** The fetch ran, so the remote-tracking ref may have moved. */
-  refsFetched: boolean;
+  /** A fetch was launched, so the remote-tracking refs may have moved. */
+  refsMayHaveChanged: boolean;
 }
 
-/** What one completed sync did to a mesh. */
+/** What one sync attempt did to a mesh. */
 export interface SyncOutcome {
   verified: boolean;
-  refsFetched: boolean;
+  refsMayHaveChanged: boolean;
 }
 
 interface MeshSyncCompletionState {
@@ -165,7 +171,7 @@ export function raiseSyncAttention(target: SyncTarget, result: GitSyncResult, op
     syncAction(target, result.message, evidenceOf(result)), options);
 }
 
-/** Publish what one completed sync did to a mesh, for rows to react to. Two
+/** Publish what one sync attempt did to a mesh, for rows to react to. Two
  *  effects in one place, because both belong to the same fact and every entry
  *  point must produce both:
  *  - resolves an earlier "Needs attention" item when the mesh was *verified*,
@@ -173,27 +179,32 @@ export function raiseSyncAttention(target: SyncTarget, result: GitSyncResult, op
  *  - publishes the outcome so a sidebar row clears its own failure badge and
  *    re-reads the cached behind-count even though it did not run the sync.
  *
- *  A result that neither verified nor fetched publishes nothing, so every row
- *  keeps what it already had: a `skipped` mesh, a `failed` result that came back
- *  with `fetched: false` (the fetch failed, or the path was not a usable
- *  repository — a completed command result, not an error), and an IPC that never
- *  reached the backend all land here. Those still raise a toast and a
- *  Needs-attention card; they simply changed nothing for another mesh's row.
- *  `refsFetched` is read from the backend's own `fetched` flag rather than
- *  inferred from the status, because a `Partial` run fetches without
- *  fast-forwarding and that is exactly the case whose behind-count goes stale. */
+ *  Publishing nothing is reserved for a provable no-op: a mesh with no remote,
+ *  where no fetch was ever launched and nothing could have moved. Everything
+ *  else publishes, because a fetch that was attempted may have moved a ref even
+ *  when it did not complete — see `outcomeOf`. Those outcomes still raise a
+ *  toast, and a card when they leave the mesh in trouble. */
 export function noteSyncOutcome(target: SyncTarget, outcome: SyncOutcome): void {
-  if (!outcome.verified && !outcome.refsFetched) return;
+  if (!outcome.verified && !outcome.refsMayHaveChanged) return;
   if (outcome.verified) {
     useToastStore.getState().resolveMeshSyncNotification(target.path, 'Synced successfully.');
   }
   useMeshSyncCompletion.getState().noteCompletion(target.path, outcome);
 }
 
-/** The outcome of a `git_sync` result, in the two signals rows react to. */
+/** The two signals a `git_sync` result gives to the rows watching that mesh.
+ *
+ *  `refsMayHaveChanged` is derived from the status, not from the result's
+ *  `fetched` flag: `skipped` (no remote) is the one outcome where no fetch was
+ *  launched at all, and every other outcome launched one. A `failed` fetch
+ *  reports `fetched: false` because it did not *complete*, but the manual fetch
+ *  runs without `--atomic` and can update some remote-tracking refs before
+ *  failing on another, so the behind-count may genuinely be stale. Reading
+ *  `fetched` here is what let a stale marker survive a bulk sync and a card
+ *  retry. */
 export function outcomeOf(result: GitSyncResult): SyncOutcome {
   const feedback = classifySyncResult(result);
-  return { verified: feedback.verified, refsFetched: result.fetched };
+  return { verified: feedback.verified, refsMayHaveChanged: result.status !== 'skipped' };
 }
 
 /** Report one manual sync: always a toast, plus a "Needs attention" item when
@@ -220,6 +231,11 @@ export function reportSyncError(target: SyncTarget, error: unknown, options?: Re
   const detail = error instanceof Error ? error.message : String(error);
   addToast(SYNC_PROVIDER, `${target.name}: Sync failed: ${detail}`, 'error',
     syncAction(target, detail, 'unknown'), options);
+  // Publish the refresh too. An IPC rejection does not tell us whether the
+  // backend stopped before or after running the fetch, so the same conservative
+  // reading as a failed fetch applies: the refs may have moved, and a redundant
+  // re-read is cheaper than a marker the last sync already invalidated.
+  noteSyncOutcome(target, { verified: false, refsMayHaveChanged: true });
   return { severity: 'error', unresolved: true, verified: false };
 }
 
@@ -227,14 +243,12 @@ export function reportSyncError(target: SyncTarget, error: unknown, options?: Re
  *  "Force sync from upstream" and the notification card's "Retry sync", so the
  *  two cannot drift apart on severity, wording or resolution.
  *
- *  `answered` means only that the backend returned a `GitSyncResult` — NOT that
- *  the fetch ran. A `failed` or `skipped` result comes back having contacted
- *  nothing. It is the right signal for "re-read the row's cached branch
- *  status": a returned result means the refs may have moved (and the
- *  row-refresh trigger for a fetched-but-not-applied pull rides on the
- *  published outcome), while a thrown IPC means nothing could have. Callers
- *  needing the fetch fact itself read it off the result's own `fetched` flag
- *  via `outcomeOf`. */
+ *  `answered` means only that the backend returned a `GitSyncResult` — not that
+ *  the fetch ran, and not that it did not. It is the right signal for "the
+ *  result is worth reporting at all": a rejected IPC produced no result to
+ *  classify, while a returned one — including `failed` and `skipped` — always
+ *  carries a status. Callers needing to know what to refresh read
+ *  `refsMayHaveChanged` from `outcomeOf`. */
 export async function runMeshSync(target: SyncTarget): Promise<{ feedback: SyncFeedback; answered: boolean }> {
   try {
     const result = await gitSync(target.path);

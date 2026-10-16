@@ -717,6 +717,41 @@ describe('MeshItem', () => {
       .toBeGreaterThan(readsBefore));
   });
 
+  it('refreshes the behind-count when a fetch the row did not start did not complete', async () => {
+    // `git fetch` runs without `--atomic`, so a failed fetch can update some
+    // remote-tracking refs before failing on another. The count is therefore
+    // possibly stale and must be re-read — even though the result reports
+    // `fetched: false`, which means "did not complete", not "moved nothing".
+    // The badge stays lit: the mesh is still behind.
+    renderMeshItem();
+    await act(async () => {
+      await emit('mesh-sync-warning', {
+        node_id: 10,
+        mesh_path: MESH.path,
+        outcome: 'fetch_failed',
+        new_commits: null,
+        pr_number: null,
+        head_ref: null,
+        expected_sha: null,
+        actual_sha: null,
+        fallback_base_ref: null,
+        head_repo_owner: null,
+        head_repo_clone_url: null,
+        message: 'fetch failed: network down',
+      });
+    });
+    await screen.findByLabelText(/^Sync failed for /);
+
+    const readsBefore = vi.mocked(invoke).mock.calls.filter(c => c[0] === 'get_git_branch_status').length;
+    await act(async () => { reportMeshSync({ name: MESH.name, path: MESH.path }, {
+      fetched: false, pulled: false, new_commits: 0, message: 'Fetch failed: could not resolve host', status: 'failed',
+    }); });
+
+    await waitFor(() => expect(vi.mocked(invoke).mock.calls.filter(c => c[0] === 'get_git_branch_status').length)
+      .toBeGreaterThan(readsBefore));
+    expect(screen.getByLabelText(/^Sync failed for /)).toBeTruthy();
+  });
+
   it('refreshes the behind-count when a sync the row did not start only fetched', async () => {
     // A partial run advances the remote-tracking ref without fast-forwarding.
     // The count is therefore stale — this is the originally reported symptom —

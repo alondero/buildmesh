@@ -319,8 +319,13 @@ function MeshItemView({
   // still showing a lit badge. The row's own retries publish the same outcome,
   // so this is the only place either update happens.
   //
-  // The two signals are applied separately on purpose: a partial sync fetches
-  // without fast-forwarding, so the count is stale while the badge is correct.
+  // The two signals are applied separately on purpose. Verification ends the
+  // problem: it clears the badge. A fetch that was merely ATTEMPTED ends
+  // staleness: it re-reads the behind-count, because `git fetch` without
+  // --atomic can update some remote-tracking refs before failing on another,
+  // so a failed sync may still have moved the ref this count is measured
+  // against. Only a provable no-fetch — a mesh with no remote — skips the
+  // refresh.
   const completion = useMeshSyncCompletion(s => s.completions[mesh.path]);
   const lastHandled = useRef(0);
   useEffect(() => {
@@ -328,7 +333,7 @@ function MeshItemView({
     if (revision === lastHandled.current) return;
     lastHandled.current = revision;
     if (completion?.verified) setSpawnSyncFailed(false);
-    if (completion?.refsFetched) refreshBranchStatus();
+    if (completion?.refsMayHaveChanged) refreshBranchStatus();
   }, [completion, refreshBranchStatus]);
 
   // One sync path behind both entry points: the failure badge in the header

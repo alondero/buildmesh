@@ -46,12 +46,13 @@ function AttentionCard({ title, notice, subject, detail, path, status, action, t
 }
 
 /** What the card may assert, per what the record actually establishes. The
- *  three cases are genuinely different claims, not shades of one: a fetched
- *  run knows the mesh is behind; a result that reports `fetched: false` knows
- *  the remote was never contacted; and everything else — a fetch whose
- *  comparison failed, an IPC that never returned, a record from a build that
- *  did not record this — establishes nothing either way, so the card says so
- *  instead of picking the most alarming reading. */
+ *  cases are genuinely different claims, not shades of one: a fetched run that
+ *  did not fast-forward knows the mesh is behind; `not-fetched` means the
+ *  record came from a mesh with no remote, where nothing was ever fetched (only
+ *  records written by earlier builds carry it, and it raises no card today);
+ *  and everything else establishes nothing either way — a fetch that did not
+ *  complete, a comparison that failed, an IPC that never returned — so the card
+ *  says so instead of picking the more alarming reading. */
 function syncStatusLine(evidence: SyncEvidence): string {
   switch (evidence) {
     case 'behind':

@@ -427,21 +427,23 @@ on GitHub.
 
 Forcing a sync always reports back, one way or another. A toast says what
 happened: how many commits were pulled, that the mesh was already up to date,
-or that this mesh has no remote configured. When the sync could not finish —
-the fetch failed, the fast-forward was refused because your local changes
-would be overwritten, your branch has diverged, the pull timed out, or the
-comparison against upstream could not be made — a card also appears in **Needs
-attention** in the Notifications probe (the bell in the title bar), naming the
-mesh, the reason, and its path. That card stays until a later sync succeeds, and
-its **Retry sync** button re-runs the sync for you.
+that this mesh has no remote configured, or that its branch has no upstream to
+compare against. Two of those are ordinary states rather than problems, and
+they get a toast only — **no card**. When the sync could not finish — the fetch
+failed, the fast-forward was refused because your local changes would be
+overwritten, your branch has diverged, the pull timed out, or the comparison
+against upstream failed — a card also appears in **Needs attention** in the
+Notifications probe (the bell in the title bar), naming the mesh, the reason,
+and its path. That card stays until a later sync succeeds, and its **Retry
+sync** button re-runs the sync for you.
 
 What the card claims depends on how far the sync got. Only one case supports a
 claim about being behind: the commits were fetched and the fast-forward did not
 apply, so the card says the mesh is behind. Everything else — the fetch failed
-partway, the comparison could not be made, the branch has no upstream to
-compare against — supports no claim at all, so the card says the upstream state
-is unknown. A failed fetch in particular does *not* mean upstream was never
-contacted: the sync was attempted, so the app will not tell you it wasn't.
+partway, or the comparison itself failed — supports no claim at all, so the
+card says the upstream state is unknown. A failed fetch in particular does *not*
+mean upstream was never contacted: the sync was attempted, so the app will not
+tell you it wasn't.
 
 A pull that times out is the opposite case: the fetch already succeeded and the
 commits were counted, so the mesh really is behind and the card says so.

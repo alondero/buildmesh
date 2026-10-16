@@ -144,11 +144,11 @@ describe('reporting a manual sync', () => {
     }
   });
 
-  it('publishes a completion only for a verified sync', () => {
+  it('publishes nothing only for a provable no-fetch', () => {
     const revisions = () => useMeshSyncCompletion.getState().completions[MESH.path]?.revision ?? 0;
     expect(revisions()).toBe(0);
 
-    reportSyncError(MESH, new Error('boom'));
+    // No remote: no fetch was launched, so nothing could have moved.
     reportMeshSync(MESH, NO_REMOTE());
     expect(revisions()).toBe(0);
 
@@ -165,25 +165,28 @@ describe('reporting a manual sync', () => {
     // mesh must re-read it — while the failure itself stays unresolved.
     const entry = () => useMeshSyncCompletion.getState().completions[MESH.path];
     reportMeshSync(MESH, PARTIAL());
-    expect(entry()).toMatchObject({ verified: false, refsFetched: true });
+    expect(entry()).toMatchObject({ verified: false, refsMayHaveChanged: true });
     expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1);
   });
 
-  it('publishes no completion for a result that neither verified nor fetched', () => {
-    // Publishing nothing and raising a card are separate questions, and this
-    // pins the difference so the documented contract cannot drift from it. A
-    // failed fetch is a completed `git_sync` result — the backend answered —
-    // that moved no refs and established nothing, so no row's cached state
-    // changes.
+  it('publishes a refresh for a fetch that did not complete', () => {
+    // `git fetch` runs without `--atomic`, so it can update some remote-tracking
+    // refs before failing on another. The behind-count may therefore be stale
+    // even though the result reports `fetched: false`, and the row has to
+    // re-read it. The card still claims nothing — publishing a refresh is not
+    // the same as asserting a position.
     reportMeshSync(MESH, FAILED());
-    expect(useMeshSyncCompletion.getState().completions[MESH.path]).toBeUndefined();
-    // …but the user still has to be told, so it raises an unresolved card.
+    expect(useMeshSyncCompletion.getState().completions[MESH.path])
+      .toMatchObject({ verified: false, refsMayHaveChanged: true });
     expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1);
-    // A mesh with no remote neither publishes nor raises: there is nothing to
-    // report and nothing that is wrong.
-    reportMeshSync(MESH, NO_REMOTE());
-    expect(useMeshSyncCompletion.getState().completions[MESH.path]).toBeUndefined();
-    expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1);
+  });
+
+  it('publishes a refresh for a rejected IPC', () => {
+    // A rejection does not say whether the backend stopped before or after
+    // running the fetch, so the same conservative reading applies.
+    reportSyncError(MESH, new Error('boom'));
+    expect(useMeshSyncCompletion.getState().completions[MESH.path])
+      .toMatchObject({ verified: false, refsMayHaveChanged: true });
   });
 
   it('publishes a fetch for a no-upstream sync — the remote was contacted', () => {
@@ -191,27 +194,29 @@ describe('reporting a manual sync', () => {
     // re-read, even though nothing was compared and nothing resolved.
     reportMeshSync(MESH, NO_UPSTREAM());
     expect(useMeshSyncCompletion.getState().completions[MESH.path])
-      .toMatchObject({ verified: false, refsFetched: true });
+      .toMatchObject({ verified: false, refsMayHaveChanged: true });
   });
 
-  it('reads the fetch signal from the backend flag, not the status', () => {
-    // Two non-verified outcomes disagree about `fetched`: a partial and a
-    // no-upstream run fetched, a failed fetch did not complete. Deriving the
-    // signal from the status instead would miss exactly that difference.
-    expect(outcomeOf(PARTIAL())).toEqual({ verified: false, refsFetched: true });
-    expect(outcomeOf(NO_UPSTREAM())).toEqual({ verified: false, refsFetched: true });
-    expect(outcomeOf(FAILED())).toEqual({ verified: false, refsFetched: false });
-    expect(outcomeOf(SYNCED())).toEqual({ verified: true, refsFetched: true });
+  it('derives the refresh signal from whether a fetch was launched, not from `fetched`', () => {
+    // Every outcome except a remote-less mesh launched a fetch, so every one of
+    // them may have moved a ref. Reading the result's `fetched` flag instead
+    // would drop the failed and partial cases — which is exactly how a stale
+    // marker survived a bulk sync and a card retry.
+    expect(outcomeOf(PARTIAL())).toEqual({ verified: false, refsMayHaveChanged: true });
+    expect(outcomeOf(NO_UPSTREAM())).toEqual({ verified: false, refsMayHaveChanged: true });
+    expect(outcomeOf(FAILED())).toEqual({ verified: false, refsMayHaveChanged: true });
+    expect(outcomeOf(SYNCED())).toEqual({ verified: true, refsMayHaveChanged: true });
+    expect(outcomeOf(NO_REMOTE())).toEqual({ verified: false, refsMayHaveChanged: false });
   });
 
   it('publishes a fetch for an unverified comparison so the row re-reads its count', () => {
     // `Unverified` fetched — the remote-tracking refs DID move — so the row's
     // cached behind-count is stale and must be re-read, even though nothing
     // was verified and nothing was resolved.
-    expect(outcomeOf(UNVERIFIED())).toEqual({ verified: false, refsFetched: true });
+    expect(outcomeOf(UNVERIFIED())).toEqual({ verified: false, refsMayHaveChanged: true });
     reportMeshSync(MESH, UNVERIFIED());
     expect(useMeshSyncCompletion.getState().completions[MESH.path])
-      .toMatchObject({ verified: false, refsFetched: true });
+      .toMatchObject({ verified: false, refsMayHaveChanged: true });
   });
 });
 

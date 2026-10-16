@@ -22,6 +22,10 @@
 .notification-card-actions > span { font-size: 10px; color: var(--color-text-secondary); }
 .notification-resolve { min-height: 28px; padding: 5px 10px; border-radius: 6px; border: 1px solid var(--color-accent-cyan); background: var(--color-bg-selection); color: var(--color-text-primary); font-weight: 550; cursor: pointer; }
 .notification-resolve:hover { background: var(--color-bg-card-hover); }
+/* The Retry control is long-running: while a sync is in flight it must read
+   as unavailable rather than stay the most prominent thing on the card
+   (probe-ui-checklist §4). `disabled` alone only mutes the shared button text. */
+.notification-resolve:disabled { opacity: 0.4; cursor: not-allowed; }
 .notification-caught-up { color: var(--color-text-secondary); line-height: 1.6; }
 .notification-row { display: flex; align-items: flex-start; gap: 8px; padding: 10px 8px; border-bottom: 1px solid var(--color-border-subtle); border-radius: 6px; }
 .notification-unread { background: var(--color-bg-highlight); }

@@ -116,24 +116,21 @@ not bump the worktree revision, because it is not newer evidence about the queue
 Both kinds deduplicate by action kind *and* path, since a mesh's root checkout
 can itself be a blocked worktree path.
 
-The sync card's outcome is read back by the sidebar rather than held in it. A
-completed run publishes up to two independent signals per mesh path — whether the
-mesh was verified, and whether the fetch ran (the backend's own `fetched` flag,
-not the status) — and a mesh row applies each to the piece it owns: verification
-clears the failure badge, a fetch re-reads the cached behind-count. The split is
-what a `Partial` run needs: it advances the remote-tracking ref without
-fast-forwarding, so the count is stale while the badge is correct. Both signals
-are applied by the same effect whether the sync was started from the row, from
-this probe's Retry button, or from the omnibar's bulk command.
-
-A run that neither verified nor fetched publishes nothing, so every row keeps
-the state it already had. There are three such cases, and they differ in what
-the user is told: a `failed` result (the fetch was attempted and did not
-complete) raises a Needs-attention card and a toast; so does an IPC that never
-reached the backend at all. A mesh with no remote (`skipped`) and a branch with
-no upstream (`no_upstream`) raise neither — they get an informational toast
-only, because neither is a problem. None of the four touches another mesh's
-row.
+The sync card's outcome is read back by the sidebar rather than held in it. Each
+sync publishes two independent signals per mesh path — whether the mesh was
+verified, and whether a fetch was *launched* — and a mesh row applies each to
+the piece it owns: verification clears the failure badge, a launched fetch
+re-reads the cached behind-count. The second signal is deliberately
+"may have changed", not "did": the manual fetch runs without `--atomic`, so it
+can update some remote-tracking refs before failing on another, and a `failed`
+result leaves the count possibly stale. Only a mesh with no remote — where no
+fetch was launched at all — skips the refresh, so that publication is reserved
+for a provable no-op. The split is what a `Partial` run needs: it advances the
+remote-tracking ref without fast-forwarding, so the count is stale while the
+badge is correct. Both signals are applied by the same effect whether the sync
+was started from the row, from this probe's Retry button, or from the omnibar's
+bulk command — the bulk path publishes for the same outcomes the single-mesh
+path does, so the two cannot drift apart.
 
 What the card may *claim* is a third thing again, and the distinction is
 recorded per notification as `evidence`. A `partial` run establishes that the
