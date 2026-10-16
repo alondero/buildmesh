@@ -262,6 +262,7 @@ export async function compileOwnedTestBinaries(crateDir, { targetDir, env = proc
       if (attempt === attempts || !foreign) throw error;
       console.error(`Shared Cargo target returned another worktree's test binary. Rebuilding ${localPackages.join(', ')} from this worktree; registry dependency artifacts stay.`);
       const clean = await run('clean', 'cargo', ['clean', ...localPackages.flatMap((name) => ['-p', name])], { cwd: manifestDir, env: compileEnv, stream });
+      // eslint-disable-next-line preserve-caught-error -- the caught error is the foreign artifact stamp that triggered the `cargo clean` retry, not what made the clean itself fail. `lastError` (set above) is the error this loop ultimately rethrows if the retries run out.
       if (clean.code !== 0) throw new Error(`cargo clean failed (exit ${clean.code}):\n${clean.output}`);
     }
   }

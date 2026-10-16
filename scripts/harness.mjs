@@ -692,7 +692,7 @@ async function internalGate(root, name) {
     const entries = knownFlakes(root);
     try { await validateFlakeIssues(entries); }
     catch (error) {
-      if (!error.message.includes('must be an open issue')) throw new Error(`BLOCKED: Cannot verify known-flake issues: ${error.message}`);
+      if (!error.message.includes('must be an open issue')) throw new Error(`BLOCKED: Cannot verify known-flake issues: ${error.message}`, { cause: error });
       throw error;
     }
     return;

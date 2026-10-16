@@ -62,9 +62,35 @@ morning, each **grouped**. Ungrouped npm on a repository this size produces
 dozens of single-bump pull requests a week, and every pull request pays the
 frontend quality gate (and, for a Rust or workflow change, the Rust graph), so
 the review cost is real. Grouping keeps one reviewable pull request per
-ecosystem while the gates keep the safety. Cargo is split by semver level so a
-major bump — the kind that changes an API — arrives alone rather than hidden in
-a batch.
+ecosystem while the gates keep the safety. Both the npm and the Cargo
+configuration are split by semver level so a major bump — the kind that changes
+an API — arrives alone rather than hidden in a batch.
+
+npm goes one level finer than Cargo, because a major bump in one frontend
+toolchain routinely breaks the peer range of another:
+
+| Group | Holds |
+|---|---|
+| `production-dependencies` | runtime dependencies |
+| `development-patches-minors` | every development patch and minor bump |
+| `eslint-toolchain-majors` | `eslint`, `@eslint/*`, `eslint-plugin-*`, `typescript-eslint`, `@typescript-eslint/*`, `globals` |
+| `vite-toolchain-majors` | `vite`, `@vitejs/*`, `tailwindcss`, `@tailwindcss/*`, `postcss`, `autoprefixer` |
+| `vitest-toolchain-majors` | `vitest`, `@vitest/*`, `jsdom`, `@testing-library/*`, `@playwright/test` |
+| `development-majors` | any other development major |
+
+Dependabot applies the first group a dependency matches, so the family groups
+precede the catch-all. Grouping the whole development toolchain together is
+what produced the nineteen-update pull request that no single reviewer could
+install (issue #2247).
+
+TypeScript majors are `ignore`d outright. `typescript-eslint` publishes
+`typescript: ">=4.8.4 <6.1.0"`, so a TypeScript 7 bump arriving in the same
+batch made `npm ci` fail with `ERESOLVE` before `tsc`, ESLint, or Vitest could
+run — and the grouped bump rewrote the manifest's own `~5.8.3` pin to
+`~7.0.2`, so the range did not hold it back. A manifest range is not a
+sufficient guard for a dependency whose real constraint is another package's
+peer range; lift the ignore when typescript-eslint's declared peer range admits
+the target TypeScript release.
 
 Dependabot's `labels` override is omitted because the repository does not define
 the custom `security` label. With no override, Dependabot can apply its default

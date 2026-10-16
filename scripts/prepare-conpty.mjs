@@ -64,6 +64,7 @@ async function prepare(rustArch, profileDir) {
     if (error.code !== 'ENOENT') throw error;
     const url = `https://api.nuget.org/v3-flatcontainer/microsoft.windows.console.conpty/${VERSION}/microsoft.windows.console.conpty.${VERSION}.nupkg`;
     const response = await fetch(url, { signal: AbortSignal.timeout(60000) });
+    // eslint-disable-next-line preserve-caught-error -- the caught error is the cache-miss ENOENT that brought us here, not the reason the download failed. Attaching it as `cause` would read as "the HTTP status was caused by the missing file".
     if (!response.ok) throw new Error(`ConPTY download failed: HTTP ${response.status}`);
     bytes = Buffer.from(await response.arrayBuffer());
     verifyPackage(bytes);

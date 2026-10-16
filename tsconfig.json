@@ -2,7 +2,13 @@
   "compilerOptions": {
     "target": "ES2020",
     "useDefineForClassFields": true,
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    /* `ES2022.Error` is the `Error` constructor's `cause` option and the
+       `Error.cause` property, and nothing else from ES2022. It is declared
+       rather than assumed because `npm run lint` enforces ESLint 10's
+       `preserve-caught-error`, whose whole point is to attach the original
+       error as `cause`. `target` stays ES2020: an older webview that ignores
+       the extra argument simply drops the cause, it does not misbehave. */
+    "lib": ["ES2020", "ES2022.Error", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "skipLibCheck": true,
 

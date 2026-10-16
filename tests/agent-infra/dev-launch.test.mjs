@@ -6,7 +6,7 @@ import { createServer as createHttpServer } from 'node:http';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const ps = process.platform === 'win32' ? 'powershell.exe' : 'pwsh';
@@ -32,7 +32,7 @@ function run(command, args, options = {}) {
   });
 }
 
-function fixture() {
+function fixture({ blockEsbuild = false } = {}) {
   mkdirSync(join(root, '.tmp'), { recursive: true });
   const dir = mkdtempSync(join(root, '.tmp', `bm-dev-launch-${process.pid}-`));
   mkdirSync(join(dir, 'scripts'));
@@ -40,8 +40,38 @@ function fixture() {
     copyFileSync(join(root, 'scripts', name), join(dir, 'scripts', name));
   }
   symlinkSync(join(root, 'node_modules'), join(dir, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir');
+  if (blockEsbuild) {
+    // A loader hook that makes the `esbuild` specifier unresolvable, which is
+    // what a clean install of Vite 8 looks like: esbuild is an optional peer
+    // and is not installed at all. Needed because a developer machine can have
+    // esbuild resolvable from a parent directory tree, which would hide the
+    // failure this test exists to catch.
+    writeFileSync(join(dir, 'block-esbuild-hooks.mjs'), [
+      'export async function resolve(specifier, context, next) {',
+      "  if (specifier === 'esbuild') {",
+      "    const error = new Error(\"Cannot find package 'esbuild'\");",
+      "    error.code = 'ERR_MODULE_NOT_FOUND';",
+      '    throw error;',
+      '  }',
+      '  return next(specifier, context);',
+      '}',
+      '',
+    ].join('\n'));
+    writeFileSync(join(dir, 'block-esbuild.mjs'), [
+      "import { register } from 'node:module';",
+      "register('./block-esbuild-hooks.mjs', import.meta.url);",
+      '',
+    ].join('\n'));
+  }
   writeFileSync(join(dir, 'index.html'), '<html><body>detached fixture</body></html>');
   return dir;
+}
+
+// `start` spawns the worker with the environment it inherited, so the hook has
+// to be active when the server is launched, not when `stop` is called.
+function blockEsbuildEnv(dir) {
+  const hook = pathToFileURL(join(dir, 'block-esbuild.mjs')).href;
+  return { ...environment, NODE_OPTIONS: [environment.NODE_OPTIONS, `--import ${hook}`].filter(Boolean).join(' ') };
 }
 
 async function freePort() {
@@ -108,6 +138,43 @@ test('detached Vite returns, survives its CLI, and stops only its worktree serve
       const stopped = await run(process.execPath, [cli(dir), 'stop']);
       assert.equal(stopped.code, 0, stopped.output);
       // Let pending child-process handle cleanup run during bounded removal.
+      await rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    }
+  }
+});
+
+test('stop shuts the server down even when the optional bundler is unresolvable', { timeout: 120000 }, async () => {
+  // Vite 8 lists esbuild as an optional peer, so a clean install has no
+  // `node_modules/esbuild`. The worker imported it unconditionally on `/stop`,
+  // which returned HTTP 500, so `stop` exited 1 without unlinking the ownership
+  // record and left the server running (issue #2247 review). With the specifier
+  // blocked, a stop must still terminate the server and clear the record.
+  const dir = fixture({ blockEsbuild: true });
+  const cli = dir => join(dir, 'scripts', 'dev-server.mjs');
+  const blocked = blockEsbuildEnv(dir);
+  try {
+    const port = await freePort();
+    let result = await run(process.execPath, [cli(dir), 'start', '--port', String(port)], { env: blocked });
+    assert.equal(result.code, 0, result.output);
+    const owned = JSON.parse(readFileSync(join(dir, '.harness', 'dev-server.json'), 'utf8'));
+    assert.equal(alive(owned.pid), true);
+
+    result = await run(process.execPath, [cli(dir), 'stop'], { env: blocked });
+    assert.equal(result.code, 0, result.output);
+    assert.equal(alive(owned.pid), false, 'a missing optional bundler must not keep the server running');
+    assert.equal(existsSync(join(dir, '.harness', 'dev-server.json')), false, 'stop must clear the ownership record');
+  } finally {
+    if (existsSync(join(dir, '.harness', 'dev-server.json'))) {
+      // A stop that failed leaves the server holding the fixture directory, so
+      // removing it can fail with EBUSY. The assertions above already report
+      // why; letting that secondary error replace them would hide it.
+      try {
+        await run(process.execPath, [cli(dir), 'stop'], { env: blocked });
+        await rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+      } catch {
+        // Already reported by the assertions above.
+      }
+    } else {
       await rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
   }
