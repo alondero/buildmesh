@@ -72,10 +72,12 @@ import { buildInitScript, loadFixtures } from './ui-mock/tauri-mock.mjs';
 import { startDevServer, stopDevServer } from './ui-shot-server.mjs';
 import { runSteps } from './ui-shot-steps.mjs';
 import { withDeadline } from './ui-shot-deadline.mjs';
+import { closeBrowser } from './ui-shot-close.mjs';
 import { PHASE_FILE_ENV, createPhaseRecorder } from './phase-watchdog.mjs';
 import {
   BROWSER_LAUNCH_TIMEOUT_MS,
   BROWSER_CLOSE_TIMEOUT_MS,
+  BROWSER_CLOSE_GRACE_MS,
   BROWSER_SETUP_TIMEOUT_MS,
   FIXTURES_LOAD_TIMEOUT_MS,
   NAVIGATION_TIMEOUT_MS,
@@ -241,8 +243,11 @@ async function getPage() {
       // is unconditional here.
       if (browser) {
         phase('browser close');
-        await withDeadline(browser.close(), BROWSER_CLOSE_TIMEOUT_MS, 'Closing the browser after setup failed')
-          .catch((closeError) => { console.error('[ui-shot] teardown close after setup failure:', closeError.message); });
+        await closeBrowser(browser, {
+          timeoutMs: BROWSER_CLOSE_TIMEOUT_MS,
+          graceMs: BROWSER_CLOSE_GRACE_MS,
+          phase: 'Closing the browser after setup failed',
+        }).catch((closeError) => { console.error('[ui-shot] teardown close after setup failure:', closeError.message); });
       }
       if (devServer) {
         phase('dev-server stop');
@@ -329,18 +334,25 @@ try {
   // In CDP mode this detaches from the app without closing it;
   // in --url/--mock mode it closes the headless browser.
   try {
-    // `browser.close()` takes no timeout argument, so the priced close budget is
-    // enforced by racing it: without this the teardown phase is the one thing in
-    // a run that nothing bounds, and the wrapper's slack cannot cover it (#2063).
-    // Scoped to `--mock` for the same reason as the step cap — in real-app modes
-    // a hang here would fail a run that had already produced its screenshot, by a
-    // number the wrapper does not budget.
+    // `browser.close()` takes no timeout argument, so the close phase is bounded
+    // by racing it: without this the teardown is the one thing in a run that
+    // nothing bounds, and the wrapper's slack cannot cover it (#2063).
+    //
+    // What the budget bounds is how long the run waits, not whether it passes.
+    // The close resolves only once Chromium has exited and Playwright has
+    // removed its profile directory, which under Windows suite load costs far
+    // more than any budget this side of it; failing the run there reported host
+    // contention as a product failure after the screenshot was already written
+    // (#2245). An overrun is reported and handed off, and a close that *errors*
+    // is still the run's failure. Scoped to `--mock` for the same reason as the
+    // step cap — in real-app modes a hang here would fail a run that had already
+    // produced its screenshot, by a number the wrapper does not budget.
     phase('browser close');
-    await withDeadline(
-      browser.close(),
-      mock ? BROWSER_CLOSE_TIMEOUT_MS : null,
-      'Closing the browser',
-    );
+    await closeBrowser(browser, {
+      timeoutMs: mock ? BROWSER_CLOSE_TIMEOUT_MS : null,
+      graceMs: mock ? BROWSER_CLOSE_GRACE_MS : 0,
+      phase: 'Closing the browser',
+    });
   } catch (closeError) {
     if (!failure) failure = closeError;
     else console.error('[ui-shot] browser close after a failed run:', closeError.message);

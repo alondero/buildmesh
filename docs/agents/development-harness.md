@@ -372,15 +372,37 @@ rather than auditing the script's source text, which could not see a phase in
 neither copy and matched the first occurrence of a call string.
 
 Phases Playwright cannot bound itself are bounded in `scripts/ui-shot-deadline.mjs`:
-the step script, importing the steps module, reading the mock fixtures, both
-`browser.close()` call sites, and page setup (`browser.newPage` and
-`page.addInitScript`) — none of which accept a timeout argument. A hanging step
-script is reported as the step script phase with the offending steps file named.
+the step script, importing the steps module, reading the mock fixtures, page setup
+(`browser.newPage` and `page.addInitScript`) — none of which accept a timeout
+argument. A hanging step script is reported as the step script phase with the
+offending steps file named.
+
+Both `browser.close()` call sites are different: they are bounded by
+`scripts/ui-shot-close.mjs`, which bounds how long the run *waits* without
+letting a slow browser decide the run's verdict. The close resolves only once
+Chromium has exited and Playwright has removed the profile directory it created,
+which is work this repo does not own: measured on Windows it costs 2-3s on a
+quiet host and 24-50s while a full suite saturates the machine, because
+Playwright force-kills the browser it launched 30s into the close
+(`DEFAULT_PLAYWRIGHT_TIMEOUT`) and the profile removal follows that. Racing that
+at 15s and failing the run reported host contention as a product failure, for a
+screenshot already written — the four `ui-shot` tests that carried this in
+`scripts/known-flakes.json` each failed with that same close-timeout error
+(#2245). An overrun is now reported on stderr and handed off;
+`BROWSER_CLOSE_GRACE_MS` keeps the process alive to Playwright's own 30s kill
+point so its profile cleanup runs in-process instead of losing to the exit
+handler, whose synchronous removal runs against a browser that has not finished
+dying and fails with EPERM (each occurrence observed under load left a
+`playwright_chromiumdev_profile-*` directory behind; the four load runs after
+this change left none). A close that *errors* is still the run's failure: slow
+teardown is host contention, a broken one is not.
+
 The step budgets and the teardown deadlines apply to `--mock` only. `--url` and
 CDP-attach drive a real app with no supervising wrapper and no priced budget, so
 their step phases and teardown stay unbounded rather than being cut off by a
-number nothing accounts for. Their navigation is bounded, but by Playwright's own
-default rather than by a priced budget.
+number nothing accounts for: they pass a null close budget and keep the
+unbounded close they used before the close budget existed. Their navigation is
+bounded, but by Playwright's own default rather than by a priced budget.
 
 `startDevServer` decides whether the URL is already served with a TCP connect, not
 an HTTP request, and waits for readiness afterwards. A live dev server whose first
