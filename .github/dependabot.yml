@@ -60,14 +60,17 @@ updates:
       development-patches-minors:
         dependency-type: development
         update-types:
-          - "version-update:semver-patch"
-          - "version-update:semver-minor"
+          - patch
+          - minor
       # A major bump is a migration with its own peer and runtime fallout, so
       # it arrives alone for its own family rather than hidden in a batch.
+      # `groups.update-types` takes the bare semver levels (`major`, `minor`,
+      # `patch`, as the cargo groups below use); the `version-update:semver-*`
+      # spelling belongs to `ignore` and `allow` alone.
       eslint-toolchain-majors:
         dependency-type: development
         update-types:
-          - "version-update:semver-major"
+          - major
         patterns:
           - "eslint"
           - "@eslint/*"
@@ -78,7 +81,7 @@ updates:
       vite-toolchain-majors:
         dependency-type: development
         update-types:
-          - "version-update:semver-major"
+          - major
         patterns:
           - "vite"
           - "@vitejs/*"
@@ -89,7 +92,7 @@ updates:
       vitest-toolchain-majors:
         dependency-type: development
         update-types:
-          - "version-update:semver-major"
+          - major
         patterns:
           - "vitest"
           - "@vitest/*"
@@ -99,7 +102,7 @@ updates:
       development-majors:
         dependency-type: development
         update-types:
-          - "version-update:semver-major"
+          - major
 
   - package-ecosystem: cargo
     directory: /src-tauri
