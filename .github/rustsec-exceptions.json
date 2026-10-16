@@ -10,7 +10,12 @@
     "",
     "A `vulnerabilities` advisory (a real vulnerability, not a maintenance warning) is never",
     "listed here: those must be fixed, which is why rustls RUSTSEC-2026-0285 was resolved in",
-    "the same change that introduced this file."
+    "the same change that introduced this file.",
+    "",
+    "`yanked` is empty because its only entry, `zip@4.6.1`, was un-yanked upstream on",
+    "2026-10-16 (the crate's other 4.x releases remain yanked). A reverted yank stops being",
+    "reported, and a stale exception fails rather than lingering with a rationale that no",
+    "longer describes the dependency tree."
   ],
   "advisories": [
     {
@@ -50,14 +55,5 @@
       "reviewBy": "2027-01-15"
     }
   ],
-  "yanked": [
-    {
-      "crate": "zip",
-      "version": "4.6.1",
-      "kind": "yanked",
-      "owner": "maintainers (transitive, via tauri-plugin-updater)",
-      "rationale": "On 2026-10-16 the zip maintainer yanked every published 4.x release, 4.0.0 through 4.6.1 inclusive, so the locked version now reports as a `yanked` warning. A yank is not a vulnerability: there is no RustSec advisory behind it, and cargo audit classes it as a warning rather than an exploitable finding. zip reaches Buildmesh only through tauri-plugin-updater 2.13.2, which pins zip = \"^4\", and `cargo update -p zip` cannot resolve because no 4.x remains on crates.io; the only non-yanked release is 9.0.3, a major bump the Tauri plugin controls. The locked 4.6.1 still builds and is the version this application already ships. Re-review when tauri-plugin-updater moves to zip 9, or if the crate is un-yanked, at which point this entry becomes stale and the gate fails it.",
-      "reviewBy": "2027-01-15"
-    }
-  ]
+  "yanked": []
 }
