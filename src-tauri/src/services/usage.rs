@@ -1179,7 +1179,16 @@ pub fn opencode_usage() -> UsageOutcome {
 const AGY_HOST: &str = "https://daily-cloudcode-pa.googleapis.com";
 /// The Antigravity CLI identifies with this User-Agent and the Cloud Code private
 /// API allowlists it. Load-bearing: without it the API returns 403 PERMISSION_DENIED.
-const AGY_USER_AGENT: &str = "antigravity/cli/1.0.3 windows/amd64";
+///
+/// The advertised CLI version is ALSO load-bearing: `retrieveUserQuotaSummary`
+/// gates the "Gemini Models" (weekly + 5-hour) quota group on it. The API still
+/// returns HTTP 200 for an older version, it just silently strips that group —
+/// so the Gemini Usage Meters disappear with no error (regression 2026-10-16: an
+/// `antigravity/cli/1.0.3` UA was served only the "Claude and GPT models" group).
+/// Verified live 2026-10-16: `1.1.5` omits the group, `1.2.0` includes it. Keep
+/// the pin at or above the gate in
+/// `agy_user_agent_meets_gemini_quota_version_gate`.
+const AGY_USER_AGENT: &str = "antigravity/cli/1.4.0 windows/amd64";
 
 // ─── OpenCode Go (live `_server billing.get` probe) ────────────────────────
 //
@@ -1840,6 +1849,38 @@ pub(crate) mod tests {
         assert!(
             !src.contains("\"/usage\""),
             "do not spawn agy --print /usage; call retrieveUserQuotaSummary instead"
+        );
+    }
+
+    #[test]
+    fn agy_user_agent_meets_gemini_quota_version_gate() {
+        // Regression 2026-10-16: `retrieveUserQuotaSummary` gates the
+        // "Gemini Models" (weekly + 5-hour) group on the CLI version advertised
+        // in the User-Agent. An `antigravity/cli/1.0.3` UA still got HTTP 200
+        // but with the Gemini group stripped, so both Gemini Usage Meters
+        // vanished. Verified live: `1.1.5` omits the group, `1.2.0` includes
+        // it. Guard the pin against drifting back below the gate.
+        let version_token = AGY_USER_AGENT
+            .strip_prefix("antigravity/cli/")
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("AGY_USER_AGENT must read `antigravity/cli/<major.minor.patch> <os>/<arch>`");
+        let version: Vec<u32> = version_token
+            .split('.')
+            .map(|part| {
+                part.parse()
+                    .unwrap_or_else(|_| panic!("non-numeric version segment in {version_token:?}"))
+            })
+            .collect();
+        assert_eq!(
+            version.len(),
+            3,
+            "AGY_USER_AGENT must advertise a major.minor.patch version, got {version_token:?}"
+        );
+        assert!(
+            (version[0], version[1], version[2]) >= (1, 2, 0),
+            "the quota API returns the Gemini (weekly + 5-hour) group only for \
+             User-Agent cli versions >= 1.2.0, but AGY_USER_AGENT advertises \
+             {version_token:?}; bump the pin"
         );
     }
 
