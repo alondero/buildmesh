@@ -29,9 +29,10 @@ The user workflow for uncertain actions is in
 
 The external journal has a closed Rust kind vocabulary: `spawn`, `prompt`, and
 `github`. GitHub subactions share the journal fence but keep distinct provider
-contracts above. Worker mapping explicitly handles every `Effect` variant;
-adding one requires choosing a durable policy in that match. Unknown external
-results never authorize automatic replay.
+contracts above. `Effect::persistence` is the one durable policy for every
+variant; adding one means choosing that policy there. Dispatch still matches
+every external action. Unknown external results never authorize automatic
+replay.
 
 ## Review continuation
 

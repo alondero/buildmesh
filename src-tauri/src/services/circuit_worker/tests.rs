@@ -97,6 +97,11 @@ fn worker_effect_persistence_mapping_covers_every_effect_variant() {
             target_agent_id: 101,
             prompt: "continue".into(),
         },
+        Effect::NudgeIdleAgent {
+            node_id: "status".into(),
+            target_agent_id: 101,
+            prompt: "wake".into(),
+        },
         Effect::CloseAgentNode {
             node_id: "status".into(),
             target_node_id: Some("spawn".into()),
@@ -577,16 +582,40 @@ fn circuit_completion_allows_its_terminal_actions_but_not_stale_effects_or_spawn
         target_node_id: Some("$source".into()),
         prompt: "fix".into(),
     };
-    assert!(effect_allowed_in_state("completed", true, &notify));
-    assert!(effect_allowed_in_state("completed", true, &set_status));
-    assert!(effect_allowed_in_state("completed", true, &close));
-    assert!(!effect_allowed_in_state("completed", true, &spawn));
-    assert!(!effect_allowed_in_state("completed", true, &inject));
+    assert!(dispatch::effect_allowed_in_state(
+        "completed",
+        true,
+        &notify
+    ));
+    assert!(dispatch::effect_allowed_in_state(
+        "completed",
+        true,
+        &set_status
+    ));
+    assert!(dispatch::effect_allowed_in_state("completed", true, &close));
+    assert!(!dispatch::effect_allowed_in_state(
+        "completed",
+        true,
+        &spawn
+    ));
+    assert!(!dispatch::effect_allowed_in_state(
+        "completed",
+        true,
+        &inject
+    ));
     for effect in [notify, set_status, close, spawn, inject] {
-        assert!(!effect_allowed_in_state("completed", false, &effect));
-        assert!(!effect_allowed_in_state("cancelled", true, &effect));
+        assert!(!dispatch::effect_allowed_in_state(
+            "completed",
+            false,
+            &effect
+        ));
+        assert!(!dispatch::effect_allowed_in_state(
+            "cancelled",
+            true,
+            &effect
+        ));
         assert_eq!(
-            effect_allowed_in_state("failed", true, &effect),
+            dispatch::effect_allowed_in_state("failed", true, &effect),
             matches!(
                 effect,
                 Effect::Notify { .. }
