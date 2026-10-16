@@ -33,14 +33,17 @@ export interface GitSummaryResult {
   /** Most recent failure for this path, or `null`. Cleared by any success. */
   error: Error | null;
   /**
-   * `true` when the fetch failed and no summary has ever been observed for
-   * this path. Compact surfaces show this as "changes unavailable" rather
-   * than silently rendering nothing.
+   * `true` when the fetch failed and there is no summary to show. That covers
+   * two cases a compact surface must not let look alike: the status was never
+   * observed, and it was observed clean and then a refresh broke. Both render
+   * nothing, so the surface says "changes unavailable" instead of staying
+   * silent and letting the silence read as "clean".
    */
   unavailable: boolean;
   /**
    * `true` when the fetch failed but an earlier summary is still being shown.
-   * Those counts are real but may be out of date.
+   * Those counts are real but may be out of date. `false` whenever
+   * `summary` is `null` — there is nothing on screen to be stale.
    */
   stale: boolean;
   refresh: () => void;
@@ -69,15 +72,21 @@ export function useGitSummary(gitPath: string | null): GitSummaryResult {
   // Match the original hook's public shape: hide zero-total summaries as
   // `null` so consumers can render a single `summary ? <Panel /> : null`.
   const summary = data && data.total > 0 ? data : null;
+  // Both flags are derived from `summary`, not from `data`. `summary` is what
+  // a consumer actually renders, so deriving from it keeps the flags honest
+  // about that. Deriving from `data` opened a hole on review of #2389: an
+  // observed-clean repo keeps `data = { total: 0 }` after a failed refresh, so
+  // `data`-based `unavailable` was false while the zero-total projection had
+  // already collapsed `summary` to `null` — the node header then rendered
+  // nothing at all, showing a broken status identically to a healthy clean one,
+  // which is the exact confusion issue #2328 exists to remove.
+  const broken = error !== null;
   return {
     summary,
     loading,
     error,
-    // `data` is null on a failed fetch and non-null once anything has been
-    // observed, so these two are exactly "never known" and "known, then
-    // the refresh broke".
-    unavailable: error !== null && data === null,
-    stale: error !== null && data !== null,
+    unavailable: broken && summary === null,
+    stale: broken && summary !== null,
     refresh,
   };
 }

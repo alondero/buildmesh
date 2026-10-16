@@ -138,6 +138,17 @@ compatibility and adds `unavailable` / `stale` alongside it. When you add a
 consumer, read the error channel; do not re-derive availability from an empty
 value.
 
+Derive a wrapper's `unavailable` / `stale` flags from the value the consumer
+actually renders, not from the raw cached `data`. A wrapper that projects its
+data — `useGitSummary` collapses a zero-total summary to `null` — makes those
+two disagree: after a clean repo's refresh fails, `data` is still
+`{ total: 0 }` while `summary` is already `null`, so `data`-derived
+`unavailable` was false with `summary` null and the surface rendered nothing.
+A broken status then looked exactly like a healthy clean repo, which is the
+confusion the error channel exists to prevent (issue #2328, review of #2389).
+Keep the flags consistent with what is on screen: `unavailable` when there is
+nothing to show, `stale` only when counts are still showing.
+
 Two consequences for surfaces. A surface that asserts a *state* (a clean
 count, "No changes") must render unavailable explicitly with a retry. A
 surface that only *annotates* — the `FileTree` badges, which never claim a

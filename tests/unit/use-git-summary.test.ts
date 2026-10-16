@@ -77,6 +77,58 @@ describe('useGitSummary — unavailable vs clean vs stale (issue #2328)', () => 
     }
   });
 
+  it('reports a failed refresh after an observed clean repo as unavailable, not stale', async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(CLEAN);
+    const { result } = renderHook(() => useGitSummary('/repo'));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.summary).toBeNull();
+    expect(result.current.unavailable).toBe(false);
+    expect(result.current.error).toBeNull();
+
+    const restoreClock = skipRefetchWindow();
+    try {
+      vi.mocked(invoke).mockRejectedValue(new Error('index.lock'));
+      await act(async () => {
+        await emit('git-changed', { path: '/repo' });
+      });
+      await waitFor(() => expect(result.current.error).toBeInstanceOf(Error));
+    } finally {
+      restoreClock();
+    }
+
+    // Regression caught in review of #2389: the cache still holds
+    // `{ total: 0 }`, so a `data`-derived `unavailable` stayed false while the
+    // zero-total projection had already collapsed `summary` to `null`. A
+    // compact surface that renders `summary` alone then showed nothing at all,
+    // making a broken status indistinguishable from a healthy clean repo — the
+    // exact confusion issue #2328 exists to remove.
+    expect(result.current.summary).toBeNull();
+    expect(result.current.unavailable).toBe(true);
+    // There are no counts on screen, so nothing can be "last known".
+    expect(result.current.stale).toBe(false);
+  });
+
+  it('recovers from a clean-repo failure when a retry succeeds', async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(CLEAN);
+    const { result } = renderHook(() => useGitSummary('/repo'));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    vi.mocked(invoke).mockRejectedValueOnce(new Error('index.lock'));
+    await act(async () => {
+      result.current.refresh();
+    });
+    await waitFor(() => expect(result.current.unavailable).toBe(true));
+
+    vi.mocked(invoke).mockResolvedValueOnce(DIRTY);
+    await act(async () => {
+      result.current.refresh();
+    });
+    await waitFor(() => expect(result.current.summary).toEqual(DIRTY));
+    expect(result.current.error).toBeNull();
+    expect(result.current.unavailable).toBe(false);
+    expect(result.current.stale).toBe(false);
+  });
+
   it('clears the stale flag when a retry succeeds', async () => {
     vi.mocked(invoke).mockResolvedValueOnce(DIRTY);
     const { result } = renderHook(() => useGitSummary('/repo'));

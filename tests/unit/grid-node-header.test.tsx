@@ -824,6 +824,28 @@ describe('GridNodeHeader git-summary outcomes (issue #2328)', () => {
     expect(notice.getAttribute('title')).toContain('index.lock');
   });
 
+  it('shows the unavailable message for a clean repo whose refresh then failed', () => {
+    // The state review of #2389 missed: the cache still holds a zero-total
+    // summary, so `summary` is null while `error` is set. `useGitSummary` now
+    // reports `unavailable` (not `stale`) for this, and the header must render
+    // the failure rather than nothing. Distinct from the never-observed case
+    // above even though the output matches: a regression that flips which flag
+    // fires would leave `summary` null with both flags false and silence.
+    summaryMock.mockReturnValue(null);
+    summaryStateMock.mockReturnValue({
+      error: new Error('index.lock'),
+      unavailable: true,
+      stale: false,
+    });
+
+    const details = openDetails();
+    expect(screen.getByTestId('git-summary-unavailable').textContent)
+      .toContain('Change status unavailable');
+    // No counts, and specifically no "last known" claim — nothing is shown.
+    expect(details.textContent).not.toContain('changed files');
+    expect(details.textContent).not.toContain('last known');
+  });
+
   it('marks preserved counts as last known after a failed refresh', () => {
     summaryMock.mockReturnValue({ total: 6, added: 3, modified: 2, deleted: 1 });
     summaryStateMock.mockReturnValue({
