@@ -1446,6 +1446,107 @@ mod tests {
         );
     }
 
+    /// The WSL/native split for a mesh path, on the only host where the
+    /// distinction exists at all. These are the literal shapes Build/Run
+    /// receives from a WSL mesh; the classification decides whether the
+    /// shell gets a POSIX cwd or a translated Windows one.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn env_for_path_classifies_wsl_mesh_paths_on_a_windows_host() {
+        for path in [
+            "/mnt/d/projects/myapp",
+            "/home/user/projects/myapp",
+            r"\\wsl$\Ubuntu\home\user\mesh",
+            r"\\wsl.localhost\Debian\home\user\mesh",
+        ] {
+            assert_eq!(
+                env_for_path(Path::new(path)),
+                super::Environment::Wsl,
+                "{path} should classify as WSL"
+            );
+        }
+        // Drive-letter paths, in either separator style, are Windows-native.
+        for path in [r"C:\Projects\myapp", "X:/src/buildmesh", "F:/Code/MyRepo"] {
+            assert_eq!(
+                env_for_path(Path::new(path)),
+                super::Environment::Windows,
+                "{path} should classify as Windows"
+            );
+        }
+    }
+
+    /// `/home/…` and `/root/…` become `\\wsl$\<distro>\…`, and the distro is
+    /// the *supplied* one. Hard-coding `Ubuntu` here — or letting a test call
+    /// the live `wsl.exe` probe — would pass on a developer machine running a
+    /// single distribution while a Debian mesh resolved to a directory that
+    /// does not exist, and the failure would only surface at spawn time.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn to_host_path_home_paths_use_the_supplied_distribution() {
+        assert_eq!(
+            to_host_path_with_distro("/home/alond/mesh", || Some("Debian".to_string())),
+            r"\\wsl$\Debian\home\alond\mesh"
+        );
+        assert_eq!(
+            to_host_path_with_distro("/root/project", || Some("openSUSE".to_string())),
+            r"\\wsl$\openSUSE\root\project"
+        );
+        // Nothing detected (probe returns `None`): the documented `Ubuntu`
+        // fallback, not an empty or malformed UNC.
+        assert_eq!(
+            to_host_path_with_distro("/home/alond/mesh", || None),
+            r"\\wsl$\Ubuntu\home\alond\mesh"
+        );
+    }
+
+    /// A path that is already a Windows host path needs no translation, so
+    /// `to_host_path` returns it unchanged. Both separator styles occur in
+    /// practice — `C:\…` from the Windows API, `X:/…` from user input and
+    /// from mesh rows persisted verbatim.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn to_host_path_leaves_windows_host_paths_unchanged() {
+        for path in [r"C:\Projects\myapp", "X:/src/buildmesh"] {
+            assert_eq!(
+                to_host_path_with_distro(path, || Some("Debian".to_string())),
+                path,
+                "{path} should pass through unchanged"
+            );
+        }
+    }
+
+    /// WSL does not exist on macOS or native Linux, so a `/home/…` or
+    /// `/mnt/…` path there is *already* host-native and must not be rewritten
+    /// into a `\\wsl$\…` UNC that no git2/file op on that host can open.
+    /// Asserting both arms inside one test keeps the non-Windows branch under
+    /// test on Linux CI instead of `#[cfg]`-ing the whole case away.
+    #[test]
+    fn native_hosts_treat_posix_paths_as_host_native() {
+        if cfg!(target_os = "windows") {
+            assert_eq!(
+                env_for_path(Path::new("/home/alond/mesh")),
+                super::Environment::Wsl
+            );
+            assert!(
+                to_host_path("/home/alond/mesh").starts_with(r"\\wsl$\"),
+                "a Windows host must translate the WSL home path into a UNC"
+            );
+        } else {
+            for path in ["/home/alond/mesh", "/mnt/d/projects/myapp"] {
+                assert_eq!(
+                    env_for_path(Path::new(path)),
+                    super::Environment::Windows,
+                    "{path} is host-native off Windows"
+                );
+                assert_eq!(
+                    to_host_path(path),
+                    path,
+                    "{path} must not be translated off Windows"
+                );
+            }
+        }
+    }
+
     #[test]
     fn runtime_host_path_converts_relocated_wsl_home() {
         let converted = to_host_path_for_runtime("/var/lib/codex", EnvType::Wsl);

@@ -117,7 +117,6 @@ describe('useAgentNodeStore', () => {
       loading: false,
       error: null,
       closingNodeIds: new Set(),
-      schedules: {},
     });
     vi.clearAllMocks();
     setWorktreeCloseActionResolverForTests();
@@ -1109,17 +1108,6 @@ describe('useAgentNodeStore', () => {
       expect(mockInvoke).toHaveBeenCalledWith('delete_agent_node', {nodeId:70,removeWorktree:false});
     });
 
-    it('preserves a scheduled prompt when worktree closure is cancelled', async () => {
-      const node=makeNode({id:71});
-      seedAgentNodes([node],71);
-      mockDeleteFlow(makeSafety({has_uncommitted:true}));
-      setWorktreeCloseActionResolverForTests(vi.fn().mockResolvedValue('cancel'));
-      useAgentNodeStore.getState().scheduleInput(71,60000,'continue','1m');
-      const scheduled = useAgentNodeStore.getState().schedules[71];
-      await useAgentNodeStore.getState().deleteAgentNode(71);
-      expect(useAgentNodeStore.getState().schedules[71]).toBe(scheduled);
-      useAgentNodeStore.getState().cancelSchedule(71);
-    });
     it('silently removes a clean worktree when closing the node', async () => {
       seedAgentNodes([makeNode({ id: 15 })], 15);
       mockDeleteFlow(makeSafety());
@@ -1995,156 +1983,6 @@ describe('useAgentNodeStore', () => {
       await useAgentNodeStore.getState().swapAgentNodes(1, 2);
 
       expect(mockInvoke).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('scheduleInput / cancelSchedule', () => {
-    beforeEach(() => {
-      vi.useFakeTimers();
-    });
-
-    afterEach(() => {
-      vi.useRealTimers();
-    });
-
-    it('stores schedule metadata with a computed targetTime', () => {
-      const now = Date.now();
-      useAgentNodeStore.getState().scheduleInput(1, 300_000, 'still there?', '5m');
-
-      const task = useAgentNodeStore.getState().schedules[1];
-      expect(task).toMatchObject({ nodeId: 1, message: 'still there?', label: '5m' });
-      expect(task.targetTime).toBeGreaterThanOrEqual(now + 300_000);
-      expect(task.timeoutId).toBeDefined();
-    });
-
-    it('sends the message and clears the schedule when the timeout fires', async () => {
-      // The scheduled node must be loaded — issue #1252's fire-handler
-      // guard bails if the node is missing or archived. The real
-      // SchedulingPopover only ever schedules against a node already
-      // on screen, so this is the realistic shape.
-      seedAgentNodes([makeNode({ id: 2, status: 'running' })]);
-      mockInvoke.mockResolvedValue(undefined);
-      useAgentNodeStore.getState().scheduleInput(2, 1000, 'ping', '1m');
-
-      await vi.advanceTimersByTimeAsync(1000);
-
-      expect(mockInvoke).toHaveBeenCalledWith('send_to_agent', { sessionId: 2, input: 'ping' });
-      expect(useAgentNodeStore.getState().schedules[2]).toBeUndefined();
-    });
-
-    it('writes a bare Enter instead of sendToAgent when message is empty', async () => {
-      seedAgentNodes([makeNode({ id: 3, status: 'running' })]);
-      mockInvoke.mockResolvedValue(undefined);
-      useAgentNodeStore.getState().scheduleInput(3, 1000, '', 'usage_reset');
-
-      await vi.advanceTimersByTimeAsync(1000);
-
-      expect(mockInvoke).toHaveBeenCalledWith('write_to_agent', { sessionId: 3, data: '\n' });
-    });
-
-    it('replaces an existing schedule for the same node instead of stacking', async () => {
-      seedAgentNodes([makeNode({ id: 4, status: 'running' })]);
-      mockInvoke.mockResolvedValue(undefined);
-      useAgentNodeStore.getState().scheduleInput(4, 1000, 'first', '1m');
-      useAgentNodeStore.getState().scheduleInput(4, 2000, 'second', '2m');
-
-      await vi.advanceTimersByTimeAsync(1000);
-      // The first schedule was cancelled — nothing fires at its original delay.
-      expect(mockInvoke).not.toHaveBeenCalledWith('send_to_agent', { sessionId: 4, input: 'first' });
-
-      await vi.advanceTimersByTimeAsync(1000);
-      expect(mockInvoke).toHaveBeenCalledWith('send_to_agent', { sessionId: 4, input: 'second' });
-    });
-
-    it('cancelSchedule clears the timeout and removes the entry', async () => {
-      mockInvoke.mockResolvedValue(undefined);
-      useAgentNodeStore.getState().scheduleInput(5, 1000, 'never sent', '1m');
-
-      useAgentNodeStore.getState().cancelSchedule(5);
-      expect(useAgentNodeStore.getState().schedules[5]).toBeUndefined();
-
-      await vi.advanceTimersByTimeAsync(1000);
-      expect(mockInvoke).not.toHaveBeenCalledWith('send_to_agent', { sessionId: 5, input: 'never sent' });
-    });
-
-    it('cancelSchedule is a no-op when there is no active schedule for the node', () => {
-      expect(() => useAgentNodeStore.getState().cancelSchedule(999)).not.toThrow();
-    });
-
-    it('deleteAgentNode cancels an active schedule for the node being deleted', async () => {
-      seedAgentNodes([makeNode({ id: 60 })], 60);
-      mockDeleteFlow(makeSafety());
-      useAgentNodeStore.getState().scheduleInput(60, 1000, 'ping', '1m');
-
-      await useAgentNodeStore.getState().deleteAgentNode(60);
-
-      expect(useAgentNodeStore.getState().schedules[60]).toBeUndefined();
-      mockInvoke.mockClear();
-      await vi.advanceTimersByTimeAsync(1000);
-      expect(mockInvoke).not.toHaveBeenCalledWith('send_to_agent', expect.anything());
-    });
-
-    // Issue #1252 — a scheduled prompt must not fire at an archived (or
-    // absent) node. Without the fetch-time cancellation the stale timer
-    // would call `send_to_agent` against an archived node, the backend
-    // would reject, `state.error` would be set, and App.tsx's generic
-    // "System" toast pipeline would surface a spurious error minutes
-    // after the user moved on. The `node-deleted` listener
-    // (`stores/agentNodeListeners.ts`) routes through `fetchAgentNodes`,
-    // so every archive transition sweeps schedules for free.
-    it('cancels schedules whose node comes back archived from fetchAgentNodes', async () => {
-      seedAgentNodes([makeNode({ id: 7, status: 'running' })]);
-      useAgentNodeStore.getState().scheduleInput(7, 1000, 'still there?', '5m');
-      // The next list_agent_nodes reflects node 7 as archived — the
-      // shape the node-deleted handler triggers via
-      // fetchAgentNodes.
-      mockInvoke.mockResolvedValueOnce([makeNode({ id: 7, status: 'archived' })]);
-
-      await useAgentNodeStore.getState().fetchAgentNodes();
-
-      // Schedule cleared — the timer is dead and can't fire at the
-      // archived node.
-      expect(useAgentNodeStore.getState().schedules[7]).toBeUndefined();
-      mockInvoke.mockClear();
-      await vi.advanceTimersByTimeAsync(1000);
-      expect(mockInvoke).not.toHaveBeenCalledWith('send_to_agent', expect.anything());
-    });
-
-    it('cancels schedules whose node is absent from fetchAgentNodes', async () => {
-      seedAgentNodes([makeNode({ id: 7, status: 'running' })]);
-      useAgentNodeStore.getState().scheduleInput(7, 1000, 'still there?', '5m');
-      // The next list_agent_nodes returns a different mesh's nodes —
-      // node 7 has been deleted out from under the schedule.
-      mockInvoke.mockResolvedValueOnce([makeNode({ id: 99 })]);
-
-      await useAgentNodeStore.getState().fetchAgentNodes();
-
-      expect(useAgentNodeStore.getState().schedules[7]).toBeUndefined();
-      mockInvoke.mockClear();
-      await vi.advanceTimersByTimeAsync(1000);
-      expect(mockInvoke).not.toHaveBeenCalledWith('send_to_agent', expect.anything());
-    });
-
-    it('schedule-fire handler bails silently when the node is archived in state at fire time', async () => {
-      // Belt-and-braces — even if the archive reaches state AFTER
-      // scheduleInput was called (e.g. between the timer being set
-      // and firing), the fire handler must re-check the node's
-      // presence + status before sending. The cancelSchedule path
-      // handles the common case; this guard covers the narrow race
-      // where a refetch between scheduling and firing hasn't yet
-      // completed when the timer resolves.
-      seedAgentNodes([makeNode({ id: 8, status: 'running' })]);
-      useAgentNodeStore.getState().scheduleInput(8, 1000, 'ping', '1m');
-      // Node 8 transitions to archived before the timer fires (e.g.
-      // a Circuit cleanup landed between the schedule and the tick).
-      seedAgentNodes([makeNode({ id: 8, status: 'archived' })]);
-
-      await vi.advanceTimersByTimeAsync(1000);
-
-      expect(mockInvoke).not.toHaveBeenCalledWith('send_to_agent', expect.anything());
-      // And the schedule entry is cleared so the (no-op) timer doesn't
-      // surface a stale "scheduled" chip in the UI.
-      expect(useAgentNodeStore.getState().schedules[8]).toBeUndefined();
     });
   });
 

@@ -13,9 +13,12 @@
  *
  * The section is deliberately "dumb": it owns no state, so the
  * "form mirrors user intent" and "do not revert on save failure" guarantees
- * stay in one place (Project Settings' `wrappedSave` and the worktree
- * config handlers beside it). All saves fire on change through the parent's
- * typed wrappers — no raw `invoke`, which preserves the `tauri-ipc-seam`
+ * stay in one place — the per-Mesh editing session in
+ * `stores/meshSettingsStore.ts`, which also owns the mesh-switch guard that
+ * drops a write whose project the user has left (issue #2242). Until then the
+ * section was handed thirteen props and handlers for exactly that state.
+ * All saves fire on change through the session's typed `save`, which uses the
+ * `lib/tauri` wrappers — no raw `invoke`, which preserves the `tauri-ipc-seam`
  * ratchet at `tests/unit/tauri-ipc-seam.test.ts`.
  *
  * The wrapping `<label>` pattern (option label + nested input) is
@@ -26,84 +29,17 @@
  */
 
 import { useEffect, useState } from 'react';
+import { useMeshSettingsStore, type BaseRefForm, type WorktreeModeForm } from '../../stores/meshSettingsStore';
 
-/**
- * The default worktree mode for a fresh agent node. Local pin that must
- * agree with `DEFAULT_WORKTREE_MODE` in `src-tauri/src/agent/spawn.rs`
- * (per the cross-language default coupling pattern — see ADR
- * follow-up). When the `meshes.worktree_mode` column is missing or
- * `null` on the wire, this is the value the form falls back to.
- */
-export const DEFAULT_WORKTREE_MODE = 'branched';
-
-/**
- * Wire-shape form values for the Starting point radio. The on-the-wire
- * value (passed to `update_worktree_base_ref`) is the `wire` field —
- * `'origin/main'` for fresh sessions, `'HEAD'` for resuming. The legacy
- * `MeshPropertiesPanel` (deleted in #380) used the same two options.
- */
-export type BaseRefForm = 'fresh' | 'head';
-
-const BASEREF_OPTIONS: { value: BaseRefForm; label: string; wire: 'origin/main' | 'HEAD' }[] = [
-  { value: 'fresh', label: 'Fresh — start new session (origin/<default>)', wire: 'origin/main' },
-  { value: 'head', label: 'Head — resume last session (HEAD)', wire: 'HEAD' },
+const BASEREF_OPTIONS: { value: BaseRefForm; label: string }[] = [
+  { value: 'fresh', label: 'Fresh — start new session (origin/<default>)' },
+  { value: 'head', label: 'Head — resume last session (HEAD)' },
 ];
-
-/**
- * Wire-shape form values for the Worktree mode radio. Mirrors the
- * legacy `MeshPropertiesPanel` options verbatim. `branched` is the
- * default per `DEFAULT_WORKTREE_MODE` above.
- */
-export type WorktreeModeForm = 'branched' | 'detached';
 
 const WORKTREE_MODE_OPTIONS: { value: WorktreeModeForm; label: string }[] = [
   { value: 'branched', label: 'Branched — actual git branch per worktree (default)' },
   { value: 'detached', label: 'Detached — detached HEAD worktree' },
 ];
-
-// Mappers between the form's two-option enum and the open-ended
-// string values stored in `meshes.base_ref` / `meshes.worktree_mode`.
-// We intentionally collapse anything other than the canonical values
-// to the form's default — matches the legacy panel's
-// `config.base_ref === 'HEAD' ? 'head' : 'fresh'` rule and the
-// `config.worktree_mode ?? DEFAULT_WORKTREE_MODE` fallback.
-export const wireToFormBaseRef = (wire: string | null): BaseRefForm =>
-  wire === 'HEAD' ? 'head' : 'fresh';
-export const wireToFormMode = (wire: string | null): WorktreeModeForm =>
-  wire === 'detached' ? 'detached' : DEFAULT_WORKTREE_MODE;
-export const formToWireBaseRef = (form: BaseRefForm): 'origin/main' | 'HEAD' =>
-  form === 'head' ? 'HEAD' : 'origin/main';
-
-export interface WorktreeStrategySectionProps {
-  useWorktree: boolean;
-  baseRef: BaseRefForm;
-  worktreeMode: WorktreeModeForm;
-  /** Per-mesh pre-spawn pool target (`0` = off, `1..=5`). The toggle's
-   *  `checked` is derived from `preSpawnPoolSize > 0`. */
-  preSpawnPoolSize: number;
-  /**
-   * Live count of `available` warm pool entries for the mesh. Drives
-   * the `<PoolStatus>` row under the "Pre-spawn warm worktrees"
-   * header. `null` = first fetch in flight (badge shows "…" instead
-   * of a misleading "0/N").
-   */
-  poolCount: number | null;
-  /** Per-Mesh worktree directory override draft (`''` = inherit, issue #1519). */
-  worktreeDirectory: string;
-  /** Inherited effective container dir for display (backend-authoritative). */
-  worktreeDirEffective: string;
-  /** Inline save failure, scoped to these controls. Kept separate from the
-   *  destination's top-level `SaveIndicator` because a form this long needs
-   *  the message to say WHICH control failed ("Failed to update base_ref"),
-   *  and because the "form mirrors user intent" rule means the field keeps
-   *  the user's typed value while this explains why it did not stick. */
-  error?: string | null;
-  onToggleUseWorktree: (next: boolean) => void;
-  onChangeBaseRef: (next: BaseRefForm) => void;
-  onChangeWorktreeMode: (next: WorktreeModeForm) => void;
-  onChangePoolSize: (next: number) => void;
-  onChangeWorktreeDirectory: (next: string) => void;
-}
 
 /**
  * The worktree strategy body. The section frame (heading, description,
@@ -112,25 +48,24 @@ export interface WorktreeStrategySectionProps {
  * list stays in one readable column; this component only owns the four
  * controls and their internal directory draft.
  */
-export function WorktreeStrategySection({
-  useWorktree,
-  baseRef,
-  worktreeMode,
-  preSpawnPoolSize,
-  poolCount,
-  worktreeDirectory,
-  worktreeDirEffective,
-  error,
-  onToggleUseWorktree,
-  onChangeBaseRef,
-  onChangeWorktreeMode,
-  onChangePoolSize,
-  onChangeWorktreeDirectory,
-}: WorktreeStrategySectionProps) {
+export function WorktreeStrategySection() {
+  const strategy = useMeshSettingsStore((s) => s.strategy);
+  const error = useMeshSettingsStore((s) => s.strategyError);
+  const poolCount = useMeshSettingsStore((s) => s.poolCount);
+  const save = useMeshSettingsStore((s) => s.save);
+  const {
+    useWorktree,
+    baseRef,
+    worktreeMode,
+    preSpawnPoolSize,
+    worktreeDirectory,
+    worktreeDirEffective,
+  } = strategy;
   // Issue #1519: local draft so typing doesn't fire a backend save +
-  // pool rebuild per keystroke. Committed on blur / Enter; the parent
+  // pool rebuild per keystroke. Committed on blur / Enter; the session
   // refreshes `worktreeDirectory` from the backend on success, which
-  // re-syncs this draft via the effect below.
+  // re-syncs this draft via the effect below. This is presentation-local
+  // (uncommitted input), not session state, so it stays here.
   const [dirDraft, setDirDraft] = useState(worktreeDirectory);
   useEffect(() => {
     setDirDraft(worktreeDirectory);
@@ -152,7 +87,7 @@ export function WorktreeStrategySection({
         <input
           type="checkbox"
           checked={useWorktree}
-          onChange={(e) => onToggleUseWorktree(e.target.checked)}
+          onChange={(e) => void save('useWorktree', e.target.checked)}
           className="accent-accent-cyan"
         />
         <span>Use worktree</span>
@@ -176,7 +111,7 @@ export function WorktreeStrategySection({
                   // (the spec's default; the size input then lets the
                   // user pick 2..5). The save fires immediately so the
                   // pool worker's next reconcile sees the new target.
-                  onChangePoolSize(e.target.checked ? 1 : 0)
+                  void save('poolSize', e.target.checked ? 1 : 0)
                 }
                 className="accent-accent-cyan"
               />
@@ -214,7 +149,7 @@ export function WorktreeStrategySection({
                   // a save round-trip just to get rejected.
                   const n = Number(e.target.value);
                   if (Number.isFinite(n) && n >= 1 && n <= 5) {
-                    onChangePoolSize(Math.trunc(n));
+                    void save('poolSize', Math.trunc(n));
                   }
                 }}
                 className="w-12 px-1 py-0.5 rounded-md border border-border-subtle bg-bg-overlay text-text-primary disabled:opacity-50 disabled:cursor-not-allowed"
@@ -246,7 +181,7 @@ export function WorktreeStrategySection({
                   name="wt-cfg-baseref"
                   value={o.value}
                   checked={baseRef === o.value}
-                  onChange={() => onChangeBaseRef(o.value)}
+                  onChange={() => void save('baseRef', o.value)}
                   className="mt-0.5 accent-accent-cyan"
                 />
                 <span>{o.label}</span>
@@ -269,7 +204,7 @@ export function WorktreeStrategySection({
                   name="wt-cfg-mode"
                   value={o.value}
                   checked={worktreeMode === o.value}
-                  onChange={() => onChangeWorktreeMode(o.value)}
+                  onChange={() => void save('worktreeMode', o.value)}
                   className="mt-0.5 accent-accent-cyan"
                 />
                 <span>{o.label}</span>
@@ -292,7 +227,7 @@ export function WorktreeStrategySection({
                 value={dirDraft}
                 onChange={(e) => setDirDraft(e.target.value)}
                 onBlur={() => {
-                  if (dirDraft !== worktreeDirectory) onChangeWorktreeDirectory(dirDraft);
+                  if (dirDraft !== worktreeDirectory) void save('worktreeDirectory', dirDraft);
                 }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
@@ -308,7 +243,7 @@ export function WorktreeStrategySection({
             {worktreeDirectory.trim() !== '' && (
               <button
                 type="button"
-                onClick={() => onChangeWorktreeDirectory('')}
+                onClick={() => void save('worktreeDirectory', '')}
                 className="text-2xs text-text-muted underline hover:text-text-primary"
               >
                 Reset to inherited

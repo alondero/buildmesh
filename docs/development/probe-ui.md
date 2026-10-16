@@ -139,15 +139,53 @@ authentication (see [troubleshooting](../troubleshooting.md#github-feeds-fail-fo
 
 ## Configuration saves reject, they never resolve silently
 
-Every Project Settings field saves through `wrappedSave`, which routes success and
-failure to the destination's `SaveIndicator`. That is only meaningful if the store
-action underneath actually rejects: `meshStore.updateMeshName` used to catch the
-`update_mesh_name` IPC failure, write `state.error`, and **resolve**, so `wrappedSave`
+Every Project Settings field saves through `meshSettingsStore`'s `save`, which routes
+success and failure to the destination's `SaveIndicator`. That is only meaningful if the
+store action underneath actually rejects: `meshStore.updateMeshName` used to catch the
+`update_mesh_name` IPC failure, write `state.error`, and **resolve**, so the save channel
 took its success branch and the tab rendered "Saved" for a write the backend refused —
 while the sidebar, which only moves on success, kept the old name. The action now
 rethrows after recording the error, so the caller shows the real rejection and the
 draft the user typed survives for a retry. The pattern generalises: a store action
 that swallows a failure makes every success indicator above it a lie.
+
+## Per-Mesh editing session (issue #2242)
+
+`meshSettingsStore` is the single owner of the editable state the two Mesh-lens
+configuration destinations render: Project Settings' form and worktree-strategy drafts,
+the Scratch Pad's text, the save-status machine, and the load that fills them. The tab
+files keep only what is local to the render (provider catalogue, the app-wide default
+label, the sandbox-availability probe, the `gh auth` flag, the delete confirmation) and
+render the session, so the destinations stay dumb and the state has one writer.
+
+Three rules live in the store because each one is about the *session*, not a widget:
+
+- **Load once per Mesh, applied only while it is the newest request.** One
+  `get_mesh_properties` feeds the form, the worktree strategy, and the directory
+  resolution; detection, preferences and the directory config ride along as
+  individually best-effort reads so a failure degrades the "Effective:" display rather
+  than blanking the form. Identity is a monotonic token rather than a Mesh-id
+  comparison, so a retry or a path edit retires the previous read too. Drafts are
+  cleared when a load *starts*, not when it resolves, so a slow load cannot leave
+  the previous Mesh's values in the form under the new Mesh's header — the user would
+  edit one project and save it to another. This is the same authority rule
+  `useMeshStore` applies to `list_meshes` (below).
+- **A save that settles after the user left drops its result.** Each save captures the
+  session's Mesh when the IPC starts and compares it on settle. A "Saved" or a "Save
+  failed" for the outgoing Mesh describes a project the user is no longer looking at.
+  The Scratch Pad applies the same rule with its own revision counter, because a second
+  keystroke also supersedes the first write's result.
+- **One indicator per session, not per field.** `idle → saving → saved` auto-clears
+  after a fixed window; `error` persists until the next save starts. Worktree-strategy
+  failures use a section-local channel instead, because that message has to name the
+  column that refused the write.
+
+Because every async continuation writes to the store rather than into a component's
+`useState`, a write that settles after a destination unmounts is harmless. That is what
+the hand-rolled `mountedRef` and `activeMeshIdRef` in `ProjectSettingsTab` used to
+guard, and what `ScratchpadTab`'s own `AbortSignal` ref guarded as a second copy: the
+store is the owner of "which Mesh am I editing", so the mirrors are gone rather than
+relocated.
 
 ## Mesh snapshot authority (issue #2326)
 

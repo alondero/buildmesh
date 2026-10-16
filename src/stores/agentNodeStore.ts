@@ -275,19 +275,6 @@ export function resetAgentNodeListenersForTests(): void {
   resetAgentNodeListenerAttachment?.();
 }
 
-// A pending "send input at time T" schedule (issue #785), e.g. the
-// SchedulingPopover's "remind me in 5m" / "at usage reset" actions. Keyed by
-// node ID in `schedules` — one active schedule per node.
-export interface ScheduledTask {
-  nodeId: number;
-  targetTime: number;
-  // Empty string is the "just hit Enter" sentinel — the SchedulingPopover uses
-  // it for the "at usage reset" preset to wake the agent without new content.
-  message: string;
-  label: string;
-  timeoutId: ReturnType<typeof setTimeout>;
-}
-
 export interface SpawnAgentOptions {
   rows?: number;
   cols?: number;
@@ -347,15 +334,6 @@ interface AgentNodeState {
   // exist only while a node is actually stalled, so the map is empty in the
   // normal case and the UI footprint is unchanged.
   stalledInputs: Record<number, InputStall>;
-  // Pending "send input at time T" schedules (issue #785), keyed by node ID.
-  // One active schedule per node — a new `scheduleInput` cancels the prior
-  // timer, and `deleteAgentNode` cancels the schedule outright so a stray
-  // timeout can't fire `sendToAgent` against a deleted node. `fetchAgentNodes`
-  // additionally cancels any schedule whose target node is absent from the
-  // refreshed list OR has `status === 'archived'` (issue #1252) — otherwise
-  // the node-deleted path would let a stale timer fire against an
-  // archived node, surfacing a spurious "System" error toast minutes later.
-  schedules: Record<number, ScheduledTask>;
 
   // Derived getters
   /// Returns the ordered array of agent nodes (mesh_id, position) for code
@@ -492,11 +470,6 @@ interface AgentNodeState {
   /// stalled-input reports into [`stalledInput`]. Idempotent, and called by
   /// `initAttentionListeners` so the app's existing init path is enough.
   initTerminalInputWatch: () => void;
-  /// Schedule `message` (or a bare Enter if empty) to be sent to `nodeId`
-  /// after `delayMs`. Replaces any existing schedule for the node — only one
-  /// pending send per node at a time (issue #785).
-  scheduleInput: (nodeId: number, delayMs: number, message: string, label: string) => void;
-  cancelSchedule: (nodeId: number) => void;
 }
 
 /// Issue #2021 — the derived full node array, memoized once per store
@@ -516,7 +489,7 @@ interface AgentNodeState {
 /// delete replaces `nodeIds`), so a changed reference means the derivation must
 /// re-run; an unchanged pair means nothing that feeds it moved, and the cached
 /// array is returned as-is. Writes that do NOT touch nodes — a Circuit
-/// ownership patch, `loading`, `error`, `stalledInputs`, `schedules` — keep both
+/// ownership patch, `loading`, `error`, `stalledInputs` — keep both
 /// references identical and now cost one `Object.is` pair instead of N
 /// dereferences per subscriber.
 ///
@@ -611,6 +584,43 @@ export function useAllAgentNodes(): readonly AgentNode[] {
 /// the fan-out can never leave newer event state unapplied. A fetch
 /// failure does not refresh the stamp, so the next event retries.
 export const REFRESH_IF_STALE_MS = 10_000;
+
+/// Issue #2242 — the row-removal transition, shared by the two paths that drop
+/// a node: the user close (`deleteAgentNode`, optimistically, before the
+/// delete IPC commits) and the circuit-driven reconcile (`removeAgentNode`).
+///
+/// Both must evaporate the row from the SAME set of containers. A row left in
+/// `nodeIds` but missing from `nodesById` reappears on the next derivation;
+/// a row left in `activeNodeId` points at nothing; and issue #1384's
+/// `semanticTurns` is keyed by id, so turn metadata that outlives the row
+/// re-attaches to whatever id the DB hands out next. Keeping the four writes
+/// in one function makes that a property of the transition rather than
+/// something two call sites have to remember to keep in step.
+///
+/// Returns `null` when the store does not hold the row: the optimistic close
+/// and the reconcile can both race a fetch that already dropped it, and
+/// neither may resurrect it by writing stale containers.
+type RowRemoval = Pick<
+  AgentNodeState,
+  'nodesById' | 'nodeIds' | 'activeNodeId' | 'semanticTurns'
+>;
+
+function withoutRow(state: AgentNodeState, id: number): RowRemoval | null {
+  if (!(id in state.nodesById)) return null;
+  const nodesById = { ...state.nodesById };
+  delete nodesById[id];
+  // Issue #1384 — `semanticTurns` keyed by id, so the row's turn metadata
+  // evaporates with the row. The listener re-keys when a node with the same
+  // id returns, but id stability is enforced by the DB autoincrement.
+  const semanticTurns = { ...state.semanticTurns };
+  delete semanticTurns[id];
+  return {
+    nodesById,
+    nodeIds: state.nodeIds.filter((nodeId) => nodeId !== id),
+    activeNodeId: state.activeNodeId === id ? null : state.activeNodeId,
+    semanticTurns,
+  };
+}
 
 export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   // Monotonic revision of the ownership ledger. Every newer authoritative
@@ -718,34 +728,6 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       for (const id of failedAutoSpawns) {
         if (!newById[id] || newById[id].status === 'archived') failedAutoSpawns.delete(id);
       }
-      // Issue #1252 — a schedule that outlives its target node would
-      // fire `send_to_agent` (or `write_to_agent` for the empty-message
-      // "hit Enter" sentinel) at an archived node, the backend would
-      // reject, and App.tsx's generic "System" toast pipeline would
-      // surface a spurious error minutes after the user moved on. The
-      // `node-deleted` listener (`stores/agentNodeListeners.ts`)
-      // routes through here, so every archive transition sweeps
-      // schedules for free — without this, the only cancellation path
-      // was `deleteAgentNode`, which the archive path never invokes.
-      //
-      // Compute cancellations OUTSIDE the `set` updater — `clearTimeout`
-      // is a side effect we don't want running twice under React
-      // StrictMode. We keep the same object reference when nothing was
-      // cancelled, so subscribers that read `state.schedules` don't
-      // re-render on every fetch (the steady-state Circuit case).
-      const oldSchedules = get().schedules;
-      const keptSchedules: Record<number, ScheduledTask> = {};
-      for (const idStr of Object.keys(oldSchedules)) {
-        const id = Number(idStr);
-        const node = newById[id];
-        if (node && node.status !== 'archived') {
-          keptSchedules[id] = oldSchedules[id];
-        } else {
-          clearTimeout(oldSchedules[id].timeoutId);
-        }
-      }
-      const schedulesChanged =
-        Object.keys(keptSchedules).length !== Object.keys(oldSchedules).length;
       // A live event patched the ledger while this snapshot was in flight, so
       // this ownership list is older than what the store already holds. Keep
       // the newer state and leave the revision alone — the event's own
@@ -765,7 +747,6 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
           ? get().semanticTurns
           : Object.fromEntries(semanticTurns.map((turn) => [turn.node_id, turn])),
         loading: false,
-        ...(schedulesChanged && { schedules: keptSchedules }),
       });
       // Success stamps the freshness clock `refreshIfStale` reads. A
       // rejection below skips the stamp so the next event retries rather
@@ -829,7 +810,6 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   error: null,
   closingNodeIds: new Set(),
   stalledInputs: {},
-  schedules: {},
 
   getAgentNodes: () => {
     const { nodesById, nodeIds } = get();
@@ -1093,9 +1073,6 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       return;
     }
 
-    // Cancellation keeps scheduled work intact; cancel only after acceptance.
-    get().cancelSchedule(id);
-
     // Re-capture the row RIGHT BEFORE the optimistic remove so the restore
     // path below sees the version of the node that's actually being dropped
     // (Phase 1 awaited `getWorktree_close_safety`, and a `node-renamed`
@@ -1122,22 +1099,8 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     set((state) => {
       const closing = new Set(state.closingNodeIds);
       closing.delete(id);
-      if (!(id in state.nodesById)) return { closingNodeIds: closing };
-      const nextById = { ...state.nodesById };
-      delete nextById[id];
-      // Issue #1384 — `semanticTurns` keyed by id, so the row's turn
-      // metadata evaporates with the row on optimistic remove. The
-      // listener re-keys when a node with the same id returns, but
-      // id stability is enforced by the DB autoincrement.
-      const semanticTurns = { ...state.semanticTurns };
-      delete semanticTurns[id];
-      return {
-        nodesById: nextById,
-        nodeIds: state.nodeIds.filter(nid => nid !== id),
-        activeNodeId: state.activeNodeId === id ? null : state.activeNodeId,
-        closingNodeIds: closing,
-        semanticTurns,
-      };
+      const removed = withoutRow(state, id);
+      return removed ? { ...removed, closingNodeIds: closing } : { closingNodeIds: closing };
     });
     // Issue #2325 — the row is gone, so any mutation still in flight for it
     // owns nothing and must not write it back when it settles.
@@ -1220,20 +1183,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     // A user-initiated close already dropped the row optimistically and owns
     // its terminal disposal; only act when the store still holds the row.
     if (!(id in get().nodesById)) return;
-    get().cancelSchedule(id);
-    set((state) => {
-      if (!(id in state.nodesById)) return state;
-      const nodesById = { ...state.nodesById };
-      delete nodesById[id];
-      const semanticTurns = { ...state.semanticTurns };
-      delete semanticTurns[id];
-      return {
-        nodesById,
-        nodeIds: state.nodeIds.filter(nodeId => nodeId !== id),
-        activeNodeId: state.activeNodeId === id ? null : state.activeNodeId,
-        semanticTurns,
-      };
-    });
+    set((state) => withoutRow(state, id) ?? state);
     // The backend row is gone — the only case the terminal-persistence rule
     // allows disposal. This is the circuit-driven counterpart of
     // `deleteAgentNode`'s success-path dispose.
@@ -1541,50 +1491,6 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
         return {};
       }
       return { stalledInputs: { ...state.stalledInputs, [nodeId]: stall } };
-    });
-  },
-
-  scheduleInput: (nodeId, delayMs, message, label) => {
-    get().cancelSchedule(nodeId);
-
-    const timeoutId = setTimeout(() => {
-      set((state) => {
-        const next = { ...state.schedules };
-        delete next[nodeId];
-        return { schedules: next };
-      });
-      // Issue #1252 — belt-and-braces guard. The fetch-time cancellation
-      // in `fetchAgentNodes` is the common path: a `node-deleted` event
-      // archives the node, the listener refetches, and
-      // any pending schedule is dropped. This guard covers the narrow
-      // race where the timer resolves AFTER the schedule was created
-      // but BEFORE the refetch lands — bail silently rather than call
-      // `send_to_agent` on a node the backend would reject.
-      const node = get().findAgentNode(nodeId);
-      if (!node || node.status === 'archived') return;
-      if (message === '') {
-        get().writeToAgent(nodeId, '\n');
-      } else {
-        get().sendToAgent(nodeId, message);
-      }
-    }, delayMs);
-
-    set((state) => ({
-      schedules: {
-        ...state.schedules,
-        [nodeId]: { nodeId, targetTime: Date.now() + delayMs, message, label, timeoutId },
-      },
-    }));
-  },
-
-  cancelSchedule: (nodeId) => {
-    const existing = get().schedules[nodeId];
-    if (!existing) return;
-    clearTimeout(existing.timeoutId);
-    set((state) => {
-      const next = { ...state.schedules };
-      delete next[nodeId];
-      return { schedules: next };
     });
   },
   };
