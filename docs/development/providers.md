@@ -481,15 +481,21 @@ deliberately-set names above ever drift in.
 Every adapter that injects a Buildmesh entry into a harness config does the same
 three things: read the user's document, merge Buildmesh's own entry into it, and
 persist the result without losing the user's content.
-`src-tauri/src/agent/managed_config.rs` owns those three steps; an adapter
-supplies only what is genuinely per-harness. AGY, Claude Code, Cursor, Grok,
-mcode, Muse and the workspace-trust stores route all three through the module.
-The rest share only part of it, because they have less to share. Cline and
-OpenCode share only the writer: a hook script and a pure plugin template have no
-document to parse and no user entries to preserve. Kimi shares only the refusal,
-because its config is TOML and its `config.yaml` permission pin is a surgical
-single-line edit rather than a round-trip. Codex shares only the writer, and only
-on its native arm.
+`src-tauri/src/agent/managed_config.rs` owns the read and the write for every
+adapter that uses it, plus the merge wherever the document's shape fits one of
+the two shared upserts. How much each adapter shares follows its document.
+
+Claude Code, Cursor, Grok and mcode share all three: their entry is a member of
+an array of handlers or matcher groups, which is what `upsert_entry` and
+`upsert_matcher_group` are for. AGY, Muse and the workspace-trust stores share
+the read and the write but merge in their own way, because their entry is not a
+member of a handler array — AGY owns one whole namespace key, Muse sets a
+decision value keyed by workspace, and a trust store appends a path to a list of
+values. Cline and OpenCode share only the writer: a hook script and a pure
+plugin template have no document to parse and no user entries to preserve. Kimi
+shares the refusal and the writer, because its config is TOML and its
+`config.yaml` permission pin is a surgical single-line edit rather than a
+round-trip. Codex shares only the writer, and only on its native arm.
 
 **What the shared module owns.**
 
@@ -516,10 +522,10 @@ on its native arm.
   `powershell.exe -EncodedCommand` line first, because the WindowsInterop relay
   base64-encodes the callback and an undecoded match would make a re-provision
   append a duplicate of our own hook instead of replacing it. For Claude Code
-  that decode widened its predicate, which did not decode before #2235: an
-  interop-installed `settings.local.json` is now recognised as ours and updated
-  in place rather than duplicated beside a stale copy. Cursor, Grok and mcode
-  already decoded, so theirs is unchanged.
+  and Grok that decode widened their predicates, which did not decode before
+  #2235: a WindowsInterop-installed config is now recognised as ours and updated
+  in place rather than duplicated beside a stale copy. Cursor and mcode already
+  decoded, so theirs is unchanged.
 - `upsert_entry` and `upsert_matcher_group` are the two merge shapes. Both
   report whether anything changed, which is what lets a re-provision skip the
   write entirely (issue #886's no-spurious-mtime invariant). Neither appends into
