@@ -155,10 +155,23 @@ async function worker(port, token) {
     try {
       if (request.url === '/stop') {
         await vite.close();
-        // Vite's config/dependency bundler owns an esbuild service process.
-        // Close it before exiting so its Windows cwd handle is released too.
-        const esbuild = await import('esbuild');
-        esbuild.stop();
+        // Vite up to 7 owned an esbuild service process for its config and
+        // dependency bundling, and its Windows cwd handle outlived the close
+        // above. Vite 8 bundles with Rolldown/oxc and keeps esbuild as an
+        // optional peer, so a clean install has no `node_modules/esbuild` —
+        // and `package.json` declares no `esbuild` entry, so the import below
+        // resolved only because Vite 7 happened to install it. Importing it
+        // unconditionally made `/stop` answer HTTP 500 on a clean install,
+        // leaving the caller unable to clear its ownership record
+        // (issue #2247 review; `dev-launch.test.mjs` drives that case).
+        // Stop the service when it is installed; a missing optional bundler
+        // must not be allowed to block shutdown.
+        try {
+          const esbuild = await import('esbuild');
+          esbuild.stop();
+        } catch {
+          // No esbuild service to stop.
+        }
       }
       response.setHeader('Connection', 'close');
       response.setHeader('Content-Type', 'application/json');
