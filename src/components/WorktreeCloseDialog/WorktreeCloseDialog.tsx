@@ -3,6 +3,7 @@ import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { useWorktreeClosePromptStore } from '../../stores/worktreeClosePromptStore';
 import { useChangedFiles } from '../../hooks/useChangedFiles';
 import { fileDiffStatusMeta } from '../../lib/status';
+import { ChangedFileRow } from '../FileTree/ChangedFileRow';
 
 export function WorktreeCloseDialog() {
   const pending = useWorktreeClosePromptStore(state => state.pending);
@@ -83,12 +84,7 @@ export function WorktreeCloseDialog() {
                     title={file.path}
                     className="flex items-center gap-2 px-2 py-0.5 text-xs font-mono"
                   >
-                    <span className={`font-bold w-3 flex-shrink-0 ${meta.color}`} title={meta.label}>
-                      {meta.letter}
-                    </span>
-                    <span className="flex-1 truncate text-text-secondary">{file.path}</span>
-                    <span className="text-accent-green flex-shrink-0">+{file.additions}</span>
-                    <span className="text-accent-red flex-shrink-0">-{file.deletions}</span>
+                    <ChangedFileRow file={file} meta={meta} />
                   </div>
                 );
               })
