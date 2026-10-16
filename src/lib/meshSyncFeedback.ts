@@ -14,7 +14,7 @@ import { create } from 'zustand';
 import { gitSync } from './tauri';
 import type { GitSyncResult } from '../types/generated/GitSyncResult';
 import type { GitSyncStatus } from '../types/generated/GitSyncStatus';
-import type { MeshSyncNotificationAction } from './notifications';
+import type { MeshSyncNotificationAction, SyncEvidence } from './notifications';
 import type { ToastSeverity } from './toastUtils';
 
 /** Per-mesh record of what the last completed sync did, with a counter so a
@@ -81,8 +81,33 @@ const FEEDBACK: Record<GitSyncStatus, SyncFeedback> = {
   up_to_date: { severity: 'info', unresolved: false, verified: true },
   skipped: { severity: 'info', unresolved: false, verified: false },
   partial: { severity: 'warning', unresolved: true, verified: false },
+  // Fetched, but the backend never established where this mesh stands. It is
+  // a problem — the mesh may be arbitrarily far behind — and it is emphatically
+  // not a verified success, so it must not resolve a card or clear a badge.
+  unverified: { severity: 'warning', unresolved: true, verified: false },
   failed: { severity: 'error', unresolved: true, verified: false },
 };
+
+/** What a stored failure record may claim about the mesh's position. Total by
+ *  construction: any status this build does not recognise falls to `unknown`
+ *  rather than defaulting to a claim. */
+export function evidenceOf(result: GitSyncResult): SyncEvidence {
+  switch (result.status) {
+    // Fetched, commits arrived, the fast-forward did not apply: the mesh is
+    // behind, and that much is established.
+    case 'partial':
+      return 'behind';
+    // The result itself reports `fetched: false`, so "no fetch ran" is a fact
+    // here rather than an inference.
+    case 'failed':
+    case 'skipped':
+      return result.fetched ? 'unknown' : 'not-fetched';
+    // `unverified` fetched but nobody compared it; an unrecognised status is
+    // not this build's to interpret.
+    default:
+      return 'unknown';
+  }
+}
 
 /** Classifies a sync result. Pure, so the severity table is pinned by tests
  *  rather than by whichever entry point happens to be exercised.
@@ -103,8 +128,8 @@ export interface SyncTarget {
   path: string;
 }
 
-function syncAction(target: SyncTarget, detail: string, refsFetched: boolean): MeshSyncNotificationAction {
-  return { kind: 'mesh-sync-failure', path: target.path, meshName: target.name, detail, refsFetched };
+function syncAction(target: SyncTarget, detail: string, evidence: SyncEvidence): MeshSyncNotificationAction {
+  return { kind: 'mesh-sync-failure', path: target.path, meshName: target.name, detail, evidence };
 }
 
 /** How loudly to report. A command that syncs N meshes reports the problems in
@@ -123,7 +148,7 @@ export interface ReportOptions {
  *  would only create a way for the wording and the state claim to disagree. */
 export function raiseSyncAttention(target: SyncTarget, result: GitSyncResult, options?: ReportOptions): void {
   addToast(SYNC_PROVIDER, `${target.name}: ${result.message}`, classifySyncResult(result).severity,
-    syncAction(target, result.message, result.fetched), options);
+    syncAction(target, result.message, evidenceOf(result)), options);
 }
 
 /** Publish what one completed sync did to a mesh, for rows to react to. Two
@@ -180,7 +205,7 @@ export function reportMeshSync(target: SyncTarget, result: GitSyncResult): SyncF
 export function reportSyncError(target: SyncTarget, error: unknown, options?: ReportOptions): SyncFeedback {
   const detail = error instanceof Error ? error.message : String(error);
   addToast(SYNC_PROVIDER, `${target.name}: Sync failed: ${detail}`, 'error',
-    syncAction(target, detail, false), options);
+    syncAction(target, detail, 'unknown'), options);
   return { severity: 'error', unresolved: true, verified: false };
 }
 
@@ -188,14 +213,19 @@ export function reportSyncError(target: SyncTarget, error: unknown, options?: Re
  *  "Force sync from upstream" and the notification card's "Retry sync", so the
  *  two cannot drift apart on severity, wording or resolution.
  *
- *  `completed` distinguishes "the backend answered and it did not go well"
- *  from "the IPC itself failed": only the former means the fetch ran, so only
- *  the former is worth re-reading the behind count for. */
-export async function runMeshSync(target: SyncTarget): Promise<{ feedback: SyncFeedback; completed: boolean }> {
+ *  `answered` means only that the backend returned a `GitSyncResult` — NOT that
+ *  the fetch ran. A `failed` or `skipped` result comes back having contacted
+ *  nothing. It is the right signal for "re-read the row's cached branch
+ *  status": a returned result means the refs may have moved (and the
+ *  row-refresh trigger for a fetched-but-not-applied pull rides on the
+ *  published outcome), while a thrown IPC means nothing could have. Callers
+ *  needing the fetch fact itself read it off the result's own `fetched` flag
+ *  via `outcomeOf`. */
+export async function runMeshSync(target: SyncTarget): Promise<{ feedback: SyncFeedback; answered: boolean }> {
   try {
     const result = await gitSync(target.path);
-    return { feedback: reportMeshSync(target, result), completed: true };
+    return { feedback: reportMeshSync(target, result), answered: true };
   } catch (error) {
-    return { feedback: reportSyncError(target, error), completed: false };
+    return { feedback: reportSyncError(target, error), answered: false };
   }
 }

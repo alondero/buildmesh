@@ -18,4 +18,4 @@
  *
  * Generated to src/types/generated/GitSyncStatus.ts (issue #404).
  */
-export type GitSyncStatus = "synced" | "up_to_date" | "skipped" | "partial" | "failed";
+export type GitSyncStatus = "synced" | "up_to_date" | "skipped" | "partial" | "unverified" | "failed";

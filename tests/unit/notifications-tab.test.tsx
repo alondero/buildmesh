@@ -79,7 +79,7 @@ describe('sync failures in Needs attention', () => {
   const SYNC_ACTION = {
     kind: 'mesh-sync-failure' as const, path: '/repos/mesh-a', meshName: 'mesh-a',
     detail: 'Fetched 1 new commit but fast-forward failed: not possible to fast-forward',
-    refsFetched: true,
+    evidence: 'behind',
   };
 
   it('names the mesh and its reason, and counts it as needing attention', async () => {
@@ -100,13 +100,42 @@ describe('sync failures in Needs attention', () => {
     // confirmed lag: the backend never contacted upstream, so it established
     // nothing about this mesh's position.
     addToast('Git sync', 'mesh-a: Fetch failed: could not resolve host', 'error',
-      { ...SYNC_ACTION, detail: 'Fetch failed: could not resolve host', refsFetched: false });
+      { ...SYNC_ACTION, detail: 'Fetch failed: could not resolve host', evidence: 'not-fetched' });
     render(<><NotificationButton /><ProbePanel /></>);
     fireEvent.click(screen.getByRole('button', { name: 'Open Notifications' }));
 
     const card = await screen.findByTestId('sync-attention-/repos/mesh-a');
     expect(within(card).getByText('Upstream not checked — the fetch did not run')).toBeTruthy();
     expect(within(card).queryByText(/Behind upstream/)).toBeNull();
+  });
+
+  it('claims nothing when a fetch happened but the comparison failed', async () => {
+    // Fetched, so the refs moved — but nobody established where this mesh
+    // stands. Neither "behind" nor "the fetch did not run" is supported.
+    addToast('Git sync', 'mesh-a: could not compare with upstream', 'error',
+      { ...SYNC_ACTION, detail: 'Fetched, but could not compare with upstream: lock contention', evidence: 'unknown' });
+    render(<><NotificationButton /><ProbePanel /></>);
+    fireEvent.click(screen.getByRole('button', { name: 'Open Notifications' }));
+
+    const card = await screen.findByTestId('sync-attention-/repos/mesh-a');
+    expect(within(card).getByText('Upstream state unknown — this sync could not be verified')).toBeTruthy();
+    expect(within(card).queryByText(/Behind upstream/)).toBeNull();
+    expect(within(card).queryByText(/fetch did not run/)).toBeNull();
+  });
+
+  it('claims nothing for a record written before the evidence field existed', async () => {
+    // A pre-`evidence` record may have been a fetched partial; it may equally
+    // have been a fetch that never ran. The stored record supports neither, so
+    // the card has to say so rather than pick the more alarming reading.
+    const legacy = { kind: 'mesh-sync-failure' as const, path: '/repos/mesh-a', meshName: 'mesh-a', detail: 'Fetch failed: network down' };
+    addToast('Git sync', 'mesh-a: Fetch failed: network down', 'error', legacy as typeof SYNC_ACTION);
+    render(<><NotificationButton /><ProbePanel /></>);
+    fireEvent.click(screen.getByRole('button', { name: 'Open Notifications' }));
+
+    const card = await screen.findByTestId('sync-attention-/repos/mesh-a');
+    expect(within(card).getByText('Upstream state unknown — this sync could not be verified')).toBeTruthy();
+    expect(within(card).queryByText(/Behind upstream/)).toBeNull();
+    expect(within(card).queryByText(/fetch did not run/)).toBeNull();
   });
 
   it('retries the sync from the card and clears it once the mesh syncs', async () => {

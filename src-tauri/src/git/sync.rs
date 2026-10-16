@@ -143,6 +143,15 @@ pub(crate) enum SyncOutcome {
     SkippedNoRemote,
     /// Fetched; no new commits to pull.
     UpToDate,
+    /// Fetched successfully, but comparing the local branch against upstream
+    /// failed for a reason other than a missing upstream (perm denied on
+    /// .git/HEAD, corrupt object db, refdb lock contention). The fetch DID
+    /// happen — the remote-tracking refs are current — but the mesh's position
+    /// relative to upstream was never established, so this must not be
+    /// reported as `UpToDate`: that reads as "verified in sync", which would
+    /// resolve attention cards and clear failure badges for a mesh nobody
+    /// checked. Carries the git2 error.
+    ComparisonFailed { reason: String },
     /// Fetched and fast-forwarded `new_commits` commits onto the
     /// current branch.
     Synced { new_commits: u32 },
@@ -182,12 +191,14 @@ impl SyncOutcome {
     /// after any of these outcomes is cut from up-to-date refs.
     ///
     /// `PullTimedOut` counts — the FETCH succeeded; only the working-tree
-    /// fast-forward hung. `Skipped*` do NOT count (no fetch ran), and the
-    /// two error variants obviously don't.
+    /// fast-forward hung. `ComparisonFailed` counts too: the fetch succeeded
+    /// and only the count-behind read failed. `Skipped*` do NOT count (no
+    /// fetch ran), and the two error variants obviously don't.
     pub(crate) fn fetched_ok(&self) -> bool {
         matches!(
             self,
             Self::UpToDate
+                | Self::ComparisonFailed { .. }
                 | Self::Synced { .. }
                 | Self::FetchedButDiverged { .. }
                 | Self::FetchedButDirty { .. }
@@ -202,6 +213,12 @@ impl SyncOutcome {
     /// single-sourced (issue #634). Returns `false` for the two error-shaped
     /// variants (`FetchFailed`, `RepoUnusable`) — neither advanced the ref,
     /// and the caller can't usefully schedule a refresh pass on a failure.
+    /// `ComparisonFailed` also returns `false`, even though its fetch
+    /// succeeded: the count-behind produced no number, so we do not know
+    /// whether new commits arrived, and resetting the warm pool onto a SHA we
+    /// never confirmed is the phantom advance `PullTimedOut` avoids. The refs
+    /// are still fresh — that is `fetched_ok`'s job — but the pool must not
+    /// move.
     pub(crate) fn advanced_ref(&self) -> bool {
         matches!(
             self,
@@ -313,13 +330,17 @@ pub(crate) fn do_sync(
                     "do_sync: no upstream to compare against ({}); treating as up-to-date",
                     e
                 );
-            } else {
-                tracing::warn!(
-                    "do_sync: failed to count commits behind upstream ({}); treating as up-to-date",
-                    e
-                );
+                return SyncOutcome::UpToDate;
             }
-            return SyncOutcome::UpToDate;
+            // A real git2 error, not the benign "no upstream" case. The fetch
+            // already ran, so the refs are fresh — but "how far behind are we"
+            // is unknown, and reporting `UpToDate` here would assert it is
+            // zero. `ComparisonFailed` keeps that distinction on the wire.
+            tracing::warn!(
+                "do_sync: failed to count commits behind upstream ({}); fetch succeeded but the comparison is unverified",
+                e
+            );
+            return SyncOutcome::ComparisonFailed { reason: e };
         }
     };
     if new_commits == 0 {
@@ -848,6 +869,20 @@ pub fn fetch_origin(project_root: &str, base_ref: &str) -> Result<FetchOutcome, 
         },
         SyncOutcome::SkippedNoRemote => FetchOutcome::SkippedNoRemote,
         SyncOutcome::UpToDate => FetchOutcome::UpToDate,
+        // The spawn-time contract keeps the behaviour it had when this folded
+        // into `UpToDate`: fetch succeeded, so `fetched_ok` stamps freshness,
+        // and no warning toast is raised. `ComparisonFailed` exists for the
+        // MANUAL `git_sync` path, whose frontend turns a status into a
+        // "Needs attention" card and a resolution — "Already up to date" there
+        // would resolve cards for a mesh nobody compared. The spawn path has
+        // no such consumer and no card to get wrong.
+        SyncOutcome::ComparisonFailed { reason } => {
+            tracing::warn!(
+                "fetch_origin: {}; treating as up-to-date for the spawn path",
+                reason
+            );
+            FetchOutcome::UpToDate
+        }
         SyncOutcome::Synced { new_commits } => FetchOutcome::Synced { new_commits },
         SyncOutcome::FetchedButDiverged {
             new_commits,

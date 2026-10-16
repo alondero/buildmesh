@@ -429,16 +429,23 @@ Forcing a sync always reports back, one way or another. A toast says what
 happened: how many commits were pulled, that the mesh was already up to date,
 or that this mesh has no remote configured. When the sync could not finish —
 the fetch failed, the fast-forward was refused because your local changes
-would be overwritten, your branch has diverged, or the pull timed out — a card
-also appears in **Needs attention** in the Notifications probe (the bell in the
-title bar), naming the mesh, the reason, and its path. That card stays until a
-later sync succeeds, and its **Retry sync** button re-runs the sync for you.
+would be overwritten, your branch has diverged, the pull timed out, or the
+comparison against upstream could not be made — a card also appears in **Needs
+attention** in the Notifications probe (the bell in the title bar), naming the
+mesh, the reason, and its path. That card stays until a later sync succeeds, and
+its **Retry sync** button re-runs the sync for you.
 
-What the card claims depends on how far the sync got. When the commits were
-fetched but the fast-forward did not apply, the mesh is definitely behind and
-the card says so. When the fetch itself never reached the remote, upstream was
-not checked at all, and the card says that instead — a network outage does not
-mean your mesh fell behind.
+What the card claims depends on how far the sync got, because those are three
+different claims and only one of them is about being behind:
+
+- the commits were fetched but the fast-forward did not apply — the mesh is
+  definitely behind, and the card says so;
+- the fetch never reached the remote — upstream was not checked at all;
+- the fetch worked but could not be compared against upstream — the fetch
+  succeeded, so the references are current, but nothing established how far
+  behind the mesh is, so the card says the state is unknown.
+
+A network outage never makes the app claim your mesh fell behind.
 
 A mesh whose sync could not finish also shows the sync retry icon next to its
 name, and that icon stays until a sync succeeds — click it to retry. It is

@@ -74,7 +74,7 @@ describe('reporting a manual sync', () => {
     reportMeshSync(MESH, result('partial', detail));
     const [notice] = useToastStore.getState().notifications;
     expect(needsAttention(notice)).toBe(true);
-    expect(notice.action).toEqual({ kind: 'mesh-sync-failure', path: MESH.path, meshName: MESH.name, detail, refsFetched: true });
+    expect(notice.action).toEqual({ kind: 'mesh-sync-failure', path: MESH.path, meshName: MESH.name, detail, evidence: 'behind' });
     // The reason is the whole point: a diverged history and a dirty path are
     // different recoveries, and the UI has no way to invent that text.
     expect(notice.message).toContain('fast-forward failed');
@@ -181,21 +181,25 @@ describe('reporting a manual sync', () => {
 describe('runMeshSync', () => {
   it('invokes git_sync and reports the result it gets back', async () => {
     vi.mocked(invoke).mockResolvedValue(result('partial', 'Fetched 2 new commits; fast-forward skipped: changes to a.txt would be overwritten'));
-    const { feedback, completed } = await runMeshSync(MESH);
+    const { feedback, answered } = await runMeshSync(MESH);
     expect(invoke).toHaveBeenCalledWith('git_sync', { path: MESH.path });
-    // `completed` is what tells the sidebar the fetch actually ran, so only
-    // then is re-reading the behind count meaningful.
-    expect(completed).toBe(true);
+    // `answered` means only that the backend replied — it does NOT mean the
+    // fetch ran. The fetch fact comes from the result's own `fetched` flag
+    // (via `outcomeOf`), which is what makes the row's refresh precise.
+    expect(answered).toBe(true);
     expect(feedback.unresolved).toBe(true);
     expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1);
   });
 
-  it('reports a rejected IPC as not completed so the caller skips the refresh', async () => {
+  it('reports a rejected IPC as unanswered so the caller skips the refresh', async () => {
     vi.mocked(invoke).mockRejectedValue(new Error('boom'));
-    const { feedback, completed } = await runMeshSync(MESH);
-    expect(completed).toBe(false);
+    const { feedback, answered } = await runMeshSync(MESH);
+    expect(answered).toBe(false);
     expect(feedback).toEqual({ severity: 'error', unresolved: true, verified: false });
     expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1);
+    // A rejected IPC learned nothing about the fetch, so the card must not
+    // claim it did not run.
+    expect(useToastStore.getState().notifications[0].action).toMatchObject({ evidence: 'unknown' });
   });
 
   it('treats an unknown status as a failure instead of crashing the sidebar', async () => {
@@ -204,9 +208,9 @@ describe('runMeshSync', () => {
     // failure is the safe reading; throwing would take the sidebar row down
     // and leave the user with no feedback at all.
     vi.mocked(invoke).mockResolvedValue({ fetched: true, pulled: false, new_commits: 0, message: 'who knows', status: 'invented' } as unknown as GitSyncResult);
-    const { feedback, completed } = await runMeshSync(MESH);
+    const { feedback, answered } = await runMeshSync(MESH);
     expect(feedback).toEqual({ severity: 'error', unresolved: true, verified: false });
-    expect(completed).toBe(true);
+    expect(answered).toBe(true);
     expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1);
   });
 });
@@ -239,8 +243,23 @@ describe('raiseSyncAttention', () => {
     raiseSyncAttention({ name: 'other', path: '/repos/other' }, failed('Fetch failed: network down'));
     const byName = new Map(useToastStore.getState().notifications
       .filter(needsAttention).map(n => [n.action?.kind === 'mesh-sync-failure' ? n.action.meshName : '', n.action]));
-    expect(byName.get(MESH.name)).toMatchObject({ refsFetched: true });
-    expect(byName.get('other')).toMatchObject({ refsFetched: false });
+    expect(byName.get(MESH.name)).toMatchObject({ evidence: 'behind' });
+    expect(byName.get('other')).toMatchObject({ evidence: 'not-fetched' });
+  });
+
+  it('records unknown evidence for a fetch whose comparison failed', () => {
+    // The backend fetched, so refs moved, but it never established where this
+    // mesh stands. Neither "behind" nor "did not fetch" is supported.
+    raiseSyncAttention(MESH, result('unverified', 'Fetched, but could not compare with upstream: lock contention'));
+    expect(useToastStore.getState().notifications[0].action)
+      .toMatchObject({ evidence: 'unknown' });
+  });
+
+  it('never claims lag for a status this build does not recognise', () => {
+    const invented = { ...result('failed', 'x'), status: 'invented' } as unknown as GitSyncResult;
+    raiseSyncAttention(MESH, invented);
+    expect(useToastStore.getState().notifications[0].action)
+      .toMatchObject({ evidence: 'unknown' });
   });
 
   it('still shows a toast when a silent record has no action to file it under', () => {

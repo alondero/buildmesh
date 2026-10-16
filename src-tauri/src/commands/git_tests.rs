@@ -686,6 +686,15 @@ mod tests {
                 GitSyncStatus::Synced,
             ),
             (SyncOutcome::UpToDate, GitSyncStatus::UpToDate),
+            // A comparison error must NOT fold into UpToDate: the frontend
+            // classifies UpToDate as verified, which resolves attention cards
+            // and clears failure badges for a mesh nobody actually checked.
+            (
+                SyncOutcome::ComparisonFailed {
+                    reason: "reference 'refs/remotes/origin/main' not found".to_string(),
+                },
+                GitSyncStatus::Unverified,
+            ),
             // A Mesh with no remote is a valid local-only setup, not a
             // problem to nag about — the frontend's classifier treats it as
             // resolved, and `mesh-sync-feedback.test.ts` pins that.

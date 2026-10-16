@@ -343,13 +343,14 @@ function MeshItemView({
     if (syncing) return;
     setSyncing(true);
     try {
-      const { completed } = await runMeshSync({ name: mesh.name, path: mesh.path });
-      // Re-read the behind count on any completed sync, as before: the fetch
-      // half alone advances the remote-tracking ref the count is measured
-      // against, so a skipped fast-forward can still move it. A verified sync
-      // also refreshes via the completion effect above; that redundant read is
-      // cheaper than the conditional that would avoid it.
-      if (completed) refreshBranchStatus();
+      const { answered } = await runMeshSync({ name: mesh.name, path: mesh.path });
+      // Re-read the behind count whenever the backend answered: the fetch half
+      // alone advances the remote-tracking ref the count is measured against,
+      // so even a skipped fast-forward can move it. A thrown IPC means nothing
+      // could have moved. A verified sync also refreshes via the completion
+      // effect above; that redundant read is cheaper than the conditional that
+      // would avoid it.
+      if (answered) refreshBranchStatus();
     } finally {
       setSyncing(false);
     }

@@ -378,6 +378,12 @@ pub enum GitSyncStatus {
     Skipped,
     /// Commits were fetched but the fast-forward did not apply.
     Partial,
+    /// The fetch ran, but comparing the local branch against upstream failed,
+    /// so the mesh's position is unknown. Distinct from `UpToDate` — which
+    /// asserts "verified in sync" and would resolve attention cards and clear
+    /// failure badges — and from `Failed`, which asserts the fetch never
+    /// reached the remote. Reports `fetched: true`: the refs did move.
+    Unverified,
     /// The fetch failed, or the path is not a usable repository.
     Failed,
 }
@@ -571,6 +577,16 @@ pub(crate) fn sync_outcome_to_git_sync_result(
             new_commits: 0,
             message: "Already up to date".to_string(),
             status: GitSyncStatus::UpToDate,
+        },
+        SyncOutcome::ComparisonFailed { reason } => GitSyncResult {
+            // `fetched: true` because the fetch ran and moved the
+            // remote-tracking refs — this is not a fetch failure. The status is
+            // what stops it reading as "verified in sync".
+            fetched: true,
+            pulled: false,
+            new_commits: 0,
+            message: format!("Fetched, but could not compare with upstream: {}", reason),
+            status: GitSyncStatus::Unverified,
         },
         SyncOutcome::Synced { new_commits } => GitSyncResult {
             fetched: true,

@@ -8,26 +8,37 @@ export interface WorktreeNotificationAction {
   resolution?: string;
 }
 
+/** How much a stored sync failure supports the card claiming.
+ *
+ *  Deliberately not the same fact as `SyncOutcome.refsFetched` (which says
+ *  whether the remote-tracking ref moved, and drives a row's behind-count
+ *  refresh). A ref can move without anything being learned about the mesh:
+ *  a fetch that succeeds but whose comparison fails leaves the position
+ *  unknown, and a record written before this distinction existed cannot say.
+ *  Both are `unknown`, and the card says so rather than asserting either.
+ */
+export type SyncEvidence =
+  /** The fetch ran and the fast-forward did not apply: the mesh is behind. */
+  | 'behind'
+  /** The result proves no fetch ran, so upstream was never contacted. */
+  | 'not-fetched'
+  /** Nothing in the stored record establishes whether a fetch ran. */
+  | 'unknown';
+
 /** A manual mesh sync that did not leave the mesh in sync with upstream —
  *  either the fetch failed or the commits arrived but the working-tree
  *  fast-forward did not apply. Carries the mesh's identity so the card names
  *  which mesh is behind instead of only reporting a git message, and the
- *  backend's own wording as `detail` so the surface never invents a reason.
- *
- *  `refsFetched` is what separates the two failure shapes, and the card says
- *  different things for each. A `Partial` run fetched, so the mesh really is
- *  behind and the card can say so. A `Failed` run did not reach the remote, so
- *  the upstream state was never established — a network outage on an
- *  already-current mesh must not be reported as confirmed lag. */
+ *  backend's own wording as `detail` so the surface never invents a reason. */
 export interface MeshSyncNotificationAction {
   kind: 'mesh-sync-failure';
   /** The Mesh's DB-canonical path (the key both sync entry points sync on). */
   path: string;
   meshName: string;
   detail: string;
-  /** Whether the fetch ran. Records persisted before this field existed are
-   *  restored as `false`, the reading that claims nothing. */
-  refsFetched: boolean;
+  /** What the card may claim. Records persisted before this field existed
+   *  restore as `unknown`: the record does not say, so the card must not. */
+  evidence: SyncEvidence;
   resolution?: string;
 }
 
@@ -93,13 +104,15 @@ function restoreAction(value: unknown): NotificationAction | null {
       : null;
   }
   if (a.kind === 'mesh-sync-failure') {
-    return typeof a.path === 'string' && typeof a.meshName === 'string'
-      && typeof a.detail === 'string'
-      // A record written before `refsFetched` existed restores as `false`: the
-      // card then reports the outcome without claiming the mesh is behind,
-      // which is the reading that cannot mislead. Dropping the record instead
-      // would lose an unresolved problem the user still has.
-      ? { kind: 'mesh-sync-failure', path: a.path, meshName: a.meshName, detail: a.detail, refsFetched: a.refsFetched === true, resolution: a.resolution as string | undefined }
+    // A record written before `evidence` existed (and one written by a build
+    // whose record we cannot interpret) restores as `unknown`. It may well
+    // have been a fetched partial, so `behind` would claim lag that nothing
+    // supports, and `not-fetched` would claim the fetch was skipped — also
+    // unsupported. Dropping the record instead would lose an unresolved
+    // problem the user still has.
+    const evidence = a.evidence === 'behind' || a.evidence === 'not-fetched' ? a.evidence : 'unknown';
+    return typeof a.path === 'string' && typeof a.meshName === 'string' && typeof a.detail === 'string'
+      ? { kind: 'mesh-sync-failure', path: a.path, meshName: a.meshName, detail: a.detail, evidence, resolution: a.resolution as string | undefined }
       : null;
   }
   return null;

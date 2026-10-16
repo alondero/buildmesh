@@ -2,7 +2,7 @@ import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react';
 import { useToastStore } from '../../stores/toastStore';
 import { openBlockedCleanups, useBlockedCleanupStore } from '../../stores/blockedCleanupStore';
 import { isMeshSyncFailure, isWorktreeCleanup, needsAttention,
-  type MeshSyncNotificationAction, type Notification, type WorktreeNotificationAction } from '../../lib/notifications';
+  type MeshSyncNotificationAction, type Notification, type SyncEvidence, type WorktreeNotificationAction } from '../../lib/notifications';
 import { runMeshSync } from '../../lib/meshSyncFeedback';
 import { refreshWorktreeNotifications } from '../../lib/worktreeNotifications';
 import { ProbeTabBody } from './ProbeTabBody';
@@ -45,30 +45,43 @@ function AttentionCard({ title, notice, subject, detail, path, status, action, t
   </article>;
 }
 
+/** What the card may assert, per what the record actually establishes. The
+ *  three cases are genuinely different claims, not shades of one: a fetched
+ *  run knows the mesh is behind; a result that reports `fetched: false` knows
+ *  the remote was never contacted; and everything else — a fetch whose
+ *  comparison failed, an IPC that never returned, a record from a build that
+ *  did not record this — establishes nothing either way, so the card says so
+ *  instead of picking the most alarming reading. */
+function syncStatusLine(evidence: SyncEvidence): string {
+  switch (evidence) {
+    case 'behind':
+      return 'Behind upstream — the fetched commits were not applied';
+    case 'not-fetched':
+      return 'Upstream not checked — the fetch did not run';
+    case 'unknown':
+    default:
+      // The `default` arm is load-bearing, not a formality: `evidence` is
+      // read out of persisted JSON, so a record written by an older build can
+      // arrive here with the field missing and TypeScript cannot see it. It
+      // falls into the same reading as `unknown` — which is the point.
+      return 'Upstream state unknown — this sync could not be verified';
+  }
+}
+
 /** A mesh whose manual sync did not finish. Retrying from here is the point of
  *  putting it in this section: the sync runs through the same `runMeshSync` the
  *  sidebar uses, and a success resolves this very card. The local `pending`
- *  state disables the button for the duration of one IPC round trip.
- *
- *  The status line reports what is actually known. When the fetch ran, the
- *  commits are here and the working tree did not move, so the mesh is
- *  definitively behind. When it did not — a fetch failure, or an unusable
- *  repository — upstream was never contacted, and a mesh that was already
- *  current must not be described as behind on the strength of a network
- *  outage. */
+ *  state disables the button for the duration of one IPC round trip. */
 function SyncAttentionCard({ notice }: { notice: Notification & { action: MeshSyncNotificationAction } }) {
   const [pending, setPending] = useState(false);
   const action = notice.action;
-  const status = pending ? 'Retrying…'
-    : action.refsFetched ? 'Behind upstream — the fetched commits were not applied'
-      : 'Upstream not checked — the fetch did not run';
   return <AttentionCard
     title="Sync from upstream incomplete"
     notice={notice}
     subject={action.meshName}
     detail={action.detail}
     path={action.path}
-    status={status}
+    status={pending ? 'Retrying…' : syncStatusLine(action.evidence)}
     testId={`sync-attention-${action.path}`}
     action={<button type="button" className="notification-resolve" disabled={pending}
       aria-label={`Retry sync for ${action.meshName}`}

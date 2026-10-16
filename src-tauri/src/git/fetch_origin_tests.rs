@@ -752,6 +752,43 @@ fn sync_outcome_advanced_ref_table() {
     assert!(!SkippedNoRemote.advanced_ref());
     assert!(!FetchFailed { reason: "x".into() }.advanced_ref());
     assert!(!RepoUnusable { reason: "x".into() }.advanced_ref());
+    // The count-behind produced no number, so we do not know whether new
+    // commits arrived. Resetting the warm pool onto an unconfirmed SHA is the
+    // phantom advance PullTimedOut avoids, so this stays false.
+    assert!(!ComparisonFailed { reason: "x".into() }.advanced_ref());
+}
+
+/// Pin the `SyncOutcome::fetched_ok()` truth table — the predicate the
+/// per-Mesh freshness stamp keys on. It answers a different question from
+/// `advanced_ref`: did the fetch reach the remote and move the
+/// remote-tracking refs? A comparison failure answers TRUE here (the fetch
+/// ran) while answering FALSE to `advanced_ref` (we never learned whether
+/// commits arrived), and keeping those two apart is the whole point of having
+/// both.
+#[test]
+fn sync_outcome_fetched_ok_table() {
+    use crate::git::sync::SyncOutcome::*;
+    assert!(UpToDate.fetched_ok());
+    assert!(Synced { new_commits: 1 }.fetched_ok());
+    assert!(FetchedButDiverged {
+        new_commits: 1,
+        reason: "x".into()
+    }
+    .fetched_ok());
+    assert!(FetchedButDirty {
+        new_commits: 1,
+        blocking_paths: vec!["README.md".into()]
+    }
+    .fetched_ok());
+    assert!(PullTimedOut {
+        new_commits: 1,
+        reason: "x".into()
+    }
+    .fetched_ok());
+    assert!(ComparisonFailed { reason: "x".into() }.fetched_ok());
+    assert!(!SkippedNoRemote.fetched_ok());
+    assert!(!FetchFailed { reason: "x".into() }.fetched_ok());
+    assert!(!RepoUnusable { reason: "x".into() }.fetched_ok());
 }
 
 // ── 2026-07-17 incident — URL-only remote (no fetch refspec) ────────────────
