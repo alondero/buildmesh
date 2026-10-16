@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import type { SpawnOption } from '../../lib/groups';
 import type { SpawnConfiguration } from '../../types/generated/SpawnConfiguration';
 import { deleteSpawnConfiguration, getLaunchTargets, listProviders, listSpawnConfigurations, saveSpawnConfiguration, verifyLaunchConfiguration } from '../../lib/tauri/provider';
-import { LaunchConfigurationEditor } from './LaunchConfigurationEditor';
+import { LaunchConfigurationEditor, cloneConfiguration } from './LaunchConfigurationEditor';
 import type { ProviderPairing } from '../../types/generated/ProviderPairing';
 import type { LaunchTarget } from '../../types/generated/LaunchTarget';
 
@@ -162,11 +162,13 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
   };
   const menuClass = 'w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-selection focus:bg-bg-selection focus:outline-none';
   const mutedMenuClass = 'w-full px-3 py-1.5 text-left text-xs text-text-muted';
+  const rowActionClass = 'px-2 text-xs text-text-secondary hover:bg-bg-selection focus:bg-bg-selection';
   const menuEntries = [
     { id: 'defaults', kind: 'spawn' as const },
     ...configurations.flatMap((value) => [
       { id: `configuration:${value.id}`, kind: 'configuration' as const, value },
       { id: `edit:${value.id}`, kind: 'edit' as const, value },
+      { id: `clone:${value.id}`, kind: 'clone' as const, value },
     ]),
     { id: 'new', kind: 'new' as const },
   ];
@@ -251,7 +253,8 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
                 className={`${menuClass} min-w-0 flex-1 break-words ${unavailable ? 'cursor-default text-text-muted' : ''}`} onClick={(e) => { if (!unavailable) onSelect(value.spawn_option_id, e.altKey, value.id); }}>
                 {value.name}{unavailable && <span className="block text-text-muted">{unavailable}</span>}
               </button>
-              <button type="button" role="menuitem" data-menu-index={menuIndex.get(`edit:${value.id}`)} tabIndex={activeMenuIndex === menuIndex.get(`edit:${value.id}`) ? 0 : -1} aria-label={`Edit ${value.name}`} className="px-3 text-xs text-text-secondary hover:bg-bg-selection focus:bg-bg-selection" onClick={() => openDraft(value)}>Edit</button>
+              <button type="button" role="menuitem" data-menu-index={menuIndex.get(`edit:${value.id}`)} tabIndex={activeMenuIndex === menuIndex.get(`edit:${value.id}`) ? 0 : -1} aria-label={`Edit ${value.name}`} className={rowActionClass} onClick={() => openDraft(value)}>Edit</button>
+              <button type="button" role="menuitem" data-menu-index={menuIndex.get(`clone:${value.id}`)} tabIndex={activeMenuIndex === menuIndex.get(`clone:${value.id}`) ? 0 : -1} aria-label={`Clone ${value.name}`} className={rowActionClass} onClick={() => openDraft(cloneConfiguration(value))}>Clone</button>
             </div>;
           })}
           <button type="button" role="menuitem" data-menu-index={menuIndex.get('new')} tabIndex={activeMenuIndex === menuIndex.get('new') && loaded ? 0 : -1} disabled={!loaded} className={loaded ? menuClass : mutedMenuClass} onClick={() => openDraft({ id: '', name: '', spawn_option_id: option.id, model: null, effort: null, extra_args: null })}>New configuration…</button>

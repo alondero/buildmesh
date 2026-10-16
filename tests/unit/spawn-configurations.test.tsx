@@ -60,6 +60,39 @@ describe('Spawn configurations', () => {
     }), route));
     await screen.findByRole('menuitem', { name: 'Edit Sol Max' });
   });
+  it('clones a saved configuration into a separate pre-filled recipe', async () => {
+    const clone = { ...saved, id: 'sol-copy', name: 'Sol Max copy', effort: 'high' };
+    vi.mocked(api.saveSpawnConfiguration).mockResolvedValue(clone);
+    // The provider list is re-read after the save, so the backend hands back a
+    // row for the new configuration alongside the original one.
+    vi.mocked(api.listProviders).mockResolvedValue([option, savedRow, { ...option, id: clone.id, label: clone.name, configuration: clone }]);
+    render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Clone Sol Max' }));
+
+    // The clone arrives pre-filled from the clicked recipe: change the effort,
+    // keep the rest. Awaiting Model also waits for the launch targets the
+    // Harness/Provider selects and Save depend on.
+    await screen.findByLabelText('Model');
+    expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('Sol Max copy');
+    expect((screen.getByLabelText('Model') as HTMLInputElement).value).toBe('gpt-5.6-sol');
+    expect((screen.getByLabelText('Effort') as HTMLSelectElement).value).toBe('max');
+    // An unsaved clone carries no id, so the menu withholds its Delete action.
+    expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull();
+
+    fireEvent.change(screen.getByLabelText('Effort'), { target: { value: 'high' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(api.saveSpawnConfiguration).toHaveBeenCalledWith(expect.objectContaining({
+      id: '', name: 'Sol Max copy', spawn_option_id: 'codex', model: 'gpt-5.6-sol', effort: 'high',
+    })));
+    // Both recipes coexist: the clone is saved separately and the original is
+    // still launchable and editable.
+    await screen.findByRole('menuitem', { name: 'Clone Sol Max copy' });
+    expect(screen.getByRole('menuitem', { name: 'Edit Sol Max' })).toBeTruthy();
+    expect(screen.getByText('Sol Max').closest('button[role="menuitem"]')?.getAttribute('aria-disabled')).toBe('false');
+  });
+
   it('keeps default launch and selects a saved configuration with Alt preserved', async () => {
     const select = vi.fn();
     render(<GroupedProviderMenu providers={[option]} onSelect={select} />);

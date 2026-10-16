@@ -207,10 +207,14 @@ changes.
 
 ## Find agents that need attention
 
-Choose **Attention** in the sidebar to see failed, waiting and suspended nodes
-across repositories. Each row names its repository and offers **Open terminal**
-and, where applicable, **Retry** or **Resume**. Return to **Workspace** to use
-the existing repository and drag order.
+Choose **Attention** in the sidebar to see nodes across repositories, grouped
+into **Failed sessions**, **Needs input**, and **Paused sessions**, in that
+order. Each heading shows its count; empty groups disappear. Cards name the
+repository and show the current question or permission request when the
+harness supplied one. **Open terminal** takes you to that
+session. Failed sessions also offer **Retry**; paused sessions offer **Resume**
+when a saved session identity is available. Return to **Workspace** to use the
+existing repository and drag order.
 
 In **Filtered** view, use the header's **Filters** button for provider, status,
 sort and direction. The count shows matching nodes out of all loaded nodes.
@@ -769,11 +773,16 @@ MiniMax Code has no configurable effort control. See the [MiniMax CLI model refe
 
 Adding or enabling a known provider creates compatible routes; configurations
 are only the recipes you save, so each harness submenu starts with none.
-**Clone** creates an independent recipe. Deleted configurations are not recreated
-automatically. In the desktop spawn menu, choose a harness directly for its
-defaults or open its configurations submenu for a named recipe, including
-provider routes such as MiniMax via Claude Code. Mobile groups the same recipes
-under each harness.
+**Clone** creates an independent recipe from the one you click. **Settings →
+Launch Configurations** offers it on each saved configuration, and a harness's
+spawn submenu offers it beside **Edit**. The editor opens pre-filled from the
+recipe you cloned, with a `copy` suffix on the name, so you only change what
+differs — a different effort level, a different model version. Saving stores a
+separate configuration and leaves the original untouched. Deleted configurations
+are not recreated automatically. In the desktop spawn menu, choose a harness
+directly for its defaults or open its configurations submenu for a named recipe,
+including provider routes such as MiniMax via Claude Code. Mobile groups the same
+recipes under each harness.
 Unavailable entries explain whether a harness, key, route, or verification needs
 attention. Codex proxy routes still require verification for their exact model
 and runtime before launch. Use **Verify provider and model** in the configuration
