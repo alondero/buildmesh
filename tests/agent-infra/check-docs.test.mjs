@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -29,6 +30,33 @@ test('the documentation contract passes for the real repository', () => {
   assert.deepEqual(failures, [], failures.join('\n'));
   assert.ok(collectMarkdownFiles(root).includes(join(root, 'CONTEXT.md')));
   assert.ok(collectMarkdownFiles(root).includes(join(root, 'docs', 'releases', 'v1.3.0.md')));
+});
+
+test('a gitignored document is skipped while its tracked neighbour is collected', () => {
+  const fixtureRoot = mkdtempSync(join(tmpdir(), 'buildmesh-doc-ignored-'));
+  const git = (...args) => execFileSync('git', args, { cwd: fixtureRoot, stdio: ['ignore', 'pipe', 'ignore'] });
+  try {
+    git('init');
+    mkdirSync(join(fixtureRoot, 'docs', 'development'), { recursive: true });
+    writeFileSync(join(fixtureRoot, '.gitignore'), 'docs/development/local-draft.md\n');
+    const contract = join(fixtureRoot, 'docs', 'development', 'contract.md');
+    const draft = join(fixtureRoot, 'docs', 'development', 'local-draft.md');
+    writeFileSync(contract, '# Contract\n\nStatus: accepted\n');
+    // The shape the issue reports: a local file nobody intends to commit, which
+    // the plain walk used to hand to the status contract anyway.
+    writeFileSync(draft, '# Draft\n\nNotes to self, no status.\n');
+    git('add', '.gitignore', 'docs/development/contract.md');
+
+    const collected = collectMarkdownFiles(fixtureRoot);
+    assert.ok(collected.includes(contract), collected.join('\n'));
+    assert.equal(collected.includes(draft), false);
+
+    const statusFailures = checkDocumentation({ root: fixtureRoot })
+      .filter((failure) => failure.includes('local-draft'));
+    assert.deepEqual(statusFailures, [], statusFailures.join('\n'));
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
 });
 
 test('local links check both targets and GitHub-style anchors', () => {
