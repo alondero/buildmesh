@@ -13,4 +13,8 @@ outcomes: Array<StepPushOutcome>,
  * The evidence the push would set aside, in plain words. `None` when
  * nothing is holding the step and the push only saves waiting.
  */
-overrides: string | null, };
+overrides: string | null, 
+/**
+ * Choosing completed starts another review pass.
+ */
+starts_next_review: boolean, };

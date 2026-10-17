@@ -156,6 +156,18 @@ it('offers exactly the checkpoint actions the desktop listed; recheck acts at on
   });
 });
 
+it('names a review re-entry as the next review pass', async () => {
+  runs = [circuit({
+    needs_you: [{ ...unverified(['recheck', 'completed']), starts_next_review: true }],
+    step: null,
+  })];
+  panel();
+  expect(await screen.findByRole('button', { name: 'Start the next review' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Check again' })).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Start the next review' }));
+  expect(screen.getByRole('dialog', { name: 'Start the next review' })).toBeTruthy();
+});
+
 it('requires evidence for a review verdict before it can be sent', async () => {
   runs = [circuit({ needs_you: [unverified(['recheck', 'review_pass'])], step: null })];
   panel();

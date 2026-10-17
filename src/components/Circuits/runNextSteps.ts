@@ -106,7 +106,8 @@ const CHECKPOINT_LABELS: Record<CheckpointAction, string> = {
   retry: 'Try it again',
 };
 
-export function checkpointActionLabel(action: CheckpointAction): string {
+export function checkpointActionLabel(action: CheckpointAction, startsNextReview = false): string {
+  if (action === 'completed' && startsNextReview) return 'Start the next review';
   return CHECKPOINT_LABELS[action];
 }
 

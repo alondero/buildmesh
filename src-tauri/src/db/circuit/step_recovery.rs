@@ -16,7 +16,9 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use super::evidence::{append_history, run_graph, DISPOSITION_APPLIED, SOURCE_OPERATOR};
+use super::evidence::{
+    append_history, revision_moved, run_graph, DISPOSITION_APPLIED, SOURCE_OPERATOR,
+};
 use crate::circuit::model::{
     CircuitGraph, CircuitNodeKind, GithubActionKind, CIRCUIT_SWEEP_NOTE_PREFIX,
 };
@@ -311,14 +313,7 @@ pub(crate) fn recover_failed_run_locked(
 ) -> Result<(), String> {
     let reason = request.reason.trim();
     let tx = db.transaction().map_err(|e| e.to_string())?;
-    let revision: i64 = tx
-        .query_row(
-            "SELECT COALESCE(MAX(id),0) FROM circuit_run_history WHERE run_id=?1",
-            [request.run_id],
-            |row| row.get(0),
-        )
-        .map_err(|e| e.to_string())?;
-    if revision != request.expected_revision {
+    if revision_moved(&tx, request.run_id, request.expected_revision).map_err(|e| e.to_string())? {
         return Err("The run changed. Refresh it before acting.".into());
     }
     let run = super::ledger::get_circuit_run_inner(&tx, request.run_id)
@@ -994,6 +989,33 @@ mod tests {
         assert!(
             recovery(&conn).is_none(),
             "that case has its own Review again"
+        );
+    }
+
+    #[test]
+    fn duplicate_observation_history_does_not_block_reopening_a_failed_run() {
+        let mut conn = fixture();
+        failed_finish_run(&conn);
+        let seen = request(&conn, "finish", RecoveryAction::Retry, "");
+        append_history(
+            &conn,
+            1,
+            Some("finish"),
+            Some(1),
+            "observation",
+            "{}",
+            Some("codex_rollout"),
+            Some("duplicate"),
+        )
+        .unwrap();
+        recover_failed_run_locked(&mut conn, &seen)
+            .expect("duplicate observations are not a new fact");
+        assert_eq!(
+            super::super::ledger::get_circuit_run_inner(&conn, 1)
+                .unwrap()
+                .unwrap()
+                .state,
+            "pending"
         );
     }
 

@@ -212,7 +212,7 @@ A Circuit Step whose outcome or owned work Buildmesh cannot currently verify, re
 _Avoid_: failed step, stalled step
 
 **Operator-recorded Outcome**:
-A human-attested outcome for a Circuit Step, recorded with a reason. A person may also push a step that is still waiting on an agent, setting aside background-work or input-wait evidence they know to be stale; the override is named in the run's history and the note is optional. It remains distinct from verified evidence and cannot satisfy separate permission or review-approval requirements.
+A human-attested outcome for a Circuit Step, recorded with a reason. A person may also push a step that is still waiting on an agent, setting aside background-work or input-wait evidence they know to be stale; the override is named in the run's history and the note is optional. When that outcome finishes work a bounded review will look at again, the person is starting the next review pass, not approving it. A repeat of an observation already recorded is not a new change to the run. It remains distinct from verified evidence and cannot satisfy separate permission or review-approval requirements.
 _Avoid_: verified outcome, skip
 
 **Handoff file**:

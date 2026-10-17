@@ -152,6 +152,8 @@ pub struct CircuitCheckpoint {
     pub node_id: String,
     pub attempt: i32,
     pub actions: Vec<CheckpointAction>,
+    /// Completing this step starts another review pass.
+    pub starts_next_review: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
@@ -411,9 +413,10 @@ fn evidence_view_unresolved(
             }
             let actions = checkpoint_actions(db, run_id, &graph, &view, &step)?;
             checkpoints.push(CircuitCheckpoint {
-                node_id: step.node_id,
+                node_id: step.node_id.clone(),
                 attempt: step.attempt,
                 actions,
+                starts_next_review: view.completion_starts_next_review(&step.node_id),
             });
         }
     }
@@ -469,6 +472,7 @@ pub(crate) fn attention_inner(db: &Connection, run_id: i64) -> Result<CircuitRun
                 node_id: step.node_id.clone(),
                 attempt: step.attempt,
                 actions: checkpoint_actions(db, run_id, &graph, &view, step)?,
+                starts_next_review: view.completion_starts_next_review(&step.node_id),
             });
         }
     }
@@ -922,14 +926,7 @@ pub(super) fn record_outcome_locked(
         return Err("Give the evidence behind your review decision.".into());
     }
     let tx = db.transaction().map_err(|e| e.to_string())?;
-    let revision: i64 = tx
-        .query_row(
-            "SELECT COALESCE(MAX(id),0) FROM circuit_run_history WHERE run_id=?1",
-            [request.run_id],
-            |r| r.get(0),
-        )
-        .map_err(|e| e.to_string())?;
-    if revision != request.expected_revision {
+    if revision_moved(&tx, request.run_id, request.expected_revision).map_err(|e| e.to_string())? {
         return Err("The run changed. Refresh its evidence before acting.".into());
     }
     let run = super::ledger::get_circuit_run_inner(&tx, request.run_id)
@@ -1693,6 +1690,39 @@ pub(super) fn revision_inner(db: &Connection, run_id: i64) -> SqlResult<i64> {
     )
 }
 
+/// Whether history since `expected` contains a fact the person has not seen.
+///
+/// Duplicate observations are the same fact recorded again. They must not
+/// refuse an operator action the person already refreshed for. Any other row
+/// still refuses, including a new observation and a row whose disposition was
+/// never set. A revision ahead of the ledger is treated as moved.
+pub(super) fn revision_moved(db: &Connection, run_id: i64, expected: i64) -> SqlResult<bool> {
+    let current = revision_inner(db, run_id)?;
+    if current == expected {
+        return Ok(false);
+    }
+    if expected > current {
+        return Ok(true);
+    }
+    // `IS`, not `=`. A missing disposition is unknown under `=`, so `NOT`
+    // would drop that row and a stale click would succeed.
+    db.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM circuit_run_history
+            WHERE run_id=?1 AND id>?2
+              AND NOT (kind='observation' AND disposition IS ?3)
+        )",
+        params![
+            run_id,
+            expected,
+            observation_disposition_str(
+                crate::circuit::observation::ObservationDisposition::Duplicate
+            )
+        ],
+        |row| row.get(0),
+    )
+}
+
 pub fn observation_revision(run: &crate::models::AutopilotCircuitRun) -> SqlResult<i64> {
     let db = crate::db::read_conn();
     db.query_row(
@@ -1918,6 +1948,10 @@ pub(crate) fn commit_transition_locked(
         )?;
     }
     for observation in evidence.observations {
+        if observation.disposition == crate::circuit::observation::ObservationDisposition::Duplicate
+        {
+            continue;
+        }
         let identity = &observation.observation.identity;
         let detail = serde_json::to_string(observation)
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;

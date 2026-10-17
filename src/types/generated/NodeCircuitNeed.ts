@@ -14,6 +14,10 @@ detail: string | null,
  */
 actions: Array<CheckpointAction>, 
 /**
+ * Completing this unverified step starts another review pass.
+ */
+starts_next_review: boolean, 
+/**
  * The agent to open to answer an `input` need.
  */
 agent_node_id: number | null, };

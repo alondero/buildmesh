@@ -74,6 +74,8 @@ pub struct NodeCircuitNeed {
     /// Checkpoint actions the desktop offers for this step. Empty unless
     /// `kind` is `unverified`.
     pub actions: Vec<CheckpointAction>,
+    /// Completing this unverified step starts another review pass.
+    pub starts_next_review: bool,
     /// The agent to open to answer an `input` need.
     #[ts(as = "Option<i32>")]
     pub agent_node_id: Option<i64>,
@@ -173,6 +175,7 @@ fn build(
                 step: step_view(step),
                 detail: None,
                 actions: Vec::new(),
+                starts_next_review: false,
                 agent_node_id: None,
             }),
             "unverified" => {
@@ -186,6 +189,7 @@ fn build(
                         step: step_view(step),
                         detail: step.error_message.clone(),
                         actions: checkpoint.actions.clone(),
+                        starts_next_review: checkpoint.starts_next_review,
                         agent_node_id: None,
                     });
                 }
@@ -198,6 +202,7 @@ fn build(
                         step: step_view(step),
                         detail: Some(describe_wait(wait.wait_kind).to_string()),
                         actions: Vec::new(),
+                        starts_next_review: false,
                         agent_node_id: Some(wait.identity.agent_node_id),
                     });
                 }
@@ -216,6 +221,7 @@ fn build(
             },
             detail: recovery.error.clone(),
             actions: Vec::new(),
+            starts_next_review: false,
             agent_node_id: None,
         });
     }

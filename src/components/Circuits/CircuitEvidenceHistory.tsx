@@ -259,6 +259,7 @@ export function CircuitEvidenceHistory({ runId, updatedAt, nodeLabel }: {
       {rows?.length === 0 && <p className="text-text-muted">No evidence history was retained for this run.</p>}
       {checkpoints.length > 0 && <div className="space-y-2">
         <p>Inspect the agent or external result, then choose how to continue. Record completed advances this step without replaying its action.</p>
+        {checkpoints.some((step) => step.starts_next_review) && <p>Start the next review records that this step finished and sends the work back to the reviewer. It does not approve the work.</p>}
         <p>For a staged prompt, submit it in the agent terminal first. Record completed only after confirming it was accepted.</p>
 <p>Completion does not grant review approval. Explicit review decisions are recorded as human verdicts.</p>
         <label htmlFor="evidence-reason" className="block">Reason and supporting evidence</label>
@@ -268,7 +269,7 @@ export function CircuitEvidenceHistory({ runId, updatedAt, nodeLabel }: {
         {checkpoints.map((step) => <fieldset key={step.node_id} disabled={pending || rows === null} className="flex flex-wrap gap-2">
           <legend>{step.node_id}</legend>
           {step.actions.map((action) => <button key={action} type="button" disabled={pending || (checkpointActionNeedsEvidence(action) && reason.trim() === '')} className="text-accent-cyan disabled:opacity-50" onClick={() => void record(step, action)}>
-            {{ completed: 'Record completed', not_performed: 'Record not performed', retry: 'Retry as new attempt', recheck: 'Recheck evidence', review_pass: 'Review passed', review_fail: 'Request changes' }[action]}
+            {action === 'completed' && step.starts_next_review ? 'Start the next review' : { completed: 'Record completed', not_performed: 'Record not performed', retry: 'Retry as new attempt', recheck: 'Recheck evidence', review_pass: 'Review passed', review_fail: 'Request changes' }[action]}
           </button>)}
         </fieldset>)}
       </div>}

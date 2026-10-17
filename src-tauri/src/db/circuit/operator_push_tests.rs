@@ -301,6 +301,166 @@ fn a_pushed_classifier_follows_the_outcome_the_person_chose() {
 }
 
 #[test]
+fn duplicate_observation_history_does_not_block_recording_the_step() {
+    let mut db = fixture(
+        &graph(await_turn()),
+        "unverified",
+        &CircuitContext::default(),
+    );
+    let seen = revision(&db);
+    for _ in 0..3 {
+        super::evidence::append_history(
+            &db,
+            1,
+            Some("await"),
+            Some(1),
+            "observation",
+            "{}",
+            Some("codex_rollout"),
+            Some("duplicate"),
+        )
+        .unwrap();
+    }
+
+    let attest = CheckpointRequest {
+        run_id: 1,
+        node_id: "await".into(),
+        attempt: 1,
+        expected_revision: seen,
+        action: CheckpointAction::Completed,
+        reason: String::new(),
+    };
+    super::evidence::record_outcome_locked(&mut db, &attest)
+        .expect("duplicate observations are not a new fact");
+    let step = super::ledger::list_circuit_run_steps_inner(&db, 1)
+        .unwrap()
+        .into_iter()
+        .find(|step| step.node_id == "await")
+        .unwrap();
+    assert_eq!(step.status, "completed");
+    assert_eq!(step.outcome.as_deref(), Some("completed"));
+
+    let mut pushed = fixture(&graph(await_turn()), "running", &CircuitContext::default());
+    let seen = revision(&pushed);
+    super::evidence::append_history(
+        &pushed,
+        1,
+        Some("await"),
+        Some(1),
+        "observation",
+        "{}",
+        Some("agent_status_projection"),
+        Some("duplicate"),
+    )
+    .unwrap();
+    let mut move_on = request(&pushed, StepPushOutcome::Completed);
+    move_on.expected_revision = seen;
+    push_step_locked(&mut pushed, &move_on, NOW_MS)
+        .expect("a push survives duplicate observations");
+
+    let mut blocked = fixture(
+        &graph(await_turn()),
+        "unverified",
+        &CircuitContext::default(),
+    );
+    let seen = revision(&blocked);
+    super::evidence::append_history(
+        &blocked,
+        1,
+        Some("await"),
+        Some(1),
+        "observation",
+        "{}",
+        Some("codex_rollout"),
+        Some("accepted"),
+    )
+    .unwrap();
+    let attest = CheckpointRequest {
+        run_id: 1,
+        node_id: "await".into(),
+        attempt: 1,
+        expected_revision: seen,
+        action: CheckpointAction::Completed,
+        reason: String::new(),
+    };
+    let error = super::evidence::record_outcome_locked(&mut blocked, &attest).unwrap_err();
+    assert!(
+        error.contains("The run changed. Refresh its evidence before acting."),
+        "{error}"
+    );
+    let mut move_on = request(&blocked, StepPushOutcome::Completed);
+    move_on.expected_revision = seen;
+    let error = push_step_locked(&mut blocked, &move_on, NOW_MS).unwrap_err();
+    assert!(
+        error.contains("The run changed. Refresh it before acting."),
+        "{error}"
+    );
+}
+
+#[test]
+fn completing_the_fix_wait_offers_the_next_review() {
+    let review = CircuitGraph::agent_review(None, None, 5);
+    let mut context = CircuitContext::default();
+    context.set("source.agent_id", "9");
+    let db = Connection::open_in_memory().unwrap();
+    crate::db::init_schema(&db).unwrap();
+    db.execute_batch(
+        "INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+        INSERT INTO agent_nodes(id,mesh_id,name,path,status) VALUES(9,1,'implementer','/repo','idle');
+        INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'review');
+        INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');
+        INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status)
+            VALUES(1,'await_fixes',2,'unverified');",
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE autopilot_circuits SET graph_json=?1",
+        [review.to_json().unwrap()],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE autopilot_circuit_runs SET context_json=?1",
+        [context.to_json().unwrap()],
+    )
+    .unwrap();
+
+    let attention = attention_inner(&db, 1).unwrap();
+    let checkpoint = attention
+        .checkpoints
+        .iter()
+        .find(|checkpoint| checkpoint.node_id == "await_fixes")
+        .expect("the fix wait is an unverified checkpoint");
+    assert!(
+        checkpoint
+            .actions
+            .iter()
+            .any(|action| matches!(action, CheckpointAction::Completed)),
+        "the person can record that the implementation finished: {:?}",
+        checkpoint.actions
+    );
+    assert!(
+        checkpoint.starts_next_review,
+        "recording completion re-enters the review loop"
+    );
+    let push = attention
+        .pushes
+        .iter()
+        .find(|push| push.node_id == "await_fixes")
+        .expect("the fix wait can be moved on");
+    assert!(push.outcomes.contains(&StepPushOutcome::Completed));
+    assert!(push.starts_next_review);
+
+    let ordinary = fixture(
+        &graph(await_turn()),
+        "unverified",
+        &CircuitContext::default(),
+    );
+    let ordinary = attention_inner(&ordinary, 1).unwrap();
+    assert!(!ordinary.checkpoints[0].starts_next_review);
+    assert!(!ordinary.pushes[0].starts_next_review);
+}
+
+#[test]
 fn an_unrouted_outcome_is_refused() {
     let mut db = fixture(&graph(await_turn()), "running", &CircuitContext::default());
     let error = push(&mut db, StepPushOutcome::Blocked).unwrap_err();

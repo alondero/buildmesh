@@ -198,6 +198,16 @@ it('offers read-only evidence recheck for a recorded OpenPr target', async () =>
   }));
 });
 
+it('calls a review re-entry Start the next review', async () => {
+  vi.mocked(circuitRunHistory).mockResolvedValue({ entries: [entry], coverage: [],
+    checkpoints: [{ node_id: 'await_fixes', attempt: 2, actions: ['recheck', 'completed'], starts_next_review: true }] });
+  const { container } = render(<CircuitEvidenceHistory runId={3} updatedAt="one" />);
+  fireEvent.click(container.querySelector('summary')!);
+  expect(await screen.findByRole('button', { name: 'Start the next review' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Recheck evidence' })).toBeTruthy();
+  expect(screen.getByText(/sends the work back to the reviewer/)).toBeTruthy();
+});
+
 it('offers agent handoff recovery before history and retains a rejected reason for retry', async () => {
   vi.mocked(circuitRunHistory).mockResolvedValue({ entries: [entry], coverage: [],
     checkpoints: [{ node_id: 'await_fixes', attempt: 2, actions: ['recheck', 'completed'] }] });

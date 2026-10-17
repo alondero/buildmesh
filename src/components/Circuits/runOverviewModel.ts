@@ -174,9 +174,14 @@ export function overviewNeedsYou(overview: Pick<CircuitRunOverview, 'run' | 'ste
 }
 
 /** What moving a step on to `outcome` means for this kind of step. */
-export function pushOutcomeLabel(kind: CircuitNodeKind, outcome: StepPushOutcome): string {
+export function pushOutcomeLabel(
+  kind: CircuitNodeKind,
+  outcome: StepPushOutcome,
+  startsNextReview = false,
+): string {
   switch (outcome) {
     case 'completed':
+      if (startsNextReview) return 'Start the next review';
       return kind.type === 'llm_turn_classifier' ? 'Task is complete' : 'Agent has finished';
     case 'working':
       return 'Still working';

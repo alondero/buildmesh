@@ -47,7 +47,7 @@ function decisionTitle(decision: Decision): string {
     case 'approve':
       return `Approve the ${decision.need.step.role}?`;
     case 'record':
-      return checkpointActionLabel(decision.action);
+      return checkpointActionLabel(decision.action, decision.need.starts_next_review);
     case 'recover':
       return "I've done this — continue";
     case 'cancel':
@@ -229,7 +229,7 @@ export function NodeCircuitRunPanel({
                       : setDecision({ kind: 'record', need, action })
                   }
                 >
-                  {checkpointActionLabel(action)}
+                  {checkpointActionLabel(action, need.starts_next_review)}
                 </button>
               ))}
             </div>

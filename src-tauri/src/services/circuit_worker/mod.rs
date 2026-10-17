@@ -1211,8 +1211,13 @@ fn persist_transition_checked_with(
 ) -> Result<bool, TransitionPersistFailure> {
     let turn_boundary_changed = prepare_turn_boundaries(view, &transition.effects)
         .map_err(TransitionPersistFailure::Other)?;
+    // Duplicate observations are not durable. Persisting them only advanced
+    // the history id and made the operator revision check fail.
+    let records_evidence = transition.observations.iter().any(|observation| {
+        observation.disposition != crate::circuit::observation::ObservationDisposition::Duplicate
+    });
     if !transition.step_writes.is_empty()
-        || !transition.observations.is_empty()
+        || records_evidence
         || transition.run_state_changed
         || transition.context_changed
         || turn_boundary_changed

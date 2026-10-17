@@ -143,6 +143,8 @@ describe('checkpointActionLabel', () => {
   it('uses plain verbs for each recorded outcome', () => {
     expect(checkpointActionLabel('recheck')).toBe('Check again');
     expect(checkpointActionLabel('completed')).toBe("I've done this — mark it done");
+    expect(checkpointActionLabel('completed', true)).toBe('Start the next review');
+    expect(checkpointActionLabel('recheck', true)).toBe('Check again');
     expect(checkpointActionLabel('not_performed')).toBe("It didn't happen");
     expect(checkpointActionLabel('retry')).toBe('Try it again');
   });

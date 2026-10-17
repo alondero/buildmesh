@@ -472,6 +472,106 @@ fn observation_blockers_are_typed_deduplicated_and_attempt_scoped() {
         .contains("question or permission"));
 }
 
+/// A poll that sees the same fact again must not produce a transition. Duplicate
+/// observation rows were the only thing advancing a stuck review run's history,
+/// so every human checkpoint lost the race against the next poll.
+#[test]
+fn a_repeated_observation_records_nothing() {
+    use super::super::observation::*;
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    run.attach_agent_node("spawn", 900);
+    let identity = ObservationIdentity {
+        run_id: run.run_id,
+        step_id: "spawn".into(),
+        attempt: 1,
+        agent_node_id: 900,
+        session_incarnation: Some("generation-1".into()),
+        session_id: Some("session-1".into()),
+        turn_id: Some("turn-1".into()),
+        report_revision: None,
+    };
+    let observation = CircuitObservation {
+        identity: identity.clone(),
+        source: "codex_rollout".into(),
+        source_id: Some("task-complete".into()),
+        observed_at_ms: 10,
+        authoritative: true,
+        fact: ObservedWorkFact::Working,
+    };
+    let first = advance(
+        &mut run,
+        &CircuitEvent::ObservationBatch {
+            receipt_id: 7,
+            expected: identity.clone(),
+            observations: vec![observation.clone()],
+            stale: false,
+            input_guard: None,
+        },
+    );
+    assert_eq!(
+        first.observations[0].disposition,
+        ObservationDisposition::Accepted
+    );
+    assert_eq!(run.context.get("observer.receipt_cursor"), Some("7"));
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Running);
+
+    let repeated = advance(
+        &mut run,
+        &CircuitEvent::ObservationBatch {
+            receipt_id: 7,
+            expected: identity.clone(),
+            observations: vec![observation],
+            stale: false,
+            input_guard: None,
+        },
+    );
+    assert!(
+        repeated.is_empty(),
+        "a repeated fact must not record a duplicate or rewrite context: {repeated:?}"
+    );
+
+    // The same missing-ownership fact, seen again while the step is running,
+    // still parks the step. It does not also record the duplicate.
+    let missing = CircuitObservation {
+        identity: identity.clone(),
+        source: "codex_rollout".into(),
+        source_id: Some("ownership-missing".into()),
+        observed_at_ms: 11,
+        authoritative: true,
+        fact: ObservedWorkFact::OwnershipUnavailable {
+            reason: "the harness has not recorded a current finished turn".into(),
+        },
+    };
+    let parked = advance(
+        &mut run,
+        &CircuitEvent::Observed {
+            expected: identity.clone(),
+            observation: Box::new(missing.clone()),
+        },
+    );
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Unverified);
+    assert_eq!(
+        parked.observations[0].disposition,
+        ObservationDisposition::Unavailable
+    );
+    run.step_mut("spawn").unwrap().status = StepStatus::Running;
+    let parked_again = advance(
+        &mut run,
+        &CircuitEvent::Observed {
+            expected: identity,
+            observation: Box::new(missing),
+        },
+    );
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Unverified);
+    assert!(
+        parked_again.observations.is_empty(),
+        "re-parking must not append a duplicate observation"
+    );
+    assert_eq!(parked_again.step_writes.len(), 1);
+}
+
 /// Issue #2138: `unverify_step` guards roughly thirteen call sites, and every
 /// emitted `StepWrite` becomes a `step_transition` row — plus a
 /// `checkpoint_reason` when the status is `unverified`. Re-parking a step that is

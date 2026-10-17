@@ -233,6 +233,15 @@ describe('Overview panel', () => {
     });
   });
 
+  it('names a completed push that re-enters review as the next review', () => {
+    const review = overview();
+    review.attention.pushes[0].starts_next_review = true;
+    render(<CircuitRunOverview {...props} overview={review} />);
+    expect(screen.getByTestId('run-overview-push-await-completed').textContent).toBe('Start the next review');
+    fireEvent.click(screen.getByTestId('run-overview-push-await-completed'));
+    expect(screen.getByTestId('run-overview-push-confirm-await').textContent).toBe('Move on: Start the next review');
+  });
+
   it('shows a refused push, keeps the choice open and rereads the run so a retry uses its new revision', async () => {
     vi.mocked(pushCircuitStep).mockRejectedValue('The run changed. Refresh it before acting.');
     props.onRefresh.mockClear();

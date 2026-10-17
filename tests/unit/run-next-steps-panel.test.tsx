@@ -278,6 +278,19 @@ describe('a running run waiting on evidence', () => {
     );
   });
 
+  it('names a review re-entry as the next review pass', async () => {
+    vi.mocked(circuitRunAttention).mockResolvedValue({
+      revision: 12,
+      checkpoints: [{ node_id: 'await_fixes', attempt: 2, actions: ['recheck', 'completed'], starts_next_review: true }],
+    });
+    renderPanel({ state: 'running' }, [step({ node_id: 'await_fixes', status: 'unverified', attempt: 2, outcome: null, error_message: null })]);
+
+    expect(await screen.findByRole('button', { name: 'Start the next review' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Check again' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Start the next review' }));
+    expect(screen.getByRole('button', { name: 'Confirm: Start the next review' })).toBeTruthy();
+  });
+
   it('recording a result offers an optional note box, and sends it when given', async () => {
     vi.mocked(circuitRunAttention).mockResolvedValue(checkpointed());
     renderPanel({ state: 'running' }, waiting);

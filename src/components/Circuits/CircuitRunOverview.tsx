@@ -350,7 +350,7 @@ function StepPushControl({ push, kind, revision, runId, onPushed, onRefused }: {
             data-testid={`run-overview-push-${push.node_id}-${outcome}`}
             onClick={() => setChoice(choice === outcome ? null : outcome)}
             className={`rounded-md px-1.5 py-1 disabled:opacity-40 ${choice === outcome ? 'bg-accent-cyan/30 text-text-primary' : 'bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25'}`}>
-            {pushOutcomeLabel(kind, outcome)}
+            {pushOutcomeLabel(kind, outcome, push.starts_next_review)}
           </button>
         ))}
       </div>
@@ -370,7 +370,7 @@ function StepPushControl({ push, kind, revision, runId, onPushed, onRefused }: {
           <button type="button" disabled={pending} onClick={() => void confirm(choice)}
             data-testid={`run-overview-push-confirm-${push.node_id}`}
             className="rounded-md bg-accent-cyan/15 px-1.5 py-1 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40">
-            {pending ? 'Moving on…' : `Move on: ${pushOutcomeLabel(kind, choice)}`}
+            {pending ? 'Moving on…' : `Move on: ${pushOutcomeLabel(kind, choice, push.starts_next_review)}`}
           </button>
         </div>
       )}

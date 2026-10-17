@@ -94,10 +94,13 @@ classifier. It offers the outcomes the graph routes onward, plus "finished" on
 a step with no way onward. Review verdicts are not pushed: they keep their
 explicit Review passed and Request changes decisions. An evidence conflict on
 any of that agent's steps still blocks the push. The confirmation names what is
-holding the step, and the note is optional. The push checks the run revision.
-It settles that agent's stale background-work and input-wait evidence across
-the run and clears a stale lifecycle report that is blocking it, then records
-the outcome as an operator override in Run History. It is an Operator-recorded
+holding the step, and the note is optional. The push checks the run revision. History that only repeats an observation
+already recorded does not count as a change; a new observation or any other
+history row does. It settles that agent's stale background-work and input-wait
+evidence across the run and clears a stale lifecycle report that is blocking it,
+then records the outcome as an operator override in Run History. When the
+completed outcome re-enters a bounded review, the push is labelled **Start the
+next review**. It is an Operator-recorded
 Outcome, not verified evidence, and it grants no review approval.
 
 When an agent disappears, its cancellation explanation retains the preceding
@@ -298,8 +301,11 @@ bookkeeping are behind **Show technical detail (N more)**.
 Agent checkpoints offer **Recheck evidence** for the same attempt. This restarts
 the observation window without sending the original prompt or requesting an
 automatic continuation. Eligible agent handoffs also offer **Record completed**:
-inspect the work, enter a reason, and attest that this step can advance. This is
-an operator decision, not verified lifecycle evidence. Missing agent attachments,
+inspect the work, enter a reason, and attest that this step can advance. When
+that completion re-enters a bounded review, the run card, the history action and
+the phone all say **Start the next review** instead. The next worker tick asks
+the reviewer to look again. This is an operator decision, not verified lifecycle
+evidence, and it does not approve the review. Missing agent attachments,
 known unfinished child work, conflicting evidence, and unresolved human requests
 cannot be completed this way; review-verdict and approval gates remain separate.
 Recovery controls appear before the retained history entries.

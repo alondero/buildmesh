@@ -320,6 +320,28 @@ impl RunView {
             .collect()
     }
 
+    /// Completing this step re-enters a review: a completed edge reaches a
+    /// retry gate, and that gate's re-entry reaches a review verdict.
+    /// The shape matches [`execute_retry_limit`], which treats that completed
+    /// parent as the next review pass.
+    pub(crate) fn completion_starts_next_review(&self, node_id: &str) -> bool {
+        self.graph.edges.iter().any(|edge| {
+            edge.from == node_id
+                && matches!(
+                    edge.condition,
+                    EdgeCondition::Always | EdgeCondition::OnOutcome(StepOutcome::Completed)
+                )
+                && matches!(
+                    self.graph.node(&edge.to).map(|node| &node.kind),
+                    Some(CircuitNodeKind::RetryLimit { .. })
+                )
+                && self.graph.children(&edge.to).first().is_some_and(|target| {
+                    retry_gate_reaches_itself(self, &edge.to, target)
+                        && reaches_review_verdict(self, target)
+                })
+        })
+    }
+
     /// Read-path availability is structural; the write boundary validates delivery.
     pub(crate) fn can_offer_review(&self, node_id: &str, outcome: StepOutcome) -> bool {
         self.state == RunState::Running
@@ -1521,23 +1543,30 @@ fn apply_observation(
     } else {
         D::Rejected
     };
+    // A repeated fact is not new evidence. Recording it advanced the run
+    // revision on every poll and made every operator action lose the race.
+    // Missing ownership can still park a running step; that write is the
+    // step row, not another observation.
+    if disposition == D::Duplicate {
+        if !evidence.lifecycle_verified() && !evidence.has_human_wait() {
+            if let super::observation::ObservedWorkFact::OwnershipUnavailable { reason } =
+                &observation.fact
+            {
+                if run
+                    .step(&expected.step_id)
+                    .is_some_and(|step| step.status == StepStatus::Running)
+                {
+                    unverify_step(run, t, &expected.step_id, reason.clone());
+                }
+            }
+        }
+        return false;
+    }
     t.observations.push(RecordedObservation {
         observation: observation.clone(),
         disposition,
     });
-    if disposition == D::Duplicate && !evidence.lifecycle_verified() && !evidence.has_human_wait() {
-        if let super::observation::ObservedWorkFact::OwnershipUnavailable { reason } =
-            &observation.fact
-        {
-            if run
-                .step(&expected.step_id)
-                .is_some_and(|step| step.status == StepStatus::Running)
-            {
-                unverify_step(run, t, &expected.step_id, reason.clone());
-            }
-        }
-    }
-    if matches!(disposition, D::Rejected | D::Duplicate) {
+    if disposition == D::Rejected {
         return false;
     }
     run.context.set(
@@ -1688,9 +1717,11 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 t.input_guard = input_guard.clone();
             }
             if *receipt_id > 0 {
-                run.context
-                    .set("observer.receipt_cursor", receipt_id.to_string());
-                t.context_changed = true;
+                let cursor = receipt_id.to_string();
+                if run.context.get("observer.receipt_cursor") != Some(cursor.as_str()) {
+                    run.context.set("observer.receipt_cursor", cursor);
+                    t.context_changed = true;
+                }
             }
         }
         CircuitEvent::Observed {
@@ -4195,6 +4226,24 @@ fn execute_retry_limit(run: &mut RunView, t: &mut Transition, node_id: &str, max
             format!("retry budget exhausted after {max_retries} attempts"),
         );
     }
+}
+
+fn reaches_review_verdict(run: &RunView, start: &str) -> bool {
+    let mut stack = vec![start.to_string()];
+    let mut visited = std::collections::HashSet::new();
+    while let Some(current) = stack.pop() {
+        if !visited.insert(current.clone()) {
+            continue;
+        }
+        if matches!(
+            run.graph.node(&current).map(|node| &node.kind),
+            Some(CircuitNodeKind::ReviewVerdict { .. })
+        ) {
+            return true;
+        }
+        stack.extend(run.graph.children(&current));
+    }
+    false
 }
 
 /// Return true when a RetryLimit's first outgoing target can reach the gate

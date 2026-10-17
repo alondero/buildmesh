@@ -443,11 +443,11 @@ mod tests {
         assert_eq!(run.state, RunState::Running);
         let duplicate = advance(&mut run, &event);
         assert!(duplicate.effects.is_empty());
-        assert!(duplicate
-            .observations
-            .iter()
-            .all(|record| record.disposition
-                == crate::circuit::observation::ObservationDisposition::Duplicate));
+        assert!(
+            duplicate.observations.is_empty(),
+            "a repeated report must not record duplicate observations"
+        );
+        assert!(!duplicate.context_changed);
         // A recheck restores this attempt and retains observation deduplication.
         run.steps[0].status = StepStatus::Running;
         run.context.set("node.spawn.recheck_only", "1");
