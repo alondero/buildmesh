@@ -294,6 +294,22 @@ its gates read. `runIdentity` hashes the base string, so a short sha and its
 full hash are two identities for one commit, and both sides of the
 `binding-drift` comparison use the resolved one (issue #2350).
 
+That identity also covers the environment the gates ran in — `NODE_OPTIONS`,
+`RUSTFLAGS`, `CARGO_TARGET_DIR`, `CC`, `CXX` and `TS_RS_EXPORT_DIR` — so a
+receipt describes one run rather than one tree. Keeping `CARGO_TARGET_DIR` in
+it is a deliberate call, not an oversight: the variable redirects build output,
+so the harness treats a change to it as a change of run and asks for
+verification again (issue #2377). Verifying under one target directory and
+finishing under another therefore reports a stale receipt, which is the
+intended verdict and used to be indistinguishable from a missing check. The
+receipt now records the run identity it was written under, so that verdict
+names what differs (`CARGO_TARGET_DIR: recorded D:\shared\target, now unset`),
+`harness status` lists the same differences under `verification.differs`, and
+the repair is either to re-run `npm run verify` here or to run the harness in
+the environment that verified. A stale receipt caused by a source change, and a
+receipt written before this field existed, keep the plain `Run npm run verify`
+advice.
+
 Committed, staged, unstaged, deleted and untracked paths determine scope.
 Unknown paths select both product layers; generated wire types always select
 both. Executable hooks and harness tests still run infrastructure gates.
@@ -483,7 +499,8 @@ environment. The first nonpassing gate stops the attempt (gates already running
 in the other lane finish); unrun gates remain absent and cannot count as green. Receipt JSON preserves the command, base,
 HEAD, worktree, paths, outcome, count, duration and log reference. Its content
 fingerprint includes tracked/untracked inputs, tests, harness configuration,
-lockfiles, HEAD, index content and tool versions. Staged paths must match the
+lockfiles, HEAD, index content, tool versions and the run environment, which the
+receipt records alongside the tree it hashed. Staged paths must match the
 working content being tested. Source changes during verification invalidate
 the result. Passing gates are reused across runs until the inputs they read change,
 keyed on each gate's input set, environment identity, and task ID. Gates with no
@@ -577,7 +594,9 @@ implementation that cannot be repaired, write
 `{"phase": "blocked", "blockers": ["<why>"]}` to a JSON file and run
 `npm run harness -- update --spec <file>`; the FAIL stop message repeats this
 command. Never edit `.harness/active-task.json` by hand. None of these paths
-marks the task complete.
+marks the task complete. A stale receipt names the run identity that differs
+when there is one, so a block caused by a different `CARGO_TARGET_DIR` reads as
+an environment mismatch rather than as a check the agent forgot.
 
 These hooks apply to Claude; other agents use the portable CLI and existing CI
 gates. Tasks must be started explicitly for this completion guard to apply;

@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { changedPaths, completion, fingerprint, runGate, scopePaths, verify, waitForVerify } from '../../scripts/harness.mjs';
+import { changedPaths, completion, fingerprint, identityMismatch, runGate, runIdentity, scopePaths, verify, waitForVerify } from '../../scripts/harness.mjs';
 import { executedTests, formatDiffPaths, gateReads, planGates } from '../../scripts/harness-plan.mjs';
 import { acquireSlot, heavyGateEnv, heavyGateLimit, runPlan, slotHolders } from '../../scripts/harness-lanes.mjs';
 import { RUST_PATH_INCLUDES, fastGates, frontendInScope, lintablePaths, pathIncludeDrift, planChecks, rustModule, rustScope } from '../../scripts/harness-check.mjs';
@@ -499,7 +499,8 @@ function repo(t) {
   put('.gitignore', '.harness/\n.task.json\n');
   put('src/owner.ts', 'export const owner = 1;\n');
   const base = commit();
-  const cli = (...args) => spawnSync(process.execPath, [script, ...args], { cwd, encoding: 'utf8', timeout: 30000 });
+  const run = (args, env) => spawnSync(process.execPath, [script, ...args], { cwd, encoding: 'utf8', timeout: 30000, env: env ? { ...process.env, ...env } : process.env });
+  const cli = (...args) => run(args);
   const hook = (payload, env) => spawnSync(process.execPath, [script, 'hook'], { cwd, encoding: 'utf8', input: JSON.stringify(payload), timeout: 15000, env: env ? { ...process.env, ...env } : process.env });
   const start = () => {
     put('.task.json', JSON.stringify({ goal: 'Preserve owner state', criteria: ['Switches preserve state'], plannedEdits: ['src/owner.ts'], base }));
@@ -507,11 +508,14 @@ function repo(t) {
     assert.equal(result.status, 0, result.stderr);
     return JSON.parse(result.stdout);
   };
-  return { cwd, git, put, commit, base, cli, hook, start };
+  return { cwd, git, put, commit, base, run, cli, hook, start };
 }
+// The identity belongs to the environment that writes the receipt, so the
+// recording process computes it: a copied-in fixture value would make the
+// staleness assertions below compare the test process with itself.
 function passingReceipt(fixture, task) {
   const gatePlan = taskPlan(fixture, task);
-  fixture.put('.harness/receipt.json', JSON.stringify({ root: fixture.cwd, taskId: task.id, base: task.base, tree: fingerprint(fixture.cwd, task.base), full: false, gatePlan, gates: gatePlan.map(gate => ({ id: gate.id, outcome: 'PASS' })), outcome: 'PASS' }));
+  fixture.put('.harness/receipt.json', JSON.stringify({ root: fixture.cwd, taskId: task.id, base: task.base, tree: fingerprint(fixture.cwd, task.base), full: false, gatePlan, gates: gatePlan.map(gate => ({ id: gate.id, outcome: 'PASS' })), outcome: 'PASS', runIdentity: runIdentity(fixture.cwd, task.base) }));
   const tree = fingerprint(fixture.cwd, task.base);
   fixture.put('.harness/active-task.json', JSON.stringify({ ...task, evidence: ['Observed state after owner switch'], evidenceTree: tree, reviewTree: tree, review: { reviewer: 'independent fixture', verdict: 'APPROVE', findings: [], summary: 'Approved current change' } }));
 }
@@ -1179,6 +1183,75 @@ test('Stop does not re-block a task whose phase is already complete (#2407)', t 
     assert.equal(stop.stdout, '', `a complete task must not emit a block decision for ${JSON.stringify(payload)}`);
   }
   assert.equal(JSON.parse(readFileSync(join(fixture.cwd, '.harness/active-task.json'))).phase, 'complete');
+});
+test('a stale receipt names the run identity that differs, and a source change does not (#2377)', async t => {
+  const fixture = repo(t);
+  const task = fixture.start();
+  passingReceipt(fixture, task);
+  // Read the receipt under a different target directory, with no source edit:
+  // the tree is untouched, so only the environment can explain the stale tree.
+  const other = { CARGO_TARGET_DIR: join(fixture.cwd, 'other-target') };
+  const finished = fixture.run(['finish'], other);
+  assert.equal(finished.status, 2);
+  assert.match(finished.stdout, /Verification is missing or stale: this is not the run that verified/);
+  assert.match(finished.stdout, /CARGO_TARGET_DIR: recorded .*, now \S+/, `the message must name the differing variable: ${finished.stdout}`);
+  assert.match(finished.stdout, /Re-run npm run verify in this environment/, 'the repair differs from an ordinary missing receipt');
+
+  // The Stop hook reads the same reason, so an agent blocked on a turn is told
+  // which environment disagrees instead of re-running verify blind.
+  const blocked = JSON.parse(fixture.hook({ hook_event_name: 'Stop' }, other).stdout);
+  assert.equal(blocked.decision, 'block');
+  assert.match(blocked.reason, /CARGO_TARGET_DIR: recorded .*, now \S+/);
+  // `harness status` reports the same cause, so `current: false` is not a dead end.
+  const reported = JSON.parse(fixture.run(['status'], other).stdout).verification;
+  assert.equal(reported.current, false);
+  assert.equal(reported.differs.length, 1, `expected one differing part, got ${JSON.stringify(reported.differs)}`);
+  assert.match(reported.differs[0], /^CARGO_TARGET_DIR: /);
+  // The comparison itself: a run compared with itself reports no difference,
+  // and a receipt that recorded no identity has no comparison to make.
+  const current = runIdentity(fixture.cwd, task.base);
+  assert.deepEqual(identityMismatch(current, current), []);
+  assert.deepEqual(identityMismatch(undefined, current), []);
+  // A run that differs in everything stays readable: the reader needs to know
+  // the list is truncated, so the marker has to survive the cap.
+  const moved = JSON.parse(current);
+  moved.node = 'v0.0.0-moved';
+  moved.platform = `${moved.platform}-moved`;
+  moved.environment = moved.environment.map(([key, value]) => [key, value === null ? 'set' : null]);
+  const everywhere = identityMismatch(current, JSON.stringify(moved));
+  assert.equal(everywhere.length, 5, `expected four differences and a marker, got ${JSON.stringify(everywhere)}`);
+  assert.match(everywhere.at(-1), /^\(\+4 more\)$/);
+
+  // The persisted receipt is what a real verify leaves behind, so the identity
+  // has to reach disk: the fixture above writes its own copy, which does not
+  // cover the production write.
+  const written = repo(t);
+  const { gate } = fakeGates(written);
+  await verify(written.cwd, { base: written.base, plan: () => [gate('docs-fake')], selfReview: false });
+  const persisted = JSON.parse(readFileSync(join(written.cwd, '.harness/receipt.json')));
+  assert.equal(persisted.runIdentity, runIdentity(written.cwd, written.base));
+
+  // A source change is the ordinary case and keeps its ordinary advice; naming
+  // an environment that did not change would send the reader to the wrong fix.
+  const edited = repo(t);
+  const editedTask = edited.start();
+  passingReceipt(edited, editedTask);
+  edited.put('src/owner.ts', 'export const owner = 2;\n');
+  const source = edited.cli('finish');
+  assert.equal(source.status, 2);
+  assert.match(source.stdout, /Verification is missing or stale\. Run npm run verify\./);
+  assert.doesNotMatch(source.stdout, /this is not the run that verified/);
+  assert.deepEqual(JSON.parse(edited.cli('status').stdout).verification.differs, []);
+
+  // A receipt written before the run identity was recorded predates this
+  // contract. It must fall back to the generic reason rather than guess, and
+  // still read as stale after a source edit.
+  const receipt = JSON.parse(readFileSync(join(edited.cwd, '.harness/receipt.json')));
+  delete receipt.runIdentity;
+  edited.put('.harness/receipt.json', JSON.stringify(receipt));
+  const legacy = edited.cli('finish');
+  assert.equal(legacy.status, 2);
+  assert.match(legacy.stdout, /Verification is missing or stale\. Run npm run verify\./);
 });
 test('the operation lock blocks a live owner, and a lock left by a dead process is reclaimed', t => {
   const fixture = repo(t);
