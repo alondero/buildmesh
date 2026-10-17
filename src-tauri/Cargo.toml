@@ -169,20 +169,23 @@ tauri-plugin-global-shortcut = "2"
 #     both go through `extract_exe`, which never opens an archive. The zip path
 #     is therefore unreachable whichever key the updater settles on. The
 #     platform-to-asset mapping this was checked against is recorded in
-#     docs/archive/2026-10/rustsec-zip-extraction-2026-10.md — re-read the
-#     published feed before relying on this, since a new key pointing at a real
-#     `.zip` artifact would make the feature needed again.
-#   * The feature also gates Linux AppImage `.tar.gz` extraction, and there is
-#     no Linux release or AppImage artifact. Re-enabling the feature is the
-#     first step if that ever changes.
+#     docs/archive/2026-10/rustsec-zip-extraction-2026-10.md.
+#   * The feature also gates Linux AppImage `.tar.gz` extraction. There is no
+#     Linux release or AppImage artifact, so nothing needs it today.
 #
-# Re-enabling this feature reintroduces RUSTSEC-2026-0367/0368/0369 (insecure
-# ZIP extraction). No version to upgrade to is available instead, because the
-# plugin pins `zip = "4"` and the advisories are fixed only in 9.x; both halves
-# of that are upstream state that can change without a commit here, so
-# docs/development/supply-chain.md#when-no-fixed-release-exists carries the rule
-# and the same archive entry carries the dated check. Keep this feature off
-# (issue #2438).
+# That second bullet is not a reason to turn the feature back on. It is one
+# switch covering both cases: in 2.13.3 it is `["dep:zip", "dep:tar",
+# "dep:flate2"]`, so enabling it restores the pinned `zip = "4"` to Cargo.lock
+# and to the Windows build — which is precisely what RUSTSEC-2026-0367/0368/0369
+# are about. Re-enabling it to reach Linux AppImage support, or to serve a real
+# `.zip` artifact, would reintroduce the reported vulnerabilities.
+#
+# Either case needs a safe extraction path or a fixed dependency first: a plugin
+# release that splits the feature or raises the floor to 9.x, or extracting the
+# AppImage outside the plugin. Only then is this feature worth reconsidering.
+# Keep it off (issue #2438). The rule this follows is in
+# docs/development/supply-chain.md#when-no-fixed-release-exists, and the dated
+# check behind it is in the archive entry above.
 tauri-plugin-updater = { version = "2", default-features = false, features = ["rustls-tls", "system-proxy"] }
 tauri-plugin-process = "2"
 

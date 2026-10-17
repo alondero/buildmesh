@@ -82,17 +82,36 @@ release API. It was wrong; the key resolves to the MSI. The lesson generalises:
 derive the feed mapping from `gh api repos/alondero/buildmesh/releases/tags/v1.4.1`
 rather than from the bundler's documented convention.
 
-## Residual scope
+## Residual scope, and why the feature must not simply be turned back on
 
 The feature also gates Linux AppImage `.tar.gz` extraction (`updater.rs`, around
 line 1179). Buildmesh publishes no Linux release or AppImage artifact, so nothing
 regresses today. All the plugin's Windows updater types are `#[cfg(windows)]`, so
 that block is the feature's only Linux effect, and `std::io::Cursor` stays used
 elsewhere in the file, so disabling the feature raises no unused-import warning.
-Re-enabling the feature is the first step if a Linux release is ever added.
+
+That residual scope is **not** an argument for re-enabling the feature. The two
+are one switch: in `tauri-plugin-updater` 2.13.3 it is
+
+```
+zip = ["dep:zip", "dep:tar", "dep:flate2"]
+```
+
+so turning it on to reach Linux AppImage extraction also puts the pinned
+`zip = "4"` back into `Cargo.lock` and into the Windows build, which is exactly
+what `RUSTSEC-2026-0367`, `-0368` and `-0369` describe. The Windows extraction
+path becomes reachable again even though no Windows feed key needs it today, and
+the advisory gate fails. The same applies to serving a real `.zip` update
+artifact.
+
+Adding Linux support, or a `.zip` artifact, therefore needs a safe extraction
+path or a fixed dependency first — a plugin release that splits the feature or
+raises the `zip` floor to 9.x, or extracting the AppImage outside the plugin.
+Only then is the feature worth reconsidering.
 
 ## What to re-verify before repeating any of this
 
 - the crates.io version list for `tauri-plugin-updater`, and each version's `zip` requirement
+- whether the feature still gates both the Linux and the Windows extraction paths
 - the `solution` field on each `RUSTSEC-2026-0367/0368/0369` advisory
 - the published `latest.json` platform-to-asset mapping for the current release
