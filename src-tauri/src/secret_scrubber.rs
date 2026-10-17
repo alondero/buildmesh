@@ -35,6 +35,8 @@
 //! text pipeline, so `buildmesh.log` and a support copy of it are not a second
 //! copy of a credential.
 
+use std::borrow::Cow;
+
 use once_cell::sync::Lazy;
 use regex::{Captures, Regex};
 
@@ -193,8 +195,14 @@ impl SecretScrubber {
     /// passphrase is masked whole by the quoted-value rule rather than leaking
     /// the words after the first space (issue #1220). Idempotent: re-scrubbing
     /// already-masked text is a no-op.
+    ///
+    /// Returns an owned string even when nothing changed, because that is this
+    /// entry point's contract. A caller that writes the result straight to a
+    /// sink rather than holding it wants the borrowed pipeline, which
+    /// [`scrub_for_persistence_borrowed`](Self::scrub_for_persistence_borrowed)
+    /// exposes for the log writer.
     pub fn scrub(input: &str) -> String {
-        scrub_str(input)
+        scrub_str(input).into_owned()
     }
 
     /// Mask a log line before it is written to `buildmesh.log`.
@@ -208,7 +216,22 @@ impl SecretScrubber {
     /// pass would treat the already-masked array as a key/value and tear the
     /// brackets. A span that is not JSON, and a JSON value with nothing to
     /// mask, is kept byte-for-byte.
+    ///
+    /// Returns an owned string even when nothing changed; the log-file writer
+    /// takes [`scrub_for_persistence_borrowed`](Self::scrub_for_persistence_borrowed).
     pub fn scrub_for_persistence(input: &str) -> String {
+        scrub_log_line(input).into_owned()
+    }
+
+    /// [`scrub_for_persistence`](Self::scrub_for_persistence) that borrows
+    /// `input` when nothing needed masking.
+    ///
+    /// This is the writer's entry point: an unchanged line reaches
+    /// `buildmesh.log` as the caller's own bytes, with no copy made on the
+    /// emitting thread (issue #2426). `an_unchanged_line_is_borrowed_and_a_masked_one_is_owned`
+    /// pins the borrow, and `startup::tests::a_clean_json_subscriber_line_is_written_without_a_copy`
+    /// pins what the writer does with it.
+    pub fn scrub_for_persistence_borrowed(input: &str) -> Cow<'_, str> {
         scrub_log_line(input)
     }
 
@@ -256,17 +279,33 @@ enum Probe {
 /// the prose, so `password="correct {} horse"` is still one quoted value. A JSON value that
 /// is itself the value of a secret-named key (`token=["…"]`) is masked whole.
 /// A string leaf that contains JSON is scanned again, up to [`MAX_EMBED_DEPTH`].
-fn scrub_log_line(input: &str) -> String {
+fn scrub_log_line(input: &str) -> Cow<'_, str> {
     scrub_log_line_at(input, 0)
 }
 
-fn scrub_log_line_at(input: &str, depth: u32) -> String {
+/// The owned form of a scrub result, or `None` when nothing was replaced:
+/// `Cow::Borrowed` is the pipeline's "unchanged" signal, and it is what lets a
+/// caller skip the write entirely.
+///
+/// Taking the `Cow` by value also ends its borrow of the text at the call, which
+/// is what allows the caller to store the result back into that same text.
+fn owned_change(scrubbed: Cow<'_, str>) -> Option<String> {
+    match scrubbed {
+        Cow::Owned(changed) => Some(changed),
+        Cow::Borrowed(_) => None,
+    }
+}
+
+fn scrub_log_line_at(input: &str, depth: u32) -> Cow<'_, str> {
     if depth > MAX_EMBED_DEPTH {
         return scrub_str(input);
     }
     // Resolved once for the whole line; see `BracketIndex`.
     let brackets = BracketIndex::new(input);
-    let mut out = String::with_capacity(input.len());
+    // Created by the first span that actually differs, not on entry. While this
+    // is `None` every span examined so far came back byte-identical, so the
+    // whole line can still be borrowed (issue #2426).
+    let mut out: Option<String> = None;
     let mut i = 0;
     let mut probe_budget = input.len() + JSON_PROBE_SLACK;
     while i < input.len() {
@@ -286,7 +325,19 @@ fn scrub_log_line_at(input: &str, depth: u32) -> String {
             }
         }
         let Some((start, end, mut value)) = parsed else {
-            out.push_str(&scrub_str(&input[i..]));
+            // Nothing after this point can be a JSON value, so the rest of the
+            // line is one prose span. An unchanged tail still has to reach an
+            // existing buffer: the closing `'` of `data='{…}'` is exactly this
+            // case, and dropping it would corrupt the line.
+            let replaced = owned_change(scrub_str(&input[i..]));
+            match replaced {
+                Some(tail) => push_span(&mut out, input, i, &tail),
+                None => {
+                    if let Some(buffer) = &mut out {
+                        buffer.push_str(&input[i..]);
+                    }
+                }
+            }
             break;
         };
         let prose = &input[i..start];
@@ -296,27 +347,40 @@ fn scrub_log_line_at(input: &str, depth: u32) -> String {
         } else {
             scrub_json_at(&mut value, depth)
         };
-        out.push_str(&scrub_str(prose));
-        push_value(&mut out, input, start, end, &value, changed);
+        let replaced = owned_change(scrub_str(prose));
+        match replaced {
+            Some(scrubbed) => push_span(&mut out, input, i, &scrubbed),
+            None => {
+                if let Some(buffer) = &mut out {
+                    buffer.push_str(prose);
+                }
+            }
+        }
+        if changed {
+            push_span(&mut out, input, start, &value.to_string());
+        } else if let Some(buffer) = &mut out {
+            buffer.push_str(&input[start..end]);
+        }
         i = end;
     }
-    out
+    out.map_or(Cow::Borrowed(input), Cow::Owned)
 }
 
-/// Append a parsed JSON value, reusing the original text when nothing in it
-/// needed masking.
-fn push_value(
-    out: &mut String,
-    input: &str,
-    start: usize,
-    end: usize,
-    value: &serde_json::Value,
-    changed: bool,
-) {
-    if changed {
-        out.push_str(&value.to_string());
-    } else {
-        out.push_str(&input[start..end]);
+/// Append `text` — the output for `input[..at]` followed by `text` — to the line
+/// buffer, creating that buffer on first need.
+///
+/// `at` is where this span begins in `input`, and it is only read while no
+/// buffer exists, which is exactly the state in which every earlier span was
+/// emitted verbatim: `input[..at]` is then the prefix the buffer is missing.
+fn push_span(out: &mut Option<String>, input: &str, at: usize, text: &str) {
+    match out {
+        Some(buffer) => buffer.push_str(text),
+        None => {
+            let mut buffer = String::with_capacity(input.len());
+            buffer.push_str(&input[..at]);
+            buffer.push_str(text);
+            *out = Some(buffer);
+        }
     }
 }
 
@@ -531,16 +595,20 @@ fn prose_ends_with_secret_key(prose: &str) -> bool {
 fn scrub_json_at(value: &mut serde_json::Value, depth: u32) -> bool {
     match value {
         serde_json::Value::String(s) => {
-            let cleaned = if depth >= MAX_EMBED_DEPTH {
+            // Borrowed means "unchanged", so the leaf is rewritten only when a
+            // pass really replaced something inside it. Matching on the variant
+            // is also what avoids allocating a candidate string for every
+            // clean leaf just to compare it (issue #2426).
+            match owned_change(if depth >= MAX_EMBED_DEPTH {
                 scrub_str(s)
             } else {
                 scrub_log_line_at(s, depth + 1)
-            };
-            if &cleaned != s {
-                *s = cleaned;
-                true
-            } else {
-                false
+            }) {
+                Some(cleaned) => {
+                    *s = cleaned;
+                    true
+                }
+                None => false,
             }
         }
         serde_json::Value::Array(items) => {
@@ -605,10 +673,41 @@ fn mask_all_leaves(value: &mut serde_json::Value) -> bool {
 }
 
 /// The masking pipeline, factored out so both public entry points share it.
-fn scrub_str(input: &str) -> String {
+///
+/// Returns `input` borrowed when no pass replaced anything, because a regex
+/// that finds no match hands back the text it was given and only a real
+/// replacement needs a buffer. `owned` is that single buffer: the first pass
+/// that replaces materialises it and every later pass writes into it, so a
+/// line carrying several secrets is copied once rather than once per pass
+/// (issue #2426).
+fn scrub_str(input: &str) -> Cow<'_, str> {
+    let mut owned: Option<String> = None;
+    // One masking pass. Two things make it cheap on a clean line: the `Cow` is
+    // collapsed to an `Option<String>` in its own statement, so the borrow it
+    // holds on the current buffer ends before `owned` is reassigned; and the
+    // match test comes first, because `replace_all` on a haystack with no match
+    // returns it unchanged — while the closure passes still build a capture-slot
+    // `Vec` on the way to discovering that. Asking first keeps that allocation
+    // for lines that actually carry a secret. Every pass still runs its regex
+    // on every line; this decides whether a *rewrite* is needed, never whether
+    // a rule is checked.
+    macro_rules! pass {
+        ($re:expr, $rep:expr) => {{
+            let current: &str = owned.as_deref().unwrap_or(input);
+            if $re.is_match(current) {
+                let replaced: Option<String> = match $re.replace_all(current, $rep) {
+                    Cow::Owned(next) => Some(next),
+                    Cow::Borrowed(_) => None,
+                };
+                if let Some(next) = replaced {
+                    owned = Some(next);
+                }
+            }
+        }};
+    }
     // 1. Whole PEM blocks first, before the token rules can nibble at their
     //    base64 body.
-    let step1 = PRIVATE_KEY_RE.replace_all(input, "[REDACTED PRIVATE KEY]");
+    pass!(PRIVATE_KEY_RE, "[REDACTED PRIVATE KEY]");
     // 2. Quoted multi-word secrets — runs BEFORE the single-word key=value
     //    rule so a passphrase like `"correct horse battery staple"` is masked
     //    whole. If the single-word rule ran first it would only mask the first
@@ -617,28 +716,27 @@ fn scrub_str(input: &str) -> String {
     //    (issue #1220). The callback picks which branch matched (`dq` vs
     //    `sq`) so the replacement uses the right quote character on both
     //    sides of the mask.
-    let step2 = QUOTED_VALUE_RE.replace_all(&step1, |caps: &Captures| {
+    pass!(QUOTED_VALUE_RE, |caps: &Captures| {
         let quote = if caps.name("dq").is_some() { '"' } else { '\'' };
         format!("{}{}{}{}{}", &caps["key"], &caps["sep"], quote, MASK, quote)
     });
     // 3. Unquoted (or single-quoted) key=value secrets — mask only the value,
     //    keep key + punctuation.
-    let step3 = KEY_VALUE_RE.replace_all(&step2, |caps: &Captures| {
+    pass!(KEY_VALUE_RE, |caps: &Captures| {
         format!("{}{}{}{}", &caps["key"], &caps["sep"], &caps["q"], MASK)
     });
     // 4. Auth-scheme credentials — mask the credential, keep the scheme word.
-    let step4 = AUTH_SCHEME_RE.replace_all(&step3, |caps: &Captures| {
+    pass!(AUTH_SCHEME_RE, |caps: &Captures| {
         format!("{} {}", &caps["scheme"], MASK)
     });
     // 5. Pairing invitations in URL fragments. Idempotent: `#pair=[REDACTED]`
     //    matches the same value pattern and is replaced with itself.
-    let step5 = PAIRING_FRAGMENT_RE.replace_all(&step4, "#pair=[REDACTED]");
+    pass!(PAIRING_FRAGMENT_RE, "#pair=[REDACTED]");
     // 6. Context-free token shapes anywhere they appear.
-    let mut out = step5.into_owned();
     for (re, repl) in TOKEN_RES.iter() {
-        out = re.replace_all(&out, *repl).into_owned();
+        pass!(re, *repl);
     }
-    out
+    owned.map_or(Cow::Borrowed(input), Cow::Owned)
 }
 
 #[cfg(test)]
@@ -1191,4 +1289,220 @@ mod tests {
             );
         }
     }
+
+    // --- #2426: unchanged text is borrowed, not copied --------------------
+
+    /// A line with nothing to mask must not be copied on the thread that emits
+    /// it. `Cow::Borrowed` *is* the evidence: no buffer sits behind it, so the
+    /// writer can hand the caller's own bytes straight to the file.
+    #[test]
+    fn an_unchanged_line_is_borrowed_and_a_masked_one_is_owned() {
+        for clean in [
+            "2026-10-16T16:30:00Z DEBUG buildmesh: refreshed git status for node 42",
+            r#"result={"node_id":42,"state":"running"}"#,
+            "repair=yes author=octocat session=42",
+            "",
+        ] {
+            assert!(
+                matches!(scrub_str(clean), Cow::Borrowed(_)),
+                "the text pipeline must borrow {clean:?}"
+            );
+            assert!(
+                matches!(scrub_log_line(clean), Cow::Borrowed(_)),
+                "the persistence pipeline must borrow {clean:?}"
+            );
+            assert!(
+                matches!(
+                    SecretScrubber::scrub_for_persistence_borrowed(clean),
+                    Cow::Borrowed(_)
+                ),
+                "the writer's entry point must borrow {clean:?}"
+            );
+        }
+        // The other half of the contract: a masked line owns its buffer, and the
+        // secret is gone from it.
+        let masked =
+            SecretScrubber::scrub_for_persistence_borrowed("export DB_PASSWORD=hunter2 && run");
+        assert!(matches!(masked, Cow::Owned(_)));
+        assert_eq!(masked, "export DB_PASSWORD=[REDACTED] && run");
+    }
+
+    /// The change is allocation-only, so every rule must still run on every
+    /// line. A cheap "does this look like a credential" pre-check is the
+    /// tempting way to skip work, and it would silently drop the embedded-JSON
+    /// and secret-key checks for a line carrying no familiar token prefix.
+    #[test]
+    fn the_secret_key_check_still_runs_without_a_token_prefix() {
+        for raw in [
+            r#"result={"api_keys":["plain-secret-no-shape"]} session=42"#,
+            r#"{"password": "correct horse battery staple"}"#,
+        ] {
+            let scrubbed = SecretScrubber::scrub_for_persistence_borrowed(raw);
+            assert!(matches!(scrubbed, Cow::Owned(_)), "{raw} needs masking");
+            assert!(!scrubbed.contains("plain-secret-no-shape"), "{scrubbed}");
+            assert!(!scrubbed.contains("horse"), "{scrubbed}");
+        }
+    }
+
+    /// A leaf nested past the embed budget falls back to the text rules. The
+    /// borrowing refactor must not have moved where that fallback sits, and
+    /// masking a deeply nested payload must not cost a bracket.
+    #[test]
+    fn an_embed_past_the_depth_budget_is_still_masked_as_text() {
+        let mut nested = String::from("password=hunter2");
+        for _ in 0..MAX_EMBED_DEPTH + 2 {
+            nested = format!("[{{\"a\":\"{nested}\"}}]");
+        }
+        let scrubbed = SecretScrubber::scrub_for_persistence(&nested);
+        assert!(!scrubbed.contains("hunter2"), "{scrubbed}");
+        assert!(scrubbed.contains("password=[REDACTED]"), "{scrubbed}");
+        // Neither square bracket is countable here — the mask is `[REDACTED]`.
+        // The object braces only appear where the payload put them.
+        assert_eq!(
+            scrubbed.matches('}').count(),
+            nested.matches('}').count(),
+            "the payload shape must survive masking: {scrubbed}"
+        );
+    }
+
+    /// Redaction is byte-equivalent across the refactor that stops cloning
+    /// unchanged text. Every expectation below was captured from the production
+    /// functions at the base commit, including the shapes where the text
+    /// pipeline and the JSON-aware persistence pipeline legitimately disagree —
+    /// those disagreements are the contract, not accidents to tidy up here.
+    #[test]
+    fn redaction_is_byte_equivalent_on_a_representative_corpus() {
+        for &(input, expected_persistence, expected_text) in REDACTION_CORPUS {
+            assert_eq!(
+                SecretScrubber::scrub_for_persistence(input),
+                expected_persistence,
+                "scrub_for_persistence moved a byte for {input:?}"
+            );
+            assert_eq!(
+                SecretScrubber::scrub(input),
+                expected_text,
+                "scrub moved a byte for {input:?}"
+            );
+        }
+    }
+
+    /// Frozen golden data, one row per representative input: the input, the
+    /// persistence pipeline's output, and the text pipeline's output. `skip`
+    /// because this is captured output rather than code that should be
+    /// reflowed when the table grows.
+    #[rustfmt::skip]
+    const REDACTION_CORPUS: &[(&str, &str, &str)] = &[
+    // empty
+    ("", "", ""),
+    // clean prose
+    ("2026-10-16T16:30:00Z DEBUG buildmesh: refreshed git status for node 42", "2026-10-16T16:30:00Z DEBUG buildmesh: refreshed git status for node 42", "2026-10-16T16:30:00Z DEBUG buildmesh: refreshed git status for node 42"),
+    // benign key-words
+    ("repair=yes author=octocat session=42", "repair=yes author=octocat session=42", "repair=yes author=octocat session=42"),
+    // benign key-words, prose
+    ("Running cargo test on branch feat/x — 42 passed, last_activity_at=2026.", "Running cargo test on branch feat/x — 42 passed, last_activity_at=2026.", "Running cargo test on branch feat/x — 42 passed, last_activity_at=2026."),
+    // author field
+    ("{\"author\": \"octocat\", \"number\": 7}", "{\"author\": \"octocat\", \"number\": 7}", "{\"author\": \"octocat\", \"number\": 7}"),
+    // shell password
+    ("export DB_PASSWORD=hunter2 && run", "export DB_PASSWORD=[REDACTED] && run", "export DB_PASSWORD=[REDACTED] && run"),
+    // json quoted secret
+    ("{\"api_token\": \"ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345\"}", "{\"api_token\":\"[REDACTED]\"}", "{\"api_token\": \"[REDACTED]\"}"),
+    // aws secret by key
+    ("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEX", "AWS_SECRET_ACCESS_KEY=[REDACTED]", "AWS_SECRET_ACCESS_KEY=[REDACTED]"),
+    // github token mid-sentence
+    ("I ran it with ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345 set.", "I ran it with [REDACTED] set.", "I ran it with [REDACTED] set."),
+    // github fine-grained pat
+    ("pat github_pat_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ok", "pat [REDACTED] ok", "pat [REDACTED] ok"),
+    // aws access key id
+    ("key id AKIAIOSFODNN7EXAMPLE here", "key id [REDACTED] here", "key id [REDACTED] here"),
+    // google api key
+    ("key AIzaSyDUMMYKEYEXAMPLEabcdefghijklmnopqr here", "key [REDACTED] here", "key [REDACTED] here"),
+    // slack token
+    ("post xoxb-1234567890-abcdefghijkl here", "post [REDACTED] here", "post [REDACTED] here"),
+    // bearer header
+    ("Authorization: Bearer abc123def456ghi789", "Authorization: Bearer [REDACTED]", "Authorization: Bearer [REDACTED]"),
+    // legacy token scheme
+    ("curl -H 'Authorization: token 1234567890abcdef1234567890abcdef12345678'", "curl -H 'Authorization: token [REDACTED]'", "curl -H 'Authorization: token [REDACTED]'"),
+    // oauth scheme
+    ("Authorization: OAuth deadbeefdeadbeef", "Authorization: OAuth [REDACTED]", "Authorization: OAuth [REDACTED]"),
+    // already-masked line
+    ("Authorization: Bearer [REDACTED] s=42", "Authorization: Bearer [REDACTED] s=42", "Authorization: Bearer [REDACTED] s=42"),
+    // pem rsa block
+    ("before\n-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\nabc/def+ghi=\n-----END RSA PRIVATE KEY-----\nafter", "before\n[REDACTED PRIVATE KEY]\nafter", "before\n[REDACTED PRIVATE KEY]\nafter"),
+    // pem multiline block
+    ("2026-10-16T16:30:00Z INFO buildmesh: pasted a key\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtz\n-----END OPENSSH PRIVATE KEY-----\n2026-10-16T16:30:01Z INFO buildmesh: done", "2026-10-16T16:30:00Z INFO buildmesh: pasted a key\n[REDACTED PRIVATE KEY]\n2026-10-16T16:30:01Z INFO buildmesh: done", "2026-10-16T16:30:00Z INFO buildmesh: pasted a key\n[REDACTED PRIVATE KEY]\n2026-10-16T16:30:01Z INFO buildmesh: done"),
+    // passphrase shell
+    ("APP_SECRET=\"correct horse battery staple\"", "APP_SECRET=\"[REDACTED]\"", "APP_SECRET=\"[REDACTED]\""),
+    // passphrase json
+    ("{\"password\": \"correct horse battery staple\"}", "{\"password\":\"[REDACTED]\"}", "{\"password\": \"[REDACTED]\"}"),
+    // passphrase single-quoted
+    ("API_KEY='multi word secret value'", "API_KEY='[REDACTED]'", "API_KEY='[REDACTED]'"),
+    // passphrase spaced separator
+    ("DB_PASSWORD  =  \"phrase with spaces\"", "DB_PASSWORD  =  \"[REDACTED]\"", "DB_PASSWORD  =  \"[REDACTED]\""),
+    // pairing fragment and ticket
+    ("open https://127.0.0.1/#pair=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa then ticket=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "open https://127.0.0.1/#pair=[REDACTED] then ticket=[REDACTED]", "open https://127.0.0.1/#pair=[REDACTED] then ticket=[REDACTED]"),
+    // credential array
+    ("failed {\"api_keys\":[\"plain-secret-no-shape\"],\"author\":\"octocat\"}", "failed {\"api_keys\":[\"[REDACTED]\"],\"author\":\"octocat\"}", "failed {\"api_keys\":[REDACTED]\"plain-secret-no-shape\"],\"author\":\"octocat\"}"),
+    // encoded json in string
+    ("{\"message\":\"{\\\"api_keys\\\":[\\\"plain-secret-no-shape\\\"]}\",\"author\":\"octocat\"}", "{\"author\":\"octocat\",\"message\":\"{\\\"api_keys\\\":[\\\"[REDACTED]\\\"]}\"}", "{\"message\":\"{\\\"api_keys\\\":[\\\"plain-secret-no-shape\\\"]}\",\"author\":\"octocat\"}"),
+    // json owned by secret key (array)
+    ("token=[\"0123456789abcdef0123456789abcdef\"]", "token=[\"[REDACTED]\"]", "token=[REDACTED]\"0123456789abcdef0123456789abcdef\"]"),
+    // json owned by secret key (object)
+    ("token={\"raw\":\"fedcba9876543210fedcba9876543210\"}", "token={\"raw\":\"[REDACTED]\"}", "token=[REDACTED]\"raw\":\"fedcba9876543210fedcba9876543210\"}"),
+    // quoted secret containing braces
+    ("password=\"correct {} horse\" session=42", "password=\"[REDACTED]\" session=42", "password=\"[REDACTED]\" session=42"),
+    // single-quoted json payload
+    ("data='{\"api_keys\":[\"plain-secret-no-shape\"]}'", "data='{\"api_keys\":[\"[REDACTED]\"]}'", "data='{\"api_keys\":[REDACTED]\"plain-secret-no-shape\"]}'"),
+    // apostrophe before json
+    ("it's {\"api_keys\":[\"plain-secret-no-shape\"]}", "it's {\"api_keys\":[\"[REDACTED]\"]}", "it's {\"api_keys\":[REDACTED]\"plain-secret-no-shape\"]}"),
+    // single-quoted json under secret key
+    ("token='[\"0123456789abcdef0123456789abcdef\"]'", "token='[REDACTED]'", "token='[REDACTED]'"),
+    // named single-quoted json
+    ("password='{\"user\":\"alice\"}'", "password='[REDACTED]'", "password='[REDACTED]'"),
+    // unbalanced brace in prose
+    ("token=abc{def session=42", "token=[REDACTED] session=42", "token=[REDACTED] session=42"),
+    // brace heavy prose
+    ("{not json xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "{not json xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "{not json xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
+    // numeric pin
+    ("{\"password\": 123456}", "{\"password\":\"[REDACTED]\"}", "{\"password\": [REDACTED]"),
+    // numeric token
+    ("{\"token\": 987654321}", "{\"token\":\"[REDACTED]\"}", "{\"token\": [REDACTED]"),
+    // numeric array token
+    ("token=[987654321]", "token=[\"[REDACTED]\"]", "token=[REDACTED]"),
+    // mixed array under secret key
+    ("{\"api_keys\":[1, true]}", "{\"api_keys\":[\"[REDACTED]\",\"[REDACTED]\"]}", "{\"api_keys\":[REDACTED], true]}"),
+    // benign scalars
+    ("{\"count\": 42, \"author\": \"octocat\"}", "{\"count\": 42, \"author\": \"octocat\"}", "{\"count\": 42, \"author\": \"octocat\"}"),
+    // over-masked key
+    ("{\"tokens_used\": 42}", "{\"tokens_used\":\"[REDACTED]\"}", "{\"tokens_used\": [REDACTED]"),
+    // quoted key before array
+    ("\"token\": [\"0123456789abcdef\"]", "\"token\": [\"[REDACTED]\"]", "\"token\": [REDACTED]\"0123456789abcdef\"]"),
+    // passphrase then quoted key
+    ("PASSWORD=\"correct horse battery staple\"\"token\": [\"0123456789abcdef\"]", "PASSWORD=\"[REDACTED]\"\"token\": [\"[REDACTED]\"]", "PASSWORD=\"[REDACTED]\"\"token\": [REDACTED]\"0123456789abcdef\"]"),
+    // sk key with trailing word
+    ("export sk-ant-api03-DUMMYKEYEXAMPLEabcdefghijklmnop1234567890AB other", "export [REDACTED] other", "export [REDACTED] other"),
+    // sk project key
+    ("sk-proj-abcdefghijklmnopqrstuv1234567890ABCD", "[REDACTED]", "[REDACTED]"),
+    // sk admin key
+    ("sk-admin-abcdefghijklmnopqrstuv1234567890ABCD", "[REDACTED]", "[REDACTED]"),
+    // clean json payload
+    ("{\"node_id\":42,\"state\":\"running\"}", "{\"node_id\":42,\"state\":\"running\"}", "{\"node_id\":42,\"state\":\"running\"}"),
+    // secret key and prose together
+    ("result={\"api_keys\":[\"plain-secret-no-shape\"]} session=42", "result={\"api_keys\":[\"[REDACTED]\"]} session=42", "result={\"api_keys\":[REDACTED]\"plain-secret-no-shape\"]} session=42"),
+    // escaped backslash leaf
+    ("{\"message\":\"a\\\\b\",\"author\":\"octocat\"}", "{\"message\":\"a\\\\b\",\"author\":\"octocat\"}", "{\"message\":\"a\\\\b\",\"author\":\"octocat\"}"),
+    // tabs and crlf
+    ("DB_PASSWORD=\tvalue\r\nnext=1", "DB_PASSWORD=\t[REDACTED]\r\nnext=1", "DB_PASSWORD=\t[REDACTED]\r\nnext=1"),
+    // deep-ish nesting
+    ("{\"a\":\"{\\\"b\\\":[{\\\"c\\\":\\\"password=x\\\"}]}\"}", "{\"a\":\"{\\\"b\\\":[{\\\"c\\\":\\\"password=[REDACTED]\\\"}]}\"}", "{\"a\":\"{\\\"b\\\":[{\\\"c\\\":\\\"password=[REDACTED]\"}]}\"}"),
+    // nested array of objects
+    ("{\"items\":[{\"api_key\":\"one\"},{\"api_key\":\"two\"}],\"ok\":true}", "{\"items\":[{\"api_key\":\"[REDACTED]\"},{\"api_key\":\"[REDACTED]\"}],\"ok\":true}", "{\"items\":[{\"api_key\":\"[REDACTED]\"},{\"api_key\":\"[REDACTED]\"}],\"ok\":true}"),
+    // unterminated quote
+    ("DB_PASSWORD=\"never closed", "DB_PASSWORD=\"[REDACTED] closed", "DB_PASSWORD=\"[REDACTED] closed"),
+    // secret between two clean json values
+    ("{\"a\":1} PASSWORD=hunter2 {\"b\":2}", "{\"a\":1} PASSWORD=[REDACTED] {\"b\":2}", "{\"a\":1} PASSWORD=[REDACTED] {\"b\":2}"),
+    // empty json object
+    ("{}", "{}", "{}"),
+    // empty json array
+    ("[]", "[]", "[]"),
+    ];
 }

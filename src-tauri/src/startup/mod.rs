@@ -504,9 +504,9 @@ impl SharedLog {
 
     /// Append one timestamped line, forced to disk.
     fn append_and_sync(&self, line: &str) -> io::Result<()> {
-        let scrubbed = crate::secret_scrubber::SecretScrubber::scrub_for_persistence(line);
+        let scrubbed = crate::secret_scrubber::SecretScrubber::scrub_for_persistence_borrowed(line);
         self.with(|writer| {
-            writer.write_line(&scrubbed)?;
+            writer.write_line(scrubbed.as_ref())?;
             writer.sync()
         })
     }
@@ -544,16 +544,18 @@ impl SharedLog {
 /// Invalid UTF-8 is written unchanged: there is no text to mask, and dropping
 /// the line would hide the failure this log exists to record.
 ///
-/// Returns borrowed bytes when nothing needed masking, so an ordinary
-/// diagnostic line costs no allocation.
+/// The borrow is the point. A line with nothing to mask is returned as the
+/// caller's own bytes, so an ordinary diagnostic line costs no allocation on
+/// the logging thread (issue #2426) — the borrowed variant of the scrubber
+/// says "unchanged" without materialising a masked copy and comparing it, so
+/// the old "allocate, then throw the copy away" step is gone rather than
+/// merely invisible.
 fn scrub_log_bytes(buf: &[u8]) -> Cow<'_, [u8]> {
     match std::str::from_utf8(buf) {
         Ok(text) => {
-            let scrubbed = crate::secret_scrubber::SecretScrubber::scrub_for_persistence(text);
-            if scrubbed == text {
-                Cow::Borrowed(buf)
-            } else {
-                Cow::Owned(scrubbed.into_bytes())
+            match crate::secret_scrubber::SecretScrubber::scrub_for_persistence_borrowed(text) {
+                Cow::Borrowed(_) => Cow::Borrowed(buf),
+                Cow::Owned(scrubbed) => Cow::Owned(scrubbed.into_bytes()),
             }
         }
         Err(_) => Cow::Borrowed(buf),
@@ -991,6 +993,63 @@ mod tests {
         // failure this log exists to record.
         let binary = [0xffu8, 0xfe, b'\n'];
         assert_eq!(scrub_log_bytes(&binary).as_ref(), &binary[..]);
+    }
+
+    /// The borrowed arm has to cover the JSON line too, not just prose: that
+    /// shape is parsed, walked and re-serialized internally, so it is the case
+    /// where a writer is most likely to quietly start copying again.
+    #[test]
+    fn a_clean_json_subscriber_line_is_written_without_a_copy() {
+        let clean = b"2026-10-16T16:30:00Z DEBUG buildmesh: result={\"node_id\":42,\"state\":\"running\"}\n";
+        assert!(matches!(
+            scrub_log_bytes(clean),
+            Cow::Borrowed(bytes) if bytes == clean
+        ));
+        // A line whose JSON carries a credential is the opposite case: it owns
+        // a buffer, and the credential is gone from it.
+        let masked =
+            scrub_log_bytes(b"result={\"api_keys\":[\"plain-secret-no-shape\"]} session=42\n");
+        let text = std::str::from_utf8(&masked).unwrap();
+        assert!(!text.contains("plain-secret-no-shape"), "{text}");
+        assert!(
+            text.contains(r#"result={"api_keys":["[REDACTED]"]}"#),
+            "{text}"
+        );
+    }
+
+    /// The redaction that matters runs through the production writer, not only
+    /// through the pure function: `buildmesh.log` is the file a user is asked
+    /// to hand over, so the assertion is on the bytes that reached it.
+    #[test]
+    fn the_persistence_writer_masks_secrets_and_keeps_clean_lines_verbatim() {
+        let dir = std::env::temp_dir().join(format!("bm-startup-scrub-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = SharedLog::new(crate::diagnostics::main_log_writer(&dir).unwrap());
+
+        let secret = "sk-ant-api03-DUMMYKEYEXAMPLEabcdefghijklmnop1234567890AB";
+        log.append_and_sync(&format!("STARTUP_FAILURE stage=test detail={secret}"))
+            .unwrap();
+        log.append_and_sync("STARTUP_FAILURE stage=ok detail=clean")
+            .unwrap();
+        log.append_and_sync(r#"result={"api_keys":["plain-secret-no-shape"]}"#)
+            .unwrap();
+        log.append_and_sync(r#"result={"node_id":42,"state":"running"}"#)
+            .unwrap();
+
+        let contents = std::fs::read_to_string(dir.join("buildmesh.log")).unwrap();
+        assert!(!contents.contains(secret), "{contents}");
+        assert!(!contents.contains("plain-secret-no-shape"), "{contents}");
+        assert!(contents.contains("[REDACTED]"), "{contents}");
+        // An ordinary diagnostic line is not rewritten on its way to disk.
+        assert!(
+            contents.contains("STARTUP_FAILURE stage=ok detail=clean"),
+            "{contents}"
+        );
+        assert!(
+            contents.contains(r#"result={"node_id":42,"state":"running"}"#),
+            "{contents}"
+        );
     }
 
     /// `Tee` is the writer the tracing layer actually hands events to, and the
