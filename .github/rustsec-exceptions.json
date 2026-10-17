@@ -16,7 +16,15 @@
     "2026-10-16 (the crate's other 4.x releases remain yanked); a reverted yank stops being reported, and a",
     "stale exception fails rather than lingering with a rationale that no longer describes the dependency",
     "tree. `zip` left the tree entirely in issue #2438, which dropped the `zip` feature from",
-    "`tauri-plugin-updater` and with it the RUSTSEC-2026-0367/0368/0369 extraction advisories."
+    "`tauri-plugin-updater` and with it the RUSTSEC-2026-0367/0368/0369 extraction advisories.",
+    "",
+    "`zvariant`, `zvariant_derive` and `zbus_names` (RUSTSEC-2026-0370/0371/0372) are unmaintained",
+    "upstream because they were merged into zbus 6.0.0, and each advisory lists `patched = []`, so no",
+    "release of these crates clears it. All three reach the tree through one non-optional dependency —",
+    "`tauri-plugin-opener`'s `zbus ^5.9` for Linux/BSD — which no feature switch can disable and no",
+    "published plugin release has moved to zbus 6. This is the \"no fixed release exists\" case in",
+    "docs/development/supply-chain.md rather than a missed upgrade; the dated evidence is in",
+    "docs/archive/2026-10/rustsec-zbus-unmaintained-2026-10.md."
   ],
   "advisories": [
     {
@@ -53,6 +61,33 @@
       "kind": "unmaintained",
       "owner": "maintainers (transitive, build-time)",
       "rationale": "proc-macro-error is unmaintained and is a build-time-only macro helper in the transitive graph. It cannot affect a shipped artifact's run-time behaviour.",
+      "reviewBy": "2027-01-15"
+    },
+    {
+      "id": "RUSTSEC-2026-0370",
+      "crate": "zvariant",
+      "version": "5.15.0",
+      "kind": "unmaintained",
+      "owner": "maintainers (transitive, via tauri-plugin-opener)",
+      "rationale": "zvariant is unmaintained upstream: it was merged into zbus 6.0.0 as its `wire` module and the advisory lists no patched version, so no zvariant release clears it. `cargo tree -i zvariant --target all` gives the whole path — zvariant -> zbus -> tauri-plugin-opener -> buildmesh — and Buildmesh never names zvariant or zbus in its own code. zbus is a non-optional `cfg(any(target_os = \"linux\", ...dragonfly, freebsd, netbsd, openbsd))` dependency of the plugin, so no feature switch removes it, and as checked on 2026-10-17 neither tauri-plugin-opener 2.7.2 (highest stable) nor 3.0.0-alpha.3 requires zbus 6. The released artifacts are Windows installers and a signed Android APK. The Linux target is compiled and tested by verify.yml's Rust jobs on ubuntu-latest, which are gated on needs: changes rather than running on every pull request, so a Linux compile is part of normal CI; the subtree is not linked into anything Buildmesh distributes. Clears when a tauri-plugin-opener release requires zbus 6 or later.",
+      "reviewBy": "2027-01-15"
+    },
+    {
+      "id": "RUSTSEC-2026-0371",
+      "crate": "zbus_names",
+      "version": "4.3.4",
+      "kind": "unmaintained",
+      "owner": "maintainers (transitive, via tauri-plugin-opener)",
+      "rationale": "zbus_names is unmaintained upstream: it was merged into zbus 6.0.0 as its `names` module and the advisory lists no patched version, so no zbus_names release clears it. It arrives by the same single path as RUSTSEC-2026-0370 — zbus_names -> zbus -> tauri-plugin-opener -> buildmesh — through the plugin's non-optional Linux/BSD `zbus ^5.9` dependency, and Buildmesh has no direct use of it. No published tauri-plugin-opener release requires zbus 6 as checked on 2026-10-17 (2.7.2 and 3.0.0-alpha.3 both pin `zbus ^5.9`), so there is no upgrade that removes it. Nothing in a released artifact links it: Buildmesh ships Windows installers and a signed Android APK. Clears with the plugin's move to zbus 6.",
+      "reviewBy": "2027-01-15"
+    },
+    {
+      "id": "RUSTSEC-2026-0372",
+      "crate": "zvariant_derive",
+      "version": "5.15.0",
+      "kind": "unmaintained",
+      "owner": "maintainers (transitive, via tauri-plugin-opener)",
+      "rationale": "zvariant_derive is unmaintained upstream: its derive macros moved into zbus 6.0.0 and the advisory lists no patched version, so no zvariant_derive release clears it. It reaches the tree only as zbus's own proc-macro dependency on the same path as RUSTSEC-2026-0370 — zvariant_derive -> zvariant -> zbus -> tauri-plugin-opener -> buildmesh — and Buildmesh uses no zbus derive macro directly. Because the plugin's `zbus ^5.9` Linux/BSD dependency is non-optional and, as checked on 2026-10-17, no published tauri-plugin-opener release has moved to zbus 6, there is no version bump that removes it. It is also a proc-macro, so it is build-time only and cannot affect a shipped artifact's run-time behaviour. Clears with the plugin's move to zbus 6.",
       "reviewBy": "2027-01-15"
     }
   ],

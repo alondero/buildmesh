@@ -32,6 +32,14 @@ dev-tools = []
 # workspace alongside `buildmesh_lib`.
 buildmesh_macros = { path = "proc-macros" }
 tauri = { version = "2", features = ["devtools"] }
+# Brings a Linux/BSD-only `zbus ^5.9` into the tree, non-optionally, for the
+# plugin's D-Bus path — so the unmaintained `zvariant`, `zbus_names` and
+# `zvariant_derive` (RUSTSEC-2026-0370/0371/0372, all merged into zbus 6.0.0 with
+# `patched = []`) cannot be removed by turning a feature off, and no published
+# plugin release requires zbus 6 yet. Kept: the plugin drives "open in editor"
+# and every external link. Reviewed exceptions, not an oversight — issue #2444,
+# rule in docs/development/supply-chain.md#when-no-fixed-release-exists, dated
+# evidence in docs/archive/2026-10/rustsec-zbus-unmaintained-2026-10.md.
 tauri-plugin-opener = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
