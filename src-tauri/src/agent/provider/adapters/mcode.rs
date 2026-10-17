@@ -51,7 +51,11 @@
 //! 2. `command` + `args` are executed **without shell interpretation**, so the
 //!    invocation names a shell (`cmd.exe` / `sh`) and hands it one command line.
 //! 3. mcode `env_clear()`s `BUILDMESH_*` before running a hook — exactly like
-//!    Codex, so the shared callback URL bakes the loopback port.
+//!    Codex, so the shared callback URL bakes the loopback port. Because the
+//!    manifest is one user-global file, it bakes each running instance's port
+//!    rather than the spawning one's, and the fan-out is what keeps the hub and
+//!    a dev instance from stealing each other's MiniMax nodes' callbacks
+//!    (issue #2343).
 //!
 //! The merge is idempotent and additive: sibling events and user-authored
 //! handlers round-trip untouched, a malformed user file fails closed rather
@@ -84,7 +88,7 @@ use crate::agent::provider::{
 #[cfg(test)]
 use crate::agent::provider::WindowsShell;
 use crate::agent::session_lifecycle::LifecycleKind;
-use crate::env::windows_attention_command;
+use crate::env::windows_attention_command_for_urls;
 use crate::models::EnvType;
 use std::path::{Path, PathBuf};
 
@@ -171,37 +175,45 @@ const BUILDMESH_HOOK_MARKER: &str = "/api/attention/";
 /// piping or output suppression — the invocation therefore names a shell
 /// explicitly and hands it a single command line.
 ///
-/// The URL is **baked**, never expanded from the environment: mcode
+/// The URLs are **baked**, never expanded from the environment: mcode
 /// `env_clear()`s the `BUILDMESH_*` variables before running a hook (the live
 /// 0.4.12 validation observed `%BUILDMESH_PORT%` arriving verbatim), which is
-/// the same constraint Codex has. The event payload is forwarded from the
-/// hook's stdin with `--data-binary @-`; a curl failure must never surface as
-/// a non-zero hook exit, so both branches swallow it.
+/// the same constraint Codex has. And there is more than one URL: the manifest
+/// is a single user-global file, so baking only the spawning instance's port
+/// let the most recent MiniMax spawn steal every other instance's callbacks —
+/// those nodes then stayed `Running` forever because the callback landed on an
+/// instance that does not own the node (issue #2343). Naming every live
+/// instance needs no per-instance plugin dir: curl reads the stdin body once
+/// and POSTs it to each URL, and the node-independent route lets the owning
+/// instance accept the callback while the others discard it as unknown. A curl
+/// failure must never surface as a non-zero hook exit, so both branches swallow
+/// it.
 ///
 /// The `WindowsInterop` case is the mirror image: Buildmesh runs *inside* the
 /// WSL/Linux host and mcode is the **Windows** executable reached through
 /// interop (`EnvType::WindowsInterop` = "Windows executable reached through
 /// interoperability from a Linux WSL host"). The callback is therefore
-/// relayed back into the guest by `windows_attention_command`, whose
+/// relayed back into the guest by `windows_attention_command_for_urls`, whose
 /// `powershell.exe … -EncodedCommand <b64>` line runs
 /// `wsl.exe -d <distro> --exec curl …`; that curl lands on the Linux-side
 /// listener's own loopback, so this direction needs no mirrored networking.
 /// Its single-line command is split into the `command` + `args` shape.
-fn attention_invocation(env_type: EnvType, url: &str) -> (String, Vec<String>) {
+fn attention_invocation(env_type: EnvType, urls: &[String]) -> (String, Vec<String>) {
     if env_type == EnvType::WindowsInterop {
-        if let Some(command) = windows_attention_command(Some(url)) {
+        if let Some(command) = windows_attention_command_for_urls(urls) {
             let mut parts = command.split(' ');
             let executable = parts.next().unwrap_or("powershell.exe").to_string();
             return (executable, parts.map(str::to_string).collect());
         }
     }
+    let targets = urls.join(" ");
     if cfg!(target_os = "windows") && env_type == EnvType::Windows {
         (
             "cmd.exe".to_string(),
             vec![
                 "/c".to_string(),
                 format!(
-                    "curl.exe -sf --connect-timeout 1 --max-time 2 -X POST --data-binary @- {url} >nul 2>nul"
+                    "curl.exe -sf --connect-timeout 1 --max-time 2 -X POST --data-binary @- {targets} >nul 2>nul"
                 ),
             ],
         )
@@ -211,7 +223,7 @@ fn attention_invocation(env_type: EnvType, url: &str) -> (String, Vec<String>) {
             vec![
                 "-c".to_string(),
                 format!(
-                    "curl -sf --connect-timeout 1 --max-time 2 -X POST --data-binary @- {url} >/dev/null 2>&1 || true"
+                    "curl -sf --connect-timeout 1 --max-time 2 -X POST --data-binary @- {targets} >/dev/null 2>&1 || true"
                 ),
             ],
         )
@@ -222,9 +234,8 @@ fn attention_invocation(env_type: EnvType, url: &str) -> (String, Vec<String>) {
 /// mcode 0.4.0+ shape nests the executable entry under a `hooks` array beside
 /// a `matcher` (a `"*"` matcher matches every occurrence).
 fn attention_handler(_node_id: i64, env_type: EnvType) -> serde_json::Value {
-    let port = crate::http_server::current_http_port();
-    let url = format!("http://localhost:{port}/api/attention/mcode");
-    let (command, args) = attention_invocation(env_type, &url);
+    let urls = attention_targets();
+    let (command, args) = attention_invocation(env_type, &urls);
     serde_json::json!({
         "matcher": "*",
         "hooks": [{
@@ -234,6 +245,16 @@ fn attention_handler(_node_id: i64, env_type: EnvType) -> serde_json::Value {
             "timeout": MCODE_HOOK_TIMEOUT_SECONDS,
         }],
     })
+}
+
+/// The node-independent attention route on every Buildmesh instance listening
+/// on this machine, this one included. See [`attention_invocation`] for why a
+/// baked handler cannot name only the instance that spawned the node.
+fn attention_targets() -> Vec<String> {
+    crate::http::instances::live_ports(crate::http::current_http_port())
+        .into_iter()
+        .map(|port| format!("http://localhost:{port}/api/attention/mcode"))
+        .collect()
 }
 
 /// Resolve mcode's data root — the directory holding both the Buildmesh
@@ -1193,6 +1214,9 @@ mod tests {
     //      `/api/attention/mcode` through a real localhost listener,
     //      with NO reliance on inherited environment (mcode env_clears
     //      `BUILDMESH_*`, so the URL is baked).
+    //   8. One baked invocation reaches EVERY live instance from a single
+    //      stdin read, including across an instance that has since exited
+    //      (issue #2343).
     // -----------------------------------------------------------------
 
     fn plugin_manifest_path(home: &Path) -> std::path::PathBuf {
@@ -1522,12 +1546,12 @@ mod tests {
     /// redirection and `|| true` — never Windows `>nul` or `curl.exe`.
     #[test]
     fn provision_writes_posix_invocation_on_unix() {
-        let url = "http://localhost:2992/api/attention/7";
-        let (command, args) = attention_invocation(EnvType::Wsl, url);
+        let url = "http://localhost:2992/api/attention/7".to_string();
+        let (command, args) = attention_invocation(EnvType::Wsl, std::slice::from_ref(&url));
         assert_eq!(command, "sh");
         assert_eq!(args[0], "-c");
         assert!(
-            args[1].contains(url),
+            args[1].contains(&url),
             "POSIX invocation must carry the baked url: {}",
             args[1]
         );
@@ -2133,13 +2157,13 @@ defaultModelThinking:
     /// emit the cmd-shape line.
     #[test]
     fn attention_invocation_matches_host_platform() {
-        let url = "http://localhost:1992/api/attention/42";
-        let (command, args) = attention_invocation(EnvType::Windows, url);
+        let url = "http://localhost:1992/api/attention/42".to_string();
+        let (command, args) = attention_invocation(EnvType::Windows, std::slice::from_ref(&url));
         if cfg!(target_os = "windows") {
             assert_eq!(command, "cmd.exe");
             assert_eq!(args[0], "/c");
             assert!(
-                args[1].contains(url),
+                args[1].contains(&url),
                 "Windows invocation must carry the url: {}",
                 args[1]
             );
@@ -2163,14 +2187,40 @@ defaultModelThinking:
         }
     }
 
-    /// Provisioning contract: the hook invocation targets the currently
-    /// configured `/api/attention/mcode` URL with stdin JSON as the body and
-    /// does not rely on inherited `BUILDMESH_*` environment. This local test
-    /// verifies the generated command against a listener; it does not validate
-    /// native delivery from the installed mcode TUI.
+    /// The one user-global manifest names **every** live instance, not just the
+    /// one that provisioned it. Both URLs follow a single `--data-binary @-`,
+    /// so the stdin body is read once and POSTed to each — the shape issue
+    /// #2343 needs, since the owner is decided by the payload, not by the port.
     #[test]
-    fn attention_invocation_delivers_stdin_to_attention_route_without_env() {
-        use std::io::{Read, Seek, Write};
+    fn every_instance_url_follows_the_single_stdin_read() {
+        let urls = vec![
+            "http://localhost:1992/api/attention/mcode".to_string(),
+            "http://localhost:2992/api/attention/mcode".to_string(),
+            "http://localhost:4992/api/attention/mcode".to_string(),
+        ];
+        let (_, args) = attention_invocation(EnvType::Wsl, &urls);
+        let line = &args[1];
+        assert_eq!(
+            line.matches("--data-binary @-").count(),
+            1,
+            "one stdin read must serve every URL: {line}"
+        );
+        for url in &urls {
+            assert!(line.contains(url.as_str()), "missing {url} in {line}");
+        }
+        // Order is preserved, so the invocation stays byte-stable across
+        // re-provisions (the idempotency invariant a sibling instance relies on).
+        let positions: Vec<usize> = urls
+            .iter()
+            .map(|url| line.find(url.as_str()).expect("url present"))
+            .collect();
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{line}");
+    }
+
+    /// Accept one HTTP request and hand back its request head and body, standing in
+    /// for the attention route of one running Buildmesh instance.
+    fn serve_one_hook() -> (u16, std::thread::JoinHandle<(String, Vec<u8>)>) {
+        use std::io::{Read, Write};
         use std::time::{Duration, Instant};
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2218,18 +2268,23 @@ defaultModelThinking:
                 .unwrap();
             (headers, body)
         });
+        (port, server)
+    }
 
-        // Bake the listener's ephemeral port into the URL the way the
-        // provisioner bakes the live Buildmesh port.
-        let url = format!("http://localhost:{port}/api/attention/741");
+    /// Run the provisioned invocation exactly as mcode's hook runner does:
+    /// `command` + `args` with no shell interpretation and no `BUILDMESH_*` in
+    /// the environment, and `payload` on stdin.
+    fn run_attention_invocation(urls: &[String], payload: &[u8]) -> std::process::Output {
+        use std::io::{Seek, Write};
+        use std::time::Duration;
+
         let env_type = if cfg!(target_os = "windows") {
             EnvType::Windows
         } else {
             EnvType::Wsl
         };
-        let (command, args) = attention_invocation(env_type, &url);
+        let (command, args) = attention_invocation(env_type, urls);
 
-        let payload = br#"{"hook_event_name":"Stop","session_id":"8a979720-1cb0-408c-b29c-9f0f68f2982b","transcript_path":"/tmp/x.jsonl","permission_mode":"auto","message":"literal $HOME & %PATH%"}"#;
         let mut input = tempfile::tempfile().unwrap();
         input.write_all(payload).unwrap();
         input.rewind().unwrap();
@@ -2245,19 +2300,35 @@ defaultModelThinking:
             .env("NO_PROXY", "localhost,127.0.0.1")
             .env("no_proxy", "localhost,127.0.0.1")
             .stdin(std::process::Stdio::from(input));
-        let output = crate::process_util::run_command_with_timeout(
+        crate::process_util::run_command_with_timeout(
             invocation,
             "mcode attention invocation",
             Duration::from_secs(10),
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    /// Provisioning contract: the hook invocation targets the currently
+    /// configured `/api/attention/mcode` URL with stdin JSON as the body and
+    /// does not rely on inherited `BUILDMESH_*` environment. This local test
+    /// verifies the generated command against a listener; it does not validate
+    /// native delivery from the installed mcode TUI.
+    #[test]
+    fn attention_invocation_delivers_stdin_to_attention_route_without_env() {
+        let (port, server) = serve_one_hook();
+
+        // Bake the listener's ephemeral port into the URL the way the
+        // provisioner bakes the live Buildmesh port.
+        let url = vec![format!("http://localhost:{port}/api/attention/741")];
+        let payload = br#"{"hook_event_name":"Stop","session_id":"8a979720-1cb0-408c-b29c-9f0f68f2982b","transcript_path":"/tmp/x.jsonl","permission_mode":"auto","message":"literal $HOME & %PATH%"}"#;
+        let output = run_attention_invocation(&url, payload);
+
+        let (headers, body) = server.join().unwrap();
         assert!(
             output.status.success(),
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-
-        let (headers, body) = server.join().unwrap();
         assert!(output.stdout.is_empty(), "hook stdout: {:?}", output.stdout);
         assert!(
             headers.starts_with("POST /api/attention/741 HTTP/1.1\r\n"),
@@ -2267,5 +2338,44 @@ defaultModelThinking:
         // payload integrity so a regression that re-encodes or filters the body
         // trips here.
         assert_eq!(body, payload);
+    }
+
+    /// Issue #2343 acceptance, at the only layer a unit test can reach: one
+    /// manifest, one stdin body, several instances. A MiniMax node in any
+    /// instance posts the same payload to every named port, so the instance
+    /// that owns the node accepts it whichever instance spawned last. A port
+    /// that no longer answers (an instance that exited after the manifest was
+    /// written) sits between the two live ones and must not starve them.
+    #[test]
+    fn attention_invocation_reaches_every_live_instance() {
+        let (hub_port, hub) = serve_one_hook();
+        let (dev_port, dev) = serve_one_hook();
+        let exited = {
+            let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = taken.local_addr().unwrap().port();
+            drop(taken);
+            port
+        };
+        let urls = vec![
+            format!("http://localhost:{hub_port}/api/attention/mcode"),
+            format!("http://localhost:{exited}/api/attention/mcode"),
+            format!("http://localhost:{dev_port}/api/attention/mcode"),
+        ];
+        let payload = br#"{"hook_event_name":"Stop","session_id":"8a979720-1cb0-408c-b29c-9f0f68f2982b","transcript_path":"/tmp/x.jsonl","permission_mode":"auto"}"#;
+        let output = run_attention_invocation(&urls, payload);
+
+        let (hub_request, dev_request) = (hub.join().unwrap(), dev.join().unwrap());
+        assert!(
+            output.status.success(),
+            "a dead peer must not fail the hook: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for (instance, (headers, body)) in [("hub", &hub_request), ("dev", &dev_request)] {
+            assert!(
+                headers.starts_with("POST /api/attention/mcode HTTP/1.1\r\n"),
+                "{instance} instance saw {headers}"
+            );
+            assert_eq!(body, payload, "{instance} instance got the wrong body");
+        }
     }
 }

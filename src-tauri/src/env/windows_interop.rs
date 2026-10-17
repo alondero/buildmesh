@@ -116,7 +116,16 @@ pub(crate) fn powershell_literal(value: &str) -> String {
 /// Explicitly enter the owning Linux distribution for callbacks. Windows
 /// localhost may belong to a different Buildmesh instance under WSL NAT.
 pub(crate) fn windows_attention_command(url: Option<&str>) -> Option<String> {
-    windows_attention_command_impl(url, None)
+    windows_attention_command_impl(url.map(|one| vec![one]).as_deref(), None)
+}
+
+/// [`windows_attention_command`] for a caller that has no `$BUILDMESH_PORT` to
+/// expand and must name each Buildmesh instance instead. curl reads the piped
+/// body once and POSTs it to each URL, so one hook still reaches whichever
+/// instance owns the node (issue #2343).
+pub(crate) fn windows_attention_command_for_urls(urls: &[String]) -> Option<String> {
+    let targets: Vec<&str> = urls.iter().map(String::as_str).collect();
+    windows_attention_command_impl(Some(&targets), None)
 }
 
 /// The one-line command a Windows-side hook shell runs to POST its stdin to
@@ -182,7 +191,7 @@ pub(crate) fn windows_hook_callback_command_for_runtime(url: &str, distro: Optio
     // A distribution name PowerShell would re-parse cannot travel unquoted
     // (`wsl.exe -d My Distro`), so that name keeps the encoded payload that
     // quotes it. Rare enough that its command-line cost is acceptable.
-    windows_attention_command_for_distro(distro, Some(url), Some("{}"))
+    windows_attention_command_for_distro(distro, Some(&[url]), Some("{}"))
 }
 
 /// Whether a value can appear unquoted in a PowerShell command line. WSL
@@ -196,25 +205,39 @@ fn is_shell_safe_token(value: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
-fn windows_attention_command_impl(url: Option<&str>, stdout_line: Option<&str>) -> Option<String> {
+fn windows_attention_command_impl(
+    urls: Option<&[&str]>,
+    stdout_line: Option<&str>,
+) -> Option<String> {
     if !is_wsl_host() {
         return None;
     }
     let distro = std::env::var("WSL_DISTRO_NAME").ok()?;
     Some(windows_attention_command_for_distro(
         &distro,
-        url,
+        urls,
         stdout_line,
     ))
 }
 
+/// `None` keeps the `$BUILDMESH_*` expansion for harnesses that still have the
+/// environment; a list names the targets to bake instead (issue #2343). The
+/// script's single `--data-binary '@-'` reads the piped body once, and curl
+/// sends it to each URL that follows.
 fn windows_attention_command_for_distro(
     distro_name: &str,
-    url: Option<&str>,
+    urls: Option<&[&str]>,
     stdout_line: Option<&str>,
 ) -> String {
     let distro = powershell_literal(distro_name);
-    let url = url.map(powershell_literal).unwrap_or_else(|| "('http://localhost:' + $env:BUILDMESH_PORT + '/api/attention/' + $env:BUILDMESH_SESSION_ID)".into());
+    let url = urls
+        .map(|list| {
+            list.iter()
+                .map(|one| powershell_literal(one))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_else(|| "('http://localhost:' + $env:BUILDMESH_PORT + '/api/attention/' + $env:BUILDMESH_SESSION_ID)".into());
     let stdout = stdout_line
         .map(|line| format!("; [Console]::Out.WriteLine({})", powershell_literal(line)))
         .unwrap_or_default();
@@ -346,7 +369,8 @@ mod command_tests {
     #[test]
     fn codex_windows_callback_script_fails_open_and_emits_json() {
         let url = "http://localhost:1992/api/attention/42";
-        let command = super::windows_attention_command_for_distro("Ubuntu", Some(url), Some("{}"));
+        let command =
+            super::windows_attention_command_for_distro("Ubuntu", Some(&[url]), Some("{}"));
         let script = super::decode_powershell_command(&command).expect("decode PowerShell command");
 
         assert!(script.contains(" 2>$null"), "{script}");
@@ -362,7 +386,8 @@ mod command_tests {
     #[test]
     fn codex_windows_callback_returns_success_after_wsl_failure() {
         let url = "http://localhost:1992/api/attention/42";
-        let command = super::windows_attention_command_for_distro("Ubuntu", Some(url), Some("{}"));
+        let command =
+            super::windows_attention_command_for_distro("Ubuntu", Some(&[url]), Some("{}"));
         let script = super::decode_powershell_command(&command).expect("decode PowerShell command");
         let script = format!(
             "function wsl.exe {{ Write-Error 'simulated callback failure'; $global:LASTEXITCODE = 22 }}; {script}"

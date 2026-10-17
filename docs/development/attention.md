@@ -119,7 +119,21 @@ delivered the session id after a completed turn. mcode 0.4.0+ reads
 `.claude-plugin/plugin.json` with `hooks` **inlined** (a separate
 `hooks/hooks.json` document is ignored, and a directory with no manifest is
 skipped silently), runs `command` + `args` with no shell interpretation, and
-`env_clear()`s `BUILDMESH_*` — so the shared callback URL bakes only the port. Native session/workspace payloads resolve the node; the provisioned SessionStart handler is capture-only, but its delivery has not been observed live.
+`env_clear()`s `BUILDMESH_*` — so the shared callback URL bakes the ports. It
+bakes every Buildmesh instance listening on the machine, not just the one
+that spawned the node: the manifest is one user-global file, so naming only the
+spawning instance's port made the most recent MiniMax spawn steal the other
+instances' callbacks, and those nodes stayed `Running` forever because the
+callback landed on an instance that does not own the node (issue #2343). The
+instance list comes from `http::instances`, a machine-global registry of bound
+ports whose entries a TCP-connect probe filters to the ones that answer; curl
+reads the stdin body once and POSTs it to each URL, and the node-independent
+route lets the owning instance accept the callback while the others discard it
+as unknown. See
+[Remote Access](remote-access.md#multiple-instances-on-one-machine) for the
+registry's location and lifetime. Native session/workspace payloads resolve the
+node; the provisioned SessionStart handler is capture-only, but its delivery
+has not been observed live.
 Only `TurnCompleted` is advertised: the launch pins Full Access
 (`permissionMode: bypassPermissions`, a surgical one-line edit to
 `<dataDir>/config.yaml` — the TUI has no permission flag), so no permission

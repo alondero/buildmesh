@@ -619,6 +619,10 @@ pub fn run() {
                 }
                 tauri::RunEvent::Exit => {
                     tracing::info!("App exit complete");
+                    // Stop advertising this instance's port: a sibling's next
+                    // harness spawn should not fan a callback out to a port
+                    // nothing answers on (issue #2343).
+                    crate::http::instances::unpublish(crate::http::current_http_port());
                 }
                 tauri::RunEvent::WindowEvent { label, event, .. } => match event {
                     tauri::WindowEvent::CloseRequested { .. } => {

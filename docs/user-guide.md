@@ -604,7 +604,12 @@ http://localhost:<app port>/api/attention/<node>
 ```
 
 MiniMax Code is the one variant: its callback is node-independent and posts to
-`/api/attention/mcode` instead of a node path.
+`/api/attention/mcode` instead of a node path. It also cannot read the app's
+port when the hook runs, so its shared hook file lists the port of each
+Buildmesh instance you have running. Every instance ignores a callback for a
+node it does not own, and the instance that owns the node is the one that acts
+on it — so a MiniMax node reaches the right window even when you run the app
+and a dev profile side by side.
 
 - **It stays on your machine.** The address is loopback, so the request never
   reaches the network. LAN and VPN access is a separate, opt-in feature with its
