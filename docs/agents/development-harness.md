@@ -245,6 +245,11 @@ Quick infrastructure gates (whitespace, shared rules, docs, README, process
 spawns, contract tests, ESLint) run first, in order. The product gates then run
 as two lanes at the same time, each keeping its own order and fail-fast:
 
+The agent-infrastructure contract suite has a fifteen-minute deadline on
+Windows, where its CLI subprocess and PowerShell startup costs can exceed the
+five-minute deadline used elsewhere. Its assertions and failure handling are
+the same on each platform.
+
 | Lane | Order |
 |---|---|
 | Frontend | `frontend-build` → `bundle` → `frontend-tests` → `browser-smoke` |

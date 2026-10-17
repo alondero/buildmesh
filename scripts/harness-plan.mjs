@@ -105,7 +105,7 @@ export function planGates(paths, { full = false } = {}) {
   node('readme', ['scripts/check-readme-drift.mjs']);
   node('process-spawns', ['scripts/check-process-spawn-discipline.mjs']);
   node('known-flakes', ['scripts/harness.mjs', 'gate', 'flakes']);
-  scoped('agent-tests', 'test:agent', { tests: 'node', ignores: AGENT_TEST_IGNORES });
+  scoped('agent-tests', 'test:agent', { tests: 'node', ignores: AGENT_TEST_IGNORES, minutes: process.platform === 'win32' ? 15 : 5 });
   scoped('docs-tests', 'test:docs', { tests: 'node' });
   scoped('readme-tests', 'test:readme', { tests: 'node', ignores: README_TEST_IGNORES });
   scoped('lint-tests', 'test:lint', { tests: 'node', ignores: LINT_FIXTURE_IGNORES });
