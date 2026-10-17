@@ -1,141 +1,116 @@
 import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
-import { join, relative, sep } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
+import ts from 'typescript';
+import { ESLint } from 'eslint';
 
-/**
- * IPC seam guard (ADR-0010). Every Tauri `invoke` must go through the typed
- * wrapper in `src/lib/tauri.ts`, so a renamed `#[command]` breaks in one place
- * instead of silently across N components (the project's #1 runtime-failure
- * mode). This is the enforcement the repo uses in place of an ESLint rule (it
- * has no ESLint setup): a drift test with a (now-steady-state) allowlist.
- *
- * The allowlist started as the migration to-do list (#385) and shrank as the
- * sweep proceeded; it has reached steady state with a single legitimate
- * exception (see `EXEMPT_LEGITIMATE` below). Any new file importing raw
- * `invoke` fails this test immediately. Nothing outside `tauri.ts` and the
- * exempt list may import `invoke` from `@tauri-apps/api/core`.
- *
- * The wrapper itself is also the central IPC error-logging chokepoint
- * (issue #386) — see `_invoke` in `src/lib/tauri.ts` and the shape serializer
- * in `src/lib/ipcShape.ts`. That follow-up is the reason `frontendLog.ts` is
- * pinned as a peer-of-wrapper exemption below: the wrapper calls
- * `frontendLog` on every rejection, so routing `frontendLog.ts` through the
- * wrapper would risk a logging cycle.
- */
-
-/**
- * The legitimate, deliberate exceptions. `frontendLog.ts` is a peer of the
- * wrapper, not a consumer: it forwards console errors to the backend, and
- * the wrapper itself may eventually call *it* for central IPC error logging
- * (per ADR-0010's "deliberate follow-up"). Routing `frontendLog.ts` through
- * the wrapper would risk a logging cycle, so it stays a raw `invoke` site
- * and keeps its own re-entrancy guard. Documented at the file head too.
- *
- * `src/lib/tauri/_invoke.ts` is the **chokepoint module** for the
- * `tauri/` facet split (issue #1656 Phase 2). Every facet wrapper
- * (`provider.ts`, future `mesh.ts`, `git.ts`, etc.) routes through
- * `_invoke.ts`'s exported `_invoke<T>(...)` rather than importing raw
- * `invoke` directly — keeping the chokepoint at one file while letting
- * facets own their domain IPC. The doc-pinning assertion below
- * (`facet files import _invoke from the chokepoint, not raw invoke`)
- * catches a future contributor adding a 2nd raw-invoke site.
- */
-const EXEMPT_LEGITIMATE = new Set<string>([
+// ADR-0010: facets own domain wrappers; _invoke owns error logging. The
+// logging bridge is a deliberate peer because routing it back through the
+// wrapper would introduce a logging cycle.
+const RAW_INVOKE_OWNERS = new Set([
   'src/lib/frontendLog.ts',
   'src/lib/tauri/_invoke.ts',
 ]);
-
-// The one place `invoke` is allowed to be imported — the wrapper itself.
-const WRAPPER = 'src/lib/tauri.ts';
-
-const IMPORTS_INVOKE =
-  /import\s*\{[^}]*\binvoke\b[^}]*\}\s*from\s*['"]@tauri-apps\/api\/core['"]/;
-
 const SRC_DIR = join(process.cwd(), 'src');
+const FACET_DIR = join(SRC_DIR, 'lib', 'tauri');
 
 function tsFiles(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const full = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      out.push(...tsFiles(full));
-    } else if (/\.(ts|tsx)$/.test(entry.name)) {
-      out.push(full);
-    }
-  }
-  return out;
+    return entry.isDirectory() ? tsFiles(full) : /\.tsx?$/.test(entry.name) ? [full] : [];
+  });
 }
 
 function rel(full: string): string {
   return relative(process.cwd(), full).split(sep).join('/');
 }
 
-describe('Tauri IPC seam (ADR-0010)', () => {
-  it('only the wrapper and the documented exemptions import raw invoke', () => {
-    const importers = tsFiles(SRC_DIR)
-      .filter((f) => IMPORTS_INVOKE.test(readFileSync(f, 'utf8')))
-      .map(rel)
-      .filter((f) => f !== WRAPPER);
-
-    const unexpected = importers.filter((f) => !EXEMPT_LEGITIMATE.has(f));
-    expect(
-      unexpected,
-      `These files import raw invoke. Route them through ` +
-        `src/lib/tauri.ts (import * as api from '../lib/tauri'). See ADR-0010. ` +
-        `The exemption list is closed — adding to it requires an ADR update.`,
-    ).toEqual([]);
-  });
-
-  it('every exempt entry still imports raw invoke (no stale exemptions)', () => {
-    const importers = new Set(
-      tsFiles(SRC_DIR)
-        .filter((f) => IMPORTS_INVOKE.test(readFileSync(f, 'utf8')))
-        .map(rel),
-    );
-    const stale = [...EXEMPT_LEGITIMATE].filter((f) => !importers.has(f));
-    expect(
-      stale,
-      'These exempt entries no longer import raw invoke — delete them so the ' +
-        'exemption list stays a true map of legitimate exceptions.',
-    ).toEqual([]);
-  });
-
-  it('facet files route through the _invoke chokepoint, not raw invoke', () => {
-    // Issue #1656 Phase 2 — every facet under `src/lib/tauri/` MUST
-    // import `_invoke` from `./_invoke` rather than reaching for raw
-    // `invoke`. This is the structural enforcement of the "facets own
-    // the wrapper, not consume it" property: a facet that imports raw
-    // `invoke` would bypass the IPC error-logging chokepoint.
-    //
-    // Facets are discovered from the filesystem (not from the
-    // EXEMPT_LEGITIMATE allowlist — that list only contains the
-    // chokepoint module itself + `frontendLog.ts`, since every other
-    // facet is supposed to route through the chokepoint and therefore
-    // has no business being on the raw-invoke allowlist).
-    const facetDir = join(SRC_DIR, 'lib', 'tauri');
-    const facetFiles = readdirSync(facetDir, { withFileTypes: true })
-      .filter(
-        (e) =>
-          e.isFile() &&
-          /\.(ts|tsx)$/.test(e.name) &&
-          e.name !== '_invoke.ts',
-      )
-      .map((e) => `src/lib/tauri/${e.name}`);
-    expect(facetFiles.length, 'sanity: at least one facet exists').toBeGreaterThan(0);
-    for (const f of facetFiles) {
-      const src = readFileSync(join(process.cwd(), f), 'utf8');
-      // Facets must NOT import raw `invoke` from `@tauri-apps/api/core`.
-      expect(
-        src,
-        `${f} imports raw invoke from @tauri-apps/api/core. Route through ` +
-          `the _invoke chokepoint (import { _invoke } from './_invoke') instead.`,
-      ).not.toMatch(/from\s*['"]@tauri-apps\/api\/core['"]/);
-      // Facets must import _invoke from the chokepoint.
-      expect(
-        src,
-        `${f} does not import _invoke from the chokepoint. Add: ` +
-          `import { _invoke } from './_invoke';`,
-      ).toMatch(/import\s*\{[^}]*\b_invoke\b[^}]*\}\s*from\s*['"]\.\/_invoke['"]/);
+function imports(full: string) {
+  const source = readFileSync(full, 'utf8');
+  const file = ts.createSourceFile(full, source, ts.ScriptTarget.Latest, true);
+  const edges: { module: string; rawInvoke: boolean }[] = [];
+  function visit(node: ts.Node) {
+    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+        node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+      const bindings = ts.isImportDeclaration(node)
+        ? node.importClause?.namedBindings : node.exportClause;
+      const rawInvoke = !bindings || ts.isNamespaceImport(bindings) || ts.isNamespaceExport(bindings) ||
+        bindings.elements.some((e) => (e.propertyName ?? e.name).text === 'invoke');
+      edges.push({ module: node.moduleSpecifier.text, rawInvoke });
+    } else if (ts.isCallExpression(node) &&
+        (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+          ts.isIdentifier(node.expression) && node.expression.text === 'require') &&
+        node.arguments[0] && ts.isStringLiteral(node.arguments[0])) {
+      edges.push({ module: node.arguments[0].text, rawInvoke: true });
     }
+    ts.forEachChild(node, visit);
+  }
+  visit(file);
+  return edges;
+}
+
+describe('Tauri IPC seam (ADR-0010)', () => {
+  const sources = tsFiles(SRC_DIR).map((full) => ({ full, name: rel(full), edges: imports(full) }));
+
+  it('only the chokepoint and logging bridge reach raw invoke, including aliases and dynamic imports', () => {
+    const owners = sources.filter(({ edges }) => edges.some((edge) =>
+      edge.module === '@tauri-apps/api/core' && edge.rawInvoke)).map(({ name }) => name);
+    expect(owners.sort()).toEqual([...RAW_INVOKE_OWNERS].sort());
+  });
+
+  it('consumers cannot reach around domain facets into the _invoke chokepoint', () => {
+    const violations = sources.filter(({ full, edges }) => !full.startsWith(FACET_DIR + sep) &&
+      edges.some(({ module }) => module.startsWith('.') &&
+        resolve(full, '..', module).replace(/\.ts$/, '') === join(FACET_DIR, '_invoke')));
+    expect(violations.map(({ name }) => name)).toEqual([]);
+  });
+
+  it('facets route through the chokepoint and cannot depend on the compatibility barrel', () => {
+    const facets = sources.filter(({ full, name }) => full.startsWith(FACET_DIR + sep) && !name.endsWith('/_invoke.ts'));
+    expect(facets.length).toBeGreaterThan(0);
+    for (const { name, full, edges } of facets) {
+      expect(edges.some(({ module }) => module === './_invoke'), name).toBe(true);
+      expect(edges.some(({ module }) => module.startsWith('.') &&
+        resolve(full, '..', module).replace(/\.ts$/, '') === join(SRC_DIR, 'lib', 'tauri')), name).toBe(false);
+    }
+  });
+
+  it('the compatibility barrel contains only deprecated domain re-exports', () => {
+    const full = join(SRC_DIR, 'lib', 'tauri.ts');
+    const source = readFileSync(full, 'utf8');
+    const file = ts.createSourceFile(full, source, ts.ScriptTarget.Latest, true);
+    expect(source.split('\n').length).toBeLessThan(400);
+    expect(file.statements.every(ts.isExportDeclaration)).toBe(true);
+    for (const statement of file.statements) {
+      expect(statement.getFullText(file)).toContain('@deprecated');
+    }
+  });
+});
+
+describe('IPC import lint enforcement', () => {
+  const eslint = new ESLint();
+  async function errors(code: string, filePath = 'src/components/NewFacetConsumer.tsx') {
+    const [result] = await eslint.lintText(code, { filePath });
+    return result.messages.filter((message) => message.ruleId === 'no-restricted-imports');
+  }
+
+  it.each(['../../lib/tauri', '../../lib/tauri.ts', '../lib/tauri', './tauri'])(
+    'rejects new compatibility-barrel imports from %s', async (module) => {
+      expect(await errors(`import { listAgentNodes } from '${module}'; listAgentNodes();`)).toHaveLength(1);
+    },
+  );
+  it('permits domain imports and Channel without permitting raw invoke or private transport access', async () => {
+    expect(await errors("import { listAgentNodes } from '../../lib/tauri/agentNode'; listAgentNodes();")).toEqual([]);
+    expect(await errors("import { Channel } from '@tauri-apps/api/core'; new Channel();")).toEqual([]);
+    expect(await errors("import { invoke as raw } from '@tauri-apps/api/core'; raw('x');")).toHaveLength(1);
+    expect(await errors("import * as core from '@tauri-apps/api/core'; core.invoke('x');")).toHaveLength(1);
+    expect(await errors("import { _invoke } from '../../lib/tauri/_invoke'; _invoke('x');")).toHaveLength(1);
+    expect(await errors("export { _invoke } from '../../lib/tauri/_invoke';")).toHaveLength(1);
+  });
+  it('allows legacy consumers while still prohibiting private transport access there', async () => {
+    expect(await errors("import { listAgentNodes } from '../lib/tauri'; listAgentNodes();", 'src/stores/agentNodeStore.ts')).toEqual([]);
+    expect(await errors("import { toHostPath } from './tauri'; toHostPath('/repo');", 'src/lib/fileDropPaste.ts')).toEqual([]);
+    expect(await errors("import { _invoke } from '../lib/tauri/_invoke'; _invoke('x');", 'src/stores/agentNodeStore.ts')).toHaveLength(1);
+    expect(await errors("import { _invoke } from './_invoke'; _invoke('x');", 'src/lib/tauri/agentNode.ts')).toEqual([]);
   });
 });

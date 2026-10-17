@@ -42,6 +42,111 @@ import tseslint from 'typescript-eslint';
 import reactHooks from 'eslint-plugin-react-hooks';
 import globals from 'globals';
 
+// Closed migration list: remove entries as legacy callers adopt domain facets.
+// New callers must name their IPC domain in the import (issue #2454).
+const legacyTauriImporters = [
+  "src/App.tsx",
+  "src/components/AgentNodeView/AgentNodeView.tsx",
+  "src/components/AgentNodeView/AgentReviewButton.tsx",
+  "src/components/AgentNodeView/CenterDiffOverlay.tsx",
+  "src/components/AgentNodeView/DiffFileNavDrawer.tsx",
+  "src/components/AgentNodeView/GridNodeHeader.tsx",
+  "src/components/AgentNodeView/PrDiffView.tsx",
+  "src/components/AgentNodeView/PrPill.tsx",
+  "src/components/AgentNodeView/PrReviewerSpawnDialog.tsx",
+  "src/components/AgentNodeView/SemanticTurnBanner.tsx",
+  "src/components/AppSettings/AccountCard.tsx",
+  "src/components/AppSettings/AccountsPane.tsx",
+  "src/components/AppSettings/AddProviderForm.tsx",
+  "src/components/AppSettings/AutopilotPane.tsx",
+  "src/components/AppSettings/DataRecoverySection.tsx",
+  "src/components/AppSettings/GeneralPane.tsx",
+  "src/components/AppSettings/HarnessCard.tsx",
+  "src/components/AppSettings/HarnessConfigList.tsx",
+  "src/components/AppSettings/HarnessDefaultsSection.tsx",
+  "src/components/AppSettings/HarnessesPane.tsx",
+  "src/components/AppSettings/harnessOrder.ts",
+  "src/components/AppSettings/HarnessOrderList.tsx",
+  "src/components/AppSettings/harnessVocabulary.ts",
+  "src/components/AppSettings/OpenCodeAccountCard.tsx",
+  "src/components/AppSettings/OpenCodeAccountViews.tsx",
+  "src/components/AppSettings/OpenCodeAwaitingActivationView.tsx",
+  "src/components/AppSettings/PreferencesCorruptionPanel.tsx",
+  "src/components/AppSettings/PromptsPane.tsx",
+  "src/components/AppSettings/ProvidersPane.tsx",
+  "src/components/AppSettings/ProxiedChildRow.tsx",
+  "src/components/AppSettings/RemoteAccessPane.tsx",
+  "src/components/AppSettings/SettingsDataContext.tsx",
+  "src/components/AppSettings/settingsUtils.ts",
+  "src/components/AppSettings/UsageRender.tsx",
+  "src/components/AppSettings/useSettingsResources.ts",
+  "src/components/BootErrorPanel/BootErrorPanel.tsx",
+  "src/components/Circuits/CircuitEditorOverlay.tsx",
+  "src/components/Circuits/CircuitFlowEditor.tsx",
+  "src/components/Circuits/CircuitRunOverview.tsx",
+  "src/components/Circuits/RunHistoryDrawer.tsx",
+  "src/components/CommandOmnibar/omnibarActions.ts",
+  "src/components/Diff/Diff.tsx",
+  "src/components/Diff/diffFormat.ts",
+  "src/components/FileTree/ChangedFileRow.tsx",
+  "src/components/FileTree/ChangedFilesSection.tsx",
+  "src/components/FileTree/FileTree.tsx",
+  "src/components/Mesh/MeshCreateModal.tsx",
+  "src/components/Probe/AgentChangedFilesList.tsx",
+  "src/components/Probe/AiContextSection.tsx",
+  "src/components/Probe/ArchivedNodesTab.tsx",
+  "src/components/Probe/CircuitRunCapacity.tsx",
+  "src/components/Probe/CircuitRunCard.tsx",
+  "src/components/Probe/CircuitsProbeTab.tsx",
+  "src/components/Probe/GitIssuesTab.tsx",
+  "src/components/Probe/GitPullRequestsTab.tsx",
+  "src/components/Probe/IssueLabels.tsx",
+  "src/components/Probe/ProjectFilesTab.tsx",
+  "src/components/Probe/ProjectSettingsTab.tsx",
+  "src/components/Probe/RepositoryTab.tsx",
+  "src/components/Probe/UsageTab.tsx",
+  "src/components/RemoteAccess/RemoteAccessModal.tsx",
+  "src/components/shared/PathHeader.tsx",
+  "src/components/Sidebar/MeshItem.tsx",
+  "src/components/Terminal/BuildRunTerminalRegistry.ts",
+  "src/components/Terminal/Terminal.tsx",
+  "src/components/Terminal/TerminalRegistry.ts",
+  "src/hooks/useAgentChangedFiles.ts",
+  "src/hooks/useChangedFiles.ts",
+  "src/hooks/useGitBranchStatus.ts",
+  "src/hooks/useGitSummary.ts",
+  "src/hooks/useMeshGitHubUrl.ts",
+  "src/hooks/useMeshGitStatus.ts",
+  "src/hooks/useMeshHealth.ts",
+  "src/hooks/useMeshRecovery.ts",
+  "src/hooks/useMuseSessionTelemetry.ts",
+  "src/hooks/useOpenPr.ts",
+  "src/hooks/useProviderList.ts",
+  "src/hooks/useWindowControlOverlay.ts",
+  "src/hooks/useWorktreeEffectiveDir.ts",
+  "src/lib/fileDropPaste.ts",
+  "src/lib/meshSyncFeedback.ts",
+  "src/lib/status.ts",
+  "src/lib/updater.ts",
+  "src/lib/usagePace.ts",
+  "src/lib/worktreeNotifications.ts",
+  "src/stores/agentNodeStore.ts",
+  "src/stores/blockedCleanupStore.ts",
+  "src/stores/exitPromptStore.ts",
+  "src/stores/meshSettingsStore.ts",
+  "src/stores/meshStore.ts"
+];
+
+function ipcImportRestrictions({ legacy = false, transport = false, raw = false } = {}) {
+  return ['error', {
+    paths: raw ? [] : [{ name: '@tauri-apps/api/core', importNames: ['invoke'], message: 'Raw invoke belongs in the IPC chokepoint.' }],
+    patterns: [
+      ...(!legacy ? [{ regex: '(^|/)(?:lib/)?tauri(?:\\.ts)?$', message: 'Import the owning domain from lib/tauri/<facet>; the compatibility barrel is deprecated.' }] : []),
+      ...(!transport ? [{ regex: '(^|/)tauri/_invoke(?:\\.ts)?$', message: 'Import the owning Tauri domain facet; _invoke is private to src/lib/tauri/.' }] : []),
+    ],
+  }];
+}
+
 export default [
   // ---------- global ignores (intentional exclusions) ------------------------
   {
@@ -221,6 +326,23 @@ export default [
         },
       ],
     },
+  },
+
+  {
+    files: ['src/**/*.{ts,tsx}'],
+    rules: { 'no-restricted-imports': ipcImportRestrictions() },
+  },
+  {
+    files: legacyTauriImporters,
+    rules: { 'no-restricted-imports': ipcImportRestrictions({ legacy: true }) },
+  },
+  {
+    files: ['src/lib/tauri/*.ts'],
+    rules: { 'no-restricted-imports': ipcImportRestrictions({ transport: true }) },
+  },
+  {
+    files: ['src/lib/tauri/_invoke.ts', 'src/lib/frontendLog.ts'],
+    rules: { 'no-restricted-imports': ipcImportRestrictions({ transport: true, raw: true }) },
   },
 
   // ---------- test TS/TSX files: relaxed rules for vitest / Playwright ------
