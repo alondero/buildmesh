@@ -266,8 +266,9 @@ write, and all three were found the hard way:
    names a shell explicitly (`cmd.exe /c …` on Windows, `sh -c …` on POSIX) and
    hands it a single curl line.
 3. mcode `env_clear()`s the `BUILDMESH_*` variables before running a hook (the
-   same constraint Codex has), so the callback URL **bakes** the loopback port
-   and node id. A live run confirmed `%BUILDMESH_PORT%` arriving verbatim.
+   same constraint Codex has), so the callback URL **bakes** the loopback ports
+   of the Buildmesh instances running on the machine. A live run confirmed
+   `%BUILDMESH_PORT%` arriving verbatim.
 
 The merge is additive (sibling events and user handlers round-trip) and
 idempotent; a malformed user manifest fails closed rather than being
@@ -359,11 +360,22 @@ and sessions too and breaks the transcript reader.
 ### Known limits
 
 - **One machine-global manifest.** The plugin path is the user's home,
-  not the worktree. All nodes now provision the same `/api/attention/mcode`
-  URL. The route requires a native session id, matching workspace, live process,
+  not the worktree. All nodes provision the same `/api/attention/mcode` URL.
+  The route requires a native session id, matching workspace, live process,
   and current process generation. Known sessions cannot claim another node;
   simultaneous fresh nodes sharing one workspace are rejected as ambiguous.
   Older numeric callbacks use the same resolution, ignoring their baked node id.
+- **A shared manifest names each instance, not one.** mcode clears `BUILDMESH_*`
+  and there is no scoped plugin dir, so the port cannot be resolved at run time
+  like every other harness. Baked the spawning instance's port, the last
+  MiniMax spawn stole the other instances' callbacks and their nodes stayed
+  `Running` forever (issue #2343). The manifest now lists the port of each
+  Buildmesh instance listening on the machine (`http::instances`), one curl
+  invocation and one stdin read serving all of them; the node-independent route
+  lets the owning instance accept a callback and the others discard it as
+  unknown. Verified against two live listeners with a dead port between them —
+  not against the installed TUI, so live multi-instance delivery is still
+  unvalidated.
 - **WSL-guest mcode now fails provisioning loudly when it cannot deliver.**
   Reaching the Windows-side Buildmesh from the guest needs mirrored networking,
   so `provision_attention_hooks` preflights `wslinfo --networking-mode`
@@ -373,10 +385,13 @@ and sessions too and breaks the transcript reader.
   runs `curl` back inside the guest, where the Linux-side listener's own
   loopback is reachable. The WSL leg is still not *validated* on a live guest
   from this host.
-- The baked port means a node that survives a Buildmesh restart onto a different
+- The baked ports mean a node that survives a Buildmesh restart onto a different
   HTTP port keeps the old port until it is re-spawned. The port is stable for
   the life of the process (`RESOLVED_HTTP_PORT`) and provisioning runs on every
   spawn, so a re-spawn re-points it — the same class of limitation Codex has.
+  A port that no longer answers is dropped from the list when the next spawn
+  provisions (a TCP-connect probe), so a crashed sibling's entry cannot
+  accumulate.
 - Permission, question, and background-work signals are **not** claimed: none
   was observed. A passive `mcode_watcher` over `messages.jsonl` run boundaries
   (the Muse / Command Code pattern) remains the fallback if the plugin path

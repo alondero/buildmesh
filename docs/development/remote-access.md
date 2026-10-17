@@ -37,7 +37,7 @@ The embedded server binds **loopback only by default** (#496). An off-by-default
 - **Loopback stays plain HTTP; only non-loopback interface IPs get TLS** (`http::bind_specs`). This is deliberate: the attention webhook posts plain `http://localhost/api/attention/...`, so forcing TLS on loopback would silently break every agent's "awaiting input" signal. Do **not** "simplify" this to a single `0.0.0.0` TLS bind.
 - **TLS identities** use a stable root and a leaf covering localhost, loopback, and interface IPs. `http/tls/identity.rs` serializes writers, validates key/certificate matches and the leaf chain, stages and syncs a complete private generation, then atomically publishes `tls/current`. Readers resolve the pointer once. Legacy files migrate without changing a valid root; address changes renew only the leaf. Explicit reset publishes a fresh root. Prior complete generations remain available; incomplete staging never becomes active. Directories and private keys are owner-only, including the temporary iOS signing directory.
 - **The toggle rebinds live** without an app restart. A serialized binding operation owns the setting snapshot and listener replacement. Each listener owns its TLS/HTTP/WebSocket tasks and aborts/drains them on shutdown; loopback listeners have separate ownership. Each listener admits at most 64 HTTP/handshake connections and 32 WebSockets, with a five-second TLS deadline. WebSocket output futures remain inside their connection. Disabling LAN also invalidates unused pairing invitations.
-- **HTTP module layout (issue #1658):** `http/server.rs` (bind, TLS, accept, head parse, Host guard, body read, WS upgrade), `http/router.rs` (one `ROUTES` table + `dispatch(ParsedRequest)`), `http/state.rs` (app handle, snapshots, ports, listeners, interface cache). `http/mod.rs` re-exports and exposes `start_http_server` / `reapply_binding`.
+- **HTTP module layout (issue #1658):** `http/server.rs` (bind, TLS, accept, head parse, Host guard, body read, WS upgrade), `http/router.rs` (one `ROUTES` table + `dispatch(ParsedRequest)`), `http/state.rs` (app handle, snapshots, ports, listeners, interface cache), `http/instances.rs` (the machine-global registry of bound ports). `http/mod.rs` re-exports and exposes `start_http_server` / `reapply_binding`.
 - **Ports and the offset.** `http/state.rs` owns `HTTP_PORT_START` 1992 / `HTTP_PORT_END` 1994 (the server binds the first of the three that is free and publishes it as `current_http_port`, which is what agent attention hooks and `BUILDMESH_PORT` point at) and `port_offset`, which shifts every listener — including the dev test bridge on 1991 — so the stable hub and the `*.dev` profile never contend. A debug or `dev-tools` build reads `BUILDMESH_PORT_OFFSET` ahead of the identifier so two dev instances can each have a range; see [startup-and-profiles](startup-and-profiles.md) for the override's gate, its fallback, and how the launchers allocate it per worktree.
 - **`MaybeTls`** (`http::stream`) is the single concrete stream type (`Plain(TcpStream)` | `Tls(Box<TlsStream<TcpStream>>)`); WSS rides the same enum. The server owns the stream. Route handlers take `ParsedRequest` and return `Response` — they never touch `BufStream` / `MaybeTls`.
 - **Crypto provider is `ring`.** The embedded server selects it explicitly via
@@ -45,6 +45,40 @@ The embedded server binds **loopback only by default** (#496). An off-by-default
   process-default provider because reqwest 0.13 uses `rustls-no-provider` and
   its client builder reads that default. The embedded server remains bound to
   its explicit provider; `aws-lc-rs` is not in the dependency tree.
+
+## Multiple instances on one machine
+
+The hub, a `*.dev` profile and any `BUILDMESH_PORT_OFFSET` instance can all be
+running at once, each on its own port. Anything a harness reads at **run time**
+follows the node — `$BUILDMESH_PORT` in `spawn_environment` — but a harness that
+must bake a URL into one file it shares with every other instance cannot name
+one port: MiniMax Code's single user-global plugin manifest is the case
+`http::instances` exists for (issue #2343).
+
+- **The registry.** Each instance writes `<profile-parent>/buildmesh-instances/<port>`
+  once the port is settled (`http/server.rs`, after `store_resolved_http_port`)
+  and removes it on a clean exit. The parent of the profile directory
+  (`%APPDATA%`, `~/Library/Application Support`, `$XDG_DATA_HOME`) is where the
+  shipped profiles already meet — the hub and the `*.dev` profile differ only by
+  the leaf directory name, so neither can see the other's data directory. One
+  file per instance means no cross-process write race: nothing reads or rewrites
+  another's entry.
+  The body's pid and profile label are diagnostic only; the file *name* carries
+  the port.
+- **`live_ports(own)`** returns the sorted, deduplicated ports that answer a TCP
+  connect, always including `own`. The probe exists because a crash leaves the
+  file behind, and a stale entry must not accumulate in every hook. `own` is
+  never gated behind the probe: it is the one address that cannot be wrong, and
+  dropping it would silence the callbacks only this instance can answer.
+- **Best-effort by construction.** `publish` failing (an unwritable parent, a
+  read-only profile root) logs and returns; remote access itself never depends
+  on it. A missing registry degrades to the old single-instance behaviour.
+- **Why a fan-out is correct.** `/api/attention/*` is public and
+  node-independent: it resolves the node from the payload's session id and cwd,
+  so the instance that owns the node accepts a callback and every other instance
+  discards it as unknown. That makes the port list safe to bake whenever it was
+  written — an instance that owns a MiniMax node is by definition running, and
+  provisioned its own manifest. See [Attention](attention.md) for the hook side.
 
 ## Fuzzing the request-read path
 
