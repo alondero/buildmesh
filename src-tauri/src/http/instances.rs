@@ -123,7 +123,10 @@ fn ports_from(entries: &[String], probe: impl Fn(u16) -> bool, own: u16) -> Vec<
     let mut ports: Vec<u16> = entries
         .iter()
         .filter_map(|name| name.parse::<u16>().ok())
-        .filter(|port| probe(*port))
+        // `own` is re-added below without a probe, so probing our own listener
+        // (the common case: we published it at startup) can only cost a
+        // loopback connect per spawn and never change the answer.
+        .filter(|port| *port != own && probe(*port))
         .collect();
     // Never gated behind the probe: this instance's own listener is the one
     // entry that is certain, and dropping it would silence the callbacks that
@@ -210,15 +213,33 @@ mod tests {
     fn probe_never_sees_an_out_of_range_port() {
         let probed = std::cell::RefCell::new(BTreeSet::new());
         let ports = ports_from(
-            &["99999".to_string(), "1992".to_string()],
+            &["99999".to_string(), "4992".to_string()],
             |port| {
                 probed.borrow_mut().insert(port);
                 true
             },
             1992,
         );
-        assert_eq!(*probed.borrow(), BTreeSet::from([1992]));
-        assert_eq!(ports, vec![1992]);
+        assert_eq!(*probed.borrow(), BTreeSet::from([4992]));
+        assert_eq!(ports, vec![1992, 4992]);
+    }
+
+    /// The caller's own port is re-added without probing, so a published entry
+    /// for it costs no loopback connect on every spawn and cannot change the
+    /// answer either way.
+    #[test]
+    fn own_port_is_not_probed() {
+        let probed = std::cell::RefCell::new(Vec::new());
+        let ports = ports_from(
+            &names(&[1992, 4992]),
+            |port| {
+                probed.borrow_mut().push(port);
+                true
+            },
+            1992,
+        );
+        assert_eq!(*probed.borrow(), vec![4992]);
+        assert_eq!(ports, vec![1992, 4992]);
     }
 
     /// End to end through the filesystem, with the real probe: publish from

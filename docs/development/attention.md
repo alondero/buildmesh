@@ -129,7 +129,11 @@ instance list comes from `http::instances`, a machine-global registry of bound
 ports whose entries a TCP-connect probe filters to the ones that answer; curl
 reads the stdin body once and POSTs it to each URL, and the node-independent
 route lets the owning instance accept the callback while the others discard it
-as unknown. See
+as unknown. Every branch fails open, because the hook contract is that a
+callback which cannot reach Buildmesh still exits successfully: `|| true` under
+`sh`, `& exit 0` under `cmd.exe` (a redirection leaves the exit code alone), and
+the same in the interop relay. Without it, one sibling that has exited would
+surface as a hook error instead of a lost notification. See
 [Remote Access](remote-access.md#multiple-instances-on-one-machine) for the
 registry's location and lifetime. Native session/workspace payloads resolve the
 node; the provisioned SessionStart handler is capture-only, but its delivery

@@ -186,8 +186,11 @@ const BUILDMESH_HOOK_MARKER: &str = "/api/attention/";
 /// instance needs no per-instance plugin dir: curl reads the stdin body once
 /// and POSTs it to each URL, and the node-independent route lets the owning
 /// instance accept the callback while the others discard it as unknown. A curl
-/// failure must never surface as a non-zero hook exit, so both branches swallow
-/// it.
+/// failure must never surface as a non-zero hook exit — the documented contract
+/// is that a hook which cannot reach Buildmesh still exits successfully — so
+/// each branch ends in an explicit success: `|| true` under `sh`, `& exit 0`
+/// under `cmd.exe`, which a redirection alone does not give, and the same in the
+/// interop relay below.
 ///
 /// The `WindowsInterop` case is the mirror image: Buildmesh runs *inside* the
 /// WSL/Linux host and mcode is the **Windows** executable reached through
@@ -212,8 +215,15 @@ fn attention_invocation(env_type: EnvType, urls: &[String]) -> (String, Vec<Stri
             "cmd.exe".to_string(),
             vec![
                 "/c".to_string(),
+                // `& exit 0` is load-bearing, not decoration: a redirection does
+                // not touch the exit code, and `cmd.exe /c` reports curl's. With
+                // several URLs curl's status is the last transfer's, so one
+                // unreachable sibling — the normal case while it shuts down, or
+                // while every instance is gone — would fail the hook and mcode
+                // would surface it as a hook error (#2343 review). The POSIX
+                // branch's `|| true` is the same guarantee.
                 format!(
-                    "curl.exe -sf --connect-timeout 1 --max-time 2 -X POST --data-binary @- {targets} >nul 2>nul"
+                    "curl.exe -sf --connect-timeout 1 --max-time 2 -X POST --data-binary @- {targets} >nul 2>nul & exit 0"
                 ),
             ],
         )
@@ -1216,7 +1226,8 @@ mod tests {
     //      `BUILDMESH_*`, so the URL is baked).
     //   8. One baked invocation reaches EVERY live instance from a single
     //      stdin read, including across an instance that has since exited
-    //      (issue #2343).
+    //      (issue #2343), and an unreachable target in ANY position — last
+    //      included — still leaves the hook exiting 0.
     // -----------------------------------------------------------------
 
     fn plugin_manifest_path(home: &Path) -> std::path::PathBuf {
@@ -2177,6 +2188,13 @@ defaultModelThinking:
                 "Windows invocation must redirect to nul: {}",
                 args[1]
             );
+            // The redirection does not touch the exit code; without this the
+            // hook fails whenever a baked target is unreachable.
+            assert!(
+                args[1].ends_with("& exit 0"),
+                "Windows invocation must fail open: {}",
+                args[1]
+            );
         } else {
             assert_eq!(command, "sh", "non-Windows hosts must not emit cmd.exe");
             assert!(
@@ -2350,12 +2368,7 @@ defaultModelThinking:
     fn attention_invocation_reaches_every_live_instance() {
         let (hub_port, hub) = serve_one_hook();
         let (dev_port, dev) = serve_one_hook();
-        let exited = {
-            let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let port = taken.local_addr().unwrap().port();
-            drop(taken);
-            port
-        };
+        let exited = closed_port();
         let urls = vec![
             format!("http://localhost:{hub_port}/api/attention/mcode"),
             format!("http://localhost:{exited}/api/attention/mcode"),
@@ -2377,5 +2390,56 @@ defaultModelThinking:
             );
             assert_eq!(body, payload, "{instance} instance got the wrong body");
         }
+    }
+
+    /// Issue #2343 review: the exit code is the one thing this hook must never
+    /// leak, and it is order-dependent. `curl` reports the **last** transfer's
+    /// status, and `cmd.exe /c` reports curl's, so an unreachable target placed
+    /// last is the case that decides whether a dead sibling fails the hook.
+    /// Each ordering below pins that, including the all-targets-gone one, which
+    /// is what a node sees after every instance has exited.
+    #[test]
+    fn an_unreachable_target_never_fails_the_hook() {
+        let payload = br#"{"hook_event_name":"Stop","session_id":"8a979720-1cb0-408c-b29c-9f0f68f2982b","transcript_path":"/tmp/x.jsonl","permission_mode":"auto"}"#;
+
+        // Dead target last: the failing transfer is also the final one.
+        let (live_port, live) = serve_one_hook();
+        let dead = closed_port();
+        let output = run_attention_invocation(
+            &[
+                format!("http://localhost:{live_port}/api/attention/mcode"),
+                format!("http://localhost:{dead}/api/attention/mcode"),
+            ],
+            payload,
+        );
+        live.join().expect("the live instance must still be served");
+        assert!(
+            output.status.success(),
+            "a dead last target must not fail the hook: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // Nothing left to reach at all.
+        let output = run_attention_invocation(
+            &[
+                format!("http://localhost:{}/api/attention/mcode", closed_port()),
+                format!("http://localhost:{}/api/attention/mcode", closed_port()),
+            ],
+            payload,
+        );
+        assert!(
+            output.status.success(),
+            "a hook with no reachable instance must still exit 0: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// A port nothing is listening on, for the case above: bind to get a free
+    /// port, then release it.
+    fn closed_port() -> u16 {
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = taken.local_addr().unwrap().port();
+        drop(taken);
+        port
     }
 }
