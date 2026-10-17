@@ -252,47 +252,32 @@ which code path avoids the vulnerable behaviour.
 ### When no fixed release exists
 
 A vulnerability always fails, so the fix is normally a version bump. Sometimes
-there is no version to bump to, and the only remaining fix is to stop depending
-on the crate. `zip` is the worked example (issue #2438): it reached the tree
-only through `tauri-plugin-updater`'s default `zip` feature, and all three
-advisories (`RUSTSEC-2026-0367`, `RUSTSEC-2026-0368`, `RUSTSEC-2026-0369`) are
-fixed only in 9.x. As checked on 2026-10-17, every published release of that
-plugin still requires `zip = "4"` — `2.13.3`, `2.14.0` (the highest stable) and
-`3.0.0-alpha.3` (the highest pre-release) alike — so on the tree as it stood
-before this change, `cargo update -p zip --precise 9.0.4` (from `src-tauri/`)
-failed outright:
+there is no version to bump to — an upstream crate pins its vulnerable
+dependency below the fixed line — and the only remaining fix is to stop depending
+on it. That is still a fix rather than an exception: the crate leaves the
+tree.
 
-```
-error: failed to select a version for the requirement `zip = "^4"`
-candidate versions found which didn't match: 9.0.4
-required by package `tauri-plugin-updater v2.13.3`
-```
+Before dropping it, establish that the path which uses it is genuinely
+unreachable in what this repository ships, rather than assuming so.
+`cargo tree -i <crate>` shows what pulls it in; if it arrives through a default
+feature, the manifest shows whether that feature can be turned off. Turning a
+feature off is safe only when the behaviour it gates cannot be reached, and that
+evidence belongs with the decision rather than in this policy page — record it
+where the next person will find it: a comment at the manifest line, or a dated
+entry under [`docs/archive/`](../archive/README.md) when it is a one-off
+investigation. Cite the mapping or the versions you actually checked, so it can
+be re-derived instead of re-argued.
 
-After the change there is nothing left to update: `zip` is absent from
-`Cargo.lock`, and the same command reports that the package specification
-matched nothing. Run it from `src-tauri/`; from the repository root Cargo fails
-earlier, on the missing manifest.
+Then watch for the reverse case. If no upstream release ever lifts the floor, the
+crate stays out of the tree and a future advisory naming it is a false alarm
+rather than a regression to fix. Both halves of that reasoning — that no release
+raises the floor, and that the fixed line is what you think it is — are upstream
+state that changes without a commit here, so re-check the crate's version list
+and the advisory's own `solution` field before repeating either.
 
-Two claims there are upstream state, not repository fact, and both can change
-without any commit here: that no plugin release raises its `zip` floor, and that
-9.x is the fixed line. Re-check the crates.io version list and the advisory's
-`solution` field before repeating either.
-
-Dropping the feature was safe only because the feature was provably unused:
-Windows is the only platform with a published updater feed, and no key in that
-feed resolves to a ZIP. In the v1.4.1 `latest.json`, both `windows-x86_64` and
-`windows-x86_64-msi` point at the same asset, `Buildmesh_1.4.1_x64_en-US.msi`,
-and `windows-x86_64-nsis` points at the NSIS `Buildmesh_1.4.1_x64-setup.exe`.
-Both are handled by `extract_exe`, which never opens an archive. The feature
-also gates Linux AppImage `.tar.gz` extraction, which costs nothing here because
-the updater feed is Windows-only. **Establish that before removing a feature**,
-and record the reasoning where the next person will find it — a `Cargo.toml`
-comment, plus the note in `.github/rustsec-exceptions.json`. That reasoning is
-only as good as the feed it was checked against, so re-read the published
-`latest.json` before relying on it: a key pointing at a real `.zip` artifact
-would make the feature needed again. If no upstream release ever lifts the
-floor, the crate is staying out of the tree, and a future advisory for it is a
-false alarm rather than a regression to fix.
+Worked example, with the evidence for a specific set of versions and a specific
+published updater feed:
+[`zip` extraction advisories (issue #2438)](../archive/2026-10/rustsec-zip-extraction-2026-10.md).
 
 ## Workflow permissions
 
