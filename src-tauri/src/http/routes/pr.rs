@@ -445,12 +445,13 @@ mod tests {
 
         // The node works directly in the checkout and is therefore on `main`,
         // which is also the mesh Base Ref — nothing to compare.
-        let mesh = crate::db::create_mesh_with_base_ref(
+        let mesh = crate::db::create_mesh_with_base_ref_and_worktree(
             "route-same-branch",
             dir.path().to_str().expect("utf-8 path"),
             // No remote prefix: this repo has no configured remotes, and
             // `local_base_branch` only strips a prefix it can see as one.
             "main",
+            true,
         )
         .expect("create mesh");
         let node = crate::db::create_agent_node(

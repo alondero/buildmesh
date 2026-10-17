@@ -112,7 +112,9 @@ Help contains the advanced keyboard shortcuts.
    points at a repository already on disk; **Clone from GitHub** takes an
    `owner/repo` or github.com URL, clones it into a new subfolder under a parent
    folder you pick, and creates the Mesh from the clone in one step. Confirm that
-   Git can read the repository and that the base ref is the one you expect.
+   Git can read the repository and that the base ref is the one you expect. A
+   folder with no Git repository behind it is still a usable Mesh — it just starts
+   with **Use worktree** off, because there is no repository to cut worktrees from.
 4. Use the provider control in the sidebar to choose a harness, then create an
    Agent Node. `Ctrl+T` (`Cmd+T` on macOS) opens the new-node flow.
 5. Give the node a focused task. Watch the terminal and the node status; an
@@ -669,6 +671,11 @@ correct or safe by itself:
   Mesh health and Git status before retrying.
 - Use the Repository view to understand which branch and path belong to which
   node. Do not move a live worktree behind Buildmesh's back.
+
+One exception to that default: a Mesh over a folder with no Git repository starts
+with **Use worktree** off, and its nodes work in that folder directly, because
+there is no repository to cut a worktree from. Run `git init` in the folder, or
+turn the setting back on in Project Settings, to give it worktrees.
 
 New worktrees and the pre-spawn warm pool use `<mesh>/.worktrees/<name>`.
 Change the application default in **Settings → General → Worktree directory**,

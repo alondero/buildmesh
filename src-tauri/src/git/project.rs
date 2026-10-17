@@ -92,6 +92,34 @@ pub fn active_paths(nodes: &[crate::models::AgentNode]) -> Vec<String> {
     paths
 }
 
+/// Whether this folder has a repository that a Worktree Node could be cut
+/// from — the question a new mesh's worktree strategy is decided by.
+///
+/// Deliberately [`resolve`], the *same* gate `create_git_worktree` runs, and
+/// not a bare `.git` presence check: discovery means a subfolder of a
+/// repository still resolves (its worktrees come from the repository root),
+/// while a bare repository and a folder outside any working tree do not. Those
+/// are exactly the folders whose Worktree Node spawns would fail later, so
+/// answering with this predicate keeps the mesh's default honest instead of
+/// promising a worktree the provisioner cannot cut. An unreadable path resolves
+/// to `false` for the same reason: the conservative answer is the one that does
+/// not promise a worktree.
+///
+/// Call outside DB locks: `resolve` canonicalizes and reads git metadata.
+pub fn can_cut_worktrees(selected: &str) -> bool {
+    match resolve(selected) {
+        Ok(_) => true,
+        Err(reason) => {
+            tracing::debug!(
+                path = selected,
+                %reason,
+                "no repository to cut worktrees from; a mesh created here starts with use worktree off"
+            );
+            false
+        }
+    }
+}
+
 /// Exact open: discovering an ancestor would mistake an empty checkout husk
 /// inside the source repository for an already materialized worktree.
 pub fn is_materialized_checkout(path: &str) -> bool {
@@ -211,5 +239,39 @@ mod tests {
         assert!(resolve(td.path().to_str().unwrap())
             .unwrap_err()
             .contains("bare"));
+    }
+
+    /// The worktree-capability predicate a new mesh's strategy is decided by
+    /// must agree with what `create_git_worktree` accepts, so a mesh never
+    /// boots with **Use worktree** on for a folder whose spawns would fail.
+    #[test]
+    fn worktree_capability_tracks_repository_resolution() {
+        let td = TestDir::new("worktree-capability");
+        let root = td.path().to_str().unwrap();
+        // Fixture precondition: `resolve` walks *up* the tree, so a temp dir
+        // nested inside some unrelated repository would make the first two
+        // assertions pass for the wrong reason. Fail with that explanation
+        // instead of a confusing message mismatch.
+        assert!(
+            Repository::discover(td.path()).is_err(),
+            "fixture precondition: temp dir must not sit inside a git repository"
+        );
+        // A plain folder is not a project working directory.
+        assert!(!can_cut_worktrees(root));
+        init_repo_with_commit(td.path(), &[("file.txt", "content\n")]);
+        assert!(can_cut_worktrees(root));
+        // A subfolder resolves — worktrees are cut from the repository root —
+        // so it keeps worktrees on, matching the provisioner.
+        let sub = td.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert!(can_cut_worktrees(sub.to_str().unwrap()));
+        // A path that does not exist cannot be resolved.
+        assert!(!can_cut_worktrees(
+            td.path().join("missing").to_str().unwrap()
+        ));
+        // A bare repository has no working tree to work in.
+        let bare = TestDir::new("worktree-capability-bare");
+        Repository::init_bare(bare.path()).unwrap();
+        assert!(!can_cut_worktrees(bare.path().to_str().unwrap()));
     }
 }

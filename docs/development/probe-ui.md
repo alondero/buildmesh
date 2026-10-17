@@ -165,7 +165,18 @@ Two Mesh-lens destinations are split by job and must never merge again:
 (**Repository**) owns maintenance. Project Settings is the only home for
 identity/directory, agent runtime defaults, build and run, and worktree strategy
 (use-worktree, base ref, mode, warm pool, worktree directory) — the last group
-moved there from Repository. Repository keeps health/recovery, branch and
+moved there from Repository. Use-worktree is the group's gate, and a **new**
+Mesh's value for it is decided at creation, not by this form: every
+mesh-creation entrypoint in `commands/mesh` (`add_mesh`, `create_mesh`, and
+`clone_mesh_repo`) asks `git::project::can_cut_worktrees` — the same resolution
+`create_git_worktree` requires — and writes `meshes.use_worktree` accordingly,
+so a Mesh over a folder with no repository cannot promise a worktree it cannot
+cut. The detection is fs/git I/O and runs **before** the row is written,
+because `db::create_mesh*` holds the writer connection; a worktree-disabled row
+is created with `pre_spawn_pool_size = 0` (the v24 backfill's invariant). The
+form is still where a user changes it, and only ever shows the stored value.
+Repository keeps
+health/recovery, branch and
 worktree cleanup, and remote-tracking prune, and imports no `updateMesh*`
 wrapper. Both render labelled `ProbeSection` groups, both state that they act
 on the project root rather than a focused Agent Node's worktree, and Delete Mesh

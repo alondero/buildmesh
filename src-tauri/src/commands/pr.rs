@@ -3056,12 +3056,13 @@ mod tests {
                 .expect("checkout root branch");
         }
 
-        let mesh = crate::db::create_mesh_with_base_ref(
+        let mesh = crate::db::create_mesh_with_base_ref_and_worktree(
             "pr-source-mesh",
             root.to_str().unwrap(),
             base_ref,
+            true,
         )
-        .expect("create_mesh_with_base_ref");
+        .expect("create_mesh_with_base_ref_and_worktree");
         let node = crate::db::create_agent_node(
             mesh.id,
             "agent-1",

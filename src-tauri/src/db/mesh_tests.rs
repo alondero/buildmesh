@@ -25,13 +25,56 @@ mod tests {
         assert_eq!(default_mesh.base_ref, "origin/main");
 
         let clone_path = format!("C:/buildmesh-base-clone-{}", uuid::Uuid::new_v4());
-        let cloned =
-            crate::db::create_mesh_with_base_ref("Cloned", &clone_path, "origin/master").unwrap();
+        let cloned = crate::db::create_mesh_with_base_ref_and_worktree(
+            "Cloned",
+            &clone_path,
+            "origin/master",
+            true,
+        )
+        .unwrap();
         assert_eq!(cloned.base_ref, "origin/master");
         assert_eq!(
             crate::db::get_mesh_by_id(cloned.id).unwrap().base_ref,
             "origin/master"
         );
+    }
+
+    /// The worktree strategy the caller detected is the row's strategy: off
+    /// means `use_worktree = 0` *and* an empty warm pool (a mesh with no
+    /// worktrees has nothing to pre-warm — the invariant the v24 backfill
+    /// encodes). Both variants take the flag, so the base-ref overload cannot
+    /// drift back to a hard-coded default.
+    #[test]
+    fn create_mesh_persists_the_caller_s_worktree_strategy() {
+        let _db = crate::db::test_support::isolated();
+
+        let off_path = format!("C:/buildmesh-wt-off-{}", uuid::Uuid::new_v4());
+        let off = crate::db::create_mesh_with_worktree("No worktree", &off_path, false).unwrap();
+        assert!(!off.use_worktree);
+        assert_eq!(off.pre_spawn_pool_size, 0);
+
+        let on_path = format!("C:/buildmesh-wt-on-{}", uuid::Uuid::new_v4());
+        let on = crate::db::create_mesh_with_worktree("Worktree", &on_path, true).unwrap();
+        assert!(on.use_worktree);
+        // ADR 0020's pool-on default, written explicitly rather than left to
+        // the column default (a pre-v24 DB still carries `DEFAULT 0`).
+        assert_eq!(on.pre_spawn_pool_size, 1);
+
+        let clone_path = format!("C:/buildmesh-wt-clone-{}", uuid::Uuid::new_v4());
+        let cloned = crate::db::create_mesh_with_base_ref_and_worktree(
+            "Cloned",
+            &clone_path,
+            "origin/master",
+            false,
+        )
+        .unwrap();
+        assert_eq!(cloned.base_ref, "origin/master");
+        assert!(!cloned.use_worktree);
+        assert_eq!(cloned.pre_spawn_pool_size, 0);
+
+        // The settings form reads the re-read row, not the in-memory insert.
+        assert!(!crate::db::get_mesh_by_id(cloned.id).unwrap().use_worktree);
+        assert!(crate::db::get_mesh_by_id(on.id).unwrap().use_worktree);
     }
 
     #[test]

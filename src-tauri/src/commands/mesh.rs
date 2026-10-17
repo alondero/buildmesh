@@ -90,11 +90,10 @@ pub async fn add_mesh(app: tauri::AppHandle) -> Result<Mesh, String> {
         let name = folder_display_name(&folder_path, &path);
         tracing::debug!("mesh name: {}", name);
 
-        let mesh = db::create_mesh(&name, &path).map_err(|e| {
-            tracing::error!("create_mesh failed: {}", e);
-            e.to_string()
-        })?;
-        finalize_new_mesh(mesh, None, std::path::Path::new(&path))
+        // Same creation path as the desktop "New mesh" flow (no colour here:
+        // the pick-and-create shortcut has no colour picker), so the worktree
+        // default is decided by one rule rather than per entrypoint.
+        create_mesh_blocking(&name, &path, None)
     })
     .await
 }
@@ -102,6 +101,10 @@ pub async fn add_mesh(app: tauri::AppHandle) -> Result<Mesh, String> {
 /// Create a new mesh, optionally with a user-picked accent `color` (a
 /// `#rrggbb` hex string). `None` leaves the colour unset so the frontend
 /// falls back to the deterministic palette.
+///
+/// A folder with no repository behind it cannot back a Worktree Node, so its
+/// mesh boots with **Use worktree** off instead of failing every spawn in a
+/// worktree the provisioner cannot cut.
 #[command]
 pub async fn create_mesh(
     name: String,
@@ -109,10 +112,27 @@ pub async fn create_mesh(
     color: Option<String>,
 ) -> Result<Mesh, String> {
     crate::commands::run_blocking("create_mesh", move || {
-        let mesh = db::create_mesh(&name, &path).map_err(|e| e.to_string())?;
-        finalize_new_mesh(mesh, color.as_deref(), std::path::Path::new(&path))
+        create_mesh_blocking(&name, &path, color.as_deref())
     })
     .await
+}
+
+/// Sync core for [`create_mesh`], which [`add_mesh`] and the tests also use.
+/// The worktree default is decided here — the one place every open-folder
+/// creation passes through — and deliberately *not* inside `db::create_mesh*`,
+/// which holds the writer connection while the decision needs filesystem and
+/// git-metadata reads.
+pub(crate) fn create_mesh_blocking(
+    name: &str,
+    path: &str,
+    color: Option<&str>,
+) -> Result<Mesh, String> {
+    let use_worktree = crate::git::project::can_cut_worktrees(path);
+    let mesh = db::create_mesh_with_worktree(name, path, use_worktree).map_err(|e| {
+        tracing::error!("create_mesh failed for {path}: {e}");
+        e.to_string()
+    })?;
+    finalize_new_mesh(mesh, color, std::path::Path::new(path))
 }
 
 /// Wall-clock budget for the clone shell-out. Generous: a large repo over a
@@ -263,8 +283,19 @@ pub(crate) fn clone_target_into_mesh(
         })
         .unwrap_or_else(|_| "origin/main".to_string());
 
-    let mesh = db::create_mesh_with_base_ref(&target.repo, &dest_str, &base_ref)
-        .map_err(|e| e.to_string())?;
+    // The same repository detection as the open-folder path, so all three
+    // entrypoints share one rule for the worktree default. A successful clone
+    // always resolves here; asking rather than hard-coding `true` keeps a
+    // future non-clone caller of this function from silently reintroducing a
+    // second rule.
+    let use_worktree = crate::git::project::can_cut_worktrees(&dest_str);
+    let mesh = db::create_mesh_with_base_ref_and_worktree(
+        &target.repo,
+        &dest_str,
+        &base_ref,
+        use_worktree,
+    )
+    .map_err(|e| e.to_string())?;
     finalize_new_mesh(mesh, color.as_deref(), dest.as_path())
 }
 
@@ -498,6 +529,51 @@ pub(crate) fn get_default_provider_blocking(mesh_id: i64) -> rusqlite::Result<St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::env::test_helpers::{init_repo_with_commit, TestDir};
+
+    /// A mesh created over a folder with no repository behind it must not boot
+    /// with **Use worktree** on: the flag is read back by the Project Settings
+    /// form and by every spawn's worktree decision, and a Worktree Node there
+    /// could never have its directory cut. This is the whole behaviour — the
+    /// detection and the row it decides, through the real creation path.
+    #[test]
+    fn a_mesh_over_a_folder_without_a_repository_boots_with_worktrees_off() {
+        let _db = db::test_support::isolated();
+        let td = TestDir::new("mesh-create-plain-folder");
+        assert!(
+            git2::Repository::discover(td.path()).is_err(),
+            "fixture precondition: temp dir must not sit inside a git repository"
+        );
+
+        let mesh = create_mesh_blocking("plain", td.path().to_str().unwrap(), None)
+            .expect("create mesh over a plain folder");
+
+        assert!(
+            !mesh.use_worktree,
+            "a folder with no repository cannot back a Worktree Node"
+        );
+        // Nothing to pre-warm without worktrees — the v24 backfill's invariant.
+        assert_eq!(mesh.pre_spawn_pool_size, 0);
+        // The settings form reads the re-read row, so the persisted value is
+        // the one that has to be off, not just the returned struct.
+        assert!(!db::get_mesh_by_id(mesh.id).unwrap().use_worktree);
+    }
+
+    /// The other half of the same rule: a real repository keeps the worktree
+    /// default on and ADR 0020's pool-on default. Without this the detection
+    /// could silently disable worktrees everywhere.
+    #[test]
+    fn a_mesh_over_a_repository_boots_with_worktrees_on() {
+        let _db = db::test_support::isolated();
+        let td = TestDir::new("mesh-create-repo");
+        init_repo_with_commit(td.path(), &[("file.txt", "repository\n")]);
+
+        let mesh = create_mesh_blocking("repo", td.path().to_str().unwrap(), None)
+            .expect("create mesh over a repository");
+
+        assert!(mesh.use_worktree);
+        assert_eq!(mesh.pre_spawn_pool_size, 1);
+    }
 
     /// Deleting a mesh must retire the PTY fanout channel of *every* node the
     /// cascade removed, and it must learn those ids from the deleting statement
