@@ -84,10 +84,15 @@ API rather than `cargo search`: the search rank does not reliably surface the
 newest patch release.
 
 `[patch]` was rejected rather than tried. Forcing `zbus` 6 in place of the 5.19.0
-the plugin resolves against would be a build break, not a fix — zbus 6 is the
-release that absorbed these crates, so it is a different API surface — and the
-failure would surface only on Linux, the one platform no pull-request check
-compiles.
+the plugin resolves against would silence the three advisories without fixing
+anything: `[patch]` makes Cargo ignore the dependent's stated `^5.9` requirement,
+so what it produces is a combination the plugin's authors never built or tested
+against. `zbus` 6 is the release that absorbed these crates, so it is a different
+API surface, and a dependency pinned below its floor breaks rather than degrades.
+It would also fail loudly instead of quietly, since `verify.yml` compiles the
+Linux target on `ubuntu-latest` (see below) — but being caught is not a reason to
+do it. A gate that goes quiet because a transitive requirement was overridden is
+not a maintained dependency.
 
 ## Why the path is not in a released artifact
 
