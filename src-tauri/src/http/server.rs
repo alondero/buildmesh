@@ -19,6 +19,7 @@ use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::Role;
 use tokio_tungstenite::WebSocketStream;
 
+use crate::http::instances;
 use crate::http::request;
 use crate::http::router::{
     content_length, dispatch_matched, match_route, BodyPolicy, DispatchResult, ParsedRequest,
@@ -118,6 +119,10 @@ async fn apply_binding(port_offset: u16) {
             }
         };
     state::store_resolved_http_port(skeleton_port);
+    // The port is settled for the life of the process now, so this is where
+    // the instance becomes addressable by the siblings a harness hook might
+    // fan a callback out to (issue #2343).
+    instances::publish(skeleton_port);
     if let Some(app) = state::app_handle() {
         let _ = app.emit(
             "remote-access-port",

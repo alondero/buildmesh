@@ -116,7 +116,19 @@ pub(crate) fn powershell_literal(value: &str) -> String {
 /// Explicitly enter the owning Linux distribution for callbacks. Windows
 /// localhost may belong to a different Buildmesh instance under WSL NAT.
 pub(crate) fn windows_attention_command(url: Option<&str>) -> Option<String> {
-    windows_attention_command_impl(url, None)
+    windows_attention_command_impl(
+        url.map(|one| vec![one]).as_deref(),
+        HookShell::PropagateExit,
+    )
+}
+
+/// [`windows_attention_command`] for a caller that has no `$BUILDMESH_PORT` to
+/// expand and must name each Buildmesh instance instead. curl reads the piped
+/// body once and POSTs it to each URL, so one hook still reaches whichever
+/// instance owns the node (issue #2343).
+pub(crate) fn windows_attention_command_for_urls(urls: &[String]) -> Option<String> {
+    let targets: Vec<&str> = urls.iter().map(String::as_str).collect();
+    windows_attention_command_impl(Some(&targets), HookShell::Silent)
 }
 
 /// The one-line command a Windows-side hook shell runs to POST its stdin to
@@ -182,7 +194,7 @@ pub(crate) fn windows_hook_callback_command_for_runtime(url: &str, distro: Optio
     // A distribution name PowerShell would re-parse cannot travel unquoted
     // (`wsl.exe -d My Distro`), so that name keeps the encoded payload that
     // quotes it. Rare enough that its command-line cost is acceptable.
-    windows_attention_command_for_distro(distro, Some(url), Some("{}"))
+    windows_attention_command_for_distro(distro, Some(&[url]), HookShell::CodexJson)
 }
 
 /// Whether a value can appear unquoted in a PowerShell command line. WSL
@@ -196,33 +208,58 @@ fn is_shell_safe_token(value: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
-fn windows_attention_command_impl(url: Option<&str>, stdout_line: Option<&str>) -> Option<String> {
+fn windows_attention_command_impl(urls: Option<&[&str]>, hook: HookShell) -> Option<String> {
     if !is_wsl_host() {
         return None;
     }
     let distro = std::env::var("WSL_DISTRO_NAME").ok()?;
-    Some(windows_attention_command_for_distro(
-        &distro,
-        url,
-        stdout_line,
-    ))
+    Some(windows_attention_command_for_distro(&distro, urls, hook))
 }
 
+/// What the Windows-side hook shell does after the POST, per harness.
+///
+/// A callback observes lifecycle; failing to reach Buildmesh is not the
+/// harness's failure, so `CodexJson` and `Silent` suppress curl's stderr and
+/// exit 0. `PropagateExit` exists for the adapters that wrap this command in
+/// their own line (Kimi, Cursor, Agy) and own the exit contract there; it keeps
+/// their behaviour unchanged.
+#[derive(Clone, Copy, PartialEq)]
+enum HookShell {
+    /// Codex lifecycle callback: emit `{}` so the hook runner sees valid JSON.
+    CodexJson,
+    /// MiniMax callback: no stdout contract, and any number of baked targets
+    /// can be unreachable (issue #2343), so curl's status must not escape.
+    Silent,
+    /// Leave the exit code to the caller that wraps this command.
+    PropagateExit,
+}
+
+/// `None` keeps the `$BUILDMESH_*` expansion for harnesses that still have the
+/// environment; a list names the targets to bake instead (issue #2343). The
+/// script's single `--data-binary '@-'` reads the piped body once, and curl
+/// sends it to each URL that follows.
 fn windows_attention_command_for_distro(
     distro_name: &str,
-    url: Option<&str>,
-    stdout_line: Option<&str>,
+    urls: Option<&[&str]>,
+    hook: HookShell,
 ) -> String {
     let distro = powershell_literal(distro_name);
-    let url = url.map(powershell_literal).unwrap_or_else(|| "('http://localhost:' + $env:BUILDMESH_PORT + '/api/attention/' + $env:BUILDMESH_SESSION_ID)".into());
-    let stdout = stdout_line
-        .map(|line| format!("; [Console]::Out.WriteLine({})", powershell_literal(line)))
-        .unwrap_or_default();
-    let (stderr, exit) = if stdout_line.is_some() {
+    let url = urls
+        .map(|list| {
+            list.iter()
+                .map(|one| powershell_literal(one))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_else(|| "('http://localhost:' + $env:BUILDMESH_PORT + '/api/attention/' + $env:BUILDMESH_SESSION_ID)".into());
+    let stdout = match hook {
+        HookShell::CodexJson => "; [Console]::Out.WriteLine('{}')".to_string(),
+        HookShell::Silent | HookShell::PropagateExit => String::new(),
+    };
+    let (stderr, exit) = match hook {
         // Codex callbacks observe lifecycle and must not gate the harness.
-        (" 2>$null", "exit 0")
-    } else {
-        ("", "exit $LASTEXITCODE")
+        HookShell::CodexJson | HookShell::Silent => (" 2>$null", "exit 0"),
+        HookShell::PropagateExit => ("", "exit $LASTEXITCODE"),
     };
     let script = format!("$OutputEncoding = [System.Text.UTF8Encoding]::new($false); $input | & wsl.exe -d {distro} --exec curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary '@-' {url}{stderr}{stdout}; {exit}");
     format!(
@@ -346,7 +383,11 @@ mod command_tests {
     #[test]
     fn codex_windows_callback_script_fails_open_and_emits_json() {
         let url = "http://localhost:1992/api/attention/42";
-        let command = super::windows_attention_command_for_distro("Ubuntu", Some(url), Some("{}"));
+        let command = super::windows_attention_command_for_distro(
+            "Ubuntu",
+            Some(&[url]),
+            super::HookShell::CodexJson,
+        );
         let script = super::decode_powershell_command(&command).expect("decode PowerShell command");
 
         assert!(script.contains(" 2>$null"), "{script}");
@@ -358,11 +399,75 @@ mod command_tests {
         assert!(!script.contains("exit $LASTEXITCODE"), "{script}");
     }
 
+    /// Issue #2343 review: the MiniMax relay names every live instance, and any
+    /// of them can be gone by the time the hook runs. curl's status — and its
+    /// stderr — must not escape into mcode's hook runner, and the relay has no
+    /// stdout contract to emit.
+    #[test]
+    fn mcode_relay_swallows_every_target_failure() {
+        let urls = [
+            "http://localhost:1992/api/attention/mcode",
+            "http://localhost:2992/api/attention/mcode",
+        ];
+        let command = super::windows_attention_command_for_distro(
+            "Ubuntu",
+            Some(&urls),
+            super::HookShell::Silent,
+        );
+        let script = super::decode_powershell_command(&command).expect("decode PowerShell command");
+
+        for url in urls {
+            assert!(
+                script.contains(&format!("'{url}'")),
+                "missing {url}: {script}"
+            );
+        }
+        assert_eq!(
+            script.matches("--data-binary '@-'").count(),
+            1,
+            "one stdin read must serve every target: {script}"
+        );
+        assert!(
+            script.contains(" 2>$null"),
+            "stderr must not leak: {script}"
+        );
+        assert!(script.ends_with("; exit 0"), "{script}");
+        assert!(
+            !script.contains("exit $LASTEXITCODE"),
+            "a dead sibling must not fail the hook: {script}"
+        );
+        assert!(
+            !script.contains("[Console]::Out.WriteLine"),
+            "mcode's hook protocol has no stdout contract: {script}"
+        );
+    }
+
+    /// The adapters that wrap [`super::windows_attention_command`] own their own
+    /// exit contract, so the shared shape must keep passing curl's code through.
+    /// A change here would silently alter Kimi, Cursor and Agy.
+    #[test]
+    fn wrapping_adapters_keep_the_propagated_exit_code() {
+        let command = super::windows_attention_command_for_distro(
+            "Ubuntu",
+            None,
+            super::HookShell::PropagateExit,
+        );
+        let script = super::decode_powershell_command(&command).expect("decode PowerShell command");
+
+        assert!(script.contains("$env:BUILDMESH_PORT"), "{script}");
+        assert!(script.ends_with("; exit $LASTEXITCODE"), "{script}");
+        assert!(!script.contains(" 2>$null"), "{script}");
+    }
+
     #[cfg(windows)]
     #[test]
     fn codex_windows_callback_returns_success_after_wsl_failure() {
         let url = "http://localhost:1992/api/attention/42";
-        let command = super::windows_attention_command_for_distro("Ubuntu", Some(url), Some("{}"));
+        let command = super::windows_attention_command_for_distro(
+            "Ubuntu",
+            Some(&[url]),
+            super::HookShell::CodexJson,
+        );
         let script = super::decode_powershell_command(&command).expect("decode PowerShell command");
         let script = format!(
             "function wsl.exe {{ Write-Error 'simulated callback failure'; $global:LASTEXITCODE = 22 }}; {script}"

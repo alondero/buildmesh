@@ -5,6 +5,9 @@
 //!   guard, body read, WebSocket upgrade.
 //! - [`router`] — the route table and [`router::dispatch`].
 //! - [`state`] — app handle, snapshots, ports, listeners, interface cache.
+//! - [`instances`] — the machine-global registry of the ports every running
+//!   instance has bound, so a harness that has to bake its callback URL can
+//!   address all of them (issue #2343).
 //!
 //! Route handlers take [`router::ParsedRequest`] and return [`response::Response`];
 //! they never touch `BufStream` / [`MaybeTls`].
@@ -16,6 +19,7 @@ pub mod events;
 // under `cargo test --lib http::fuzz`, never in the shipped binary.
 #[cfg(test)]
 mod fuzz;
+pub mod instances;
 pub mod interface_rank;
 pub mod interface_watcher;
 pub mod pairing;
