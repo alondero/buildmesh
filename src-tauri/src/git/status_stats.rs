@@ -91,6 +91,10 @@ fn content_counts(repo: &Repository, delta: &DiffDelta<'_>) -> Option<(usize, us
         return None;
     }
     let mut file = std::fs::File::open(absolute).ok()?;
+    stream_counts(old_bytes, &mut file)
+}
+
+fn stream_counts(old_bytes: &[u8], file: &mut impl Read) -> Option<(usize, usize)> {
     let mut buffer = [0; 64 * 1024];
     let mut length = 0;
     let mut appended_lines = 0;
@@ -151,4 +155,83 @@ fn binary(bytes: &[u8]) -> bool {
 fn lines(bytes: &[u8]) -> usize {
     bytes.iter().filter(|&&byte| byte == b'\n').count()
         + usize::from(!bytes.is_empty() && !bytes.ends_with(b"\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stream_counts;
+    use std::io::{self, Cursor, Read};
+
+    #[test]
+    fn counts_complete_line_appends_and_truncations() {
+        for (old, current, expected) in [
+            (b"".as_slice(), b"".as_slice(), (0, 0)),
+            (b"".as_slice(), b"one\nlast".as_slice(), (2, 0)),
+            (b"one\n".as_slice(), b"one\n".as_slice(), (0, 0)),
+            (b"one\n".as_slice(), b"one\ntwo\nlast".as_slice(), (2, 0)),
+            (b"one\ntwo\nlast".as_slice(), b"one\n".as_slice(), (0, 2)),
+            (b"one\nlast".as_slice(), b"".as_slice(), (0, 2)),
+        ] {
+            assert_eq!(
+                stream_counts(old, &mut Cursor::new(current)),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn interior_edits_and_partial_line_prefixes_request_native_fallback() {
+        for (old, current) in [
+            (b"one\nold\n".as_slice(), b"one\nnew\n".as_slice()),
+            (b"one".as_slice(), b"one\ntwo\n".as_slice()),
+            (b"one\ntwo\n".as_slice(), b"one\ntwo".as_slice()),
+        ] {
+            assert_eq!(stream_counts(old, &mut Cursor::new(current)), None);
+        }
+    }
+
+    #[test]
+    fn counts_across_buffer_boundaries_and_short_reads() {
+        let mut before = vec![b'x'; 65534];
+        before.push(b'\n');
+        let mut after = before.clone();
+        after.extend_from_slice(b"tail\nlast");
+        for split in [1, 65535, 65536] {
+            let mut reader = Cursor::new(&after[..split]).chain(Cursor::new(&after[split..]));
+            assert_eq!(stream_counts(&before, &mut reader), Some((2, 0)));
+        }
+        assert_eq!(
+            stream_counts(&after, &mut Cursor::new(&before)),
+            Some((0, 2))
+        );
+    }
+
+    #[test]
+    fn binary_scan_ends_before_byte_8000_even_with_short_reads() {
+        for (nul_at, additions, deletions) in [(7999, 0, 0), (8000, 1, 1)] {
+            let mut bytes = vec![b'x'; 65536];
+            bytes[nul_at] = 0;
+            bytes.push(b'\n');
+            for split in [1, 7999, 8000, 65535] {
+                let mut reader = Cursor::new(&bytes[..split]).chain(Cursor::new(&bytes[split..]));
+                assert_eq!(stream_counts(&[], &mut reader), Some((additions, 0)));
+            }
+            assert_eq!(
+                stream_counts(&bytes, &mut io::empty()),
+                Some((0, deletions))
+            );
+        }
+    }
+
+    #[test]
+    fn read_error_requests_native_fallback_instead_of_partial_counts() {
+        struct FailedRead;
+        impl Read for FailedRead {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("injected read failure"))
+            }
+        }
+        let mut reader = Cursor::new(b"one\n").chain(FailedRead);
+        assert_eq!(stream_counts(&[], &mut reader), None);
+    }
 }
