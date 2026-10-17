@@ -187,6 +187,22 @@ export function isAuthError(e: unknown): boolean {
   return e instanceof ApiError && (e.status === 401 || e.status === 403);
 }
 
+/**
+ * Whether a failure means "the desktop could not answer right now".
+ *
+ * Issue #2330 added `503` as the transport answer for *unavailable
+ * persistence*: the desktop is reachable and authenticated, but it could not
+ * read authoritative state. A caller must keep its last-known data for this
+ * and retry — never reconcile against it as if the answer were authoritative,
+ * and never treat it as a revoked credential.
+ *
+ * `status === 0` is a transport failure (the request never completed), which
+ * shares the same "keep what you have" consequence.
+ */
+export function isUnavailableError(e: unknown): boolean {
+  return e instanceof ApiError && (e.status === 0 || e.status >= 500);
+}
+
 /** Exchange a single-use desktop invitation. The credential stays in a cookie. */
 export async function login(token: string): Promise<boolean> {
   return exchangeSession("/api/pair", token);

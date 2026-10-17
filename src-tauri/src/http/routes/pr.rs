@@ -7,6 +7,7 @@
 //! (create-PR) endpoint already lives in this module and is unchanged.
 
 use crate::db;
+use crate::http::read_status::read_response;
 use crate::http::response::Response;
 use crate::http::router::ParsedRequest;
 
@@ -237,16 +238,28 @@ pub async fn create(req: &ParsedRequest) -> Response {
         }
     };
 
-    if db::get_mesh_by_id(mesh_id).is_err() {
-        return Response::json_error("404 Not Found", "Mesh not found");
+    // Issue #2330: `.is_err()` reported every failure as a deleted mesh. A failed
+    // read must not invite the client to reconcile against a deletion that
+    // never happened — only a successful query matching no row is a 404.
+    let mesh_lookup =
+        crate::read_outcome::ReadOutcome::<crate::models::Mesh>::absent_or_unavailable(
+            db::get_mesh_by_id(mesh_id),
+        );
+    if let Some(failure) = mesh_lookup.failure() {
+        return read_response(&failure, "Mesh not found");
     }
 
     // Ownership validation at the HTTP boundary, before any work is done,
     // so a node id belonging to a different mesh gets a 403 rather than a
     // PR minted against this mesh's repository.
-    match db::get_agent_node_by_id(parsed.node_id) {
-        Err(_) => return Response::json_error("404 Not Found", "Agent node not found"),
-        Ok(node) if node.mesh_id != mesh_id => {
+    let node_lookup =
+        crate::read_outcome::ReadOutcome::<crate::models::AgentNode>::absent_or_unavailable(
+            db::get_agent_node_by_id(parsed.node_id),
+        );
+    match node_lookup.as_present() {
+        // A read that could not be performed is unavailability, not a missing
+        // node — a 403 here would also log the mobile user out.
+        Some(node) if node.mesh_id != mesh_id => {
             return Response::json_error(
                 "403 Forbidden",
                 &format!(
@@ -255,7 +268,11 @@ pub async fn create(req: &ParsedRequest) -> Response {
                 ),
             );
         }
-        Ok(_) => {}
+        _ => {
+            if let Some(failure) = node_lookup.failure() {
+                return read_response(&failure, "Agent node not found");
+            }
+        }
     }
 
     match crate::commands::pr::create_pr_for_node_source_http(

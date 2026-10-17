@@ -226,16 +226,31 @@ fn parse_session_file(
 /// Issue #1519: the mesh row is loaded by id (indexed primary key — path
 /// strings suffer drive-letter casing and slash discrepancies on Windows)
 /// to resolve the effective worktree container once; every scanner below
-/// receives it instead of re-deriving layout. A missing row degrades to
+/// receives it instead of re-deriving layout. A *missing* row degrades to
 /// legacy-only matching rather than failing the whole scan.
-pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<ArchivedAgentNode>, String> {
+///
+/// Issue #2330: the tracked-node read below is authoritative and no longer
+/// degrades. It used to `unwrap_or_default()`, so a failed read produced an
+/// empty `tracked_ids` set — every session already owned by a live node became
+/// eligible for import (creating duplicates of work that is running), and
+/// every durable archived row disappeared from the Archive list. Disk scanning
+/// cannot substitute for ownership persistence, so an unreadable ownership row
+/// is now an error.
+pub fn discover(
+    mesh_id: i64,
+    mesh_path: &str,
+) -> Result<Vec<ArchivedAgentNode>, crate::read_outcome::Unavailable> {
     let claude_dir = env::claude_dir();
     let projects_dir = claude_dir.join("projects");
 
     // One read serves both roles: session ids already owned by a live node
     // (which must not be re-surfaced as adoptable discoveries) and the
-    // archived rows the Archive list has to keep showing.
-    let mesh_nodes = db::list_agent_nodes_by_mesh(mesh_id).unwrap_or_default();
+    // archived rows the Archive list has to keep showing. This read is
+    // authoritative — it is the only record of who owns what — so it must
+    // succeed before any disk scan runs (issue #2330).
+    let mesh_nodes: Vec<crate::models::AgentNode> =
+        crate::read_outcome::ReadOutcome::ok_or_unavailable(db::list_agent_nodes_by_mesh(mesh_id))
+            .into_result()?;
     let tracked_ids: std::collections::HashSet<String> = mesh_nodes
         .iter()
         .filter(|n| n.status != crate::models::SessionStatus::Archived)
@@ -262,7 +277,7 @@ pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<ArchivedAgentNode>,
 
     sessions.extend(
         discover_claude_sessions_in(&projects_dir, mesh_path, &effective, &tracked_ids)
-            .map_err(|e| e.to_string())?,
+            .map_err(|e| crate::read_outcome::Unavailable::Read(e.to_string()))?,
     );
 
     // Cursor keeps the same user/assistant JSONL shape but nests each session
@@ -2613,5 +2628,67 @@ mod tests {
             durable_archived_entries(&mut [], &db::list_agent_nodes_by_mesh(mesh.id).unwrap());
 
         assert!(listed.is_empty());
+    }
+
+    // --- Unavailable ownership must not read as "nothing to import" (#2330) ---
+
+    /// Issue #2330, headline acceptance check: a failed ownership read returns
+    /// no importable result at all.
+    ///
+    /// The pre-fix code was `db::list_agent_nodes_by_mesh(mesh_id)
+    /// .unwrap_or_default()`, so a failed read produced an empty tracked-node
+    /// set. Two real consequences followed, and both are silent:
+    ///
+    /// 1. every session already owned by a live node became *eligible* for
+    ///    import, so the user could import a duplicate of work that is running;
+    /// 2. every durable archived row vanished from the Archive list.
+    ///
+    /// Disk scanning cannot substitute for ownership persistence, so the read
+    /// must be authoritative. This drives the real `discover` against a private
+    /// database whose `agent_nodes` table has been dropped.
+    #[test]
+    fn an_unreadable_ownership_row_returns_no_importable_result() {
+        let _db = db::test_support::isolated();
+        let mesh = db::create_mesh("demo", "/repos/demo").unwrap();
+        // A real row exists, so a pass cannot be explained by an empty mesh.
+        seed_archived_node("brave-fox", Some("11111111-1111-1111-1111-111111111111"));
+        // Now break the query `discover` depends on.
+        db::write_conn()
+            .execute_batch("DROP TABLE agent_nodes;")
+            .unwrap();
+
+        let outcome = super::discover(mesh.id, "/repos/demo");
+
+        match outcome {
+            Err(failure) => {
+                // The fault, not "there is nothing here".
+                assert!(
+                    matches!(failure, crate::read_outcome::Unavailable::Read(_)),
+                    "a failed ownership read must be unavailability, got: {failure:?}"
+                );
+            }
+            Ok(nodes) => panic!(
+                "an unreadable ownership row must not return importable entries; got {}",
+                nodes.len()
+            ),
+        }
+    }
+
+    /// The companion: a *successful* read of an empty mesh is still a success,
+    /// and an empty Archive list is a legitimate answer. This is what makes
+    /// the failing case above a real distinction rather than "discovery always
+    /// errors".
+    #[test]
+    fn a_readable_mesh_with_no_rows_still_returns_an_empty_list() {
+        let _db = db::test_support::isolated();
+        let mesh = db::create_mesh("empty", "/repos/empty").unwrap();
+
+        let outcome = super::discover(mesh.id, "/repos/empty");
+
+        assert!(
+            outcome.is_ok(),
+            "an empty mesh is a successful read, not a fault: {:?}",
+            outcome.err()
+        );
     }
 }

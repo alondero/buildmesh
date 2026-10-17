@@ -1372,29 +1372,142 @@ describe("NodeList", () => {
     expect(onOffline).not.toHaveBeenCalled();
   });
 
-  it.each([404, 500])(
-    "keeps the normal offline state for a non-auth %s response",
-    async (status) => {
-      mockApi([], { status });
-      const onOffline = vi.fn();
-      const onAuthFailed = vi.fn();
+  it("keeps the normal offline state for a non-auth 404 response", async () => {
+    // A 404 is a definite answer from a reachable desktop, but it is not a
+    // transport failure either, so it keeps the ordinary offline handling.
+    mockApi([], { status: 404 });
+    const onOffline = vi.fn();
+    const onAuthFailed = vi.fn();
 
+    render(
+      <NodeList
+        onOpenNode={noop}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={onOffline}
+        onAuthFailed={onAuthFailed}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(onOffline).toHaveBeenCalled();
+    });
+    expect(onAuthFailed).not.toHaveBeenCalled();
+  });
+
+  it("does not claim the desktop is unreachable for a 5xx it answered", async () => {
+    // Issue #2330: a 5xx means the desktop answered but could not read its
+    // state. The full-screen "can't reach the desktop" overlay would be a
+    // false claim — and it would cover the last-known list, which is exactly
+    // the data the client must keep. The stale notice says what is true.
+    mockApi([], { status: 500 });
+    const onOffline = vi.fn();
+    const onAuthFailed = vi.fn();
+
+    render(
+      <NodeList
+        onOpenNode={noop}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={onOffline}
+        onAuthFailed={onAuthFailed}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("stale-notice")).not.toBeNull();
+    });
+    expect(onOffline).not.toHaveBeenCalled();
+    expect(onAuthFailed).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Issue #2330, client half: a `503` means the desktop answered but could not
+   * read authoritative state. It is not a verdict about the workspace, so the
+   * visible snapshot must survive it — and because the desktop demonstrably
+   * answered, a stale offline overlay has to clear when the next read succeeds.
+   *
+   * Pre-fix this could not be observed at all, because the server answered
+   * `200 []` on a failed read: the client received a *success*, replaced a
+   * populated workspace with an empty one, and there was no error to react to.
+   * Both halves of the fix are asserted here — the poll that fails, and the
+   * one after it that succeeds.
+   */
+  it("keeps the last-known list through a 503 and converges on the next successful poll", async () => {
+    vi.useFakeTimers();
+    let nodeCalls = 0;
+    const fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("/api/nodes")) {
+        nodeCalls += 1;
+        // The WS-fallback poll fires on mount and every 5s; make the *second*
+        // one fail so the list is populated, then degraded, then restored.
+        if (nodeCalls === 2) {
+          return {
+            ok: false,
+            status: 503,
+            json: async () => ({ error: "Failed to read authoritative state" }),
+          };
+        }
+        return { ok: true, status: 200, json: async () => [makeNode(7, "idle")] };
+      }
+      if (url.includes("/api/meshes")) return { ok: true, status: 200, json: async () => [mesh] };
+      if (url.includes("/api/providers")) return { ok: true, status: 200, json: async () => [] };
+      if (url.includes("/api/ws-ticket"))
+        return { ok: true, status: 200, json: async () => ({ ticket: "t" }) };
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetch);
+    const onReachable = vi.fn();
+    const onOffline = vi.fn();
+
+    try {
       render(
         <NodeList
           onOpenNode={noop}
           onOpenAgentNodes={noop}
           onOpenIssues={noop}
           onOffline={onOffline}
-          onAuthFailed={onAuthFailed}
+          onReachable={onReachable}
+          onAuthFailed={noop}
         />,
       );
-
-      await waitFor(() => {
-        expect(onOffline).toHaveBeenCalled();
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
       });
-      expect(onAuthFailed).not.toHaveBeenCalled();
-    },
-  );
+      // The first successful poll is what put the node on screen.
+      expect(screen.queryByTestId("node-7")).not.toBeNull();
+
+      // The failing poll must not remove it, and must not claim the desktop
+      // is unreachable — it answered; it just could not read its state.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      expect(nodeCalls).toBeGreaterThanOrEqual(2);
+      expect(
+        screen.queryByTestId("node-7"),
+        "a 503 must not blank a list the client already has",
+      ).not.toBeNull();
+      expect(onOffline).not.toHaveBeenCalled();
+      expect(screen.queryByTestId("stale-notice")).not.toBeNull();
+
+      // The next successful poll converges and reports reachability, so the
+      // shell can retire an offline overlay raised while reads were failing.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      expect(nodeCalls).toBeGreaterThanOrEqual(3);
+      expect(screen.queryByTestId("node-7")).not.toBeNull();
+      expect(onReachable).toHaveBeenCalled();
+      expect(
+        screen.queryByTestId("stale-notice"),
+        "the stale notice must retire once a read succeeds",
+      ).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it("routes an auth failure during the 5-second poll to onAuthFailed", async () => {
     vi.useFakeTimers();

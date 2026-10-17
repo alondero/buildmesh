@@ -433,6 +433,15 @@ export default function App() {
             if (activeRecoveryVersion !== recoveryVersionRef.current) return;
             setOffline(true);
           }}
+          // Issue #2330: a `503` means the desktop answered but could not read
+          // storage. The list keeps its last-known data through that, so the
+          // next successful poll must be able to clear an offline overlay that
+          // was raised while the read was failing — otherwise the overlay
+          // outlives the fault and hides data that is already fresh.
+          onReachable={() => {
+            if (activeRecoveryVersion !== recoveryVersionRef.current) return;
+            setOffline(false);
+          }}
           onAuthFailed={handleAuthFailedForActiveScreen}
         />
       )}

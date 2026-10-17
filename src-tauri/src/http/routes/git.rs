@@ -14,22 +14,43 @@
 //! `Repository::open` (e.g. WSL UNC path with paused VM).
 
 use crate::db;
+use crate::http::read_status::{read_response, serialized_or_500};
 use crate::http::response::Response;
 use crate::http::router::ParsedRequest;
+use crate::read_outcome::ReadOutcome;
+
+/// Resolve the node a per-agent git route is about, or the response to answer
+/// with instead.
+///
+/// Issue #2330: three routes here used `if db::get_agent_node_by_id(agent_id)
+/// .is_err() { 404 }`, so a failed read was reported as a deleted agent. The
+/// Changes view would then drop the node's diff history on a transient fault.
+/// Only a successful query matching no row is absence.
+fn require_agent(agent_id: i64) -> Result<crate::models::AgentNode, Response> {
+    let outcome = ReadOutcome::<crate::models::AgentNode>::absent_or_unavailable(
+        db::get_agent_node_by_id(agent_id),
+    );
+    match outcome {
+        ReadOutcome::Present(node) => Ok(node),
+        _ => Err(read_response(
+            &outcome
+                .failure()
+                .expect("a non-Present outcome has a failure"),
+            "Agent not found",
+        )),
+    }
+}
 
 /// `GET /api/agents/{id}/git/status` — the file-by-file tree of everything the
 /// node changed since it branched (ADR 0005), so it agrees with the per-file
 /// `/diff` endpoint below. Empty list for a node with no changes since base.
 pub async fn status(req: &ParsedRequest) -> Response {
     let agent_id = req.id0();
-    if db::get_agent_node_by_id(agent_id).is_err() {
-        return Response::json_error("404 Not Found", "Agent not found");
+    if let Err(response) = require_agent(agent_id) {
+        return response;
     }
     match crate::commands::diff::node_changed_files(agent_id).await {
-        Ok(status) => {
-            let body = serde_json::to_string(&status).unwrap_or_else(|_| "[]".to_string());
-            Response::json("200 OK", body)
-        }
+        Ok(status) => serialized_or_500("200 OK", &status),
         Err(e) => Response::json_error("500 Internal Server Error", &e),
     }
 }
@@ -39,14 +60,11 @@ pub async fn status(req: &ParsedRequest) -> Response {
 /// header and the tree agree.
 pub async fn summary(req: &ParsedRequest) -> Response {
     let agent_id = req.id0();
-    if db::get_agent_node_by_id(agent_id).is_err() {
-        return Response::json_error("404 Not Found", "Agent not found");
+    if let Err(response) = require_agent(agent_id) {
+        return response;
     }
     match crate::commands::diff::node_changed_summary(agent_id).await {
-        Ok(summary) => {
-            let body = serde_json::to_string(&summary).unwrap_or_else(|_| "{}".to_string());
-            Response::json("200 OK", body)
-        }
+        Ok(summary) => serialized_or_500("200 OK", &summary),
         Err(e) => Response::json_error("500 Internal Server Error", &e),
     }
 }
@@ -54,12 +72,12 @@ pub async fn summary(req: &ParsedRequest) -> Response {
 /// `GET /api/agents/{id}/git/branch` — current branch name.
 pub async fn branch(req: &ParsedRequest) -> Response {
     let agent_id = req.id0();
+    // A node row that cannot be read is unavailability, not absence (#2330).
+    if let Err(response) = require_agent(agent_id) {
+        return response;
+    }
     match crate::commands::pr::get_current_branch(agent_id).await {
-        Ok(name) => {
-            let body = serde_json::to_string(&serde_json::json!({ "branch": name }))
-                .unwrap_or_else(|_| "{}".to_string());
-            Response::json("200 OK", body)
-        }
+        Ok(name) => serialized_or_500("200 OK", &serde_json::json!({ "branch": name })),
         Err(e) => Response::json_error("404 Not Found", &e),
     }
 }
@@ -84,14 +102,11 @@ pub async fn diff(req: &ParsedRequest) -> Response {
     {
         return Response::json_error("400 Bad Request", "Invalid path");
     }
-    if db::get_agent_node_by_id(agent_id).is_err() {
-        return Response::json_error("404 Not Found", "Agent not found");
+    if let Err(response) = require_agent(agent_id) {
+        return response;
     }
     match crate::commands::diff::diff_node_file_against_base(agent_id, file_path).await {
-        Ok(diff) => {
-            let body = serde_json::to_string(&diff).unwrap_or_else(|_| "{}".to_string());
-            Response::json("200 OK", body)
-        }
+        Ok(diff) => serialized_or_500("200 OK", &diff),
         Err(e) => Response::json_error("500 Internal Server Error", &e),
     }
 }

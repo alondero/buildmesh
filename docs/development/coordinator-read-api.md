@@ -93,6 +93,15 @@ be polled on the order of seconds.
 curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:1992/nodes
 ```
 
+**An empty array means an empty fleet — never an unreadable one (issue #2330).**
+`200 []` is a successful query that matched zero rows. A scan that could not
+query the database answers **503**, which is retryable and says nothing about how
+many nodes exist. A Coordinator must branch on the status and keep its previous
+model on a 503; scheduling from a `200 []` produced by a storage fault is how an
+agent gets told the fleet is empty while it is busy. (Before #2330 the handler
+degraded a failed read to `[]` on purpose, "so a scan does not 500" — the 500 it
+avoided was the cheaper mistake.)
+
 Response shape (one element, abridged):
 
 ```json
@@ -183,6 +192,11 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
   provider, no session, file missing/unreadable, JSONL shape change) is a
   **200** carrying the same `{"status":"unavailable",...}` envelope as
   `GET /nodes` — so the consumer always gets a structured answer.
+- **Content unavailability is not persistence unavailability (issue #2330).**
+  A transcript the desktop cannot read is a `200` `unavailable` envelope. A node
+  row the desktop cannot *query* is a **503** — the request is retryable and
+  says nothing about whether the node exists. A Coordinator must never treat
+  either as "this node is gone".
 - Content is **raw, not pre-summarised**. The Coordinator is itself an LLM;
   handing it the real material is cheaper and less lossy than spending
   Buildmesh's tokens on a summary. Buildmesh's own LLM is reserved for the

@@ -13,6 +13,7 @@
 //! with a `Deprecation: true` response header.
 
 use crate::db;
+use crate::http::read_status::{read_response, serialized_or_500};
 use crate::http::request;
 use crate::http::response::Response;
 use crate::http::router::ParsedRequest;
@@ -29,27 +30,35 @@ pub async fn discover(req: &ParsedRequest) -> Response {
     // + disk walk) in one `run_blocking` so the worker only hops once.
     //
     // `run_blocking` is generic over `T: Send + 'static`, so the closure
-    // returns `Result<Option<Vec<ArchivedAgentNode>>, String>` — `None`
-    // means "mesh not found" (route → 404), `Some(_)` is the discovery
-    // payload (route → 200). The route distinguishes 404 vs 500 without
-    // string sentinels or a second offload.
-    match crate::commands::run_blocking("http_discover_agent_nodes", move || {
-        let mesh = match db::get_mesh_by_id(mesh_id) {
-            Ok(m) => m,
-            Err(_) => return Ok(None),
-        };
-        crate::services::agent_node_discovery::discover(mesh_id, &mesh.path)
-            .map(Some)
-            .map_err(|e| e.to_string())
-    })
+    // returns `Result<Vec<ArchivedAgentNode>, Unavailable>` where `Absent`
+    // means "mesh not found" (route → 404) and `Read(..)` covers both a failed
+    // ownership read and a failed disk scan (route → 503). Issue #2330: the
+    // mesh lookup used `Err(_) => Ok(None)`, so a broken query answered 404 —
+    // telling the client a mesh had been deleted when it still existed.
+    let mesh = match crate::commands::run_blocking_typed::<_, crate::read_outcome::Unavailable, _>(
+        "http_discover_mesh_lookup",
+        move || {
+            crate::read_outcome::ReadOutcome::absent_or_unavailable(db::get_mesh_by_id(mesh_id))
+                .into_result()
+        },
+    )
     .await
     {
-        Ok(Some(nodes)) => {
-            let body = serde_json::to_string(&nodes).unwrap_or_else(|_| "[]".to_string());
-            Response::json("200 OK", body)
-        }
-        Ok(None) => Response::json_error("404 Not Found", "Mesh not found"),
-        Err(e) => Response::json_error("500 Internal Server Error", &e),
+        Ok(mesh) => mesh,
+        Err(failure) => return read_response(&failure, "Mesh not found"),
+    };
+
+    let mesh_id = mesh.id;
+    let mesh_path = mesh.path;
+    let discovered = crate::commands::run_blocking_typed::<_, crate::read_outcome::Unavailable, _>(
+        "http_discover_agent_nodes",
+        move || crate::services::agent_node_discovery::discover(mesh_id, &mesh_path),
+    )
+    .await;
+
+    match discovered {
+        Ok(nodes) => serialized_or_500("200 OK", &nodes),
+        Err(failure) => read_response(&failure, "Mesh not found"),
     }
 }
 
@@ -196,17 +205,19 @@ pub async fn import_and_resume(req: &ParsedRequest) -> Response {
     {
         // Don't surface as 500 — the node row exists and could still be
         // used; instead return the node + the spawn error in one payload
-        // so the mobile UI can decide.
-        let body = serde_json::to_string(&serde_json::json!({
-            "node": node,
-            "spawn_error": e,
-        }))
-        .unwrap_or_else(|_| "{}".to_string());
-        return Response::json("207 Multi-Status", body);
+        // so the mobile UI can decide. A body that cannot be encoded is a
+        // real 500: there is no honest multi-status body to send (issue #2330
+        // removed the `unwrap_or_else(|_| "{}")` that invented one).
+        return serialized_or_500(
+            "207 Multi-Status",
+            &serde_json::json!({
+                "node": node,
+                "spawn_error": e,
+            }),
+        );
     }
 
-    let body = serde_json::to_string(&node).unwrap_or_else(|_| "{}".to_string());
-    Response::json("200 OK", body)
+    serialized_or_500("200 OK", &node)
 }
 
 #[cfg(test)]

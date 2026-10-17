@@ -11,6 +11,10 @@
 //!
 //! Route handlers take [`router::ParsedRequest`] and return [`response::Response`];
 //! they never touch `BufStream` / [`MaybeTls`].
+//!
+//! [`read_status`] is the one transport policy for a failed authoritative
+//! persistence read (issue #2330): absent → 404, unavailable → 503, so no
+//! route can answer a storage fault with a successful empty body.
 
 pub mod assets;
 pub mod auth;
@@ -24,6 +28,7 @@ pub mod interface_rank;
 pub mod interface_watcher;
 pub mod pairing;
 pub mod rate_limit;
+pub mod read_status;
 pub mod request;
 pub mod response;
 pub mod revocation;

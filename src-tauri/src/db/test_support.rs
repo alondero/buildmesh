@@ -147,6 +147,25 @@ pub fn installed_node_id_range() -> Option<(i64, i64)> {
     INSTALLED.with(|slot| slot.borrow().as_ref().map(|i| i.node_id_range))
 }
 
+/// A movable name for this thread's installed database, if it has one.
+///
+/// Unlike [`claim_depth`] this does **not** take a depth reference, so the
+/// caller does not own an uninstall. It exists for the blocking-offload seam
+/// in [`crate::blocking`]: a route handler's work runs on a pool thread, where
+/// a `thread_local!` install is invisible, so the handle has to be captured on
+/// the submitting thread and adopted inside the closure.
+pub fn installed_handle() -> Option<IsolatedDbHandle> {
+    INSTALLED.with(|slot| {
+        let slot = slot.borrow();
+        let installed = slot.as_ref()?;
+        Some(IsolatedDbHandle {
+            db: installed.db,
+            files: Arc::clone(&installed.files),
+            node_id_range: installed.node_id_range,
+        })
+    })
+}
+
 /// A private, in-memory database URI unique to this process and install.
 ///
 /// The shared-cache form is what [`super::init`] uses for `:memory:`: SQLite

@@ -6,6 +6,7 @@ import {
   Provider,
   createNode,
   isAuthError,
+  isUnavailableError,
   newOperationKey,
   listCircuitRuns,
   listMeshes,
@@ -44,6 +45,15 @@ type Props = {
   onOpenIssues: (mesh: Mesh) => void;
   onOpenPulls?: (mesh: Mesh) => void;
   onOffline: () => void;
+  /**
+   * A poll succeeded, so the desktop answered a request again.
+   *
+   * Issue #2330: a `503` leaves the visible snapshot alone (an unavailable
+   * read is not a verdict about the workspace), but the phone is demonstrably
+   * reachable again — without this, the offline overlay raised during the
+   * fault would outlive the fault and hide data that is now fresh.
+   */
+  onReachable?: () => void;
   onAuthFailed: () => void;
 };
 
@@ -79,6 +89,7 @@ export default function NodeList({
   onOpenIssues,
   onOpenPulls,
   onOffline,
+  onReachable = () => {},
   onAuthFailed,
 }: Props) {
   const [query, setQuery] = useState("");
@@ -97,6 +108,16 @@ export default function NodeList({
   const [creating, setCreating] = useState<number | null>(null);
   const [meshActions, setMeshActions] = useState<Mesh | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * The desktop answered but could not read its own state (issue #2330).
+   *
+   * The list below is the last successful read, not a live one. Showing that
+   * as a plain list would be a lie, and replacing it with an empty list would
+   * be a worse one — so the data stays and this notice says why it may be
+   * stale. Distinct from the offline overlay, which means the desktop could
+   * not be reached at all.
+   */
+  const [staleNotice, setStaleNotice] = useState(false);
   /**
    * A node quick-create committed but could not start (issue #2331). Held
    * rather than navigated to, because `onOpenNode` unmounts this screen and
@@ -160,15 +181,35 @@ export default function NodeList({
         setMeshes(m);
         setNodes(n);
         if (runs !== null) setCircuitRuns(new Map(runs.map((run) => [run.node_id, run])));
+        // The read succeeded, so the snapshot is live again — the stale notice
+        // has done its job (issue #2330).
+        setStaleNotice(false);
+        // Issue #2330: a `503` (the desktop is up but could not read
+        // authoritative state) is not a verdict about the workspace, so the
+        // list is left untouched — but the desktop has demonstrably answered
+        // again, so any stale offline overlay must clear. Convergence is the
+        // second half of the contract: keep the last-known data through the
+        // failure, then reconcile as soon as a read succeeds.
+        onReachable();
       } catch (e) {
         if (!isLatest() || !mountedRef.current || revision !== refreshRevision.current) return;
         // A 401 means the token was revoked/expired — bounce to Connect
         // instead of claiming the desktop is offline.
-        if (isAuthError(e)) onAuthFailed();
-        else onOffline();
+        if (isAuthError(e)) {
+          onAuthFailed();
+        } else if (isUnavailableError(e)) {
+          // Issue #2330: the desktop *answered* — it just could not read
+          // authoritative state. That is not "can't reach the desktop", and
+          // the full-screen offline overlay would be a false claim that also
+          // hides the data we deliberately kept. Show a notice that says the
+          // snapshot may be stale, and leave the list on screen.
+          setStaleNotice(true);
+        } else {
+          onOffline();
+        }
       }
     },
-    [onOffline, onAuthFailed],
+    [onOffline, onAuthFailed, onReachable],
   );
 
   // 5s poll is the WS-fallback safety net — `useWsEvents` below drives
@@ -889,6 +930,29 @@ export default function NodeList({
             onOpenPulls(m);
           } : undefined}
         />
+      )}
+
+      {staleNotice && (
+        <div className="toast" data-testid="stale-notice">
+          <span style={{ flex: 1 }}>
+            The desktop could not read its current state. Showing the last known list.
+          </span>
+          <button
+            onClick={() => setStaleNotice(false)}
+            aria-label="Dismiss"
+            style={{
+              background: "none",
+              border: "none",
+              color: "var(--text-faint)",
+              cursor: "pointer",
+              fontSize: 18,
+              lineHeight: 1,
+              padding: 0,
+            }}
+          >
+            ×
+          </button>
+        </div>
       )}
 
       {error && (

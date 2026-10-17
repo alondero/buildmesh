@@ -23,7 +23,12 @@ pub async fn discover_agent_nodes(
     // and opens each session's JSONL transcript looking for the first real
     // user message — unbounded filesystem I/O (slow on WSL UNC paths) that
     // must not park a Tauri async worker while the Archive tab loads.
-    agent_node_discovery::discover(mesh_id, &mesh_path)
+    //
+    // The IPC boundary is a `String`, so the typed read outcome is rendered
+    // here rather than collapsed inside the service: a desktop caller that
+    // cannot read ownership gets an error, never an empty Archive list
+    // (issue #2330).
+    agent_node_discovery::discover(mesh_id, &mesh_path).map_err(|failure| failure.to_string())
 }
 
 /// Import a discovered session as a new agent node with the correct worktree/path settings,

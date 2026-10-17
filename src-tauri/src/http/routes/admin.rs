@@ -12,9 +12,11 @@
 //! (`commands::devices`); both back onto the shared `db` + `revocation` layer.
 
 use crate::db;
+use crate::http::read_status::{read_response, serialized};
 use crate::http::response::Response;
 use crate::http::revocation;
 use crate::http::router::ParsedRequest;
+use crate::read_outcome::{ReadOutcome, Unavailable};
 
 /// Best-effort human label for a paired device, derived from its `User-Agent`
 /// at pairing (e.g. "Safari on iPhone"). Pure so it's unit-testable without a
@@ -67,27 +69,31 @@ pub fn device_label_from_user_agent(ua: Option<&str>) -> Option<String> {
 }
 
 /// `GET /admin/devices` → JSON array of `DeviceSession` (never the token hash).
-/// Degrades to `[]` on a read error rather than 500ing, mirroring the
-/// coordinator read routes.
 ///
-/// Issue #1389 — the sync SQLite read used to run on whatever thread the
-/// dispatcher called us from (the tokio worker that just accepted the
-/// connection). Convert to `async` + `run_blocking` so the read moves to
-/// Tauri's blocking pool, matching the shape `http/routes/meshes.rs` and
-/// `nodes.rs` adopted in PR #1388.
+/// Issue #2330: this degraded a read error to `[]` "rather than 500ing",
+/// mirroring the coordinator read routes. That mirroring is exactly what the
+/// issue removes: a paired-device list that reads empty is indistinguishable
+/// from one where every device was revoked, so the admin panel would show "no
+/// devices" and invite a re-pair of a machine that is still paired. A failed
+/// read is a `503`; an empty list is a successful query that matched no row.
 pub async fn list(_req: &ParsedRequest) -> Response {
-    Response::json("200 OK", list_devices_json().await)
+    match list_devices_json().await {
+        Ok(response) => response,
+        // A list read is never "absent" — this message only names the
+        // resource the list is *of*, for the (unreachable) absence branch.
+        Err(failure) => read_response(&failure, "No devices found"),
+    }
 }
 
-pub async fn list_devices_json() -> String {
-    match crate::commands::run_blocking("http_list_devices", || {
-        db::list_device_sessions().map_err(|e| e.to_string())
-    })
-    .await
-    {
-        Ok(devices) => serde_json::to_string(&devices).unwrap_or_else(|_| "[]".to_string()),
-        Err(_) => "[]".to_string(),
-    }
+pub async fn list_devices_json() -> Result<Response, Unavailable> {
+    let devices: Vec<crate::models::DeviceSession> =
+        crate::commands::run_blocking_typed::<Vec<crate::models::DeviceSession>, Unavailable, _>(
+            "http_list_devices",
+            || ReadOutcome::ok_or_unavailable(db::list_device_sessions()).into_result(),
+        )
+        .await?;
+
+    serialized("200 OK", &devices).map_err(Unavailable::Read)
 }
 
 /// `POST /admin/devices/{id}/revoke` — delete the device row and immediately

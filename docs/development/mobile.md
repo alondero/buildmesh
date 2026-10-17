@@ -328,6 +328,20 @@ that is what drops the hung-fetch-during-mobile-suspend response minutes after a
 one landed. Consumers also keep their own mounted/revision check; `isLatest()` is about
 polling order, not about being mounted.
 
+**A failed read is not an empty one (issue #2330).** The desktop answers `503` when it
+could not read authoritative state (see
+[remote access](remote-access.md#lanvpn-exposure--self-signed-tls)). That response must
+leave the visible snapshot untouched and retry on the next tick — it says nothing about
+how many nodes exist, so reconciling against it would blank a populated Work list. Only
+a `200` may replace the snapshot. Concretely: `NodeList`'s `catch` routes `401`/`403`
+to `onAuthFailed`, a `5xx` to the **stale notice** (the desktop answered — it just could
+not read its own state — so the full-screen "can't reach the desktop" overlay would be a
+false claim *and* would cover the data we kept), and anything else to `onOffline`; none of
+them clears `nodes`. The next successful poll calls `onReachable`, which retires an
+offline overlay raised while reads were failing, and drops the stale notice. Convergence
+is part of the contract — an overlay that outlives the fault hides data that is already
+fresh.
+
 **When the chain runs.** Each tick is a chained `setTimeout` armed only after the
 previous refresh settled, so iterations are `intervalMs` apart rather than overlapping.
 `visibilitychange` and `online` fire exactly one immediate refresh each and then

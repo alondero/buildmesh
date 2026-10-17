@@ -5,23 +5,38 @@ use crate::agent::process::{ProcessRegistryApi, PROCESS_REGISTRY};
 use tauri::Emitter;
 
 use crate::db;
+use crate::http::read_status::{read_response, serialized, serialized_or_500};
 use crate::http::response::Response;
 use crate::http::router::ParsedRequest;
 use crate::http::state;
+use crate::read_outcome::{ReadOutcome, Unavailable};
 
 pub async fn list(_req: &ParsedRequest) -> Response {
-    Response::json("200 OK", list_json().await)
+    match list_json().await {
+        Ok(response) => response,
+        // A list read is never "absent" — this message only names the
+        // resource the list is *of*, for the (unreachable) absence branch.
+        Err(failure) => read_response(&failure, "No nodes found"),
+    }
 }
 
-pub async fn list_json() -> String {
-    match crate::commands::run_blocking("http_list_nodes", || {
-        db::list_agent_nodes().map_err(|e| e.to_string())
-    })
-    .await
-    {
-        Ok(nodes) => serde_json::to_string(&nodes).unwrap_or_else(|_| "[]".to_string()),
-        Err(_) => "[]".to_string(),
-    }
+/// The authoritative agent-node inventory as a JSON body.
+///
+/// Issue #2330: this ended in `Err(_) => "[]"`, and a failed query was
+/// indistinguishable from an empty `agent_nodes` table — so a phone polling a
+/// populated Work list during a storage fault was handed `200 []` and showed an
+/// empty workspace. `200 []` now means "a successful query found zero rows",
+/// and a failed read is a `503` the client can retry rather than a success it
+/// must believe.
+pub async fn list_json() -> Result<Response, Unavailable> {
+    let nodes: Vec<crate::models::AgentNode> =
+        crate::commands::run_blocking_typed::<Vec<crate::models::AgentNode>, Unavailable, _>(
+            "http_list_nodes",
+            || ReadOutcome::ok_or_unavailable(db::list_agent_nodes()).into_result(),
+        )
+        .await?;
+
+    serialized("200 OK", &nodes).map_err(Unavailable::Read)
 }
 
 #[derive(serde::Deserialize, ts_rs::TS)]
@@ -211,7 +226,6 @@ async fn run_create(
 
     match outcome {
         Ok(outcome) => {
-            let (status, body) = outcome_response(&outcome);
             // A committed node must be discoverable by other clients even when
             // its start failed (#2331) — the old handler emitted this event
             // only after a *complete* success, so a partially-created node was
@@ -224,7 +238,7 @@ async fn run_create(
                     },
                 );
             }
-            Response::json(status, body)
+            outcome_response(&outcome)
         }
         Err(rejection) => map_create_rejection(rejection),
     }
@@ -251,9 +265,11 @@ fn map_create_rejection(rejection: crate::services::create_operation::CreateReje
 /// is *not* the contract: 202 and 207 are never produced for a running agent,
 /// so a client that only reads the status still cannot mistake a
 /// committed-but-unstarted node for a running one.
-fn outcome_response(
-    outcome: &crate::services::create_operation::CreateNodeOutcome,
-) -> (&'static str, String) {
+///
+/// Issue #2330: a body that cannot be encoded used to become `"{}"` under the
+/// outcome's own success status — a 200/202/207 carrying no node at all. There
+/// is no honest body to substitute, so the failure is reported as a 500.
+fn outcome_response(outcome: &crate::services::create_operation::CreateNodeOutcome) -> Response {
     use crate::services::create_operation::CreateNodeOutcome;
 
     let status = match outcome {
@@ -265,10 +281,7 @@ fn outcome_response(
         // failed" signal (see the import-and-resume route).
         CreateNodeOutcome::StartFailed { .. } => "207 Multi-Status",
     };
-    (
-        status,
-        serde_json::to_string(outcome).unwrap_or_else(|_| "{}".to_string()),
-    )
+    serialized_or_500(status, outcome)
 }
 
 pub async fn create(req: &ParsedRequest) -> Response {
@@ -348,15 +361,22 @@ pub async fn post_input(req: &ParsedRequest) -> Response {
     // it, a stale tap on a since-deleted node would 503 (PTY not running)
     // and the user would have to guess whether the agent died or the request
     // was malformed. Pin the failure shape.
-    let node_exists = crate::commands::run_blocking("http_input_node_lookup", move || {
-        db::get_agent_node_by_id(node_id)
-            .map(|_| ())
-            .map_err(|e| e.to_string())
-    })
-    .await
-    .is_ok();
-    if !node_exists {
-        return Response::json_error("404 Not Found", "Node not found");
+    //
+    // Issue #2330: this was `.is_ok()`, so *every* failure answered 404 — a
+    // dropped or broken query read as "the node is gone" and would invite the
+    // client to reconcile against a deletion that never happened. Only a
+    // successful query matching no row is absence.
+    let node: Result<crate::models::AgentNode, Unavailable> =
+        crate::commands::run_blocking_typed::<_, Unavailable, _>(
+            "http_input_node_lookup",
+            move || {
+                ReadOutcome::absent_or_unavailable(db::get_agent_node_by_id(node_id)).into_result()
+            },
+        )
+        .await;
+    match node {
+        Ok(_) => {}
+        Err(failure) => return read_response(&failure, "Node not found"),
     }
 
     // Write the bytes to the PTY. `write_mobile_input` runs the attention
@@ -669,8 +689,8 @@ mod tests {
                 operation_key: Some("op-1".into()),
                 reason: "App not ready".into(),
             })
-            .0,
-            "202 Accepted"
+            .status_code(),
+            202
         );
         assert_eq!(
             super::outcome_response(&CreateNodeOutcome::StartFailed {
@@ -678,8 +698,8 @@ mod tests {
                 operation_key: Some("op-1".into()),
                 start_error: "boom".into(),
             })
-            .0,
-            "207 Multi-Status"
+            .status_code(),
+            207
         );
     }
 
@@ -735,5 +755,86 @@ mod tests {
             text.contains("Node not found"),
             "expected 'Node not found' envelope; got: {text:?}"
         );
+    }
+
+    // --- Issue #2330: the node inventory must not invent an empty workspace ---
+
+    async fn list_nodes() -> Response {
+        list(&ParsedRequest::test_get("/api/nodes")).await
+    }
+
+    /// The acceptance check in both directions: a successful query against an
+    /// empty database is `200 []`, because "there are no nodes" is a real
+    /// observation a client is entitled to act on.
+    #[tokio::test]
+    async fn an_empty_database_still_returns_a_successful_empty_array() {
+        let _db = crate::db::test_support::isolated();
+        let resp = list_nodes().await;
+        assert_eq!(resp.status_code(), 200);
+        assert_eq!(String::from_utf8_lossy(resp.body()), "[]");
+    }
+
+    /// The production failure this issue is about: a phone polling a populated
+    /// Work list while a query fails. Pre-fix the handler answered `200 []`, so
+    /// the client replaced a populated workspace with an empty one and a
+    /// Coordinator would have scheduled against an invented empty fleet.
+    #[tokio::test]
+    async fn a_failed_query_is_503_and_never_an_empty_success() {
+        let _db = crate::db::test_support::isolated();
+        let mesh = crate::db::create_mesh("demo", "/tmp/bm-2330-nodes").unwrap();
+        crate::db::create_agent_node(
+            mesh.id,
+            "agent-1",
+            "/tmp/bm-2330-nodes",
+            "main",
+            crate::models::EnvType::Windows,
+            "terminal",
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        // Break the query the route depends on. The isolated database is
+        // carried onto the blocking pool by `blocking::adopt_test_db`, so this
+        // is the test's own database and no other test can observe it.
+        crate::db::write_conn()
+            .execute_batch("DROP TABLE agent_nodes;")
+            .unwrap();
+
+        let resp = list_nodes().await;
+        assert_eq!(
+            resp.status_code(),
+            503,
+            "an unavailable read is retryable, never an empty success"
+        );
+        let text = String::from_utf8_lossy(resp.body());
+        assert!(
+            !text.contains("[]"),
+            "the failure must not read as an empty workspace: {text:?}"
+        );
+    }
+
+    /// The triage route's node lookup. Pre-fix `.is_ok()` turned every failure
+    /// — including a failed query — into a 404, which told the client a live
+    /// node had been deleted.
+    #[tokio::test]
+    async fn a_failed_node_lookup_is_503_not_a_false_404() {
+        let _db = crate::db::test_support::isolated();
+        crate::db::write_conn()
+            .execute_batch("DROP TABLE agent_nodes;")
+            .unwrap();
+
+        let resp = post_input(&req(br#"{"seq":"y\r"}"#, 0)).await;
+        assert_ne!(
+            resp.status_code(),
+            404,
+            "an unreadable node row must not be reported as a deleted node"
+        );
+        assert_eq!(resp.status_code(), 503);
     }
 }

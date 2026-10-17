@@ -13,59 +13,70 @@
 
 use crate::coordinator::{drive, enrichment, node_digest};
 use crate::db;
+use crate::http::read_status::{read_response, serialized};
 use crate::http::response::Response;
 use crate::http::router::ParsedRequest;
+use crate::read_outcome::{ReadOutcome, Unavailable};
 
 /// `GET /nodes` → JSON array of layered Node Digests across every Mesh. Each
 /// digest is the always-available spine plus a transcript-derived rich layer;
 /// for a provider with no readable transcript the enrichment is explicitly
-/// flagged `unsupported` (degrade-and-flag, ADR-0008 §3). Returns `[]` rather
-/// than erroring if the DB read fails, so a Coordinator scan degrades to "no
-/// nodes" instead of a 500.
+/// flagged `unsupported` (degrade-and-flag, ADR-0008 §3).
+///
+/// Issue #2330: this used to answer `200 []` when the read failed, so a
+/// Coordinator scanning during a storage fault believed the fleet was empty
+/// and could schedule against that. A failed read is now a `503`: an
+/// authoritative inventory may not be invented. Empty stays reserved for a
+/// successful query that matched zero rows.
 pub async fn list(_req: &ParsedRequest) -> Response {
-    Response::json("200 OK", list_nodes_json())
+    match list_nodes_json() {
+        Ok(response) => response,
+        // A list read is never "absent" — this message only names the
+        // resource the list is *of*, for the (unreachable) absence branch.
+        Err(failure) => read_response(&failure, "No nodes found"),
+    }
 }
 
-pub fn list_nodes_json() -> String {
-    match db::list_coordinator_node_rows() {
-        Ok(rows) => {
-            let digests: Vec<_> = rows
-                .iter()
-                .map(|(node, mesh, changed)| {
-                    let tail = enrichment::digest_enrichment(node);
-                    let mut digest = node_digest::layered(node, mesh, *changed, tail.as_ref());
-                    digest.observed_session_telemetry =
-                        enrichment::observed_session_telemetry(node);
-                    digest
-                })
-                .collect();
-            serde_json::to_string(&digests).unwrap_or_else(|_| "[]".to_string())
-        }
-        Err(_) => "[]".to_string(),
-    }
+pub fn list_nodes_json() -> Result<Response, Unavailable> {
+    let rows = ReadOutcome::ok_or_unavailable(db::list_coordinator_node_rows()).into_result()?;
+    let digests: Vec<_> = rows
+        .iter()
+        .map(|(node, mesh, changed)| {
+            let tail = enrichment::digest_enrichment(node);
+            let mut digest = node_digest::layered(node, mesh, *changed, tail.as_ref());
+            digest.observed_session_telemetry = enrichment::observed_session_telemetry(node);
+            digest
+        })
+        .collect();
+    serialized("200 OK", &digests).map_err(Unavailable::Read)
 }
 
 /// `GET /nodes/{id}/log?tail=N` → the raw recent transcript turns for one node.
-/// Returns `None` (→ 404 in the dispatcher) only when the node id is unknown;
-/// every other degrade path (unsupported provider, no session,
-/// missing/unreadable/shape-changed transcript) is a `200` carrying a typed
-/// `{"status":"unavailable",...}` envelope, so the Coordinator always gets a
-/// structured answer.
+/// Only a node id that no row matches is a `404`; a read that *could not be
+/// performed* is a `503`. The content degrade paths (unsupported provider, no
+/// session, missing/unreadable/shape-changed transcript) are a `200` carrying a
+/// typed `{"status":"unavailable",...}` envelope, so the Coordinator gets a
+/// structured answer — and that envelope stays distinct from a node whose
+/// persistence was unavailable.
 pub async fn log(req: &ParsedRequest) -> Response {
     let tail = req.tail_param();
     match log_json(req.id0(), tail) {
-        Some(body) => Response::json("200 OK", body),
-        None => Response::empty("404 Not Found"),
+        Ok(response) => response,
+        Err(failure) => read_response(&failure, "Unknown node"),
     }
 }
 
-pub fn log_json(node_id: i64, tail: usize) -> Option<String> {
-    let node = db::get_agent_node_by_id(node_id).ok()?;
+/// Read one node and render its transcript tail.
+///
+/// Issue #2330: `db::get_agent_node_by_id(node_id).ok()?` turned *every* lookup
+/// failure into `None`, and the dispatcher mapped `None` to 404. So a broken
+/// query was indistinguishable from a deleted node — and a Coordinator acting
+/// on that 404 would drop a live node from its model.
+pub fn log_json(node_id: i64, tail: usize) -> Result<Response, Unavailable> {
+    let node: crate::models::AgentNode =
+        ReadOutcome::absent_or_unavailable(db::get_agent_node_by_id(node_id)).into_result()?;
     let result = enrichment::transcript_tail(&node, tail);
-    Some(serde_json::to_string(&result).unwrap_or_else(|_| {
-        // A serialization failure still answers structurally rather than 500ing.
-        "{\"status\":\"unavailable\",\"reason\":\"unreadable\"}".to_string()
-    }))
+    serialized("200 OK", &result).map_err(Unavailable::Read)
 }
 
 /// The drive request body: `{"prompt": "...", "idempotency_key": "..."}`. Strict
@@ -167,13 +178,22 @@ pub async fn prompt(req: &ParsedRequest) -> Response {
             Response::json("200 OK", body)
         }
         Err(drive::DriveError::NotLive) => {
-            if db::get_agent_node_by_id(node_id).is_err() {
-                Response::json_error("404 Not Found", "Unknown node")
-            } else {
-                Response::json_error(
+            // Issue #2330: `is_err()` answered 404 for every failure. A node
+            // that exists but whose row could not be read must not be reported
+            // as deleted — the Coordinator would drop it from its model.
+            let lookup =
+                ReadOutcome::<crate::models::AgentNode>::absent_or_unavailable(db::get_agent_node_by_id(node_id));
+            match lookup {
+                ReadOutcome::Present(_) => Response::json_error(
                     "409 Conflict",
                     "Node is not live — only a node with a running agent can be driven",
-                )
+                ),
+                _ => read_response(
+                    &lookup
+                        .failure()
+                        .expect("a non-Present outcome has a failure"),
+                    "Unknown node",
+                ),
             }
         }
         Err(drive::DriveError::WriteFailed(e)) => {
@@ -276,5 +296,115 @@ mod tests {
     fn accepts_a_normal_key_at_the_length_boundary() {
         let max = "x".repeat(MAX_IDEMPOTENCY_KEY_LEN);
         assert_eq!(validate_drive_request("hi", &max).unwrap(), max);
+    }
+
+    // --- Issue #2330: a Coordinator must not schedule against an invented fleet ---
+
+    /// A successful query against an empty database stays a successful empty
+    /// array: "no agents" is a legitimate answer a Coordinator may act on.
+    #[test]
+    fn an_empty_database_is_still_a_successful_empty_array() {
+        let _db = crate::db::test_support::isolated();
+        let resp = super::list_nodes_json().expect("an empty read is a success");
+        assert_eq!(resp.status, "200 OK");
+        assert_eq!(String::from_utf8_lossy(resp.body()), "[]");
+    }
+
+    /// The pre-fix handler documented itself as degrading a failed read to "no
+    /// nodes" so a Coordinator scan would not 500. The consequence was worse
+    /// than the 500 it avoided: the Coordinator believed the fleet was empty
+    /// and could make scheduling decisions from that.
+    #[test]
+    fn a_failed_query_is_unavailable_not_an_empty_fleet() {
+        let _db = crate::db::test_support::isolated();
+        crate::db::write_conn()
+            .execute_batch("DROP TABLE agent_nodes;")
+            .unwrap();
+
+        match super::list_nodes_json() {
+            Ok(resp) => panic!(
+                "a failed inventory read must not answer a successful empty fleet: {} {:?}",
+                resp.status,
+                String::from_utf8_lossy(resp.body())
+            ),
+            Err(failure) => assert_eq!(
+                crate::http::read_status::read_status(&failure),
+                "503 Service Unavailable"
+            ),
+        }
+    }
+
+    /// `log_json` was `.ok()?`, so *every* lookup failure became a 404 and the
+    /// dispatcher answered "not found". A Coordinator acting on that would drop
+    /// a live node from its model.
+    #[test]
+    fn an_unreadable_node_is_not_reported_as_a_deleted_one() {
+        let _db = crate::db::test_support::isolated();
+        crate::db::write_conn()
+            .execute_batch("DROP TABLE agent_nodes;")
+            .unwrap();
+
+        match super::log_json(1, 5) {
+            Ok(resp) => panic!(
+                "an unreadable node must not answer as a transcript: {} {:?}",
+                resp.status,
+                String::from_utf8_lossy(resp.body())
+            ),
+            Err(failure) => assert_eq!(
+                crate::http::read_status::read_status(&failure),
+                "503 Service Unavailable"
+            ),
+        }
+    }
+
+    /// A genuinely unknown node id *is* absence — the one case that is a 404.
+    #[test]
+    fn an_unknown_node_is_still_a_404() {
+        let _db = crate::db::test_support::isolated();
+        match super::log_json(987_654_321, 5) {
+            Ok(_) => panic!("an unknown node id must not resolve to a transcript"),
+            Err(failure) => assert_eq!(
+                crate::http::read_status::read_status(&failure),
+                "404 Not Found"
+            ),
+        }
+    }
+
+    /// The degrade-and-flag contract of ADR-0008 §3 survives: an unsupported
+    /// transcript is a `200` carrying a typed envelope, and must stay distinct
+    /// from a node whose persistence was unavailable. A Terminal node has no
+    /// readable transcript at all, so it exercises exactly that path.
+    #[test]
+    fn an_unreadable_transcript_stays_a_200_unavailable_envelope() {
+        let _db = crate::db::test_support::isolated();
+        let mesh = crate::db::create_mesh("demo", "/tmp/bm-2330-coord").unwrap();
+        let node = crate::db::create_agent_node(
+            mesh.id,
+            "agent-1",
+            "/tmp/bm-2330-coord",
+            "main",
+            crate::models::EnvType::Windows,
+            "terminal",
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let resp = super::log_json(node.id, 5).expect("the node resolved, so this is not absence");
+        assert_eq!(
+            resp.status, "200 OK",
+            "a missing transcript is content degradation, not a storage fault"
+        );
+        let body = String::from_utf8_lossy(resp.body());
+        assert!(
+            body.contains("unavailable"),
+            "expected the typed unavailable envelope; got: {body:?}"
+        );
     }
 }
