@@ -1613,7 +1613,7 @@ fn discarded_prompt_text_is_not_carried_into_the_next_prompt() {
     let clears: [Vec<u8>; 3] = [b"\x03".to_vec(), vec![0x7f; typed], {
         // Type past the empty prompt, then back over both runs.
         let mut typed_more = b"more".to_vec();
-        typed_more.extend(std::iter::repeat(0x7f).take(typed + "more".len()));
+        typed_more.extend(std::iter::repeat_n(0x7f, typed + "more".len()));
         typed_more
     }];
     for clear in &clears {

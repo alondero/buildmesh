@@ -258,7 +258,7 @@ fn windows_interop_cmd_launch_accounts_for_the_outer_powershell_script() {
 fn cmd_budget_accounts_for_windows_quote_and_backslash_escaping() {
     let recipe = SpawnRecipe {
         binary: "codex",
-        base_args: vec![std::iter::repeat("\\\"").take(2_200).collect::<String>()],
+        base_args: vec!["\\\"".repeat(2_200)],
         trailing_args: vec![],
         windows_shell: WindowsShell::Cmd,
     };

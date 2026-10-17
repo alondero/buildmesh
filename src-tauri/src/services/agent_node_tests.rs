@@ -1305,8 +1305,8 @@ fn create_blocking_propagates_use_worktree_override_on_idle_path() {
     // `create_with_source_pr_fork` writes `use_worktree` only if
     // `session_name` is non-empty AND the override is not None.
     // `Some(false)` writes `false` (Root Node shape — `worktree_name = None`).
-    assert_eq!(
-        node.use_worktree, false,
+    assert!(
+        !node.use_worktree,
         "use_worktree_override=Some(false) must persist as use_worktree=false on the row"
     );
     assert_eq!(
@@ -1341,8 +1341,8 @@ fn create_blocking_propagates_use_worktree_override_on_pending_path() {
     )
     .expect("create_blocking on pending path must succeed");
 
-    assert_eq!(
-        node.use_worktree, false,
+    assert!(
+        !node.use_worktree,
         "use_worktree_override=Some(false) must persist as use_worktree=false \
              on the Pending row too — Finding #1's regression"
     );
