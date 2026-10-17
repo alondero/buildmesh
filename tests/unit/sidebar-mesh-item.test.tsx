@@ -21,8 +21,8 @@ import { MeshItem } from '../../src/components/Sidebar/MeshItem';
 import { needsAttention } from '../../src/lib/notifications';
 import { reportMeshSync, useMeshSyncCompletion } from '../../src/lib/meshSyncFeedback';
 import { useToastStore } from '../../src/stores/toastStore';
+import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import type { Mesh } from '../../src/stores/meshStore';
-import type { AgentNode } from '../../src/stores/agentNodeStore';
 import type { SpawnOption } from '../../src/lib/groups';
 import type { NodeActivityCluster } from '../../src/lib/nodeActivities';
 
@@ -195,6 +195,10 @@ describe('MeshItem', () => {
     // Also the published-completion store: a test that leaves a completion
     // behind would make the next test's row clear a badge it never lit.
     useMeshSyncCompletion.setState({ completions: {} });
+    // The row reads its own `openNodeId` bit off this store, so a test that
+    // leaves an active agent behind would start the next test's row already
+    // expanded.
+    useAgentNodeStore.setState({ nodesById: {}, nodeIds: [], activeNodeId: null });
   });
 
   // RTL doesn't auto-unmount in this vitest setup, so the previous
@@ -985,6 +989,78 @@ describe('MeshItem', () => {
       expect(screen.queryByText('node-hot')).toBeNull();
       rerenderWith({ nodeClusters: [loneCluster({ ...hot, id: 12, name: 'node-hotter' })] });
       expect(screen.queryByText('node-hotter')).toBeNull();
+    });
+  });
+
+  // Opening a mesh or one of its agents expands its sidebar row, so the
+  // agent the user just opened is visible in the list they open it from. The
+  // row owns the open-agent bit (`openNodeId` above) rather than taking a
+  // prop from `Sidebar`; the tests drive it through the store.
+  describe('revealing the row for the open mesh and agent', () => {
+    it('expands when the mesh becomes the selected one', () => {
+      const { rerenderWith } = renderMeshItem({ nodeClusters: [loneCluster(makeNode({ status: 'idle' }))] });
+      expect(screen.queryByText('node-a')).toBeNull();
+
+      rerenderWith({ isSelected: true });
+      expect(screen.getByText('node-a')).toBeTruthy();
+    });
+
+    it('expands when one of its agents becomes the active one', async () => {
+      const node = makeNode({ status: 'idle' });
+      renderMeshItem({ nodeClusters: [loneCluster(node)] });
+      expect(screen.queryByText('node-a')).toBeNull();
+
+      await act(async () => {
+        useAgentNodeStore.setState({ nodesById: { [node.id]: node }, nodeIds: [node.id], activeNodeId: node.id });
+      });
+      expect(screen.getByText('node-a')).toBeTruthy();
+    });
+
+    it('expands on mount when an agent is already open', () => {
+      const node = makeNode({ status: 'idle' });
+      useAgentNodeStore.setState({ nodesById: { [node.id]: node }, nodeIds: [node.id], activeNodeId: node.id });
+
+      renderMeshItem({ nodeClusters: [loneCluster(node)] });
+      expect(screen.getByText('node-a')).toBeTruthy();
+    });
+
+    it('leaves the row alone when the active agent belongs to another mesh', async () => {
+      const node = makeNode({ status: 'idle' });
+      renderMeshItem({ nodeClusters: [loneCluster(node)] });
+
+      const elsewhere = makeNode({ id: 99, mesh_id: 4, name: 'node-elsewhere', status: 'idle' });
+      await act(async () => {
+        useAgentNodeStore.setState({
+          nodesById: { [elsewhere.id]: elsewhere },
+          nodeIds: [elsewhere.id],
+          activeNodeId: elsewhere.id,
+        });
+      });
+      expect(screen.queryByText('node-a')).toBeNull();
+      expect(screen.getByRole('button', { name: 'Show agents for my-mesh' })).toBeTruthy();
+    });
+
+    it('keeps a deliberate collapse while the same mesh and agent stay open, and reopens on a new one', async () => {
+      const node = makeNode({ status: 'idle' });
+      renderMeshItem({ nodeClusters: [loneCluster(node)], isSelected: true });
+      expect(screen.getByText('node-a')).toBeTruthy();
+
+      // The user folds the row they are already looking at. Later updates
+      // must not spring it open again — only a NEW open event may.
+      await userEvent.click(screen.getByRole('button', { name: 'Hide agents for my-mesh' }));
+      expect(screen.queryByText('node-a')).toBeNull();
+      await act(async () => {});
+      expect(screen.queryByText('node-a')).toBeNull();
+
+      const sibling = makeNode({ id: 11, name: 'node-b', status: 'idle' });
+      await act(async () => {
+        useAgentNodeStore.setState({
+          nodesById: { [sibling.id]: sibling },
+          nodeIds: [sibling.id],
+          activeNodeId: sibling.id,
+        });
+      });
+      expect(screen.getByText('node-a')).toBeTruthy();
     });
   });
 

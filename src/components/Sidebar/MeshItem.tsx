@@ -4,7 +4,7 @@ import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import type { Mesh } from '../../stores/meshStore';
-import type { AgentNode } from '../../stores/agentNodeStore';
+import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
 import { getMeshColor } from '../../lib/meshColors';
 import type { MeshHealth } from '../../lib/tauri';
 import { runMeshSync, useMeshSyncCompletion } from '../../lib/meshSyncFeedback';
@@ -265,6 +265,42 @@ function MeshItemView({
     userToggled.current = true;
     setExpanded((v) => !v);
   }, []);
+
+  // What the user currently has open, as this row sees it: the id of the
+  // active agent when that agent lives in this mesh, else nothing. The row
+  // owns this bit instead of taking it from `Sidebar` as a prop — the same
+  // seam `NodeItem` uses for its own `isActive` — so activating an agent
+  // re-renders only the two affected rows rather than every memo in the
+  // list. The selector returns an id or `null`, so zustand skips the render
+  // for the rows that hold no open agent.
+  const openNodeId = useAgentNodeStore((s) => {
+    const id = s.activeNodeId;
+    return id !== null && s.nodesById[id]?.mesh_id === mesh.id ? id : null;
+  });
+
+  // Opening a mesh or one of its agents reveals the row. Both signals are
+  // read on the RISING EDGE — a newly opened agent, or a mesh that just
+  // became the selected one — so the row also opens when the app mounts with
+  // a mesh or agent already open (both refs start empty), while a deliberate
+  // collapse of the row the user is already looking at survives every later
+  // re-render instead of springing open again. `userToggled` is left alone:
+  // opening something is not the user taking the row over, so a collapse
+  // they made still outweighs the heat effect above.
+  const lastOpenNodeRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (openNodeId === null) {
+      lastOpenNodeRef.current = null;
+      return;
+    }
+    if (openNodeId === lastOpenNodeRef.current) return;
+    lastOpenNodeRef.current = openNodeId;
+    setExpanded(true);
+  }, [openNodeId]);
+  const wasSelectedRef = useRef(false);
+  useEffect(() => {
+    if (isSelected && !wasSelectedRef.current) setExpanded(true);
+    wasSelectedRef.current = isSelected;
+  }, [isSelected]);
 
   // Failure-only sync indicator (no always-on button): syncs are automatic
   // (background sync per ADR 0020 + spawn-time auto-sync), so a permanent
