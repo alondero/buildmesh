@@ -220,6 +220,8 @@ enum Handler {
     IssueLabels,
     IssueSetLabel,
     CircuitRuns,
+    NodeReviewOptions,
+    NodeStartReview,
     CircuitApprove,
     CircuitOutcome,
     CircuitRecover,
@@ -470,6 +472,26 @@ const ROUTES: &[Route] = &[
         scope: RouteScope::Admin,
         body: BodyPolicy::Cap(8 * 1024),
         handler: Handler::IssueSetLabel,
+    },
+    Route {
+        method: "GET",
+        m: RouteMatch::OneId {
+            prefix: "/api/nodes/",
+            suffix: "/reviews",
+        },
+        scope: RouteScope::Admin,
+        body: BodyPolicy::None,
+        handler: Handler::NodeReviewOptions,
+    },
+    Route {
+        method: "POST",
+        m: RouteMatch::OneId {
+            prefix: "/api/nodes/",
+            suffix: "/reviews",
+        },
+        scope: RouteScope::Admin,
+        body: BodyPolicy::Cap(1024),
+        handler: Handler::NodeStartReview,
     },
     // Circuit Runs on Agent Nodes (issue #2314). The run id is in the path;
     // the act routes reuse the desktop commands, so eligibility is theirs.
@@ -848,6 +870,8 @@ async fn run_handler(handler: Handler, req: &ParsedRequest) -> DispatchResult {
         Handler::IssueLabels => Http(routes::issues::labels(req).await),
         Handler::IssueSetLabel => Http(routes::issues::set_label(req).await),
         Handler::CircuitRuns => Http(routes::circuit::list(req).await),
+        Handler::NodeReviewOptions => Http(routes::circuit::review_options(req).await),
+        Handler::NodeStartReview => Http(routes::circuit::start_review(req).await),
         Handler::CircuitApprove => Http(routes::circuit::approve(req).await),
         Handler::CircuitOutcome => Http(routes::circuit::outcome(req).await),
         Handler::CircuitRecover => Http(routes::circuit::recover(req).await),
@@ -1172,6 +1196,8 @@ POST /api/meshes/{id}/agent-nodes/import-and-resume -> Admin
 POST /api/meshes/{mesh_id}/issues/{issue_number}/spawn -> Admin
 GET /api/meshes/{id}/issue-labels -> Admin
 POST /api/meshes/{mesh_id}/issues/{issue_number}/label -> Admin
+GET /api/nodes/{id}/reviews -> Admin
+POST /api/nodes/{id}/reviews -> Admin
 GET /api/circuit-runs -> Admin
 POST /api/circuit-runs/{id}/approve -> Admin
 POST /api/circuit-runs/{id}/outcome -> Admin

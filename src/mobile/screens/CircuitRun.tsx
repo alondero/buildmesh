@@ -14,6 +14,7 @@ import { checkpointActionLabel, checkpointActionNeedsEvidence, lastRoundGuidance
 import { canCancel, circuitStatusLine, needHeading } from '../circuitRun';
 import { Sheet } from '../ui';
 import { useVisibilityPolling } from '../useVisibilityPolling';
+import { useWsEvents } from '../useWsEvents';
 
 /** The one decision a sheet is asking the person to confirm. */
 type Decision =
@@ -34,7 +35,7 @@ function stillOffered(decision: Decision, run: NodeCircuitRun): boolean {
   switch (decision.kind) {
     case 'approve':
     case 'record':
-      return run.needs_you.some((need) => sameStep(need, decision.need));
+      return run.needs_you.some((need) => sameStep(need, decision.need) && (decision.kind !== 'record' || need.actions.includes(decision.action)));
     case 'recover':
       return run.recovery?.options.some((option) => option.action === decision.action && option.available) ?? false;
     case 'cancel':
@@ -66,10 +67,12 @@ export function NodeCircuitRunPanel({
   nodeId,
   onAuthFailed,
   onOpenTerminal,
+  onBusyChange,
 }: {
   nodeId: number;
   onAuthFailed: () => void;
-  onOpenTerminal: () => void;
+  onOpenTerminal: (nodeId?: number) => void;
+  onBusyChange?: (busy: boolean) => void;
 }) {
   const [run, setRun] = useState<NodeCircuitRun | null>(null);
   // An action that failed is an alert; a status read that failed is only a
@@ -78,6 +81,7 @@ export function NodeCircuitRunPanel({
   const [readError, setReadError] = useState('');
   const [notice, setNotice] = useState('');
   const [decision, setDecision] = useState<Decision | null>(null);
+  const decisionAt = useRef<{ runId: number; revision: number } | null>(null);
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const active = useRef(true);
@@ -85,8 +89,8 @@ export function NodeCircuitRunPanel({
   const acting = useRef(false);
   useEffect(() => {
     active.current = true;
-    return () => { active.current = false; };
-  }, []);
+    return () => { active.current = false; onBusyChange?.(false); };
+  }, [onBusyChange]);
 
   async function refresh(isLatest: () => boolean = () => true, signal?: AbortSignal) {
     if (acting.current) return;
@@ -106,10 +110,14 @@ export function NodeCircuitRunPanel({
     }
   }
   useVisibilityPolling(refresh, 5000);
+  useWsEvents((msg) => {
+    if (msg.type === 'circuit-run-updated') void refresh();
+  }, onAuthFailed);
 
   async function act(work: () => Promise<void>, done: string) {
     if (acting.current) return;
     acting.current = true;
+    onBusyChange?.(true);
     // Anything fetched before this click describes the world we are changing.
     ++version.current;
     setBusy(true);
@@ -129,12 +137,13 @@ export function NodeCircuitRunPanel({
       acting.current = false;
       if (active.current) {
         setBusy(false);
+        onBusyChange?.(false);
         void refresh();
       }
     }
   }
 
-  const openDecision = run !== null && decision !== null && stillOffered(decision, run) ? decision : null;
+  const openDecision = run !== null && decision !== null && decisionAt.current?.runId === run.run_id && decisionAt.current.revision === run.revision && stillOffered(decision, run) ? decision : null;
   if (run === null) {
     // A cancelled run leaves the list, so its confirmation has to outlive the run.
     if (error) return <p role="alert" className="inline-error">{error}</p>;
@@ -146,6 +155,13 @@ export function NodeCircuitRunPanel({
     action === 'completed' && need.ends_review && !need.starts_next_review
       ? 'Recorded. The review stops.'
       : 'Recorded. The run will carry on.';
+
+  function choose(next: Decision) {
+    decisionAt.current = { runId: run!.run_id, revision: run!.revision };
+    setNote('');
+    setDecision(next);
+  }
+
   const record = (need: NodeCircuitNeed, action: CheckpointAction, reason: string) =>
     act(
       () =>
@@ -211,13 +227,11 @@ export function NodeCircuitRunPanel({
           {need.kind === 'input' && (
             <>
               <p className="field-hint">{need.detail ?? 'The agent is waiting for an answer.'} Answer it in the terminal.</p>
-              {(need.agent_node_id === null || need.agent_node_id === nodeId) && (
-                <button className="btn-primary" onClick={onOpenTerminal}>Open terminal to answer</button>
-              )}
+              <button className="btn-primary" disabled={busy} onClick={() => onOpenTerminal(need.agent_node_id ?? nodeId)}>Open terminal to answer</button>
             </>
           )}
           {need.kind === 'approval' && (
-            <button className="btn-primary" disabled={busy} onClick={() => setDecision({ kind: 'approve', need })}>Approve…</button>
+            <button className="btn-primary" disabled={busy} onClick={() => choose({ kind: 'approve', need })}>Approve…</button>
           )}
           {need.kind === 'unverified' && (
             <div className="action-grid">
@@ -230,7 +244,7 @@ export function NodeCircuitRunPanel({
                     // Checking again changes nothing, so it needs no statement.
                     action === 'recheck'
                       ? void record(need, action, 'Checked again from the phone.')
-                      : setDecision({ kind: 'record', need, action })
+                      : choose({ kind: 'record', need, action })
                   }
                 >
                   {checkpointActionLabel(action, need.starts_next_review, need.ends_review)}
@@ -253,7 +267,7 @@ export function NodeCircuitRunPanel({
               <button className="btn-primary" disabled={busy} onClick={() => void recover('retry', '')}>Retry this step</button>
             )}
             {guidance.continue.available && (
-              <button className="btn-ghost" disabled={busy} onClick={() => setDecision({ kind: 'recover', action: 'continue' })}>
+              <button className="btn-ghost" disabled={busy} onClick={() => choose({ kind: 'recover', action: 'continue' })}>
                 I’ve done this — continue
               </button>
             )}
@@ -261,7 +275,7 @@ export function NodeCircuitRunPanel({
         </div>
       )}
       {canCancel(run) && (
-        <button className="btn-ghost" disabled={busy} onClick={() => setDecision({ kind: 'cancel' })}>Cancel run</button>
+        <button className="btn-ghost" disabled={busy} onClick={() => choose({ kind: 'cancel' })}>Cancel run</button>
       )}
       {notice && <p role="status" className="field-hint">{notice}</p>}
       {error && !openDecision && <p role="alert" className="inline-error">{error}</p>}

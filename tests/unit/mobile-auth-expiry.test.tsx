@@ -260,7 +260,7 @@ describe("mobile auth-expiry recovery", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(authResponse()));
 
     renderWithRecovery((onAuthFailed) => (
-      <IssuesScreen mesh={mesh} onBack={() => {}} onSpawned={() => {}} onAuthFailed={onAuthFailed} />
+      <IssuesScreen mesh={mesh} visitId={1} onBack={() => {}} onSpawned={() => {}} onAuthFailed={onAuthFailed} />
     ));
 
     await waitFor(() => {
@@ -279,6 +279,7 @@ describe("mobile auth-expiry recovery", () => {
     render(
       <IssuesScreen
         mesh={mesh}
+        visitId={1}
         onBack={() => {}}
         onSpawned={() => {}}
         onAuthFailed={onAuthFailed}
@@ -304,7 +305,7 @@ describe("mobile auth-expiry recovery", () => {
     );
 
     renderWithRecovery((onAuthFailed) => (
-      <IssuesScreen mesh={mesh} onBack={() => {}} onSpawned={() => {}} onAuthFailed={onAuthFailed} />
+      <IssuesScreen mesh={mesh} visitId={1} onBack={() => {}} onSpawned={() => {}} onAuthFailed={onAuthFailed} />
     ));
 
     await userEvent.click(await screen.findByTestId("issue-101"));
@@ -322,6 +323,7 @@ describe("mobile auth-expiry recovery", () => {
     renderWithRecovery((onAuthFailed) => (
       <ArchivedNodesScreen
         mesh={mesh}
+        visitId={1}
         onBack={() => {}}
         onResumed={() => {}}
         onAuthFailed={onAuthFailed}
@@ -344,6 +346,7 @@ describe("mobile auth-expiry recovery", () => {
     render(
       <ArchivedNodesScreen
         mesh={mesh}
+        visitId={1}
         onBack={() => {}}
         onResumed={() => {}}
         onAuthFailed={onAuthFailed}
@@ -371,6 +374,7 @@ describe("mobile auth-expiry recovery", () => {
     renderWithRecovery((onAuthFailed) => (
       <ArchivedNodesScreen
         mesh={mesh}
+        visitId={1}
         onBack={() => {}}
         onResumed={() => {}}
         onAuthFailed={onAuthFailed}

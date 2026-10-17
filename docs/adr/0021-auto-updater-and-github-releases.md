@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (2026-07-16)
+Accepted (2026-07-16). Amended 2026-10-17 (issue #2438) — see [Amendment](#amendment-2026-10-17-the-updaters-zip-extraction-feature-stays-off). Decisions 1–3 are unchanged.
 
 ## Context
 
@@ -48,13 +48,83 @@ an update package is authentic. We can ship auto-update now with zero paid certs
    overlay pattern and keeps the per-push `build.yml` green **without** a signing
    secret (critical: PR builds — including from forks — cannot see secrets).
 
-4. **Windows-only releases, for now.** The app is Windows/WSL-centric; a
-   cross-platform matrix would ~4x CI cost per tag and needs each OS to compile
-   Windows-centric code. The base `tauri.conf.json` already narrows
-   `bundle.targets` to `["msi", "nsis"]` (Windows-only installer formats), so
-   `tauri build` on macOS/Linux would produce no installer today — extending
-   the workflow to a matrix (issue #835) is also the right time to widen the
-   target list. Tracked as a follow-up issue.
+4. **Windows-only Tauri desktop installers, for now.** The app is
+   Windows/WSL-centric; a cross-platform matrix would ~4x CI cost per tag and
+   needs each OS to compile Windows-centric code. The `release` job runs only on
+   `windows-latest`, so the desktop artifact is a Windows installer regardless of
+   `bundle.targets` — the base `tauri.conf.json` sets `"targets": "all"`, and the
+   release overlay does not narrow it, but a non-Windows runner is never used to
+   build a tagged release. Extending the workflow to a matrix (issue #835) is also
+   the right time to widen the target list deliberately rather than inherit
+   `all`. Tracked as a follow-up issue.
+
+   **Scope of "Windows-only".** That describes the *Tauri desktop installers*, not
+   the release as a whole. A second job, `android-release`, builds a signed APK on
+   `ubuntu-latest` and uploads it to the same GitHub Release when
+   `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEY_ALIAS` and `ANDROID_KEY_PASSWORD` are
+   configured; without them it warns and exits 0, and *that* release is genuinely
+   Windows-only. The APK is uploaded as a plain asset with a `.sha256` sidecar
+   and is deliberately **not** added to `latest.json`, so the auto-updater feed
+   this ADR is about stays Windows-only either way. See
+   [`docs/development/android.md`](../development/android.md#release-signing-and-distribution)
+   and [`docs/development/releasing.md`](../development/releasing.md).
+
+## Amendment (2026-10-17): the updater's ZIP extraction feature stays off
+
+Issue #2438. This qualifies decision 4 rather than reversing it, and it adds a
+security condition that was not recorded here.
+
+### Context
+
+`zip` is not a direct dependency. It reaches the tree solely through
+`tauri-plugin-updater`'s **default** `zip` feature, which the manifest adopted
+implicitly with `tauri-plugin-updater = "2"`. Three advisories against `zip` 4.x
+— `RUSTSEC-2026-0367` (SUID/SGID preservation), `RUSTSEC-2026-0368` (symlinks
+targeting paths outside the destination), `RUSTSEC-2026-0369` (Unix permissions
+applied through unconfined symlinks) — are fixed only in 9.x.
+
+There is no version to upgrade to. At the time of writing, every published
+release of the plugin requires `zip = "4"`, so `cargo update -p zip --precise
+9.0.4` fails to resolve. This repository's RustSec policy records no exception
+for a vulnerability, so a version bump was not available as an alternative. The
+dated evidence, including the specific versions checked and the resolver output,
+is in
+[`docs/archive/2026-10/rustsec-zip-extraction-2026-10.md`](../archive/2026-10/rustsec-zip-extraction-2026-10.md).
+
+### Decision
+
+5. **The `zip` feature is off, and turning it back on is not a migration step.**
+   `src-tauri/Cargo.toml` declares
+   `tauri-plugin-updater = { version = "2", default-features = false, features = ["rustls-tls", "system-proxy"] }`.
+   `zip` was the only default feature dropped.
+
+   The invariant that matters: **in the plugin, that feature is one switch
+   covering two extraction paths.** It is `["dep:zip", "dep:tar", "dep:flate2"]`,
+   and it gates both the Linux AppImage `.tar.gz` extraction and the Windows ZIP
+   extraction. Enabling it puts the pinned `zip = "4"` back into `Cargo.lock` and
+   into the Windows build, and the three advisories return with it. That holds
+   regardless of which path motivated the change, and regardless of platform,
+   because `Cargo.lock` is platform-independent even though the crate is not.
+
+### Consequences
+
+- **Adding macOS/Linux release builds (issue #835) does not mean enabling this
+  feature.** AppImage `.tar.gz` extraction needs the feature, so Linux support
+  requires one of: a plugin release that splits the feature or raises the `zip`
+  floor to 9.x; or extracting the AppImage outside the plugin. Any of those makes
+  the feature worth revisiting; "turn it on" is not a step on its own.
+- **Serving a ZIP update artifact on Windows has the same requirement.** The
+  reason the feature is currently safe is that no published feed key resolves to
+  a ZIP artifact — the keys map to `.msi` and `.exe`, both handled by
+  `extract_exe`. Publishing a `.zip` artifact would make the archive path
+  reachable, so it needs the same safe extraction path or fixed dependency first.
+  That feed mapping is a published-state fact and must be re-read before it is
+  relied on.
+- **Verified by gate, not by convention.** The RustSec advisory gate fails on any
+  vulnerability with no exception mechanism, so re-enabling the feature turns the
+  build red rather than silently regressing. A regression test in
+  `tests/agent-infra/supply-chain-gates.test.mjs` additionally asserts `zip` stays
+  out of `Cargo.lock` and out of the dependency line.
 
 ## Signing keys
 

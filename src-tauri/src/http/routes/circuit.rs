@@ -25,6 +25,111 @@ use crate::http::response::Response;
 use crate::http::router::ParsedRequest;
 use crate::http::state;
 
+#[derive(Debug, serde::Serialize, ts_rs::TS)]
+#[ts(export, export_to = "NodeReviewOption.ts")]
+pub struct NodeReviewOption {
+    #[ts(as = "Option<i32>")]
+    pub circuit_id: Option<i64>,
+    pub name: String,
+}
+
+#[derive(serde::Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "StartNodeReviewRequest.ts")]
+#[serde(deny_unknown_fields)]
+pub struct StartNodeReviewRequest {
+    #[ts(as = "Option<i32>")]
+    pub circuit_id: Option<i64>,
+    pub max_rounds: i32,
+}
+
+fn review_options_core(node_id: i64) -> Result<Vec<NodeReviewOption>, ActError> {
+    let node = db::get_agent_node_by_id(node_id).map_err(|error| match error {
+        rusqlite::Error::QueryReturnedNoRows => ActError::NodeNotFound(node_id),
+        other => ActError::Failed(other.to_string()),
+    })?;
+    let circuits = db::list_autopilot_circuits(node.mesh_id).map_err(|e| e.to_string())?;
+    let mut options = vec![NodeReviewOption {
+        circuit_id: None,
+        name: "Built-in Review Blueprint".into(),
+    }];
+    for circuit in circuits {
+        if circuit.is_preset {
+            continue;
+        }
+        let Ok(graph) = crate::circuit::model::CircuitGraph::from_json(&circuit.graph_json) else {
+            continue;
+        };
+        use crate::circuit::model::CircuitNodeKind;
+        if graph.validate().is_ok()
+            && !graph.roots().is_empty()
+            && graph
+                .roots()
+                .iter()
+                .all(|n| matches!(n.kind, CircuitNodeKind::Manual))
+            && graph
+                .nodes
+                .iter()
+                .any(|n| matches!(n.kind, CircuitNodeKind::ReviewVerdict { .. }))
+        {
+            options.push(NodeReviewOption {
+                circuit_id: Some(circuit.id),
+                name: circuit.name,
+            });
+        }
+    }
+    Ok(options)
+}
+
+pub async fn review_options(req: &ParsedRequest) -> Response {
+    let node_id = req.id0();
+    match crate::blocking::run_blocking_typed("http_node_review_options", move || {
+        review_options_core(node_id)
+    })
+    .await
+    {
+        Ok(options) => Response::json(
+            "200 OK",
+            serde_json::to_string(&options).expect("serializable options"),
+        ),
+        Err(error) => error.response(),
+    }
+}
+
+fn start_review_core(node_id: i64, request: StartNodeReviewRequest) -> Result<i64, ActError> {
+    if !review_options_core(node_id)?
+        .iter()
+        .any(|o| o.circuit_id == request.circuit_id)
+    {
+        return Err(ActError::Refused(
+            "Select a Review Circuit from this agent's Mesh.".into(),
+        ));
+    }
+    circuit_commands::trigger_circuit_from_node_now(
+        state::app_handle(),
+        node_id,
+        request.circuit_id,
+        request.max_rounds,
+        None,
+    )
+    .map_err(ActError::Refused)
+}
+
+pub async fn start_review(req: &ParsedRequest) -> Response {
+    let request = match parse_body::<StartNodeReviewRequest>(req) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+    let node_id = req.id0();
+    match crate::blocking::run_blocking_typed("http_start_node_review", move || {
+        start_review_core(node_id, request)
+    })
+    .await
+    {
+        Ok(run_id) => reply(run_id, Ok(())),
+        Err(error) => error.response(),
+    }
+}
+
 /// Body of `POST /api/circuit-runs/{id}/approve`.
 #[derive(serde::Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "ApproveCircuitStepRequest.ts")]
@@ -39,6 +144,7 @@ pub struct ApproveCircuitStepRequest {
 /// (see `routes::pr::pr_source`).
 #[derive(Debug)]
 enum ActError {
+    NodeNotFound(i64),
     NotFound(i64),
     /// The run is not in a state that accepts this action (stale revision,
     /// step already moved on, recovery not offered).
@@ -55,6 +161,10 @@ impl From<String> for ActError {
 impl ActError {
     fn response(&self) -> Response {
         match self {
+            ActError::NodeNotFound(node_id) => Response::json_error(
+                "404 Not Found",
+                &format!("Agent node {node_id} no longer exists."),
+            ),
             ActError::NotFound(run_id) => {
                 Response::json_error("404 Not Found", &format!("Run {run_id} no longer exists."))
             }
@@ -223,6 +333,120 @@ mod tests {
     use super::*;
     use crate::db::circuit::CircuitStepOp;
     use crate::models::{EnvType, SessionStatus};
+
+    #[test]
+    fn review_choices_include_only_this_meshs_manual_reviews() {
+        let _db = db::test_support::isolated();
+        let (node, run) = review_run();
+        let run = db::get_circuit_run(run).unwrap().unwrap();
+        let copied =
+            db::circuit::ledger::copy_review_blueprint(run.circuit_id, "Team review").unwrap();
+        db::create_autopilot_circuit(
+            run.mesh_id,
+            "Not a review",
+            "",
+            &crate::circuit::model::CircuitGraph::walking_skeleton("hello")
+                .to_json()
+                .unwrap(),
+        )
+        .unwrap();
+        let other_mesh = db::create_mesh("Other", "/other").unwrap();
+        db::create_autopilot_circuit(
+            other_mesh.id,
+            "Other review",
+            "",
+            &crate::circuit::model::CircuitGraph::agent_review(None, None, 3)
+                .to_json()
+                .unwrap(),
+        )
+        .unwrap();
+        let options = review_options_core(node).unwrap();
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].circuit_id, None);
+        assert_eq!(options[1].circuit_id, Some(copied.id));
+        assert_eq!(options[1].name, "Team review");
+        assert_eq!(
+            review_options_core(99999).unwrap_err().response().status,
+            "404 Not Found"
+        );
+    }
+
+    #[test]
+    fn starting_a_review_parses_strictly_and_refuses_unavailable_sources() {
+        let _db = db::test_support::isolated();
+        for body in [
+            br#"{}"#.as_slice(),
+            br#"{"max_rounds":3,"extra":true}"#,
+            b"bad",
+        ] {
+            assert_eq!(
+                parse_body::<StartNodeReviewRequest>(&post("reviews", 1, body))
+                    .err()
+                    .unwrap()
+                    .status,
+                "400 Bad Request"
+            );
+        }
+        let (node, _) = review_run();
+        let request = |id| StartNodeReviewRequest {
+            circuit_id: id,
+            max_rounds: 3,
+        };
+        assert_eq!(
+            start_review_core(node, request(Some(99999)))
+                .unwrap_err()
+                .response()
+                .status,
+            "409 Conflict"
+        );
+        let refusal = start_review_core(node, request(None))
+            .unwrap_err()
+            .response();
+        assert_eq!(refusal.status, "409 Conflict");
+        assert!(text(&refusal).contains("Resume the agent"));
+    }
+
+    #[test]
+    fn starting_a_review_uses_the_desktop_run_and_deduplicates_retries() {
+        let _db = db::test_support::isolated();
+        let unique = 89_000_000 + i64::from(std::process::id());
+        db::write_conn()
+            .execute(
+                "UPDATE sqlite_sequence SET seq = ?1 WHERE name = 'agent_nodes'",
+                [unique - 1],
+            )
+            .unwrap();
+        let (node, old_run) = review_run();
+        assert_eq!(node, unique);
+        db::commit_circuit_advance(old_run, Some("completed"), None, &[]).unwrap();
+        let registry = &crate::agent::process::PROCESS_REGISTRY;
+        crate::agent::process::testing::insert_standin(registry, node);
+        struct Cleanup(i64);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                crate::agent::process::PROCESS_REGISTRY.kill_session(self.0);
+            }
+        }
+        let _cleanup = Cleanup(node);
+        let request = || StartNodeReviewRequest {
+            circuit_id: None,
+            max_rounds: 3,
+        };
+        let run = start_review_core(node, request()).unwrap();
+        assert_ne!(run, old_run);
+        assert_eq!(start_review_core(node, request()).unwrap(), run);
+        let stored = db::get_circuit_run(run).unwrap().unwrap();
+        assert_eq!(stored.source_agent_node_id, Some(node));
+        assert_eq!(stored.state, "pending");
+        assert_eq!(reply(run, Ok(())).status, "200 OK");
+        cancel_core(run).unwrap();
+        for provider in ["dsh", "freebuff"] {
+            db::set_agent_node_provider(node, provider).unwrap();
+            let refusal = start_review_core(node, request()).unwrap_err().response();
+            assert_eq!(refusal.status, "409 Conflict");
+            assert!(text(&refusal).contains("no turn-completion signal"));
+        }
+    }
 
     fn text(response: &Response) -> String {
         String::from_utf8_lossy(response.body()).into_owned()

@@ -36,6 +36,8 @@ export type { CreateNodeOutcome };
 import type { ApproveCircuitStepRequest } from '../types/generated/ApproveCircuitStepRequest';
 import type { CheckpointRequest } from '../types/generated/CheckpointRequest';
 import type { NodeCircuitRun } from '../types/generated/NodeCircuitRun';
+import type { NodeReviewOption } from '../types/generated/NodeReviewOption';
+import type { StartNodeReviewRequest } from '../types/generated/StartNodeReviewRequest';
 import type { RecoveryRequest } from '../types/generated/RecoveryRequest';
 export type { NodeCircuitRun };
 
@@ -415,6 +417,17 @@ export function recoverCircuitRun(request: RecoveryRequest): Promise<void> {
 
 export function cancelCircuitRun(runId: number): Promise<void> {
   return postCircuit(`/api/circuit-runs/${runId}/cancel`);
+}
+
+export async function listNodeReviews(nodeId: number, signal?: AbortSignal): Promise<NodeReviewOption[]> {
+  const body: unknown = await (await apiFetch(`/api/nodes/${nodeId}/reviews`, { signal })).json();
+  if (Array.isArray(body)) return body as NodeReviewOption[];
+  if (body && typeof body === 'object' && 'error' in body && body.error === 'not found') return [];
+  throw new Error('Review choices are unavailable. Update Buildmesh and refresh.');
+}
+
+export function startNodeReview(nodeId: number, request: StartNodeReviewRequest): Promise<void> {
+  return postCircuit(`/api/nodes/${nodeId}/reviews`, request);
 }
 
 /**

@@ -301,6 +301,17 @@ fn dispatch_invoke(body: &str, app: Option<&AppHandle>) -> String {
     match rpc_req.cmd.as_str() {
         "create_test_mesh" => handle_create_test_mesh(&rpc_req.args),
         "create_test_review_fixture" => handle_create_test_review_fixture(&rpc_req.args),
+        "create_mobile_review_approval_fixture" => {
+            let name = rpc_req
+                .args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Phone review approval");
+            match crate::services::test_fixtures::create_mobile_review_approval_fixture(name) {
+                Ok(data) => JsonRpcResponse::success(&data),
+                Err(error) => JsonRpcResponse::error(&error),
+            }
+        }
         "create_attention_backlog_fixture" => {
             handle_create_attention_backlog_fixture(&rpc_req.args)
         }

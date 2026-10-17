@@ -63,7 +63,17 @@ pub(crate) fn app_handle() -> Option<&'static tauri::AppHandle> {
 }
 
 pub(crate) fn set_app_handle(app: tauri::AppHandle) {
-    let _ = APP_HANDLE.set(app);
+    if APP_HANDLE.set(app.clone()).is_ok() {
+        use tauri::Listener;
+        app.listen("circuit-run-updated", |event| {
+            super::events::forward_circuit_update(event.payload());
+        });
+        app.listen("circuit-runs-attention-dismissed", |_| {
+            // Dismissal can remove several runs; any run invalidation causes a
+            // full read, so no DB lookup is needed in the event callback.
+            super::events::emit(super::events::EventMsg::CircuitRunUpdated { run_id: None });
+        });
+    }
 }
 
 pub(crate) const HTTP_PORT_START: u16 = 1992;

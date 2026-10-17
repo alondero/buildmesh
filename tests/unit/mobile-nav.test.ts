@@ -41,8 +41,12 @@ describe("parentOf", () => {
   });
 
   it("sessions and issues back out to the list", () => {
-    expect(parentOf({ kind: "sessions", mesh })).toEqual({ kind: "list" });
-    expect(parentOf({ kind: "issues", mesh })).toEqual({ kind: "list" });
+    expect(parentOf({ kind: "sessions", mesh, visitId: 1 })).toEqual({
+      kind: "list",
+    });
+    expect(parentOf({ kind: "issues", mesh, visitId: 1 })).toEqual({
+      kind: "list",
+    });
   });
 
   it("changes backs out to the same node's terminal", () => {

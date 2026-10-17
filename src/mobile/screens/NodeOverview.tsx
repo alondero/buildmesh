@@ -6,6 +6,7 @@ import { useVisibilityPolling } from "../useVisibilityPolling";
 import { useWsEvents } from "../useWsEvents";
 import { NodePullRequest } from './PullRequests';
 import { NodeCircuitRunPanel } from './CircuitRun';
+import { StartReview } from './StartReview';
 
 export default function NodeOverview({
   node: initial,
@@ -20,6 +21,8 @@ export default function NodeOverview({
   onReplyNoticeChange,
   onBack,
   onTerminal,
+  onTerminalNode,
+  onActionBusyChange,
   onChanges,
   onAuthFailed,
 }: {
@@ -27,6 +30,8 @@ export default function NodeOverview({
   visitId: number;
   onBack: () => void;
   onTerminal: () => void;
+  onTerminalNode?: (node: AgentNode) => void;
+  onActionBusyChange?: (busy: boolean) => void;
   onChanges: () => void;
   onAuthFailed: () => void;
   prompt?: string;
@@ -219,7 +224,20 @@ export default function NodeOverview({
             Open terminal
           </button>
         </div>
-        {!missing && <NodeCircuitRunPanel nodeId={node.id} onAuthFailed={onAuthFailed} onOpenTerminal={onTerminal} />}
+        {!missing && <NodeCircuitRunPanel nodeId={node.id} onAuthFailed={onAuthFailed} onBusyChange={onActionBusyChange} onOpenTerminal={(targetId) => {
+          if (targetId === undefined || targetId === node.id) { onTerminal(); return; }
+          void listNodes().then((nodes) => {
+            if (!active.current) return;
+            const target = nodes.find((candidate) => candidate.id === targetId);
+            if (target && onTerminalNode) onTerminalNode(target);
+            else setError('The agent waiting for your answer is no longer available. Refresh the run.');
+          }).catch((e: unknown) => {
+            if (!active.current) return;
+            if (isAuthError(e)) onAuthFailed();
+            else setError((e as Error).message);
+          });
+        }} />}
+        {!missing && node.provider !== 'terminal' && <StartReview key={node.id} nodeId={node.id} onAuthFailed={onAuthFailed} onBusyChange={onActionBusyChange} />}
         {!missing && <NodePullRequest meshId={node.mesh_id} nodeId={node.id} onAuthFailed={onAuthFailed} />}
         <form
           className="reply-panel"

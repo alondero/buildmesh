@@ -16,6 +16,33 @@ use crate::env::to_host_path;
 use crate::git::{health, primitives};
 use crate::models::MeshHealth;
 
+#[cfg(test)]
+pub(super) mod status_metrics {
+    use std::cell::Cell;
+    thread_local! {
+        static COUNTS: Cell<[usize; 3]> = const { Cell::new([0; 3]) };
+    }
+    fn increment(index: usize) {
+        COUNTS.with(|counts| {
+            let mut value = counts.get();
+            value[index] += 1;
+            counts.set(value);
+        });
+    }
+    pub fn walk() {
+        increment(0);
+    }
+    pub fn diff() {
+        increment(1);
+    }
+    pub fn patch() {
+        increment(2);
+    }
+    pub fn take() -> [usize; 3] {
+        COUNTS.with(|counts| counts.replace([0; 3]))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "GitSummary.ts")]
 /// Generated to src/types/generated/GitSummary.ts (issue #404). `usize`
@@ -58,6 +85,8 @@ pub struct GitStatus {
 /// Untracked files require `show_untracked_content` so their new lines are
 /// counted as additions; without it git2 emits an empty patch for them.
 fn line_stats_by_path(repo: &Repository) -> HashMap<String, (usize, usize)> {
+    #[cfg(test)]
+    status_metrics::diff();
     let mut diff_opts = DiffOptions::new();
     diff_opts
         .include_untracked(true)
@@ -77,6 +106,18 @@ fn line_stats_by_path(repo: &Repository) -> HashMap<String, (usize, usize)> {
 
     let num_deltas = diff.deltas().len();
     for idx in 0..num_deltas {
+        let delta = diff.get_delta(idx).expect("index is within diff deltas");
+        if let Some(counts) = crate::git::status_stats::simple_counts(repo, &delta) {
+            for file in [delta.new_file().path(), delta.old_file().path()]
+                .into_iter()
+                .flatten()
+            {
+                stats.insert(file.to_string_lossy().into_owned(), counts);
+            }
+            continue;
+        }
+        #[cfg(test)]
+        status_metrics::patch();
         // Binary files / errors yield no patch — leave them at (0, 0).
         let patch = match Patch::from_diff(&diff, idx) {
             Ok(Some(p)) => p,
@@ -207,9 +248,9 @@ pub(crate) fn get_git_status_blocking(path: String) -> Result<Vec<GitStatus>, St
     let mut opts = StatusOptions::new();
     opts.include_untracked(true).recurse_untracked_dirs(true);
 
+    #[cfg(test)]
+    status_metrics::walk();
     let statuses = repo.statuses(Some(&mut opts)).map_err(|e| e.to_string())?;
-
-    let line_stats = line_stats_by_path(&repo);
 
     let mut changed_files: Vec<GitStatus> = Vec::new();
 
@@ -237,8 +278,6 @@ pub(crate) fn get_git_status_blocking(path: String) -> Result<Vec<GitStatus>, St
             "untracked"
         };
 
-        let (additions, deletions) = line_stats.get(&path).copied().unwrap_or((0, 0));
-
         changed_files.push(GitStatus {
             project_path: std::path::Path::new(&path)
                 .strip_prefix(&project.relative_folder)
@@ -246,9 +285,17 @@ pub(crate) fn get_git_status_blocking(path: String) -> Result<Vec<GitStatus>, St
                 .map(|path| path.to_string_lossy().replace('\\', "/")),
             path,
             status: status_str.to_string(),
-            additions,
-            deletions,
+            additions: 0,
+            deletions: 0,
         });
+    }
+
+    if !changed_files.is_empty() {
+        let line_stats = line_stats_by_path(&repo);
+        for file in &mut changed_files {
+            (file.additions, file.deletions) =
+                line_stats.get(&file.path).copied().unwrap_or((0, 0));
+        }
     }
 
     Ok(changed_files)
@@ -269,6 +316,8 @@ pub(crate) fn get_git_summary_blocking(path: String) -> Result<GitSummary, Strin
     let mut opts = StatusOptions::new();
     opts.include_untracked(true).recurse_untracked_dirs(true);
 
+    #[cfg(test)]
+    status_metrics::walk();
     let statuses = repo.statuses(Some(&mut opts)).map_err(|e| e.to_string())?;
 
     let mut total = 0usize;

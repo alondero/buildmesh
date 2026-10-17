@@ -81,18 +81,44 @@ fn parse_str(s: String) -> Option<String> {
 }
 // --- Mesh operations ---
 
+/// Insert a mesh row with the worktree strategy **on**. This is the
+/// fixture/test shape (and the dev-only `create_test_mesh`); production
+/// entrypoints derive `use_worktree` from the folder's repository and call
+/// [`create_mesh_with_worktree`] so a mesh over a non-repository folder does
+/// not boot promising worktrees it cannot cut.
 pub fn create_mesh(name: &str, path: &str) -> SqlResult<Mesh> {
     let db = write_conn();
     create_mesh_inner(&db, name, path)
 }
 
-/// Create a mesh whose **Base Ref** is not the `origin/main` default. Used by
-/// the GitHub clone flow, which resolves the cloned repo's real default branch
-/// so worktrees are cut from the right ref instead of booting the mesh up as a
-/// **drifted root**.
-pub fn create_mesh_with_base_ref(name: &str, path: &str, base_ref: &str) -> SqlResult<Mesh> {
+/// Create a mesh over `path` with an explicit worktree strategy, on the
+/// `origin/main` base ref. This is the open-folder entry point in
+/// `commands::mesh`; the clone flow uses
+/// [`create_mesh_with_base_ref_and_worktree`]. Both require the caller to have
+/// detected the folder's repository *before* calling: these functions take the
+/// writer connection, and the detection is filesystem I/O.
+pub fn create_mesh_with_worktree(name: &str, path: &str, use_worktree: bool) -> SqlResult<Mesh> {
     let db = write_conn();
-    create_mesh_with_base_ref_inner(&db, name, path, base_ref)
+    create_mesh_with_base_ref_inner(&db, name, path, "origin/main", use_worktree)
+}
+
+/// Create a mesh whose **Base Ref** is not the `origin/main` default, with an
+/// explicit worktree strategy. Used by the GitHub clone flow, which resolves
+/// the cloned repo's real default branch so worktrees are cut from the right
+/// ref instead of booting the mesh up as a **drifted root**.
+///
+/// There is deliberately no base-ref-only overload: a caller that knows the
+/// real default branch has already inspected the repository it cloned, so it
+/// has the worktree answer too, and a wrapper that hard-coded `true` would be
+/// a second rule to keep in step.
+pub fn create_mesh_with_base_ref_and_worktree(
+    name: &str,
+    path: &str,
+    base_ref: &str,
+    use_worktree: bool,
+) -> SqlResult<Mesh> {
+    let db = write_conn();
+    create_mesh_with_base_ref_inner(&db, name, path, base_ref, use_worktree)
 }
 
 /// Per-test isolated variant of [`create_mesh`]. The public function locks
@@ -100,14 +126,21 @@ pub fn create_mesh_with_base_ref(name: &str, path: &str, base_ref: &str) -> SqlR
 /// `&Connection` so parallel tests can each operate against their own
 /// in-memory DB without contending on the global mutex (issue #1691).
 pub(crate) fn create_mesh_inner(db: &Connection, name: &str, path: &str) -> SqlResult<Mesh> {
-    create_mesh_with_base_ref_inner(db, name, path, "origin/main")
+    create_mesh_with_base_ref_inner(db, name, path, "origin/main", true)
 }
 
+/// `use_worktree` is the mesh's **Worktree strategy → Use worktree** setting,
+/// decided by the caller because only it has inspected the folder's
+/// repository. A worktree-disabled mesh is written with an empty warm pool
+/// (`pre_spawn_pool_size = 0`): it has no worktrees to warm, which is the same
+/// invariant the v24 pool-default backfill encodes (its `WHERE` requires
+/// `use_worktree = 1`).
 pub(crate) fn create_mesh_with_base_ref_inner(
     db: &Connection,
     name: &str,
     path: &str,
     base_ref: &str,
+    use_worktree: bool,
 ) -> SqlResult<Mesh> {
     // Check if mesh with this path already exists (idempotent upsert)
     let existing: Option<i64> = db
@@ -131,12 +164,13 @@ pub(crate) fn create_mesh_with_base_ref_inner(
 
     // `pre_spawn_pool_size = 1` is written explicitly (not left to the
     // column default) because a DB upgraded from pre-v24 still carries the
-    // ALTER-time `DEFAULT 0` — new meshes must get the pool-on default
-    // regardless of when the DB was created (ADR 0020).
+    // ALTER-time `DEFAULT 0` — new worktree-enabled meshes must get the
+    // pool-on default regardless of when the DB was created (ADR 0020).
+    let pool_size: i32 = i32::from(use_worktree);
     db.execute(
         "INSERT INTO meshes (name, path, layout, position, use_worktree, base_ref, pre_spawn_pool_size)
-         VALUES (?1, ?2, 'grid', ?3, 1, ?4, 1)",
-        params![name, path, next_position, base_ref],
+         VALUES (?1, ?2, 'grid', ?3, ?4, ?5, ?6)",
+        params![name, path, next_position, i32::from(use_worktree), base_ref, pool_size],
     )?;
     let id = db.last_insert_rowid();
     get_mesh_by_id_inner(db, id)

@@ -237,6 +237,7 @@ describe("mobile happy paths (issue #1262)", () => {
       render(
         <IssuesScreen
           mesh={mesh}
+          visitId={1}
           onBack={() => {}}
           onSpawned={onSpawned}
         />,
@@ -250,7 +251,13 @@ describe("mobile happy paths (issue #1262)", () => {
       await userEvent.click(screen.getByRole("button", { name: "Start", exact: true }));
 
       await waitFor(() => {
-        expect(onSpawned).toHaveBeenCalledWith(node);
+        // The node plus the identity of the visit that started the launch, so
+        // the App can retire a completion the user has navigated away from.
+        expect(onSpawned).toHaveBeenCalledWith(node, {
+          kind: "issues",
+          meshId: 1,
+          visitId: 1,
+        });
       });
     });
 
@@ -273,6 +280,7 @@ describe("mobile happy paths (issue #1262)", () => {
       render(
         <IssuesScreen
           mesh={mesh}
+          visitId={1}
           onBack={() => {}}
           onSpawned={onSpawned}
         />,
@@ -314,6 +322,7 @@ describe("mobile happy paths (issue #1262)", () => {
       render(
         <ArchivedNodesScreen
           mesh={mesh}
+          visitId={1}
           onBack={() => {}}
           onResumed={onResumed}
         />,
@@ -324,7 +333,11 @@ describe("mobile happy paths (issue #1262)", () => {
       await userEvent.click(screen.getByTestId("node-resume-session-101"));
 
       await waitFor(() => {
-        expect(onResumed).toHaveBeenCalledWith(node);
+        expect(onResumed).toHaveBeenCalledWith(node, {
+          kind: "sessions",
+          meshId: 1,
+          visitId: 1,
+        });
       });
     });
 
@@ -354,6 +367,7 @@ describe("mobile happy paths (issue #1262)", () => {
       render(
         <ArchivedNodesScreen
           mesh={mesh}
+          visitId={1}
           onBack={() => {}}
           onResumed={onResumed}
         />,

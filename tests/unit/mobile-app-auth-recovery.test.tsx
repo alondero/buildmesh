@@ -2,6 +2,7 @@ import { act, createElement } from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import App from "../../src/mobile/App";
+import type { LaunchVisit } from "../../src/mobile/launchVisit";
 
 const appState = vi.hoisted(() => ({
   authFailed: null as (() => void) | null,
@@ -185,8 +186,18 @@ vi.mock("../../src/mobile/screens/ChangesScreen", () => ({
 }));
 
 vi.mock("../../src/mobile/screens/IssuesScreen", () => ({
-  default: (props: { onSpawned: (nextNode: typeof node) => void }) => {
-    appState.lateSpawn = () => props.onSpawned(node);
+  default: (props: {
+    onSpawned: (nextNode: typeof node, visit: LaunchVisit) => void;
+    visitId: number;
+  }) => {
+    // Reports the visit the App handed this screen instance, so the App — not
+    // the screen — decides whether the completion may still navigate.
+    appState.lateSpawn = () =>
+      props.onSpawned(node, {
+        kind: "issues",
+        meshId: 1,
+        visitId: props.visitId,
+      });
     return createElement("div", { "data-testid": "mock-issues" }, "issues");
   },
 }));
