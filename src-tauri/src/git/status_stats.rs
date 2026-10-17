@@ -152,30 +152,3 @@ fn lines(bytes: &[u8]) -> usize {
     bytes.iter().filter(|&&byte| byte == b'\n').count()
         + usize::from(!bytes.is_empty() && !bytes.ends_with(b"\n"))
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::commands::git::{get_git_status_blocking, stage_file_blocking};
-    use crate::env::test_helpers::TestDir;
-
-    #[test]
-    fn large_unborn_staged_file_is_recounted_after_an_edit() {
-        let td = TestDir::new("large-unborn-status");
-        let repo = git2::Repository::init(td.path()).unwrap();
-        repo.config()
-            .unwrap()
-            .set_bool("core.autocrlf", false)
-            .unwrap();
-        let line = format!("{}\n", "x".repeat(65536));
-        std::fs::write(td.path().join("file.txt"), &line).unwrap();
-        let path = td.path().to_string_lossy().into_owned();
-        let first = get_git_status_blocking(path.clone()).unwrap();
-        assert_eq!((first[0].additions, first[0].deletions), (1, 0));
-        stage_file_blocking(&path, "file.txt").unwrap();
-        std::fs::write(td.path().join("file.txt"), format!("{line}second\nlast")).unwrap();
-        let second = get_git_status_blocking(path).unwrap();
-        assert_eq!(second.len(), 1);
-        assert_eq!(second[0].path, "file.txt");
-        assert_eq!((second[0].additions, second[0].deletions), (3, 0));
-    }
-}

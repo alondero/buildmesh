@@ -125,6 +125,10 @@ fn large_simple_deltas_keep_exact_counts_without_patches() {
 fn chunk_boundaries_binary_detection_and_eof_match_native_counts() {
     let td = TestDir::new("status-stream-boundaries");
     let repo = init_repo_with_commit(td.path(), &[("empty.txt", ""), ("no-eof.txt", "old")]);
+    repo.config()
+        .unwrap()
+        .set_bool("core.autocrlf", false)
+        .unwrap();
     let mut text = "record\n".repeat(40_000).into_bytes();
     text.push(b'x');
     fs::write(td.path().join("large.txt"), &text).unwrap();
@@ -137,7 +141,9 @@ fn chunk_boundaries_binary_detection_and_eof_match_native_counts() {
     late_nul[8000] = 0;
     late_nul.push(b'\n');
     fs::write(td.path().join("late-nul.txt"), late_nul).unwrap();
+    status_metrics::take();
     let rows = read(td.path());
+    assert_eq!(status_metrics::take(), [1, 1, 2]);
     assert_eq!(
         rows.iter()
             .find(|r| r.path == "large.txt")
