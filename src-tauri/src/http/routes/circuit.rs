@@ -1,6 +1,7 @@
 //! Mobile HTTP routes for Circuit Runs on Agent Nodes (issue #2314).
 //!
-//! `GET /api/circuit-runs` is the one read: the implementation nodes that are
+//! `GET /api/circuit-agent-ownerships` shares the desktop's pairing ledger.
+//! `GET /api/circuit-runs` lists the implementation nodes that are
 //! inside a live run, or whose failed run nobody has acknowledged, with the
 //! actions a person can take on each. The `POST /api/circuit-runs/{id}/...`
 //! routes call the same implementation as the desktop commands, so the phone is
@@ -220,6 +221,25 @@ pub async fn list(_req: &ParsedRequest) -> Response {
         crate::commands::run_blocking(
             "http_list_node_circuit_runs",
             node_run::list_node_circuit_runs,
+        )
+        .await,
+    )
+}
+
+fn ownerships_reply(
+    rows: Result<Vec<circuit_commands::CircuitAgentOwnership>, String>,
+) -> Response {
+    match rows.and_then(|rows| serde_json::to_string(&rows).map_err(|error| error.to_string())) {
+        Ok(body) => Response::json("200 OK", body),
+        Err(error) => Response::json_error("500 Internal Server Error", &error),
+    }
+}
+
+pub async fn ownerships(_req: &ParsedRequest) -> Response {
+    ownerships_reply(
+        crate::commands::run_blocking(
+            "http_circuit_agent_ownerships",
+            circuit_commands::list_circuit_agent_ownerships,
         )
         .await,
     )
@@ -530,6 +550,28 @@ mod tests {
 
     fn listing() -> Response {
         list_reply(node_run::list_node_circuit_runs())
+    }
+
+    #[test]
+    fn ownership_read_shares_the_desktop_ledger_and_reports_failed_reads() {
+        let _db = db::test_support::isolated();
+        assert_eq!(
+            text(&ownerships_reply(
+                circuit_commands::list_circuit_agent_ownerships()
+            )),
+            "[]"
+        );
+        let (node, run) = review_run();
+        let response = ownerships_reply(circuit_commands::list_circuit_agent_ownerships());
+        assert_eq!(response.status, "200 OK");
+        let body = json(&response);
+        assert_eq!(body.as_array().unwrap().len(), 1);
+        assert_eq!(body[0]["node_id"], node);
+        assert_eq!(body[0]["run_id"], run);
+        assert!(body[0]["parent_node_id"].is_null());
+        let failure = ownerships_reply(Err("read failed".into()));
+        assert_eq!(failure.status, "500 Internal Server Error");
+        assert_eq!(json(&failure)["error"], "read failed");
     }
 
     #[test]

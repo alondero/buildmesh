@@ -18,7 +18,7 @@ function load(name) {
   }
   visit(alias.type);
 }
-for (const name of ['NodeCircuitRun', 'NodeReviewOption', 'StartNodeReviewRequest', 'CheckpointRequest', 'RecoveryRequest', 'ApproveCircuitStepRequest']) load(name);
+for (const name of ['NodeCircuitRun', 'CircuitAgentOwnership', 'NodeReviewOption', 'StartNodeReviewRequest', 'CheckpointRequest', 'RecoveryRequest', 'ApproveCircuitStepRequest']) load(name);
 const scalarUnion = node => ts.isUnionTypeNode(node) && node.types.every(t => ts.isLiteralTypeNode(t) && ts.isStringLiteral(t.literal));
 function shape(node) {
   if (node.kind === ts.SyntaxKind.StringKeyword || scalarUnion(node)) return { type: 'String', read: v => `${v}.jsonPrimitive.content`, write: v => `JsonPrimitive(${v})` };

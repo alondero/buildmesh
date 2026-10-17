@@ -9,7 +9,31 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class CircuitRunsTest {
-    private val snapshot = """{"node_id":17,"run_id":7,"blueprint_name":"Review Blueprint","state":"running","step":{"node_id":"gate","role":"Approval gate","attempt":1,"status":"blocked"},"review":{"round":2,"max_rounds":3,"verdict":"changes_requested","summary":"Fix the retry loop."},"needs_you":[{"kind":"approval","step":{"node_id":"gate","role":"Approval gate","attempt":1,"status":"blocked"},"detail":null,"actions":[],"agent_node_id":null}],"revision":12}"""
+    @Test fun ownershipApiPreservesPairingAndOnlyAnAbsentRouteMeansNoSupport() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("""[{"node_id":18,"run_id":7,"circuit_id":3,"circuit_name":"Review","state":"running","parent_node_id":17}]"""))
+            server.enqueue(MockResponse().setResponseCode(404))
+            server.enqueue(MockResponse().setBody("""{"error":"not found"}"""))
+            server.enqueue(MockResponse().setResponseCode(403).setBody("""{"error":"Refused"}"""))
+            server.enqueue(MockResponse().setResponseCode(500).setBody("""{"error":"Read failed"}"""))
+            server.enqueue(MockResponse().setBody("""[{"node_id":18}]"""))
+            val api = BuildmeshApi(server.url("/").toString())
+            try {
+                assertEquals(17L, api.circuitOwnerships().single().parent_node_id)
+                assertEquals("/api/circuit-agent-ownerships", server.takeRequest().path)
+                assertTrue(api.circuitOwnerships().isEmpty())
+                assertTrue(api.circuitOwnerships().isEmpty())
+                for (status in listOf(403, 500)) {
+                    try { api.circuitOwnerships(); fail("Expected $status") }
+                    catch (e: ApiException) { assertEquals(status, e.status) }
+                }
+                try { api.circuitOwnerships(); fail("Malformed ownership must be rejected") }
+                catch (_: NoSuchElementException) { /* Generated decoder rejects missing fields. */ }
+            } finally { api.close() }
+        }
+    }
+
+    private val snapshot = """{"node_id":17,"run_id":7,"blueprint_name":"Review Blueprint","state":"running","step":{"node_id":"gate","role":"Approval gate","attempt":1,"status":"blocked"},"review":{"round":2,"max_rounds":3,"verdict":"changes_requested","summary":"Fix the retry loop."},"needs_you":[{"kind":"approval","step":{"node_id":"gate","role":"Approval gate","attempt":1,"status":"blocked"},"detail":null,"actions":[],"starts_next_review":false,"ends_review":false,"review_again":false,"agent_node_id":null}],"revision":12}"""
     private fun run() = NodeCircuitRun.fromJson(Json.parseToJsonElement(snapshot))
 
     @Test fun generatedWireReadsNullableAndOptionalFieldsAndHumanisesTheRun() {

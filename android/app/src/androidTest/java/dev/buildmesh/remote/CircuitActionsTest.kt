@@ -44,7 +44,7 @@ class CircuitActionsTest {
     }
 
     @Test fun approvalNeedsConfirmationAndShowsARefusalInsideTheDialog() {
-        val run = NodeCircuitRun.fromJson(Json.parseToJsonElement("""{"node_id":17,"run_id":7,"blueprint_name":"Team review","state":"running","step":null,"review":null,"needs_you":[{"kind":"approval","step":{"node_id":"gate","role":"Approval gate","attempt":1,"status":"blocked"},"detail":null,"actions":[],"agent_node_id":null}],"revision":12}"""))
+        val run = NodeCircuitRun.fromJson(Json.parseToJsonElement("""{"node_id":17,"run_id":7,"blueprint_name":"Team review","state":"running","step":null,"review":null,"needs_you":[{"kind":"approval","step":{"node_id":"gate","role":"Approval gate","attempt":1,"status":"blocked"},"detail":null,"actions":[],"starts_next_review":false,"ends_review":false,"review_again":false,"agent_node_id":null}],"revision":12}"""))
         withDesktop({ MockResponse().setResponseCode(409).setBody("""{"error":"The run changed. Refresh before trying again."}""") }) { vm, requests ->
             compose.setContent { BuildmeshTheme { Column(Modifier.verticalScroll(rememberScrollState())) { CircuitRunPanel(run, vm, {}) } } }
             compose.onNodeWithText("Approve…").performScrollTo().performClick()

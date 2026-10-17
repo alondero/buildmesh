@@ -165,6 +165,8 @@ fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) 
             (!attentionOnly || circuitNeedsAttention(node, state.circuitRuns)) &&
             (query.isBlank() || node.text("name").contains(query, true) || node.text("branch").contains(query, true))
     }
+    val activities = if (tab == "Work") matchingWorkActivities(state, meshId, query, attentionOnly) else emptyList()
+    val glyphMotion = if (tab == "Work") rememberWorkGlyphMotion() else null
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item {
             Text(if (tab == "Overview") "Overview" else "Your work", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
@@ -206,8 +208,16 @@ fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) 
                 }
             }
         }
-        if (visible.isEmpty()) item { EmptyMessage(if (state.refreshing) "Loading agents…" else "No agents match this view. Capture a task to start one.") }
-        items(visible.sortedByDescending { circuitNeedsAttention(it, state.circuitRuns) }, key = { "node-${it.number("id")}" }) { node ->
+        if (tab == "Work") {
+            val byMesh = activities.groupBy { it.root.number("mesh_id") }
+            val meshOrder = state.meshes.map { it.number("id") }
+            byMesh.entries.sortedBy { meshOrder.indexOf(it.key).takeIf { index -> index >= 0 } ?: Int.MAX_VALUE }.forEach { (id, members) ->
+                item(key = "work-mesh-$id") { WorkMeshHeader(state.meshes.firstOrNull { it.number("id") == id }, members.sumOf { it.members.size }) }
+                items(members, key = { "activity-${it.root.number("id")}" }) { WorkActivityRows(it, state, requireNotNull(glyphMotion), openNode) }
+            }
+        }
+        if (if (tab == "Work") activities.isEmpty() else visible.isEmpty()) item { EmptyMessage(if (state.refreshing) "Loading agents…" else "No agents match this view. Capture a task to start one.") }
+        if (tab != "Work") items(visible.sortedByDescending { circuitNeedsAttention(it, state.circuitRuns) }, key = { "node-${it.number("id")}" }) { node ->
             Card(onClick = { openNode(node.number("id")) }, colors = CardDefaults.cardColors(containerColor = MeshColors.card)) {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(node.text("name"), style = MaterialTheme.typography.titleMedium)

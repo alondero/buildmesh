@@ -17,6 +17,13 @@ suspend fun BuildmeshApi.circuitRuns(): List<NodeCircuitRun> {
     return body.jsonArray.map(NodeCircuitRun::fromJson)
 }
 
+suspend fun BuildmeshApi.circuitOwnerships(): List<CircuitAgentOwnership> {
+    val body = try { get("/api/circuit-agent-ownerships") }
+    catch (error: ApiException) { if (error.status == 404) return emptyList() else throw error }
+    if (body is JsonObject && body.text("error") == "not found") return emptyList()
+    return body.jsonArray.map(CircuitAgentOwnership::fromJson)
+}
+
 suspend fun BuildmeshApi.reviewOptions(nodeId: Long): List<NodeReviewOption> {
     val body = get("/api/nodes/$nodeId/reviews")
     if (body is JsonObject && body.text("error") == "not found") return emptyList()
@@ -141,7 +148,7 @@ fun StartReviewButton(nodeId: Long, vm: BuildmeshViewModel) {
     var open by remember(nodeId) { mutableStateOf(false) }
     var options by remember(nodeId) { mutableStateOf<List<NodeReviewOption>?>(null) }
     var selected by remember(nodeId) { mutableStateOf<Long?>(null) }
-    var rounds by remember(nodeId) { mutableStateOf(3L) }
+    var rounds by remember(nodeId) { mutableLongStateOf(3L) }
     var readError by remember(nodeId) { mutableStateOf("") }
     LaunchedEffect(open, nodeId, state.resourceRevision) {
         if (!open) return@LaunchedEffect

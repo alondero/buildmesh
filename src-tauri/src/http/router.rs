@@ -220,6 +220,7 @@ enum Handler {
     IssueLabels,
     IssueSetLabel,
     CircuitRuns,
+    CircuitAgentOwnerships,
     NodeReviewOptions,
     NodeStartReview,
     CircuitApprove,
@@ -492,6 +493,13 @@ const ROUTES: &[Route] = &[
         scope: RouteScope::Admin,
         body: BodyPolicy::Cap(1024),
         handler: Handler::NodeStartReview,
+    },
+    Route {
+        method: "GET",
+        m: RouteMatch::Exact("/api/circuit-agent-ownerships"),
+        scope: RouteScope::Admin,
+        body: BodyPolicy::None,
+        handler: Handler::CircuitAgentOwnerships,
     },
     // Circuit Runs on Agent Nodes (issue #2314). The run id is in the path;
     // the act routes reuse the desktop commands, so eligibility is theirs.
@@ -870,6 +878,7 @@ async fn run_handler(handler: Handler, req: &ParsedRequest) -> DispatchResult {
         Handler::IssueLabels => Http(routes::issues::labels(req).await),
         Handler::IssueSetLabel => Http(routes::issues::set_label(req).await),
         Handler::CircuitRuns => Http(routes::circuit::list(req).await),
+        Handler::CircuitAgentOwnerships => Http(routes::circuit::ownerships(req).await),
         Handler::NodeReviewOptions => Http(routes::circuit::review_options(req).await),
         Handler::NodeStartReview => Http(routes::circuit::start_review(req).await),
         Handler::CircuitApprove => Http(routes::circuit::approve(req).await),
@@ -1198,6 +1207,7 @@ GET /api/meshes/{id}/issue-labels -> Admin
 POST /api/meshes/{mesh_id}/issues/{issue_number}/label -> Admin
 GET /api/nodes/{id}/reviews -> Admin
 POST /api/nodes/{id}/reviews -> Admin
+GET /api/circuit-agent-ownerships -> Admin
 GET /api/circuit-runs -> Admin
 POST /api/circuit-runs/{id}/approve -> Admin
 POST /api/circuit-runs/{id}/outcome -> Admin

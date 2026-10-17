@@ -13,8 +13,9 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import java.security.MessageDigest
 import java.util.Base64
 import dev.buildmesh.remote.wire.NodeCircuitRun
+import dev.buildmesh.remote.wire.CircuitAgentOwnership
 
-private data class DashboardSnapshot(val meshes: List<JsonObject>, val nodes: List<JsonObject>, val providers: List<JsonObject>, val runs: List<NodeCircuitRun>?)
+private data class DashboardSnapshot(val meshes: List<JsonObject>, val nodes: List<JsonObject>, val providers: List<JsonObject>, val runs: List<NodeCircuitRun>?, val ownerships: List<CircuitAgentOwnership>?)
 
 data class RemoteState(
     val restoring: Boolean = true,
@@ -29,6 +30,7 @@ data class RemoteState(
     val nodes: List<JsonObject> = emptyList(),
     val providers: List<JsonObject> = emptyList(),
     val circuitRuns: List<NodeCircuitRun> = emptyList(),
+    val circuitOwnerships: List<CircuitAgentOwnership> = emptyList(),
     val resourceRevision: Int = 0,
 )
 
@@ -59,10 +61,18 @@ class BuildmeshViewModel(application: Application) : AndroidViewModel(applicatio
                         null
                     }
                 }
-                DashboardSnapshot(meshes.await(), nodes.await(), providers.await(), runs.await())
+                val ownerships = async {
+                    try { client.circuitOwnerships() }
+                    catch (e: CancellationException) { throw e }
+                    catch (e: Exception) {
+                        if (e is ApiException && e.sessionRejected) throw e
+                        null
+                    }
+                }
+                DashboardSnapshot(meshes.await(), nodes.await(), providers.await(), runs.await(), ownerships.await())
             }
         }, publish = { snapshot ->
-            mutableState.update { it.copy(meshes = snapshot.meshes, nodes = snapshot.nodes, providers = snapshot.providers, circuitRuns = snapshot.runs ?: it.circuitRuns, error = "") }
+            mutableState.update { it.copy(meshes = snapshot.meshes, nodes = snapshot.nodes, providers = snapshot.providers, circuitRuns = snapshot.runs ?: it.circuitRuns, circuitOwnerships = snapshot.ownerships ?: it.circuitOwnerships, error = "") }
         }, onError = ::report,
         onBusy = { busy -> mutableState.update { it.copy(refreshing = busy) } },
     )

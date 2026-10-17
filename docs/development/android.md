@@ -174,6 +174,16 @@ Tapping an Overview mesh name selects its ID and switches to Work, clearing the
 search and attention filter. Mesh headers summarize open (non-archived) nodes
 with wrapping status dots and a count, independent of dashboard filters. Empty
 mesh names and paths use the muted text token; their actions remain available.
+Work uses compact rows under mesh headers, with the desktop status-circle shapes
+and Circuit orbit glyphs. Circuit-linked agents share one bracket, ordered with
+the representative first; each row opens that agent. Search and Needs attention
+match individual agents and retain the matching activity's other members for
+context. Missing or archived parents, cross-mesh links and cycles leave agents
+accessible. Desktop manual groups remain local desktop view state.
+`GET /api/circuit-agent-ownerships` supplies the same ownership ledger as the
+desktop sidebar, using the generated `CircuitAgentOwnership` wire type. Older
+desktops without this route show standalone rows. A failed ownership refresh
+retains the previous relationships while node updates continue.
 Drafts persist privately on the phone, scoped to the verified desktop endpoint
 and trusted certificate, until an acknowledged action succeeds. Re-pairing the
 same desktop restores its drafts without exposing them to another desktop.
