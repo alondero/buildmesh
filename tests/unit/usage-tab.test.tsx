@@ -391,8 +391,10 @@ describe('UsageTab (issue #601 ProbePanel usage tab)', () => {
     try {
       vi.setSystemTime(new Date('2026-07-17T14:23:00Z'));
       mockBackend();
-      const { unmount } = render(<UsageTab />);
-      await screen.findByText(/Refreshed just now/);
+      // A visible label can precede its passive effect; flush the async mount
+      // before asserting that the label owns a timer.
+      const { unmount } = await act(async () => render(<UsageTab />));
+      expect(screen.getByText(/Refreshed just now/)).toBeTruthy();
       // The clock lives in the label span now, not the tab — exactly one
       // interval while mounted, zero after unmount.
       expect(vi.getTimerCount()).toBe(1);
