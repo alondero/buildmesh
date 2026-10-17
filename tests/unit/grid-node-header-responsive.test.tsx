@@ -102,10 +102,13 @@ vi.mock('../../src/lib/tauri', async (importOriginal) => {
   return {
     ...actual,
     openInFileManager: openInFileManagerMock,
-    toggleNodePinned: toggleNodePinnedMock,
     mergePr: vi.fn().mockResolvedValue('Merged'),
   };
 });
+vi.mock('../../src/lib/tauri/agentNode', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/lib/tauri/agentNode')>(),
+  toggleNodePinned: toggleNodePinnedMock,
+}));
 
 // Imported AFTER mocks so it sees the stubbed BuildRunDropdown etc.
 import { seedAgentNodes } from './helpers/seedAgentNodes';

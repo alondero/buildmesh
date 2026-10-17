@@ -67,10 +67,13 @@ vi.mock('../../src/lib/tauri', async (importOriginal) => {
   return {
     ...actual,
     openInFileManager: openInFileManagerMock,
-    toggleNodePinned: toggleNodePinnedMock,
     mergePr: mergePrMock,
   };
 });
+vi.mock('../../src/lib/tauri/agentNode', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/lib/tauri/agentNode')>(),
+  toggleNodePinned: toggleNodePinnedMock,
+}));
 
 import { GridNodeHeader } from '../../src/components/AgentNodeView/GridNodeHeader';
 import { resolveCircuitOutcome } from '../../src/lib/circuitNodePresentation';
