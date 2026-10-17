@@ -113,4 +113,8 @@ describe('IPC import lint enforcement', () => {
     expect(await errors("import { _invoke } from '../lib/tauri/_invoke'; _invoke('x');", 'src/stores/agentNodeStore.ts')).toHaveLength(1);
     expect(await errors("import { _invoke } from './_invoke'; _invoke('x');", 'src/lib/tauri/agentNode.ts')).toEqual([]);
   });
+  it('caps the mobile NodeList screen at 600 lines', async () => {
+    const [result] = await eslint.lintText('\n'.repeat(601), { filePath: 'src/mobile/screens/NodeList.tsx' });
+    expect(result.messages.some((message) => message.ruleId === 'max-lines')).toBe(true);
+  });
 });

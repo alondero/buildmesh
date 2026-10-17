@@ -344,6 +344,10 @@ export default [
     files: ['src/lib/tauri/_invoke.ts', 'src/lib/frontendLog.ts'],
     rules: { 'no-restricted-imports': ipcImportRestrictions({ transport: true, raw: true }) },
   },
+  {
+    files: ['src/mobile/screens/NodeList.tsx'],
+    rules: { 'max-lines': ['error', { max: 600 }] },
+  },
 
   // ---------- test TS/TSX files: relaxed rules for vitest / Playwright ------
   // Tests import a lot of fixtures that they intentionally don't use
