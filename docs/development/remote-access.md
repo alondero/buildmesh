@@ -36,10 +36,10 @@ previews, overview, per-mesh sections, provider picker, mesh actions sheet and
 snapshot/create notices. ESLint caps the screen at 600 lines.
 
 `useNodeListSnapshot` owns the mesh/node/Circuit reads, provider loading,
-visibility polling and WebSocket reconciliation. It retains the screen's
-mounted ref and refresh revision fence; a failed secondary Circuit read keeps
-the last successful Circuit data, and an unavailable primary read keeps the
-visible list with a stale notice. Reply markers and create operation keys stay
+visibility polling and WebSocket reconciliation. The screen passes its mounted
+ref into the hook, which owns the refresh revision fence. A failed secondary
+Circuit read keeps the last successful Circuit data, and an unavailable primary
+read keeps the visible list with a stale notice. Reply markers and create operation keys stay
 with the screen so extracting rendering modules does not reset pending work.
 
 ## LAN/VPN Exposure & Self-Signed TLS

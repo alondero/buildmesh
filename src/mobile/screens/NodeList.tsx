@@ -5,7 +5,7 @@ export { NodeRow } from '../components/nodeList/NodeRow';
 import { ProviderPicker } from '../components/nodeList/ProviderPicker';
 import { MeshActionsSheet } from '../components/nodeList/MeshActionsSheet';
 import { MeshNodeSection } from '../components/nodeList/MeshNodeSection';
-import { NodeOverview } from '../components/nodeList/NodeOverview';
+import { OverviewSummary } from '../components/nodeList/OverviewSummary';
 import { NodeListNotices } from '../components/nodeList/NodeListNotices';
 import { useNodeListSnapshot } from '../components/nodeList/useNodeListSnapshot';
 import type { SentAction, SentMarker } from '../components/nodeList/types';
@@ -421,7 +421,7 @@ export default function NodeList({
               </div>
               {activeView === "overview" && (
                 <>
-                  <NodeOverview attentionCount={attentionCount} runningCount={runningCount} visibleNodes={visibleNodes} problemNodes={problemNodes} meshes={meshes} providers={providers} circuitRuns={circuitRuns} setFilter={setFilter} changeView={changeView} onOpenNode={onOpenNode} />
+                  <OverviewSummary attentionCount={attentionCount} runningCount={runningCount} visibleNodes={visibleNodes} problemNodes={problemNodes} meshes={meshes} providers={providers} circuitRuns={circuitRuns} setFilter={setFilter} changeView={changeView} onOpenNode={onOpenNode} />
                 </>
               )}
               {activeView === "work" && (

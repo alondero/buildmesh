@@ -5,7 +5,7 @@ import { nodeInputContext } from '../../../lib/status';
 import { SectionHeading } from './SectionHeading';
 import { NodeRow } from './NodeRow';
 
-export function NodeOverview({ attentionCount, runningCount, visibleNodes, problemNodes, meshes, providers, circuitRuns, setFilter, changeView, onOpenNode }: {
+export function OverviewSummary({ attentionCount, runningCount, visibleNodes, problemNodes, meshes, providers, circuitRuns, setFilter, changeView, onOpenNode }: {
   attentionCount: number; runningCount: number; visibleNodes: AgentNode[]; problemNodes: AgentNode[]; meshes: Mesh[]; providers: Provider[]; circuitRuns: Map<number, NodeCircuitRun>;
   setFilter: (filter: string) => void; changeView: (view: 'overview' | 'work' | 'capture') => void; onOpenNode: (node: AgentNode, prompt?: string) => void;
 }) {
