@@ -28,7 +28,7 @@ import type { AutopilotCircuitRun } from '../../types/generated/AutopilotCircuit
 import type { AutopilotCircuitRunStep } from '../../types/generated/AutopilotCircuitRunStep';
 import type { CheckpointAction } from '../../types/generated/CheckpointAction';
 import type { CircuitRunAttention } from '../../types/generated/CircuitRunAttention';
-import { LAST_ROUND_GUIDANCE, checkpointActionLabel, checkpointActionNeedsEvidence, describeProblem, recoveryGuidance } from './runNextSteps';
+import { checkpointActionLabel, checkpointActionNeedsEvidence, describeProblem, lastRoundGuidance, recoveryGuidance } from './runNextSteps';
 import { runFailureStep } from './runStepPresentation';
 
 /** A backend answer we can rely on, or `null` (a mock or a skewed build). */
@@ -299,7 +299,7 @@ export function RunNextSteps({ run, steps, roleLabel, busy }: RunNextStepsProps)
                 })}
               </div>
               {checkpoint.ends_review && !checkpoint.starts_next_review && (
-                <p className="mt-0.5 text-text-secondary">{LAST_ROUND_GUIDANCE}</p>
+                <p className="mt-0.5 text-text-secondary">{lastRoundGuidance(checkpoint.review_again)}</p>
               )}
             </div>
           ))}

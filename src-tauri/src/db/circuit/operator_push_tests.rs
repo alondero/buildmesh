@@ -450,7 +450,9 @@ fn completing_the_fix_wait_offers_the_next_review() {
     assert!(push.outcomes.contains(&StepPushOutcome::Completed));
     assert!(push.starts_next_review);
     assert!(!checkpoint.ends_review);
+    assert!(!checkpoint.review_again);
     assert!(!push.ends_review);
+    assert!(!push.review_again);
 
     let ordinary = fixture(
         &graph(await_turn()),
@@ -504,7 +506,11 @@ fn the_last_allowed_review_round_offers_review_again() {
     );
     assert!(
         checkpoint.ends_review,
-        "the last allowed attempt stops the review so the person can use Review again"
+        "the last allowed attempt stops the review"
+    );
+    assert!(
+        !checkpoint.review_again,
+        "this fixture has no source agent, so recovery cannot continue it"
     );
     let push = attention
         .pushes
@@ -514,6 +520,7 @@ fn the_last_allowed_review_round_offers_review_again() {
     assert!(push.outcomes.contains(&StepPushOutcome::Completed));
     assert!(!push.starts_next_review);
     assert!(push.ends_review);
+    assert!(!push.review_again);
 
     let mut raised = context.clone();
     raised.set("source.review_preset", "1");
@@ -539,8 +546,261 @@ fn the_last_allowed_review_round_offers_review_again() {
         "a review preset follows the run's raised round limit, not only the graph"
     );
     assert!(!raised_checkpoint.ends_review);
+    assert!(!raised_checkpoint.review_again);
     assert!(raised_attention.pushes[0].starts_next_review);
     assert!(!raised_attention.pushes[0].ends_review);
+    assert!(!raised_attention.pushes[0].review_again);
+}
+
+/// A bounded review cycle that is not a node review and not the issue-review
+/// blueprint. Recovery rejects it; the last-round guidance must not promise
+/// Review again.
+fn custom_review_loop() -> CircuitGraph {
+    CircuitGraph {
+        version: CIRCUIT_GRAPH_VERSION,
+        blueprint: None,
+        nodes: vec![
+            node("trigger", CircuitNodeKind::Manual),
+            node(
+                "implementer",
+                CircuitNodeKind::SpawnAgentNode {
+                    prompt: "do the work".into(),
+                    name: None,
+                    provider: None,
+                    model: None,
+                    effort: None,
+                    extra_args: None,
+                    timeout_seconds: None,
+                },
+            ),
+            node(
+                "wait",
+                CircuitNodeKind::AwaitAgentTurn {
+                    target_node_id: Some("implementer".into()),
+                },
+            ),
+            node("gate", CircuitNodeKind::RetryLimit { max_retries: 1 }),
+            node(
+                "again",
+                CircuitNodeKind::InjectPty {
+                    prompt: "look again".into(),
+                    target_node_id: Some("reviewer".into()),
+                },
+            ),
+            node(
+                "verdict",
+                CircuitNodeKind::ReviewVerdict {
+                    target_node_id: Some("reviewer".into()),
+                },
+            ),
+            node(
+                "reviewer",
+                CircuitNodeKind::SpawnAgentNode {
+                    prompt: "review the change".into(),
+                    name: None,
+                    provider: None,
+                    model: None,
+                    effort: None,
+                    extra_args: None,
+                    timeout_seconds: None,
+                },
+            ),
+            node(
+                "exhausted",
+                CircuitNodeKind::Notify {
+                    message: "stopped".into(),
+                },
+            ),
+        ],
+        edges: vec![
+            edge("trigger", "implementer", EdgeCondition::Always),
+            edge("trigger", "reviewer", EdgeCondition::Always),
+            edge("implementer", "wait", EdgeCondition::Always),
+            edge(
+                "wait",
+                "gate",
+                EdgeCondition::OnOutcome(StepOutcome::Completed),
+            ),
+            edge(
+                "gate",
+                "again",
+                EdgeCondition::OnOutcome(StepOutcome::Completed),
+            ),
+            edge(
+                "gate",
+                "exhausted",
+                EdgeCondition::OnOutcome(StepOutcome::Failed),
+            ),
+            edge("again", "verdict", EdgeCondition::Always),
+            edge(
+                "verdict",
+                "wait",
+                EdgeCondition::OnOutcome(StepOutcome::Working),
+            ),
+        ],
+    }
+}
+
+fn review_attention_db(
+    graph: &CircuitGraph,
+    source_agent_node_id: Option<i64>,
+    context: &CircuitContext,
+    steps_sql: &str,
+) -> Connection {
+    let db = Connection::open_in_memory().unwrap();
+    crate::db::init_schema(&db).unwrap();
+    db.execute_batch(
+        "INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+        INSERT INTO agent_nodes(id,mesh_id,name,path,status) VALUES(9,1,'implementer','/repo','idle');
+        INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'review');
+        INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');",
+    )
+    .unwrap();
+    if let Some(source) = source_agent_node_id {
+        db.execute(
+            "UPDATE autopilot_circuit_runs SET source_agent_node_id=?1 WHERE id=1",
+            [source],
+        )
+        .unwrap();
+    }
+    db.execute(
+        "UPDATE autopilot_circuits SET graph_json=?1",
+        [graph.to_json().unwrap()],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE autopilot_circuit_runs SET context_json=?1",
+        [context.to_json().unwrap()],
+    )
+    .unwrap();
+    db.execute_batch(steps_sql).unwrap();
+    db
+}
+
+#[test]
+fn a_custom_review_loop_on_its_last_round_does_not_promise_review_again() {
+    let custom = custom_review_loop();
+    custom
+        .validate()
+        .expect("a bounded custom review loop is a valid graph");
+    assert!(!custom.has_local_review_contract());
+    assert!(!custom.is_issue_driven_autopilot_review());
+    let mut context = CircuitContext::default();
+    context.set("source.agent_id", "9");
+    let db = review_attention_db(
+        &custom,
+        None,
+        &context,
+        "INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,agent_node_id)
+            VALUES(1,'implementer',1,'completed',9);
+        INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status)
+            VALUES(1,'wait',1,'unverified');
+        INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,outcome)
+            VALUES(1,'again',1,'completed','completed');
+        INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,outcome)
+            VALUES(1,'verdict',1,'completed','working');",
+    );
+    let attention = attention_inner(&db, 1).unwrap();
+    let checkpoint = attention
+        .checkpoints
+        .iter()
+        .find(|checkpoint| checkpoint.node_id == "wait")
+        .expect("the wait is an unverified checkpoint");
+    assert!(
+        checkpoint.ends_review,
+        "the spent custom loop still stops the review"
+    );
+    assert!(!checkpoint.starts_next_review);
+    assert!(
+        !checkpoint.review_again,
+        "recovery cannot continue this graph, so the checkpoint must not promise Review again"
+    );
+    let push = attention
+        .pushes
+        .iter()
+        .find(|push| push.node_id == "wait")
+        .expect("the wait can be moved on");
+    assert!(push.ends_review);
+    assert!(!push.review_again);
+
+    db.execute(
+        "UPDATE autopilot_circuit_runs SET state='failed' WHERE id=1",
+        [],
+    )
+    .unwrap();
+    let refused = super::recovery::review_recovery_inner(&db, 1, 1).unwrap_err();
+    assert!(
+        refused.contains("This custom circuit needs manual recovery. Open its implementation agent and inspect the failed step."),
+        "{refused}"
+    );
+
+    let review = CircuitGraph::agent_review(None, None, 5);
+    let supported = review_attention_db(
+        &review,
+        Some(9),
+        &context,
+        "INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status)
+            VALUES(1,'await_fixes',2,'unverified');
+        INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,outcome)
+            VALUES(1,'re_review',5,'completed','completed');
+        INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,outcome)
+            VALUES(1,'verdict',5,'completed','working');",
+    );
+    let supported_attention = attention_inner(&supported, 1).unwrap();
+    let supported_checkpoint = supported_attention
+        .checkpoints
+        .iter()
+        .find(|checkpoint| checkpoint.node_id == "await_fixes")
+        .expect("the fix wait is an unverified checkpoint");
+    assert!(supported_checkpoint.ends_review);
+    assert!(
+        supported_checkpoint.review_again,
+        "a node review with its source agent can be continued"
+    );
+    assert!(supported_attention.pushes[0].review_again);
+    supported
+        .execute(
+            "UPDATE autopilot_circuit_runs SET state='failed' WHERE id=1",
+            [],
+        )
+        .unwrap();
+    let plan = super::recovery::review_recovery_inner(&supported, 1, 1).unwrap();
+    assert_eq!(plan.source_id, 9);
+
+    let issue = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+    issue.validate().unwrap();
+    let issue_db = review_attention_db(
+        &issue,
+        None,
+        &CircuitContext::default(),
+        "INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,agent_node_id)
+            VALUES(1,'implementer',1,'completed',9);
+        INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status)
+            VALUES(1,'feedback_classifier',1,'unverified');
+        INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,outcome)
+            VALUES(1,'re_review',3,'completed','completed');
+        INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,outcome)
+            VALUES(1,'review_classifier',3,'completed','working');",
+    );
+    let issue_attention = attention_inner(&issue_db, 1).unwrap();
+    let issue_checkpoint = issue_attention
+        .checkpoints
+        .iter()
+        .find(|checkpoint| checkpoint.node_id == "feedback_classifier")
+        .expect("the feedback classifier is an unverified checkpoint");
+    assert!(issue_checkpoint.ends_review);
+    assert!(
+        issue_checkpoint.review_again,
+        "the issue-review blueprint can be continued"
+    );
+    issue_db
+        .execute(
+            "UPDATE autopilot_circuit_runs SET state='failed' WHERE id=1",
+            [],
+        )
+        .unwrap();
+    let issue_plan = super::recovery::review_recovery_inner(&issue_db, 1, 1).unwrap();
+    assert_eq!(issue_plan.source_id, 9);
 }
 
 #[test]

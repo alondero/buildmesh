@@ -29,7 +29,7 @@ import { formatDurationMs, ledgerTimestampMs, statusTextClass, stepDurationMs } 
 import { runStateLabel, stepStatusLabel } from './circuitVocabulary';
 import { reviewCircuitMetadata, reviewResult } from './runDiagnostics';
 import { formatWallClock } from './runIdentity';
-import { LAST_ROUND_GUIDANCE } from './runNextSteps';
+import { lastRoundGuidance } from './runNextSteps';
 import { distinctRailLabels, pushOutcomeLabel, railRows, type RailRow, type RailState } from './runOverviewModel';
 import { nodeRoleLabel, parseRunContext, reviewReport, stepPassLabel, stepVerdict, verdictTextClass } from './runStepPresentation';
 
@@ -346,7 +346,7 @@ function StepPushControl({ push, kind, revision, runId, onPushed, onRefused }: {
       )}
       <p className="mb-1 text-text-muted">If you know better, say what happened and the run moves on:</p>
       {push.ends_review && !push.starts_next_review && (
-        <p className="mb-1 text-text-secondary">{LAST_ROUND_GUIDANCE}</p>
+        <p className="mb-1 text-text-secondary">{lastRoundGuidance(push.review_again)}</p>
       )}
       <div className="flex flex-wrap items-center gap-1">
         {push.outcomes.map((outcome) => (

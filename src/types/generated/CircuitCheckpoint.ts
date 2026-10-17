@@ -7,7 +7,11 @@ export type CircuitCheckpoint = { node_id: string, attempt: number, actions: Arr
  */
 starts_next_review: boolean, 
 /**
- * Completing this step uses the last review round. Another pass is
- * Review again after the run stops.
+ * Completing this step uses the last review round.
  */
-ends_review: boolean, };
+ends_review: boolean, 
+/**
+ * Review again can add another round after the run stops. False when
+ * recovery would reject this graph as a custom circuit.
+ */
+review_again: boolean, };

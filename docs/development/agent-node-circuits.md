@@ -101,8 +101,9 @@ evidence across the run and clears a stale lifecycle report that is blocking it,
 then records the outcome as an operator override in Run History. When the
 completed outcome re-enters a bounded review and a round remains, the push is labelled **Start the
 next review**. On the last allowed round it is labelled **Record the last round**;
-recording it stops the review, and Review again adds one more round after the run
-stops. It is an Operator-recorded
+recording it stops the review. When recovery can continue the graph, Review again
+adds one more round after the run stops. A custom loop tells the person to open
+the implementation agent and inspect the failed step. It is an Operator-recorded
 Outcome, not verified evidence, and it grants no review approval.
 
 When an agent disappears, its cancellation explanation retains the preceding
@@ -306,8 +307,10 @@ automatic continuation. Eligible agent handoffs also offer **Record completed**:
 inspect the work, enter a reason, and attest that this step can advance. When
 that completion re-enters a bounded review and a round remains, the run card, the history action and
 the phone all say **Start the next review** instead. On the last allowed round
-they say **Record the last round**. Recording it stops the review. Review again
-adds one more round after the run stops. The next worker tick asks
+they say **Record the last round**. Recording it stops the review. When recovery
+can continue the graph, Review again adds one more round after the run stops. A
+custom loop tells the person to open the implementation agent and inspect the
+failed step. The next worker tick asks
 the reviewer to look again only while a round remains. This is an operator decision, not verified lifecycle
 evidence, and it does not approve the review. Missing agent attachments,
 known unfinished child work, conflicting evidence, and unresolved human requests

@@ -203,6 +203,20 @@ pub(crate) fn review_recovery_inner(
     })
 }
 
+/// Whether Review again accepts this graph.
+///
+/// A node review still needs its source agent. The issue-review blueprint
+/// does not. The failed-state check and the later recovery checks stay in
+/// [`review_source_id`]. Last-round guidance is shown while the run is still
+/// going, so it uses this contract.
+pub(crate) fn review_continuation_supported(
+    run: &crate::models::AutopilotCircuitRun,
+    graph: &CircuitGraph,
+) -> bool {
+    (run.source_agent_node_id.is_some() && graph.has_local_review_contract())
+        || graph.is_issue_driven_autopilot_review()
+}
+
 fn review_source_id(
     run: &crate::models::AutopilotCircuitRun,
     original: &CircuitGraph,
@@ -214,10 +228,10 @@ fn review_source_id(
                 .into(),
         );
     }
-    let local = run.source_agent_node_id.is_some() && original.has_local_review_contract();
-    if !local && !original.is_issue_driven_autopilot_review() {
+    if !review_continuation_supported(run, original) {
         return Err("This custom circuit needs manual recovery. Open its implementation agent and inspect the failed step.".into());
     }
+    let local = run.source_agent_node_id.is_some() && original.has_local_review_contract();
     let source_id = if local {
         run.source_agent_node_id
     } else {

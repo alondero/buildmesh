@@ -294,7 +294,7 @@ describe('a running run waiting on evidence', () => {
   it('names the last allowed round as recording the round, and points at Review again', async () => {
     vi.mocked(circuitRunAttention).mockResolvedValue({
       revision: 12,
-      checkpoints: [{ node_id: 'await_fixes', attempt: 2, actions: ['recheck', 'completed'], starts_next_review: false, ends_review: true }],
+      checkpoints: [{ node_id: 'await_fixes', attempt: 2, actions: ['recheck', 'completed'], starts_next_review: false, ends_review: true, review_again: true }],
     });
     renderPanel({ state: 'running' }, [step({ node_id: 'await_fixes', status: 'unverified', attempt: 2, outcome: null, error_message: null })]);
 
@@ -303,6 +303,18 @@ describe('a running run waiting on evidence', () => {
     expect(screen.getByText('Recording this stops the review. Review again adds one more round after the run stops.')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Record the last round' }));
     expect(screen.getByRole('button', { name: 'Confirm: Record the last round' })).toBeTruthy();
+  });
+
+  it('points a custom last round at manual recovery instead of Review again', async () => {
+    vi.mocked(circuitRunAttention).mockResolvedValue({
+      revision: 12,
+      checkpoints: [{ node_id: 'await_fixes', attempt: 2, actions: ['recheck', 'completed'], starts_next_review: false, ends_review: true, review_again: false }],
+    });
+    renderPanel({ state: 'running' }, [step({ node_id: 'await_fixes', status: 'unverified', attempt: 2, outcome: null, error_message: null })]);
+
+    expect(await screen.findByRole('button', { name: 'Record the last round' })).toBeTruthy();
+    expect(screen.getByText('Recording this stops the review. This custom circuit needs manual recovery. Open its implementation agent and inspect the failed step.')).toBeTruthy();
+    expect(screen.queryByText('Recording this stops the review. Review again adds one more round after the run stops.')).toBeNull();
   });
 
   it('recording a result offers an optional note box, and sends it when given', async () => {

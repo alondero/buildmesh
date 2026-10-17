@@ -332,7 +332,8 @@ impl RunView {
     }
 
     /// Completing this step reaches a review retry gate whose budget is
-    /// already spent. The run stops, and another pass is Review again.
+    /// already spent, so the run stops. Review again is a separate recovery
+    /// decision: a custom loop does not imply that another round can be added.
     pub(crate) fn completion_ends_review(&self, node_id: &str) -> bool {
         let gates = self.review_reentry_gates(node_id);
         !gates.is_empty() && gates.iter().all(|gate| !self.review_round_remains(gate))

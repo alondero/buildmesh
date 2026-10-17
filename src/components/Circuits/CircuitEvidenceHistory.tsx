@@ -10,7 +10,7 @@ import type { RecordedClassification } from '../../types/generated/RecordedClass
 import type { ObservedWorkFact } from '../../types/generated/ObservedWorkFact';
 import { ledgerTimestampMs } from './circuitGraphModel';
 import { historyTitle, splitHistory, stepReference } from './historyPresentation';
-import { LAST_ROUND_GUIDANCE, checkpointActionNeedsEvidence } from './runNextSteps';
+import { LAST_ROUND_GUIDANCE, LAST_ROUND_MANUAL_RECOVERY, checkpointActionNeedsEvidence } from './runNextSteps';
 import { formatWallClock } from './runIdentity';
 
 function historyActionLabel(action: CheckpointAction, startsNextReview: boolean, endsReview: boolean): string {
@@ -273,7 +273,8 @@ export function CircuitEvidenceHistory({ runId, updatedAt, nodeLabel }: {
       {checkpoints.length > 0 && <div className="space-y-2">
         <p>Inspect the agent or external result, then choose how to continue. Record completed advances this step without replaying its action.</p>
         {checkpoints.some((step) => step.starts_next_review) && <p>Start the next review records that this step finished and sends the work back to the reviewer. It does not approve the work.</p>}
-        {checkpoints.some((step) => step.ends_review && !step.starts_next_review) && <p>{LAST_ROUND_GUIDANCE}</p>}
+        {checkpoints.some((step) => step.ends_review && !step.starts_next_review && step.review_again) && <p>{LAST_ROUND_GUIDANCE}</p>}
+        {checkpoints.some((step) => step.ends_review && !step.starts_next_review && !step.review_again) && <p>{LAST_ROUND_MANUAL_RECOVERY}</p>}
         <p>For a staged prompt, submit it in the agent terminal first. Record completed only after confirming it was accepted.</p>
 <p>Completion does not grant review approval. Explicit review decisions are recorded as human verdicts.</p>
         <label htmlFor="evidence-reason" className="block">Reason and supporting evidence</label>

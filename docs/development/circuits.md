@@ -97,7 +97,10 @@ the next review** on the checkpoint and on the manual push while a round remains
 That is a completed edge into a retry gate whose re-entry reaches a review verdict,
 and the gate's target attempt is still under the same limit the gate will use. On
 the last allowed attempt the same completion is **Record the last round**: recording
-it stops the review, and **Review again** adds one more round after the run stops.
+it stops the review. When recovery can continue that run — a node review that still
+has its implementation agent, or the issue-review blueprint — **Review again** adds
+one more round after the run stops. Otherwise the same recording tells the person
+to open the implementation agent and inspect the failed step.
 **Check again** stays a recheck. **Review passed** and **Request changes** keep
 their names. **Start the next review** and **Record the last round** do not approve
 the work. The next worker tick

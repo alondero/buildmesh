@@ -210,12 +210,22 @@ it('calls a review re-entry Start the next review', async () => {
 
 it('names the last allowed round as recording the round, and points at Review again', async () => {
   vi.mocked(circuitRunHistory).mockResolvedValue({ entries: [entry], coverage: [],
-    checkpoints: [{ node_id: 'await_fixes', attempt: 2, actions: ['recheck', 'completed'], starts_next_review: false, ends_review: true }] });
+    checkpoints: [{ node_id: 'await_fixes', attempt: 2, actions: ['recheck', 'completed'], starts_next_review: false, ends_review: true, review_again: true }] });
   const { container } = render(<CircuitEvidenceHistory runId={3} updatedAt="one" />);
   fireEvent.click(container.querySelector('summary')!);
   expect(await screen.findByRole('button', { name: 'Record the last round' })).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Recheck evidence' })).toBeTruthy();
   expect(screen.getByText('Recording this stops the review. Review again adds one more round after the run stops.')).toBeTruthy();
+});
+
+it('points a custom last round at manual recovery instead of Review again', async () => {
+  vi.mocked(circuitRunHistory).mockResolvedValue({ entries: [entry], coverage: [],
+    checkpoints: [{ node_id: 'await_fixes', attempt: 2, actions: ['recheck', 'completed'], starts_next_review: false, ends_review: true, review_again: false }] });
+  const { container } = render(<CircuitEvidenceHistory runId={3} updatedAt="one" />);
+  fireEvent.click(container.querySelector('summary')!);
+  expect(await screen.findByRole('button', { name: 'Record the last round' })).toBeTruthy();
+  expect(screen.getByText('Recording this stops the review. This custom circuit needs manual recovery. Open its implementation agent and inspect the failed step.')).toBeTruthy();
+  expect(screen.queryByText('Recording this stops the review. Review again adds one more round after the run stops.')).toBeNull();
 });
 
 it('offers agent handoff recovery before history and retains a rejected reason for retry', async () => {

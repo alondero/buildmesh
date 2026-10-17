@@ -21,4 +21,9 @@ starts_next_review: boolean,
 /**
  * Choosing completed uses the last review round.
  */
-ends_review: boolean, };
+ends_review: boolean, 
+/**
+ * Review again can add another round after the run stops. False when
+ * recovery would reject this graph as a custom circuit.
+ */
+review_again: boolean, };

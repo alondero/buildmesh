@@ -246,11 +246,23 @@ describe('Overview panel', () => {
     const review = overview();
     review.attention.pushes[0].starts_next_review = false;
     review.attention.pushes[0].ends_review = true;
+    review.attention.pushes[0].review_again = true;
     render(<CircuitRunOverview {...props} overview={review} />);
     expect(screen.getByTestId('run-overview-push-await-completed').textContent).toBe('Record the last round');
     expect(screen.getByText('Recording this stops the review. Review again adds one more round after the run stops.')).toBeTruthy();
     fireEvent.click(screen.getByTestId('run-overview-push-await-completed'));
     expect(screen.getByTestId('run-overview-push-confirm-await').textContent).toBe('Move on: Record the last round');
+  });
+
+  it('points a custom last round at manual recovery instead of Review again', () => {
+    const review = overview();
+    review.attention.pushes[0].starts_next_review = false;
+    review.attention.pushes[0].ends_review = true;
+    review.attention.pushes[0].review_again = false;
+    render(<CircuitRunOverview {...props} overview={review} />);
+    expect(screen.getByTestId('run-overview-push-await-completed').textContent).toBe('Record the last round');
+    expect(screen.getByText('Recording this stops the review. This custom circuit needs manual recovery. Open its implementation agent and inspect the failed step.')).toBeTruthy();
+    expect(screen.queryByText('Recording this stops the review. Review again adds one more round after the run stops.')).toBeNull();
   });
 
   it('shows a refused push, keeps the choice open and rereads the run so a retry uses its new revision', async () => {

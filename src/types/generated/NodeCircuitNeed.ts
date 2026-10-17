@@ -22,6 +22,11 @@ starts_next_review: boolean,
  */
 ends_review: boolean, 
 /**
+ * Review again can add another round after the run stops. False when
+ * recovery would reject this graph as a custom circuit.
+ */
+review_again: boolean, 
+/**
  * The agent to open to answer an `input` need.
  */
 agent_node_id: number | null, };

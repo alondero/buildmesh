@@ -234,6 +234,7 @@ fn an_unverified_step_offers_exactly_the_actions_the_desktop_run_card_offers() {
         desktop.checkpoints[0].starts_next_review
     );
     assert_eq!(need.ends_review, desktop.checkpoints[0].ends_review);
+    assert_eq!(need.review_again, desktop.checkpoints[0].review_again);
 }
 
 #[test]
@@ -266,6 +267,8 @@ fn the_phone_offers_the_next_review_when_the_fix_wait_is_unverified() {
         .expect("the phone lists the fix wait");
     assert!(need.starts_next_review);
     assert!(!need.ends_review);
+    assert!(!need.review_again);
+    assert_eq!(need.review_again, checkpoint.review_again);
     assert_eq!(
         format!("{:?}", need.actions),
         format!("{:?}", checkpoint.actions)
@@ -305,6 +308,8 @@ fn the_phone_offers_review_again_on_the_last_allowed_round() {
         .expect("the phone lists the fix wait");
     assert!(!need.starts_next_review);
     assert!(need.ends_review);
+    assert!(need.review_again);
+    assert_eq!(need.review_again, checkpoint.review_again);
 }
 
 #[test]

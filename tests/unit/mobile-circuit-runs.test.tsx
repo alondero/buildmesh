@@ -18,6 +18,7 @@ const unverified = (actions: NodeCircuitNeed['actions']): NodeCircuitNeed => ({
   actions,
   starts_next_review: false,
   ends_review: false,
+  review_again: false,
   agent_node_id: null,
 });
 const circuit = (over: Partial<NodeCircuitRun> = {}): NodeCircuitRun => ({
@@ -172,7 +173,7 @@ it('names a review re-entry as the next review pass', async () => {
 
 it('names the last allowed round as recording the round, and points at Review again', async () => {
   runs = [circuit({
-    needs_you: [{ ...unverified(['recheck', 'completed']), starts_next_review: false, ends_review: true }],
+    needs_you: [{ ...unverified(['recheck', 'completed']), starts_next_review: false, ends_review: true, review_again: true }],
     step: null,
   })];
   panel();
@@ -184,6 +185,19 @@ it('names the last allowed round as recording the round, and points at Review ag
   expect(screen.getAllByText('Recording this stops the review. Review again adds one more round after the run stops.')).toHaveLength(2);
   fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
   expect(await screen.findByText('Recorded. The review stops.')).toBeTruthy();
+});
+
+it('points a custom last round at manual recovery instead of Review again', async () => {
+  runs = [circuit({
+    needs_you: [{ ...unverified(['recheck', 'completed']), starts_next_review: false, ends_review: true, review_again: false }],
+    step: null,
+  })];
+  panel();
+  expect(await screen.findByRole('button', { name: 'Record the last round' })).toBeTruthy();
+  expect(screen.getByText('Recording this stops the review. This custom circuit needs manual recovery. Open its implementation agent and inspect the failed step.')).toBeTruthy();
+  expect(screen.queryByText('Recording this stops the review. Review again adds one more round after the run stops.')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Record the last round' }));
+  expect(screen.getAllByText('Recording this stops the review. This custom circuit needs manual recovery. Open its implementation agent and inspect the failed step.')).toHaveLength(2);
 });
 
 it('requires evidence for a review verdict before it can be sent', async () => {

@@ -154,9 +154,11 @@ pub struct CircuitCheckpoint {
     pub actions: Vec<CheckpointAction>,
     /// Completing this step starts another review pass.
     pub starts_next_review: bool,
-    /// Completing this step uses the last review round. Another pass is
-    /// Review again after the run stops.
+    /// Completing this step uses the last review round.
     pub ends_review: bool,
+    /// Review again can add another round after the run stops. False when
+    /// recovery would reject this graph as a custom circuit.
+    pub review_again: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
@@ -353,6 +355,7 @@ fn evidence_view_unresolved(
         let steps =
             super::ledger::list_circuit_run_steps_inner(db, run_id).map_err(|e| e.to_string())?;
         let view = recovery_view(db, &run)?;
+        let continuation = super::recovery::review_continuation_supported(&run, &graph);
         for step in steps {
             if let Some(agent_id) = step
                 .agent_node_id
@@ -415,12 +418,14 @@ fn evidence_view_unresolved(
                 continue;
             }
             let actions = checkpoint_actions(db, run_id, &graph, &view, &step)?;
+            let ends_review = view.completion_ends_review(&step.node_id);
             checkpoints.push(CircuitCheckpoint {
                 node_id: step.node_id.clone(),
                 attempt: step.attempt,
                 actions,
                 starts_next_review: view.completion_starts_next_review(&step.node_id),
-                ends_review: view.completion_ends_review(&step.node_id),
+                ends_review,
+                review_again: ends_review && continuation,
             });
         }
     }
@@ -468,16 +473,19 @@ pub(crate) fn attention_inner(db: &Connection, run_id: i64) -> Result<CircuitRun
         super::ledger::list_circuit_run_steps_inner(db, run_id).map_err(|e| e.to_string())?;
     let mut checkpoints = Vec::new();
     let mut pushes = Vec::new();
+    let continuation = super::recovery::review_continuation_supported(&run, &graph);
     if run.state == "running" {
         let view = recovery_view(db, &run)?;
-        pushes = super::operator_push::pushes(&view);
+        pushes = super::operator_push::pushes(&view, continuation);
         for step in steps.iter().filter(|step| step.status == "unverified") {
+            let ends_review = view.completion_ends_review(&step.node_id);
             checkpoints.push(CircuitCheckpoint {
                 node_id: step.node_id.clone(),
                 attempt: step.attempt,
                 actions: checkpoint_actions(db, run_id, &graph, &view, step)?,
                 starts_next_review: view.completion_starts_next_review(&step.node_id),
-                ends_review: view.completion_ends_review(&step.node_id),
+                ends_review,
+                review_again: ends_review && continuation,
             });
         }
     }

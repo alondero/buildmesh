@@ -10,7 +10,7 @@ import {
 import type { NodeCircuitRun } from '../api';
 import type { CheckpointAction } from '../../types/generated/CheckpointAction';
 import type { NodeCircuitNeed } from '../../types/generated/NodeCircuitNeed';
-import { LAST_ROUND_GUIDANCE, checkpointActionLabel, checkpointActionNeedsEvidence, recoveryGuidance } from '../../components/Circuits/runNextSteps';
+import { checkpointActionLabel, checkpointActionNeedsEvidence, lastRoundGuidance, recoveryGuidance } from '../../components/Circuits/runNextSteps';
 import { canCancel, circuitStatusLine, needHeading } from '../circuitRun';
 import { Sheet } from '../ui';
 import { useVisibilityPolling } from '../useVisibilityPolling';
@@ -239,7 +239,7 @@ export function NodeCircuitRunPanel({
             </div>
           )}
           {need.kind === 'unverified' && need.ends_review && !need.starts_next_review && (
-            <p>{LAST_ROUND_GUIDANCE}</p>
+            <p>{lastRoundGuidance(need.review_again)}</p>
           )}
         </article>
       ))}
@@ -272,7 +272,7 @@ export function NodeCircuitRunPanel({
           {openDecision.kind === 'cancel' && <p>The run stops and its helper agents are closed. Your implementation agent stays open.</p>}
           {openDecision.kind === 'approve' && <p>The run continues past this gate as soon as you confirm.</p>}
           {openDecision.kind === 'record' && openDecision.action === 'completed' && openDecision.need.ends_review && !openDecision.need.starts_next_review && (
-            <p>{LAST_ROUND_GUIDANCE}</p>
+            <p>{lastRoundGuidance(openDecision.need.review_again)}</p>
           )}
           {(openDecision.kind === 'record' || openDecision.kind === 'recover') && (
             <label>
