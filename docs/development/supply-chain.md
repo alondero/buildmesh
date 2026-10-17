@@ -279,6 +279,21 @@ Worked example, with the evidence for a specific set of versions and a specific
 published updater feed:
 [`zip` extraction advisories (issue #2438)](../archive/2026-10/rustsec-zip-extraction-2026-10.md).
 
+The rule has a second outcome, reached when the feature switch does not exist.
+Turning the dependency's default features off then leaves the crate in the tree,
+and the honest statement narrows to where the subtree *ships*: name the artifacts
+this repository actually releases and show the code is not linked into them. For
+the worked example below that is the Windows installers and the Android APK, per
+the extension assertions in `release.yml`. Note what such a claim does **not**
+cover — `verify.yml` still compiles the Linux target in its `ubuntu-latest` Rust
+jobs, so "not released" is not "not built" and must not be written as though it
+were.
+
+Work through both failure modes — the feature switch and the upstream version list
+— before settling, because either one alone is a thin reason to leave an advisory
+unaddressed. Worked example:
+[`zvariant` / `zbus_names` unmaintained advisories (issue #2444)](../archive/2026-10/rustsec-zbus-unmaintained-2026-10.md).
+
 ## Workflow permissions
 
 Every workflow declares an explicit top-level `permissions:` block, so no job
