@@ -114,6 +114,7 @@ describe("ArchivedNodesScreen", () => {
     render(
       <ArchivedNodesScreen
         mesh={mesh}
+        visitId={1}
         onBack={noop}
         onResumed={noop}
       />,
@@ -164,6 +165,7 @@ describe("ArchivedNodesScreen", () => {
     render(
       <ArchivedNodesScreen
         mesh={mesh}
+        visitId={1}
         onBack={noop}
         onResumed={noop}
       />,
@@ -181,6 +183,7 @@ describe("ArchivedNodesScreen", () => {
     render(
       <ArchivedNodesScreen
         mesh={mesh}
+        visitId={1}
         onBack={noop}
         onResumed={noop}
       />,
@@ -207,6 +210,7 @@ describe("ArchivedNodesScreen", () => {
     render(
       <ArchivedNodesScreen
         mesh={mesh}
+        visitId={1}
         onBack={noop}
         onResumed={noop}
       />,
@@ -233,6 +237,7 @@ describe("ArchivedNodesScreen", () => {
     render(
       <ArchivedNodesScreen
         mesh={mesh}
+        visitId={1}
         onBack={noop}
         onResumed={noop}
       />,
@@ -250,6 +255,7 @@ describe("ArchivedNodesScreen", () => {
     render(
       <ArchivedNodesScreen
         mesh={mesh}
+        visitId={1}
         onBack={noop}
         onResumed={noop}
       />,
@@ -278,6 +284,7 @@ describe("ArchivedNodesScreen", () => {
     render(
       <ArchivedNodesScreen
         mesh={mesh}
+        visitId={1}
         onBack={noop}
         onResumed={noop}
       />,
@@ -295,6 +302,7 @@ describe("ArchivedNodesScreen", () => {
     render(
       <ArchivedNodesScreen
         mesh={mesh}
+        visitId={1}
         onBack={noop}
         onResumed={noop}
       />,
@@ -321,6 +329,7 @@ describe("ArchivedNodesScreen", () => {
       render(
         <ArchivedNodesScreen
           mesh={mesh}
+          visitId={1}
           onBack={noop}
           onResumed={noop}
         />,

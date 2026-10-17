@@ -217,6 +217,50 @@ silently. Submitted fields are frozen while the request is in flight, so the val
 screen always match the ones GitHub received. `Sheet` also carries `role="dialog"`,
 `aria-modal`, and focus containment.
 
+## Launch and resume visit ownership
+
+Creating an Agent Node from an Issue or resuming an archived session spawns a real
+agent, so the completion arrives long after the tap. Navigation on completion belongs
+to the **user's current visit**, not to the component that happened to start the
+request (issue #2327).
+
+A component's unmount is not that decision. The backend half of the work is
+acknowledged the moment the user commits it — the worktree exists, the process is
+starting, the session is imported — and must be allowed to finish. Only the
+*presentation* half, the navigation to the result, is retired when the user leaves.
+Retiring a visit never cancels the request: `spawnFromIssue` and `importAndResume`
+carry no `AbortSignal`, and a completed operation becomes discoverable through
+`NodeList`'s own refresh instead of yanking the user off whatever they opened next.
+
+`src/mobile/launchVisit.ts` owns the mechanism, and it is deliberately small: an
+App mints a fresh `visitId` for every visit to `issues` / `sessions`, the screen
+captures that identity **before** its `await`, and App's single `completeLaunch`
+transition asks `launchVisitIsCurrent` whether that identity is still what it has on
+screen. Returning to the same Mesh's Archive mints a new visit, so the request the
+user walked away from can never claim the screen they came back to. `meshId` is part
+of the identity for the same reason.
+
+Both screens pass the identity with the node (`onSpawned(node, visit)` /
+`onResumed(node, visit)`), and each drops its own late writes — error text, busy
+slot — once its read effect's signal aborts. `visitId` is a dependency of that
+effect, alongside `mesh.id`, so a new visit is a new screen load: it reloads the
+feed, releases the previous visit's busy slot, and — on the Issue launch sheet —
+releases `pending`, which otherwise leaves the sheet both undismissable and
+unlaunchable.
+
+Two independent checks hold this up, and both are needed. The screens decide what
+they may still report, and App — which owns navigation — decides what it will still
+navigate to, so a screen that mis-retires its work still cannot move the user.
+`completeLaunch` carries the existing auth-recovery guard as well, which covers the
+one tick where a completion and a 401 arrive together: the credential is already
+cleared and Connect is already scheduled, but React has not re-rendered, so the ref
+mirroring the displayed screen would otherwise still say "Issues" and let the
+completion navigate over the pairing screen.
+
+Auth recovery is otherwise unaffected and stays centralized: a genuine 401 from the
+visit on display still runs the clear-and-Connect policy, while a 401 belonging to a
+screen the user left is inert, exactly like its error text.
+
 ## Mobile diff empty states
 
 The diff route diffs a file against the node's **merge base** with its mesh `base_ref`

@@ -9,6 +9,7 @@ import {
 } from "../api";
 import { AppBar, CenterNote, PulseDots } from "../ui";
 import { useAsyncEffect } from "../../hooks/useAsyncEffect";
+import type { LaunchVisit } from "../launchVisit";
 import type { GitHubIssueFeed } from "../../types/generated/GitHubIssueFeed";
 import { FeedCompletenessNote } from "../../components/Probe/FeedCompletenessNote";
 import { IssueTags } from "./IssueTags";
@@ -16,8 +17,13 @@ import { IssueLaunchChoice } from "./IssueLaunchChoice";
 
 type Props = {
   mesh: Mesh;
+  /// Identifies this visit to the screen. Minted per visit by the App, so a
+  /// return to the same Mesh's Issues screen is a new visit (issue #2327).
+  visitId: number;
   onBack: () => void;
-  onSpawned: (node: AgentNode) => void;
+  /// Reports the created node together with the visit that started the launch,
+  /// so the App can decide whether this completion still owns navigation.
+  onSpawned: (node: AgentNode, visit: LaunchVisit) => void;
   onAuthFailed?: () => void;
   backHandlerRef?: RefObject<(() => boolean) | null>;
 };
@@ -26,6 +32,7 @@ const BODY_PREVIEW_LIMIT = 600;
 
 export default function IssuesScreen({
   mesh,
+  visitId,
   onBack,
   onSpawned,
   onAuthFailed,
@@ -65,6 +72,11 @@ export default function IssuesScreen({
     setLaunchIssue(null);
     setBusyIssue(null);
     setFilter("");
+    // `pending` guards one launch per visit, so a visit that has moved on has
+    // to release it: `spawn` early-returns while it is set, and `dismissLaunch`
+    // and the Back gate both refuse while it is set too, so leaving it behind
+    // would leave the sheet both undismissable and unlaunchable (issue #2327).
+    pending.current = false;
     listIssues(mesh.id)
       .then((i) => {
         if (signal.aborted) return;
@@ -78,22 +90,32 @@ export default function IssuesScreen({
         }
         setError((e as Error).message);
       });
-  }, [mesh.id, onAuthFailed]);
+    // `visitId` is a dep for the same reason `mesh.id` is: a new visit is a new
+    // screen load, and the read effect's cleanup is what aborts the previous
+    // visit's in-flight launch (issue #2327).
+  }, [mesh.id, visitId, onAuthFailed]);
 
   const spawn = async (issue: GitHubIssue, provider?: string) => {
     if (pending.current) return;
     pending.current = true;
     const owner = lifetime.current;
+    // Captured before the await, so the App can recognise this completion as
+    // belonging to *this* visit rather than whichever one is on screen later.
+    const ownerVisit: LaunchVisit = { kind: "issues", meshId: mesh.id, visitId };
+    // `useAsyncEffect` aborts on cleanup, and `visitId` is a dep of the read
+    // effect, so this covers unmount and a new visit alike. Whether it still
+    // owns *navigation* is the App's call, not this screen's.
+    const retired = () => owner?.aborted === true;
     setBusyIssue(issue.number);
     setError(null);
     try {
       const node = await spawnFromIssue(mesh.id, issue, provider);
-      if (owner?.aborted) return;
+      if (retired()) return;
       setBusyIssue(null);
       setLaunchIssue(null);
-      onSpawned(node);
+      onSpawned(node, ownerVisit);
     } catch (e) {
-      if (owner?.aborted) return;
+      if (retired()) return;
       setBusyIssue(null);
       if (isAuthError(e)) {
         onAuthFailed?.();
