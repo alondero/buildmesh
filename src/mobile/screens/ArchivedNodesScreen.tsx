@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   AgentNode,
   ArchivedAgentNode,
@@ -9,13 +9,21 @@ import {
 } from "../api";
 import { AppBar, CenterNote, PulseDots } from "../ui";
 import { useAsyncEffect } from "../../hooks/useAsyncEffect";
+import type { LaunchVisit } from "../launchVisit";
 import { archiveHarnessLabel } from "../../lib/archiveProvenance";
 import { formatRelativeAge } from "../../lib/time";
 
 type Props = {
   mesh: Mesh;
+  /// Identifies this visit to the screen. Minted per visit by the App, so a
+  /// return to the same Mesh's Archive is a new visit (issue #2327).
+  visitId: number;
   onBack: () => void;
-  onResumed: (node: AgentNode) => void;
+  /// Reports the imported node together with the visit that started the
+  /// resume, so the App can decide whether this completion still owns
+  /// navigation. Archive has no in-flight dismissal gate, so leaving mid-resume
+  /// is an ordinary Back press — the visit check is what protects it.
+  onResumed: (node: AgentNode, visit: LaunchVisit) => void;
   onAuthFailed?: () => void;
 };
 
@@ -28,6 +36,7 @@ export function sortAgentNodes(nodes: ArchivedAgentNode[]): ArchivedAgentNode[] 
 
 export default function ArchivedNodesScreen({
   mesh,
+  visitId,
   onBack,
   onResumed,
   onAuthFailed,
@@ -40,8 +49,14 @@ export default function ArchivedNodesScreen({
   // that a stray tap shouldn't trigger it. First tap expands the card,
   // the explicit Resume button commits.
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const lifetime = useRef<AbortSignal | null>(null);
 
   useAsyncEffect((signal) => {
+    lifetime.current = signal;
+    // A new visit is a new screen load: release the previous visit's busy slot
+    // so a resume that outlived it cannot leave this one permanently disabled
+    // (issue #2327).
+    setBusyId(null);
     discoverAgentNodes(mesh.id)
       .then((s) => {
         if (signal.aborted) return;
@@ -55,16 +70,32 @@ export default function ArchivedNodesScreen({
         }
         setError((e as Error).message);
       });
-  }, [mesh.id, onAuthFailed]);
+  }, [mesh.id, visitId, onAuthFailed]);
 
   const resume = async (s: ArchivedAgentNode) => {
+    const owner = lifetime.current;
+    // Captured before the await, so the App can recognise this completion as
+    // belonging to *this* visit rather than whichever one is on screen later.
+    const ownerVisit: LaunchVisit = {
+      kind: "sessions",
+      meshId: mesh.id,
+      visitId,
+    };
+    // `useAsyncEffect` aborts on cleanup, and `visitId` is a dep of the read
+    // effect, so this covers unmount and a new visit alike. Whether it still
+    // owns *navigation* is the App's call, not this screen's.
+    const retired = () => owner?.aborted === true;
     setBusyId(s.session_id);
     setError(null);
     try {
       const node = await importAndResume(mesh.id, s);
+      // The import and spawn are acknowledged backend work and must finish;
+      // only the navigation to the result is retired with the visit.
+      if (retired()) return;
       setBusyId(null);
-      onResumed(node);
+      onResumed(node, ownerVisit);
     } catch (e) {
+      if (retired()) return;
       setBusyId(null);
       if (isAuthError(e)) {
         onAuthFailed?.();

@@ -8,6 +8,10 @@ import {
 } from "react";
 import "./styles.css";
 import { AgentNode, Mesh, clearStoredToken, restoreSession } from "./api";
+import {
+  launchVisitIsCurrent,
+  type LaunchVisit,
+} from "./launchVisit";
 import Connect from "./screens/Connect";
 import NodeList from "./screens/NodeList";
 import NodeOverview from "./screens/NodeOverview";
@@ -50,8 +54,8 @@ export type Screen =
       fromOverview?: boolean;
       terminalFromOverview?: boolean;
     } & WorkState)
-  | { kind: "sessions"; mesh: Mesh }
-  | { kind: "issues"; mesh: Mesh }
+  | { kind: "sessions"; mesh: Mesh; visitId: number }
+  | { kind: "issues"; mesh: Mesh; visitId: number }
   | { kind: "pulls"; mesh: Mesh };
 
 type WorkScreen = Extract<
@@ -156,6 +160,11 @@ export function parentOf(s: Screen): Screen {
 export default function App() {
   const [screen, setScreen] = useState<Screen>({ kind: "connect" });
   const workVisitIdRef = useRef(0);
+  // Issues / Archive visits are identified separately from work-screen visits:
+  // their identity exists to scope a *completion*, not to preserve draft state.
+  // Minting one per visit is what makes returning to the same Mesh a new visit
+  // rather than a resumption of the request the user walked away from (#2327).
+  const launchVisitIdRef = useRef(0);
   const pairingOnLoad = useRef(
     new URLSearchParams(window.location.hash.slice(1)).has("pair"),
   );
@@ -196,6 +205,17 @@ export default function App() {
   } | null>(null);
   const [prCreatedUrl, setPrCreatedUrl] = useState<string | null>(null);
   const nextWorkVisitId = useCallback(() => ++workVisitIdRef.current, []);
+  const nextLaunchVisitId = useCallback(() => ++launchVisitIdRef.current, []);
+
+  // The launch visit the App currently has on display, or null when the visible
+  // screen is not a launch screen. Mirrored into a ref during render (the same
+  // idiom `prSheetRef` uses) because the completion handlers are registered
+  // once by a screen and fire long after that screen may have been replaced.
+  const launchVisitRef = useRef<LaunchVisit | null>(null);
+  launchVisitRef.current =
+    screen.kind === "issues" || screen.kind === "sessions"
+      ? { kind: screen.kind, meshId: screen.mesh.id, visitId: screen.visitId }
+      : null;
 
   const prSheetRef = useRef(prSheet);
   prSheetRef.current = prSheet;
@@ -208,6 +228,8 @@ export default function App() {
   // A ref (not state) because the popstate handler is registered once with
   // [] deps and must stay stable.
   const prSheetBusyRef = useRef(false);
+  const nodeActionBusyRef = useRef(false);
+  const handleNodeActionBusy = useCallback((busy: boolean) => { nodeActionBusyRef.current = busy; }, []);
   const issuesBackRef = useRef<(() => boolean) | null>(null);
   const handlePrSheetBusy = useCallback((busy: boolean) => {
     prSheetBusyRef.current = busy;
@@ -232,6 +254,10 @@ export default function App() {
 
   useEffect(() => {
     const onPop = () => {
+      if (nodeActionBusyRef.current) {
+        window.history.pushState({ bm: true }, "");
+        return;
+      }
       if (issuesBackRef.current?.()) {
         window.history.pushState({ bm: true }, "");
         return;
@@ -316,6 +342,22 @@ export default function App() {
     if (activeRecoveryVersion !== recoveryVersionRef.current) return;
     handleAuthFailed();
   }, [activeRecoveryVersion, handleAuthFailed]);
+  // The single navigation transition for both launch screens (issue #2327).
+  //
+  // `visit` is the identity the screen captured when it *started* the mutation,
+  // so this handler — not the screen — decides whether a completion may take
+  // the user to its result. A completion whose visit is no longer on display is
+  // dropped: the worktree and process were created and stay in the node list's
+  // own refresh, but a slow spawn must not move the user off a Mesh or Agent
+  // Node they opened after walking away from the launch screen.
+  const completeLaunch = useCallback(
+    (node: AgentNode, visit: LaunchVisit) => {
+      if (activeRecoveryVersion !== recoveryVersionRef.current) return;
+      if (!launchVisitIsCurrent(launchVisitRef.current, visit)) return;
+      setScreen({ kind: "overview", node, visitId: nextWorkVisitId() });
+    },
+    [activeRecoveryVersion, nextWorkVisitId],
+  );
   const handleConnected = useCallback(() => {
     authRecoveryRef.current = false;
     setAuthNotice(null);
@@ -377,11 +419,11 @@ export default function App() {
           }}
           onOpenAgentNodes={(mesh) => {
             if (activeRecoveryVersion !== recoveryVersionRef.current) return;
-            navigate({ kind: "sessions", mesh });
+            navigate({ kind: "sessions", mesh, visitId: nextLaunchVisitId() });
           }}
           onOpenIssues={(mesh) => {
             if (activeRecoveryVersion !== recoveryVersionRef.current) return;
-            navigate({ kind: "issues", mesh });
+            navigate({ kind: "issues", mesh, visitId: nextLaunchVisitId() });
           }}
           onOpenPulls={(mesh) => {
             if (activeRecoveryVersion !== recoveryVersionRef.current) return;
@@ -425,6 +467,8 @@ export default function App() {
               ...preserveWorkState(screen),
             })
           }
+          onTerminalNode={(node) => navigate({ kind: 'terminal', node, visitId: nextWorkVisitId() })}
+          onActionBusyChange={handleNodeActionBusy}
           onChanges={() =>
             navigate({
               kind: "changes",
@@ -498,15 +542,9 @@ export default function App() {
         <Suspense fallback={<ScreenLoading />}>
           <ArchivedNodesScreen
             mesh={screen.mesh}
+            visitId={screen.visitId}
             onBack={goBack}
-            onResumed={(node) => {
-              if (activeRecoveryVersion !== recoveryVersionRef.current) return;
-              setScreen({
-                kind: "overview",
-                node,
-                visitId: nextWorkVisitId(),
-              });
-            }}
+            onResumed={completeLaunch}
             onAuthFailed={handleAuthFailedForActiveScreen}
           />
         </Suspense>
@@ -516,15 +554,9 @@ export default function App() {
           <IssuesScreen
             backHandlerRef={issuesBackRef}
             mesh={screen.mesh}
+            visitId={screen.visitId}
             onBack={goBack}
-            onSpawned={(node) => {
-              if (activeRecoveryVersion !== recoveryVersionRef.current) return;
-              setScreen({
-                kind: "overview",
-                node,
-                visitId: nextWorkVisitId(),
-              });
-            }}
+            onSpawned={completeLaunch}
             onAuthFailed={handleAuthFailedForActiveScreen}
           />
         </Suspense>

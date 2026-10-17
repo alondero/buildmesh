@@ -12,10 +12,11 @@
     "listed here: those must be fixed, which is why rustls RUSTSEC-2026-0285 was resolved in",
     "the same change that introduced this file.",
     "",
-    "`yanked` is empty because its only entry, `zip@4.6.1`, was un-yanked upstream on",
-    "2026-10-16 (the crate's other 4.x releases remain yanked). A reverted yank stops being",
-    "reported, and a stale exception fails rather than lingering with a rationale that no",
-    "longer describes the dependency tree."
+    "`yanked` is empty. Its only entry used to be `zip@4.6.1`, which was un-yanked upstream on",
+    "2026-10-16 (the crate's other 4.x releases remain yanked); a reverted yank stops being reported, and a",
+    "stale exception fails rather than lingering with a rationale that no longer describes the dependency",
+    "tree. `zip` left the tree entirely in issue #2438, which dropped the `zip` feature from",
+    "`tauri-plugin-updater` and with it the RUSTSEC-2026-0367/0368/0369 extraction advisories."
   ],
   "advisories": [
     {

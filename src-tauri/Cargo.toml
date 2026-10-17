@@ -158,7 +158,35 @@ tauri-plugin-global-shortcut = "2"
 # In-app auto-update (issue #826). Desktop-only: the updater downloads &
 # verifies a signed release package (its own minisign signature, independent
 # of OS code signing); `process` provides `relaunch()` after install.
-tauri-plugin-updater = "2"
+#
+# `default-features = false` drops the plugin's `zip` feature, the only path
+# that pulls the `zip` crate into the graph. It stays off because the crate is
+# not fixable at any version we could adopt (see below), and nothing Buildmesh
+# ships needs it:
+#
+#   * Windows is the only platform with a published updater feed, and no key in
+#     that feed resolves to a ZIP: every key maps to an `.msi` or an `.exe`, and
+#     both go through `extract_exe`, which never opens an archive. The zip path
+#     is therefore unreachable whichever key the updater settles on. The
+#     platform-to-asset mapping this was checked against is recorded in
+#     docs/archive/2026-10/rustsec-zip-extraction-2026-10.md.
+#   * The feature also gates Linux AppImage `.tar.gz` extraction. There is no
+#     Linux release or AppImage artifact, so nothing needs it today.
+#
+# That second bullet is not a reason to turn the feature back on. It is one
+# switch covering both cases: in 2.13.3 it is `["dep:zip", "dep:tar",
+# "dep:flate2"]`, so enabling it restores the pinned `zip = "4"` to Cargo.lock
+# and to the Windows build — which is precisely what RUSTSEC-2026-0367/0368/0369
+# are about. Re-enabling it to reach Linux AppImage support, or to serve a real
+# `.zip` artifact, would reintroduce the reported vulnerabilities.
+#
+# Either case needs a safe extraction path or a fixed dependency first: a plugin
+# release that splits the feature or raises the floor to 9.x, or extracting the
+# AppImage outside the plugin. Only then is this feature worth reconsidering.
+# Keep it off (issue #2438). The rule this follows is in
+# docs/development/supply-chain.md#when-no-fixed-release-exists, and the dated
+# check behind it is in the archive entry above.
+tauri-plugin-updater = { version = "2", default-features = false, features = ["rustls-tls", "system-proxy"] }
 tauri-plugin-process = "2"
 
 [dev-dependencies]

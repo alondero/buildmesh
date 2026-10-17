@@ -92,13 +92,15 @@ lifecycle, and is cancelled while merging.
 
 ## Circuit Runs on the phone
 
-A node that is inside a Circuit Run shows it. The browser client puts one line on
+A node that is inside a Circuit Run shows it. Both phone clients put one line on
 the node card, for example `Needs you: Review Blueprint · Round 2 of 3 · Approval gate:
 Needs approval`, and a **Circuit Run** panel on the node screen with the latest
 reviewer verdict and report. The line turns amber only while the run is waiting for a
 person. Wording comes from the desktop's own `circuitVocabulary` and `runNextSteps`
-modules, so a state reads the same on both. The native Android client does not show
-Circuit Runs yet.
+modules in the browser; Android uses the same human-readable state names.
+Run needs also count in **Needs attention**, even when the agent itself is running.
+Circuit changes and bulk attention dismissal invalidate the phone snapshot over
+`/ws/events`; foreground polling remains the fallback.
 
 `GET /api/circuit-runs` is the single read: one `NodeCircuitRun` per *implementation*
 node (the run's source agent, or an agent a circuit step owns) whose run is queued,
@@ -111,7 +113,9 @@ with `200`; the clients read that as "no circuit support", and a failed circuit 
 never takes the node list offline.
 
 `NodeCircuitRun` is derived by `db::circuit::node_run` and generated to
-`src/types/generated/`. It carries the blueprint name, raw run state, the current step
+`src/types/generated/`. Android's build generates its Circuit DTOs from those
+exports with `scripts/generate-android-circuit-wire.mjs`; generated Kotlin stays
+under the build directory. It carries the blueprint name, raw run state, the current step
 with a plain role (`Review`, `Approval gate`), the review round and its limit, the
 verdict and shortened report for the *current* pass only (a retry reuses the node id, so
 an unmatched verdict belongs to an earlier pass), the history `revision`, and
@@ -121,7 +125,7 @@ an unmatched verdict belongs to an earlier pass), the history `revision`, and
 |---|---|---|
 | `approval` | An approval gate is parked (**Needs approval**) | **Approve…**, with a confirmation |
 | `unverified` | Buildmesh cannot verify a step (**Unverified Checkpoint**) | Exactly the checkpoint actions the desktop run card lists for it |
-| `input` | The agent raised a permission or question | **Open terminal to answer**; the answer goes through the existing terminal path |
+| `input` | The agent raised a permission or question | **Open terminal to answer** opens the requesting agent, including a reviewer helper; the answer goes through the existing terminal path |
 | `failed` | The run failed at this step | The run's `recovery` options: **Retry this step**, **I've done this — continue** |
 
 Eligibility is not recomputed for the phone. `unverified` actions and `recovery` come
@@ -134,6 +138,8 @@ and is attributed to the person.
 
 | Route | Does |
 |---|---|
+| `GET /api/nodes/{id}/reviews` | List the built-in review plus valid manual Review Circuits in the node's Mesh |
+| `POST /api/nodes/{id}/reviews` `StartNodeReviewRequest` | Start the selected review through the desktop's node-start command |
 | `POST /api/circuit-runs/{id}/approve` `{node_id}` | Approve the parked gate (`approve_circuit_step`) |
 | `POST /api/circuit-runs/{id}/outcome` `CheckpointRequest` | Recheck or record an Operator-recorded Outcome (`record_circuit_outcome`) |
 | `POST /api/circuit-runs/{id}/recover` `RecoveryRequest` | Run Recovery (`recover_failed_circuit_run`) |
@@ -143,12 +149,23 @@ The run id is in the path; a body naming another run is `400`. A missing run is 
 A request the desktop refuses (a stale `expected_revision`, a step that already moved on,
 a recovery that is not offered) is `409` with the desktop's own sentence. These routes
 do not answer `401` or `403` themselves: the client reads those as a revoked device and
-answers by dropping the session. Open sheets re-check the offered action against each refresh and close if it
-is no longer offered, because approval has no revision of its own.
+answers by dropping the session. Open confirmations are bound to the run and its
+revision and close when either changes or the action is no longer offered.
+Back, cancellation and backdrop dismissal are held while a decision is sending.
 
-Not in this slice: starting a review from the phone, an attention-filter entry or event
-socket message for "run needs you", the Android client, and authoring or editing circuit
-graphs. Run history beyond the key events stays on the desktop.
+**Start review…** on the node screen offers the built-in Review Blueprint or a
+saved Circuit with a manual root and a Review step in the same Mesh. The built-in
+choice accepts one to ten rounds (default three) and inherits desktop reviewer
+settings; a saved choice keeps its graph's reviewer and round limit. The source
+must have a live process and a supported turn-completion hook or transcript
+watcher. This is enforced by the shared desktop/phone start command. A repeated start returns the existing
+live run rather than creating another one. A refusal stays in the sheet; resume
+the agent on the desktop or correct the saved Circuit, then retry. Older desktops
+without the choices route ask for an update. Unknown or failed Circuit reads do
+not remove the successfully fetched node list.
+
+Authoring or editing circuit graphs and Run History beyond the key events stay
+on the desktop.
 
 ## Session-cookie recovery
 
@@ -216,6 +233,50 @@ complete into nothing and pop the *screen's* history entry, navigating the user 
 silently. Submitted fields are frozen while the request is in flight, so the values on
 screen always match the ones GitHub received. `Sheet` also carries `role="dialog"`,
 `aria-modal`, and focus containment.
+
+## Launch and resume visit ownership
+
+Creating an Agent Node from an Issue or resuming an archived session spawns a real
+agent, so the completion arrives long after the tap. Navigation on completion belongs
+to the **user's current visit**, not to the component that happened to start the
+request (issue #2327).
+
+A component's unmount is not that decision. The backend half of the work is
+acknowledged the moment the user commits it — the worktree exists, the process is
+starting, the session is imported — and must be allowed to finish. Only the
+*presentation* half, the navigation to the result, is retired when the user leaves.
+Retiring a visit never cancels the request: `spawnFromIssue` and `importAndResume`
+carry no `AbortSignal`, and a completed operation becomes discoverable through
+`NodeList`'s own refresh instead of yanking the user off whatever they opened next.
+
+`src/mobile/launchVisit.ts` owns the mechanism, and it is deliberately small: an
+App mints a fresh `visitId` for every visit to `issues` / `sessions`, the screen
+captures that identity **before** its `await`, and App's single `completeLaunch`
+transition asks `launchVisitIsCurrent` whether that identity is still what it has on
+screen. Returning to the same Mesh's Archive mints a new visit, so the request the
+user walked away from can never claim the screen they came back to. `meshId` is part
+of the identity for the same reason.
+
+Both screens pass the identity with the node (`onSpawned(node, visit)` /
+`onResumed(node, visit)`), and each drops its own late writes — error text, busy
+slot — once its read effect's signal aborts. `visitId` is a dependency of that
+effect, alongside `mesh.id`, so a new visit is a new screen load: it reloads the
+feed, releases the previous visit's busy slot, and — on the Issue launch sheet —
+releases `pending`, which otherwise leaves the sheet both undismissable and
+unlaunchable.
+
+Two independent checks hold this up, and both are needed. The screens decide what
+they may still report, and App — which owns navigation — decides what it will still
+navigate to, so a screen that mis-retires its work still cannot move the user.
+`completeLaunch` carries the existing auth-recovery guard as well, which covers the
+one tick where a completion and a 401 arrive together: the credential is already
+cleared and Connect is already scheduled, but React has not re-rendered, so the ref
+mirroring the displayed screen would otherwise still say "Issues" and let the
+completion navigate over the pairing screen.
+
+Auth recovery is otherwise unaffected and stays centralized: a genuine 401 from the
+visit on display still runs the clear-and-Connect policy, while a 401 belonging to a
+screen the user left is inert, exactly like its error text.
 
 ## Mobile diff empty states
 

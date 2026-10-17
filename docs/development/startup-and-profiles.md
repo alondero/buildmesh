@@ -57,6 +57,14 @@ The structured pass is bounded per line (brackets resolved once, then a JSON par
 of nothing but braces cannot stall a logging thread; whatever falls outside that budget is still masked
 by the text rules.
 
+**A clean line costs no allocation.** Masking is synchronous on the thread that emits the record, so the
+pipeline borrows text no pass changed and allocates once, on the first pass that actually replaces
+something: a line with nothing to mask reaches the writer's borrowed arm without a copy and is written
+from the caller's own bytes. That is why `scrub_for_persistence_borrowed` exists next to the `String`
+entry point — the writer and the stderr mirror take the borrowed form, and the `String` form remains for
+callers that genuinely need an owned string. `src-tauri/examples/scrub_alloc_bench.rs` counts allocations
+per input shape through the production functions, which is how the claim is measured rather than assumed.
+
 **Failures are typed, and retry is gated on stage.** `StartupFailure` carries a `StartupStage` (whose `label()`
 is prose, because a modal dialog must not read `StartupStage::AppData`), a summary authored here rather than
 derived from a driver error, a `SecretScrubber`-passed technical detail, and the resolved log and profile

@@ -249,6 +249,36 @@ The useful question is "why is this reachable-but-harmless here?", and the
 answer usually names where the crate comes from (`cargo tree -i <crate>`) and
 which code path avoids the vulnerable behaviour.
 
+### When no fixed release exists
+
+A vulnerability always fails, so the fix is normally a version bump. Sometimes
+there is no version to bump to — an upstream crate pins its vulnerable
+dependency below the fixed line — and the only remaining fix is to stop depending
+on it. That is still a fix rather than an exception: the crate leaves the
+tree.
+
+Before dropping it, establish that the path which uses it is genuinely
+unreachable in what this repository ships, rather than assuming so.
+`cargo tree -i <crate>` shows what pulls it in; if it arrives through a default
+feature, the manifest shows whether that feature can be turned off. Turning a
+feature off is safe only when the behaviour it gates cannot be reached, and that
+evidence belongs with the decision rather than in this policy page — record it
+where the next person will find it: a comment at the manifest line, or a dated
+entry under [`docs/archive/`](../archive/README.md) when it is a one-off
+investigation. Cite the mapping or the versions you actually checked, so it can
+be re-derived instead of re-argued.
+
+Then watch for the reverse case. If no upstream release ever lifts the floor, the
+crate stays out of the tree and a future advisory naming it is a false alarm
+rather than a regression to fix. Both halves of that reasoning — that no release
+raises the floor, and that the fixed line is what you think it is — are upstream
+state that changes without a commit here, so re-check the crate's version list
+and the advisory's own `solution` field before repeating either.
+
+Worked example, with the evidence for a specific set of versions and a specific
+published updater feed:
+[`zip` extraction advisories (issue #2438)](../archive/2026-10/rustsec-zip-extraction-2026-10.md).
+
 ## Workflow permissions
 
 Every workflow declares an explicit top-level `permissions:` block, so no job
