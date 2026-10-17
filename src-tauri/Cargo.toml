@@ -178,10 +178,11 @@ tauri-plugin-global-shortcut = "2"
 #     first step if that ever changes.
 #
 # Re-enabling this feature reintroduces RUSTSEC-2026-0367/0368/0369 (insecure
-# ZIP extraction), and no published tauri-plugin-updater release raises its
-# `zip = "4"` floor to the fixed 9.x — `cargo update -p zip --precise 9.0.4`
-# fails outright — so there is no version to upgrade to instead. Keep it off
-# (issue #2438).
+# ZIP extraction). No version to upgrade to is available instead, because the
+# plugin pins `zip = "4"` and the advisories are fixed only in 9.x; both halves
+# of that are upstream state that can change without a commit here, so
+# docs/development/supply-chain.md#when-no-fixed-release-exists carries the
+# dated check and what to re-verify. Keep this feature off (issue #2438).
 tauri-plugin-updater = { version = "2", default-features = false, features = ["rustls-tls", "system-proxy"] }
 tauri-plugin-process = "2"
 
