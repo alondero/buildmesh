@@ -512,14 +512,24 @@ fn windows_kill_session_closes_master() {
 }
 
 /// End-to-end regression guard for issue #287. On Windows ConPTY
-/// 10.0.28120 the master read pipe does NOT EOF on child exit, so a
-/// reader thread blocked in `pump_pty_output` stays blocked until the
-/// master itself is closed. This test wires up a real portable-pty
-/// child, a real `pump_pty_output` reader, and the production
-/// `watch_child_exit` helper, then asserts the reader unblocks
-/// within a bounded budget after the child exits — i.e. the
-/// watcher successfully drives the master close that the broken
-/// ConPTY no longer does on its own.
+/// 10.0.28120 the master read pipe does not reliably EOF on child
+/// exit, so a reader thread blocked in `pump_pty_output` can stay
+/// blocked until the master itself is closed. This test wires up a
+/// real portable-pty child, a real `pump_pty_output` reader, and the
+/// production `watch_child_exit` helper, then asserts the reader
+/// unblocks within a bounded budget after the child exits — the
+/// observable contract behind "node goes Idle instead of staying
+/// running forever".
+///
+/// The unblock budget is measured from the **observed** child exit, not
+/// from spawn (issue #2371). ConPTY launches the child asynchronously:
+/// `spawn_child` returns in ~40ms, but `cmd.exe /c echo hello` does not
+/// reach its exit for ~3s on a loaded 28120 host, and that gap grows
+/// with host load. Charging a ConPTY-hosted child's startup to the
+/// teardown deadline left under a second of headroom, which is why
+/// this test flaked under full-suite load while passing alone. The
+/// sibling `watcher_drops_master_after_child_exit` unit test already
+/// measures the same way.
 ///
 /// Windows-only: on macOS/Linux the master EOFs naturally and the
 /// watcher is unnecessary, so the assertion would still pass without
@@ -580,23 +590,67 @@ fn windows_natural_child_exit_unblocks_reader_via_watcher() {
     // #287's fix.
     let _watcher = watch_child_exit(child_arc.clone(), master_arc.clone());
 
-    // Wait for the reader to unblock. On Windows 28120 ConPTY this
-    // happens only after the watcher drops the master (≤ ~500ms
-    // after the child exits). 5s is a comfortable upper bound.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    // Wait for the child to exit before starting the teardown clock.
+    // The probe takes the child mutex with try_lock and drops the guard at
+    // the end of the match arm, so the 20ms poll sleep is held outside the
+    // lock. The watcher's tick therefore waits on this probe for at most
+    // one try_wait call, and is skipped-and-retried, never delayed by the
+    // sleep.
+    let exit_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let exited_at = loop {
+        let status = match child_arc.try_lock() {
+            Ok(mut guard) => guard.try_wait().expect("child try_wait"),
+            // WouldBlock: the watcher holds the child mutex for its own
+            // try_wait this tick. Re-probe next poll.
+            Err(std::sync::TryLockError::WouldBlock) => None,
+            Err(std::sync::TryLockError::Poisoned(p)) => {
+                panic!("child mutex poisoned: {}", p);
+            }
+        };
+        if status.is_some() {
+            break std::time::Instant::now();
+        }
+        assert!(
+            std::time::Instant::now() < exit_deadline,
+            "probe child did not exit within 30s of spawn. This is ConPTY \
+             child startup, not the teardown contract under test, so it has \
+             its own budget."
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+
+    // Wait for the reader to unblock. Measured from the observed exit,
+    // this has to cover one watcher poll interval (500ms) plus the
+    // ConPTY teardown that closes the read pipe. 10s is generous for
+    // both while still failing loudly if the reader is left wedged.
+    let deadline = exited_at + std::time::Duration::from_secs(10);
     while reader_alive.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     assert!(
         !reader_alive.load(Ordering::SeqCst),
-        "reader thread should unblock within 5s of child exit. \
-         On Windows 28120 ConPTY the master read pipe does not EOF on \
-         child exit (#287) — only watch_child_exit dropping the master \
-         unblocks the reader. If this assertion fails, the watcher is \
-         not closing the master in time."
+        "reader thread should unblock within 10s of the child's observed exit \
+         (waited {}ms). On Windows 28120 ConPTY the master read pipe does not \
+         reliably EOF on child exit (#287), so watch_child_exit closing the \
+         master is what releases the reader; a failure here means the reader \
+         is left wedged and a node would stay running.",
+        exited_at.elapsed().as_millis()
     );
 
-    // Drop the writer + master so the test process exits cleanly.
+    // The reader must have pumped real output before the EOF. `pump_pty_output`
+    // also breaks out on a read error, so an unblocked reader is not by itself
+    // evidence that it drained the child's output.
+    let output = String::from_utf8_lossy(&collected.lock().unwrap()).into_owned();
+    assert!(
+        output.contains("hello"),
+        "expected the child's 'hello' in the reader's output, got: {output:?}"
+    );
+
+    // Drop the writer so the test process exits cleanly. `master_arc`
+    // stays alive until the end of the test on purpose: dropping the
+    // master's last Arc here would close the master from this scope
+    // rather than from the watcher, so the unblock would stop being
+    // evidence that the watcher ran.
     drop(writer);
     let _ = reader_handle.join();
 }
