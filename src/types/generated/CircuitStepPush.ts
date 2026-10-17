@@ -17,4 +17,8 @@ overrides: string | null,
 /**
  * Choosing completed starts another review pass.
  */
-starts_next_review: boolean, };
+starts_next_review: boolean, 
+/**
+ * Choosing completed uses the last review round.
+ */
+ends_review: boolean, };

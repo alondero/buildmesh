@@ -242,6 +242,17 @@ describe('Overview panel', () => {
     expect(screen.getByTestId('run-overview-push-confirm-await').textContent).toBe('Move on: Start the next review');
   });
 
+  it('names the last allowed round as recording the round, and points at Review again', () => {
+    const review = overview();
+    review.attention.pushes[0].starts_next_review = false;
+    review.attention.pushes[0].ends_review = true;
+    render(<CircuitRunOverview {...props} overview={review} />);
+    expect(screen.getByTestId('run-overview-push-await-completed').textContent).toBe('Record the last round');
+    expect(screen.getByText('Recording this stops the review. Review again adds one more round after the run stops.')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('run-overview-push-await-completed'));
+    expect(screen.getByTestId('run-overview-push-confirm-await').textContent).toBe('Move on: Record the last round');
+  });
+
   it('shows a refused push, keeps the choice open and rereads the run so a retry uses its new revision', async () => {
     vi.mocked(pushCircuitStep).mockRejectedValue('The run changed. Refresh it before acting.');
     props.onRefresh.mockClear();

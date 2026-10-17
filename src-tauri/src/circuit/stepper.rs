@@ -323,23 +323,51 @@ impl RunView {
     /// Completing this step re-enters a review: a completed edge reaches a
     /// retry gate, and that gate's re-entry reaches a review verdict.
     /// The shape matches [`execute_retry_limit`], which treats that completed
-    /// parent as the next review pass.
+    /// parent as the next review pass. The gate's current target attempt must
+    /// still be under the same limit that gate will use.
     pub(crate) fn completion_starts_next_review(&self, node_id: &str) -> bool {
-        self.graph.edges.iter().any(|edge| {
-            edge.from == node_id
-                && matches!(
-                    edge.condition,
-                    EdgeCondition::Always | EdgeCondition::OnOutcome(StepOutcome::Completed)
-                )
-                && matches!(
-                    self.graph.node(&edge.to).map(|node| &node.kind),
-                    Some(CircuitNodeKind::RetryLimit { .. })
-                )
-                && self.graph.children(&edge.to).first().is_some_and(|target| {
-                    retry_gate_reaches_itself(self, &edge.to, target)
-                        && reaches_review_verdict(self, target)
-                })
-        })
+        self.review_reentry_gates(node_id)
+            .iter()
+            .any(|gate| self.review_round_remains(gate))
+    }
+
+    /// Completing this step reaches a review retry gate whose budget is
+    /// already spent. The run stops, and another pass is Review again.
+    pub(crate) fn completion_ends_review(&self, node_id: &str) -> bool {
+        let gates = self.review_reentry_gates(node_id);
+        !gates.is_empty() && gates.iter().all(|gate| !self.review_round_remains(gate))
+    }
+
+    fn review_reentry_gates(&self, node_id: &str) -> Vec<String> {
+        self.graph
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.from == node_id
+                    && matches!(
+                        edge.condition,
+                        EdgeCondition::Always | EdgeCondition::OnOutcome(StepOutcome::Completed)
+                    )
+                    && matches!(
+                        self.graph.node(&edge.to).map(|node| &node.kind),
+                        Some(CircuitNodeKind::RetryLimit { .. })
+                    )
+                    && self.graph.children(&edge.to).first().is_some_and(|target| {
+                        retry_gate_reaches_itself(self, &edge.to, target)
+                            && reaches_review_verdict(self, target)
+                    })
+            })
+            .map(|edge| edge.to.clone())
+            .collect()
+    }
+
+    /// Whether [`execute_retry_limit`] would queue another pass for this gate.
+    /// The attempt is the gate's first child, the same step execution resets.
+    fn review_round_remains(&self, gate_id: &str) -> bool {
+        let Some(max_retries) = retry_gate_max(self, gate_id) else {
+            return false;
+        };
+        retry_target_attempt(self, gate_id) < max_retries
     }
 
     /// Read-path availability is structural; the write boundary validates delivery.
@@ -4109,22 +4137,10 @@ fn start_effects_and_completion(
                 set_step(run, t, node_id, StepStatus::Completed);
             }
         }
-        CircuitNodeKind::RetryLimit { max_retries } => {
-            // Node-started review runs carry their per-run round limit in
-            // context so the shared preset can be reused safely by multiple
-            // runs with different limits. Ordinary authored circuits must
-            // always use each gate's graph value; otherwise one gate's
-            // context write would silently override another gate.
-            let max_retries = if run.context.get("source.review_preset") == Some("1") {
-                run.context
-                    .get("retry.max_retries")
-                    .and_then(|value| value.parse::<i32>().ok())
-                    .filter(|value| *value > 0)
-                    .unwrap_or(*max_retries)
-            } else {
-                *max_retries
-            };
-            execute_retry_limit(run, t, node_id, max_retries);
+        CircuitNodeKind::RetryLimit { .. } => {
+            if let Some(max_retries) = retry_gate_max(run, node_id) {
+                execute_retry_limit(run, t, node_id, max_retries);
+            }
         }
         // Triggers never normally reach here (auto-completed at trigger
         // time), but a re-tick racing the trigger write must not wedge.
@@ -4148,6 +4164,41 @@ fn start_effects_and_completion(
 /// uses the same attempt budget. Budget exhaustion fails ordinary retry
 /// gates, while a review cycle completes with a Failed outcome so its
 /// explicit exhaustion notification can run.
+/// Node-started review runs carry their per-run round limit in context so
+/// the shared preset can be reused by runs with different limits. Ordinary
+/// authored circuits use the gate's own graph value; a context write must
+/// not override a different gate.
+fn retry_gate_max(run: &RunView, gate_id: &str) -> Option<i32> {
+    let max_retries = match run.graph.node(gate_id).map(|node| &node.kind) {
+        Some(CircuitNodeKind::RetryLimit { max_retries }) => *max_retries,
+        _ => return None,
+    };
+    Some(if run.context.get("source.review_preset") == Some("1") {
+        run.context
+            .get("retry.max_retries")
+            .and_then(|value| value.parse::<i32>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(max_retries)
+    } else {
+        max_retries
+    })
+}
+
+fn step_attempt(run: &RunView, node_id: &str) -> i32 {
+    run.step(node_id).map(|step| step.attempt).unwrap_or(1)
+}
+
+/// Attempt of the gate's first child. Execution resets that child; a missing
+/// row is the first pass.
+fn retry_target_attempt(run: &RunView, gate_id: &str) -> i32 {
+    run.graph
+        .children(gate_id)
+        .into_iter()
+        .next()
+        .map(|target| step_attempt(run, &target))
+        .unwrap_or(1)
+}
+
 fn execute_retry_limit(run: &mut RunView, t: &mut Transition, node_id: &str, max_retries: i32) {
     run.context
         .set("retry.max_retries", max_retries.to_string());
@@ -4204,7 +4255,7 @@ fn execute_retry_limit(run: &mut RunView, t: &mut Transition, node_id: &str, max
         return;
     };
     let target = retry_target.clone().unwrap_or(parent_node_id);
-    let attempt = run.step(&target).map(|s| s.attempt).unwrap_or(1);
+    let attempt = step_attempt(run, &target);
     run.context.set("retry.attempt", attempt.to_string());
     if attempt < max_retries {
         let next_attempt = attempt + 1;

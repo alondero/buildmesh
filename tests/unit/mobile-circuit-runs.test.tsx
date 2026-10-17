@@ -16,6 +16,8 @@ const unverified = (actions: NodeCircuitNeed['actions']): NodeCircuitNeed => ({
   step: { node_id: 'verdict', role: 'Review', attempt: 2, status: 'unverified' },
   detail: null,
   actions,
+  starts_next_review: false,
+  ends_review: false,
   agent_node_id: null,
 });
 const circuit = (over: Partial<NodeCircuitRun> = {}): NodeCircuitRun => ({
@@ -166,6 +168,22 @@ it('names a review re-entry as the next review pass', async () => {
   expect(screen.getByRole('button', { name: 'Check again' })).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: 'Start the next review' }));
   expect(screen.getByRole('dialog', { name: 'Start the next review' })).toBeTruthy();
+});
+
+it('names the last allowed round as recording the round, and points at Review again', async () => {
+  runs = [circuit({
+    needs_you: [{ ...unverified(['recheck', 'completed']), starts_next_review: false, ends_review: true }],
+    step: null,
+  })];
+  panel();
+  expect(await screen.findByRole('button', { name: 'Record the last round' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Check again' })).toBeTruthy();
+  expect(screen.getByText('Recording this stops the review. Review again adds one more round after the run stops.')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Record the last round' }));
+  expect(screen.getByRole('dialog', { name: 'Record the last round' })).toBeTruthy();
+  expect(screen.getAllByText('Recording this stops the review. Review again adds one more round after the run stops.')).toHaveLength(2);
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+  expect(await screen.findByText('Recorded. The review stops.')).toBeTruthy();
 });
 
 it('requires evidence for a review verdict before it can be sent', async () => {

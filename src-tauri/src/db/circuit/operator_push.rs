@@ -63,6 +63,8 @@ pub struct CircuitStepPush {
     pub overrides: Option<String>,
     /// Choosing completed starts another review pass.
     pub starts_next_review: bool,
+    /// Choosing completed uses the last review round.
+    pub ends_review: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, ts_rs::TS)]
@@ -96,6 +98,7 @@ pub(crate) fn pushes(view: &RunView) -> Vec<CircuitStepPush> {
                 outcomes,
                 overrides: holding_evidence(view, &step.node_id).map(|b| b.message()),
                 starts_next_review: view.completion_starts_next_review(&step.node_id),
+                ends_review: view.completion_ends_review(&step.node_id),
             })
         })
         .collect()

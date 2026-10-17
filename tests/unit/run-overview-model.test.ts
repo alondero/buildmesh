@@ -128,6 +128,9 @@ describe('pushOutcomeLabel', () => {
     expect(pushOutcomeLabel({ type: 'await_agent_turn', target_node_id: null }, 'completed')).toBe('Agent has finished');
     expect(pushOutcomeLabel({ type: 'await_agent_turn', target_node_id: null }, 'completed', true)).toBe('Start the next review');
     expect(pushOutcomeLabel({ type: 'llm_turn_classifier', target_node_id: null }, 'completed', true)).toBe('Start the next review');
+    expect(pushOutcomeLabel({ type: 'await_agent_turn', target_node_id: null }, 'completed', false, true)).toBe('Record the last round');
+    expect(pushOutcomeLabel({ type: 'llm_turn_classifier', target_node_id: null }, 'completed', false, true)).toBe('Record the last round');
+    expect(pushOutcomeLabel({ type: 'await_agent_turn', target_node_id: null }, 'completed', true, true)).toBe('Start the next review');
     expect(pushOutcomeLabel({ type: 'llm_turn_classifier', target_node_id: null }, 'completed')).toBe('Task is complete');
     expect(pushOutcomeLabel({ type: 'llm_turn_classifier', target_node_id: null }, 'working')).toBe('Still working');
     expect(pushOutcomeLabel({ type: 'llm_turn_classifier', target_node_id: null }, 'blocked')).toBe('Needs a person');

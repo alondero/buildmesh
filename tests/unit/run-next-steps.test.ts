@@ -144,7 +144,10 @@ describe('checkpointActionLabel', () => {
     expect(checkpointActionLabel('recheck')).toBe('Check again');
     expect(checkpointActionLabel('completed')).toBe("I've done this — mark it done");
     expect(checkpointActionLabel('completed', true)).toBe('Start the next review');
+    expect(checkpointActionLabel('completed', false, true)).toBe('Record the last round');
+    expect(checkpointActionLabel('completed', true, true)).toBe('Start the next review');
     expect(checkpointActionLabel('recheck', true)).toBe('Check again');
+    expect(checkpointActionLabel('recheck', false, true)).toBe('Check again');
     expect(checkpointActionLabel('not_performed')).toBe("It didn't happen");
     expect(checkpointActionLabel('retry')).toBe('Try it again');
   });

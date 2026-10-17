@@ -10,8 +10,21 @@ import type { RecordedClassification } from '../../types/generated/RecordedClass
 import type { ObservedWorkFact } from '../../types/generated/ObservedWorkFact';
 import { ledgerTimestampMs } from './circuitGraphModel';
 import { historyTitle, splitHistory, stepReference } from './historyPresentation';
-import { checkpointActionNeedsEvidence } from './runNextSteps';
+import { LAST_ROUND_GUIDANCE, checkpointActionNeedsEvidence } from './runNextSteps';
 import { formatWallClock } from './runIdentity';
+
+function historyActionLabel(action: CheckpointAction, startsNextReview: boolean, endsReview: boolean): string {
+  if (action === 'completed' && startsNextReview) return 'Start the next review';
+  if (action === 'completed' && endsReview) return 'Record the last round';
+  return {
+    completed: 'Record completed',
+    not_performed: 'Record not performed',
+    retry: 'Retry as new attempt',
+    recheck: 'Recheck evidence',
+    review_pass: 'Review passed',
+    review_fail: 'Request changes',
+  }[action];
+}
 
 /** Wall-clock time of one entry; the raw stamp stays on the element's `title`. */
 function entryTime(observedAt: string, now: Date): string {
@@ -260,6 +273,7 @@ export function CircuitEvidenceHistory({ runId, updatedAt, nodeLabel }: {
       {checkpoints.length > 0 && <div className="space-y-2">
         <p>Inspect the agent or external result, then choose how to continue. Record completed advances this step without replaying its action.</p>
         {checkpoints.some((step) => step.starts_next_review) && <p>Start the next review records that this step finished and sends the work back to the reviewer. It does not approve the work.</p>}
+        {checkpoints.some((step) => step.ends_review && !step.starts_next_review) && <p>{LAST_ROUND_GUIDANCE}</p>}
         <p>For a staged prompt, submit it in the agent terminal first. Record completed only after confirming it was accepted.</p>
 <p>Completion does not grant review approval. Explicit review decisions are recorded as human verdicts.</p>
         <label htmlFor="evidence-reason" className="block">Reason and supporting evidence</label>
@@ -269,7 +283,7 @@ export function CircuitEvidenceHistory({ runId, updatedAt, nodeLabel }: {
         {checkpoints.map((step) => <fieldset key={step.node_id} disabled={pending || rows === null} className="flex flex-wrap gap-2">
           <legend>{step.node_id}</legend>
           {step.actions.map((action) => <button key={action} type="button" disabled={pending || (checkpointActionNeedsEvidence(action) && reason.trim() === '')} className="text-accent-cyan disabled:opacity-50" onClick={() => void record(step, action)}>
-            {action === 'completed' && step.starts_next_review ? 'Start the next review' : { completed: 'Record completed', not_performed: 'Record not performed', retry: 'Retry as new attempt', recheck: 'Recheck evidence', review_pass: 'Review passed', review_fail: 'Request changes' }[action]}
+            {historyActionLabel(action, step.starts_next_review, step.ends_review)}
           </button>)}
         </fieldset>)}
       </div>}

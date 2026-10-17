@@ -93,10 +93,14 @@ a human review decision separately from an agent verdict. The revision check ign
 history that only repeats an observation already recorded. A new observation, a step
 change, or any other history row still means the run changed and the action must be
 refreshed. Completing a step that re-enters a bounded review is offered as **Start
-the next review** on the checkpoint and on the manual push. That is a completed edge
-into a retry gate whose re-entry reaches a review verdict. **Check again** stays a
-recheck. **Review passed** and **Request changes** are unchanged, and starting the
-next review does not approve the work. The next worker tick
+the next review** on the checkpoint and on the manual push while a round remains.
+That is a completed edge into a retry gate whose re-entry reaches a review verdict,
+and the gate's target attempt is still under the same limit the gate will use. On
+the last allowed attempt the same completion is **Record the last round**: recording
+it stops the review, and **Review again** adds one more round after the run stops.
+**Check again** stays a recheck. **Review passed** and **Request changes** keep
+their names. **Start the next review** and **Record the last round** do not approve
+the work. The next worker tick
 follows the existing approval or feedback branch. Operator findings are appended
 to the feedback injection even when its editable prompt omits the reviewer-report
 placeholder; human approvals are attributed to the operator in the merge handoff.

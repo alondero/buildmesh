@@ -449,6 +449,8 @@ fn completing_the_fix_wait_offers_the_next_review() {
         .expect("the fix wait can be moved on");
     assert!(push.outcomes.contains(&StepPushOutcome::Completed));
     assert!(push.starts_next_review);
+    assert!(!checkpoint.ends_review);
+    assert!(!push.ends_review);
 
     let ordinary = fixture(
         &graph(await_turn()),
@@ -457,7 +459,88 @@ fn completing_the_fix_wait_offers_the_next_review() {
     );
     let ordinary = attention_inner(&ordinary, 1).unwrap();
     assert!(!ordinary.checkpoints[0].starts_next_review);
+    assert!(!ordinary.checkpoints[0].ends_review);
     assert!(!ordinary.pushes[0].starts_next_review);
+    assert!(!ordinary.pushes[0].ends_review);
+}
+
+#[test]
+fn the_last_allowed_review_round_offers_review_again() {
+    let review = CircuitGraph::agent_review(None, None, 5);
+    let mut context = CircuitContext::default();
+    context.set("source.agent_id", "9");
+    let db = Connection::open_in_memory().unwrap();
+    crate::db::init_schema(&db).unwrap();
+    db.execute_batch(
+        "INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+        INSERT INTO agent_nodes(id,mesh_id,name,path,status) VALUES(9,1,'implementer','/repo','idle');
+        INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'review');
+        INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');
+        INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status) VALUES
+            (1,'await_fixes',2,'unverified'),
+            (1,'re_review',5,'completed');",
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE autopilot_circuits SET graph_json=?1",
+        [review.to_json().unwrap()],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE autopilot_circuit_runs SET context_json=?1",
+        [context.to_json().unwrap()],
+    )
+    .unwrap();
+
+    let attention = attention_inner(&db, 1).unwrap();
+    let checkpoint = attention
+        .checkpoints
+        .iter()
+        .find(|checkpoint| checkpoint.node_id == "await_fixes")
+        .expect("the fix wait is an unverified checkpoint");
+    assert!(
+        !checkpoint.starts_next_review,
+        "the last allowed attempt does not start another review"
+    );
+    assert!(
+        checkpoint.ends_review,
+        "the last allowed attempt stops the review so the person can use Review again"
+    );
+    let push = attention
+        .pushes
+        .iter()
+        .find(|push| push.node_id == "await_fixes")
+        .expect("the fix wait can be moved on");
+    assert!(push.outcomes.contains(&StepPushOutcome::Completed));
+    assert!(!push.starts_next_review);
+    assert!(push.ends_review);
+
+    let mut raised = context.clone();
+    raised.set("source.review_preset", "1");
+    raised.set("retry.max_retries", "6");
+    db.execute(
+        "UPDATE autopilot_circuit_run_steps SET attempt=5 WHERE node_id='re_review'",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE autopilot_circuit_runs SET context_json=?1",
+        [raised.to_json().unwrap()],
+    )
+    .unwrap();
+    let raised_attention = attention_inner(&db, 1).unwrap();
+    let raised_checkpoint = raised_attention
+        .checkpoints
+        .iter()
+        .find(|checkpoint| checkpoint.node_id == "await_fixes")
+        .unwrap();
+    assert!(
+        raised_checkpoint.starts_next_review,
+        "a review preset follows the run's raised round limit, not only the graph"
+    );
+    assert!(!raised_checkpoint.ends_review);
+    assert!(raised_attention.pushes[0].starts_next_review);
+    assert!(!raised_attention.pushes[0].ends_review);
 }
 
 #[test]

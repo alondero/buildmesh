@@ -5,4 +5,9 @@ export type CircuitCheckpoint = { node_id: string, attempt: number, actions: Arr
 /**
  * Completing this step starts another review pass.
  */
-starts_next_review: boolean, };
+starts_next_review: boolean, 
+/**
+ * Completing this step uses the last review round. Another pass is
+ * Review again after the run stops.
+ */
+ends_review: boolean, };

@@ -29,6 +29,7 @@ import { formatDurationMs, ledgerTimestampMs, statusTextClass, stepDurationMs } 
 import { runStateLabel, stepStatusLabel } from './circuitVocabulary';
 import { reviewCircuitMetadata, reviewResult } from './runDiagnostics';
 import { formatWallClock } from './runIdentity';
+import { LAST_ROUND_GUIDANCE } from './runNextSteps';
 import { distinctRailLabels, pushOutcomeLabel, railRows, type RailRow, type RailState } from './runOverviewModel';
 import { nodeRoleLabel, parseRunContext, reviewReport, stepPassLabel, stepVerdict, verdictTextClass } from './runStepPresentation';
 
@@ -344,13 +345,16 @@ function StepPushControl({ push, kind, revision, runId, onPushed, onRefused }: {
         <p className="mb-1 text-status-warning break-words">Autopilot is waiting: {push.overrides}</p>
       )}
       <p className="mb-1 text-text-muted">If you know better, say what happened and the run moves on:</p>
+      {push.ends_review && !push.starts_next_review && (
+        <p className="mb-1 text-text-secondary">{LAST_ROUND_GUIDANCE}</p>
+      )}
       <div className="flex flex-wrap items-center gap-1">
         {push.outcomes.map((outcome) => (
           <button key={outcome} type="button" disabled={pending} aria-pressed={choice === outcome}
             data-testid={`run-overview-push-${push.node_id}-${outcome}`}
             onClick={() => setChoice(choice === outcome ? null : outcome)}
             className={`rounded-md px-1.5 py-1 disabled:opacity-40 ${choice === outcome ? 'bg-accent-cyan/30 text-text-primary' : 'bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25'}`}>
-            {pushOutcomeLabel(kind, outcome, push.starts_next_review)}
+            {pushOutcomeLabel(kind, outcome, push.starts_next_review, push.ends_review)}
           </button>
         ))}
       </div>
@@ -370,7 +374,7 @@ function StepPushControl({ push, kind, revision, runId, onPushed, onRefused }: {
           <button type="button" disabled={pending} onClick={() => void confirm(choice)}
             data-testid={`run-overview-push-confirm-${push.node_id}`}
             className="rounded-md bg-accent-cyan/15 px-1.5 py-1 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40">
-            {pending ? 'Moving on…' : `Move on: ${pushOutcomeLabel(kind, choice, push.starts_next_review)}`}
+            {pending ? 'Moving on…' : `Move on: ${pushOutcomeLabel(kind, choice, push.starts_next_review, push.ends_review)}`}
           </button>
         </div>
       )}

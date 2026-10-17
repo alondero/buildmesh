@@ -18,6 +18,10 @@ actions: Array<CheckpointAction>,
  */
 starts_next_review: boolean, 
 /**
+ * Completing this unverified step uses the last review round.
+ */
+ends_review: boolean, 
+/**
  * The agent to open to answer an `input` need.
  */
 agent_node_id: number | null, };

@@ -178,10 +178,12 @@ export function pushOutcomeLabel(
   kind: CircuitNodeKind,
   outcome: StepPushOutcome,
   startsNextReview = false,
+  endsReview = false,
 ): string {
   switch (outcome) {
     case 'completed':
       if (startsNextReview) return 'Start the next review';
+      if (endsReview) return 'Record the last round';
       return kind.type === 'llm_turn_classifier' ? 'Task is complete' : 'Agent has finished';
     case 'working':
       return 'Still working';

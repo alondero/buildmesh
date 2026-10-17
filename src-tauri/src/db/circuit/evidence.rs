@@ -154,6 +154,9 @@ pub struct CircuitCheckpoint {
     pub actions: Vec<CheckpointAction>,
     /// Completing this step starts another review pass.
     pub starts_next_review: bool,
+    /// Completing this step uses the last review round. Another pass is
+    /// Review again after the run stops.
+    pub ends_review: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
@@ -417,6 +420,7 @@ fn evidence_view_unresolved(
                 attempt: step.attempt,
                 actions,
                 starts_next_review: view.completion_starts_next_review(&step.node_id),
+                ends_review: view.completion_ends_review(&step.node_id),
             });
         }
     }
@@ -473,6 +477,7 @@ pub(crate) fn attention_inner(db: &Connection, run_id: i64) -> Result<CircuitRun
                 attempt: step.attempt,
                 actions: checkpoint_actions(db, run_id, &graph, &view, step)?,
                 starts_next_review: view.completion_starts_next_review(&step.node_id),
+                ends_review: view.completion_ends_review(&step.node_id),
             });
         }
     }
