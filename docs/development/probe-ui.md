@@ -24,6 +24,16 @@ no longer drives View Mode through a cross-store subscription. Lifecycle
 operations load navigation lazily rather than making the mesh store import
 the UI store during initialization. Mobile navigation is separate.
 
+Opening is mirrored in the sidebar: a Mesh row expands when its Mesh becomes
+the selected one, and when one of its agents becomes the active Agent Node, so
+the agent a user just opened is visible in the list they opened it from. Both
+signals are read on their rising edge — a newly opened agent, or a Mesh that
+just became selected — by the row itself (`MeshItem`), which owns the
+`activeNodeId`-keyed bit instead of taking a prop from `Sidebar`, the same seam
+`NodeItem` uses for its own active bit (#1748). A collapse the user made by
+hand therefore survives later re-renders and only a newly opened Mesh or agent
+expands the row again.
+
 ## Probe Context Lenses (issue #1456)
 Probe destinations have explicit ownership in `src/lib/probeContext.ts`; the
 complete `PROBE_TAB_DEFINITIONS` record is the source of truth for ownership
