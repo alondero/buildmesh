@@ -48,15 +48,26 @@ an update package is authentic. We can ship auto-update now with zero paid certs
    overlay pattern and keeps the per-push `build.yml` green **without** a signing
    secret (critical: PR builds — including from forks — cannot see secrets).
 
-4. **Windows-only releases, for now.** The app is Windows/WSL-centric; a
-   cross-platform matrix would ~4x CI cost per tag and needs each OS to compile
-   Windows-centric code. The release job runs only on `windows-latest`, so what
-   ships is a Windows installer regardless of `bundle.targets` — the base
-   `tauri.conf.json` sets `"targets": "all"`, and the release overlay does not
-   narrow it, but a non-Windows runner is never used to build a tagged release.
-   Extending the workflow to a matrix (issue #835) is also the right time to
-   widen the target list deliberately rather than inherit `all`. Tracked as a
-   follow-up issue.
+4. **Windows-only Tauri desktop installers, for now.** The app is
+   Windows/WSL-centric; a cross-platform matrix would ~4x CI cost per tag and
+   needs each OS to compile Windows-centric code. The `release` job runs only on
+   `windows-latest`, so the desktop artifact is a Windows installer regardless of
+   `bundle.targets` — the base `tauri.conf.json` sets `"targets": "all"`, and the
+   release overlay does not narrow it, but a non-Windows runner is never used to
+   build a tagged release. Extending the workflow to a matrix (issue #835) is also
+   the right time to widen the target list deliberately rather than inherit
+   `all`. Tracked as a follow-up issue.
+
+   **Scope of "Windows-only".** That describes the *Tauri desktop installers*, not
+   the release as a whole. A second job, `android-release`, builds a signed APK on
+   `ubuntu-latest` and uploads it to the same GitHub Release when
+   `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEY_ALIAS` and `ANDROID_KEY_PASSWORD` are
+   configured; without them it warns and exits 0, and *that* release is genuinely
+   Windows-only. The APK is uploaded as a plain asset with a `.sha256` sidecar
+   and is deliberately **not** added to `latest.json`, so the auto-updater feed
+   this ADR is about stays Windows-only either way. See
+   [`docs/development/android.md`](../development/android.md#release-signing-and-distribution)
+   and [`docs/development/releasing.md`](../development/releasing.md).
 
 ## Amendment (2026-10-17): the updater's ZIP extraction feature stays off
 
