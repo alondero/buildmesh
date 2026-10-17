@@ -254,24 +254,43 @@ which code path avoids the vulnerable behaviour.
 A vulnerability always fails, so the fix is normally a version bump. Sometimes
 there is no version to bump to, and the only remaining fix is to stop depending
 on the crate. `zip` is the worked example (issue #2438): it reached the tree
-only through `tauri-plugin-updater`'s default `zip` feature, every published
-release of that plugin requires `zip = "4"`, and all three advisories
-(`RUSTSEC-2026-0367`, `RUSTSEC-2026-0368`, `RUSTSEC-2026-0369`) are fixed only
-in 9.x. `cargo update -p zip --precise 9.0.4` fails outright:
+only through `tauri-plugin-updater`'s default `zip` feature, and all three
+advisories (`RUSTSEC-2026-0367`, `RUSTSEC-2026-0368`, `RUSTSEC-2026-0369`) are
+fixed only in 9.x. As checked on 2026-10-17, every published release of that
+plugin still requires `zip = "4"` — `2.13.3`, `2.14.0` (the highest stable) and
+`3.0.0-alpha.3` (the highest pre-release) alike — so on the tree as it stood
+before this change, `cargo update -p zip --precise 9.0.4` (from `src-tauri/`)
+failed outright:
 
 ```
 error: failed to select a version for the requirement `zip = "^4"`
+candidate versions found which didn't match: 9.0.4
 required by package `tauri-plugin-updater v2.13.3`
 ```
 
+After the change there is nothing left to update: `zip` is absent from
+`Cargo.lock`, and the same command reports that the package specification
+matched nothing. Run it from `src-tauri/`; from the repository root Cargo fails
+earlier, on the missing manifest.
+
+Two claims there are upstream state, not repository fact, and both can change
+without any commit here: that no plugin release raises its `zip` floor, and that
+9.x is the fixed line. Re-check the crates.io version list and the advisory's
+`solution` field before repeating either.
+
 Dropping the feature was safe only because the feature was provably unused:
-the updater resolves `windows-x86_64-{msi,nsis}` before the generic
-`windows-x86_64` key, both of those artifacts are published, and both are
-handled without an archive reader. The feature also gates Linux AppImage
-`.tar.gz` extraction, which costs nothing here because the updater feed is
-Windows-only. **Establish that before removing a feature**, and record the
-reasoning where the next person will find it — a `Cargo.toml` comment, plus the
-note in `.github/rustsec-exceptions.json`. If no upstream release ever lifts the
+Windows is the only platform with a published updater feed, and no key in that
+feed resolves to a ZIP. In the v1.4.1 `latest.json`, both `windows-x86_64` and
+`windows-x86_64-msi` point at the same asset, `Buildmesh_1.4.1_x64_en-US.msi`,
+and `windows-x86_64-nsis` points at the NSIS `Buildmesh_1.4.1_x64-setup.exe`.
+Both are handled by `extract_exe`, which never opens an archive. The feature
+also gates Linux AppImage `.tar.gz` extraction, which costs nothing here because
+the updater feed is Windows-only. **Establish that before removing a feature**,
+and record the reasoning where the next person will find it — a `Cargo.toml`
+comment, plus the note in `.github/rustsec-exceptions.json`. That reasoning is
+only as good as the feed it was checked against, so re-read the published
+`latest.json` before relying on it: a key pointing at a real `.zip` artifact
+would make the feature needed again. If no upstream release ever lifts the
 floor, the crate is staying out of the tree, and a future advisory for it is a
 false alarm rather than a regression to fix.
 

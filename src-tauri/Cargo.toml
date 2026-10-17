@@ -164,11 +164,15 @@ tauri-plugin-global-shortcut = "2"
 # not fixable at any version we could adopt (see below), and nothing Buildmesh
 # ships needs it:
 #
-#   * Windows is the only platform with a published updater feed. The updater
-#     resolves `windows-x86_64-{msi,nsis}` before the generic `windows-x86_64`
-#     key, both of those artifacts are published, and both go through
-#     `extract_exe`, which never opens an archive. The generic key is a zip,
-#     but no such asset is published, so it cannot be reached.
+#   * Windows is the only platform with a published updater feed, and no key in
+#     that feed resolves to a ZIP. In the v1.4.1 `latest.json`, both
+#     `windows-x86_64` and `windows-x86_64-msi` point at the same asset,
+#     `Buildmesh_1.4.1_x64_en-US.msi`, and `windows-x86_64-nsis` points at the
+#     NSIS `Buildmesh_1.4.1_x64-setup.exe`. An `.msi` and an `.exe` both go
+#     through `extract_exe`, which never opens an archive, so the zip path is
+#     unreachable whichever key the updater settles on. Re-read the published
+#     feed before relying on this; a new key that points at a real `.zip`
+#     artifact would make the feature needed again.
 #   * The feature also gates Linux AppImage `.tar.gz` extraction, and there is
 #     no Linux release or AppImage artifact. Re-enabling the feature is the
 #     first step if that ever changes.
