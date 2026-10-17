@@ -72,6 +72,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/terminal"))
+    sourceSets["main"].java.srcDir(layout.buildDirectory.dir("generated/circuitWire"))
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
     lint {
         abortOnError = true
@@ -91,6 +92,14 @@ val terminalAssets by tasks.registering(Exec::class) {
     outputs.dir(layout.buildDirectory.dir("generated/terminal"))
 }
 tasks.named("preBuild") { dependsOn(terminalAssets) }
+
+val circuitWire by tasks.registering(Exec::class) {
+    workingDir(rootProject.projectDir.parentFile)
+    commandLine("node", "scripts/generate-android-circuit-wire.mjs")
+    inputs.files(fileTree(rootProject.file("../src/types/generated")), rootProject.file("../scripts/generate-android-circuit-wire.mjs"))
+    outputs.dir(layout.buildDirectory.dir("generated/circuitWire"))
+}
+tasks.named("preBuild") { dependsOn(circuitWire) }
 
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2025.05.01")

@@ -344,6 +344,15 @@ export default function NodeList({
   const runningCount = visibleNodes.filter(
     (n) => n.status === "running",
   ).length;
+  const circuitNeeds = (node: AgentNode) => {
+    const run = circuitRuns.get(node.id);
+    return run !== undefined && needsYou(run);
+  };
+  const attentionCount = visibleNodes.filter((node) =>
+    node.status === 'awaiting_input' || problemNodes.some((p) => p.id === node.id) || circuitNeeds(node),
+  ).length;
+  const circuitAttentionNodes = visibleNodes.filter((node) => circuitNeeds(node) &&
+    node.status !== 'awaiting_input' && !problemNodes.some((p) => p.id === node.id));
   const matches = (node: AgentNode) => {
     const mesh = meshes?.find((m) => m.id === node.mesh_id);
     const textMatches =
@@ -355,6 +364,7 @@ export default function NodeList({
       (filter === "all" ||
         (filter === "attention"
           ? node.status === "awaiting_input" ||
+            circuitNeeds(node) ||
             problemNodes.some((p) => p.id === node.id)
           : node.status === filter))
     );
@@ -427,6 +437,7 @@ export default function NodeList({
     if (
       activeView === "overview" &&
       (node.status === "awaiting_input" ||
+        circuitNeeds(node) ||
         problemNodes.some((p) => p.id === node.id))
     )
       continue;
@@ -527,12 +538,12 @@ export default function NodeList({
                     >
                       <strong
                         className={
-                          attentionNodes.length + problemNodes.length
+                          attentionCount
                             ? "needs-you"
                             : ""
                         }
                       >
-                        {attentionNodes.length + problemNodes.length}
+                        {attentionCount}
                       </strong>
                       <span>Attention</span>
                     </button>
@@ -567,7 +578,7 @@ export default function NodeList({
                     </span>
                     <span aria-hidden="true">→</span>
                   </button>
-                  {!attentionNodes.length && !problemNodes.length && (
+                  {attentionCount === 0 && (
                     <div className="all-clear">
                       <strong>No errors, warnings, or pending replies.</strong>
                     </div>
@@ -635,6 +646,16 @@ export default function NodeList({
                   )}
                 </div>
               )}
+              {activeView === 'overview' && circuitAttentionNodes.length > 0 && (
+                <section aria-label="Circuit Runs need you">
+                  <SectionHeading color="var(--amber)">Circuit Runs need you</SectionHeading>
+                  {circuitAttentionNodes.map((node) => (
+                    <NodeRow key={node.id} node={node} providers={providers}
+                      meshName={meshes.find((m) => m.id === node.mesh_id)?.name}
+                      circuitRun={circuitRuns.get(node.id)} onClick={() => onOpenNode(node)} />
+                  ))}
+                </section>
+              )}
               {activeView === "overview" && attentionNodes.length > 0 && (
                 <section
                   data-testid="attention-section"
@@ -664,6 +685,7 @@ export default function NodeList({
                             meshes.find((m) => m.id === node.mesh_id)?.name
                           }
                           request={request}
+                          circuitRun={circuitRuns.get(node.id)}
                           providers={providers}
                           busy={keyBusy.get(node.id)}
                           sent={
@@ -1039,6 +1061,7 @@ function SheetButton({
 // that answering means opening the terminal (issue #1966).
 function AttentionCard({
   node,
+  circuitRun,
   meshName,
   request,
   providers,
@@ -1049,6 +1072,7 @@ function AttentionCard({
   onOpen,
 }: {
   node: AgentNode;
+  circuitRun?: NodeCircuitRun;
   meshName?: string;
   request: NodeInputRequest;
   providers?: Provider[];
@@ -1139,6 +1163,7 @@ function AttentionCard({
           {node.branch ? `⎇ ${node.branch}` : "No branch reported"} ·{" "}
           {providerLabel}
         </div>
+        {circuitRun && <div className="node-circuit-line" data-testid={`node-circuit-${node.id}`} data-needs-you={needsYou(circuitRun)}>{circuitStatusLine(circuitRun)}</div>}
         <div
           data-testid={`attn-prompt-${node.id}`}
           style={{

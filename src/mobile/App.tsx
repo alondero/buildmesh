@@ -228,6 +228,8 @@ export default function App() {
   // A ref (not state) because the popstate handler is registered once with
   // [] deps and must stay stable.
   const prSheetBusyRef = useRef(false);
+  const nodeActionBusyRef = useRef(false);
+  const handleNodeActionBusy = useCallback((busy: boolean) => { nodeActionBusyRef.current = busy; }, []);
   const issuesBackRef = useRef<(() => boolean) | null>(null);
   const handlePrSheetBusy = useCallback((busy: boolean) => {
     prSheetBusyRef.current = busy;
@@ -252,6 +254,10 @@ export default function App() {
 
   useEffect(() => {
     const onPop = () => {
+      if (nodeActionBusyRef.current) {
+        window.history.pushState({ bm: true }, "");
+        return;
+      }
       if (issuesBackRef.current?.()) {
         window.history.pushState({ bm: true }, "");
         return;
@@ -461,6 +467,8 @@ export default function App() {
               ...preserveWorkState(screen),
             })
           }
+          onTerminalNode={(node) => navigate({ kind: 'terminal', node, visitId: nextWorkVisitId() })}
+          onActionBusyChange={handleNodeActionBusy}
           onChanges={() =>
             navigate({
               kind: "changes",

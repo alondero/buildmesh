@@ -11,6 +11,63 @@ use crate::models::{EnvType, SessionStatus};
 use serde_json::Value;
 use std::path::Path;
 
+/// A persisted built-in Review Run parked at its source approval gate. The
+/// real worker consumes the phone approval; no provider is launched by setup.
+/// After approval, publication may fail because this fixture has no live PTY.
+pub(crate) fn create_mobile_review_approval_fixture(name: &str) -> Result<Value, String> {
+    let mesh = crate::services::mesh::create_test(name).map_err(|e| e.to_string())?;
+    let result = (|| {
+        let source = crate::db::create_agent_node(
+            mesh.id,
+            "Phone approval implementation",
+            &mesh.path,
+            "main",
+            EnvType::Windows,
+            "codex",
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+        crate::db::update_agent_node_status(source.id, SessionStatus::Ready)
+            .map_err(|e| e.to_string())?;
+        let run_id = crate::db::create_node_circuit_run(source.id, None, 3, None)?;
+        let steps: Vec<_> = [
+            ("trigger", "completed", Some("completed")),
+            ("await_source", "completed", Some("blocked")),
+            ("confirm_source", "blocked", None),
+        ]
+        .into_iter()
+        .map(|(id, status, outcome)| CircuitStepOp {
+            node_id: id.into(),
+            status: status.into(),
+            outcome: outcome.map(|o| Some(o.into())),
+            error: None,
+            agent_node_id: None,
+            attempt: 1,
+            fresh_attempt: false,
+        })
+        .collect();
+        crate::db::commit_circuit_advance(run_id, Some("running"), None, &steps)
+            .map_err(|e| e.to_string())?;
+        let run = crate::db::get_circuit_run(run_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("Fixture run disappeared")?;
+        Ok(
+            serde_json::json!({ "mesh": mesh, "source": source.id, "run": run_id, "circuit": run.circuit_id }),
+        )
+    })();
+    if result.is_err() {
+        teardown_fixture(mesh.id, &mesh.path)?;
+    }
+    result
+}
+
 /// Create completed node-started and issue-driven review rows used by the
 /// real-runtime activity screenshot. No agent process or worktree is created.
 pub(crate) fn create_review_activity_fixture(name: &str) -> Result<Value, String> {

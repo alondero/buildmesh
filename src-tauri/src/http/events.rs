@@ -15,6 +15,13 @@ use tokio::sync::broadcast;
 #[ts(export, export_to = "EventMsg.ts")]
 #[serde(tag = "type")]
 pub enum EventMsg {
+    /// Invalidate the phone's run snapshot, including person-gated steps.
+    #[serde(rename = "circuit-run-updated")]
+    CircuitRunUpdated {
+        /// `None` invalidates all runs after a bulk attention dismissal.
+        #[ts(as = "Option<i32>")]
+        run_id: Option<i64>,
+    },
     #[serde(rename = "attention-cleared")]
     AttentionCleared {
         #[ts(as = "i32")]
@@ -77,9 +84,46 @@ pub fn emit(msg: EventMsg) {
     let _ = channel().send(msg);
 }
 
+/// All producers already notify the desktop; bridge that bus once instead of
+/// maintaining a second list of worker and command transition call sites.
+pub(crate) fn forward_circuit_update(payload: &str) {
+    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(payload) {
+        if let Some(run_id) = payload.get("run_id").and_then(serde_json::Value::as_i64) {
+            emit(EventMsg::CircuitRunUpdated {
+                run_id: Some(run_id),
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn desktop_circuit_update_reaches_the_phone_socket_channel() {
+        let mut rx = subscribe();
+        forward_circuit_update(r#"{"run_id":987654321,"state":"running"}"#);
+        let message = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let message = rx.recv().await.unwrap();
+                if matches!(
+                    message,
+                    EventMsg::CircuitRunUpdated {
+                        run_id: Some(987654321)
+                    }
+                ) {
+                    break message;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(message).unwrap(),
+            serde_json::json!({"type":"circuit-run-updated","run_id":987654321})
+        );
+    }
 
     #[tokio::test]
     async fn subscribe_then_emit_delivers_message() {
