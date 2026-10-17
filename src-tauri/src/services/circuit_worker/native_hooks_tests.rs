@@ -2,7 +2,7 @@
 //!
 //! Split out of `src-tauri/src/services/circuit_worker/native_hooks.rs` by issue #2451. The conventions this
 //! layout depends on — why the module keeps the name `tests`, and why every
-//! `#[path = "..."]` module needs an entry in `RUST_PATH_INCLUDES` — are
+//! `#[path]` module needs an entry in `RUST_PATH_INCLUDES` — are
 //! documented once in `docs/development/rust-conventions.md`, under *Rust unit
 //! tests live in sibling `*_tests.rs` files*.
 //!
