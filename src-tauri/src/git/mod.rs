@@ -12,5 +12,6 @@ pub mod ai_context_runtime;
 pub mod health;
 pub mod primitives;
 pub mod project;
+pub(crate) mod status_stats;
 pub mod sync;
 pub mod worktree;

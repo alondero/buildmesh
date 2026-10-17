@@ -77,6 +77,8 @@ export function frontendInScope(paths) {
 // Rust diff itself, not only the one CI happens to run (review of PR #2232).
 export const RUST_PATH_INCLUDES = {
   'src-tauri/src/agent/terminal_input.rs': 'agent::process::terminal_input',
+  'src-tauri/src/commands/git_status_bench.rs': 'commands::git_tests',
+  'src-tauri/src/commands/git_status_counts_tests.rs': 'commands::git_tests::status_counts',
   'src-tauri/src/git/fetch_origin_tests.rs': 'git::sync::fetch_origin_tests',
   'src-tauri/src/git/mesh_health_tests.rs': 'git::health::mesh_health_tests',
   'src-tauri/src/commands/prune_tests.rs': 'commands::prune::prune_tests',

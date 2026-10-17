@@ -6,6 +6,11 @@ import { circuitStatusLine } from '../../src/mobile/circuitRun';
 import type { AgentNode, Mesh, NodeCircuitRun } from '../../src/mobile/api';
 import type { NodeCircuitNeed } from '../../src/types/generated/NodeCircuitNeed';
 
+vi.mock('../../src/mobile/api', async (original) => ({
+  ...await original<typeof import('../../src/mobile/api')>(),
+  eventsWsUrl: vi.fn().mockResolvedValue('ws://test/ws/events'),
+}));
+
 const response = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
@@ -36,6 +41,7 @@ let postReply: () => Promise<Response>;
 let fetcher: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
+  vi.stubGlobal('WebSocket', class { close() {} });
   runs = [circuit()];
   posts = [];
   postReply = () => Promise.resolve(response({ ok: true, run_id: 7 }));
@@ -137,6 +143,23 @@ it('drops a confirmation whose gate has since been resolved elsewhere', async ()
   act(() => window.dispatchEvent(new Event('online')));
   await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   expect(posts).toEqual([]);
+});
+
+it.each([{ run_id: 8 }, { revision: 13 }])('drops a confirmation when its run snapshot changes: %o', async (change) => {
+  panel();
+  fireEvent.click(await screen.findByRole('button', { name: 'Approve…' }));
+  runs = [circuit(change)];
+  act(() => window.dispatchEvent(new Event('online')));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(posts).toEqual([]);
+});
+
+it('opens the agent that asked for input, including a reviewer helper', async () => {
+  const open = vi.fn();
+  runs = [circuit({ needs_you: [{ kind: 'input', step: { node_id: 'verdict', role: 'Review', attempt: 1, status: 'running' }, detail: 'Waiting for input', actions: [], agent_node_id: 99 }] })];
+  panel({ onOpenTerminal: open });
+  fireEvent.click(await screen.findByRole('button', { name: 'Open terminal to answer' }));
+  expect(open).toHaveBeenCalledWith(99);
 });
 
 it('offers exactly the checkpoint actions the desktop listed; recheck acts at once with the revision', async () => {
@@ -297,4 +320,21 @@ it('keeps the node list when the circuit read fails, and shows the line when it 
   circuitStatus = 200;
   act(() => window.dispatchEvent(new Event('online')));
   expect((await screen.findByTestId('node-circuit-17')).textContent).toContain('Needs you: Review Blueprint');
+});
+
+it('includes a running agent with a parked Circuit gate in the attention filter', async () => {
+  vi.stubGlobal('WebSocket', class { close() {} });
+  const node = { id: 17, mesh_id: 1, name: 'Needs review approval', provider: 'anthropic', status: 'running' } as AgentNode;
+  const other = { ...node, id: 18, name: 'Working normally' };
+  fetcher.mockImplementation((url: string) => Promise.resolve(response(
+    url === '/api/circuit-runs' ? runs : url === '/api/nodes' ? [node, other] : url === '/api/meshes' ? [{ id: 1, name: 'Buildmesh' }] : url === '/api/providers' ? [] : { ticket: 't' },
+  )));
+  render(<NodeList view="work" onOpenNode={vi.fn()} onOpenAgentNodes={vi.fn()} onOpenIssues={vi.fn()} onOffline={vi.fn()} onAuthFailed={vi.fn()} />);
+  await screen.findByText('Working normally');
+  fireEvent.click(screen.getByRole('button', { name: 'Needs attention', exact: true }));
+  expect(screen.getByText('Needs review approval')).toBeTruthy();
+  expect(screen.queryByText('Working normally')).toBeNull();
+  runs = [];
+  act(() => window.dispatchEvent(new Event('online')));
+  await waitFor(() => expect(screen.queryByText('Needs review approval')).toBeNull());
 });

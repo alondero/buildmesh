@@ -117,6 +117,7 @@ describe("IssuesScreen", () => {
     render(
       <IssuesScreen
         mesh={mesh}
+        visitId={1}
         onBack={noop}
         onSpawned={noop}
       />,
@@ -156,6 +157,7 @@ describe("IssuesScreen", () => {
     render(
       <IssuesScreen
         mesh={mesh}
+        visitId={1}
         onBack={noop}
         onSpawned={noop}
       />,
@@ -184,6 +186,7 @@ describe("IssuesScreen", () => {
     render(
       <IssuesScreen
         mesh={mesh}
+        visitId={1}
         onBack={noop}
         onSpawned={noop}
       />,
@@ -211,6 +214,7 @@ describe("IssuesScreen", () => {
     render(
       <IssuesScreen
         mesh={mesh}
+        visitId={1}
         onBack={noop}
         onSpawned={noop}
       />,
@@ -237,6 +241,7 @@ describe("IssuesScreen", () => {
     render(
       <IssuesScreen
         mesh={mesh}
+        visitId={1}
         onBack={noop}
         onSpawned={noop}
       />,
@@ -261,7 +266,7 @@ describe("IssuesScreen", () => {
     async function loadAndGetCard() {
       mockListIssues(BACKEND_ISSUES);
       render(
-        <IssuesScreen mesh={mesh} onBack={noop} onSpawned={noop} />,
+        <IssuesScreen mesh={mesh} visitId={1} onBack={noop} onSpawned={noop} />,
       );
       return await screen.findByTestId("issue-101");
     }

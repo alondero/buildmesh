@@ -12,6 +12,9 @@ import kotlinx.serialization.json.*
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import java.security.MessageDigest
 import java.util.Base64
+import dev.buildmesh.remote.wire.NodeCircuitRun
+
+private data class DashboardSnapshot(val meshes: List<JsonObject>, val nodes: List<JsonObject>, val providers: List<JsonObject>, val runs: List<NodeCircuitRun>?)
 
 data class RemoteState(
     val restoring: Boolean = true,
@@ -25,6 +28,7 @@ data class RemoteState(
     val meshes: List<JsonObject> = emptyList(),
     val nodes: List<JsonObject> = emptyList(),
     val providers: List<JsonObject> = emptyList(),
+    val circuitRuns: List<NodeCircuitRun> = emptyList(),
     val resourceRevision: Int = 0,
 )
 
@@ -47,10 +51,18 @@ class BuildmeshViewModel(application: Application) : AndroidViewModel(applicatio
                 val meshes = async { client.get("/api/meshes").objects() }
                 val nodes = async { client.get("/api/nodes").objects() }
                 val providers = async { client.get("/api/providers").objects() }
-                Triple(meshes.await(), nodes.await(), providers.await())
+                val runs = async {
+                    try { client.circuitRuns() }
+                    catch (e: CancellationException) { throw e }
+                    catch (e: Exception) {
+                        if (e is ApiException && e.sessionRejected) throw e
+                        null
+                    }
+                }
+                DashboardSnapshot(meshes.await(), nodes.await(), providers.await(), runs.await())
             }
         }, publish = { snapshot ->
-            mutableState.update { it.copy(meshes = snapshot.first, nodes = snapshot.second, providers = snapshot.third, error = "") }
+            mutableState.update { it.copy(meshes = snapshot.meshes, nodes = snapshot.nodes, providers = snapshot.providers, circuitRuns = snapshot.runs ?: it.circuitRuns, error = "") }
         }, onError = ::report,
         onBusy = { busy -> mutableState.update { it.copy(refreshing = busy) } },
     )
@@ -149,10 +161,11 @@ class BuildmeshViewModel(application: Application) : AndroidViewModel(applicatio
         if (state.value.busy) return
         val owner = generation
         mutableState.update { it.copy(busy = true, error = "", notice = "") }
+        refresher.invalidate()
         actionJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
             try {
                 block(client)
-                if (owner == generation) refresh()
+                if (owner == generation) { refresher.invalidate(); refresh() }
             } catch (e: CancellationException) { throw e
             } catch (e: Exception) {
                 if (owner == generation) {

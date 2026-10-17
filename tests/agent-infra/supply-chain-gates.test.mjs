@@ -602,3 +602,27 @@ test('rust advisories: the committed exception file is complete and in date', ()
     assert.ok(entry.owner && entry.rationale.length > 20, `${entry.id} needs a substantive rationale`);
   }
 });
+
+test('rust advisories: the zip crate stays out of the tree (issue #2438)', () => {
+  // RUSTSEC-2026-0367/0368/0369 are fixed only in zip 9.x, and every published
+  // tauri-plugin-updater requires `zip = "4"`, so there is no version to
+  // upgrade to and no exception is permitted. The only fix available is that the
+  // crate is not depended on: `zip` reached the tree solely through the
+  // plugin's default `zip` feature, which the updater never uses.
+  //
+  // `cargo audit` is the authoritative gate and already fails if `zip` returns,
+  // but it needs a populated advisory database; these two assertions are the
+  // cheap local check that fails the moment the dependency line is reverted.
+  const lock = fs.readFileSync(path.join(repoRoot, 'src-tauri', 'Cargo.lock'), 'utf8');
+  assert.doesNotMatch(
+    lock,
+    /^\[\[package\]\]\r?\nname = "zip"$/m,
+    'zip is in Cargo.lock again: keep default-features = false on tauri-plugin-updater',
+  );
+
+  const manifest = fs.readFileSync(path.join(repoRoot, 'src-tauri', 'Cargo.toml'), 'utf8');
+  const line = manifest.split('\n').find((l) => l.startsWith('tauri-plugin-updater'));
+  assert.ok(line, 'expected a tauri-plugin-updater dependency line');
+  assert.match(line, /default-features = false/, 'the zip feature is back on via default features');
+  assert.doesNotMatch(line, /"zip"/, 'the zip feature must not be re-enabled explicitly either');
+});

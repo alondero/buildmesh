@@ -185,6 +185,71 @@ The two cleanup kinds are deliberately different, and the difference matters:
   behind. Deletion only reaches this on the success path — a rejected delete
   means the Mesh survived, so its cached state stays authoritative.
 
+## Backend status line counts
+
+`commands::git::get_git_status_blocking` owns each status observation. It
+first builds the ordered, ignore-filtered rows from libgit2 status, including
+the queried project's `project_path` projection. An empty list skips the
+HEAD-to-workdir line diff. A nonempty list keeps that diff HEAD-relative,
+so staged and unstaged changes are combined rather than summed.
+
+`git::status_stats` counts large, simple regular-file deltas without storing patch
+lines: additions/untracked files, deletions, and byte-prefix append/truncate
+edits at complete line boundaries. Workdir content is streamed through a
+64 KiB buffer. Existing blob content is still loaded for comparison; this
+does not make large-file reads constant-memory. Binary detection follows
+libgit2's first-8,000-byte NUL rule. Missing final newlines count as a line.
+Files whose delta reports less than 64 KiB stay with native patches, which
+avoid the streaming probe's extra I/O on small files. This threshold selects
+the calculation; it never suppresses counts.
+
+Attributes, clean filters, autocrlf conversion, special file modes, edits
+inside existing content, and partial-line prefix edits fall back to the
+native patch calculation. Sizes beyond libgit2's default diff size policy
+also select that fallback. There is no additional count cutoff or estimate.
+
+Status and summary have independent backend observations. Each invocation
+reopens the requested host/WSL path on the blocking pool, outside DB locks;
+no backend result or failure survives a call. A file edit, HEAD/index change,
+stage/revert, or manual refresh therefore needs no backend invalidation.
+The frontend's path keys, event rate window, trailing refresh and error
+states above remain the freshness boundary. Project folders and separate
+worktrees do not share backend observations, even when their common Git
+directory is the same.
+
+The overlap benchmark found that summary's extra walk was small compared
+with status's line-count work. Keeping it independent avoids making a cheap
+summary wait for line statistics or introducing a second freshness policy.
+
+### Reproducing the status benchmark
+
+Build mobile assets, then run `node scripts/bench-git-status.mjs
+.tmp/git-status-results.json`. `BUILDMESH_STATUS_BENCH_READS` sets the reads
+per case (default five). The runner compiles and snapshots an owned test
+binary using the Rust shard runner's worktree checks. It invokes the real
+blocking commands in fresh processes, creates fixtures outside those
+processes, and retains fixtures, the executable and JSON under `.tmp/`.
+Run it before and after changing the implementation, using the same machine
+and build profile; these are debug test builds, not production latency claims.
+
+Cases cover clean/small edits, 1/10/100 MiB generated text with an appended
+line, 100 MiB untracked text, 2,000 small modified files, 100 generated files
+of 1 MiB each, and four simultaneous
+worktrees with 10 MiB untracked text each. Status/summary overlap is measured
+for both the many-file and multi-worktree cases using per-round barriers.
+Results include per-read latency, row and line totals, status/diff/patch
+invocations, and Windows peak committed private memory and working set.
+Other platforms report memory as unavailable; Rust allocator counts alone
+would omit libgit2's C allocations.
+The 10 MiB case also measures an interior edit that uses native fallback.
+An optional second argument selects a previously retained owned executable
+instead of compiling, so the same fixtures can be rerun against a recorded
+baseline binary; its worktree stamp is still checked.
+An optional third argument supplies a baseline executable to compare both
+binaries against the same fixtures with alternating pair order. The
+[Windows benchmark record](../archive/2026-10/git-status-benchmark.md)
+documents measured benefits and native-fallback costs.
+
 ## Tests
 
 `tests/unit/path-cache-retention.test.ts` covers the retention contract:
@@ -196,3 +261,9 @@ expiry and isolation, and the dual-key shape.
 `tests/unit/path-cache-request-ownership.test.ts` covers the neighbouring
 concern — request coalescing, supersession, and trailing-refetch cleanup —
 which is a separate axis from how much the cache keeps.
+
+`commands::git_tests::status_counts` exercises the actual blocking command,
+compares counts against the native patch implementation, and checks that
+clean reads and simple deltas avoid diff/patch work. Existing Git command
+tests cover ignored Windows junctions, project-folder actions and worktree
+isolation.

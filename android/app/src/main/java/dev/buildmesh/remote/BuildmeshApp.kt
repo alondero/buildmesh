@@ -95,7 +95,7 @@ fun BuildmeshApp(vm: BuildmeshViewModel, invitation: String = "") {
                             meshId = id
                             if (target == "work") tab = "Work" else screen = target
                         }, { id, option -> meshId = id; launch = option; screen = "capture" })
-                    "node" -> if (selected != null) NodeScreen(selected, vm, { screen = "terminal" }, { screen = "changes" }, { screen = "pr" })
+                    "node" -> if (selected != null) NodeScreen(selected, vm, { screen = "terminal" }, { screen = "changes" }, { screen = "pr" }, { id -> nodeId = id; screen = "terminal" })
                         else EmptyMessage("This node is no longer available.")
                     "terminal" -> vm.api?.let { TerminalPane(it, nodeId, vm) }
                     "changes" -> vm.api?.let { ChangesScreen(it, nodeId, vm, { file = it; screen = "diff" }) }
@@ -162,13 +162,13 @@ fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) 
     val nodesByMesh = openNodes.groupBy { it.number("mesh_id") }
     val visible = openNodes.filter { node ->
         (meshId == 0L || node.number("mesh_id") == meshId) &&
-            (!attentionOnly || node.text("status") == "awaiting_input") &&
+            (!attentionOnly || circuitNeedsAttention(node, state.circuitRuns)) &&
             (query.isBlank() || node.text("name").contains(query, true) || node.text("branch").contains(query, true))
     }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item {
             Text(if (tab == "Overview") "Overview" else "Your work", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-            Text("${openNodes.count { it.text("status") == "running" }} running · ${openNodes.count { it.text("status") == "awaiting_input" }} need attention · ${state.meshes.size} meshes", color = MeshColors.secondary)
+            Text("${openNodes.count { it.text("status") == "running" }} running · ${openNodes.count { circuitNeedsAttention(it, state.circuitRuns) }} need attention · ${state.meshes.size} meshes", color = MeshColors.secondary)
         }
         item {
             Selector("Mesh", listOf(0L to "All meshes") + state.meshes.map { it.number("id") to it.text("name") }, meshId, selectMesh)
@@ -207,11 +207,14 @@ fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) 
             }
         }
         if (visible.isEmpty()) item { EmptyMessage(if (state.refreshing) "Loading agents…" else "No agents match this view. Capture a task to start one.") }
-        items(visible.sortedByDescending { it.text("status") == "awaiting_input" }, key = { "node-${it.number("id")}" }) { node ->
+        items(visible.sortedByDescending { circuitNeedsAttention(it, state.circuitRuns) }, key = { "node-${it.number("id")}" }) { node ->
             Card(onClick = { openNode(node.number("id")) }, colors = CardDefaults.cardColors(containerColor = MeshColors.card)) {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(node.text("name"), style = MaterialTheme.typography.titleMedium)
                     Text(nodeLabel(node), color = MeshColors.status(node.text("status")))
+                    state.circuitRuns.firstOrNull { it.node_id == node.number("id") }?.let { run ->
+                        Text(circuitStatus(run), color = if (run.needs_you.isNotEmpty()) MeshColors.amber else MeshColors.secondary)
+                    }
                     Text("${state.meshes.firstOrNull { it.number("id") == node.number("mesh_id") }?.text("name").orEmpty()} · ${node.text("branch")}", color = MeshColors.secondary)
                     node.objectAt("lifecycle")?.text("message")?.takeIf { it.isNotBlank() }?.let { Text(it, maxLines = 3) }
                 }

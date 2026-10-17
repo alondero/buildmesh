@@ -6,6 +6,14 @@
 //! Run with: cd src-tauri && cargo test git::tests
 
 #[cfg(test)]
+#[path = "git_status_bench.rs"]
+mod status_bench;
+
+#[cfg(test)]
+#[path = "git_status_counts_tests.rs"]
+mod status_counts;
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn scoped_project_status_stage_and_revert_use_repository_paths() {

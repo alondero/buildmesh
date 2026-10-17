@@ -107,7 +107,7 @@ export function useWsEvents(onEvent: (msg: EventMsg) => void, onAuthError: () =>
           // `attention-cleared` pair. Every event still just triggers a
           // /api/nodes refetch (NodeList reconciles from the server, which
           // is the source of truth after a reconnect/lag).
-          if (msg && (msg.type === "attention-cleared" || msg.type === "agent-lifecycle")) {
+          if (msg && (msg.type === "attention-cleared" || msg.type === "agent-lifecycle" || msg.type === "circuit-run-updated")) {
             onEventRef.current(msg);
           }
         } catch {

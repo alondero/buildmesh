@@ -43,7 +43,7 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 async function openIssue(onSpawned = vi.fn()) {
-  render(<IssuesScreen mesh={mesh} onBack={() => {}} onSpawned={onSpawned} />);
+  render(<IssuesScreen mesh={mesh} visitId={1} onBack={() => {}} onSpawned={onSpawned} />);
   fireEvent.click(await screen.findByTestId('issue-42'));
   return onSpawned;
 }
@@ -79,7 +79,7 @@ describe('phone issue triage', () => {
     expect(writes).toEqual([]);
     fireEvent.change(choice, { target: { value: 'claude' } });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Start' }));
-    await waitFor(() => expect(onSpawned).toHaveBeenCalledWith({ id: 9 }));
+    await waitFor(() => expect(onSpawned).toHaveBeenCalledWith({ id: 9 }, { kind: 'issues', meshId: 1, visitId: 1 }));
     expect(writes).toEqual([{ path: '/api/meshes/1/issues/42/spawn', body: { title: 'Fix deadline', provider: 'claude' } }]);
   });
 
@@ -131,7 +131,7 @@ describe('phone issue triage', () => {
     const backHandlerRef = { current: null as (() => boolean) | null };
     const onSpawned = vi.fn();
     const onBack = vi.fn();
-    render(<IssuesScreen mesh={mesh} onBack={onBack} onSpawned={onSpawned} backHandlerRef={backHandlerRef} />);
+    render(<IssuesScreen mesh={mesh} visitId={1} onBack={onBack} onSpawned={onSpawned} backHandlerRef={backHandlerRef} />);
     fireEvent.click(await screen.findByTestId('issue-42'));
     fireEvent.click(screen.getByTestId('issue-spawn-42'));
     const start = within(await screen.findByRole('dialog')).getByRole('button', { name: 'Start' });
@@ -176,11 +176,11 @@ describe('phone issue triage', () => {
   it('rejects a late tag completion belonging to a different mesh', async () => {
     let resolve!: (response: Response) => void;
     save = () => new Promise(r => { resolve = r; });
-    const view = render(<IssuesScreen mesh={mesh} onBack={() => {}} onSpawned={() => {}} />);
+    const view = render(<IssuesScreen mesh={mesh} visitId={1} onBack={() => {}} onSpawned={() => {}} />);
     await screen.findByTestId('issue-42');
     fireEvent.click(screen.getByRole('button', { name: 'Edit tags for issue #42' }));
     fireEvent.click(await screen.findByRole('checkbox', { name: /buildmesh:run/ }));
-    view.rerender(<IssuesScreen mesh={{ ...mesh, id: 2 }} onBack={() => {}} onSpawned={() => {}} />);
+    view.rerender(<IssuesScreen mesh={{ ...mesh, id: 2 }} visitId={2} onBack={() => {}} onSpawned={() => {}} />);
     await screen.findByTestId('issue-42');
     resolve(new Response(null, { status: 204 }));
     fireEvent.click(screen.getByRole('button', { name: 'Edit tags for issue #42' }));
@@ -192,7 +192,7 @@ describe('phone issue triage', () => {
   it('routes an authorization failure from a tag write to pairing', async () => {
     save = async () => response({ error: 'Device revoked' }, 401);
     const onAuthFailed = vi.fn();
-    render(<IssuesScreen mesh={mesh} onBack={() => {}} onSpawned={() => {}} onAuthFailed={onAuthFailed} />);
+    render(<IssuesScreen mesh={mesh} visitId={1} onBack={() => {}} onSpawned={() => {}} onAuthFailed={onAuthFailed} />);
     await screen.findByTestId('issue-42');
     fireEvent.click(screen.getByRole('button', { name: 'Edit tags for issue #42' }));
     fireEvent.click(await screen.findByRole('checkbox', { name: /buildmesh:run/ }));

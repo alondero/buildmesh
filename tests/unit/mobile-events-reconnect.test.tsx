@@ -95,6 +95,15 @@ describe("useWsEvents reconnect on foreground/online", () => {
     utils.unmount();
   });
 
+  it('delivers Circuit Run invalidations to the screen for an immediate refresh', async () => {
+    const receive = vi.fn();
+    const view = renderHook(() => useWsEvents(receive, noop));
+    await waitFor(() => expect(sockets).toHaveLength(1));
+    act(() => sockets[0].onmessage?.({ data: JSON.stringify({ type: 'circuit-run-updated', run_id: 7 }) }));
+    expect(receive).toHaveBeenCalledWith({ type: 'circuit-run-updated', run_id: 7 });
+    view.unmount();
+  });
+
   it("reconnects a dropped socket when the document is foregrounded", async () => {
     const utils = await mountAndConnect();
     act(() => sockets[0].simulateDrop());

@@ -12,7 +12,7 @@ import androidx.compose.ui.unit.dp
 import kotlinx.serialization.json.*
 
 @Composable
-fun NodeScreen(node: JsonObject, vm: BuildmeshViewModel, terminal: () -> Unit, changes: () -> Unit, createPr: () -> Unit) {
+fun NodeScreen(node: JsonObject, vm: BuildmeshViewModel, terminal: () -> Unit, changes: () -> Unit, createPr: () -> Unit, circuitTerminal: (Long) -> Unit = { terminal() }) {
     val state by vm.state.collectAsState()
     val id = node.number("id")
     var draft by rememberSaveable(state.draftNamespace, id) { mutableStateOf(vm.draft("reply-$id")) }
@@ -41,6 +41,8 @@ fun NodeScreen(node: JsonObject, vm: BuildmeshViewModel, terminal: () -> Unit, c
         OutlinedButton(shape = MaterialTheme.shapes.small, onClick = changes, modifier = Modifier.fillMaxWidth()) { Text("Review changes") }
         OutlinedButton(shape = MaterialTheme.shapes.small, onClick = createPr, modifier = Modifier.fillMaxWidth()) { Text("Create pull request") }
         vm.api?.let { PullRequestsPanel(it, node.number("mesh_id"), vm, id) }
+        state.circuitRuns.firstOrNull { it.node_id == id }?.let { CircuitRunPanel(it, vm, circuitTerminal) }
+        if (node.text("provider") != "terminal") StartReviewButton(id, vm)
         if (canReply || draft.isNotEmpty()) {
             Text("Reply to agent", style = MaterialTheme.typography.titleMedium)
             choices.forEach { choice -> Text("• $choice", color = MeshColors.secondary) }

@@ -798,13 +798,27 @@ fn trigger_circuit_now_prepared_locked(
 ///
 /// Retrying for an agent that already owns a live run returns that run's id and
 /// does not apply the new `reviewer_provider` or `max_rounds` — the first
-/// writer wins. The source agent must have a live process; an unsupported
-/// harness is refused when it is picked as the reviewer, not as the source
-/// (the title-bar control disables itself when the source harness cannot
-/// yield a turn).
+/// writer wins. The source agent must have a live process and a turn-completion
+/// signal, matching the title-bar control's eligibility check.
 #[command]
 pub fn trigger_circuit_from_node(
     app: AppHandle,
+    node_id: i64,
+    circuit_id: Option<i64>,
+    max_rounds: i32,
+    reviewer_provider: Option<String>,
+) -> Result<i64, String> {
+    trigger_circuit_from_node_now(
+        Some(&app),
+        node_id,
+        circuit_id,
+        max_rounds,
+        reviewer_provider,
+    )
+}
+
+pub(crate) fn trigger_circuit_from_node_now(
+    app: Option<&AppHandle>,
     node_id: i64,
     circuit_id: Option<i64>,
     max_rounds: i32,
@@ -820,6 +834,10 @@ pub fn trigger_circuit_from_node(
     if node.provider == "terminal" {
         return Err("Review loops require an AI agent.".into());
     }
+    let source = crate::agent::provider::SpawnOptionId::from(node.provider.as_str());
+    if crate::circuit::compatibility::reviewer_harness_reason(source.harness_id()).is_some() {
+        return Err("This agent's harness has no turn-completion signal. Start the review from an agent with a supported turn hook or transcript watcher.".into());
+    }
     let run_id =
         crate::db::create_node_circuit_run(node_id, circuit_id, max_rounds, reviewer_provider)?;
     crate::circuit::evaluator::register_circuit(node_id);
@@ -827,10 +845,7 @@ pub fn trigger_circuit_from_node(
         .map_err(|e| e.to_string())?
         .map(|run| run.state)
         .unwrap_or_else(|| "pending".into());
-    let _ = app.emit(
-        "circuit-run-updated",
-        crate::services::circuit_worker::CircuitRunUpdatedPayload { run_id, state },
-    );
+    emit_run_updated(app, run_id, &state);
     crate::services::circuit_worker::wake_circuit_worker();
     Ok(run_id)
 }
