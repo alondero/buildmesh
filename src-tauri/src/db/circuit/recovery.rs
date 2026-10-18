@@ -473,9 +473,15 @@ pub(crate) fn extend_failed_review_locked(
         updated_at=datetime('now') WHERE id=?1 AND state='failed'",
         params![target, root_run.circuit_id, recovery.source_id, serde_json::to_string(&context).map_err(|e| e.to_string())?, run.mesh_id])
         .map_err(|e| e.to_string())?;
-    super::evidence::append_history(&tx, target, Some("reviewer"), Some(next_attempt), "review_extension",
-        &serde_json::json!({"additional_rounds":additional_rounds,"round_limit":next_limit,"attempt":next_attempt,"graph_sha256":graph_sha256}).to_string(),
-        Some(super::evidence::SOURCE_OPERATOR), Some(super::evidence::DISPOSITION_APPLIED)).map_err(|e| e.to_string())?;
+    super::evidence::append_history(&tx, super::evidence::HistoryEvent {
+        run_id: target,
+        node_id: Some("reviewer"),
+        attempt: Some(next_attempt),
+        kind: "review_extension",
+        detail: &serde_json::json!({"additional_rounds":additional_rounds,"round_limit":next_limit,"attempt":next_attempt,"graph_sha256":graph_sha256}).to_string(),
+        source: Some(super::evidence::SOURCE_OPERATOR),
+        disposition: Some(super::evidence::DISPOSITION_APPLIED),
+    }).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(target)
 }

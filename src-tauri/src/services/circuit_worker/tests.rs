@@ -1207,22 +1207,23 @@ fn circuit_status_projection_retains_yield_without_completing_assigned_work() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().to_str().unwrap();
     let mesh = db::create_mesh("evidence-projection", path).unwrap();
-    let mut node = db::create_agent_node(
-        mesh.id,
-        "Assigned work",
+    let mut node = db::create_agent_node(db::NewAgentNode {
+        mesh_id: mesh.id,
+        name: "Assigned work",
         path,
-        "work",
-        crate::models::EnvType::Windows,
-        "terminal",
-        None,
-        None,
-        None,
-        None,
-        false,
-        None,
-        None,
-        None,
-    )
+        branch: "work",
+        env: crate::models::EnvType::Windows,
+        provider: "terminal",
+        worktree_name: None,
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree: false,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        worktree_path: None,
+        spawn_configuration: None,
+    })
     .unwrap();
     let mut graph = CircuitGraph::walking_skeleton("task");
     if let CircuitNodeKind::SpawnAgentNode { prompt, .. } = &mut graph
@@ -1297,22 +1298,23 @@ fn review_handoff_without_transcript_or_native_evidence_remains_unverified() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().to_str().unwrap();
     let mesh = db::create_mesh("review-no-transcript", path).unwrap();
-    let node = db::create_agent_node(
-        mesh.id,
-        "Finished source",
+    let node = db::create_agent_node(db::NewAgentNode {
+        mesh_id: mesh.id,
+        name: "Finished source",
         path,
-        "work",
-        crate::models::EnvType::Windows,
-        "terminal",
-        None,
-        None,
-        None,
-        None,
-        false,
-        None,
-        None,
-        None,
-    )
+        branch: "work",
+        env: crate::models::EnvType::Windows,
+        provider: "terminal",
+        worktree_name: None,
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree: false,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        worktree_path: None,
+        spawn_configuration: None,
+    })
     .unwrap();
     let mut view = RunView {
         run_id: 85,
@@ -3765,22 +3767,23 @@ impl ResultReadFixture {
         crate::preferences::init_for_tests(directory.path().to_path_buf());
         let path = directory.path().to_str().unwrap();
         let mesh = db::create_mesh("result-read", path).unwrap();
-        let old_id = db::create_agent_node(
-            mesh.id,
-            "result writer",
+        let old_id = db::create_agent_node(db::NewAgentNode {
+            mesh_id: mesh.id,
+            name: "result writer",
             path,
-            "main",
-            crate::models::EnvType::Windows,
-            "cline",
-            None,
-            None,
-            None,
-            None,
-            true,
-            None,
-            None,
-            None,
-        )
+            branch: "main",
+            env: crate::models::EnvType::Windows,
+            provider: "cline",
+            worktree_name: None,
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree: true,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            worktree_path: None,
+            spawn_configuration: None,
+        })
         .unwrap()
         .id;
         let agent_id = NEXT_ID.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
@@ -4513,22 +4516,23 @@ fn circuit_archive_preserves_work_and_publishes_only_after_cleanup_receipt() {
     std::fs::write(&file, "uncommitted implementation").unwrap();
     let path = worktree.path().to_str().unwrap();
     let mesh = db::create_mesh("archive-recovery", path).unwrap();
-    let node = db::create_agent_node(
-        mesh.id,
-        "Recover me",
+    let node = db::create_agent_node(db::NewAgentNode {
+        mesh_id: mesh.id,
+        name: "Recover me",
         path,
-        "saved-branch",
-        crate::models::EnvType::Windows,
-        "claude",
-        None,
-        None,
-        None,
-        None,
-        true,
-        None,
-        None,
-        None,
-    )
+        branch: "saved-branch",
+        env: crate::models::EnvType::Windows,
+        provider: "claude",
+        worktree_name: None,
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree: true,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        worktree_path: None,
+        spawn_configuration: None,
+    })
     .unwrap();
     db::write_conn().execute("UPDATE agent_nodes SET worktree_path=?2, cli_session_id='saved-harness-session' WHERE id=?1", rusqlite::params![node.id, path]).unwrap();
     let circuit = db::create_autopilot_circuit(
@@ -4756,22 +4760,23 @@ fn three_admitted_review_runs_of_one_circuit_all_start_their_first_step() {
 
     let mut run_ids = Vec::new();
     for n in 0..3 {
-        let source = db::create_agent_node(
-            mesh.id,
-            &format!("Source {n}"),
+        let source = db::create_agent_node(db::NewAgentNode {
+            mesh_id: mesh.id,
+            name: &format!("Source {n}"),
             path,
-            "work",
-            crate::models::EnvType::Windows,
-            "terminal",
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-        )
+            branch: "work",
+            env: crate::models::EnvType::Windows,
+            provider: "terminal",
+            worktree_name: None,
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree: false,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            worktree_path: None,
+            spawn_configuration: None,
+        })
         .unwrap();
         let context = serde_json::json!({
             "source.agent_id": source.id.to_string(),
@@ -6588,39 +6593,41 @@ fn issue_review_spawn_seam_persists_parent_and_inherits_provider() {
         "/tmp/issue-review-parent-provider",
     )
     .unwrap();
-    let source = db::create_agent_node(
-        mesh.id,
-        "Implementation",
-        &mesh.path,
-        "main",
-        crate::models::EnvType::Windows,
-        "parent-provider",
-        None,
-        None,
-        None,
-        None,
-        true,
-        None,
-        None,
-        None,
-    )
+    let source = db::create_agent_node(db::NewAgentNode {
+        mesh_id: mesh.id,
+        name: "Implementation",
+        path: &mesh.path,
+        branch: "main",
+        env: crate::models::EnvType::Windows,
+        provider: "parent-provider",
+        worktree_name: None,
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree: true,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        worktree_path: None,
+        spawn_configuration: None,
+    })
     .unwrap();
-    let reviewer = db::create_agent_node(
-        mesh.id,
-        "Review",
-        &mesh.path,
-        "main",
-        crate::models::EnvType::Windows,
-        "placeholder",
-        None,
-        None,
-        None,
-        None,
-        true,
-        None,
-        None,
-        None,
-    )
+    let reviewer = db::create_agent_node(db::NewAgentNode {
+        mesh_id: mesh.id,
+        name: "Review",
+        path: &mesh.path,
+        branch: "main",
+        env: crate::models::EnvType::Windows,
+        provider: "placeholder",
+        worktree_name: None,
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree: true,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        worktree_path: None,
+        spawn_configuration: None,
+    })
     .unwrap();
     let graph = CircuitGraph::issue_driven_autopilot_review("ready-for-agent");
     let circuit = db::create_autopilot_circuit(
@@ -7053,22 +7060,23 @@ fn register_test_agent(mesh_id: i64, path: &str, name: &str) -> i64 {
 }
 
 fn register_test_agent_with_provider(mesh_id: i64, path: &str, name: &str, provider: &str) -> i64 {
-    let agent = db::create_agent_node(
+    let agent = db::create_agent_node(db::NewAgentNode {
         mesh_id,
         name,
         path,
-        "main",
-        crate::models::EnvType::Windows,
+        branch: "main",
+        env: crate::models::EnvType::Windows,
         provider,
-        None,
-        None,
-        None,
-        None,
-        true,
-        None,
-        None,
-        None,
-    )
+        worktree_name: None,
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree: true,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        worktree_path: None,
+        spawn_configuration: None,
+    })
     .unwrap();
     crate::circuit::evaluator::unregister(agent.id);
     crate::circuit::evaluator::register_circuit(agent.id);

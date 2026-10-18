@@ -93,22 +93,23 @@ mod tests {
         .unwrap();
         let path = format!("C:/buildmesh-runtime-{}", uuid::Uuid::new_v4());
         let mesh = crate::db::create_mesh("Runtime test", &path).unwrap();
-        let node = crate::db::create_agent_node(
-            mesh.id,
-            "Muse",
-            &path,
-            "main",
-            crate::models::EnvType::Windows,
-            "muse-wsl-test",
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-        )
+        let node = crate::db::create_agent_node(crate::db::NewAgentNode {
+            mesh_id: mesh.id,
+            name: "Muse",
+            path: &path,
+            branch: "main",
+            env: crate::models::EnvType::Windows,
+            provider: "muse-wsl-test",
+            worktree_name: None,
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree: false,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            worktree_path: None,
+            spawn_configuration: None,
+        })
         .unwrap();
         assert_eq!(node.env, crate::models::EnvType::Wsl);
         assert_eq!(

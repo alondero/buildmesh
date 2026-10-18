@@ -175,6 +175,45 @@ fn reject_unsupported_initial_prompt(
     }
 }
 
+/// One create-family request, assembled by the caller.
+///
+/// The create entry points used to take their inputs as long positional
+/// argument lists, so every wrapper had to remember the full arity and any
+/// entry point that grew a field grew a lint suppression for the argument
+/// count. The request struct makes the shape explicit at each call site
+/// instead: a wrapper that never uses a field writes it as `None` (or `""`,
+/// see `branch`) and the difference from its sibling stays readable.
+///
+/// `Copy` is load-bearing: the wrappers forward most fields unchanged with
+/// `..request` while overriding the few they must pin.
+#[derive(Debug, Clone, Copy)]
+pub struct NodeCreateParams<'a> {
+    pub mesh_id: i64,
+    /// The checkout to create the node against. The shared runners
+    /// ([`create_blocking`] / [`create_blocking_configured`]) look the mesh up
+    /// themselves and read the path off that row, so their callers pass `""`.
+    pub path: &'a str,
+    /// The branch to record. For [`create_blocking`] /
+    /// [`create_blocking_configured`] this is the branch *override*: an empty
+    /// value means "none supplied", and a non-empty value short-circuits the
+    /// `git::get_default_branch_blocking` lookup. The other entry points take
+    /// the branch verbatim.
+    pub branch: &'a str,
+    pub provider: Option<&'a str>,
+    pub source_issue: Option<i64>,
+    pub source_pr: Option<i64>,
+    pub source_pr_pinned_sha: Option<&'a str>,
+    pub use_worktree_override: Option<bool>,
+    pub name_override: Option<&'a str>,
+    pub head_repo_owner: Option<&'a str>,
+    pub head_repo_clone_url: Option<&'a str>,
+    pub configuration: Option<&'a crate::preferences::spawn_configurations::SpawnConfiguration>,
+    pub initial_prompt: Option<&'a str>,
+    /// Remote create-and-start key binding (issue #2331). Only the entry
+    /// points that own the key take one; the rest drop it.
+    pub operation: Option<&'a db::CreateOperationBinding>,
+}
+
 /// Create a new agent node with auto-generated name, environment detection,
 /// and provider resolution.
 ///
@@ -198,44 +237,29 @@ fn reject_unsupported_initial_prompt(
 /// retained for the structural `source_pr = Some(_)` boundary assert
 /// test coverage (`create_rejects_source_pr_some` et al.); `#[allow]`
 /// keeps the dead-code lint quiet.
-#[allow(dead_code, clippy::too_many_arguments)]
-pub fn create(
-    mesh_id: i64,
-    path: &str,
-    branch: &str,
-    provider: Option<&str>,
-    source_issue: Option<i64>,
-    source_pr: Option<i64>,
-    source_pr_pinned_sha: Option<&str>,
-    use_worktree_override: Option<bool>,
-    name_override: Option<&str>,
-) -> Result<AgentNode, AgentNodeError> {
+#[allow(dead_code)]
+pub fn create(request: NodeCreateParams<'_>) -> Result<AgentNode, AgentNodeError> {
     assert!(
-        source_pr.is_none(),
+        request.source_pr.is_none(),
         "services::agent_node::create refuses source_pr=Some(_); \
          the non-PR wrappers must persist source_pr=None so spawn_agent_inner's \
          'is this a PR-spawned node?' branch (node.source_pr.is_some()) stays a \
          reliable signal. Use create_with_source_pr_fork for PR spawns."
     );
     assert!(
-        source_pr_pinned_sha.is_none(),
+        request.source_pr_pinned_sha.is_none(),
         "services::agent_node::create refuses source_pr_pinned_sha=Some(_); \
          use create_with_source_pr_fork for PR spawns that need SHA pinning."
     );
     // Single insert path; fork fields are None for the non-fork entry point.
-    create_with_source_pr_fork(
-        mesh_id,
-        path,
-        branch,
-        provider,
-        source_issue,
-        source_pr,
-        source_pr_pinned_sha,
-        use_worktree_override,
-        name_override,
-        None,
-        None,
-    )
+    create_with_source_pr_fork(NodeCreateParams {
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        configuration: None,
+        initial_prompt: None,
+        operation: None,
+        ..request
+    })
 }
 
 /// Like [`create`], but also records the fork's owner login and clone URL
@@ -243,21 +267,22 @@ pub fn create(
 /// these to register `fork-<owner>` as a remote and fetch the head ref.
 /// For same-repo PRs, pass `None` for both fork fields and call [`create`]
 /// instead — the spawn path then takes the #420 `origin/<head_ref>` branch.
-#[allow(clippy::too_many_arguments)]
 pub fn create_with_source_pr_fork(
-    mesh_id: i64,
-    path: &str,
-    branch: &str,
-    provider: Option<&str>,
-    source_issue: Option<i64>,
-    source_pr: Option<i64>,
-    source_pr_pinned_sha: Option<&str>,
-    use_worktree_override: Option<bool>,
-    name_override: Option<&str>,
-    head_repo_owner: Option<&str>,
-    head_repo_clone_url: Option<&str>,
+    request: NodeCreateParams<'_>,
 ) -> Result<AgentNode, AgentNodeError> {
-    create_with_source_pr_fork_configured(
+    create_with_source_pr_fork_configured(NodeCreateParams {
+        configuration: None,
+        initial_prompt: None,
+        operation: None,
+        ..request
+    })
+    .map(|created| created.node)
+}
+
+pub fn create_with_source_pr_fork_configured(
+    request: NodeCreateParams<'_>,
+) -> Result<CreatedNode, AgentNodeError> {
+    let NodeCreateParams {
         mesh_id,
         path,
         branch,
@@ -269,30 +294,10 @@ pub fn create_with_source_pr_fork(
         name_override,
         head_repo_owner,
         head_repo_clone_url,
-        None,
-        None,
-        None,
-    )
-    .map(|created| created.node)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn create_with_source_pr_fork_configured(
-    mesh_id: i64,
-    path: &str,
-    branch: &str,
-    provider: Option<&str>,
-    source_issue: Option<i64>,
-    source_pr: Option<i64>,
-    source_pr_pinned_sha: Option<&str>,
-    use_worktree_override: Option<bool>,
-    name_override: Option<&str>,
-    head_repo_owner: Option<&str>,
-    head_repo_clone_url: Option<&str>,
-    configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
-    initial_prompt: Option<&str>,
-    operation: Option<&db::CreateOperationBinding>,
-) -> Result<CreatedNode, AgentNodeError> {
+        configuration,
+        initial_prompt,
+        operation,
+    } = request;
     let mesh = db::get_mesh_by_id(mesh_id)?;
     let mut prefs = crate::preferences::load().map_err(AgentNodeError::Backend)?;
     let selection = crate::preferences::resolve_default_provider(
@@ -384,20 +389,23 @@ pub fn create_with_source_pr_fork_configured(
     // reporting a node as running when it never started (#2331 review).
     let created = match operation {
         Some(binding) => match db::create_agent_node_with_operation(
-            mesh_id,
-            &session_name,
-            path,
-            branch,
-            env_type,
-            &provider_id,
-            worktree_db_name,
-            source_issue,
-            source_pr,
-            source_pr_pinned_sha,
-            use_worktree,
-            head_repo_owner,
-            head_repo_clone_url,
-            worktree_path_owned.as_deref(),
+            db::NewAgentNode {
+                mesh_id,
+                name: &session_name,
+                path,
+                branch,
+                env: env_type,
+                provider: &provider_id,
+                worktree_name: worktree_db_name,
+                source_issue,
+                source_pr,
+                source_pr_pinned_sha,
+                use_worktree,
+                head_repo_owner,
+                head_repo_clone_url,
+                worktree_path: worktree_path_owned.as_deref(),
+                spawn_configuration: None,
+            },
             configuration.as_ref(),
             binding,
         ) {
@@ -422,20 +430,23 @@ pub fn create_with_source_pr_fork_configured(
             }
         },
         None => db::create_agent_node_configured(
-            mesh_id,
-            &session_name,
-            path,
-            branch,
-            env_type,
-            &provider_id,
-            worktree_db_name,
-            source_issue,
-            source_pr,
-            source_pr_pinned_sha,
-            use_worktree,
-            head_repo_owner,
-            head_repo_clone_url,
-            worktree_path_owned.as_deref(),
+            db::NewAgentNode {
+                mesh_id,
+                name: &session_name,
+                path,
+                branch,
+                env: env_type,
+                provider: &provider_id,
+                worktree_name: worktree_db_name,
+                source_issue,
+                source_pr,
+                source_pr_pinned_sha,
+                use_worktree,
+                head_repo_owner,
+                head_repo_clone_url,
+                worktree_path: worktree_path_owned.as_deref(),
+                spawn_configuration: None,
+            },
             configuration.as_ref(),
         )
         .map(|node| CreatedNode {
@@ -483,23 +494,27 @@ pub struct CreatedNode {
 ///
 /// # Arguments
 ///
-/// * `mesh_id` — the mesh to scope the new node under. A missing
+/// * [`NodeCreateParams::mesh_id`] — the mesh to scope the new node under. A missing
 ///   mesh id surfaces as [`AgentNodeError::MeshNotFound`]. HTTP create
 ///   maps that variant to 400; HTTP import maps it to 404.
-/// * `provider` — the harness id to persist verbatim. The legacy
+/// * [`NodeCreateParams::provider`] — the harness id to persist verbatim. The legacy
 ///   `provider.unwrap_or("anthropic")` fallback lives in
 ///   [`create_with_source_pr_fork`] (issue #538 default), so a `None`
 ///   here writes `"anthropic"` to the row. Callers that want the
 ///   mesh-level / app-wide default chain resolve
 ///   beforehand (`preferences::resolve_default_provider`) and pass
 ///   the resolved string in.
-/// * `branch_override` — `Some(branch)` short-circuits the
+/// * [`NodeCreateParams::branch`] — a non-empty value short-circuits the
 ///   `git::get_default_branch_blocking` lookup. The mobile route
 ///   uses `"main"` verbatim; desktop paths that already resolved
-///   the branch via the async wrapper pass `Some(resolved)`. `None`
-///   resolves through `commands::git::get_default_branch_blocking`
+///   the branch via the async wrapper pass their resolved string. An
+///   empty value means "no override supplied" and resolves through
+///   `commands::git::get_default_branch_blocking`
 ///   (with `"main"` fallback on open failure).
-/// * `source_issue` / `name_override` / `use_worktree_override` —
+/// * [`NodeCreateParams::path`] — ignored by this runner, which reads the
+///   path off the mesh row it looks up itself; callers pass `""`.
+/// * [`NodeCreateParams::source_issue`] / [`NodeCreateParams::name_override`] /
+///   [`NodeCreateParams::use_worktree_override`] —
 ///   forwarded unchanged to the underlying create family. PR-spawn
 ///   fields stay `None` (callers reach for
 ///   `create_pending_with_source_pr_fork` directly for that flow).
@@ -516,45 +531,37 @@ pub struct CreatedNode {
 /// `create_pending_blocking` would duplicate those two steps.
 /// `pending` is a one-bit switch on the final delegation and is
 /// checked once at the bottom of the function.
-#[allow(clippy::too_many_arguments)]
 pub fn create_blocking(
-    mesh_id: i64,
-    provider: Option<&str>,
-    branch_override: Option<&str>,
-    source_issue: Option<i64>,
-    name_override: Option<&str>,
-    use_worktree_override: Option<bool>,
+    request: NodeCreateParams<'_>,
     pending: bool,
-    initial_prompt: Option<&str>,
 ) -> Result<AgentNode, AgentNodeError> {
     create_blocking_configured(
-        mesh_id,
-        provider,
-        branch_override,
-        source_issue,
-        name_override,
-        use_worktree_override,
+        NodeCreateParams {
+            configuration: None,
+            operation: None,
+            ..request
+        },
         pending,
-        None,
-        initial_prompt,
-        None,
     )
     .map(|created| created.node)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn create_blocking_configured(
-    mesh_id: i64,
-    provider: Option<&str>,
-    branch_override: Option<&str>,
-    source_issue: Option<i64>,
-    name_override: Option<&str>,
-    use_worktree_override: Option<bool>,
+    request: NodeCreateParams<'_>,
     pending: bool,
-    configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
-    initial_prompt: Option<&str>,
-    operation: Option<&db::CreateOperationBinding>,
 ) -> Result<CreatedNode, AgentNodeError> {
+    let NodeCreateParams {
+        mesh_id,
+        branch,
+        provider,
+        source_issue,
+        use_worktree_override,
+        name_override,
+        configuration,
+        initial_prompt,
+        operation,
+        ..
+    } = request;
     // 1. Mesh lookup. Map the missing-row case to the typed
     //    `AgentNodeError::MeshNotFound(mesh_id)` variant so the route
     //    can match on `Err(_)` patterns instead of inspecting a
@@ -568,15 +575,17 @@ pub fn create_blocking_configured(
         Err(e) => return Err(AgentNodeError::Db(e)),
     };
 
-    // 2. Branch resolution. `Some(b)` short-circuits the git lookup entirely
-    //    (the mobile route pins "main"; Tauri commands that already resolved
-    //    via the async wrapper reuse their result). `None` falls through to
+    // 2. Branch resolution. A non-empty `branch` short-circuits the git lookup
+    //    entirely (the mobile route pins "main"; Tauri commands that already
+    //    resolved via the async wrapper reuse their result). An empty value —
+    //    the "no override supplied" sentinel callers pass — falls through to
     //    the canonical sync helper, with `"main"` as the open-failure fallback
     //    — matching `commands::git::get_default_branch`'s infallible contract.
-    let branch = match branch_override {
-        Some(b) if !b.is_empty() => b.to_string(),
-        _ => crate::commands::git::get_default_branch_blocking(mesh.path.clone())
-            .unwrap_or_else(|_| "main".to_string()),
+    let branch = if branch.is_empty() {
+        crate::commands::git::get_default_branch_blocking(mesh.path.clone())
+            .unwrap_or_else(|_| "main".to_string())
+    } else {
+        branch.to_string()
     };
 
     // 3. Delegate to the existing create family. The fork-source and
@@ -595,42 +604,47 @@ pub fn create_blocking_configured(
     //    `use_worktree_override = Some(false)` now sees its override
     //    honored on the Pending path, not silently swallowed.
     if pending {
-        create_pending_with_source_pr_fork_and_worktree(
+        create_pending_with_source_pr_fork_and_worktree(NodeCreateParams {
             mesh_id,
-            &mesh.path,
-            &branch,
+            // The path comes from the mesh row looked up above, which is why
+            // callers of this runner pass `path: ""`.
+            path: &mesh.path,
+            branch: &branch,
             provider,
             source_issue,
-            None, // source_pr
-            None, // source_pr_pinned_sha
-            name_override,
-            None, // head_repo_owner
-            None, // head_repo_clone_url
+            source_pr: None,
+            source_pr_pinned_sha: None,
             use_worktree_override,
+            name_override,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
             configuration,
             initial_prompt,
-        )
+            operation: None,
+        })
         .map(|node| CreatedNode {
             node,
             replayed: false,
         })
     } else {
-        create_with_source_pr_fork_configured(
+        create_with_source_pr_fork_configured(NodeCreateParams {
             mesh_id,
-            &mesh.path,
-            &branch,
+            // The path comes from the mesh row looked up above, which is why
+            // callers of this runner pass `path: ""`.
+            path: &mesh.path,
+            branch: &branch,
             provider,
             source_issue,
-            None, // source_pr
-            None, // source_pr_pinned_sha
+            source_pr: None,
+            source_pr_pinned_sha: None,
             use_worktree_override,
             name_override,
-            None, // head_repo_owner
-            None, // head_repo_clone_url
+            head_repo_owner: None,
+            head_repo_clone_url: None,
             configuration,
             initial_prompt,
             operation,
-        )
+        })
     }
 }
 
@@ -650,72 +664,45 @@ pub fn create_blocking_configured(
 /// path through [`create_blocking`] with `pending: true`. `create_pending`
 /// is retained for the structural `source_pr = Some(_)` boundary assert
 /// test coverage; `#[allow]` keeps the dead-code lint quiet.
-#[allow(dead_code, clippy::too_many_arguments)]
-pub fn create_pending(
-    mesh_id: i64,
-    path: &str,
-    branch: &str,
-    provider: Option<&str>,
-    source_issue: Option<i64>,
-    source_pr: Option<i64>,
-    source_pr_pinned_sha: Option<&str>,
-    name_override: Option<&str>,
-) -> Result<AgentNode, AgentNodeError> {
+#[allow(dead_code)]
+pub fn create_pending(request: NodeCreateParams<'_>) -> Result<AgentNode, AgentNodeError> {
     assert!(
-        source_pr.is_none(),
+        request.source_pr.is_none(),
         "services::agent_node::create_pending refuses source_pr=Some(_); \
          use create_pending_with_source_pr_fork for PR spawns."
     );
     assert!(
-        source_pr_pinned_sha.is_none(),
+        request.source_pr_pinned_sha.is_none(),
         "services::agent_node::create_pending refuses source_pr_pinned_sha=Some(_); \
          use create_pending_with_source_pr_fork for PR spawns that need SHA pinning."
     );
     // Single insert path; fork fields are None for the non-fork entry point.
-    create_pending_with_source_pr_fork(
-        mesh_id,
-        path,
-        branch,
-        provider,
-        source_issue,
-        source_pr,
-        source_pr_pinned_sha,
-        name_override,
-        None,
-        None,
-    )
+    create_pending_with_source_pr_fork(NodeCreateParams {
+        use_worktree_override: None,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        configuration: None,
+        initial_prompt: None,
+        operation: None,
+        ..request
+    })
 }
 
 /// Pending-node creation with an explicit worktree policy. Issue-driven
 /// circuits use this instead of creating a legacy `autopilot_runs` row: the
 /// circuit ledger remains the owner of orchestration state while the shared
 /// Agent Node row still records the branch-backed environment it needs.
-#[allow(clippy::too_many_arguments)]
 pub fn create_pending_with_worktree_override_configured(
-    mesh_id: i64,
-    path: &str,
-    branch: &str,
-    provider: Option<&str>,
-    source_issue: Option<i64>,
-    name_override: Option<&str>,
-    use_worktree_override: Option<bool>,
-    configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
+    request: NodeCreateParams<'_>,
 ) -> Result<AgentNode, AgentNodeError> {
-    create_pending_with_source_pr_fork_and_worktree(
-        mesh_id,
-        path,
-        branch,
-        provider,
-        source_issue,
-        None,
-        None,
-        name_override,
-        None,
-        None,
-        use_worktree_override,
-        configuration,
-        None,
-    )
+    create_pending_with_source_pr_fork_and_worktree(NodeCreateParams {
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        initial_prompt: None,
+        ..request
+    })
 }
 
 /// Like [`create_pending`], but also records the fork's owner login and
@@ -723,99 +710,35 @@ pub fn create_pending_with_worktree_override_configured(
 /// commit SHA for exact-pinning (issue #444). `commands::agent::create_pr_node`
 /// calls this directly with the fork fields populated for fork PRs and
 /// `None, None` for same-repo PRs.
-#[allow(clippy::too_many_arguments)]
 pub fn create_pending_with_source_pr_fork(
-    mesh_id: i64,
-    path: &str,
-    branch: &str,
-    provider: Option<&str>,
-    source_issue: Option<i64>,
-    source_pr: Option<i64>,
-    source_pr_pinned_sha: Option<&str>,
-    name_override: Option<&str>,
-    head_repo_owner: Option<&str>,
-    head_repo_clone_url: Option<&str>,
+    request: NodeCreateParams<'_>,
 ) -> Result<AgentNode, AgentNodeError> {
-    create_pending_with_source_pr_fork_configured(
-        mesh_id,
-        path,
-        branch,
-        provider,
-        source_issue,
-        source_pr,
-        source_pr_pinned_sha,
-        name_override,
-        head_repo_owner,
-        head_repo_clone_url,
-        None,
-        None,
-    )
+    create_pending_with_source_pr_fork_configured(NodeCreateParams {
+        use_worktree_override: None,
+        configuration: None,
+        initial_prompt: None,
+        operation: None,
+        ..request
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn create_pending_with_source_pr_fork_configured(
-    mesh_id: i64,
-    path: &str,
-    branch: &str,
-    provider: Option<&str>,
-    source_issue: Option<i64>,
-    source_pr: Option<i64>,
-    source_pr_pinned_sha: Option<&str>,
-    name_override: Option<&str>,
-    head_repo_owner: Option<&str>,
-    head_repo_clone_url: Option<&str>,
-    configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
-    initial_prompt: Option<&str>,
+    request: NodeCreateParams<'_>,
 ) -> Result<AgentNode, AgentNodeError> {
-    create_pending_with_source_pr_fork_and_worktree(
-        mesh_id,
-        path,
-        branch,
-        provider,
-        source_issue,
-        source_pr,
-        source_pr_pinned_sha,
-        name_override,
-        head_repo_owner,
-        head_repo_clone_url,
-        None,
-        configuration,
-        initial_prompt,
-    )
+    create_pending_with_source_pr_fork_and_worktree(NodeCreateParams {
+        use_worktree_override: None,
+        operation: None,
+        ..request
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn create_pending_with_source_pr_fork_and_worktree(
-    mesh_id: i64,
-    path: &str,
-    branch: &str,
-    provider: Option<&str>,
-    source_issue: Option<i64>,
-    source_pr: Option<i64>,
-    source_pr_pinned_sha: Option<&str>,
-    name_override: Option<&str>,
-    head_repo_owner: Option<&str>,
-    head_repo_clone_url: Option<&str>,
-    use_worktree_override: Option<bool>,
-    configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
-    initial_prompt: Option<&str>,
+    request: NodeCreateParams<'_>,
 ) -> Result<AgentNode, AgentNodeError> {
-    let mut node = create_with_source_pr_fork_configured(
-        mesh_id,
-        path,
-        branch,
-        provider,
-        source_issue,
-        source_pr,
-        source_pr_pinned_sha,
-        use_worktree_override,
-        name_override,
-        head_repo_owner,
-        head_repo_clone_url,
-        configuration,
-        initial_prompt,
-        None,
-    )?
+    let mut node = create_with_source_pr_fork_configured(NodeCreateParams {
+        operation: None,
+        ..request
+    })?
     .node;
     // Two writes (insert + status update) is one extra ~1ms SQLite round
     // trip. Acceptable: this function is on the fast path, and the second
@@ -895,22 +818,23 @@ pub fn import_discovered_session(
         }
     }
     let provider_id = provider;
-    let node = db::create_agent_node(
+    let node = db::create_agent_node(db::NewAgentNode {
         mesh_id,
-        &session_name,
-        &mesh.path,
+        name: &session_name,
+        path: &mesh.path,
         branch,
-        env_type,
-        provider_id,
+        env: env_type,
+        provider: provider_id,
         worktree_name,
-        None,
-        None,
-        None,
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
         use_worktree,
-        None,
-        None,
-        worktree_path.as_deref(),
-    )?;
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        worktree_path: worktree_path.as_deref(),
+        spawn_configuration: None,
+    })?;
     db::update_cli_session_id(node.id, cli_session_id)?;
     db::get_agent_node_by_id(node.id).map_err(AgentNodeError::from)
 }
@@ -2662,16 +2586,24 @@ mod tests {
         };
         for pending in [false, true] {
             let node = create_blocking_configured(
-                mesh_id,
-                Some("codex"),
-                Some("main"),
-                None,
-                None,
-                Some(false),
+                NodeCreateParams {
+                    mesh_id,
+                    // The runner reads the path from the mesh row it looks up.
+                    path: "",
+                    branch: "main",
+                    provider: Some("codex"),
+                    source_issue: None,
+                    source_pr: None,
+                    source_pr_pinned_sha: None,
+                    use_worktree_override: Some(false),
+                    name_override: None,
+                    head_repo_owner: None,
+                    head_repo_clone_url: None,
+                    configuration: Some(&configuration),
+                    initial_prompt: None,
+                    operation: None,
+                },
                 pending,
-                Some(&configuration),
-                None,
-                None,
             )
             .unwrap()
             .node;
@@ -2692,16 +2624,24 @@ mod tests {
             assert_eq!(saved.resolved.unwrap().harness.harness, "codex");
         }
         let node = create_blocking_configured(
-            mesh_id,
-            Some("codex"),
-            Some("main"),
-            None,
-            None,
-            Some(false),
+            NodeCreateParams {
+                mesh_id,
+                // The runner reads the path from the mesh row it looks up.
+                path: "",
+                branch: "main",
+                provider: Some("codex"),
+                source_issue: None,
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree_override: Some(false),
+                name_override: None,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration: Some(&configuration),
+                initial_prompt: None,
+                operation: None,
+            },
             false,
-            Some(&configuration),
-            None,
-            None,
         )
         .unwrap()
         .node;
@@ -2723,14 +2663,24 @@ mod tests {
             .unwrap()
             .is_none());
         let defaults = create_blocking(
-            mesh_id,
-            Some("codex"),
-            Some("main"),
-            None,
-            None,
-            Some(false),
+            NodeCreateParams {
+                mesh_id,
+                // The runner reads the path from the mesh row it looks up.
+                path: "",
+                branch: "main",
+                provider: Some("codex"),
+                source_issue: None,
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree_override: Some(false),
+                name_override: None,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration: None,
+                initial_prompt: None,
+                operation: None,
+            },
             false,
-            None,
         )
         .unwrap();
         assert_eq!(
@@ -2771,17 +2721,22 @@ mod tests {
         let _db = crate::db::test_support::isolated();
         let mesh_id = fresh_mesh();
 
-        let node = create(
+        let node = create(NodeCreateParams {
             mesh_id,
-            "/tmp/buildmesh_invariant_test",
-            "main",
-            Some("anthropic"),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+            path: "/tmp/buildmesh_invariant_test",
+            branch: "main",
+            provider: Some("anthropic"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: None,
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        })
         .expect("create with source_pr=None must succeed");
 
         assert_eq!(
@@ -2806,16 +2761,22 @@ mod tests {
         let _db = crate::db::test_support::isolated();
         let mesh_id = fresh_mesh();
 
-        let node = create_pending(
+        let node = create_pending(NodeCreateParams {
             mesh_id,
-            "/tmp/buildmesh_invariant_test",
-            "main",
-            Some("anthropic"),
-            None,
-            None,
-            None,
-            None,
-        )
+            path: "/tmp/buildmesh_invariant_test",
+            branch: "main",
+            provider: Some("anthropic"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: None,
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        })
         .expect("create_pending with source_pr=None must succeed");
 
         assert_eq!(
@@ -2842,17 +2803,22 @@ mod tests {
         let _db = crate::db::test_support::isolated();
         let mesh_id = fresh_mesh();
 
-        let node = create(
+        let node = create(NodeCreateParams {
             mesh_id,
-            "/tmp/buildmesh_invariant_test",
-            "main",
-            Some("anthropic"),
-            Some(123),
-            None,
-            None,
-            None,
-            Some("gh123-test-slug"),
-        )
+            path: "/tmp/buildmesh_invariant_test",
+            branch: "main",
+            provider: Some("anthropic"),
+            source_issue: Some(123),
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: None,
+            name_override: Some("gh123-test-slug"),
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        })
         .expect("create with source_issue=Some(N), source_pr=None must succeed");
 
         assert_eq!(
@@ -2876,32 +2842,43 @@ mod tests {
         // silently persist it. The assertion fires before any DB call, so
         // we don't even need `db::test_support::isolated()` here — a missing DB is the
         // strongest possible failure signal for this regression.
-        let _ = create(
-            /* mesh_id */ 0,
-            "/tmp/never-read",
-            "main",
-            None,
-            None,
-            Some(42),
-            None,
-            None,
-            None,
-        );
+        let _ = create(NodeCreateParams {
+            mesh_id: 0, // never read — the assert fires before any DB call
+            path: "/tmp/never-read",
+            branch: "main",
+            provider: None,
+            source_issue: None,
+            source_pr: Some(42),
+            source_pr_pinned_sha: None,
+            use_worktree_override: None,
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        });
     }
 
     #[test]
     #[should_panic(expected = "source_pr=Some(_)")]
     fn create_pending_rejects_source_pr_some() {
-        let _ = create_pending(
-            /* mesh_id */ 0,
-            "/tmp/never-read",
-            "main",
-            None,
-            None,
-            Some(42),
-            None,
-            None,
-        );
+        let _ = create_pending(NodeCreateParams {
+            mesh_id: 0, // never read — the assert fires before any DB call
+            path: "/tmp/never-read",
+            branch: "main",
+            provider: None,
+            source_issue: None,
+            source_pr: Some(42),
+            source_pr_pinned_sha: None,
+            use_worktree_override: None,
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        });
     }
 
     #[test]
@@ -2910,17 +2887,22 @@ mod tests {
         // Same boundary for the SHA-pinning field (#444) — a caller that
         // tries to pin the head SHA on a non-PR spawn gets the same
         // refused-at-entry treatment.
-        let _ = create(
-            /* mesh_id */ 0,
-            "/tmp/never-read",
-            "main",
-            None,
-            None,
-            None,
-            Some("deadbeef"),
-            None,
-            None,
-        );
+        let _ = create(NodeCreateParams {
+            mesh_id: 0, // never read — the assert fires before any DB call
+            path: "/tmp/never-read",
+            branch: "main",
+            provider: None,
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: Some("deadbeef"),
+            use_worktree_override: None,
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -2947,28 +2929,43 @@ mod tests {
         let mesh_id = fresh_mesh();
 
         let explicit_branch_row = create_blocking(
-            mesh_id,
-            Some("anthropic"),
-            Some("main"),
-            None,
-            None,
-            None,
-            false, /* pending */
-            None,
+            NodeCreateParams {
+                mesh_id,
+                // The runner reads the path from the mesh row it looks up.
+                path: "",
+                branch: "main",
+                provider: Some("anthropic"),
+                source_issue: None,
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree_override: None,
+                name_override: None,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration: None,
+                initial_prompt: None,
+                operation: None,
+            },
+            false,
         )
         .expect("create_blocking with explicit branch must succeed");
 
-        let legacy_row = create(
+        let legacy_row = create(NodeCreateParams {
             mesh_id,
-            "/tmp/buildmesh_invariant_test",
-            "main",
-            Some("anthropic"),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+            path: "/tmp/buildmesh_invariant_test",
+            branch: "main",
+            provider: Some("anthropic"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: None,
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        })
         .expect("legacy create must succeed for the same inputs");
 
         assert_eq!(
@@ -3002,14 +2999,24 @@ mod tests {
         let mesh_id = fresh_mesh();
 
         let node = create_blocking(
-            mesh_id,
-            Some("anthropic"),
-            Some("main"),
-            Some(123), /* source_issue */
-            Some("gh123-test-slug"),
-            None,
-            true, /* pending */
-            None,
+            NodeCreateParams {
+                mesh_id,
+                // The runner reads the path from the mesh row it looks up.
+                path: "",
+                branch: "main",
+                provider: Some("anthropic"),
+                source_issue: Some(123),
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree_override: None,
+                name_override: Some("gh123-test-slug"),
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration: None,
+                initial_prompt: None,
+                operation: None,
+            },
+            true,
         )
         .expect("create_blocking with pending=true must succeed");
 
@@ -3045,14 +3052,24 @@ mod tests {
         // would surface as "500 Internal Server Error" on the SPA
         // even though the user typo'd a mesh id.
         let err = create_blocking(
-            /* mesh_id */ -1, /* not in the per-test DB */
-            Some("anthropic"),
-            Some("main"),
-            None,
-            None,
-            None,
-            false, /* pending */
-            None,
+            NodeCreateParams {
+                mesh_id: -1, // not in the per-test DB
+                // The runner reads the path from the mesh row it looks up.
+                path: "",
+                branch: "main",
+                provider: Some("anthropic"),
+                source_issue: None,
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree_override: None,
+                name_override: None,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration: None,
+                initial_prompt: None,
+                operation: None,
+            },
+            false,
         )
         .expect_err("create_blocking on unknown mesh_id must return Err");
 
@@ -3083,14 +3100,24 @@ mod tests {
         let mesh_id = fresh_mesh();
 
         let node = create_blocking(
-            mesh_id,
-            Some("anthropic"),
-            /* branch_override = */ None,
-            None,
-            None,
-            None,
-            false, /* pending */
-            None,
+            NodeCreateParams {
+                mesh_id,
+                // The runner reads the path from the mesh row it looks up.
+                path: "",
+                branch: "", // branch_override = none
+                provider: Some("anthropic"),
+                source_issue: None,
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree_override: None,
+                name_override: None,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration: None,
+                initial_prompt: None,
+                operation: None,
+            },
+            false,
         )
         .expect("create_blocking with branch_override=None must succeed");
 
@@ -3115,22 +3142,32 @@ mod tests {
         let mesh_id = fresh_mesh();
 
         let node = create_blocking(
-            mesh_id,
-            Some("anthropic"),
-            Some("main"),
-            None,
-            None,
-            /* use_worktree_override = */ Some(false),
-            false, /* pending */
-            None,
+            NodeCreateParams {
+                mesh_id,
+                // The runner reads the path from the mesh row it looks up.
+                path: "",
+                branch: "main",
+                provider: Some("anthropic"),
+                source_issue: None,
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree_override: Some(false), // use_worktree_override
+                name_override: None,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration: None,
+                initial_prompt: None,
+                operation: None,
+            },
+            false,
         )
         .expect("create_blocking on idle path must succeed");
 
         // `create_with_source_pr_fork` writes `use_worktree` only if
         // `session_name` is non-empty AND the override is not None.
         // `Some(false)` writes `false` (Root Node shape — `worktree_name = None`).
-        assert_eq!(
-            node.use_worktree, false,
+        assert!(
+            !node.use_worktree,
             "use_worktree_override=Some(false) must persist as use_worktree=false on the row"
         );
         assert_eq!(
@@ -3154,19 +3191,29 @@ mod tests {
         let mesh_id = fresh_mesh();
 
         let node = create_blocking(
-            mesh_id,
-            Some("anthropic"),
-            Some("main"),
-            None,
-            None,
-            /* use_worktree_override = */ Some(false),
-            true, /* pending */
-            None,
+            NodeCreateParams {
+                mesh_id,
+                // The runner reads the path from the mesh row it looks up.
+                path: "",
+                branch: "main",
+                provider: Some("anthropic"),
+                source_issue: None,
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree_override: Some(false), // use_worktree_override
+                name_override: None,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration: None,
+                initial_prompt: None,
+                operation: None,
+            },
+            true,
         )
         .expect("create_blocking on pending path must succeed");
 
-        assert_eq!(
-            node.use_worktree, false,
+        assert!(
+            !node.use_worktree,
             "use_worktree_override=Some(false) must persist as use_worktree=false \
              on the Pending row too — Finding #1's regression"
         );
@@ -3192,14 +3239,24 @@ mod tests {
         let _db = crate::db::test_support::isolated();
         let mesh_id = fresh_mesh();
         let err = create_blocking(
-            mesh_id,
-            Some("terminal"),
-            Some("main"),
-            None,
-            None,
-            Some(false),
+            NodeCreateParams {
+                mesh_id,
+                // The runner reads the path from the mesh row it looks up.
+                path: "",
+                branch: "main",
+                provider: Some("terminal"),
+                source_issue: None,
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree_override: Some(false),
+                name_override: None,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration: None,
+                initial_prompt: Some("ship this"),
+                operation: None,
+            },
             false,
-            Some("ship this"),
         )
         .expect_err("a prompt for Terminal must be rejected");
         assert!(matches!(err, AgentNodeError::InitialPromptUnsupported));
@@ -3212,26 +3269,46 @@ mod tests {
         let _db = crate::db::test_support::isolated();
         let mesh_id = fresh_mesh();
         let node = create_blocking(
-            mesh_id,
-            Some("terminal"),
-            Some("main"),
-            None,
-            None,
-            Some(false),
+            NodeCreateParams {
+                mesh_id,
+                // The runner reads the path from the mesh row it looks up.
+                path: "",
+                branch: "main",
+                provider: Some("terminal"),
+                source_issue: None,
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree_override: Some(false),
+                name_override: None,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration: None,
+                initial_prompt: None,
+                operation: None,
+            },
             false,
-            None,
         )
         .expect("Terminal without a prompt is a normal create");
         assert_eq!(node.provider, "terminal");
         let blank = create_blocking(
-            mesh_id,
-            Some("terminal"),
-            Some("main"),
-            None,
-            None,
-            Some(false),
+            NodeCreateParams {
+                mesh_id,
+                // The runner reads the path from the mesh row it looks up.
+                path: "",
+                branch: "main",
+                provider: Some("terminal"),
+                source_issue: None,
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree_override: Some(false),
+                name_override: None,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration: None,
+                initial_prompt: Some("   "),
+                operation: None,
+            },
             false,
-            Some("   "),
         )
         .expect("whitespace is not an initial prompt");
         assert_eq!(blank.provider, "terminal");
@@ -3242,14 +3319,24 @@ mod tests {
         let _db = crate::db::test_support::isolated();
         let mesh_id = fresh_mesh();
         let node = create_blocking(
-            mesh_id,
-            Some("codex"),
-            Some("main"),
-            None,
-            None,
-            Some(false),
+            NodeCreateParams {
+                mesh_id,
+                // The runner reads the path from the mesh row it looks up.
+                path: "",
+                branch: "main",
+                provider: Some("codex"),
+                source_issue: None,
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree_override: Some(false),
+                name_override: None,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration: None,
+                initial_prompt: Some("review the diff"),
+                operation: None,
+            },
             false,
-            Some("review the diff"),
         )
         .expect("codex accepts an initial prompt even when the CLI is absent");
         assert_eq!(node.provider, "codex");
@@ -3259,14 +3346,24 @@ mod tests {
     fn prompted_create_of_an_unknown_mesh_is_mesh_not_found() {
         let _db = crate::db::test_support::isolated();
         let err = create_blocking(
-            -1,
-            Some("terminal"),
-            Some("main"),
-            None,
-            None,
-            None,
+            NodeCreateParams {
+                mesh_id: -1,
+                // The runner reads the path from the mesh row it looks up.
+                path: "",
+                branch: "main",
+                provider: Some("terminal"),
+                source_issue: None,
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree_override: None,
+                name_override: None,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration: None,
+                initial_prompt: Some("hello"),
+                operation: None,
+            },
             false,
-            Some("hello"),
         )
         .expect_err("unknown mesh wins over the prompt rule");
         assert!(matches!(err, AgentNodeError::MeshNotFound(-1)));
@@ -3278,14 +3375,24 @@ mod tests {
         let mesh_id = fresh_mesh();
         let mesh = db::get_mesh_by_id(mesh_id).unwrap();
         let node = create_blocking(
-            mesh_id,
-            Some("codex"),
-            Some("main"),
-            None,
-            Some("new-node"),
-            Some(true),
+            NodeCreateParams {
+                mesh_id,
+                // The runner reads the path from the mesh row it looks up.
+                path: "",
+                branch: "main",
+                provider: Some("codex"),
+                source_issue: None,
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree_override: Some(true),
+                name_override: Some("new-node"),
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration: None,
+                initial_prompt: None,
+                operation: None,
+            },
             false,
-            None,
         )
         .expect("create a default worktree node");
         let expected = format!("{}/.worktrees/new-node", mesh.path);
@@ -3389,14 +3496,24 @@ mod tests {
         let _db = crate::db::test_support::isolated();
         let mesh_id = fresh_mesh();
         let node = create_blocking(
-            mesh_id,
-            Some("anthropic"),
-            Some("main"),
-            None,
-            Some("   "),
-            Some(true),
+            NodeCreateParams {
+                mesh_id,
+                // The runner reads the path from the mesh row it looks up.
+                path: "",
+                branch: "main",
+                provider: Some("anthropic"),
+                source_issue: None,
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree_override: Some(true),
+                name_override: Some("   "),
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration: None,
+                initial_prompt: None,
+                operation: None,
+            },
             false,
-            None,
         )
         .expect("a whitespace name still creates");
         assert_eq!(node.worktree_name.as_deref(), Some("   "));
@@ -3783,17 +3900,22 @@ mod tests {
         // idempotent (the function comment claims it as a property).
         let _db = crate::db::test_support::isolated();
         let mesh_id = fresh_mesh();
-        let node = create(
+        let node = create(NodeCreateParams {
             mesh_id,
-            "/tmp/buildmesh_provider_test",
-            "main",
-            Some("anthropic"),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+            path: "/tmp/buildmesh_provider_test",
+            branch: "main",
+            provider: Some("anthropic"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: None,
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        })
         .expect("seed node should succeed");
         assert_eq!(node.provider, "anthropic");
 
@@ -3823,17 +3945,22 @@ mod tests {
         for remove_worktree in [false, true] {
             let _db = crate::db::test_support::isolated();
             let mesh_id = fresh_mesh();
-            let node = create(
+            let node = create(NodeCreateParams {
                 mesh_id,
-                &format!("/tmp/buildmesh_close_idempotent_{remove_worktree}"),
-                "main",
-                Some("anthropic"),
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
+                path: &format!("/tmp/buildmesh_close_idempotent_{remove_worktree}"),
+                branch: "main",
+                provider: Some("anthropic"),
+                source_issue: None,
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree_override: None,
+                name_override: None,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration: None,
+                initial_prompt: None,
+                operation: None,
+            })
             .expect("seed node should succeed");
 
             let state_owner = crate::agent::hook_state::for_node(node.id);
@@ -3938,17 +4065,22 @@ mod tests {
         // Idle node: provider is captured verbatim, kill is NOT skipped.
         let _db = crate::db::test_support::isolated();
         let mesh_id = fresh_mesh();
-        let idle_node = create(
+        let idle_node = create(NodeCreateParams {
             mesh_id,
-            "/tmp/buildmesh_regen_load_idle",
-            "main",
-            Some("anthropic"),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+            path: "/tmp/buildmesh_regen_load_idle",
+            branch: "main",
+            provider: Some("anthropic"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: None,
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        })
         .expect("seed idle node");
         let (old_provider, skip_kill) =
             regenerate_load_blocking(idle_node.id).expect("load should succeed");
@@ -3961,17 +4093,22 @@ mod tests {
         // Suspended node: skip_kill must be true (this is the whole
         // point of the helper — `kill_agent_blocking`'s `on_idle`
         // tail would clobber Suspended→Idle if we killed).
-        let suspended_node = create(
+        let suspended_node = create(NodeCreateParams {
             mesh_id,
-            "/tmp/buildmesh_regen_load_suspended",
-            "main",
-            Some("anthropic"),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+            path: "/tmp/buildmesh_regen_load_suspended",
+            branch: "main",
+            provider: Some("anthropic"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: None,
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        })
         .expect("seed suspended node");
         db::update_agent_node_status(suspended_node.id, SessionStatus::Suspended)
             .expect("set suspended status");
@@ -3988,17 +4125,22 @@ mod tests {
         // "regenerate unavailable: node is in X state" toast.
         let _db = crate::db::test_support::isolated();
         let mesh_id = fresh_mesh();
-        let node = create(
+        let node = create(NodeCreateParams {
             mesh_id,
-            "/tmp/buildmesh_regen_load_spawning",
-            "main",
-            Some("anthropic"),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+            path: "/tmp/buildmesh_regen_load_spawning",
+            branch: "main",
+            provider: Some("anthropic"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: None,
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        })
         .expect("seed node");
         db::update_agent_node_status(node.id, SessionStatus::Spawning)
             .expect("set spawning status");
@@ -4026,17 +4168,22 @@ mod tests {
         // session for same-harness swaps).
         let _db = crate::db::test_support::isolated();
         let mesh_id = fresh_mesh();
-        let node = create(
+        let node = create(NodeCreateParams {
             mesh_id,
-            "/tmp/buildmesh_regen_apply",
-            "main",
-            Some("claude"),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+            path: "/tmp/buildmesh_regen_apply",
+            branch: "main",
+            provider: Some("claude"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: None,
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        })
         .expect("seed node");
         db::update_cli_session_id(node.id, "sess-abc").expect("set cli_session_id");
 
@@ -4064,17 +4211,22 @@ mod tests {
         // Codex id, so the apply step must report `resume = false`.
         let _db = crate::db::test_support::isolated();
         let mesh_id = fresh_mesh();
-        let node = create(
+        let node = create(NodeCreateParams {
             mesh_id,
-            "/tmp/buildmesh_regen_apply_cross",
-            "main",
-            Some("claude"),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+            path: "/tmp/buildmesh_regen_apply_cross",
+            branch: "main",
+            provider: Some("claude"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: None,
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        })
         .expect("seed node");
         db::update_cli_session_id(node.id, "claude-uuid").expect("set cli_session_id");
 
@@ -4093,17 +4245,22 @@ mod tests {
         // to the frontend store.
         let _db = crate::db::test_support::isolated();
         let mesh_id = fresh_mesh();
-        let node = create(
+        let node = create(NodeCreateParams {
             mesh_id,
-            "/tmp/buildmesh_regen_reload",
-            "main",
-            Some("anthropic"),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+            path: "/tmp/buildmesh_regen_reload",
+            branch: "main",
+            provider: Some("anthropic"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: None,
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        })
         .expect("seed node");
         let reloaded = regenerate_reload_blocking(node.id).expect("reload should succeed");
         assert_eq!(reloaded.id, node.id);

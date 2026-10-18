@@ -1076,22 +1076,23 @@ mod tests {
         let path = std::env::temp_dir().join(format!("grok-stage-test-{}", std::process::id()));
         let path = path.to_string_lossy();
         let mesh = crate::db::create_mesh("grok stage mesh", &path).unwrap();
-        let node = crate::db::create_agent_node(
-            mesh.id,
-            "worker",
-            &path,
-            "main",
-            crate::models::EnvType::Windows,
-            "grok",
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-        )
+        let node = crate::db::create_agent_node(crate::db::NewAgentNode {
+            mesh_id: mesh.id,
+            name: "worker",
+            path: &path,
+            branch: "main",
+            env: crate::models::EnvType::Windows,
+            provider: "grok",
+            worktree_name: None,
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree: false,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            worktree_path: None,
+            spawn_configuration: None,
+        })
         .unwrap();
         let id = node.id;
         let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
@@ -1138,22 +1139,23 @@ mod tests {
             std::env::temp_dir().join(format!("grok-stage-unguarded-test-{}", std::process::id()));
         let path = path.to_string_lossy();
         let mesh = crate::db::create_mesh("grok stage unguarded mesh", &path).unwrap();
-        let node = crate::db::create_agent_node(
-            mesh.id,
-            "worker",
-            &path,
-            "main",
-            crate::models::EnvType::Windows,
-            "grok",
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-        )
+        let node = crate::db::create_agent_node(crate::db::NewAgentNode {
+            mesh_id: mesh.id,
+            name: "worker",
+            path: &path,
+            branch: "main",
+            env: crate::models::EnvType::Windows,
+            provider: "grok",
+            worktree_name: None,
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree: false,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            worktree_path: None,
+            spawn_configuration: None,
+        })
         .unwrap();
         let id = node.id;
         let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
@@ -1179,22 +1181,23 @@ mod tests {
         let path = std::env::temp_dir().join(format!("grok-digest-test-{}", std::process::id()));
         let path = path.to_string_lossy();
         let mesh = crate::db::create_mesh("grok digest mesh", &path).unwrap();
-        let node = crate::db::create_agent_node(
-            mesh.id,
-            "worker",
-            &path,
-            "main",
-            crate::models::EnvType::Windows,
-            "grok",
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-        )
+        let node = crate::db::create_agent_node(crate::db::NewAgentNode {
+            mesh_id: mesh.id,
+            name: "worker",
+            path: &path,
+            branch: "main",
+            env: crate::models::EnvType::Windows,
+            provider: "grok",
+            worktree_name: None,
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree: false,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            worktree_path: None,
+            spawn_configuration: None,
+        })
         .unwrap();
         let id = node.id;
         let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
@@ -1258,22 +1261,23 @@ mod tests {
         let mesh = crate::db::create_mesh("grok cont mesh", &path).unwrap();
 
         // Continuation prompt generated through prepare_continuation
-        let cont_node = crate::db::create_agent_node(
-            mesh.id,
-            "worker-cont",
-            &path,
-            "main",
-            crate::models::EnvType::Windows,
-            "grok",
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-        )
+        let cont_node = crate::db::create_agent_node(crate::db::NewAgentNode {
+            mesh_id: mesh.id,
+            name: "worker-cont",
+            path: &path,
+            branch: "main",
+            env: crate::models::EnvType::Windows,
+            provider: "grok",
+            worktree_name: None,
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree: false,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            worktree_path: None,
+            spawn_configuration: None,
+        })
         .unwrap();
         let cont_id = cont_node.id;
         let (registry_cont, writes_cont) =
@@ -1320,22 +1324,23 @@ mod tests {
         registry_cont.kill_session(cont_id);
 
         // Wake-up nudge prompt
-        let nudge_node = crate::db::create_agent_node(
-            mesh.id,
-            "worker-nudge",
-            &path,
-            "main",
-            crate::models::EnvType::Windows,
-            "grok",
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-        )
+        let nudge_node = crate::db::create_agent_node(crate::db::NewAgentNode {
+            mesh_id: mesh.id,
+            name: "worker-nudge",
+            path: &path,
+            branch: "main",
+            env: crate::models::EnvType::Windows,
+            provider: "grok",
+            worktree_name: None,
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree: false,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            worktree_path: None,
+            spawn_configuration: None,
+        })
         .unwrap();
         let nudge_id = nudge_node.id;
         let (registry_nudge, writes_nudge) =
@@ -1367,22 +1372,23 @@ mod tests {
         let path = std::env::temp_dir().join(format!("codex-cr-test-{}", std::process::id()));
         let path = path.to_string_lossy();
         let mesh = crate::db::create_mesh("codex cr mesh", &path).unwrap();
-        let node = crate::db::create_agent_node(
-            mesh.id,
-            "source",
-            &path,
-            "main",
-            crate::models::EnvType::Windows,
-            "codex",
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-        )
+        let node = crate::db::create_agent_node(crate::db::NewAgentNode {
+            mesh_id: mesh.id,
+            name: "source",
+            path: &path,
+            branch: "main",
+            env: crate::models::EnvType::Windows,
+            provider: "codex",
+            worktree_name: None,
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree: false,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            worktree_path: None,
+            spawn_configuration: None,
+        })
         .unwrap();
         let id = node.id;
         evaluator::register(id);
@@ -1526,22 +1532,23 @@ mod tests {
         let path = std::env::temp_dir().join("codex-guarded-paste");
         let path = path.to_string_lossy();
         let mesh = crate::db::create_mesh("guarded Codex paste", &path).unwrap();
-        let node = crate::db::create_agent_node(
-            mesh.id,
-            "source",
-            &path,
-            "main",
-            crate::models::EnvType::Windows,
-            "codex",
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-        )
+        let node = crate::db::create_agent_node(crate::db::NewAgentNode {
+            mesh_id: mesh.id,
+            name: "source",
+            path: &path,
+            branch: "main",
+            env: crate::models::EnvType::Windows,
+            provider: "codex",
+            worktree_name: None,
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree: false,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            worktree_path: None,
+            spawn_configuration: None,
+        })
         .unwrap();
         let id = node.id;
         let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
@@ -1788,22 +1795,23 @@ mod tests {
             std::env::temp_dir().join(format!("codex-paste-selection-{}", std::process::id()));
         let path = path.to_string_lossy();
         let mesh = crate::db::create_mesh("codex paste selection", &path).unwrap();
-        let node = crate::db::create_agent_node(
-            mesh.id,
-            "reviewer",
-            &path,
-            "main",
-            crate::models::EnvType::Windows,
-            "codex",
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-        )
+        let node = crate::db::create_agent_node(crate::db::NewAgentNode {
+            mesh_id: mesh.id,
+            name: "reviewer",
+            path: &path,
+            branch: "main",
+            env: crate::models::EnvType::Windows,
+            provider: "codex",
+            worktree_name: None,
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree: false,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            worktree_path: None,
+            spawn_configuration: None,
+        })
         .unwrap();
         let node_id = node.id;
         evaluator::register(node_id);
@@ -1814,22 +1822,23 @@ mod tests {
                 .paste,
             PasteReadiness::RenderedMultiline { .. }
         ));
-        let proxied = crate::db::create_agent_node(
-            mesh.id,
-            "proxied reviewer",
-            &path,
-            "main",
-            crate::models::EnvType::Windows,
-            "codex:minimax",
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-        )
+        let proxied = crate::db::create_agent_node(crate::db::NewAgentNode {
+            mesh_id: mesh.id,
+            name: "proxied reviewer",
+            path: &path,
+            branch: "main",
+            env: crate::models::EnvType::Windows,
+            provider: "codex:minimax",
+            worktree_name: None,
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree: false,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            worktree_path: None,
+            spawn_configuration: None,
+        })
         .unwrap();
         let proxied_id = proxied.id;
         evaluator::register(proxied_id);
@@ -1929,22 +1938,23 @@ mod tests {
         let path = std::env::temp_dir().join("muse-paste-selection");
         let path = path.to_string_lossy();
         let mesh = crate::db::create_mesh("muse paste selection", &path).unwrap();
-        let node = crate::db::create_agent_node(
-            mesh.id,
-            "source",
-            &path,
-            "main",
-            crate::models::EnvType::Windows,
-            "muse",
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-        )
+        let node = crate::db::create_agent_node(crate::db::NewAgentNode {
+            mesh_id: mesh.id,
+            name: "source",
+            path: &path,
+            branch: "main",
+            env: crate::models::EnvType::Windows,
+            provider: "muse",
+            worktree_name: None,
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree: false,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            worktree_path: None,
+            spawn_configuration: None,
+        })
         .unwrap();
         let node_id = node.id;
         evaluator::register(node_id);
@@ -2025,22 +2035,23 @@ mod tests {
         let path = std::env::temp_dir().join(label);
         let path = path.to_string_lossy();
         let mesh = crate::db::create_mesh(label, &path).unwrap();
-        crate::db::create_agent_node(
-            mesh.id,
-            "publisher",
-            &path,
-            "main",
-            crate::models::EnvType::Windows,
-            "muse",
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-        )
+        crate::db::create_agent_node(crate::db::NewAgentNode {
+            mesh_id: mesh.id,
+            name: "publisher",
+            path: &path,
+            branch: "main",
+            env: crate::models::EnvType::Windows,
+            provider: "muse",
+            worktree_name: None,
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree: false,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            worktree_path: None,
+            spawn_configuration: None,
+        })
         .unwrap()
         .id
     }
@@ -2358,22 +2369,23 @@ mod tests {
         let path = std::env::temp_dir().join(format!("{}-{}", label, std::process::id()));
         let path = path.to_string_lossy();
         let mesh = crate::db::create_mesh(label, &path).unwrap();
-        let node = crate::db::create_agent_node(
-            mesh.id,
-            "worker",
-            &path,
-            "main",
-            crate::models::EnvType::Windows,
-            "codex",
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-        )
+        let node = crate::db::create_agent_node(crate::db::NewAgentNode {
+            mesh_id: mesh.id,
+            name: "worker",
+            path: &path,
+            branch: "main",
+            env: crate::models::EnvType::Windows,
+            provider: "codex",
+            worktree_name: None,
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree: false,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            worktree_path: None,
+            spawn_configuration: None,
+        })
         .unwrap();
         node.id
     }

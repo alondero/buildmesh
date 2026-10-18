@@ -45,28 +45,56 @@ pub struct WorktreeCleanupFailedPayload {
     pub retry_not_before: i64,
 }
 
+/// The `create_agent_node` invoke payload. Tauri IPC commands carry every
+/// primitive as a separate wire parameter, so this stays flat on the wire
+/// (issue #2449) and is read in one piece through `WirePayload` rather than
+/// collapsing into a nested payload parameter.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateAgentNodeRequest {
+    mesh_id: i64,
+    /// Part of the wire but unused by the runner, which reads the mesh path
+    /// from the mesh row. Kept so the frontend payload stays unchanged.
+    #[allow(dead_code)]
+    name: String,
+    /// Part of the wire but unused by the runner, which reads the mesh path
+    /// from the mesh row. Kept so the frontend payload stays unchanged.
+    #[allow(dead_code)]
+    path: String,
+    branch: String,
+    /// Every optional field defaults, which is what Tauri's own per-key
+    /// extraction does for an `Option` parameter whose key the caller
+    /// omitted — an absent key must still mean `None`.
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    use_worktree: Option<bool>,
+    #[serde(default)]
+    configuration_id: Option<String>,
+    #[serde(default)]
+    initial_prompt: Option<String>,
+}
+
 /// Create a new agent node.
 ///
 /// `path` stays on the IPC surface and is unused: the runner reads the
 /// mesh path from the mesh row. `initial_prompt` is optional. When it
 /// trims to text, the runner rejects a harness that cannot take one
 /// before inserting a row.
-// The 8-argument surface is the wire contract for this command; bundling it
-// into a struct would be a breaking IPC change for no gain. Suppressed here
-// rather than repo-wide so `clippy::too_many_arguments` stays useful
-// (issue #2331 review; AGENTS.md requires zero warnings in touched files).
-#[allow(clippy::too_many_arguments)]
 #[command]
 pub async fn create_agent_node(
-    mesh_id: i64,
-    _name: String,
-    #[allow(unused)] path: String,
-    branch: String,
-    provider: Option<String>,
-    use_worktree: Option<bool>,
-    configuration_id: Option<String>,
-    initial_prompt: Option<String>,
+    payload: crate::commands::wire_payload::WirePayload<CreateAgentNodeRequest>,
 ) -> Result<AgentNode, String> {
+    let CreateAgentNodeRequest {
+        mesh_id,
+        name: _,
+        path: _,
+        branch,
+        provider,
+        use_worktree,
+        configuration_id,
+        initial_prompt,
+    } = payload.into_inner();
     // Offload: create locks SQLite, touches the filesystem, and may run
     // git worktree operations (issue #1380).
     crate::commands::run_blocking("create_agent_node", move || {
@@ -96,16 +124,24 @@ pub(crate) fn create_agent_node_blocking(
     )
     .map_err(|error| error.to_string())?;
     services::agent_node::create_blocking_configured(
-        mesh_id,
-        provider,
-        Some(branch),
-        None,
-        None,
-        use_worktree,
+        services::agent_node::NodeCreateParams {
+            mesh_id,
+            // The runner reads the path from the mesh row it looks up.
+            path: "",
+            branch,
+            provider,
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: use_worktree,
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: configuration.as_ref(),
+            initial_prompt,
+            operation: None,
+        },
         false,
-        configuration.as_ref(),
-        initial_prompt,
-        /* operation = */ None,
     )
     .map_err(|error| {
         tracing::error!("create_agent_node failed: {}", error);
@@ -580,6 +616,71 @@ pub async fn regenerate_agent_node(
 #[cfg(test)]
 mod tests {
     use super::validate_rename_name;
+    use super::CreateAgentNodeRequest;
+
+    /// Issue #2449: `create_agent_node` reads its eight fields through
+    /// `WirePayload`, so the Rust signature stops being a positional bag
+    /// while the wire stays flat. This payload is exactly what
+    /// `createAgentNode` in `src/lib/tauri.ts` sends, `?? null` optionals
+    /// included — pinning it here means that refactor can never quietly
+    /// become an IPC change.
+    #[test]
+    fn create_agent_node_still_reads_the_flat_frontend_payload() {
+        let wire = serde_json::json!({
+            "meshId": 7,
+            "name": "reviewer",
+            "path": "C:/repos/buildmesh",
+            "branch": "main",
+            "provider": "claude",
+            "useWorktree": true,
+            "configurationId": "launch/claude",
+            "initialPrompt": "review the diff",
+        });
+        let request: CreateAgentNodeRequest =
+            serde_json::from_value(wire).expect("flat invoke payload still parses");
+        assert_eq!(request.mesh_id, 7);
+        // `name` and `path` are part of the wire even though the runner
+        // reads the mesh path from the mesh row.
+        assert_eq!(request.name, "reviewer");
+        assert_eq!(request.path, "C:/repos/buildmesh");
+        assert_eq!(request.branch, "main");
+        assert_eq!(request.provider.as_deref(), Some("claude"));
+        assert_eq!(request.use_worktree, Some(true));
+        assert_eq!(request.configuration_id.as_deref(), Some("launch/claude"));
+        assert_eq!(request.initial_prompt.as_deref(), Some("review the diff"));
+    }
+
+    /// Tauri extracts an `Option` parameter by key, so both `null` and an
+    /// absent key have to land on `None` instead of failing the whole
+    /// command.
+    #[test]
+    fn create_agent_node_accepts_null_and_omitted_optional_fields() {
+        let nulled: CreateAgentNodeRequest = serde_json::from_value(serde_json::json!({
+            "meshId": 1,
+            "name": "n",
+            "path": "C:/repos/buildmesh",
+            "branch": "main",
+            "provider": null,
+            "useWorktree": null,
+            "configurationId": null,
+            "initialPrompt": null,
+        }))
+        .expect("null optionals parse");
+        assert_eq!(nulled.provider, None);
+        assert_eq!(nulled.use_worktree, None);
+        assert_eq!(nulled.configuration_id, None);
+        assert_eq!(nulled.initial_prompt, None);
+
+        let omitted: CreateAgentNodeRequest = serde_json::from_value(serde_json::json!({
+            "meshId": 1,
+            "name": "n",
+            "path": "C:/repos/buildmesh",
+            "branch": "main",
+        }))
+        .expect("omitted optionals default to None");
+        assert_eq!(omitted.provider, None);
+        assert_eq!(omitted.use_worktree, None);
+    }
 
     /// Issue #1550 — the fork argv is only reachable if this call site
     /// actually asks for `ResumeCause::Regenerate`. `regenerate_agent_node`

@@ -109,22 +109,23 @@ fn new_node_handover_uses_its_saved_codex_launch_configuration() {
     let root = tempfile::tempdir().unwrap();
     crate::preferences::init_for_tests(root.path().to_path_buf());
     let mesh = crate::db::create_mesh("new handover", "C:/handover-fixture").unwrap();
-    let node = crate::db::create_agent_node(
-        mesh.id,
-        "handover",
-        &mesh.path,
-        "main",
-        crate::models::EnvType::Windows,
-        "anthropic",
-        None,
-        None,
-        None,
-        None,
-        false,
-        None,
-        None,
-        None,
-    )
+    let node = crate::db::create_agent_node(crate::db::NewAgentNode {
+        mesh_id: mesh.id,
+        name: "handover",
+        path: &mesh.path,
+        branch: "main",
+        env: crate::models::EnvType::Windows,
+        provider: "anthropic",
+        worktree_name: None,
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree: false,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        worktree_path: None,
+        spawn_configuration: None,
+    })
     .unwrap();
     let mut node = node;
     node.launch_configuration = Some(
@@ -201,22 +202,23 @@ async fn new_node_handover_staging_failure_deletes_the_idle_node() {
     let root = tempfile::tempdir().unwrap();
     crate::preferences::init_for_tests(root.path().to_path_buf());
     let mesh = crate::db::create_mesh("failed handover", "C:/failed-handover-fixture").unwrap();
-    let created = crate::db::create_agent_node(
-        mesh.id,
-        "failed-handover",
-        &mesh.path,
-        "main",
-        crate::models::EnvType::Windows,
-        "codex",
-        None,
-        None,
-        None,
-        None,
-        false,
-        None,
-        None,
-        None,
-    )
+    let created = crate::db::create_agent_node(crate::db::NewAgentNode {
+        mesh_id: mesh.id,
+        name: "failed-handover",
+        path: &mesh.path,
+        branch: "main",
+        env: crate::models::EnvType::Windows,
+        provider: "codex",
+        worktree_name: None,
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree: false,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        worktree_path: None,
+        spawn_configuration: None,
+    })
     .unwrap();
     let node_id = created.id;
     let node = crate::db::get_agent_node_by_id(node_id).unwrap();
@@ -254,22 +256,23 @@ async fn existing_node_handover_staging_failure_does_not_delete_the_node() {
     let root = tempfile::tempdir().unwrap();
     crate::preferences::init_for_tests(root.path().to_path_buf());
     let mesh = crate::db::create_mesh("existing handover", "C:/existing-handover-fixture").unwrap();
-    let node = crate::db::create_agent_node(
-        mesh.id,
-        "existing-handover",
-        &mesh.path,
-        "main",
-        crate::models::EnvType::Windows,
-        "codex",
-        None,
-        None,
-        None,
-        None,
-        false,
-        None,
-        None,
-        None,
-    )
+    let node = crate::db::create_agent_node(crate::db::NewAgentNode {
+        mesh_id: mesh.id,
+        name: "existing-handover",
+        path: &mesh.path,
+        branch: "main",
+        env: crate::models::EnvType::Windows,
+        provider: "codex",
+        worktree_name: None,
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree: false,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        worktree_path: None,
+        spawn_configuration: None,
+    })
     .unwrap();
     let node_id = node.id;
     std::fs::write(root.path().join("handovers"), "blocked").unwrap();
@@ -310,22 +313,23 @@ async fn new_node_handover_reports_cleanup_failure_and_keeps_the_row() {
     let root = tempfile::tempdir().unwrap();
     crate::preferences::init_for_tests(root.path().to_path_buf());
     let mesh = crate::db::create_mesh("cleanup failure", "C:/cleanup-failure-fixture").unwrap();
-    let node = crate::db::create_agent_node(
-        mesh.id,
-        "cleanup-failure",
-        &mesh.path,
-        "main",
-        crate::models::EnvType::Windows,
-        "codex",
-        None,
-        None,
-        None,
-        None,
-        false,
-        None,
-        None,
-        None,
-    )
+    let node = crate::db::create_agent_node(crate::db::NewAgentNode {
+        mesh_id: mesh.id,
+        name: "cleanup-failure",
+        path: &mesh.path,
+        branch: "main",
+        env: crate::models::EnvType::Windows,
+        provider: "codex",
+        worktree_name: None,
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree: false,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        worktree_path: None,
+        spawn_configuration: None,
+    })
     .unwrap();
     let node_id = node.id;
     // The trigger forces agent_node::delete to fail after staging has already

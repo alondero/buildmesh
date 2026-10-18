@@ -2820,22 +2820,23 @@ mod tests {
         .expect("worktree creation must succeed");
         // Insert a mesh + node row so `db::get_agent_node_by_id` resolves.
         let mesh = crate::db::create_mesh(mesh_name, root.to_str().unwrap()).expect("create_mesh");
-        let node = crate::db::create_agent_node(
-            mesh.id,
-            "agent-1",
-            root.to_str().unwrap(),
-            "main", // base_branch
-            crate::models::EnvType::Windows,
-            "claude",
-            Some("agent-1"),
-            None,
-            None,
-            None,
-            true,
-            None,
-            None,
-            None,
-        )
+        let node = crate::db::create_agent_node(crate::db::NewAgentNode {
+            mesh_id: mesh.id,
+            name: "agent-1",
+            path: root.to_str().unwrap(),
+            branch: "main", // base_branch
+            env: crate::models::EnvType::Windows,
+            provider: "claude",
+            worktree_name: Some("agent-1"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree: true,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            worktree_path: None,
+            spawn_configuration: None,
+        })
         .expect("create_agent_node");
         (tmp, node.id)
     }
@@ -3007,7 +3008,6 @@ mod tests {
     /// The worktree is cut from `main` BEFORE the root is moved onto
     /// `root_branch`, which is the production order: an agent branches from
     /// the base ref, not from wherever the mesh root happens to be parked.
-    #[allow(clippy::too_many_arguments)]
     fn make_mesh_root_and_node(
         origin_url: &str,
         root_branch: &str,
@@ -3063,22 +3063,23 @@ mod tests {
             true,
         )
         .expect("create_mesh_with_base_ref_and_worktree");
-        let node = crate::db::create_agent_node(
-            mesh.id,
-            "agent-1",
-            root.to_str().unwrap(),
-            "main",
-            crate::models::EnvType::Windows,
-            "claude",
-            Some("agent-1"),
-            None,
-            None,
-            None,
-            true,
-            None,
-            None,
-            None,
-        )
+        let node = crate::db::create_agent_node(crate::db::NewAgentNode {
+            mesh_id: mesh.id,
+            name: "agent-1",
+            path: root.to_str().unwrap(),
+            branch: "main",
+            env: crate::models::EnvType::Windows,
+            provider: "claude",
+            worktree_name: Some("agent-1"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree: true,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            worktree_path: None,
+            spawn_configuration: None,
+        })
         .expect("create_agent_node");
         (tmp, mesh.id, node.id)
     }

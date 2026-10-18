@@ -3,7 +3,7 @@
 //! Prefactor for #1148 (Per-Harness Default Configurations & Per-Mesh Overrides).
 //! This module introduces the authoritative capability descriptor every Agent
 //! Harness adapter declares, plus a pure resolver that masks unsupported
-//! configuration values before they reach `build_spawn_command`. The
+//! configuration values before they reach `build_spawn_command_prepared`. The
 //! behaviour-preserving contract for this prefactor:
 //!
 //! * The Mesh row's legacy `model` and `effort` columns feed the resolver's
@@ -13,7 +13,7 @@
 //! * Whitespace-only inputs at every layer are normalised to absent before
 //!   the cascade (issue #1148 acceptance criteria 32).
 //! * Capability masking happens **inside** the resolver; downstream callers
-//!   receive values that already passed the mask. `build_spawn_command` no
+//!   receive values that already passed the mask. `build_spawn_command_prepared` no
 //!   longer needs to consult the adapter's `supports_*` flags.
 //! * The per-harness application-default slot is plumbed through the
 //!   signature with `None` today; #1148 fills it.
@@ -34,7 +34,7 @@ use crate::agent::provider::{AgentProvider, Platform};
 ///
 /// The capability contract: a resolved effort value is only forwarded when
 /// the selected harness's control kind matches. The resolver masks
-/// unsupported values before they reach `build_spawn_command`, so a harness
+/// unsupported values before they reach `build_spawn_command_prepared`, so a harness
 /// with no effort control never receives a synthetic `--effort` argument.
 ///
 /// `Closed` matches harnesses like Claude Code whose CLI surface exposes a
@@ -224,7 +224,7 @@ pub struct BackgroundInferenceCapability {
 /// #1148). One descriptor per Agent Harness — the same descriptor drives:
 ///
 /// 1. The configuration resolver (`resolve_agent_config`): masks unsupported
-///    values before they reach `build_spawn_command`.
+///    values before they reach `build_spawn_command_prepared`.
 /// 2. The Spawn Menu (`ProviderInfo.capabilities`): the frontend can render
 ///    only the controls each harness actually supports, so a Codex row offers
 ///    the inline-config effort knob and an OpenCode row offers model (but
@@ -313,7 +313,7 @@ pub struct HarnessCapabilities {
 /// The output of the per-field configuration resolver. Every field is
 /// already capability-masked: a `None` here means either "all upstream slots
 /// were empty" or "the selected harness doesn't support this control" —
-/// downstream callers (`build_spawn_command`) can forward the `Some` value
+/// downstream callers (`build_spawn_command_prepared`) can forward the `Some` value
 /// verbatim without consulting any further capability flag.
 ///
 /// Generated to `src/types/generated/ResolvedAgentConfig.ts`.
@@ -402,7 +402,7 @@ pub struct AgentConfigInputs<'a> {
 ///
 /// Pure (no I/O, no globals) so the resolver is the unit-test seam for both
 /// the cascade and the capability mask. Returns a [`ResolvedAgentConfig`]
-/// every `Some` of which is safe to forward to `build_spawn_command`. All
+/// every `Some` of which is safe to forward to `build_spawn_command_prepared`. All
 /// three fields are populated atomically — callers must NOT need to
 /// patch up the result post-hoc (issue #1362 code review caught a
 /// previous `resolved.extra_args = resolve_extra_args(...)` mutation
@@ -1535,7 +1535,7 @@ mod tests {
 
     /// Plain-terminal harness with no synthetic flags: capability mask +
     /// empty cascade both contribute. The resolved config must be fully
-    /// empty so `build_spawn_command` doesn't forward anything to the
+    /// empty so `build_spawn_command_prepared` doesn't forward anything to the
     /// user's shell (the acceptance criteria "Terminal and other
     /// non-configurable harnesses receive no synthetic model or effort
     /// arguments").

@@ -96,7 +96,7 @@ pub(crate) fn remove_node_files(node_id: i64, app_data_dir: Option<&Path>) {
     let Some(root) = app_data_dir else {
         return;
     };
-    if let Err(error) = std::fs::remove_dir_all(node_dir(&root, node_id)) {
+    if let Err(error) = std::fs::remove_dir_all(node_dir(root, node_id)) {
         if error.kind() != std::io::ErrorKind::NotFound {
             tracing::warn!("Could not remove handover files for node {node_id}: {error}");
         }
@@ -122,22 +122,23 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             crate::preferences::init_for_tests(root.path().to_path_buf());
             let mesh = crate::db::create_mesh("handover", "C:/handover-fixture").unwrap();
-            let node = crate::db::create_agent_node(
-                mesh.id,
-                "handover",
-                &mesh.path,
-                "main",
-                EnvType::Windows,
-                "codex",
-                None,
-                None,
-                None,
-                None,
-                false,
-                None,
-                None,
-                None,
-            )
+            let node = crate::db::create_agent_node(crate::db::NewAgentNode {
+                mesh_id: mesh.id,
+                name: "handover",
+                path: &mesh.path,
+                branch: "main",
+                env: EnvType::Windows,
+                provider: "codex",
+                worktree_name: None,
+                source_issue: None,
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree: false,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                worktree_path: None,
+                spawn_configuration: None,
+            })
             .unwrap();
             Self {
                 root,

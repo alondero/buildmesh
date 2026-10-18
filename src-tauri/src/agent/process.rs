@@ -349,23 +349,39 @@ fn input_buffer_len_after(len: usize, data: &[u8]) -> usize {
     input_buffer_state_after(len, false, data).0
 }
 
+/// Every field [`AgentProcess::new`] needs for a registry entry, in the order
+/// the spawn path supplies them.
+pub struct AgentProcessParams {
+    pub child: Box<dyn Child + Send + Sync>,
+    pub writer_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+    pub queue: Arc<InputQueueGauge>,
+    pub writer_handle: Option<JoinHandle<()>>,
+    pub master: Box<dyn MasterPty + Send>,
+    pub reader_alive: Arc<AtomicBool>,
+    pub deliberate_kill: Arc<AtomicBool>,
+    pub job: Option<crate::process_util::JobHandle>,
+    pub reader_handle: Option<JoinHandle<()>>,
+    pub spawn_start: std::time::Instant,
+    pub mesh_id: i64,
+}
+
 impl AgentProcess {
     /// Build a registry entry. `generation` is assigned by
     /// [`AgentProcessRegistry::insert`]; pass `0` from callers.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        child: Box<dyn Child + Send + Sync>,
-        writer_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
-        queue: Arc<InputQueueGauge>,
-        writer_handle: Option<JoinHandle<()>>,
-        master: Box<dyn MasterPty + Send>,
-        reader_alive: Arc<AtomicBool>,
-        deliberate_kill: Arc<AtomicBool>,
-        job: Option<crate::process_util::JobHandle>,
-        reader_handle: Option<JoinHandle<()>>,
-        spawn_start: std::time::Instant,
-        mesh_id: i64,
-    ) -> Self {
+    pub fn new(params: AgentProcessParams) -> Self {
+        let AgentProcessParams {
+            child,
+            writer_tx,
+            queue,
+            writer_handle,
+            master,
+            reader_alive,
+            deliberate_kill,
+            job,
+            reader_handle,
+            spawn_start,
+            mesh_id,
+        } = params;
         Self {
             child: Arc::new(Mutex::new(child)),
             writer_tx: Mutex::new(Some(writer_tx)),
@@ -2000,19 +2016,19 @@ mod tests {
             }
             writer_exited_thread.store(true, Ordering::SeqCst);
         });
-        let agent = AgentProcess::new(
+        let agent = AgentProcess::new(AgentProcessParams {
             child,
             writer_tx,
             queue,
-            Some(writer_thread),
-            pair.master,
-            Arc::new(AtomicBool::new(true)),
-            Arc::new(AtomicBool::new(false)),
-            None,
-            None,
-            std::time::Instant::now(),
-            0,
-        );
+            writer_handle: Some(writer_thread),
+            master: pair.master,
+            reader_alive: Arc::new(AtomicBool::new(true)),
+            deliberate_kill: Arc::new(AtomicBool::new(false)),
+            job: None,
+            reader_handle: None,
+            spawn_start: std::time::Instant::now(),
+            mesh_id: 0,
+        });
         (agent, writer_exited)
     }
 
@@ -2482,19 +2498,19 @@ mod tests {
         });
         registry.insert(
             -915_4002,
-            AgentProcess::new(
+            AgentProcess::new(AgentProcessParams {
                 child,
                 writer_tx,
                 queue,
-                Some(writer_thread),
-                pair.master,
-                Arc::new(AtomicBool::new(true)),
-                deliberate_kill.clone(),
-                None,
-                None,
-                std::time::Instant::now(),
-                0,
-            ),
+                writer_handle: Some(writer_thread),
+                master: pair.master,
+                reader_alive: Arc::new(AtomicBool::new(true)),
+                deliberate_kill: deliberate_kill.clone(),
+                job: None,
+                reader_handle: None,
+                spawn_start: std::time::Instant::now(),
+                mesh_id: 0,
+            }),
         );
 
         registry.kill_session(-915_4002);
@@ -2575,19 +2591,19 @@ mod tests {
         let registry = AgentProcessRegistry::new();
         registry.insert(
             session_id,
-            AgentProcess::new(
+            AgentProcess::new(AgentProcessParams {
                 child,
                 writer_tx,
                 queue,
-                Some(writer_thread),
-                pair.master,
-                Arc::new(AtomicBool::new(true)),
-                Arc::new(AtomicBool::new(false)),
-                None,
-                None,
-                std::time::Instant::now(),
-                0,
-            ),
+                writer_handle: Some(writer_thread),
+                master: pair.master,
+                reader_alive: Arc::new(AtomicBool::new(true)),
+                deliberate_kill: Arc::new(AtomicBool::new(false)),
+                job: None,
+                reader_handle: None,
+                spawn_start: std::time::Instant::now(),
+                mesh_id: 0,
+            }),
         );
 
         let started = std::time::Instant::now();
@@ -3038,7 +3054,7 @@ mod tests {
         let clears: [Vec<u8>; 3] = [b"\x03".to_vec(), vec![0x7f; typed], {
             // Type past the empty prompt, then back over both runs.
             let mut typed_more = b"more".to_vec();
-            typed_more.extend(std::iter::repeat(0x7f).take(typed + "more".len()));
+            typed_more.extend(std::iter::repeat_n(0x7f, typed + "more".len()));
             typed_more
         }];
         for clear in &clears {
@@ -3969,22 +3985,23 @@ mod handover_command_tests {
         crate::preferences::init_for_tests(root.path().to_path_buf());
         let mesh =
             crate::db::create_mesh("existing handover", "C:/existing-handover-fixture").unwrap();
-        let node = crate::db::create_agent_node(
-            mesh.id,
-            "existing-handover",
-            &mesh.path,
-            "main",
-            crate::models::EnvType::Windows,
-            "launch/saved-reviewer",
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-        )
+        let node = crate::db::create_agent_node(crate::db::NewAgentNode {
+            mesh_id: mesh.id,
+            name: "existing-handover",
+            path: &mesh.path,
+            branch: "main",
+            env: crate::models::EnvType::Windows,
+            provider: "launch/saved-reviewer",
+            worktree_name: None,
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree: false,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            worktree_path: None,
+            spawn_configuration: None,
+        })
         .unwrap();
         let configuration: crate::preferences::spawn_configurations::SpawnConfiguration =
             serde_json::from_value(serde_json::json!({

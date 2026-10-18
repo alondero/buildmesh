@@ -522,22 +522,23 @@ mod tests {
             &format!("/tmp/circuit-routes-{}", std::process::id()),
         )
         .unwrap();
-        let node = db::create_agent_node(
-            mesh.id,
-            "Implementation",
-            &mesh.path,
-            "work",
-            EnvType::Windows,
-            "claude",
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-        )
+        let node = db::create_agent_node(db::NewAgentNode {
+            mesh_id: mesh.id,
+            name: "Implementation",
+            path: &mesh.path,
+            branch: "work",
+            env: EnvType::Windows,
+            provider: "claude",
+            worktree_name: None,
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree: false,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            worktree_path: None,
+            spawn_configuration: None,
+        })
         .unwrap();
         db::update_agent_node_status(node.id, SessionStatus::Ready).unwrap();
         let run = db::create_node_circuit_run(node.id, None, 3, None).unwrap();

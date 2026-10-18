@@ -17,7 +17,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use super::evidence::{
-    append_history, revision_moved, run_graph, DISPOSITION_APPLIED, SOURCE_OPERATOR,
+    append_history, revision_moved, run_graph, HistoryEvent, DISPOSITION_APPLIED, SOURCE_OPERATOR,
 };
 use crate::circuit::model::{
     CircuitGraph, CircuitNodeKind, GithubActionKind, CIRCUIT_SWEEP_NOTE_PREFIX,
@@ -374,13 +374,15 @@ pub(crate) fn recover_failed_run_locked(
             };
             append_history(
                 &tx,
-                run.id,
-                Some(&request.node_id),
-                Some(request.attempt + 1),
-                "operator_retry",
-                &detail,
-                Some(SOURCE_OPERATOR),
-                Some(DISPOSITION_APPLIED),
+                HistoryEvent {
+                    run_id: run.id,
+                    node_id: Some(&request.node_id),
+                    attempt: Some(request.attempt + 1),
+                    kind: "operator_retry",
+                    detail: &detail,
+                    source: Some(SOURCE_OPERATOR),
+                    disposition: Some(DISPOSITION_APPLIED),
+                },
             )
             .map_err(|e| e.to_string())?;
         }
@@ -419,13 +421,15 @@ pub(crate) fn recover_failed_run_locked(
             };
             append_history(
                 &tx,
-                run.id,
-                Some(&request.node_id),
-                Some(request.attempt),
-                "operator_attestation",
-                &detail,
-                Some(SOURCE_OPERATOR),
-                Some("completed"),
+                HistoryEvent {
+                    run_id: run.id,
+                    node_id: Some(&request.node_id),
+                    attempt: Some(request.attempt),
+                    kind: "operator_attestation",
+                    detail: &detail,
+                    source: Some(SOURCE_OPERATOR),
+                    disposition: Some("completed"),
+                },
             )
             .map_err(|e| e.to_string())?;
         }
@@ -557,13 +561,15 @@ mod tests {
         );
         append_history(
             conn,
-            1,
-            None,
-            None,
-            "run_transition",
-            "failed",
-            Some("circuit_worker"),
-            Some("applied"),
+            HistoryEvent {
+                run_id: 1,
+                node_id: None,
+                attempt: None,
+                kind: "run_transition",
+                detail: "failed",
+                source: Some("circuit_worker"),
+                disposition: Some("applied"),
+            },
         )
         .unwrap();
     }
@@ -999,13 +1005,15 @@ mod tests {
         let seen = request(&conn, "finish", RecoveryAction::Retry, "");
         append_history(
             &conn,
-            1,
-            Some("finish"),
-            Some(1),
-            "observation",
-            "{}",
-            Some("codex_rollout"),
-            Some("duplicate"),
+            HistoryEvent {
+                run_id: 1,
+                node_id: Some("finish"),
+                attempt: Some(1),
+                kind: "observation",
+                detail: "{}",
+                source: Some("codex_rollout"),
+                disposition: Some("duplicate"),
+            },
         )
         .unwrap();
         recover_failed_run_locked(&mut conn, &seen)
@@ -1024,7 +1032,19 @@ mod tests {
         let mut conn = fixture();
         failed_finish_run(&conn);
         let stale = request(&conn, "finish", RecoveryAction::Retry, "");
-        append_history(&conn, 1, None, None, "observation", "{}", None, None).unwrap();
+        append_history(
+            &conn,
+            HistoryEvent {
+                run_id: 1,
+                node_id: None,
+                attempt: None,
+                kind: "observation",
+                detail: "{}",
+                source: None,
+                disposition: None,
+            },
+        )
+        .unwrap();
         let error = recover_failed_run_locked(&mut conn, &stale).unwrap_err();
         assert!(error.contains("changed"), "{error}");
 

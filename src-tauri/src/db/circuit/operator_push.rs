@@ -14,7 +14,9 @@
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
-use super::evidence::{append_history, recovery_view, revision_moved, SOURCE_OPERATOR};
+use super::evidence::{
+    append_history, recovery_view, revision_moved, HistoryEvent, SOURCE_OPERATOR,
+};
 use crate::circuit::model::StepOutcome;
 use crate::circuit::observation::{CircuitObservationBlocker, WorkEvidence};
 use crate::circuit::stepper::RunView;
@@ -210,13 +212,15 @@ pub(crate) fn push_step_locked(
     }
     append_history(
         &tx,
-        run.id,
-        Some(&step.node_id),
-        Some(step.attempt),
-        "operator_override",
-        &detail,
-        Some(SOURCE_OPERATOR),
-        Some(outcome.as_db_str()),
+        HistoryEvent {
+            run_id: run.id,
+            node_id: Some(&step.node_id),
+            attempt: Some(step.attempt),
+            kind: "operator_override",
+            detail: &detail,
+            source: Some(SOURCE_OPERATOR),
+            disposition: Some(outcome.as_db_str()),
+        },
     )
     .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())

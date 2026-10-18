@@ -519,16 +519,23 @@ fn create_node_blocking(
     operation: Option<&db::CreateOperationBinding>,
 ) -> Result<crate::services::agent_node::CreatedNode, AgentNodeError> {
     crate::services::agent_node::create_blocking_configured(
-        request.mesh_id,
-        Some(&request.provider),
-        Some("main"),
-        None,
-        None,
-        None,
+        crate::services::agent_node::NodeCreateParams {
+            mesh_id: request.mesh_id,
+            path: "",
+            branch: "main",
+            provider: Some(&request.provider),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: None,
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: request.configuration.as_ref(),
+            initial_prompt: request.prompt.as_deref(),
+            operation,
+        },
         false,
-        request.configuration.as_ref(),
-        request.prompt.as_deref(),
-        operation,
     )
 }
 

@@ -818,85 +818,65 @@ pub(crate) fn circuit_lifecycle_blocker(
 }
 // --- Agent Node operations ---
 
-#[allow(clippy::too_many_arguments)]
-pub fn create_agent_node(
-    mesh_id: i64,
-    name: &str,
-    path: &str,
-    branch: &str,
-    env: EnvType,
-    provider: &str,
-    worktree_name: Option<&str>,
-    source_issue: Option<i64>,
-    source_pr: Option<i64>,
-    source_pr_pinned_sha: Option<&str>,
-    use_worktree: bool,
-    head_repo_owner: Option<&str>,
-    head_repo_clone_url: Option<&str>,
-    worktree_path: Option<&str>,
-) -> SqlResult<AgentNode> {
-    create_agent_node_configured(
-        mesh_id,
-        name,
-        path,
-        branch,
-        env,
-        provider,
-        worktree_name,
-        source_issue,
-        source_pr,
-        source_pr_pinned_sha,
-        use_worktree,
-        head_repo_owner,
-        head_repo_clone_url,
-        worktree_path,
-        None,
-    )
+/// One `agent_nodes` INSERT, bundled into a single value (issue #2449).
+///
+/// The fields mirror the INSERT's parameter list, in the same order, so the
+/// statement below still reads as the same list of columns. `env` is the
+/// *resolved* spawn environment: callers that have not run
+/// [`resolve_spawn_env`] pass the environment they want directly.
+///
+/// `spawn_configuration` is the already-serialised launch-configuration
+/// snapshot, so the two public `*_configured` entry points keep serialising
+/// [`crate::preferences::spawn_configurations::SpawnConfiguration`]
+/// themselves — before they take the writer lock — and put the JSON string in
+/// here. Callers of those two entry points leave the field `None`; they
+/// overwrite it with the serialised argument.
+pub struct NewAgentNode<'a> {
+    pub mesh_id: i64,
+    pub name: &'a str,
+    pub path: &'a str,
+    pub branch: &'a str,
+    pub env: EnvType,
+    pub provider: &'a str,
+    pub worktree_name: Option<&'a str>,
+    pub source_issue: Option<i64>,
+    pub source_pr: Option<i64>,
+    pub source_pr_pinned_sha: Option<&'a str>,
+    pub use_worktree: bool,
+    pub head_repo_owner: Option<&'a str>,
+    pub head_repo_clone_url: Option<&'a str>,
+    pub worktree_path: Option<&'a str>,
+    /// The immutable spawn-configuration snapshot as stored JSON, or `None`
+    /// for a node created without one.
+    pub spawn_configuration: Option<&'a str>,
 }
 
-#[allow(clippy::too_many_arguments)]
+pub fn create_agent_node(node: NewAgentNode<'_>) -> SqlResult<AgentNode> {
+    create_agent_node_configured(node, None)
+}
+
 pub fn create_agent_node_configured(
-    mesh_id: i64,
-    name: &str,
-    path: &str,
-    branch: &str,
-    env: EnvType,
-    provider: &str,
-    worktree_name: Option<&str>,
-    source_issue: Option<i64>,
-    source_pr: Option<i64>,
-    source_pr_pinned_sha: Option<&str>,
-    use_worktree: bool,
-    head_repo_owner: Option<&str>,
-    head_repo_clone_url: Option<&str>,
-    worktree_path: Option<&str>,
+    node: NewAgentNode<'_>,
     configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
 ) -> SqlResult<AgentNode> {
-    let env = resolve_spawn_env(provider, worktree_path, use_worktree, env);
+    let env = resolve_spawn_env(
+        node.provider,
+        node.worktree_path,
+        node.use_worktree,
+        node.env,
+    );
     let snapshot = configuration
         .map(serde_json::to_string)
         .transpose()
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    let node = NewAgentNode {
+        env,
+        spawn_configuration: snapshot.as_deref(),
+        ..node
+    };
     let mut db = write_conn();
     let tx = db.transaction()?;
-    let node = create_agent_node_configured_inner(
-        &tx,
-        mesh_id,
-        name,
-        path,
-        branch,
-        env,
-        provider,
-        worktree_name,
-        source_issue,
-        source_pr,
-        source_pr_pinned_sha,
-        use_worktree,
-        head_repo_owner,
-        head_repo_clone_url,
-        worktree_path,
-        snapshot.as_deref(),
-    )?;
+    let node = create_agent_node_configured_inner(&tx, node)?;
     tx.commit()?;
     Ok(node)
 }
@@ -941,52 +921,31 @@ pub enum CreateAgentNodeOutcome {
 /// so a retry (or a concurrent duplicate tap) is a read, not a second node.
 /// A same-key/different-content request is a hard conflict: the node INSERT is
 /// rolled back and `Err` is returned so the caller can answer 409.
-#[allow(clippy::too_many_arguments)]
 pub fn create_agent_node_with_operation(
-    mesh_id: i64,
-    name: &str,
-    path: &str,
-    branch: &str,
-    env: EnvType,
-    provider: &str,
-    worktree_name: Option<&str>,
-    source_issue: Option<i64>,
-    source_pr: Option<i64>,
-    source_pr_pinned_sha: Option<&str>,
-    use_worktree: bool,
-    head_repo_owner: Option<&str>,
-    head_repo_clone_url: Option<&str>,
-    worktree_path: Option<&str>,
+    node: NewAgentNode<'_>,
     configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
     operation: &CreateOperationBinding,
 ) -> Result<CreateAgentNodeOutcome, CreateNodeWithOperationError> {
-    let env = resolve_spawn_env(provider, worktree_path, use_worktree, env);
+    let env = resolve_spawn_env(
+        node.provider,
+        node.worktree_path,
+        node.use_worktree,
+        node.env,
+    );
     let snapshot = configuration
         .map(serde_json::to_string)
         .transpose()
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    let node = NewAgentNode {
+        env,
+        spawn_configuration: snapshot.as_deref(),
+        ..node
+    };
 
     let mut db = write_conn();
     let tx = db.transaction()?;
 
-    let node = create_agent_node_configured_inner(
-        &tx,
-        mesh_id,
-        name,
-        path,
-        branch,
-        env,
-        provider,
-        worktree_name,
-        source_issue,
-        source_pr,
-        source_pr_pinned_sha,
-        use_worktree,
-        head_repo_owner,
-        head_repo_clone_url,
-        worktree_path,
-        snapshot.as_deref(),
-    )?;
+    let node = create_agent_node_configured_inner(&tx, node)?;
 
     match super::create_operation::bind_create_operation_tx(
         &tx,
@@ -1076,26 +1035,30 @@ fn resolve_spawn_env(
 /// env depends on the harness config and worktree path; test callers
 /// pass the env directly because the test knows the env it wants and
 /// does not need harness-runtime fallback.
-#[allow(dead_code, clippy::too_many_arguments)]
+#[allow(dead_code)]
 pub(crate) fn create_agent_node_inner(
     db: &Connection,
-    mesh_id: i64,
-    name: &str,
-    path: &str,
-    branch: &str,
-    env: EnvType,
-    provider: &str,
-    worktree_name: Option<&str>,
-    source_issue: Option<i64>,
-    source_pr: Option<i64>,
-    source_pr_pinned_sha: Option<&str>,
-    use_worktree: bool,
-    head_repo_owner: Option<&str>,
-    head_repo_clone_url: Option<&str>,
-    worktree_path: Option<&str>,
+    node: NewAgentNode<'_>,
 ) -> SqlResult<AgentNode> {
-    create_agent_node_configured_inner(
-        db,
+    // The per-test helper never carries a saved configuration: `env` is the
+    // *resolved* spawn environment the test asked for (see the doc comment),
+    // and there is no snapshot to serialise.
+    let node = NewAgentNode {
+        spawn_configuration: None,
+        ..node
+    };
+    create_agent_node_configured_inner(db, node)
+}
+
+/// Isolated connection seam for creating a node with its immutable spawn
+/// configuration snapshot in the initial INSERT. Keeping the snapshot in
+/// this helper avoids a second write and lets database tests use their own
+/// in-memory connection instead of the process-global writer.
+pub(crate) fn create_agent_node_configured_inner(
+    db: &Connection,
+    node: NewAgentNode<'_>,
+) -> SqlResult<AgentNode> {
+    let NewAgentNode {
         mesh_id,
         name,
         path,
@@ -1110,33 +1073,8 @@ pub(crate) fn create_agent_node_inner(
         head_repo_owner,
         head_repo_clone_url,
         worktree_path,
-        None,
-    )
-}
-
-/// Isolated connection seam for creating a node with its immutable spawn
-/// configuration snapshot in the initial INSERT. Keeping the snapshot in
-/// this helper avoids a second write and lets database tests use their own
-/// in-memory connection instead of the process-global writer.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn create_agent_node_configured_inner(
-    db: &Connection,
-    mesh_id: i64,
-    name: &str,
-    path: &str,
-    branch: &str,
-    env: EnvType,
-    provider: &str,
-    worktree_name: Option<&str>,
-    source_issue: Option<i64>,
-    source_pr: Option<i64>,
-    source_pr_pinned_sha: Option<&str>,
-    use_worktree: bool,
-    head_repo_owner: Option<&str>,
-    head_repo_clone_url: Option<&str>,
-    worktree_path: Option<&str>,
-    spawn_configuration: Option<&str>,
-) -> SqlResult<AgentNode> {
+        spawn_configuration,
+    } = node;
     // Deterministic Issue/PR identities must be reserved under the writer
     // transaction. Imports deliberately keep their discovered identity.
     let unique_name = if use_worktree && (source_issue.is_some() || source_pr.is_some()) {
@@ -2683,21 +2621,23 @@ mod configured_tests {
         let snapshot = r#"{"id":"sol","name":"Sol Max","spawn_option_id":"codex","model":"gpt-5.6-sol","effort":"max","extra_args":null}"#;
         let node = create_agent_node_configured_inner(
             &conn,
-            mesh.id,
-            "configured",
-            &mesh.path,
-            "main",
-            EnvType::Windows,
-            "codex",
-            None,
-            None,
-            None,
-            None,
-            true,
-            None,
-            None,
-            None,
-            Some(snapshot),
+            NewAgentNode {
+                mesh_id: mesh.id,
+                name: "configured",
+                path: &mesh.path,
+                branch: "main",
+                env: EnvType::Windows,
+                provider: "codex",
+                worktree_name: None,
+                source_issue: None,
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree: true,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                worktree_path: None,
+                spawn_configuration: Some(snapshot),
+            },
         )
         .unwrap();
         let stored: Option<String> = conn
