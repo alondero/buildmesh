@@ -54,11 +54,14 @@ pub struct WorktreeCleanupFailedPayload {
 pub struct CreateAgentNodeRequest {
     mesh_id: i64,
     /// Part of the wire but unused by the runner, which reads the mesh path
-    /// from the mesh row. Kept so the frontend payload stays unchanged.
+    /// from the mesh row. Kept so the frontend payload stays unchanged and
+    /// this struct stays a faithful mirror of it (issue #2478) — deleting the
+    /// field would let the wire and the Rust shape drift apart silently,
+    /// which is the thing the payload audit exists to catch (issue #2450).
     #[allow(dead_code)]
     name: String,
     /// Part of the wire but unused by the runner, which reads the mesh path
-    /// from the mesh row. Kept so the frontend payload stays unchanged.
+    /// from the mesh row. Same reason as `name` above (issue #2450).
     #[allow(dead_code)]
     path: String,
     branch: String,
