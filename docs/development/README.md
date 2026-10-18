@@ -136,6 +136,7 @@ owner document per subsystem, reachable from the
 
 | Owner document | Area |
 |---|---|
+| [frontend-ipc.md](frontend-ipc.md) | Frontend IPC facets and transport ownership |
 | [providers.md](providers.md) | Model providers, usage meters, credentials, spawn recipes |
 | [terminals.md](terminals.md) | Terminals, xterm lifecycle, PTY input and output streaming |
 | [agent-nodes.md](agent-nodes.md) | Agent Node lifecycle, process registry, worktrees |

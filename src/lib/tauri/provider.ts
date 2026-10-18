@@ -400,3 +400,79 @@ export const deleteSpawnConfiguration = async (id: string): Promise<void> => {
     setProviderListPromise(null);
   }
 };
+
+import type { OpenCodeWorkspace } from '../../types/generated/OpenCodeWorkspace';
+import type { OpenCodeDeviceFlowStart } from '../../types/generated/OpenCodeDeviceFlowStart';
+import type { OpenCodeDeviceCodeStatus } from '../../types/generated/OpenCodeDeviceCodeStatus';
+import type { OpenCodeTokenResponse } from '../../types/generated/OpenCodeTokenResponse';
+import type { OpenCodeConsoleStatus } from '../../types/generated/OpenCodeConsoleStatus';
+
+export const setMinimaxApiKey = (key: string | null) =>
+  _invoke('set_minimax_api_key', { key });
+
+export type {
+  OpenCodeWorkspace,
+  OpenCodeDeviceFlowStart,
+  OpenCodeDeviceCodeStatus,
+  OpenCodeTokenResponse,
+  OpenCodeConsoleStatus,
+};
+
+export const startOpencodeDeviceFlowConsole = () =>
+  _invoke<OpenCodeDeviceFlowStart>('start_device_flow_console');
+
+export const pollOpencodeDeviceToken = (
+  deviceCode: string,
+  currentIntervalSecs: number,
+  // Renamed from `expiresInSecs` for issue #1010: this is the ORIGINAL
+  // window length captured at dance-start, NOT a per-tick countdown.
+  // The Rust gate `now_ms - started_at_ms >= original_expires_in_secs*1000`
+  // must stay monotonic across the full window.
+  originalExpiresInSecs: number,
+  startedAtMs: number,
+) =>
+  _invoke<OpenCodeDeviceCodeStatus>('poll_opencode_device_token', {
+    deviceCode,
+    currentIntervalSecs,
+    originalExpiresInSecs,
+    startedAtMs,
+  });
+
+export const listOpencodeWorkspaces = (accessToken?: string) =>
+  _invoke<OpenCodeWorkspace[]>('list_opencode_workspaces', { accessToken });
+
+export const persistOpencodeTokens = (
+  token: OpenCodeTokenResponse,
+  workspaceId?: string,
+  serverId?: string,
+) =>
+  _invoke<void>('persist_opencode_tokens', {
+    token,
+    workspaceId,
+    serverId,
+  });
+
+export const revokeOpencodeConsole = () =>
+  _invoke<void>('revoke_opencode_console');
+
+// Read-only session state for the Settings → OpenCode Console card.
+// Returns `signed_in: true` plus the workspace picker list, the
+// active workspace id, the access-token expiry epoch (in ms), and a
+// `session_expired` flag when the credential's `expires_at` is in
+// the past. Consumed by `OpenCodeAccountCard` on mount to render
+// `signedIn` without re-running the dance. See
+// `services::opencode_oauth::OpenCodeConsoleStatus` for the Rust
+// side; ts-rs export lives at `src/types/generated/OpenCodeConsoleStatus.ts`.
+// Re-exported at the top of the OpenCode block alongside the other
+// `OpenCode*` types so the type is in scope for `_invoke<OpenCodeConsoleStatus>(…)`.
+export const getOpencodeConsoleStatus = () =>
+  _invoke<OpenCodeConsoleStatus>('get_opencode_console_status');
+
+// Persist a workspace switch without rotating the bearer. The Rust
+// side re-writes the credential blob with a new `workspace_id` and
+// keeps `access_token` / `refresh_token` / `expires_at` / `server_id`
+// verbatim. On success, `opencode-console-changed` is emitted so the
+// Usage tab re-fetches the live probe with `force=true`. The dropdown
+// in `OpenCodeAccountCard` is the only caller today.
+export const setOpencodeConsoleWorkspace = (workspaceId: string) =>
+  _invoke<void>('set_opencode_console_workspace', { workspaceId });
