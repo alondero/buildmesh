@@ -334,7 +334,10 @@ export function Sidebar() {
             scope (driven by `uiStore.createMeshOpen`); both Sidebar
             buttons and the canvas empty state's "New mesh" CTA hit the
             same `openCreateMesh` action. */}
-        <div className="flex shrink-0 gap-1 border-b border-border-subtle p-2" aria-label="Sidebar views">
+        {/* Issue #2467 — `aria-label` is ignored on a generic unroled
+            <div>; the toggle pair needs `role="group"` for the name to reach
+            assistive technology. */}
+        <div role="group" className="flex shrink-0 gap-1 border-b border-border-subtle p-2" aria-label="Sidebar views">
           <button type="button" aria-pressed={!attentionView} onClick={() => setAttentionView(false)} className={`min-h-[24px] flex-1 rounded-md px-2 text-xs ${!attentionView ? 'bg-bg-card text-text-primary' : 'text-text-secondary hover:bg-bg-card-hover'}`}>Workspace</button>
           <button type="button" aria-pressed={attentionView} onClick={() => setAttentionView(true)} className={`min-h-[24px] flex-1 rounded-md px-2 text-xs ${attentionView ? 'bg-bg-card text-text-primary' : 'text-text-secondary hover:bg-bg-card-hover'}`}>Attention ({attentionCount})</button>
         </div>

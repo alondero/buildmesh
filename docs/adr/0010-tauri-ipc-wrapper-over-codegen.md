@@ -2,6 +2,14 @@
 
 Status: accepted
 
+## Decision update: domain facets
+
+Retain the hand-written wrapper contract while dividing callers by domain.
+New imports name their domain; a deprecated compatibility surface supports
+incremental migration. Invocation and error logging keep one chokepoint.
+See [frontend IPC](../development/frontend-ipc.md) for current module ownership
+and enforcement. The original adoption decision below used a single wrapper.
+
 Every Tauri `invoke` call goes through one typed wrapper, `src/lib/tauri.ts`, rather than calling `invoke('command_name', …)` raw. The wrapper is hand-written (one thin function per `#[command]`, typed with the generated wire types from ADR-0009), and adoption is enforced by a drift test (`tests/unit/tauri-ipc-seam.test.ts`) with a shrinking allowlist — not by generating the bindings with `tauri-specta`.
 
 ## Context

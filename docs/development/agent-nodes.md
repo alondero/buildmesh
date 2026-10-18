@@ -4,6 +4,20 @@ Status: current
 
 ## Agent Node Management
 
+### Frontend store composition
+
+`src/stores/agentNodeStore.ts` composes domain action slices from
+`src/stores/agentNode/`: creation and provider selection, session lifecycle,
+worktree close/removal, and optimistic mutations/reordering. The outward Zustand
+interface and selector hooks stay in the store. `types.ts` defines the shared
+state contract; `reconciliation.ts` owns row and Circuit ownership comparison.
+
+The store creates one optimistic field ledger and one runtime object per store
+instance. Lifecycle, removal and refresh paths share the same spawn tokens,
+failed-spawn set and node revision fence. Slices receive that ownership rather
+than creating independent ledgers or refresh clocks. Listener registration and
+snapshot reconciliation remain at the composition root.
+
 ### Normalized node store and the derived full-array selector (#1384, #2021)
 
 `useAgentNodeStore` keeps Agent Nodes normalized: `nodesById` (keyed lookup, per-id object identity preserved across a refetch) and `nodeIds` (canonical `(mesh_id, position)` order). `fetchAgentNodes` reconciles field-by-field and keeps the *previous* object reference for every row whose fields compare equal, so per-id subscribers (`state.nodesById[id]`) and memoized rows skip renders when only other nodes changed. Consumers that genuinely need the whole list call `useAllAgentNodes()`; there are seven (Sidebar, AttentionList, AgentHistoryTab, CommandOmnibar, ScopeIndicator, GridFilterPopover, AgentNodeView).

@@ -1,12 +1,12 @@
 /**
- * Mobile spawn picker (`ProviderPicker` in src/mobile/screens/NodeList.tsx).
+ * Mobile spawn picker (`src/mobile/components/nodeList/ProviderPicker.tsx`).
  *
  * Spawn choices are harness parents, with saved Launch Configurations inside
  * touch disclosures. Raw Provider Routes stay out of the spawn picker even
  * when the last saved configuration is deleted. Native harness avatar glyphs
  * still come from the live `listProviders()` row.
  *
- * The picker is module-private, so these mount `NodeList` and open the sheet
+ * These mount `NodeList` and open the picker sheet
  * through the mesh's "new node" button — the same route the #815 picker test
  * takes in mobile-node-list.test.tsx.
  */

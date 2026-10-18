@@ -101,7 +101,7 @@ describe('unsubscribeBuildRunOutput call sites', () => {
             .replace(/\/\/.*$/gm, '');
           if (!/\bunsubscribeBuildRunOutput\s*\(/.test(cleaned)) continue;
           const rel = full.replace(/\\/g, '/');
-          if (rel.endsWith('/src/lib/tauri.ts')) continue;
+          if (rel.endsWith('/src/lib/tauri/agent.ts')) continue;
           if (rel.endsWith('/src/components/Terminal/BuildRunTerminalRegistry.ts')) continue;
           hits.push(rel);
         }

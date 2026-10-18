@@ -28,13 +28,12 @@
 Each owner doc below was split out of this primer (issue #2045) and is now the
 place to add or change that area's durable architecture.
 
-For "which file do I open, and which boundary do I not cross", see the
-[Rust module map](development/module-map.md) — a short map of the seams a new
-reader should trust (commands are thin, git access lives in `git/`, the stepper
-is pure, the worker is not).
+For backend seams and module ownership, see the
+[Rust module map](development/module-map.md).
 
 | Area | Owner doc | Owning code |
 |---|---|---|
+| Frontend IPC facets and transport ownership | [frontend-ipc.md](development/frontend-ipc.md) | `src/lib/tauri/`, `src/lib/tauri.ts`, `eslint.config.js` |
 | Model providers, usage meters, credentials, spawn recipes | [providers.md](development/providers.md) | `src-tauri/src/preferences/`, `src-tauri/src/services/usage.rs`, `src-tauri/src/services/windows_cred.rs`, `src-tauri/src/agent/provider/` |
 | Terminals, xterm lifecycle, PTY input and output streaming | [terminals.md](development/terminals.md) | `src/components/Terminal/`, `src-tauri/src/pty/` |
 | Agent Node lifecycle, process registry, worktrees | [agent-nodes.md](development/agent-nodes.md) | `src-tauri/src/services/agent_node.rs`, `src-tauri/src/agent/`, `src-tauri/src/git/worktree/` |
