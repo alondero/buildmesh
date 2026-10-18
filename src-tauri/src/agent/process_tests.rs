@@ -577,19 +577,19 @@ fn idle_writer_process(session_id: i64) -> (AgentProcess, Arc<AtomicBool>) {
         }
         writer_exited_thread.store(true, Ordering::SeqCst);
     });
-    let agent = AgentProcess::new(
+    let agent = AgentProcess::new(AgentProcessParams {
         child,
         writer_tx,
         queue,
-        Some(writer_thread),
-        pair.master,
-        Arc::new(AtomicBool::new(true)),
-        Arc::new(AtomicBool::new(false)),
-        None,
-        None,
-        std::time::Instant::now(),
-        0,
-    );
+        writer_handle: Some(writer_thread),
+        master: pair.master,
+        reader_alive: Arc::new(AtomicBool::new(true)),
+        deliberate_kill: Arc::new(AtomicBool::new(false)),
+        job: None,
+        reader_handle: None,
+        spawn_start: std::time::Instant::now(),
+        mesh_id: 0,
+    });
     (agent, writer_exited)
 }
 
@@ -1058,19 +1058,19 @@ fn kill_session_sets_deliberate_kill_flag() {
     });
     registry.insert(
         -915_4002,
-        AgentProcess::new(
+        AgentProcess::new(AgentProcessParams {
             child,
             writer_tx,
             queue,
-            Some(writer_thread),
-            pair.master,
-            Arc::new(AtomicBool::new(true)),
-            deliberate_kill.clone(),
-            None,
-            None,
-            std::time::Instant::now(),
-            0,
-        ),
+            writer_handle: Some(writer_thread),
+            master: pair.master,
+            reader_alive: Arc::new(AtomicBool::new(true)),
+            deliberate_kill: deliberate_kill.clone(),
+            job: None,
+            reader_handle: None,
+            spawn_start: std::time::Instant::now(),
+            mesh_id: 0,
+        }),
     );
 
     registry.kill_session(-915_4002);
@@ -1150,19 +1150,19 @@ fn kill_session_unblocks_idle_writer_promptly() {
     let registry = AgentProcessRegistry::new();
     registry.insert(
         session_id,
-        AgentProcess::new(
+        AgentProcess::new(AgentProcessParams {
             child,
             writer_tx,
             queue,
-            Some(writer_thread),
-            pair.master,
-            Arc::new(AtomicBool::new(true)),
-            Arc::new(AtomicBool::new(false)),
-            None,
-            None,
-            std::time::Instant::now(),
-            0,
-        ),
+            writer_handle: Some(writer_thread),
+            master: pair.master,
+            reader_alive: Arc::new(AtomicBool::new(true)),
+            deliberate_kill: Arc::new(AtomicBool::new(false)),
+            job: None,
+            reader_handle: None,
+            spawn_start: std::time::Instant::now(),
+            mesh_id: 0,
+        }),
     );
 
     let started = std::time::Instant::now();

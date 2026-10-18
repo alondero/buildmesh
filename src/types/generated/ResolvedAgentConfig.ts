@@ -4,7 +4,7 @@
  * The output of the per-field configuration resolver. Every field is
  * already capability-masked: a `None` here means either "all upstream slots
  * were empty" or "the selected harness doesn't support this control" —
- * downstream callers (`build_spawn_command`) can forward the `Some` value
+ * downstream callers (`build_spawn_command_prepared`) can forward the `Some` value
  * verbatim without consulting any further capability flag.
  *
  * Generated to `src/types/generated/ResolvedAgentConfig.ts`.

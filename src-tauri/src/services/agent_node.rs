@@ -175,6 +175,45 @@ fn reject_unsupported_initial_prompt(
     }
 }
 
+/// One create-family request, assembled by the caller.
+///
+/// The create entry points used to take their inputs as long positional
+/// argument lists, so every wrapper had to remember the full arity and any
+/// entry point that grew a field grew a lint suppression for the argument
+/// count. The request struct makes the shape explicit at each call site
+/// instead: a wrapper that never uses a field writes it as `None` (or `""`,
+/// see `branch`) and the difference from its sibling stays readable.
+///
+/// `Copy` is load-bearing: the wrappers forward most fields unchanged with
+/// `..request` while overriding the few they must pin.
+#[derive(Debug, Clone, Copy)]
+pub struct NodeCreateParams<'a> {
+    pub mesh_id: i64,
+    /// The checkout to create the node against. The shared runners
+    /// ([`create_blocking`] / [`create_blocking_configured`]) look the mesh up
+    /// themselves and read the path off that row, so their callers pass `""`.
+    pub path: &'a str,
+    /// The branch to record. For [`create_blocking`] /
+    /// [`create_blocking_configured`] this is the branch *override*: an empty
+    /// value means "none supplied", and a non-empty value short-circuits the
+    /// `git::get_default_branch_blocking` lookup. The other entry points take
+    /// the branch verbatim.
+    pub branch: &'a str,
+    pub provider: Option<&'a str>,
+    pub source_issue: Option<i64>,
+    pub source_pr: Option<i64>,
+    pub source_pr_pinned_sha: Option<&'a str>,
+    pub use_worktree_override: Option<bool>,
+    pub name_override: Option<&'a str>,
+    pub head_repo_owner: Option<&'a str>,
+    pub head_repo_clone_url: Option<&'a str>,
+    pub configuration: Option<&'a crate::preferences::spawn_configurations::SpawnConfiguration>,
+    pub initial_prompt: Option<&'a str>,
+    /// Remote create-and-start key binding (issue #2331). Only the entry
+    /// points that own the key take one; the rest drop it.
+    pub operation: Option<&'a db::CreateOperationBinding>,
+}
+
 /// Create a new agent node with auto-generated name, environment detection,
 /// and provider resolution.
 ///
@@ -198,44 +237,29 @@ fn reject_unsupported_initial_prompt(
 /// retained for the structural `source_pr = Some(_)` boundary assert
 /// test coverage (`create_rejects_source_pr_some` et al.); `#[allow]`
 /// keeps the dead-code lint quiet.
-#[allow(dead_code, clippy::too_many_arguments)]
-pub fn create(
-    mesh_id: i64,
-    path: &str,
-    branch: &str,
-    provider: Option<&str>,
-    source_issue: Option<i64>,
-    source_pr: Option<i64>,
-    source_pr_pinned_sha: Option<&str>,
-    use_worktree_override: Option<bool>,
-    name_override: Option<&str>,
-) -> Result<AgentNode, AgentNodeError> {
+#[allow(dead_code)]
+pub fn create(request: NodeCreateParams<'_>) -> Result<AgentNode, AgentNodeError> {
     assert!(
-        source_pr.is_none(),
+        request.source_pr.is_none(),
         "services::agent_node::create refuses source_pr=Some(_); \
          the non-PR wrappers must persist source_pr=None so spawn_agent_inner's \
          'is this a PR-spawned node?' branch (node.source_pr.is_some()) stays a \
          reliable signal. Use create_with_source_pr_fork for PR spawns."
     );
     assert!(
-        source_pr_pinned_sha.is_none(),
+        request.source_pr_pinned_sha.is_none(),
         "services::agent_node::create refuses source_pr_pinned_sha=Some(_); \
          use create_with_source_pr_fork for PR spawns that need SHA pinning."
     );
     // Single insert path; fork fields are None for the non-fork entry point.
-    create_with_source_pr_fork(
-        mesh_id,
-        path,
-        branch,
-        provider,
-        source_issue,
-        source_pr,
-        source_pr_pinned_sha,
-        use_worktree_override,
-        name_override,
-        None,
-        None,
-    )
+    create_with_source_pr_fork(NodeCreateParams {
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        configuration: None,
+        initial_prompt: None,
+        operation: None,
+        ..request
+    })
 }
 
 /// Like [`create`], but also records the fork's owner login and clone URL
@@ -243,21 +267,22 @@ pub fn create(
 /// these to register `fork-<owner>` as a remote and fetch the head ref.
 /// For same-repo PRs, pass `None` for both fork fields and call [`create`]
 /// instead — the spawn path then takes the #420 `origin/<head_ref>` branch.
-#[allow(clippy::too_many_arguments)]
 pub fn create_with_source_pr_fork(
-    mesh_id: i64,
-    path: &str,
-    branch: &str,
-    provider: Option<&str>,
-    source_issue: Option<i64>,
-    source_pr: Option<i64>,
-    source_pr_pinned_sha: Option<&str>,
-    use_worktree_override: Option<bool>,
-    name_override: Option<&str>,
-    head_repo_owner: Option<&str>,
-    head_repo_clone_url: Option<&str>,
+    request: NodeCreateParams<'_>,
 ) -> Result<AgentNode, AgentNodeError> {
-    create_with_source_pr_fork_configured(
+    create_with_source_pr_fork_configured(NodeCreateParams {
+        configuration: None,
+        initial_prompt: None,
+        operation: None,
+        ..request
+    })
+    .map(|created| created.node)
+}
+
+pub fn create_with_source_pr_fork_configured(
+    request: NodeCreateParams<'_>,
+) -> Result<CreatedNode, AgentNodeError> {
+    let NodeCreateParams {
         mesh_id,
         path,
         branch,
@@ -269,30 +294,10 @@ pub fn create_with_source_pr_fork(
         name_override,
         head_repo_owner,
         head_repo_clone_url,
-        None,
-        None,
-        None,
-    )
-    .map(|created| created.node)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn create_with_source_pr_fork_configured(
-    mesh_id: i64,
-    path: &str,
-    branch: &str,
-    provider: Option<&str>,
-    source_issue: Option<i64>,
-    source_pr: Option<i64>,
-    source_pr_pinned_sha: Option<&str>,
-    use_worktree_override: Option<bool>,
-    name_override: Option<&str>,
-    head_repo_owner: Option<&str>,
-    head_repo_clone_url: Option<&str>,
-    configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
-    initial_prompt: Option<&str>,
-    operation: Option<&db::CreateOperationBinding>,
-) -> Result<CreatedNode, AgentNodeError> {
+        configuration,
+        initial_prompt,
+        operation,
+    } = request;
     let mesh = db::get_mesh_by_id(mesh_id)?;
     let mut prefs = crate::preferences::load().map_err(AgentNodeError::Backend)?;
     let selection = crate::preferences::resolve_default_provider(
@@ -384,20 +389,23 @@ pub fn create_with_source_pr_fork_configured(
     // reporting a node as running when it never started (#2331 review).
     let created = match operation {
         Some(binding) => match db::create_agent_node_with_operation(
-            mesh_id,
-            &session_name,
-            path,
-            branch,
-            env_type,
-            &provider_id,
-            worktree_db_name,
-            source_issue,
-            source_pr,
-            source_pr_pinned_sha,
-            use_worktree,
-            head_repo_owner,
-            head_repo_clone_url,
-            worktree_path_owned.as_deref(),
+            db::NewAgentNode {
+                mesh_id,
+                name: &session_name,
+                path,
+                branch,
+                env: env_type,
+                provider: &provider_id,
+                worktree_name: worktree_db_name,
+                source_issue,
+                source_pr,
+                source_pr_pinned_sha,
+                use_worktree,
+                head_repo_owner,
+                head_repo_clone_url,
+                worktree_path: worktree_path_owned.as_deref(),
+                spawn_configuration: None,
+            },
             configuration.as_ref(),
             binding,
         ) {
@@ -422,20 +430,23 @@ pub fn create_with_source_pr_fork_configured(
             }
         },
         None => db::create_agent_node_configured(
-            mesh_id,
-            &session_name,
-            path,
-            branch,
-            env_type,
-            &provider_id,
-            worktree_db_name,
-            source_issue,
-            source_pr,
-            source_pr_pinned_sha,
-            use_worktree,
-            head_repo_owner,
-            head_repo_clone_url,
-            worktree_path_owned.as_deref(),
+            db::NewAgentNode {
+                mesh_id,
+                name: &session_name,
+                path,
+                branch,
+                env: env_type,
+                provider: &provider_id,
+                worktree_name: worktree_db_name,
+                source_issue,
+                source_pr,
+                source_pr_pinned_sha,
+                use_worktree,
+                head_repo_owner,
+                head_repo_clone_url,
+                worktree_path: worktree_path_owned.as_deref(),
+                spawn_configuration: None,
+            },
             configuration.as_ref(),
         )
         .map(|node| CreatedNode {
@@ -483,23 +494,27 @@ pub struct CreatedNode {
 ///
 /// # Arguments
 ///
-/// * `mesh_id` — the mesh to scope the new node under. A missing
+/// * [`NodeCreateParams::mesh_id`] — the mesh to scope the new node under. A missing
 ///   mesh id surfaces as [`AgentNodeError::MeshNotFound`]. HTTP create
 ///   maps that variant to 400; HTTP import maps it to 404.
-/// * `provider` — the harness id to persist verbatim. The legacy
+/// * [`NodeCreateParams::provider`] — the harness id to persist verbatim. The legacy
 ///   `provider.unwrap_or("anthropic")` fallback lives in
 ///   [`create_with_source_pr_fork`] (issue #538 default), so a `None`
 ///   here writes `"anthropic"` to the row. Callers that want the
 ///   mesh-level / app-wide default chain resolve
 ///   beforehand (`preferences::resolve_default_provider`) and pass
 ///   the resolved string in.
-/// * `branch_override` — `Some(branch)` short-circuits the
+/// * [`NodeCreateParams::branch`] — a non-empty value short-circuits the
 ///   `git::get_default_branch_blocking` lookup. The mobile route
 ///   uses `"main"` verbatim; desktop paths that already resolved
-///   the branch via the async wrapper pass `Some(resolved)`. `None`
-///   resolves through `commands::git::get_default_branch_blocking`
+///   the branch via the async wrapper pass their resolved string. An
+///   empty value means "no override supplied" and resolves through
+///   `commands::git::get_default_branch_blocking`
 ///   (with `"main"` fallback on open failure).
-/// * `source_issue` / `name_override` / `use_worktree_override` —
+/// * [`NodeCreateParams::path`] — ignored by this runner, which reads the
+///   path off the mesh row it looks up itself; callers pass `""`.
+/// * [`NodeCreateParams::source_issue`] / [`NodeCreateParams::name_override`] /
+///   [`NodeCreateParams::use_worktree_override`] —
 ///   forwarded unchanged to the underlying create family. PR-spawn
 ///   fields stay `None` (callers reach for
 ///   `create_pending_with_source_pr_fork` directly for that flow).
@@ -516,45 +531,37 @@ pub struct CreatedNode {
 /// `create_pending_blocking` would duplicate those two steps.
 /// `pending` is a one-bit switch on the final delegation and is
 /// checked once at the bottom of the function.
-#[allow(clippy::too_many_arguments)]
 pub fn create_blocking(
-    mesh_id: i64,
-    provider: Option<&str>,
-    branch_override: Option<&str>,
-    source_issue: Option<i64>,
-    name_override: Option<&str>,
-    use_worktree_override: Option<bool>,
+    request: NodeCreateParams<'_>,
     pending: bool,
-    initial_prompt: Option<&str>,
 ) -> Result<AgentNode, AgentNodeError> {
     create_blocking_configured(
-        mesh_id,
-        provider,
-        branch_override,
-        source_issue,
-        name_override,
-        use_worktree_override,
+        NodeCreateParams {
+            configuration: None,
+            operation: None,
+            ..request
+        },
         pending,
-        None,
-        initial_prompt,
-        None,
     )
     .map(|created| created.node)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn create_blocking_configured(
-    mesh_id: i64,
-    provider: Option<&str>,
-    branch_override: Option<&str>,
-    source_issue: Option<i64>,
-    name_override: Option<&str>,
-    use_worktree_override: Option<bool>,
+    request: NodeCreateParams<'_>,
     pending: bool,
-    configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
-    initial_prompt: Option<&str>,
-    operation: Option<&db::CreateOperationBinding>,
 ) -> Result<CreatedNode, AgentNodeError> {
+    let NodeCreateParams {
+        mesh_id,
+        branch,
+        provider,
+        source_issue,
+        use_worktree_override,
+        name_override,
+        configuration,
+        initial_prompt,
+        operation,
+        ..
+    } = request;
     // 1. Mesh lookup. Map the missing-row case to the typed
     //    `AgentNodeError::MeshNotFound(mesh_id)` variant so the route
     //    can match on `Err(_)` patterns instead of inspecting a
@@ -568,15 +575,17 @@ pub fn create_blocking_configured(
         Err(e) => return Err(AgentNodeError::Db(e)),
     };
 
-    // 2. Branch resolution. `Some(b)` short-circuits the git lookup entirely
-    //    (the mobile route pins "main"; Tauri commands that already resolved
-    //    via the async wrapper reuse their result). `None` falls through to
+    // 2. Branch resolution. A non-empty `branch` short-circuits the git lookup
+    //    entirely (the mobile route pins "main"; Tauri commands that already
+    //    resolved via the async wrapper reuse their result). An empty value —
+    //    the "no override supplied" sentinel callers pass — falls through to
     //    the canonical sync helper, with `"main"` as the open-failure fallback
     //    — matching `commands::git::get_default_branch`'s infallible contract.
-    let branch = match branch_override {
-        Some(b) if !b.is_empty() => b.to_string(),
-        _ => crate::commands::git::get_default_branch_blocking(mesh.path.clone())
-            .unwrap_or_else(|_| "main".to_string()),
+    let branch = if branch.is_empty() {
+        crate::commands::git::get_default_branch_blocking(mesh.path.clone())
+            .unwrap_or_else(|_| "main".to_string())
+    } else {
+        branch.to_string()
     };
 
     // 3. Delegate to the existing create family. The fork-source and
@@ -595,42 +604,47 @@ pub fn create_blocking_configured(
     //    `use_worktree_override = Some(false)` now sees its override
     //    honored on the Pending path, not silently swallowed.
     if pending {
-        create_pending_with_source_pr_fork_and_worktree(
+        create_pending_with_source_pr_fork_and_worktree(NodeCreateParams {
             mesh_id,
-            &mesh.path,
-            &branch,
+            // The path comes from the mesh row looked up above, which is why
+            // callers of this runner pass `path: ""`.
+            path: &mesh.path,
+            branch: &branch,
             provider,
             source_issue,
-            None, // source_pr
-            None, // source_pr_pinned_sha
-            name_override,
-            None, // head_repo_owner
-            None, // head_repo_clone_url
+            source_pr: None,
+            source_pr_pinned_sha: None,
             use_worktree_override,
+            name_override,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
             configuration,
             initial_prompt,
-        )
+            operation: None,
+        })
         .map(|node| CreatedNode {
             node,
             replayed: false,
         })
     } else {
-        create_with_source_pr_fork_configured(
+        create_with_source_pr_fork_configured(NodeCreateParams {
             mesh_id,
-            &mesh.path,
-            &branch,
+            // The path comes from the mesh row looked up above, which is why
+            // callers of this runner pass `path: ""`.
+            path: &mesh.path,
+            branch: &branch,
             provider,
             source_issue,
-            None, // source_pr
-            None, // source_pr_pinned_sha
+            source_pr: None,
+            source_pr_pinned_sha: None,
             use_worktree_override,
             name_override,
-            None, // head_repo_owner
-            None, // head_repo_clone_url
+            head_repo_owner: None,
+            head_repo_clone_url: None,
             configuration,
             initial_prompt,
             operation,
-        )
+        })
     }
 }
 
@@ -650,72 +664,45 @@ pub fn create_blocking_configured(
 /// path through [`create_blocking`] with `pending: true`. `create_pending`
 /// is retained for the structural `source_pr = Some(_)` boundary assert
 /// test coverage; `#[allow]` keeps the dead-code lint quiet.
-#[allow(dead_code, clippy::too_many_arguments)]
-pub fn create_pending(
-    mesh_id: i64,
-    path: &str,
-    branch: &str,
-    provider: Option<&str>,
-    source_issue: Option<i64>,
-    source_pr: Option<i64>,
-    source_pr_pinned_sha: Option<&str>,
-    name_override: Option<&str>,
-) -> Result<AgentNode, AgentNodeError> {
+#[allow(dead_code)]
+pub fn create_pending(request: NodeCreateParams<'_>) -> Result<AgentNode, AgentNodeError> {
     assert!(
-        source_pr.is_none(),
+        request.source_pr.is_none(),
         "services::agent_node::create_pending refuses source_pr=Some(_); \
          use create_pending_with_source_pr_fork for PR spawns."
     );
     assert!(
-        source_pr_pinned_sha.is_none(),
+        request.source_pr_pinned_sha.is_none(),
         "services::agent_node::create_pending refuses source_pr_pinned_sha=Some(_); \
          use create_pending_with_source_pr_fork for PR spawns that need SHA pinning."
     );
     // Single insert path; fork fields are None for the non-fork entry point.
-    create_pending_with_source_pr_fork(
-        mesh_id,
-        path,
-        branch,
-        provider,
-        source_issue,
-        source_pr,
-        source_pr_pinned_sha,
-        name_override,
-        None,
-        None,
-    )
+    create_pending_with_source_pr_fork(NodeCreateParams {
+        use_worktree_override: None,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        configuration: None,
+        initial_prompt: None,
+        operation: None,
+        ..request
+    })
 }
 
 /// Pending-node creation with an explicit worktree policy. Issue-driven
 /// circuits use this instead of creating a legacy `autopilot_runs` row: the
 /// circuit ledger remains the owner of orchestration state while the shared
 /// Agent Node row still records the branch-backed environment it needs.
-#[allow(clippy::too_many_arguments)]
 pub fn create_pending_with_worktree_override_configured(
-    mesh_id: i64,
-    path: &str,
-    branch: &str,
-    provider: Option<&str>,
-    source_issue: Option<i64>,
-    name_override: Option<&str>,
-    use_worktree_override: Option<bool>,
-    configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
+    request: NodeCreateParams<'_>,
 ) -> Result<AgentNode, AgentNodeError> {
-    create_pending_with_source_pr_fork_and_worktree(
-        mesh_id,
-        path,
-        branch,
-        provider,
-        source_issue,
-        None,
-        None,
-        name_override,
-        None,
-        None,
-        use_worktree_override,
-        configuration,
-        None,
-    )
+    create_pending_with_source_pr_fork_and_worktree(NodeCreateParams {
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        initial_prompt: None,
+        ..request
+    })
 }
 
 /// Like [`create_pending`], but also records the fork's owner login and
@@ -723,99 +710,35 @@ pub fn create_pending_with_worktree_override_configured(
 /// commit SHA for exact-pinning (issue #444). `commands::agent::create_pr_node`
 /// calls this directly with the fork fields populated for fork PRs and
 /// `None, None` for same-repo PRs.
-#[allow(clippy::too_many_arguments)]
 pub fn create_pending_with_source_pr_fork(
-    mesh_id: i64,
-    path: &str,
-    branch: &str,
-    provider: Option<&str>,
-    source_issue: Option<i64>,
-    source_pr: Option<i64>,
-    source_pr_pinned_sha: Option<&str>,
-    name_override: Option<&str>,
-    head_repo_owner: Option<&str>,
-    head_repo_clone_url: Option<&str>,
+    request: NodeCreateParams<'_>,
 ) -> Result<AgentNode, AgentNodeError> {
-    create_pending_with_source_pr_fork_configured(
-        mesh_id,
-        path,
-        branch,
-        provider,
-        source_issue,
-        source_pr,
-        source_pr_pinned_sha,
-        name_override,
-        head_repo_owner,
-        head_repo_clone_url,
-        None,
-        None,
-    )
+    create_pending_with_source_pr_fork_configured(NodeCreateParams {
+        use_worktree_override: None,
+        configuration: None,
+        initial_prompt: None,
+        operation: None,
+        ..request
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn create_pending_with_source_pr_fork_configured(
-    mesh_id: i64,
-    path: &str,
-    branch: &str,
-    provider: Option<&str>,
-    source_issue: Option<i64>,
-    source_pr: Option<i64>,
-    source_pr_pinned_sha: Option<&str>,
-    name_override: Option<&str>,
-    head_repo_owner: Option<&str>,
-    head_repo_clone_url: Option<&str>,
-    configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
-    initial_prompt: Option<&str>,
+    request: NodeCreateParams<'_>,
 ) -> Result<AgentNode, AgentNodeError> {
-    create_pending_with_source_pr_fork_and_worktree(
-        mesh_id,
-        path,
-        branch,
-        provider,
-        source_issue,
-        source_pr,
-        source_pr_pinned_sha,
-        name_override,
-        head_repo_owner,
-        head_repo_clone_url,
-        None,
-        configuration,
-        initial_prompt,
-    )
+    create_pending_with_source_pr_fork_and_worktree(NodeCreateParams {
+        use_worktree_override: None,
+        operation: None,
+        ..request
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn create_pending_with_source_pr_fork_and_worktree(
-    mesh_id: i64,
-    path: &str,
-    branch: &str,
-    provider: Option<&str>,
-    source_issue: Option<i64>,
-    source_pr: Option<i64>,
-    source_pr_pinned_sha: Option<&str>,
-    name_override: Option<&str>,
-    head_repo_owner: Option<&str>,
-    head_repo_clone_url: Option<&str>,
-    use_worktree_override: Option<bool>,
-    configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
-    initial_prompt: Option<&str>,
+    request: NodeCreateParams<'_>,
 ) -> Result<AgentNode, AgentNodeError> {
-    let mut node = create_with_source_pr_fork_configured(
-        mesh_id,
-        path,
-        branch,
-        provider,
-        source_issue,
-        source_pr,
-        source_pr_pinned_sha,
-        use_worktree_override,
-        name_override,
-        head_repo_owner,
-        head_repo_clone_url,
-        configuration,
-        initial_prompt,
-        None,
-    )?
+    let mut node = create_with_source_pr_fork_configured(NodeCreateParams {
+        operation: None,
+        ..request
+    })?
     .node;
     // Two writes (insert + status update) is one extra ~1ms SQLite round
     // trip. Acceptable: this function is on the fast path, and the second
@@ -895,22 +818,23 @@ pub fn import_discovered_session(
         }
     }
     let provider_id = provider;
-    let node = db::create_agent_node(
+    let node = db::create_agent_node(db::NewAgentNode {
         mesh_id,
-        &session_name,
-        &mesh.path,
+        name: &session_name,
+        path: &mesh.path,
         branch,
-        env_type,
-        provider_id,
+        env: env_type,
+        provider: provider_id,
         worktree_name,
-        None,
-        None,
-        None,
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
         use_worktree,
-        None,
-        None,
-        worktree_path.as_deref(),
-    )?;
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        worktree_path: worktree_path.as_deref(),
+        spawn_configuration: None,
+    })?;
     db::update_cli_session_id(node.id, cli_session_id)?;
     db::get_agent_node_by_id(node.id).map_err(AgentNodeError::from)
 }

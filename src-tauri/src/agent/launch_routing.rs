@@ -216,7 +216,7 @@ impl PreparedLaunchRouting {
     /// Returns `None` when neither source resolved a path, or for the Codex
     /// proxy, which carries its own `install.executable` plumbing.
     ///
-    /// Unified across variants so [`super::command::build_spawn_command`]
+    /// Unified across variants so [`super::command::build_spawn_command_prepared`]
     /// has one place to read it. Codex's `install.executable` wins over the
     /// profile's `executable` because it's the verified npm-shim path,
     /// whereas the profile's `executable` is the bare-detection result.

@@ -6,7 +6,7 @@
 //!
 //! 1. The spawn pipeline (`agent::capabilities::resolve_agent_config`) — runs
 //!    at process launch and produces the [`crate::agent::capabilities::ResolvedAgentConfig`]
-//!    forwarded to `build_spawn_command`.
+//!    forwarded to `build_spawn_command_prepared`.
 //! 2. The IPC seam `get_resolved_harness_view` (issue #1656) — runs from the
 //!    Settings modal + spawn menu so the UI can display the cascade result
 //!    without re-implementing the collapse client-side.

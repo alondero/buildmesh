@@ -155,8 +155,10 @@ function CircuitCreateForm({
   setIntervalSeconds,
 }: CircuitCreateFormProps) {
   return (
+    // No heading of its own: the Manage disclosure summary labels this form,
+    // so a second "Create a circuit" line repeated the row the user had just
+    // expanded (#2462).
     <div className="px-3 py-2 border-b border-border-subtle shrink-0" data-testid="circuit-create-form">
-      <h3 className="text-xs font-semibold text-text-primary mb-2">Create a circuit</h3>
       <div className="flex items-center gap-1 mb-1">
         <input
           value={newName}
@@ -429,6 +431,14 @@ export function CircuitsProbeTab() {
     () => buildCircuitProbeRows(annotatedRows, view, { attentionOnly: historyAttentionOnly, search: historySearch }),
     [annotatedRows, view, historyAttentionOnly, historySearch]
   );
+  // The rows the list body actually renders. Manage lists all circuits; the
+  // run-bearing views list only rows with runs to show. The list body and its
+  // "Recent outcomes" header share this one derivation, so no header is left
+  // above an empty list (#2462).
+  const listedRows = useMemo(
+    () => (view === 'manage' ? viewRows : viewRows.filter((row) => row.visibleRuns.length > 0)),
+    [viewRows, view]
+  );
   const historyEmptyState = useMemo(() => {
     const hasFinishedRuns = rows.some((row) => row.runs.some((run) => isTerminalRunState(run.run.state)));
     return hasFinishedRuns
@@ -446,8 +456,16 @@ export function CircuitsProbeTab() {
       activityStats.queuedCount > 0 ? `${activityStats.queuedCount} queued` : null,
     ].filter((part): part is string => part !== null);
     return parts.join(' · ') ||
-      (rows.length > 0 ? `${rows.length} circuits idle` : 'No circuits configured');
+      (rows.length > 0 ? `${rows.length} circuit${rows.length === 1 ? '' : 's'} idle` : 'No circuits configured');
   }, [activityStats, rows.length]);
+  // "Open Manage" is a dead end once the user is on Manage, so the empty
+  // state there points at the Create disclosure instead (#2462).
+  const emptyCircuitsHint =
+    loadedMeshId !== activeMeshId
+      ? undefined
+      : view === 'manage'
+        ? 'Expand Create a circuit above to add one to the flow editor.'
+        : 'Open Manage to create a circuit in the flow editor.';
   const visibleActiveRunIds = useMemo(
     () => viewRows.flatMap(({ visibleRuns }) => visibleRuns.map((d) => d.run.id)),
     [viewRows]
@@ -1099,7 +1117,7 @@ setQueueWaits({});
           </section>
         )}
         {view === 'activity' && loadedMeshId === activeMeshId && activityStats.activeCount === 0 && rows.length > 0 && <EmptyState label="Ready for work" hint="No runs are active. Check the queue or trigger a circuit in Manage." />}
-        {view === 'history' && loadedMeshId === activeMeshId && viewRows.every((row) => row.visibleRuns.length === 0) && rows.length > 0 && (
+        {view === 'history' && loadedMeshId === activeMeshId && listedRows.length === 0 && rows.length > 0 && (
           <EmptyState
             label={historyEmptyState.label}
             hint={historyEmptyState.hint}
@@ -1109,13 +1127,13 @@ setQueueWaits({});
           <div className="p-4">
             <EmptyState
               label={loadedMeshId === activeMeshId ? 'No circuits yet' : loadError ? 'Circuits unavailable' : 'Loading circuits…'}
-              hint={loadedMeshId === activeMeshId ? 'Open Manage to create a circuit in the flow editor.' : undefined}
+              hint={emptyCircuitsHint}
             />
           </div>
-        ) : (
+        ) : listedRows.length > 0 && (
           <ul className="flex flex-col gap-1 p-2">
             {view === 'history' && <li className="text-2xs text-text-muted px-1">Recent outcomes · attention first</li>}
-            {viewRows.filter((row) => view === 'manage' || row.visibleRuns.length > 0).map(({ circuit, visibleRuns, reviewCircuit, nodeIndex, contextByRunId }) => {
+            {listedRows.map(({ circuit, visibleRuns, reviewCircuit, nodeIndex, contextByRunId }) => {
               // The row model computes this once when the backend payload
               // changes; the duration clock does not repeat the scan.
               const capacity = {

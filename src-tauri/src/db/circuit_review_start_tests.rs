@@ -28,22 +28,23 @@ fn review_preset_starts_on_an_unobserved_running_source() {
         &format!("/tmp/review-start-unobserved-{}", std::process::id()),
     )
     .expect("create mesh");
-    let source = create_agent_node(
-        mesh.id,
-        "Fresh source",
-        &mesh.path,
-        "main",
-        EnvType::Windows,
-        "claude",
-        None,
-        None,
-        None,
-        None,
-        false,
-        None,
-        None,
-        None,
-    )
+    let source = create_agent_node(NewAgentNode {
+        mesh_id: mesh.id,
+        name: "Fresh source",
+        path: &mesh.path,
+        branch: "main",
+        env: EnvType::Windows,
+        provider: "claude",
+        worktree_name: None,
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree: false,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        worktree_path: None,
+        spawn_configuration: None,
+    })
     .expect("create source");
     update_agent_node_status(source.id, SessionStatus::Running).expect("mark the source running");
     // Deliberately leave `cli_session_id` unset: neither it nor a readable

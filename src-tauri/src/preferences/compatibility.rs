@@ -596,7 +596,7 @@ fn anthropic_surface_env(
 ///
 /// The emitter therefore still **writes** all three vars (forward-compat for
 /// any future codex release that picks them up) but the **effective routing**
-/// happens one level out: `agent::spawn::build_spawn_command` derives a
+/// happens one level out: `agent::spawn::build_spawn_command_prepared` derives a
 /// per-pairing profile name from the same `OPENAI_*` pairs via
 /// `crate::agent::provider::adapters::codex::proxy_pair`, idempotently writes
 /// `$CODEX_HOME/<name>.config.toml` (a `[model_providers.<name>]` block Codex
