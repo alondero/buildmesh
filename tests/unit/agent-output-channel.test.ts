@@ -126,7 +126,7 @@ describe('unsubscribeAgentOutput call sites', () => {
             .replace(/\/\/.*$/gm, '');
           if (!/\bunsubscribeAgentOutput\s*\(/.test(cleaned)) continue;
           const rel = full.replace(/\\/g, '/');
-          if (rel.endsWith('/src/lib/tauri.ts')) continue;
+          if (rel.endsWith('/src/lib/tauri/agent.ts')) continue;
           if (rel.endsWith('/src/components/Terminal/TerminalRegistry.ts')) continue;
           hits.push(rel);
         }

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { AppSettingsModal } from '../../src/components/AppSettings/AppSettingsModal';
 import { openSettingsPane } from '../utils/settings-panes';
@@ -264,5 +264,40 @@ describe('AppSettingsModal — Appearance theme picker (#734)', () => {
     // The Modal's dirty-state surface is the "Discard unsaved changes?"
     // banner — assert it's not present.
     expect(screen.queryByText(/Discard unsaved changes/i)).toBeNull();
+  });
+});
+
+/**
+ * Issue #2467 — the Theme row is a `<fieldset>` of radios, not a single
+ * form control. `<fieldset>` is not labelable, so the row's
+ * `<label for="theme-radio-group">` left `label.control === null` and
+ * announced an orphaned association. The group carries its own accessible
+ * name instead; the first test below is what pins that.
+ */
+describe('AppSettingsModal — Theme group labelling (#2467)', () => {
+  it('no rendered <label for> in Settings targets a non-labelable element', async () => {
+    renderModal();
+    await openSettingsPane(/^General$/);
+    await screen.findByTestId('theme-radio-light');
+
+    // Scoped to the rendered pane, so this catches a re-introduced
+    // fieldset association here without claiming coverage of every pane.
+    const labelled = Array.from(document.querySelectorAll('label[for]'));
+    expect(labelled.length).toBeGreaterThan(0);
+    expect(
+      labelled.filter(l => (l as HTMLLabelElement).control === null).map(l => l.getAttribute('for')),
+    ).toEqual([]);
+
+    // The old target specifically: no label points at the fieldset.
+    expect(document.querySelector('label[for="theme-radio-group"]')).toBeNull();
+  });
+
+  it('names the Theme radio group itself, so it is reachable by assistive tech', async () => {
+    renderModal();
+    await openSettingsPane(/^General$/);
+    const group = await screen.findByRole('group', { name: 'Theme' });
+    expect(group.tagName).toBe('FIELDSET');
+    expect(within(group).getByRole('radio', { name: 'dark' })).toBeTruthy();
+    expect(within(group).getByRole('radio', { name: 'light' })).toBeTruthy();
   });
 });

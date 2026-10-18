@@ -1,26 +1,16 @@
+import { createCloseSlice } from './agentNode/closeSlice';
+import { createMutationSlice } from './agentNode/mutationSlice';
+import { createLifecycleSlice } from './agentNode/lifecycleSlice';
+import { createCreationSlice } from './agentNode/creationSlice';
+import { shallowEqualAgentNode, reconcileOwnerships } from './agentNode/reconciliation';
+import type { AgentNodeState, AgentNodeRuntime } from './agentNode/types';
+export type { SpawnAgentOptions } from './agentNode/types';
+export { setWorktreeCloseActionResolverForTests } from './agentNode/closeSlice';
 import { formatError } from '../lib/errorUtils';
 import { create } from 'zustand';
 import * as api from '../lib/tauri';
-import { disposeTerminal } from '../components/Terminal/Terminal'; // retained for delete path; archive must NOT dispose — see CLAUDE.md terminal-persistence rule.
-import { hasWorktreeCloseRisk, type WorktreeCloseAction, type WorktreeCloseSafety } from '../lib/worktreeClose';
-import { requestWorktreeCloseAction, useWorktreeClosePromptStore } from './worktreeClosePromptStore';
-import { isActiveForExit } from '../lib/exitGuard';
-// Issue #1001 — `deleteAgentNode` Phase 2 (delete_commit) now surfaces
-// its failure via the shared toast pipeline instead of the previously
-// silent `state.error` Zustand field. Phase 1 (worktree safety check)
-// is unchanged — it still sets `state.error`, which App.tsx routes
-// through the generic "System" toast pipeline.
-import { addToast } from './toastStore';
-// Issue #1054 — the event-driven half of the store moved to a typed
-// listeners module (`agentNodeListeners.ts`); the optimistic-with-
-// rollback pattern that `renameAgentNode` / `setNodePinned` /
-// `toggleNodePinned` hand-rolled is now a generic helper. Issue #2325
-// — the helper's ledger gives each mutation ownership of its columns, so
-// a pin completion can no longer adopt a stale full row and a stale
-// failure can no longer roll back over a newer write.
 import {
   createOptimisticFieldLedger,
-  withOptimistic,
   type AgentNodeField,
   type OptimisticSurface,
 } from '../lib/optimistic';
@@ -35,145 +25,7 @@ import { attachAgentNodeListeners } from './agentNodeListeners';
 // it adds `env`, `source_issue`, and the `archived` status the hand-written
 // interface omitted.
 import type { AgentNode } from '../types/generated/AgentNode';
-import type { CircuitAgentOwnership } from '../types/generated/CircuitAgentOwnership';
-import type { SemanticTurnPayload } from '../types/generated/SemanticTurnPayload';
-// Issue #1530 — the shape the transport's ordered retry buffer reports when it
-// is holding a session's input rather than delivering it.
-import type { InputStall } from '../lib/terminalInputQueue';
-import type { SpawnAgentIntent } from '../types/generated/SpawnAgentIntent';
 export type { AgentNode };
-
-// Issue #1054 — cross-store reach, kept narrow on purpose
-// --------------------------------------------------------
-// The proposal's third leg ("replace cross-store writes with typed
-// message-passing") was considered and deferred: every other cross-
-// store reach in the repo follows the same `.getState().action(...)`
-// / imperative-wrapper convention, and the test injection points
-// already in place (vi.mock for addToast; setWorktreeCloseActionResolverForTests;
-// useMeshStore.setState in tests) provide the isolation a message bus
-// would otherwise buy. Adding a second indirection here would add a
-// new abstraction layer for no testability gain.
-//
-// The lifecycle actions use these cross-module boundaries:
-//   * focusNode (lazy navigation intent)    — selectProviderForMesh (issue #283 invariant)
-//   * requestWorktreeCloseAction            — deleteAgentNode Phase 1 safety prompt
-//   * addToast                              — deleteAgentNode Phase 2 failure (issue #1001)
-//   * disposeTerminal                       — deleteAgentNode success path (issue #647)
-// Any future refactor that needs to replace one of these with a bus
-// call can do so in-place; the listener module already shows the
-// "typed dispatch surface" pattern that would scale.
-
-// Issue #1384 — shallow-equal reconciliation. When `fetchAgentNodes` returns
-// a fresh list, we compare each row against the existing `nodesById[id]`
-// field-by-field. If every field matches, we keep the *old object reference*
-// so subscribed components (`state.nodesById[id]` or `state.agentNodes.find(...)`)
-// don't see a new ref and Zustand's `Object.is` selector skips the render.
-// Fields not present on either side (e.g. an `undefined` row missing a
-// generated `null`) are treated as equal so a wire-shape tweak on the Rust
-// side doesn't churn every component on every fetch.
-//
-// Why the custom loop and not `Object.is`-per-field via JSON.stringify —
-// `JSON.stringify` allocates a string per node and is order-sensitive for
-// key insertion (V8 object-key order is insertion-order for string keys, so
-// the only false-positive is if the Rust backend ever reorders its columns;
-// in that case we'd silently fail to reconcile and the cascade comes back).
-// A typed field-by-field compare is fast (≤20 primitives per node in the
-// current wire shape), deterministic, and pins the contract in the type
-// system via the exhaustiveness trick below.
-// Exhaustiveness contract — the comparator MUST list every field on
-// `AgentNode` except `id`. If the Rust struct gains a field, `tsc` will
-// fail the build at the next `cargo test` regeneration (the
-// `ReconciledKey` mapped type only compiles when every key is present).
-// `id` is excluded because it is the map key itself; comparing it would
-// be a tautology (`a.id === b.id` whenever both rows are valid). The
-// `Omit<AgentNode, 'id'>` mapped type pins the *absence* of `id`, the
-// `Record<..., true>` literal pins the *presence* of every other field.
-type ReconciledKey = keyof Omit<AgentNode, 'id'>;
-const AGENT_NODE_RECONCILE_SCHEMA: Record<ReconciledKey, true> = {
-  mesh_id: true,
-  name: true,
-  path: true,
-  branch: true,
-  worktree_name: true,
-  env: true,
-  provider: true,
-  status: true,
-  cli_session_id: true,
-  use_worktree: true,
-  is_pinned: true,
-  position: true,
-  created_at: true,
-  source_issue: true,
-  source_pr: true,
-  head_repo_owner: true,
-  head_repo_clone_url: true,
-  source_pr_pinned_sha: true,
-  signal_health: true,
-  lifecycle: true,
-  worktree_path: true,
-  project_scope: true,
-  launch_configuration: true,
-};
-const AGENT_NODE_RECONCILE_FIELDS = Object.keys(
-  AGENT_NODE_RECONCILE_SCHEMA,
-) as ReadonlyArray<ReconciledKey>;
-
-function shallowEqualAgentNode(a: AgentNode, b: AgentNode): boolean {
-  for (const k of AGENT_NODE_RECONCILE_FIELDS) {
-    if (k === 'launch_configuration' || k === 'lifecycle') {
-      if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) return false;
-      continue;
-    }
-    if (a[k] !== b[k]) return false;
-  }
-  return true;
-}
-
-// Same exhaustiveness contract as `AGENT_NODE_RECONCILE_SCHEMA` above. The
-// ownership wire type has already gained fields once, and an unreconciled
-// field would make a refresh keep a stale row's object identity (silently
-// skipping the re-render that should have shown the change). Listing every
-// key here makes `tsc` fail at the next `cargo test` regeneration instead.
-type OwnershipReconciledKey = keyof CircuitAgentOwnership;
-const CIRCUIT_OWNERSHIP_RECONCILE_SCHEMA: Record<OwnershipReconciledKey, true> = {
-  node_id: true,
-  run_id: true,
-  circuit_id: true,
-  circuit_name: true,
-  state: true,
-  parent_node_id: true,
-};
-const CIRCUIT_OWNERSHIP_RECONCILE_FIELDS = Object.keys(
-  CIRCUIT_OWNERSHIP_RECONCILE_SCHEMA,
-) as ReadonlyArray<OwnershipReconciledKey>;
-
-function shallowEqualOwnership(a: CircuitAgentOwnership, b: CircuitAgentOwnership): boolean {
-  for (const k of CIRCUIT_OWNERSHIP_RECONCILE_FIELDS) {
-    if (a[k] !== b[k]) return false;
-  }
-  return true;
-}
-
-/// Fold a fetched ownership list into the existing map, keeping the previous
-/// object identity for rows that did not change. Shared by both read paths
-/// (`fetchAgentNodes` and `refreshCircuitOwnerships`) so a full refetch does
-/// not allocate fresh ownership objects for every node and defeat per-id
-/// selector caching. `changed` reports whether anything actually moved, which
-/// lets a no-op satellite refresh skip its `set` entirely.
-function reconcileOwnerships(
-  current: Readonly<Record<number, CircuitAgentOwnership>>,
-  rows: readonly CircuitAgentOwnership[],
-): { ownerships: Record<number, CircuitAgentOwnership>; changed: boolean } {
-  const ownerships: Record<number, CircuitAgentOwnership> = {};
-  let changed = Object.keys(current).length !== rows.length;
-  for (const ownership of rows) {
-    const prior = current[ownership.node_id];
-    const unchanged = prior !== undefined && shallowEqualOwnership(prior, ownership);
-    ownerships[ownership.node_id] = unchanged ? prior : ownership;
-    if (!unchanged) changed = true;
-  }
-  return { ownerships, changed };
-}
 
 /// Single-flight plus one trailing re-run, shared by `fetchAgentNodes` and
 /// `refreshCircuitOwnerships`. A burst of callers collapses to the in-flight
@@ -205,58 +57,6 @@ function createCoalescedRefresh(task: () => Promise<void>): () => Promise<void> 
   return run;
 }
 
-/// Apply a mesh's re-positioned nodes optimistically and persist them. The
-/// updated nodes replace that mesh's entries; the whole id list is re-sorted
-/// by (mesh_id, position) so the in-memory order matches `list_agent_nodes`.
-/// On a backend error we resync from the DB rather than leave the UI out of
-/// step.
-async function persistPositions(
-  set: (partial: Partial<AgentNodeState>) => void,
-  get: () => AgentNodeState,
-  updatedMeshNodes: AgentNode[],
-) {
-  // Compute the new id ordering (full list, mesh-sorted, position-sorted).
-  // We rebuild both the map and the id list so subscribers that read either
-  // see a consistent snapshot — the alternative (mutating only the affected
-  // mesh's nodes) would leave a half-sorted state during the optimistic
-  // window, which is invisible because the id list still references the same
-  // node objects.
-  const byId = new Map(updatedMeshNodes.map(n => [n.id, n]));
-  const mergedNodes = get().nodeIds
-    .map(id => get().nodesById[id])
-    .filter(n => n !== undefined)
-    .map(n => byId.get(n.id) ?? n)
-    .sort((x, y) => x.mesh_id - y.mesh_id || x.position - y.position);
-  const mergedById: Record<number, AgentNode> = {};
-  const mergedIds: number[] = [];
-  for (const n of mergedNodes) {
-    mergedById[n.id] = n;
-    mergedIds.push(n.id);
-  }
-  set({ nodesById: mergedById, nodeIds: mergedIds });
-  try {
-    const updates = updatedMeshNodes.map(n => [n.id, n.position] as [number, number]);
-    await api.updateAgentNodePositions(updates);
-  } catch (e) {
-    set({ error: formatError(e) });
-    await get().fetchAgentNodes();
-  }
-}
-
-type WorktreeCloseActionResolver = (
-  node: AgentNode,
-  safety: WorktreeCloseSafety,
-) => Promise<WorktreeCloseAction>;
-
-const defaultWorktreeCloseActionResolver: WorktreeCloseActionResolver = (node, safety) =>
-  requestWorktreeCloseAction(node.name, safety);
-
-let worktreeCloseActionResolver = defaultWorktreeCloseActionResolver;
-
-export function setWorktreeCloseActionResolverForTests(resolver?: WorktreeCloseActionResolver) {
-  worktreeCloseActionResolver = resolver ?? defaultWorktreeCloseActionResolver;
-}
-
 // Issue #1524 — test seam for the listener attachment state machine
 // (`idle -> attaching -> attached`) that `initAttentionListeners` closes
 // over. The state lives in the store's `create()` callback, so it is one
@@ -273,203 +73,6 @@ let resetAgentNodeListenerAttachment: (() => void) | null = null;
 
 export function resetAgentNodeListenersForTests(): void {
   resetAgentNodeListenerAttachment?.();
-}
-
-export interface SpawnAgentOptions {
-  rows?: number;
-  cols?: number;
-  fresh?: boolean;
-  /// First-turn prompt (issue #1413). Non-empty wins over `fresh` /
-  /// resume and becomes `SpawnAgentIntent.loop`.
-  prefill?: string;
-}
-
-function resolveSpawnAgentIntent(
-  options: SpawnAgentOptions,
-  node: AgentNode | undefined,
-): SpawnAgentIntent {
-  const trimmed = options.prefill?.trim() ?? '';
-  if (trimmed !== '') {
-    return { type: 'loop', initial_prompt: trimmed };
-  }
-  if (options.fresh) {
-    return { type: 'fresh' };
-  }
-  if (node?.cli_session_id) {
-    return { type: 'resume' };
-  }
-  return { type: 'fresh' };
-}
-
-interface AgentNodeState {
-  // Issue #1384 — normalized entity state. Two structures back the same data:
-  //   `nodesById` — keyed lookup, preserves object identity per node so
-  //                 per-id subscribers (`state.nodesById[id]`) skip renders
-  //                 when only OTHER nodes change.
-  //   `nodeIds`   — ordered list of ids (canonical `(mesh_id, position)`
-  //                 order, matching `list_agent_nodes`); consumers that need
-  //                 the ordered array iterate this and dereference through
-  //                 `nodesById`. The id list itself is rebuilt on each
-  //                 fetch, but the per-id object references are preserved
-  //                 by the shallow reconciliation in `fetchAgentNodes`.
-  nodesById: Record<number, AgentNode>;
-  nodeIds: number[];
-  // Circuit ownership comes from the run-step satellite ledger. Every Agent
-  // Node spawned by one run resolves to the same run id shown in its header.
-  circuitOwnerships: Record<number, CircuitAgentOwnership>;
-  semanticTurns: Record<number, SemanticTurnPayload>;
-  activeNodeId: number | null;
-  loading: boolean;
-  error: string | null;
-  // Nodes whose close is in flight. The slow part of closing is the worktree
-  // safety check (a git status + ref walk) that must run *before* we can drop
-  // the row, so we flag the node here the instant the user clicks and let
-  // NodeItem show a spinner instead of looking frozen.
-  closingNodeIds: Set<number>;
-  // Issue #1530 — sessions whose PTY input the transport's ordered retry
-  // buffer is holding rather than delivering, keyed by node id. A *record*, not
-  // a single slot: Buildmesh runs many agents in parallel, so two nodes can be
-  // stalled at the same time, and with one shared slot the first node to recover
-  // would withdraw a badge that another, still-wedged node still needs. Entries
-  // exist only while a node is actually stalled, so the map is empty in the
-  // normal case and the UI footprint is unchanged.
-  stalledInputs: Record<number, InputStall>;
-
-  // Derived getters
-  /// Returns the ordered array of agent nodes (mesh_id, position) for code
-  /// paths that genuinely need the list (test seeds, view-mode helpers,
-  /// imperative `getState()` callers). Subscribed React components should
-  /// NOT use this — they get O(N) re-renders on every fetch. Use
-  /// `state.nodesById[id]` for per-node reads and a `useMemo` over
-  /// `state.nodeIds.map(id => state.nodesById[id])` for full-list views.
-  /// Each call returns a fresh array (cheap; no caching) — tests rely on
-  /// this so `setState({ nodesById, nodeIds })` followed by a
-  /// `getAgentNodes()` round-trip returns the freshly-seeded nodes.
-  getAgentNodes: () => AgentNode[];
-  getActiveNode: () => AgentNode | null;
-  getActiveMeshId: () => number | null;
-
-  fetchAgentNodes: () => Promise<void>;
-  /// Conditional full refresh for additive events (issue #1751).
-  /// Skips the `fetchAgentNodes` fan-out when the last successful
-  /// snapshot is still fresh AND every scoped id is already in the map
-  /// — the event then carries nothing the store doesn't have (e.g. a
-  /// duplicate `node-created` for a row an earlier fetch already picked
-  /// up). Fetches otherwise. Never use for evictions: an archived or
-  /// deleted id is *supposed* to be in the map, and the fetch is what
-  /// purges it — presence must not guard a removal (issue #1073
-  /// pattern: a skipped fetch must never leave event state unapplied).
-  refreshIfStale: (nodeIds?: number[]) => Promise<void>;
-  createAgentNode: (meshId: number, name: string, path: string, branch: string, provider?: string, useWorktree?: boolean, configurationId?: string, initialPrompt?: string) => Promise<AgentNode>;
-  /// Insert a node the backend just created but that did not come back through
-  /// `createAgentNode` (e.g. `create_pr_node`'s reviewer sibling). Insert-if-
-  /// absent: the `node-created` listener's async `fetchAgentNodes` may have
-  /// already delivered the row, and its version must win. Exists so a caller
-  /// can act on the new id immediately — `nodeActivityStore.groupNodes` bails
-  /// unless both ids are in `nodesById`, so grouping a fresh spawn would
-  /// otherwise race the event-driven refresh.
-  adoptAgentNode: (node: AgentNode) => void;
-  /// Sidebar "click + or pick provider" entrypoint — creates a node on the
-  /// mesh, sets it active, and selects the mesh. The three steps live behind
-  /// one action (issue #283) so the invariant — "only switch active mesh/node
-  /// if creation succeeded" — is enforced in one place, not re-derivable per
-  /// click handler. On `createAgentNode` rejection the active mesh stays put.
-  /// `initialPrompt` (issue #1413) is an optional first-turn prompt.
-  /// When non-empty, this action creates the node and then calls
-  /// `spawnAgent` with `{ prefill }` in the same turn — Terminal
-  /// auto-spawn is skipped because the node is already `spawning`.
-  /// Omitted / whitespace means Fresh (Terminal auto-spawns as before).
-  selectProviderForMesh: (meshId: number, meshName: string, meshPath: string, providerId: string, useWorktree?: boolean, initialPrompt?: string, configurationId?: string) => Promise<AgentNode>;
-  deleteAgentNode: (id: number) => Promise<void>;
-  /// Backend-driven retirement. The Circuit worker's `CloseAgentNode` effect
-  /// and cancelled-run cleanup delete the row directly and emit `node-deleted`;
-  /// this drops it from the grid and disposes its terminal. Unlike archive, a
-  /// backend delete is a real deletion, so the terminal-persistence rule
-  /// permits disposal. A no-op when the row is already absent — a
-  /// user-initiated close removed it optimistically and disposes on its own
-  /// success path.
-  removeAgentNode: (id: number) => void;
-  renameAgentNode: (id: number, name: string) => Promise<void>;
-  /// Pin a node explicitly (wayfinder #982 / ticket #984). Used by the
-  /// UI affordance when the user wants a known-good state (e.g. "Pin"
-  /// in a context menu) — distinguishes from `toggleNodePinned`, which
-  /// flips whatever the current value is. Optimistic: the local entry is
-  /// patched from the returned `AgentNode` so the grid re-renders
-  /// instantly; on rejection we revert *only* the `is_pinned` column to
-  /// its pre-call value (not the whole entry) so concurrent writes to
-  /// other columns survive, and surface the error on `state.error`.
-  setNodePinned: (nodeId: number, pinned: boolean) => Promise<AgentNode>;
-  /// Flip a node's `is_pinned` flag and patch the local entry from the
-  /// returned `AgentNode` (wayfinder #982 / ticket #984). The
-  /// single-action shape the UI's click-to-pin button uses. Same
-  /// optimistic + narrow-`is_pinned`-rollback pattern as `setNodePinned`.
-  toggleNodePinned: (nodeId: number) => Promise<AgentNode>;
-  reorderAgentNode: (nodeId: number, insertIndex: number) => Promise<void>;
-  swapAgentNodes: (aId: number, bId: number) => Promise<void>;
-  /** Select the active agent entity. Activity-tab navigation is owned by
-   * `useNodeActivityStore.activateNode`, which coordinates both stores at
-   * the UI boundary without adding transient view state here.
-   */
-  setActiveNode: (id: number | null) => void;
-  spawnAgent: (
-    nodeId: number,
-    provider: string,
-    rowsOrOptions?: number | SpawnAgentOptions,
-    cols?: number,
-  ) => Promise<void>;
-  /// Issue #774 — swap a node's Model Provider. The backend preserves
-  /// worktree / branch / name / position; only `provider` changes. The
-  /// returned `AgentNode` reflects the post-swap state (the backend has
-  /// already updated the row), so the caller can patch the local entry
-  /// without an extra `fetchAgentNodes` round-trip on the happy path.
-  regenerateAgentNode: (nodeId: number, newProviderId: string) => Promise<AgentNode>;
-  /// Issue #1306 — "Start Fresh" escape hatch. Discards the stale
-  /// `cli_session_id` and boots a new session in the same existing worktree.
-  /// Invokes `spawnAgent` with `options.fresh: true` (passing `resume: null`
-  /// to the backend), causing `spawn_with_intent` to emit `SpawnIntent::Fresh`
-  /// which clears `cli_session_id` in SQLite and spawns without `--resume`.
-  restartFreshAgent: (
-    nodeId: number,
-    options?: { rows?: number; cols?: number },
-  ) => Promise<void>;
-  spawnHandoverAgent: (meshId: number, prefill: string, provider?: string) => Promise<AgentNode>;
-  killAgent: (nodeId: number) => Promise<void>;
-  sendToAgent: (nodeId: number, input: string) => Promise<void>;
-  writeToAgent: (nodeId: number, data: string) => Promise<void>;
-  /// Hand `text` over to an existing agent node's PTY as a submitted prompt
-  /// (the terminal context menu's "Handover to node" action). The backend owns
-  /// the bracketed-paste staging and the decoupled Enter — see
-  /// [`api.handoverToAgent`].
-  handoverToNode: (nodeId: number, text: string) => Promise<void>;
-  clearAttention: (nodeId: number) => Promise<void>;
-  // Issue #1054 — typed dispatch surface for `agentNodeListeners.ts`.
-  // The listener module never reaches into `set`/`get` directly; it
-  // dispatches through these actions (plus `fetchAgentNodes` /
-  // `setActiveNode` from the public surface). Each action is a
-  // one-liner that the store can also expose to other callers if a
-  // future refactor needs the same seam.
-  patchAgentNode: (id: number, patch: Partial<AgentNode>) => void;
-  patchCircuitOwnershipState: (runId: number, state: string) => void;
-  /// Re-read just the Circuit ownership ledger, without the full
-  /// `fetchAgentNodes` fan-out. The implementation carries the reasoning.
-  refreshCircuitOwnerships: () => Promise<void>;
-  setSemanticTurn: (id: number, turn: SemanticTurnPayload | null) => void;
-  /// Issue #1530 — publish (or clear) one session's stalled-input state, as
-  /// reported by the transport's ordered retry buffer. Scoped by `nodeId` so
-  /// parallel agents cannot withdraw each other's badges.
-  setStalledInput: (nodeId: number, stall: InputStall | null) => void;
-  findAgentNode: (id: number) => AgentNode | undefined;
-  /// Issue #1054 — attach the store's Tauri event listeners; a one-line
-  /// delegate to `agentNodeListeners.attachAgentNodeListeners`.
-  /// Issue #1524 — the returned promise REJECTS if any listener fails to
-  /// register, and the store returns to `idle` so a later call retries.
-  /// The promise is shared by concurrent callers, so exactly one
-  /// attachment is ever in flight.
-  initAttentionListeners: () => Promise<void>;
-  /// Issue #1530 — begin mirroring the transport's ordered retry buffer's
-  /// stalled-input reports into [`stalledInput`]. Idempotent, and called by
-  /// `initAttentionListeners` so the app's existing init path is enough.
-  initTerminalInputWatch: () => void;
 }
 
 /// Issue #2021 — the derived full node array, memoized once per store
@@ -585,43 +188,6 @@ export function useAllAgentNodes(): readonly AgentNode[] {
 /// failure does not refresh the stamp, so the next event retries.
 export const REFRESH_IF_STALE_MS = 10_000;
 
-/// Issue #2242 — the row-removal transition, shared by the two paths that drop
-/// a node: the user close (`deleteAgentNode`, optimistically, before the
-/// delete IPC commits) and the circuit-driven reconcile (`removeAgentNode`).
-///
-/// Both must evaporate the row from the SAME set of containers. A row left in
-/// `nodeIds` but missing from `nodesById` reappears on the next derivation;
-/// a row left in `activeNodeId` points at nothing; and issue #1384's
-/// `semanticTurns` is keyed by id, so turn metadata that outlives the row
-/// re-attaches to whatever id the DB hands out next. Keeping the four writes
-/// in one function makes that a property of the transition rather than
-/// something two call sites have to remember to keep in step.
-///
-/// Returns `null` when the store does not hold the row: the optimistic close
-/// and the reconcile can both race a fetch that already dropped it, and
-/// neither may resurrect it by writing stale containers.
-type RowRemoval = Pick<
-  AgentNodeState,
-  'nodesById' | 'nodeIds' | 'activeNodeId' | 'semanticTurns'
->;
-
-function withoutRow(state: AgentNodeState, id: number): RowRemoval | null {
-  if (!(id in state.nodesById)) return null;
-  const nodesById = { ...state.nodesById };
-  delete nodesById[id];
-  // Issue #1384 — `semanticTurns` keyed by id, so the row's turn metadata
-  // evaporates with the row. The listener re-keys when a node with the same
-  // id returns, but id stability is enforced by the DB autoincrement.
-  const semanticTurns = { ...state.semanticTurns };
-  delete semanticTurns[id];
-  return {
-    nodesById,
-    nodeIds: state.nodeIds.filter((nodeId) => nodeId !== id),
-    activeNodeId: state.activeNodeId === id ? null : state.activeNodeId,
-    semanticTurns,
-  };
-}
-
 export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   // Monotonic revision of the ownership ledger. Every newer authoritative
   // write bumps it: a `circuit-run-updated` patch, or a full `fetchAgentNodes`
@@ -635,9 +201,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   // a read that began before an acknowledged pin or rename is discarded and
   // re-read rather than painted over it.
   let circuitOwnershipsRevision = 0;
-  let nodeRevision = 0;
-  const spawnRequests = new Map<number, symbol>();
-  const failedAutoSpawns = new Set<number>();
+  const runtime: AgentNodeRuntime = { nodeRevision: 0, spawnRequests: new Map(), failedAutoSpawns: new Set() };
   // Wall-clock ms of the last successful `fetchAgentNodes` snapshot.
   // `refreshIfStale` reads it; only a success stamps it (a rejection
   // keeps the previous stamp so the next event retries). `0` until the
@@ -661,7 +225,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     // it. Without this an acknowledged pin or rename was silently
     // reverted by an in-flight read, which then discarded itself and
     // re-read: the fence existed but did not observe optimistic writes.
-    onFieldWrite: () => { nodeRevision += 1; },
+    onFieldWrite: () => { runtime.nodeRevision += 1; },
   });
   const optimisticSurface: OptimisticSurface = {
     getAgentNode: (nodeId) => get().nodesById[nodeId],
@@ -688,7 +252,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     // look superseded and it would discard the newest state, leaving the stale
     // snapshot in place — the exact regression this guard exists to prevent.
     const ownershipRevision = circuitOwnershipsRevision;
-    const observedNodeRevision = nodeRevision;
+    const observedNodeRevision = runtime.nodeRevision;
     set({ loading: true, error: null });
     try {
       // Satellite reads fail independently. A transient failure preserves
@@ -698,7 +262,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
         api.listCircuitAgentOwnerships().catch(() => null),
         api.listSemanticTurns().catch(() => null),
       ]);
-      if (observedNodeRevision !== nodeRevision) {
+      if (observedNodeRevision !== runtime.nodeRevision) {
         // A live lifecycle event superseded this read. Queue one fresh snapshot
         // instead of briefly painting the old status and request over it.
         void fetchAgentNodes();
@@ -718,15 +282,15 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
         const old = oldById[n.id];
         // A missing failure event can leave the backend snapshot idle. Only
         // an explicit spawn or a live lifecycle transition clears this fence.
-        const incoming = n.status === 'idle' && old && spawnRequests.has(n.id)
+        const incoming = n.status === 'idle' && old && runtime.spawnRequests.has(n.id)
           ? { ...n, status: old.status }
-          : old?.status === 'error' && failedAutoSpawns.has(n.id) && n.status === 'idle'
+          : old?.status === 'error' && runtime.failedAutoSpawns.has(n.id) && n.status === 'idle'
             ? { ...n, status: 'error' as const } : n;
         newById[n.id] = old && shallowEqualAgentNode(old, incoming) ? old : incoming;
         newIds.push(n.id);
       }
-      for (const id of failedAutoSpawns) {
-        if (!newById[id] || newById[id].status === 'archived') failedAutoSpawns.delete(id);
+      for (const id of runtime.failedAutoSpawns) {
+        if (!newById[id] || newById[id].status === 'archived') runtime.failedAutoSpawns.delete(id);
       }
       // A live event patched the ledger while this snapshot was in flight, so
       // this ownership list is older than what the store already holds. Keep
@@ -836,9 +400,9 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   // now updates the single entry in `nodesById` (preserving identity for
   // every other node), rather than remapping the whole array.
   patchAgentNode: (id, patch) => {
-    if (patch.status === 'idle' && failedAutoSpawns.has(id)) return;
-    if (patch.status === 'error' && get().nodesById[id]) failedAutoSpawns.add(id);
-    nodeRevision += 1;
+    if (patch.status === 'idle' && runtime.failedAutoSpawns.has(id)) return;
+    if (patch.status === 'error' && get().nodesById[id]) runtime.failedAutoSpawns.add(id);
+    runtime.nodeRevision += 1;
     // Issue #2325 — a delivered event is the newest observation of the
     // columns it carries, including one another window's `node-renamed`.
     // Hand those columns over: an in-flight rename must neither roll its
@@ -848,8 +412,8 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     // mutation's own settlement reconciles its columns afterwards.
     optimisticLedger.release(id, Object.keys(patch) as AgentNodeField[]);
     if (patch.status && !['idle', 'spawning', 'error'].includes(patch.status)) {
-      spawnRequests.delete(id);
-      failedAutoSpawns.delete(id);
+      runtime.spawnRequests.delete(id);
+      runtime.failedAutoSpawns.delete(id);
     }
     set((state) => {
       const current = state.nodesById[id];
@@ -972,494 +536,15 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     };
   })(),
 
-  createAgentNode: async (meshId, name, path, branch, provider?: string, useWorktree?: boolean, configurationId?: string, initialPrompt?: string): Promise<AgentNode> => {
-    try {
-      const node = await api.createAgentNode(meshId, name, path, branch, provider, useWorktree, configurationId, initialPrompt);
-      set((state) => ({
-        nodesById: { ...state.nodesById, [node.id]: node },
-        nodeIds: [...state.nodeIds, node.id],
-      }));
-      return node;
-    } catch (e) {
-      set({ error: formatError(e) });
-      throw e;
-    }
-  },
+  ...createCreationSlice(set, get, runtime),
 
-  adoptAgentNode: (node) => {
-    if (get().nodesById[node.id]) return;
-    nodeRevision += 1;
-    // Insert-if-absent (never clobber): the `node-created` listener's fetch may
-    // already have delivered a fresher row, and this is only a bridge so a
-    // caller can act on the id before that fetch lands.
-    set((state) => ({
-      nodesById: { ...state.nodesById, [node.id]: node },
-      nodeIds: [...state.nodeIds, node.id],
-    }));
-  },
+  ...createCloseSlice(set, get, runtime, optimisticLedger),
 
-  selectProviderForMesh: async (meshId, meshName, meshPath, providerId, useWorktree?: boolean, initialPrompt?: string, configurationId?: string): Promise<AgentNode> => {
-    // Create FIRST — only switch active mesh/node if creation succeeded.
-    // The order is the invariant: pre-refactor this lived in three sequential
-    // store calls in Sidebar.handleSelectProvider (#283), where a future hand
-    // could re-arrange them and re-introduce the half-applied
-    // "mesh selected but no node" state. Holding the order here makes the
-    // invariant unit-testable and impossible to violate from a click handler.
-    const { focusNode } = await import('../lib/navigation');
-    const node = await get().createAgentNode(meshId, meshName, meshPath, 'main', providerId, useWorktree, configurationId, initialPrompt);
-    focusNode(node.id, { view: 'mesh', scope: 'node' });
-    // Explicit create-then-spawn (issue #1413 review): the prompt rides
-    // on this call, not a store-side dictionary the Terminal mount
-    // later peeks at. `spawnAgent` flips the row to `spawning`
-    // synchronously so the idle auto-spawn effect cannot start a
-    // parallel Fresh spawn. Whitespace-only is treated as "no prompt"
-    // and Terminal auto-spawns as before.
-    const trimmed = initialPrompt?.trim() ?? '';
-    if (trimmed !== '') {
-      await get().spawnAgent(node.id, providerId, { prefill: trimmed });
-    }
-    return node;
-  },
-
-  deleteAgentNode: async (id) => {
-    // A close already in flight owns this node's teardown; a second click
-    // (common while the safety check makes the row look unresponsive) must not
-    // fire a duplicate safety/kill/delete round-trip.
-    if (get().closingNodeIds.has(id)) return;
-
-    // Flag the node closing *synchronously* so the click registers instantly.
-    // We can't drop the row yet — the safety check below decides whether to
-    // prompt about uncommitted/unpushed work — so until it resolves NodeItem
-    // shows a spinner over the still-present row instead of looking frozen.
-    set((state) => ({ closingNodeIds: new Set(state.closingNodeIds).add(id) }));
-    const clearClosing = () => set((state) => {
-      const next = new Set(state.closingNodeIds);
-      next.delete(id);
-      return { closingNodeIds: next };
-    });
-
-    // Capture the row up-front so a Phase-2 (delete_commit) failure can
-    // re-insert it. By the time the IPC rejects the row is already gone from
-    // the store, so reading from get() would not find it.
-    const node = get().nodesById[id];
-
-    // Phase 1: safety check + worktree-confirmation prompt. Failures here
-    // release the closing flag (the row is still on screen and retryable) and
-    // surface `state.error` for the App.tsx toast pipeline. The promise
-    // resolves — callers don't need to react to a transient safety-check
-    // rejection any more than they do to the existing `kill_agent` warn-only.
-    let removeWorktree = false;
-    try {
-      const safety = await api.getWorktreeCloseSafety(id);
-      removeWorktree = Boolean(safety.worktree_path);
-
-      if (safety.worktree_path && hasWorktreeCloseRisk(safety)) {
-        if (!node) {
-          throw new Error(`Agent node ${id} is not loaded, cannot confirm worktree removal`);
-        }
-        const action = await worktreeCloseActionResolver(node, safety);
-        if (action === 'cancel') { clearClosing(); return; }
-        removeWorktree = action === 'remove';
-      } else if (!safety.worktree_path) {
-        const liveNode = get().nodesById[id];
-        if (liveNode && isActiveForExit(liveNode.status)) {
-          const action = await useWorktreeClosePromptStore.getState().request(liveNode.name, safety, 'active-session');
-          if (action === 'cancel') { clearClosing(); return; }
-        }
-      }
-    } catch (e) {
-      clearClosing();
-      set({ error: formatError(e) });
-      return;
-    }
-
-    // Re-capture the row RIGHT BEFORE the optimistic remove so the restore
-    // path below sees the version of the node that's actually being dropped
-    // (Phase 1 awaited `getWorktree_close_safety`, and a `node-renamed`
-    // event could fire during that window — capturing after the await closes
-    // that race). Reading after the optimistic remove would find nothing.
-    const nodeForRestore = get().nodesById[id];
-
-    // Phase 2: optimistic close + backend commit. The row drops from the UI
-    // here so closing feels instant; the backend kills the agent and removes
-    // the row in a fast Phase 1, then reclaims the worktree directory in the
-    // background (a failed cleanup surfaces later via the
-    // 'worktree-cleanup-failed' event rather than holding the node on screen
-    // while the slow delete runs).
-    //
-    // Issue #647: `disposeTerminal(id)` is intentionally NOT called yet.
-    // Disposing here would blank the terminal before the delete IPC commits,
-    // and on rejection the restored row (issue #645 zombie-row fix) would
-    // re-mount an xterm bound to a dead PTY — the agent was killed by the
-    // warn-only `kill_agent` path while `delete_agent_node` was still
-    // pending. Disposal moves to AFTER the delete IPC succeeds below; on
-    // rejection the terminal stays live so the user can retry without
-    // losing scrollback. Trade-off: terminal lingers ~one IPC round-trip
-    // longer on the happy path.
-    set((state) => {
-      const closing = new Set(state.closingNodeIds);
-      closing.delete(id);
-      const removed = withoutRow(state, id);
-      return removed ? { ...removed, closingNodeIds: closing } : { closingNodeIds: closing };
-    });
-    // Issue #2325 — the row is gone, so any mutation still in flight for it
-    // owns nothing and must not write it back when it settles.
-    optimisticLedger.forget(id);
-
-    // kill_agent tears the process down before its bookkeeping (a DB status
-    // update) can fail, and the node is being deleted anyway — so never let
-    // a kill_agent rejection skip delete_agent_node, or the node would vanish
-    // from the UI while its row and worktree survive and resurrect on the
-    // next fetch.
-    //
-    // Issue #1530: this calls `api.killAgent` directly, so it does not pass
-    // through the `killAgent` action that releases the transport's retry lane.
-    // Release it here, next to the kill that makes the buffered bytes
-    // undeliverable. Deliberately *not* at the top of this function: the
-    // worktree-safety prompt above can still be cancelled, and dropping a live
-    // node's in-flight keystrokes because the user opened a close dialog would
-    // trade one silent loss for another.
-    try {
-      await api.killAgent(id);
-      api.cancelTerminalInput(id);
-    } catch (e) {
-      console.warn('[agentNodeStore] kill_agent failed during close, continuing', e);
-    }
-
-    try {
-      await api.deleteAgentNode(id, removeWorktree);
-    } catch (e) {
-      // Issue #645: restore the optimistically-removed row so UI/DB stay in
-      // sync. Without this the catch would silently swallow the rejection,
-      // and any unrelated fetchAgentNodes (node-created, mesh switch, …)
-      // would resurrect the row anyway, making it look like a "zombie"
-      // close. Re-inserting here makes the resurrection immediate. Re-throw
-      // to match createAgentNode / renameAgentNode so callers awaiting the
-      // close can react. `nodeForRestore` was captured AFTER Phase 1's
-      // await so a `node-renamed` event fired mid-flight (e.g. user
-      // renamed then closed) restores the post-rename version, not a stale
-      // pre-rename snapshot.
-      //
-      // Issue #647: leave the terminal alive — the row is restored and
-      // needs its scrollback + live PTY for the user to retry.
-      //
-      // Issue #1001: surface the failure through the shared toast pipeline.
-      // The explicit toast is the single source of truth for delete
-      // failures — `state.error` is intentionally NOT written here
-      // because App.tsx subscribes to `useAgentNodeStore(state => state.error)`
-      // for its generic "System" pipeline, and retaining it would produce
-      // a duplicate "System" toast alongside the explicit "Node" toast
-      // (different providers, the dedup wouldn't collapse them, two of
-      // the three toast slots would burn on a single failure). Every
-      // other `state.error` setter (Phase 1 worktree safety check, etc.)
-      // continues to use the App.tsx System pipeline unchanged.
-      if (nodeForRestore) {
-        set((state) => {
-          // Only restore if the row is still absent — a concurrent
-          // `node-created` refetch may have already replaced it.
-          if (state.nodesById[id]) return state;
-          return {
-            nodesById: { ...state.nodesById, [id]: nodeForRestore },
-            nodeIds: state.nodeIds.includes(id) ? state.nodeIds : [...state.nodeIds, id],
-          };
-        });
-      }
-      addToast('Node', `Failed to close node: ${formatError(e)}`, 'error');
-      throw e;
-    }
-
-    // Issue #647: only now — after the delete IPC committed — is the
-    // terminal-persistence rule's "never dispose unless deleted" invariant
-    // satisfied. See the Phase-2 NOTE above for the failure-path reasoning.
-    disposeTerminal(id);
-  },
-
-  removeAgentNode: (id) => {
-    spawnRequests.delete(id);
-    failedAutoSpawns.delete(id);
-    // Issue #2325 — same reasoning as the close path: a retired row owns
-    // no field, so a mutation still in flight cannot write it back.
-    optimisticLedger.forget(id);
-    // A user-initiated close already dropped the row optimistically and owns
-    // its terminal disposal; only act when the store still holds the row.
-    if (!(id in get().nodesById)) return;
-    set((state) => withoutRow(state, id) ?? state);
-    // The backend row is gone — the only case the terminal-persistence rule
-    // allows disposal. This is the circuit-driven counterpart of
-    // `deleteAgentNode`'s success-path dispose.
-    disposeTerminal(id);
-  },
-
-  renameAgentNode: async (id, name) => {
-    // Issue #1054 — precheck matches the pre-refactor behaviour: a
-    // missing node is a silent no-op, not a throw. (The two pin
-    // actions throw; the rename path was always a quiet return.)
-    const prior = get().nodesById[id];
-    if (!prior) return;
-    // Optimistic update so the UI reflects the new name before the
-    // round-trip. The backend emits `node-renamed` on success, which
-    // keeps other windows in sync. We do NOT read the mutation's
-    // resolved value (rename returns `void`): the name this operation
-    // asked for IS the acknowledged value, so the ledger settles it
-    // against the value already on screen and writes nothing. What the
-    // ledger does provide is ownership — a rename that fails after a
-    // newer rename succeeded no longer restores its own stale prior,
-    // and the same holds when another window's `node-renamed` lands
-    // while this one is in flight.
-    await withOptimistic({
-      surface: optimisticSurface,
-      ledger: optimisticLedger,
-      nodeId: id,
-      optimisticPatch: { name },
-      mutation: () => api.renameAgentNode(id, name),
-    });
-  },
-
-  setNodePinned: async (nodeId, pinned) => {
-    // Optimistic patch so the Pinned Grid view re-renders instantly on
-    // a click. The backend's returned row is authoritative for `is_pinned`
-    // and for nothing else (issue #2325): its `status`/`name`/session
-    // columns are read at response time and are routinely older than the
-    // lifecycle and rename observations that landed while the IPC was in
-    // flight, so adopting the whole row erased them. On rejection the
-    // ledger restores the last acknowledged pin value, and only when no
-    // newer pin operation or event owns that column.
-    return withOptimistic({
-      surface: optimisticSurface,
-      ledger: optimisticLedger,
-      nodeId,
-      optimisticPatch: { is_pinned: pinned },
-      mutation: () => api.setNodePinned(nodeId, pinned),
-      adoptResult: (updated) => updated,
-    });
-  },
-
-  toggleNodePinned: async (nodeId) => {
-    // Optimistic flip — the visible state is `!prior.is_pinned` until
-    // the backend confirms. Same ownership and scoped-adoption policy as
-    // `setNodePinned` (issue #2325). Compute the flipped value up front so
-    // the ledger claims one value to reconcile against; the helper's
-    // `prior` capture handles the "node not loaded" throw.
-    const prior = get().nodesById[nodeId];
-    if (!prior) {
-      throw new Error(`toggleNodePinned: node ${nodeId} is not loaded`);
-    }
-    return withOptimistic({
-      surface: optimisticSurface,
-      ledger: optimisticLedger,
-      nodeId,
-      optimisticPatch: { is_pinned: !prior.is_pinned },
-      mutation: () => api.toggleNodePinned(nodeId),
-      adoptResult: (updated) => updated,
-    });
-  },
-
-  // Drag-to-reorder: move `nodeId` to flat `insertIndex` within its own mesh's
-  // ordered list, renumber positions 0..n-1, and persist. Optimistic so the
-  // grid rearranges instantly; a backend failure resyncs from the DB. Order is
-  // mesh-scoped — other meshes' nodes are never touched (matches the
-  // same-mesh-only drag guard in the UI). The merged array is re-sorted by
-  // (mesh_id, position) to mirror `list_agent_nodes`' ordering exactly.
-  reorderAgentNode: async (nodeId, insertIndex) => {
-    const dragged = get().nodesById[nodeId];
-    if (!dragged) return;
-    const meshId = dragged.mesh_id;
-
-    const meshNodes = get().nodeIds
-      .map(id => get().nodesById[id])
-      .filter((n): n is AgentNode => n !== undefined && n.mesh_id === meshId)
-      .sort((a, b) => a.position - b.position);
-    const from = meshNodes.findIndex(n => n.id === nodeId);
-    if (from === -1) return;
-
-    let to = insertIndex;
-    meshNodes.splice(from, 1);
-    if (from < to) to -= 1; // removing an earlier element shifts the target left
-    to = Math.max(0, Math.min(to, meshNodes.length));
-    meshNodes.splice(to, 0, dragged);
-    if (from === to) return; // no-op (e.g. dropped on its own boundary)
-
-    const renumbered = meshNodes.map((n, i) => ({ ...n, position: i }));
-    await persistPositions(set, get, renumbered);
-  },
-
-  // Swap the grid slots of two nodes in the same mesh by exchanging their
-  // `position` values. Only those two rows change, so we send just two updates.
-  swapAgentNodes: async (aId, bId) => {
-    if (aId === bId) return;
-    const a = get().nodesById[aId];
-    const b = get().nodesById[bId];
-    if (!a || !b || a.mesh_id !== b.mesh_id) return;
-
-    const swapped = get().nodeIds
-      .map(id => get().nodesById[id])
-      .filter((n): n is AgentNode => n !== undefined && n.mesh_id === a.mesh_id)
-      .map(n => n.id === aId ? { ...n, position: b.position }
-                : n.id === bId ? { ...n, position: a.position }
-                : n);
-    await persistPositions(set, get, swapped);
-  },
+  ...createMutationSlice(set, get, optimisticSurface, optimisticLedger),
 
   setActiveNode: (id) => { set({ activeNodeId: id }); },
 
-  spawnAgent: async (nodeId, provider, rowsOrOptions, maybeCols) => {
-    const options: SpawnAgentOptions =
-      typeof rowsOrOptions === 'object' && rowsOrOptions !== null
-        ? rowsOrOptions
-        : {
-            rows: typeof rowsOrOptions === 'number' ? rowsOrOptions : undefined,
-            cols: maybeCols,
-          };
-    const node = get().nodesById[nodeId];
-    if (!node || node.status === 'archived') return;
-    const request = Symbol('spawn');
-    spawnRequests.set(nodeId, request);
-    failedAutoSpawns.delete(nodeId);
-    nodeRevision += 1;
-    const intent = resolveSpawnAgentIntent(options, node);
-    // Flip idle → spawning *before* the first await so Terminal's
-    // auto-spawn effect (keyed on `status === 'idle'`) cannot start a
-    // second spawn_agent while this one is in flight. Issue #1384 —
-    // optimistic patch goes through `nodesById` so other entries keep
-    // their identity.
-    if (['idle', 'error', 'suspended'].includes(node.status)) {
-      set((state) => ({
-        nodesById: {
-          ...state.nodesById,
-          [nodeId]: { ...state.nodesById[nodeId]!, status: 'spawning' },
-        },
-      }));
-    }
-    try {
-      await api.spawnAgent({
-        sessionId: nodeId,
-        provider,
-        intent,
-        rows: options.rows ?? null,
-        cols: options.cols ?? null,
-      });
-      if (spawnRequests.get(nodeId) !== request) return;
-    } catch (e) {
-      // The central IPC wrapper (src/lib/tauri.ts → _invoke) already logs
-      // every rejection to buildmesh.log as `[IPC:spawn_agent] args=… — <err>`,
-      // so the prior `console.error` here produced a duplicate entry. The
-      // store-side catch keeps doing two things the wrapper does not: it
-      // surfaces the error on `state.error` for the UI to render, and it
-      // re-throws so the caller's catch can react. Issue #1384 —
-      // patch through `nodesById` so other entries keep their identity.
-      const current = get().nodesById[nodeId];
-      if (spawnRequests.get(nodeId) === request && current &&
-          ['idle', 'spawning', 'error'].includes(current.status)) {
-        failedAutoSpawns.add(nodeId);
-        nodeRevision += 1;
-        set((state) => ({
-          nodesById: {
-            ...state.nodesById,
-            [nodeId]: { ...state.nodesById[nodeId]!, status: 'error' },
-          },
-          error: formatError(e),
-        }));
-      }
-      throw e;
-    } finally {
-      if (spawnRequests.get(nodeId) === request) spawnRequests.delete(nodeId);
-    }
-    // List refresh is independent of launch success. A failed refresh must
-    // never reclassify a provider that the backend has already launched.
-    await get().fetchAgentNodes();
-  },
-
-  regenerateAgentNode: async (nodeId, newProviderId) => {
-    try {
-      // The backend's returned `AgentNode` is the pre-spawn snapshot
-      // (services::agent_node::regenerate reloads after the provider
-      // UPDATE but BEFORE `spawn_agent_inner` mutates status / captures
-      // `cli_session_id` / fires the `agent-spawned` event). A local
-      // patch from that snapshot would clobber the event-driven state
-      // — match `spawnAgent`'s pattern below and refetch instead. The
-      // refetch reads the DB, which `spawn_agent_inner` has already
-      // written, so the new `provider` / `cli_session_id` / `status`
-      // all line up.
-      await api.regenerateAgentNode(nodeId, newProviderId);
-      await get().fetchAgentNodes();
-      const updated = get().nodesById[nodeId];
-      if (!updated) {
-        throw new Error(`regenerate_agent_node: node ${nodeId} not found after refetch`);
-      }
-      return updated;
-    } catch (e) {
-      set({ error: formatError(e) });
-      throw e;
-    }
-  },
-
-  restartFreshAgent: async (nodeId, options) => {
-    const node = get().nodesById[nodeId];
-    if (!node) {
-      throw new Error(`Node ${nodeId} not found`);
-    }
-    return get().spawnAgent(nodeId, node.provider, { ...options, fresh: true });
-  },
-
-  spawnHandoverAgent: async (meshId: number, prefill: string, provider?: string) => {
-    try {
-      const node = await api.spawnHandoverAgent(meshId, prefill, provider);
-      set((state) => ({
-        nodesById: { ...state.nodesById, [node.id]: node },
-        nodeIds: state.nodeIds.includes(node.id) ? state.nodeIds : [...state.nodeIds, node.id],
-      }));
-      await get().fetchAgentNodes();
-      return node;
-    } catch (e) {
-      // Toast here rather than `state.error`: App.tsx already turns that
-      // field into a generic "System" toast, and the terminal catch would
-      // otherwise stack a second copy of the same sentence.
-      addToast('Handover', formatError(e), 'error');
-      throw e;
-    }
-  },
-
-  killAgent: async (nodeId) => {
-    try {
-      await api.killAgent(nodeId);
-      // Issue #1530 — the agent's PTY is gone, so anything the transport's
-      // retry buffer is still holding for it can never be delivered. Cancel the
-      // lane instead of leaving it to retry against a dead process: the
-      // keystrokes settle as `closed` and the lane is released.
-      api.cancelTerminalInput(nodeId);
-      await get().fetchAgentNodes();
-    } catch (e) {
-      set({ error: formatError(e) });
-    }
-  },
-
-  sendToAgent: async (nodeId, input) => {
-    try {
-      await api.sendToAgent(nodeId, input);
-    } catch (e) {
-      set({ error: formatError(e) });
-    }
-  },
-
-  writeToAgent: async (nodeId, data) => {
-    try {
-      await api.writeToAgent(nodeId, data);
-    } catch (e) {
-      set({ error: formatError(e) });
-    }
-  },
-
-  handoverToNode: async (nodeId, text) => {
-    try {
-      await api.handoverToAgent(nodeId, text);
-    } catch (e) {
-      set({ error: formatError(e) });
-    }
-  },
-
-  clearAttention: async (nodeId) => {
-    try { await api.clearAttentionNode(nodeId); } catch (e) { set({ error: formatError(e) }); }
-  },
+  ...createLifecycleSlice(set, get, runtime),
 
   setSemanticTurn: (id, turn) => {
     set((state) => {

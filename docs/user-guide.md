@@ -115,6 +115,9 @@ Help contains the advanced keyboard shortcuts.
    Git can read the repository and that the base ref is the one you expect. A
    folder with no Git repository behind it is still a usable Mesh — it just starts
    with **Use worktree** off, because there is no repository to cut worktrees from.
+   The New mesh dialog opens with keyboard focus on **Choose folder…**, the step
+   it cannot continue without, so you can pick a folder and submit without
+   reaching for the mouse.
 4. Use the provider control in the sidebar to choose a harness, then create an
    Agent Node. `Ctrl+T` (`Cmd+T` on macOS) opens the new-node flow.
 5. Give the node a focused task. Watch the terminal and the node status; an

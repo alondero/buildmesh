@@ -312,10 +312,11 @@ export function DataRecoverySection() {
           />
           <span>Leave credentials out of the export (recommended)</span>
         </label>
-        <p className="text-xs text-text-muted">
-          An export never contains provider API keys, the remote-access token, paired devices, the
-          LAN HTTPS certificate and its private key, or terminal transcripts. Turning this off keeps
-          your API keys and tokens in the file.
+        <p className="text-xs text-text-muted" data-testid="settings-data-recovery-redact-help">
+          Ticked, an export leaves out your provider API keys, the remote-access token and any
+          paired devices. The LAN HTTPS certificate and its private key, and terminal transcripts,
+          are never exported at all. Unticking it carries your API keys and tokens into the file
+          instead.
         </p>
 
         {exported && (
@@ -368,7 +369,7 @@ export function DataRecoverySection() {
               type="button"
               onClick={handleStage}
               disabled={disabled}
-              className="px-4 py-2 bg-status-error text-bg-card font-medium text-base rounded-md hover:opacity-90 disabled:opacity-50"
+              className="px-4 py-2 bg-status-error text-white font-medium text-base rounded-md hover:opacity-90 disabled:opacity-50"
               data-testid="settings-data-recovery-stage"
             >
               {busy === 'stage' ? 'Staging…' : 'Restore this state'}

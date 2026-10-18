@@ -22,6 +22,7 @@ use super::evidence::{
 use crate::circuit::model::{
     CircuitGraph, CircuitNodeKind, GithubActionKind, CIRCUIT_SWEEP_NOTE_PREFIX,
 };
+use crate::db::DbError;
 use crate::models::{AutopilotCircuitRun, AutopilotCircuitRunStep, SessionStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
@@ -109,7 +110,7 @@ enum AgentCondition {
     Live,
 }
 
-fn agent_condition(db: &Connection, agent: Option<i64>) -> Result<AgentCondition, String> {
+fn agent_condition(db: &Connection, agent: Option<i64>) -> Result<AgentCondition, DbError> {
     let Some(id) = agent else {
         return Ok(AgentCondition::Missing);
     };
@@ -125,7 +126,7 @@ fn agent_condition(db: &Connection, agent: Option<i64>) -> Result<AgentCondition
                 AgentCondition::Live
             },
         ),
-        Err(error) => Err(error.to_string()),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -210,16 +211,13 @@ fn reopen_blocker(
     run: &AutopilotCircuitRun,
     steps: &[AutopilotCircuitRunStep],
     graph: &CircuitGraph,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, DbError> {
     if let Some(source) = run.source_agent_node_id {
-        if let Some(other) =
-            super::ledger::find_live_run_for_source_inner(db, source).map_err(|e| e.to_string())?
-        {
+        if let Some(other) = super::ledger::find_live_run_for_source_inner(db, source)? {
             return Ok(Some(format!("Run #{other} is already using this agent.")));
         }
     }
-    let closing =
-        super::leases::run_has_agents_being_cleaned(db, run.id).map_err(|e| e.to_string())?;
+    let closing = super::leases::run_has_agents_being_cleaned(db, run.id)?;
     if closing {
         return Ok(Some(
             "Autopilot is still closing one of this run's agents. Try again in a moment.".into(),
@@ -262,7 +260,7 @@ pub(crate) fn build_recovery(
     run: &AutopilotCircuitRun,
     graph: &CircuitGraph,
     steps: &[AutopilotCircuitRunStep],
-) -> Result<Option<RunRecovery>, String> {
+) -> Result<Option<RunRecovery>, DbError> {
     if run.state != "failed" {
         return Ok(None);
     }
@@ -302,7 +300,7 @@ pub(crate) fn build_recovery(
 }
 
 /// Reopen a failed run at its failed step, as the person asked.
-pub fn recover_failed_run(request: &RecoveryRequest) -> Result<(), String> {
+pub fn recover_failed_run(request: &RecoveryRequest) -> Result<(), DbError> {
     let mut db = crate::db::write_conn();
     recover_failed_run_locked(&mut db, request)
 }
@@ -310,45 +308,52 @@ pub fn recover_failed_run(request: &RecoveryRequest) -> Result<(), String> {
 pub(crate) fn recover_failed_run_locked(
     db: &mut Connection,
     request: &RecoveryRequest,
-) -> Result<(), String> {
+) -> Result<(), DbError> {
     let reason = request.reason.trim();
-    let tx = db.transaction().map_err(|e| e.to_string())?;
-    if revision_moved(&tx, request.run_id, request.expected_revision).map_err(|e| e.to_string())? {
-        return Err("The run changed. Refresh it before acting.".into());
+    let tx = db.transaction()?;
+    if revision_moved(&tx, request.run_id, request.expected_revision)? {
+        return Err(DbError::conflict(
+            "The run changed. Refresh it before acting.",
+        ));
     }
-    let run = super::ledger::get_circuit_run_inner(&tx, request.run_id)
-        .map_err(|e| e.to_string())?
-        .ok_or("Run no longer exists.")?;
+    let run = super::ledger::get_circuit_run_inner(&tx, request.run_id)?
+        .ok_or_else(|| DbError::not_found("Run no longer exists."))?;
     if run.state != "failed" {
-        return Err("Only a failed run can be recovered this way.".into());
+        return Err(DbError::invalid(
+            "Only a failed run can be recovered this way.",
+        ));
     }
-    let steps =
-        super::ledger::list_circuit_run_steps_inner(&tx, run.id).map_err(|e| e.to_string())?;
+    let steps = super::ledger::list_circuit_run_steps_inner(&tx, run.id)?;
     let graph = run_graph(&tx, run.id)?;
     let recovery = build_recovery(&tx, &run, &graph, &steps)?
         .filter(|recovery| {
             recovery.node_id == request.node_id && recovery.attempt == request.attempt
         })
-        .ok_or("This failure changed. Refresh before acting.")?;
+        .ok_or_else(|| DbError::conflict("This failure changed. Refresh before acting."))?;
     let option = recovery
         .options
         .iter()
         .find(|option| option.action == request.action)
         .ok_or_else(|| {
-            "The recovery action is no longer available. Refresh the run and try again.".to_string()
+            DbError::conflict(
+                "The recovery action is no longer available. Refresh the run and try again.",
+            )
         })?;
     if let Some(reason) = &option.unavailable_reason {
-        return Err(reason.clone());
+        // `unavailable_reason` is serialized into the recovery view, so it is
+        // `String` there by design; this is the one place it becomes an error,
+        // and it arrives already rendered.
+        return Err(reason.clone().into());
     }
     let kind = graph
         .node(&request.node_id)
         .map(|node| node.kind.clone())
-        .ok_or("The step is no longer in this blueprint.")?;
+        .ok_or_else(|| DbError::not_found("The step is no longer in this blueprint."))?;
 
     // The failed step's own working state is cleared so it is judged afresh;
     // every other step and every earlier history entry is kept.
     let mut context: std::collections::BTreeMap<String, String> =
-        serde_json::from_str(&run.context_json).map_err(|e| e.to_string())?;
+        serde_json::from_str(&run.context_json)?;
     let own_prefix = format!("node.{}.", request.node_id);
     context.retain(|key, _| !key.starts_with(&own_prefix));
     context.insert("operator.recovered".into(), "1".into());
@@ -365,8 +370,7 @@ pub(crate) fn recover_failed_run_locked(
                      parent_agent_node_id = CASE WHEN ?3 THEN NULL ELSE parent_agent_node_id END
                  WHERE run_id = ?1 AND node_id = ?2",
                 params![run.id, request.node_id, spawn],
-            )
-            .map_err(|e| e.to_string())?;
+            )?;
             let detail = if reason.is_empty() {
                 "Operator retried this step as a new attempt.".to_string()
             } else {
@@ -383,8 +387,7 @@ pub(crate) fn recover_failed_run_locked(
                     source: Some(SOURCE_OPERATOR),
                     disposition: Some(DISPOSITION_APPLIED),
                 },
-            )
-            .map_err(|e| e.to_string())?;
+            )?;
         }
         RecoveryAction::Continue => {
             let effect_kind = match kind {
@@ -399,8 +402,7 @@ pub(crate) fn recover_failed_run_locked(
                      ON CONFLICT(run_id, node_id, attempt, kind)
                      DO UPDATE SET state = 'attested_completed'",
                     params![run.id, request.node_id, request.attempt, effect_kind],
-                )
-                .map_err(|e| e.to_string())?;
+                )?;
             }
             tx.execute(
                 "UPDATE autopilot_circuit_run_steps
@@ -408,8 +410,7 @@ pub(crate) fn recover_failed_run_locked(
                      completed_at = datetime('now')
                  WHERE run_id = ?1 AND node_id = ?2",
                 params![run.id, request.node_id],
-            )
-            .map_err(|e| e.to_string())?;
+            )?;
             context.insert(
                 format!("node.{}.status", request.node_id),
                 "completed".into(),
@@ -430,8 +431,7 @@ pub(crate) fn recover_failed_run_locked(
                     source: Some(SOURCE_OPERATOR),
                     disposition: Some("completed"),
                 },
-            )
-            .map_err(|e| e.to_string())?;
+            )?;
         }
     }
 
@@ -446,22 +446,16 @@ pub(crate) fn recover_failed_run_locked(
             request.node_id,
             format!("{CIRCUIT_SWEEP_NOTE_PREFIX}%")
         ],
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
     tx.execute(
         "UPDATE autopilot_circuit_runs
          SET state = 'pending', context_json = ?2, updated_at = datetime('now'),
              queue_position = (SELECT COALESCE(MAX(queue_position), 0) + 1
                                FROM autopilot_circuit_runs WHERE mesh_id = ?3)
          WHERE id = ?1 AND state = 'failed'",
-        params![
-            run.id,
-            serde_json::to_string(&context).map_err(|e| e.to_string())?,
-            run.mesh_id
-        ],
-    )
-    .map_err(|e| e.to_string())?;
-    tx.commit().map_err(|e| e.to_string())
+        params![run.id, serde_json::to_string(&context)?, run.mesh_id],
+    )?;
+    Ok(tx.commit()?)
 }
 
 #[cfg(test)]
@@ -604,7 +598,7 @@ mod tests {
         node: &str,
         action: RecoveryAction,
         reason: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), DbError> {
         let request = request(conn, node, action, reason);
         recover_failed_run_locked(conn, &request)
     }
@@ -851,7 +845,8 @@ mod tests {
             RecoveryAction::Retry,
             "",
         )
-        .unwrap_err();
+        .unwrap_err()
+        .to_string();
         assert!(refused.contains("Resume it from Archive"));
         assert_eq!(run_state(&conn), "failed");
 
@@ -921,7 +916,8 @@ mod tests {
             RecoveryAction::Continue,
             "looks good to me",
         )
-        .unwrap_err();
+        .unwrap_err()
+        .to_string();
         assert!(refused.contains("Review again"));
         assert_eq!(run_state(&conn), "failed");
     }
@@ -1045,7 +1041,9 @@ mod tests {
             },
         )
         .unwrap();
-        let error = recover_failed_run_locked(&mut conn, &stale).unwrap_err();
+        let error = recover_failed_run_locked(&mut conn, &stale)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("changed"), "{error}");
 
         for state in ["running", "completed", "cancelled", "pending"] {
@@ -1054,7 +1052,9 @@ mod tests {
                 [state],
             )
             .unwrap();
-            let error = recover(&mut conn, "finish", RecoveryAction::Retry, "").unwrap_err();
+            let error = recover(&mut conn, "finish", RecoveryAction::Retry, "")
+                .unwrap_err()
+                .to_string();
             assert!(error.contains("Only a failed run"), "{state}: {error}");
         }
 
@@ -1065,7 +1065,9 @@ mod tests {
         .unwrap();
         let mut elsewhere = request(&conn, "finish_classifier", RecoveryAction::Retry, "");
         elsewhere.node_id = "finish_classifier".into();
-        let error = recover_failed_run_locked(&mut conn, &elsewhere).unwrap_err();
+        let error = recover_failed_run_locked(&mut conn, &elsewhere)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("This failure changed"), "{error}");
     }
 

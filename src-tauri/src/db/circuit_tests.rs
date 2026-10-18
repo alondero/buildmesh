@@ -242,6 +242,7 @@ fn copied_review_continuation_requires_the_frozen_review_contract() {
     .unwrap();
     assert!(review_recovery_inner(&conn, changed, 2)
         .unwrap_err()
+        .to_string()
         .contains("manual recovery"));
 }
 
@@ -283,12 +284,16 @@ fn review_blueprint_copy_is_authorized_only_from_the_built_in_and_survives_sourc
         .id;
 
     assert_eq!(
-        copy_review_blueprint_locked(&mut conn, blueprint, "   ").unwrap_err(),
+        copy_review_blueprint_locked(&mut conn, blueprint, "   ")
+            .unwrap_err()
+            .to_string(),
         "Give the Circuit a name."
     );
     let copy = copy_review_blueprint_locked(&mut conn, blueprint, "Independent review").unwrap();
     assert_eq!(
-        copy_review_blueprint_locked(&mut conn, copy.id, "Second copy").unwrap_err(),
+        copy_review_blueprint_locked(&mut conn, copy.id, "Second copy")
+            .unwrap_err()
+            .to_string(),
         "Select a built-in Review Blueprint to copy.",
         "a user Circuit is not a copyable source"
     );
@@ -600,6 +605,7 @@ fn continued_review_dispatches_only_review_work_and_records_the_run_it_continues
     assert!(
         create_node_circuit_run_recovery_locked(&mut conn, retry, 1)
             .unwrap_err()
+            .to_string()
             .contains("cancelled"),
         "a cancelled successor closes the lineage; the ancestor cannot mint around it"
     );
@@ -1439,6 +1445,7 @@ fn failed_review_continuation_keeps_history_and_borrows_the_same_worktree() {
         .unwrap();
     assert!(review_recovery_inner(&conn, old, 1)
         .unwrap_err()
+        .to_string()
         .contains("Only failed"));
     commit_circuit_advance_locked(
         &mut conn,
@@ -1507,6 +1514,7 @@ fn failed_review_continuation_keeps_history_and_borrows_the_same_worktree() {
     assert!(
         create_node_circuit_run_recovery_locked(&mut conn, plan, 1)
             .unwrap_err()
+            .to_string()
             .contains("cancelled"),
         "requesting the ancestor again cannot bypass cancellation of its successor"
     );
@@ -1635,6 +1643,7 @@ fn extending_legacy_local_review_accepts_the_run_482_topology() {
     .unwrap();
     assert!(review_recovery_inner(&conn, run_id, 5)
         .unwrap_err()
+        .to_string()
         .contains("custom circuit needs manual recovery"));
 }
 
@@ -1886,6 +1895,7 @@ fn extending_failed_review_reuses_its_run_and_circuit_with_a_fresh_attempt() {
     cancel_circuit_run_locked(&mut conn, run_id).unwrap();
     assert!(extend_failed_review_locked(&mut conn, run_id, 1)
         .unwrap_err()
+        .to_string()
         .contains("Cancelled reviews require a fresh review"));
 }
 
@@ -2182,6 +2192,7 @@ fn failed_pr_review_continuation_preserves_scope_and_fences_cleanup() {
     .unwrap();
     assert!(create_node_circuit_run_recovery_locked(&mut conn, plan, 1)
         .unwrap_err()
+        .to_string()
         .contains("still being stopped"));
     assert_eq!(count_active_circuit_runs_inner(&conn, mesh.id).unwrap(), 0);
     release_circuit_agent_cleanup_inner(&conn, source.id, &cleanup).unwrap();
@@ -2232,6 +2243,7 @@ fn node_circuit_rejects_other_mesh_and_nonmanual_blueprints() {
     assert!(
         create_node_circuit_run_locked(&mut conn, source.id, Some(foreign.id), 3, None)
             .unwrap_err()
+            .to_string()
             .contains("manual Circuit")
     );
     let interval = CircuitGraph::triggered_skeleton(
@@ -2335,7 +2347,8 @@ fn node_review_rejects_terminal_reviewer_and_collapses_blank() {
     for picked in ["terminal", "  terminal  ", "terminal:minimax"] {
         let err =
             create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some(picked.into()))
-                .unwrap_err();
+                .unwrap_err()
+                .to_string();
         assert!(
             err.contains("Terminal"),
             "{picked:?} must be rejected, got {err:?}"
@@ -2355,7 +2368,8 @@ fn node_review_rejects_terminal_reviewer_and_collapses_blank() {
     ] {
         let err =
             create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some(picked.into()))
-                .unwrap_err();
+                .unwrap_err()
+                .to_string();
         assert!(
             err.contains(name),
             "{picked:?} must name the harness ({name}), got {err:?}"
@@ -2493,7 +2507,9 @@ fn node_review_refuses_stale_ineligible_app_wide_reviewer_on_inherit() {
     )
     .unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
-    let err = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None).unwrap_err();
+    let err = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None)
+        .unwrap_err()
+        .to_string();
     assert!(
         err.contains("Freebuff"),
         "stale value must name the harness, got {err:?}"
@@ -2892,8 +2908,9 @@ fn pending_run_queue_supports_jump_to_edge_and_explicit_reorder() {
 
     // Stale payload (unknown id) aborts with a domain error the UI can show,
     // never a raw SQLite syntax error.
-    let err =
-        reorder_queued_circuit_runs_locked(&mut conn, mesh.id, &[first, 999_999]).unwrap_err();
+    let err = reorder_queued_circuit_runs_locked(&mut conn, mesh.id, &[first, 999_999])
+        .unwrap_err()
+        .to_string();
     assert!(
         err.contains("refresh and retry"),
         "unexpected error: {}",
@@ -2907,7 +2924,9 @@ fn pending_run_queue_supports_jump_to_edge_and_explicit_reorder() {
 
     // Partial subset aborts: reordering 2 of 3 would collide positions with
     // the unpassed row.
-    let err = reorder_queued_circuit_runs_locked(&mut conn, mesh.id, &[first, second]).unwrap_err();
+    let err = reorder_queued_circuit_runs_locked(&mut conn, mesh.id, &[first, second])
+        .unwrap_err()
+        .to_string();
     assert!(
         err.contains("expected 3 pending runs"),
         "unexpected error: {}",
@@ -2923,7 +2942,8 @@ fn pending_run_queue_supports_jump_to_edge_and_explicit_reorder() {
 
     // Duplicate ids abort.
     let err = reorder_queued_circuit_runs_locked(&mut conn, mesh.id, &[first, first, second])
-        .unwrap_err();
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("duplicate"), "unexpected error: {}", err);
 }
 

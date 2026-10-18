@@ -215,9 +215,12 @@ export function GeneralPane() {
 
       {/* Appearance — per-machine colour theme. */}
       <SettingsSection title="Appearance">
+        {/* Issue #2467 — no `htmlFor` here: `<fieldset>` is not a labelable
+            element, so a `<label for="theme-radio-group">` resolving to it
+            left `label.control === null` and an orphaned association. The
+            fieldset carries `aria-label="Theme"` as its own accessible name. */}
         <SettingsRow
           label="Theme"
-          htmlFor="theme-radio-group"
           summary="Colour theme for the app and terminals."
           layout="stacked"
           details={
