@@ -294,6 +294,11 @@ jobs:
           # a draft — but an empty body would blank the published notes the
           # moment anyone turned releaseDraft off. Leave it out rather than
           # leave it out wrongly.
+          #
+          # This comment is load-bearing with the line below it: if releaseDraft
+          # is ever turned into an input, restore releaseBody here from the same
+          # docs/releases note the Windows job reads, or gate this action so it
+          # cannot update a published release without a body.
           releaseDraft: true
           prerelease: false
           # --config selects the overlay that turns on updater artifacts and

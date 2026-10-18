@@ -8,8 +8,9 @@ import { fileURLToPath } from 'node:url';
 
 import {
   assetNameFromUrl,
-  normaliseAssets,
+  extractAssetList,
   parseArgs,
+  platformBase,
   resolveAssets,
   signatureProblems,
   verifyFeed,
@@ -17,22 +18,31 @@ import {
 
 const SCRIPT = fileURLToPath(new URL('../../scripts/ci/verify-updater-feed.mjs', import.meta.url));
 
-// A minisign signature: two base64 payload lines bracketed by comment lines,
-// which is what `tauri build` writes to `<archive>.sig` and what tauri-action
-// copies into latest.json. The payloads are base64-encoded rather than
-// hand-written so their length is always a multiple of four — the checker
-// rejects a payload that is not, exactly as a real truncated signature would.
+// A minisign signature, in the shape that actually ships. Tauri stores the
+// signature as a base64 encoding of minisign's four-line output, which is what
+// a published `latest.json` really contains — not the bare lines. The first
+// fixture below is a byte-for-byte copy of the v1.4.1 feed's entry so the
+// format is pinned to reality rather than to an assumption.
+const REAL_SIGNATURE =
+  'dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUZDBKcldqL2hVdDdZcWxJaHpVZVhMVVZqQ2gydzFqZDRkcUVRM3FiTWZOeVdscUE5SWZqeVZ5RHJyUGNIR3VnQjJlSm55OE93OWRaNHpEc3JBZURPbHdueDRzRjhlblFNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxOTMyMzQxCWZpbGU6QnVpbGRtZXNoXzEuNC4xX3g2NF9lbi1VUy5tc2kJdmVyc2lvbjoxLjQuMQpvNTVWYU1xemVUQUp4THIyUE5DMk1pT25uK3pvMWNzSUVpbWpMeDQvSExKdHFJbWxNdUY4UGdJb3dmcGZhMVNHdlVPT3lhUlN3TCtUU2NHTXphcmRCdz09Cg==';
+
 function payload(text) {
   return Buffer.from(text, 'utf8').toString('base64');
 }
 
-function minisign() {
+// The plain minisign output, used to build the encoded form below.
+function minisignText() {
   return [
     'untrusted comment: signature from minisign secret key',
     payload('ed25519 signature over the updater archive'),
     'trusted comment: timestamp:1755500000\tfile:Buildmesh.app.tar.gz',
     payload('global signature over the trusted comment line'),
   ].join('\n');
+}
+
+// What Tauri actually writes into latest.json: the whole thing, base64'd.
+function minisign() {
+  return Buffer.from(minisignText(), 'utf8').toString('base64');
 }
 
 const ENTRIES = {
@@ -99,6 +109,21 @@ test('an entry with an empty signature is rejected', () => {
   assert.match(problems[0], /signature is missing or empty/);
 });
 
+test('a signature copied from the real v1.4.1 feed is accepted', () => {
+  // The regression this pins: the checker used to require two bare base64
+  // payload lines, which is minisign's *print* format. Tauri stores the whole
+  // thing base64-encoded, so the real entry looked like one opaque line and
+  // every published release would have failed.
+  assert.deepEqual(signatureProblems(REAL_SIGNATURE, 'entry'), []);
+  const decoded = Buffer.from(REAL_SIGNATURE, 'base64').toString('utf8');
+  assert.match(decoded, /^untrusted comment:/);
+  assert.match(decoded, /trusted comment: timestamp:1791932341/);
+});
+
+test('raw minisign output is accepted too, in case a future Tauri stores it', () => {
+  assert.deepEqual(signatureProblems(minisignText(), 'entry'), []);
+});
+
 test('a truncated signature is rejected, not accepted as "some base64"', () => {
   const platforms = {
     ...ENTRIES,
@@ -106,7 +131,7 @@ test('a truncated signature is rejected, not accepted as "some base64"', () => {
   };
   const problems = verifyFeed(feed(platforms), { expectedVersion: '1.5.0', requiredEntries: REQUIRED });
   assert.equal(problems.length, 1);
-  assert.match(problems[0], /expected a minisign signature \(2 base64 lines\)/);
+  assert.match(problems[0], /neither a base64 minisign signature nor raw minisign output/);
 });
 
 test('a non-base64 payload is rejected', () => {
@@ -115,13 +140,20 @@ test('a non-base64 payload is rejected', () => {
     'entry',
   );
   assert.equal(problems.length, 1);
-  assert.match(problems[0], /not valid base64/);
+  assert.match(problems[0], /neither a base64 minisign signature nor raw minisign output/);
 });
 
 test('base64 with no minisign comment framing is rejected', () => {
   const problems = signatureProblems('QUJDREVG\nR0hJSktM', 'entry');
   assert.equal(problems.length, 1);
-  assert.match(problems[0], /no 'untrusted comment:' line/);
+  assert.match(problems[0], /neither a base64 minisign signature nor raw minisign output/);
+});
+
+test('base64 that decodes to something without a trusted comment is rejected', () => {
+  // The encoded form is accepted only when it *decodes* to a whole signature;
+  // a blob that merely looks like base64 must not pass.
+  const partial = Buffer.from('untrusted comment: x\nQUJDREVG\n', 'utf8').toString('base64');
+  assert.equal(signatureProblems(partial, 'entry').length, 1);
 });
 
 test('a non-https url is rejected', () => {
@@ -225,17 +257,77 @@ test('asset names are read from api and browser url forms alike', () => {
   assert.equal(assetNameFromUrl('https://example.invalid/a/b/app.tar.gz?token=x'), 'app.tar.gz');
 });
 
-test('gh release assets and bare names normalise to the same list', () => {
-  assert.deepEqual(normaliseAssets([{ name: 'a.dmg' }, 'b.dmg']), ['a.dmg', 'b.dmg']);
-  assert.equal(normaliseAssets(null), null);
+// The real shape of `gh release view --json assets`, trimmed to the fields that
+// matter. Captured from an actual release rather than invented, because the
+// whole point of these tests is that the catalog matches what gh emits.
+function ghAsset(name, numericId) {
+  return {
+    apiUrl: `https://api.github.com/repos/o/r/releases/assets/${numericId}`,
+    contentType: 'application/octet-stream',
+    createdAt: '2026-10-13T23:04:55Z',
+    // Note: this is the GraphQL *node* id, not the numeric REST asset id. It is
+    // present in the payload and must not be used to resolve a feed entry.
+    id: 'RA_kwDOSMYi3c4mDtm6',
+    label: '',
+    name,
+    size: 1024,
+    state: 'uploaded',
+    updatedAt: '2026-10-13T23:04:56Z',
+    url: `https://github.com/o/r/releases/download/v1.5.0/${name}`,
+  };
+}
+
+function ghAssetsEnvelope() {
+  return {
+    assets: [
+      ghAsset('Buildmesh_1.5.0_x64-setup.exe', 11),
+      ghAsset('Buildmesh_1.5.0_aarch64.app.tar.gz', 22),
+      ghAsset('Buildmesh_1.5.0_x86_64.app.tar.gz', 33),
+    ],
+  };
+}
+
+test('the gh envelope is unwrapped rather than read as an absent catalog', () => {
+  assert.equal(extractAssetList(ghAssetsEnvelope()).length, 3);
+  assert.deepEqual(extractAssetList(['a.dmg']), ['a.dmg']);
+  // An unrecognised shape is null, which the CLI treats as an error.
+  assert.equal(extractAssetList({ nope: [] }), null);
+  assert.equal(extractAssetList(null), null);
 });
 
-test('the asset index carries both ids and names', () => {
-  const index = resolveAssets([
-    { name: 'a.dmg', url: 'https://api.github.com/repos/o/r/releases/assets/7' },
-    'b.dmg',
-  ]);
-  assert.deepEqual([...index.ids], ['7']);
+test('the catalog takes ids from apiUrl, not from the GraphQL node id', () => {
+  const index = resolveAssets(ghAssetsEnvelope());
+  // The numeric REST ids tauri-action writes into latest.json.
+  assert.deepEqual([...index.ids].sort(), ['11', '22', '33']);
+  assert.equal(index.ids.has('RA_kwDOSMYi3c4mDtm6'), false);
+  // Names come from both `name` and the browser download url.
+  assert.equal(index.names.has('Buildmesh_1.5.0_aarch64.app.tar.gz'), true);
+});
+
+test('a feed pointing at real gh asset ids verifies against real gh output', () => {
+  const problems = verifyFeed(feed(), {
+    expectedVersion: '1.5.0',
+    requiredEntries: REQUIRED,
+    assets: ghAssetsEnvelope(),
+  });
+  assert.deepEqual(problems, []);
+});
+
+test('an id the release does not carry is rejected against real gh output', () => {
+  const envelope = ghAssetsEnvelope();
+  envelope.assets = envelope.assets.filter((asset) => !asset.name.includes('x86_64'));
+  const problems = verifyFeed(feed(), {
+    expectedVersion: '1.5.0',
+    requiredEntries: REQUIRED,
+    assets: envelope,
+  });
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /"darwin-x86_64": points at "33", which is not an asset on this release/);
+});
+
+test('bare asset names and object assets both index', () => {
+  const index = resolveAssets(['a.dmg', { name: 'b.dmg', apiUrl: 'https://api.github.com/repos/o/r/releases/assets/9' }]);
+  assert.deepEqual([...index.ids], ['9']);
   assert.deepEqual([...index.names].sort(), ['a.dmg', 'b.dmg']);
   assert.equal(resolveAssets(null), null);
 });
@@ -302,6 +394,27 @@ test('the script exits 0 on a good feed and 1 on an incomplete one', () => {
   }
 });
 
+test('the primary entry and its installer variant may share one url', () => {
+  // Taken from the real v1.4.1 feed, where tauri-action points
+  // `windows-x86_64` and `windows-x86_64-msi` at the same .msi asset on purpose.
+  // Comparing whole keys instead of the `{os}-{arch}` base flagged every valid
+  // Windows release as a failure.
+  const shared = 'https://api.github.com/repos/alondero/buildmesh/releases/assets/638495693';
+  const platforms = {
+    'windows-x86_64': { signature: minisign(), url: shared },
+    'windows-x86_64-msi': { signature: minisign(), url: shared },
+    'windows-x86_64-nsis': { signature: minisign(), url: `${shared}63` },
+    'darwin-aarch64': { signature: minisign(), url: 'https://api.github.com/repos/alondero/buildmesh/releases/assets/638495700' },
+  };
+  const problems = verifyFeed(feed(platforms), {
+    expectedVersion: '1.5.0',
+    requiredEntries: ['windows-x86_64', 'darwin-aarch64'],
+  });
+  assert.deepEqual(problems, []);
+  assert.equal(platformBase('windows-x86_64-msi'), 'windows-x86_64');
+  assert.equal(platformBase('darwin-aarch64'), 'darwin-aarch64');
+});
+
 test('the script refuses to check nothing when no entry is required', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'updater-feed-'));
   const feedPath = path.join(dir, 'good.json');
@@ -323,4 +436,96 @@ test('the script refuses to check nothing when no entry is required', () => {
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// --- end-to-end CLI coverage for --assets -------------------------------
+//
+// These three exist because the asset check shipped broken three ways at once
+// and 44 in-memory assertions missed all of them: `--assets` was read from the
+// wrong place, the gh envelope was never unwrapped, and the catalog looked for
+// ids in the wrong field. Every one of them made the check silently do nothing
+// or fail everything, and none was visible without running the real command
+// line the workflow runs.
+
+function runCli(args) {
+  try {
+    const stdout = execFileSync(process.execPath, [SCRIPT, ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return { status: 0, stdout, stderr: '' };
+  } catch (error) {
+    return { status: error.status, stdout: error.stdout ?? '', stderr: error.stderr ?? '' };
+  }
+}
+
+function withTempDir(files, body) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'updater-feed-cli-'));
+  const paths = {};
+  for (const [name, content] of Object.entries(files)) {
+    paths[name] = path.join(dir, name);
+    fs.writeFileSync(paths[name], typeof content === 'string' ? content : JSON.stringify(content));
+  }
+  try {
+    return body(paths);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const REQUIRES = [
+  '--expect-version', '1.5.0',
+  '--require', 'windows-x86_64',
+  '--require', 'darwin-aarch64',
+  '--require', 'darwin-x86_64',
+];
+
+test('the CLI honours --assets with real gh output and passes a good feed', () => {
+  withTempDir({ 'feed.json': feed(), 'assets.json': ghAssetsEnvelope() }, ({ 'feed.json': feedPath, 'assets.json': assetsPath }) => {
+    const result = runCli([feedPath, ...REQUIRES, '--assets', assetsPath]);
+    assert.equal(result.status, 0, `expected a clean run, got: ${result.stderr}`);
+    assert.match(result.stdout, /latest\.json 1\.5\.0 verified/);
+  });
+});
+
+test('the CLI fails when a feed entry points at an id the release lacks', () => {
+  // The direct regression for the three reported defects: with `--assets` now
+  // actually loaded, an unresolvable entry has to fail the step.
+  withTempDir({ 'feed.json': feed(), 'assets.json': { assets: [] } }, ({ 'feed.json': feedPath, 'assets.json': assetsPath }) => {
+    const result = runCli([feedPath, ...REQUIRES, '--assets', assetsPath]);
+    assert.equal(result.status, 1, 'an unresolvable entry must fail the step');
+    assert.equal(
+      (result.stderr.match(/which is not an asset on this release/g) ?? []).length,
+      3,
+      'every entry should be reported, not just the first'
+    );
+  });
+});
+
+test('the CLI refuses to skip the asset check when --assets has the wrong shape', () => {
+  // Silently degrading to "no asset check" is the failure mode being designed
+  // out, so valid JSON of an unrecognised shape must be an error, not a pass.
+  for (const bad of [{ nope: [] }, 42]) {
+    withTempDir({ 'feed.json': feed(), 'assets.json': bad }, ({ 'feed.json': feedPath, 'assets.json': assetsPath }) => {
+      const result = runCli([feedPath, ...REQUIRES, '--assets', assetsPath]);
+      assert.equal(result.status, 1, `expected failure for assets.json = ${JSON.stringify(bad)}`);
+      assert.match(result.stderr, /Refusing to run without the asset check/);
+    });
+  }
+});
+
+test('the CLI reports unparseable --assets rather than skipping the check', () => {
+  withTempDir({ 'feed.json': feed(), 'assets.json': 'not json at all' }, ({ 'feed.json': feedPath, 'assets.json': assetsPath }) => {
+    const result = runCli([feedPath, ...REQUIRES, '--assets', assetsPath]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /could not read --assets/);
+  });
+});
+
+test('the CLI reports a missing --assets file rather than skipping the check', () => {
+  withTempDir({ 'feed.json': feed() }, ({ 'feed.json': feedPath }) => {
+    const result = runCli([feedPath, ...REQUIRES, '--assets', path.join(path.dirname(feedPath), 'nope.json')]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /could not read --assets/);
+  });
 });

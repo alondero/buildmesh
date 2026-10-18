@@ -23,48 +23,91 @@
 //     --require windows-x86_64 --require darwin-aarch64 --require darwin-x86_64 \
 //     [--assets assets.json]
 //
-// `--assets` takes what `gh release view --json assets` produces, and
-// additionally proves each feed entry resolves to an artifact this release
-// really carries. It has to handle two URL forms, because tauri-action v1.0.0
-// changed which one it writes: `latest.json` entries are currently the API form
-// `…/releases/assets/{numeric id}` rather than a filename, so a check that
-// compared filenames against those urls would match nothing and fail every
-// release. Matching the trailing segment covers both — an id against the
-// release's asset ids, a filename against its asset names.
+// `--assets` takes what `gh release view --json assets` produces — an object
+// with an `assets` array — and additionally proves each feed entry resolves to
+// an artifact this release really carries. It has to handle two URL forms,
+// because tauri-action v1.0.0 changed which one it writes: `latest.json`
+// entries are currently the API form `…/releases/assets/{numeric id}` rather
+// than a filename, so a check that compared filenames against those urls would
+// match nothing and fail every release.
+//
+// An unusable `--assets` file is an error, never a skipped check. The bug this
+// guards is a verification step that quietly stops verifying.
 //
 // Exit codes: 0 the feed is complete and well-formed; 1 it is not.
 
 import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
-// A minisign signature is two base64 payload lines bracketed by `untrusted
-// comment:` and `trusted comment:` lines. Requiring the base64 *and* the
-// brackets catches a truncated or placeholder signature without pinning the
-// comment text, which Tauri does not guarantee.
 const BASE64_LINE = /^[A-Za-z0-9+/]+={0,2}$/;
 const COMMENT_PREFIX = /^(untrusted|trusted) comment:/;
+
+/** True when `text` is a complete minisign signature: both comments and two base64 payload lines. */
+function looksLikeMinisign(text) {
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (!lines.some((line) => /^untrusted comment:/.test(line))) return false;
+  if (!lines.some((line) => /^trusted comment:/.test(line))) return false;
+  const payloads = lines.filter((line) => !COMMENT_PREFIX.test(line));
+  if (payloads.length < 2) return false;
+  return payloads.every((line) => BASE64_LINE.test(line) && line.length % 4 === 0);
+}
+
+/**
+ * Problems with one feed entry's updater signature.
+ *
+ * The shape is not the two bare base64 lines minisign prints: Tauri stores the
+ * signature as a *base64 encoding of the whole minisign output*, which is what
+ * actually appears in a published `latest.json` (checked against the live
+ * v1.4.1 feed, where the entry is a single unwrapped base64 blob). So both
+ * forms are accepted — the encoded blob and, in case a future Tauri stores the
+ * raw text, the plain form — and anything that is neither is rejected.
+ *
+ * Verifying against the real format matters more than it looks: a check that
+ * only understood the plain form would fail every valid release, and the unit
+ * fixtures would have kept passing.
+ */
+export function signatureProblems(signature, label) {
+  if (typeof signature !== 'string' || signature.trim() === '') {
+    return [`${label}: signature is missing or empty — the updater would reject this update`];
+  }
+
+  const asText = signature.trim();
+  const decoded = Buffer.from(asText, 'base64').toString('utf8');
+  const candidates = decoded === asText ? [asText] : [asText, decoded.trim()];
+
+  if (candidates.some((candidate) => looksLikeMinisign(candidate))) {
+    return [];
+  }
+
+  return [
+    `${label}: signature is neither a base64 minisign signature nor raw minisign output. ` +
+      'Expected the encoded form Tauri writes, which decodes to an "untrusted comment" line, ' +
+      'a base64 payload, a "trusted comment" line and a global signature.',
+  ];
+}
 
 function isPlainObject(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-export function signatureProblems(signature, label) {
-  if (typeof signature !== 'string' || signature.trim() === '') {
-    return [`${label}: signature is missing or empty — the updater would reject this update`];
+// A literal BOM, written this way so the source file itself stays BOM-free.
+const BYTE_ORDER_MARK = '﻿';
+
+/**
+ * Parse a JSON file, tolerating a UTF-8 BOM. `gh release view --json assets >
+ * assets.json` is fine under the bash shell the workflow uses, but the same
+ * redirect from PowerShell writes UTF-16 with a BOM, and `JSON.parse` throws on
+ * that — which would read as a broken feed rather than an encoding mistake.
+ */
+function parseJsonFile(file, what) {
+  try {
+    const raw = fs.readFileSync(file, 'utf8').replace(BYTE_ORDER_MARK, '');
+    return JSON.parse(raw);
+  } catch (error) {
+    // Covers a missing file and a malformed one alike: neither may reach the
+    // caller as an uncaught ENOENT or a bare SyntaxError.
+    fail(`could not read ${what} ${file}: ${error.message}`);
   }
-  const lines = signature.trim().split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const payloads = lines.filter((line) => !COMMENT_PREFIX.test(line));
-  if (payloads.length < 2) {
-    return [`${label}: signature has ${payloads.length} payload line(s), expected a minisign signature (2 base64 lines)`];
-  }
-  const malformed = payloads.filter((line) => !BASE64_LINE.test(line) || line.length % 4 !== 0);
-  if (malformed.length > 0) {
-    return [`${label}: signature payload is not valid base64 minisign output`];
-  }
-  if (!lines.some((line) => /^untrusted comment:/.test(line))) {
-    return [`${label}: signature has no 'untrusted comment:' line, so it is not a minisign signature`];
-  }
-  return [];
 }
 
 function urlProblems(entry, label) {
@@ -83,6 +126,17 @@ export function assetNameFromUrl(url) {
   const withoutQuery = url.split(/[?#]/)[0];
   const lastSegment = withoutQuery.slice(withoutQuery.lastIndexOf('/') + 1);
   return lastSegment === '' ? null : decodeURIComponent(lastSegment);
+}
+
+/**
+ * The `{os}-{arch}` part of a feed key, dropping the trailing installer
+ * variant. Tauri writes both forms: `windows-x86_64` for the primary artifact
+ * and `windows-x86_64-msi` / `windows-x86_64-nsis` for the same archives under
+ * their bundle names. The primary and its msi variant therefore point at one
+ * url on purpose, and only a *different* base sharing a url is a defect.
+ */
+export function platformBase(key) {
+  return String(key).split('-').slice(0, 2).join('-');
 }
 
 /**
@@ -145,8 +199,12 @@ export function verifyFeed(feed, { expectedVersion, requiredEntries = [], assets
       }
     }
 
-    if (typeof entry.url === 'string' && urlOwners.has(entry.url)) {
-      problems.push(`${label}: shares its url with "${urlOwners.get(entry.url)}" — one artifact cannot serve two architectures`);
+    // One artifact cannot serve two architectures — but it legitimately serves
+    // the primary key and its own installer variant, so compare the `{os}-{arch}`
+    // base rather than the full key.
+    const owner = urlOwners.get(entry.url);
+    if (typeof entry.url === 'string' && owner !== undefined && platformBase(owner) !== platformBase(key)) {
+      problems.push(`${label}: shares its url with "${owner}" — one artifact cannot serve two architectures`);
     } else if (typeof entry.url === 'string') {
       urlOwners.set(entry.url, key);
     }
@@ -164,33 +222,50 @@ function fail(message) {
 }
 
 /**
- * `gh release view --json assets` yields objects; a bare array of names is
- * accepted too. Anything that has no usable `name` becomes null rather than
- * `undefined`, so the comparisons below cannot match by accident.
+ * The asset list out of whatever `--assets` pointed at. `gh release view
+ * --json assets` writes an *envelope* — `{"assets":[…]}` — and handing that
+ * object straight to the catalog builder would make it look like "no assets
+ * given" and skip the check, so the envelope is unwrapped here. A bare array is
+ * accepted too. Returns null when the shape is unrecognised, which the caller
+ * treats as an error rather than as an absent check.
  */
-export function normaliseAssets(assets) {
-  if (!Array.isArray(assets)) return null;
-  return assets.map((asset) => (typeof asset === 'string' ? asset : asset?.name ?? null));
+export function extractAssetList(parsed) {
+  if (Array.isArray(parsed)) return parsed;
+  if (parsed && typeof parsed === 'object' && Array.isArray(parsed.assets)) return parsed.assets;
+  return null;
 }
 
 /**
  * Index a release's assets by both things a `latest.json` entry might refer to
  * them as: the numeric id in the API url form, and the filename in the browser
  * download form. Returns null when there is nothing to check against.
+ *
+ * The numeric REST asset id is taken from `apiUrl` only. In the real
+ * `gh release view --json assets` payload each asset also has an `id`, but that
+ * is the *GraphQL node* id (`RA_kwDOSMYi3c4mDtm6`), not the number tauri-action
+ * writes into `latest.json` — indexing by it would resolve nothing.
  */
 export function resolveAssets(assets) {
-  if (!Array.isArray(assets)) return null;
+  const list = extractAssetList(assets);
+  if (list === null) return null;
   const ids = new Set();
   const names = new Set();
-  for (const asset of assets) {
+  for (const asset of list) {
     if (typeof asset === 'string') {
       if (asset !== '') names.add(asset);
       continue;
     }
     if (!asset || typeof asset !== 'object') continue;
     if (typeof asset.name === 'string' && asset.name !== '') names.add(asset.name);
-    const id = assetNameFromUrl(asset.url);
-    if (id !== null && /^\d+$/.test(id)) ids.add(id);
+    // apiUrl ends in the numeric id; url is the browser download form and ends
+    // in the filename. Indexing both, discriminated by shape, covers whichever
+    // form a feed entry happens to use.
+    for (const url of [asset.apiUrl, asset.url]) {
+      const segment = assetNameFromUrl(url);
+      if (segment === null) continue;
+      if (/^\d+$/.test(segment)) ids.add(segment);
+      else names.add(segment);
+    }
   }
   return { ids, names };
 }
@@ -243,36 +318,34 @@ function main(argv) {
     fail(`unrecognised argument(s): ${options.unknown.join(', ')}`);
   }
 
-  const [feedPath, assetPath] = options.positionals;
+  const { expectedVersion, requiredEntries, assetPath } = options;
+  const [feedPath] = options.positionals;
   if (!feedPath) {
     console.error(USAGE);
     process.exit(2);
   }
 
-  const { expectedVersion, requiredEntries } = options;
   if (requiredEntries.length === 0) {
     fail('--require must name at least one <os>-<arch> entry; a feed check with no required entries checks nothing');
   }
 
   let assets = null;
   if (assetPath) {
-    try {
-      assets = JSON.parse(fs.readFileSync(assetPath, 'utf8'));
-    } catch (error) {
-      fail(`could not read --assets ${assetPath}: ${error.message}`);
-    }
-    // `gh release view --json assets` yields objects, not bare names.
-    if (Array.isArray(assets)) {
-      assets = assets.map((asset) => (typeof asset === 'string' ? asset : asset?.name));
+    // Read from `options.assetPath`, never from the positionals: `--assets` is a
+    // valued flag, so it never appears there, and reading the wrong one silently
+    // downgraded this to a feed check with no asset verification at all.
+    assets = parseJsonFile(assetPath, '--assets');
+    if (resolveAssets(assets) === null) {
+      // An unrecognised shape must not read as "no assets supplied" — that is
+      // the silent-skip this whole branch exists to prevent.
+      fail(
+        `--assets ${assetPath} is not a release asset list. Expected \`gh release view --json assets\` output ` +
+          '(an object with an "assets" array) or a bare array. Refusing to run without the asset check.'
+      );
     }
   }
 
-  let feed;
-  try {
-    feed = JSON.parse(fs.readFileSync(feedPath, 'utf8'));
-  } catch (error) {
-    fail(`could not read ${feedPath} as JSON: ${error.message}`);
-  }
+  const feed = parseJsonFile(feedPath, 'the feed');
 
   const problems = verifyFeed(feed, { expectedVersion, requiredEntries, assets });
   if (problems.length > 0) {
