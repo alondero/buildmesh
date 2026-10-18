@@ -12,6 +12,16 @@
 //! Do not add new query functions here. Put them in the domain module that
 //! owns the table. The freeze is pinned by `db_mod_owns_connection_and_init_only`.
 //!
+//! ## Error type (issue #2448)
+//!
+//! This module and the domain modules it owns share one error type,
+//! [`DbError`](error::DbError), declared in [`error`]. `SqlResult` (this
+//! module's `rusqlite::Result` re-export) still covers the accessors that
+//! return a bare SQLite error; `Result<_, DbError>` covers the operations that
+//! also report a missing row, a lost race, or a refused request.
+//! [`From<DbError> for String`](error::DbError) is what keeps every
+//! `Result<_, String>` Tauri command boundary working unchanged.
+//!
 //! ## Schema evolution (issue #249)
 //!
 //! All schema migration lives in the single entry point
@@ -42,6 +52,7 @@ pub mod auth;
 pub mod circuit;
 pub mod create_operation;
 pub mod drive;
+pub mod error;
 pub mod mesh;
 pub mod semantic_turns;
 pub mod warm_pool;
@@ -53,6 +64,7 @@ pub use create_operation::{
     claim_create_operation, record_create_start_result, CreateClaim, CreateStartState,
 };
 pub use drive::*;
+pub use error::DbError;
 pub use mesh::*;
 pub use semantic_turns::*;
 pub use warm_pool::*;

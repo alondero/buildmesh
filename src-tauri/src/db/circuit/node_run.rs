@@ -16,6 +16,7 @@ use super::step_recovery::RunRecovery;
 use crate::circuit::context::CircuitContext;
 use crate::circuit::model::{CircuitGraph, CircuitNodeKind};
 use crate::circuit::observation::{HumanWait, HumanWaitKind, WorkEvidence};
+use crate::db::DbError;
 use crate::models::{AutopilotCircuitRun, AutopilotCircuitRunStep};
 
 /// Reviewer reports are whole transcripts; a status line wants the gist.
@@ -108,28 +109,27 @@ pub struct NodeCircuitRun {
 }
 
 /// Live and attention-needing runs, one per implementation node.
-pub fn list_node_circuit_runs() -> Result<Vec<NodeCircuitRun>, String> {
+pub fn list_node_circuit_runs() -> Result<Vec<NodeCircuitRun>, DbError> {
     let db = crate::db::read_conn();
-    let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let tx = db.unchecked_transaction()?;
     let runs = list_node_circuit_runs_inner(&tx)?;
-    tx.commit().map_err(|e| e.to_string())?;
+    tx.commit()?;
     Ok(runs)
 }
 
-pub(crate) fn list_node_circuit_runs_inner(db: &Connection) -> Result<Vec<NodeCircuitRun>, String> {
+pub(crate) fn list_node_circuit_runs_inner(
+    db: &Connection,
+) -> Result<Vec<NodeCircuitRun>, DbError> {
     // The desktop header already decides which run "owns" each visible node
     // (steps and source, newest wins). Reuse that, and keep only the
     // implementation nodes: a reviewer helper is part of its source's run.
-    let ownerships = super::leases::list_circuit_agent_ownerships_inner(db)
-        .map_err(|error| error.to_string())?;
+    let ownerships = super::leases::list_circuit_agent_ownerships_inner(db)?;
     let mut listed = Vec::new();
     for (node_id, run_id, _circuit_id, blueprint_name, _state, parent_node_id) in ownerships {
         if parent_node_id.is_some() {
             continue;
         }
-        let Some(run) =
-            super::ledger::get_circuit_run_inner(db, run_id).map_err(|error| error.to_string())?
-        else {
+        let Some(run) = super::ledger::get_circuit_run_inner(db, run_id)? else {
             continue;
         };
         if is_listed(&run) {
@@ -155,10 +155,9 @@ fn build(
     node_id: i64,
     blueprint_name: String,
     run: AutopilotCircuitRun,
-) -> Result<NodeCircuitRun, String> {
+) -> Result<NodeCircuitRun, DbError> {
     let graph = super::evidence::run_graph(db, run.id)?;
-    let steps = super::ledger::list_circuit_run_steps_inner(db, run.id)
-        .map_err(|error| error.to_string())?;
+    let steps = super::ledger::list_circuit_run_steps_inner(db, run.id)?;
     let context = CircuitContext::from_json(&run.context_json)?;
     // Same function the desktop run card calls: the actions below are its
     // answer, not a recomputation.

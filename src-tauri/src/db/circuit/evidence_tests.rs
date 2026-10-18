@@ -2540,6 +2540,7 @@ fn operator_outcome_fences_retry_attempt_and_history() {
     request.action = CheckpointAction::Completed;
     assert!(record_outcome_locked(&mut db, &request)
         .unwrap_err()
+        .to_string()
         .contains("pull request identity"));
     assert!(!evidence_view_inner(&db, 1).unwrap().checkpoints[0]
         .actions
@@ -2571,6 +2572,7 @@ fn operator_outcome_fences_retry_attempt_and_history() {
     };
     assert!(record_outcome_locked(&mut db, &request)
         .unwrap_err()
+        .to_string()
         .contains("not performed"));
     request.action = CheckpointAction::NotPerformed;
     // A blank note is not a gate: the attestation is still recorded, in its
@@ -2611,6 +2613,7 @@ fn operator_outcome_fences_retry_attempt_and_history() {
     request.action = CheckpointAction::Retry;
     assert!(record_outcome_locked(&mut db, &request)
         .unwrap_err()
+        .to_string()
         .contains("Refresh"));
     request.expected_revision = history_inner(&db, 1).unwrap().last().unwrap().id;
     record_outcome_locked(&mut db, &request).unwrap();
@@ -3332,7 +3335,8 @@ fn operator_review_request_changes_without_a_feedback_route_explains_what_is_mis
             reason: "Fix the unchecked null.".into(),
         },
     )
-    .unwrap_err();
+    .unwrap_err()
+    .to_string();
     assert!(
         error.to_lowercase().contains("feedback injection"),
         "{error}"
@@ -3439,7 +3443,8 @@ fn operator_review_is_refused_when_an_unrun_outcome_can_bypass_feedback() {
             reason: "The source turn might never reach feedback.".into(),
         },
     )
-    .unwrap_err();
+    .unwrap_err()
+    .to_string();
     assert!(
         error.contains("every possible outcome on the Request changes route"),
         "the refusal should explain how to repair the route: {error}"
@@ -3634,7 +3639,8 @@ fn operator_review_is_refused_when_fail_fast_outcome_cannot_reach_feedback() {
             reason: "Fix the unchecked null.".into(),
         },
     )
-    .unwrap_err();
+    .unwrap_err()
+    .to_string();
     assert!(
         error.contains("every possible outcome on the Request changes route"),
         "the refusal should explain why this route cannot deliver the note: {error}"
@@ -3754,7 +3760,8 @@ fn operator_review_is_refused_when_parallel_failure_can_cancel_feedback() {
             reason: "Fix the unchecked null.".into(),
         },
     )
-    .unwrap_err();
+    .unwrap_err()
+    .to_string();
     assert!(
         error.contains("every possible outcome on the Request changes route"),
         "the refusal should explain why the parallel route is unsafe: {error}"
@@ -4155,7 +4162,8 @@ fn operator_review_refuses_a_running_feedback_with_a_fail_fast_sibling() {
             reason: "Findings must reach feedback.".into(),
         },
     )
-    .unwrap_err();
+    .unwrap_err()
+    .to_string();
     assert!(
         error.contains("Request changes route"),
         "error was: {error}"
@@ -4364,7 +4372,8 @@ fn operator_review_refuses_a_feedback_prompt_already_built_by_an_alternate_path(
                 reason: "Fix the unchecked null.".into(),
             },
         )
-        .unwrap_err();
+        .unwrap_err()
+        .to_string();
         assert!(
             error.contains("every possible outcome on the Request changes route"),
             "the refusal should explain why feedback can no longer receive the note: {error}"
@@ -4448,7 +4457,8 @@ fn operator_review_refuses_an_older_running_feedback_prompt_already_built() {
             reason: "These findings arrived after prompt intent.".into(),
         },
     )
-    .unwrap_err();
+    .unwrap_err()
+    .to_string();
     assert!(
         error.contains("Request changes route"),
         "error was: {error}"
@@ -4624,7 +4634,8 @@ fn operator_review_refuses_a_join_blocked_by_a_prior_failed_retry_limit() {
             reason: "Findings must reach the implementer.".into(),
         },
     )
-    .unwrap_err();
+    .unwrap_err()
+    .to_string();
     assert!(
         error.contains("Request changes route"),
         "error was: {error}"

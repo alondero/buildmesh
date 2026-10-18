@@ -11,6 +11,7 @@ use serde::Serialize;
 
 use super::evidence::{attention_inner, run_graph, CircuitRunAttention};
 use crate::circuit::model::CircuitGraph;
+use crate::db::DbError;
 use crate::models::{AutopilotCircuitRun, AutopilotCircuitRunStep};
 
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
@@ -24,28 +25,24 @@ pub struct CircuitRunOverview {
     pub attention: CircuitRunAttention,
 }
 
-pub fn overview(run_id: i64) -> Result<CircuitRunOverview, String> {
+pub fn overview(run_id: i64) -> Result<CircuitRunOverview, DbError> {
     let db = crate::db::read_conn();
-    let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let tx = db.unchecked_transaction()?;
     let overview = overview_inner(&tx, run_id)?;
-    tx.commit().map_err(|e| e.to_string())?;
+    tx.commit()?;
     Ok(overview)
 }
 
-pub(crate) fn overview_inner(db: &Connection, run_id: i64) -> Result<CircuitRunOverview, String> {
-    let run = super::ledger::get_circuit_run_inner(db, run_id)
-        .map_err(|e| e.to_string())?
-        .ok_or("Run no longer exists.")?;
-    let circuit_name: String = db
-        .query_row(
-            "SELECT name FROM autopilot_circuits WHERE id=?1",
-            [run.circuit_id],
-            |row| row.get(0),
-        )
-        .map_err(|e| e.to_string())?;
+pub(crate) fn overview_inner(db: &Connection, run_id: i64) -> Result<CircuitRunOverview, DbError> {
+    let run = super::ledger::get_circuit_run_inner(db, run_id)?
+        .ok_or_else(|| DbError::not_found("Run no longer exists."))?;
+    let circuit_name: String = db.query_row(
+        "SELECT name FROM autopilot_circuits WHERE id=?1",
+        [run.circuit_id],
+        |row| row.get(0),
+    )?;
     Ok(CircuitRunOverview {
-        steps: super::ledger::list_circuit_run_steps_inner(db, run_id)
-            .map_err(|e| e.to_string())?,
+        steps: super::ledger::list_circuit_run_steps_inner(db, run_id)?,
         graph: run_graph(db, run_id)?,
         attention: attention_inner(db, run_id)?,
         circuit_name,

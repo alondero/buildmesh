@@ -2,7 +2,7 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::db::SqlResult;
+use crate::db::{DbError, SqlResult};
 use crate::models::AutopilotCircuitRun;
 
 /// Pending Circuit Runs on one mesh in worker-admission order. The circuit
@@ -175,7 +175,10 @@ pub(crate) fn move_queued_circuit_run_to_edge_locked(
 /// `queue_position` values with unpassed rows and break adjacent Up/Down
 /// moves, so subsets and stale ids abort with a domain error asking the
 /// caller to refresh. Returns the number of rows repositioned.
-pub fn reorder_queued_circuit_runs(mesh_id: i64, ordered_run_ids: &[i64]) -> Result<usize, String> {
+pub fn reorder_queued_circuit_runs(
+    mesh_id: i64,
+    ordered_run_ids: &[i64],
+) -> Result<usize, DbError> {
     let mut db = crate::db::write_conn();
     reorder_queued_circuit_runs_locked(&mut db, mesh_id, ordered_run_ids)
 }
@@ -188,7 +191,7 @@ pub(crate) fn reorder_queued_circuit_runs_locked(
     db: &mut Connection,
     mesh_id: i64,
     ordered_run_ids: &[i64],
-) -> Result<usize, String> {
+) -> Result<usize, DbError> {
     if ordered_run_ids.is_empty() {
         return Ok(0);
     }
@@ -198,34 +201,30 @@ pub(crate) fn reorder_queued_circuit_runs_locked(
         let mut seen = std::collections::HashSet::with_capacity(ordered_run_ids.len());
         for id in ordered_run_ids {
             if !seen.insert(id) {
-                return Err(
-                    "queue order contains a duplicate run id - refresh and retry".to_string(),
-                );
+                return Err(DbError::invalid(
+                    "queue order contains a duplicate run id - refresh and retry",
+                ));
             }
         }
     }
-    let tx = db.transaction().map_err(|e| e.to_string())?;
+    let tx = db.transaction()?;
     // The full pending set for this mesh: the payload must match it exactly
     // or positions would collide with rows the caller did not pass.
     let current: Vec<i64> = {
-        let mut stmt = tx
-            .prepare(
-                "SELECT id FROM autopilot_circuit_runs \
+        let mut stmt = tx.prepare(
+            "SELECT id FROM autopilot_circuit_runs \
              WHERE mesh_id = ?1 AND state = 'pending' ORDER BY queue_position, id",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(params![mesh_id], |row| row.get(0))
-            .map_err(|e| e.to_string())?;
+        )?;
+        let rows = stmt.query_map(params![mesh_id], |row| row.get(0))?;
         let collected: SqlResult<Vec<i64>> = rows.collect();
-        collected.map_err(|e| e.to_string())?
+        collected?
     };
     if current.len() != ordered_run_ids.len() {
-        return Err(format!(
+        return Err(DbError::conflict(format!(
             "queue changed while reordering (expected {} pending runs, got {}) - refresh and retry",
             current.len(),
             ordered_run_ids.len()
-        ));
+        )));
     }
     {
         let mut current_sorted = current.clone();
@@ -233,30 +232,26 @@ pub(crate) fn reorder_queued_circuit_runs_locked(
         let mut ordered_sorted = ordered_run_ids.to_vec();
         ordered_sorted.sort_unstable();
         if current_sorted != ordered_sorted {
-            return Err(
-                "queue changed while reordering (stale or foreign run ids) - refresh and retry"
-                    .to_string(),
-            );
+            return Err(DbError::conflict(
+                "queue changed while reordering (stale or foreign run ids) - refresh and retry",
+            ));
         }
     }
     // Anchor on the current minimum so the rewrite never collides with
     // concurrent MAX+1 mints racing this transaction.
-    let base: i64 = tx
-        .query_row(
-            "SELECT COALESCE(MIN(queue_position), 0) FROM autopilot_circuit_runs \
+    let base: i64 = tx.query_row(
+        "SELECT COALESCE(MIN(queue_position), 0) FROM autopilot_circuit_runs \
          WHERE mesh_id = ?1 AND state = 'pending'",
-            params![mesh_id],
-            |row| row.get(0),
-        )
-        .map_err(|e| e.to_string())?;
+        params![mesh_id],
+        |row| row.get(0),
+    )?;
     for (index, run_id) in ordered_run_ids.iter().enumerate() {
         tx.execute(
             "UPDATE autopilot_circuit_runs SET queue_position = ?2 \
              WHERE id = ?1 AND state = 'pending'",
             params![run_id, base + index as i64],
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
     }
-    tx.commit().map_err(|e| e.to_string())?;
+    tx.commit()?;
     Ok(ordered_run_ids.len())
 }

@@ -1814,7 +1814,7 @@ pub fn regenerate_apply_blocking(
         &crate::preferences::launch_configurations::snapshot(plan),
         runtime,
     )
-    .map_err(AgentNodeError::Backend)?;
+    .map_err(|error| AgentNodeError::Backend(error.to_string()))?;
     Ok(resume)
 }
 

@@ -1,6 +1,6 @@
 //! Durable external-effect claims and append-only Circuit Run History.
 
-use crate::db::SqlResult;
+use crate::db::{DbError, SqlResult};
 use rusqlite::{params, Connection, OptionalExtension};
 
 const OBSERVATION_FRESHNESS_REJECTION_PREFIX: &str = "Observation freshness fence rejected:";
@@ -185,11 +185,11 @@ pub struct CircuitStepObservationCoverage {
     pub observation_blocker: Option<crate::circuit::observation::CircuitObservationBlocker>,
 }
 
-pub fn history(run_id: i64) -> Result<CircuitEvidenceView, String> {
+pub fn history(run_id: i64) -> Result<CircuitEvidenceView, DbError> {
     let db = crate::db::read_conn();
-    let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let tx = db.unchecked_transaction()?;
     let (mut view, pending) = evidence_view_unresolved(&tx, run_id)?;
-    tx.commit().map_err(|e| e.to_string())?;
+    tx.commit()?;
     // Resolving a harness reads preferences (profiles, launch selections),
     // which can cold-load `preferences.json`. Release the connection first so
     // no filesystem I/O happens while it is checked out.
@@ -215,14 +215,13 @@ fn resolve_pending_capabilities(view: &mut CircuitEvidenceView, pending: Pending
 pub(super) fn recovery_view(
     db: &Connection,
     run: &crate::models::AutopilotCircuitRun,
-) -> Result<crate::circuit::stepper::RunView, String> {
+) -> Result<crate::circuit::stepper::RunView, DbError> {
     use crate::circuit::{
         context::CircuitContext,
         model::StepOutcome,
         stepper::{RunState, RunView, StepStatus, StepView},
     };
-    let steps =
-        super::ledger::list_circuit_run_steps_inner(db, run.id).map_err(|e| e.to_string())?;
+    let steps = super::ledger::list_circuit_run_steps_inner(db, run.id)?;
     let mut view = RunView {
         run_id: run.id,
         graph: run_graph(db, run.id)?,
@@ -246,10 +245,9 @@ pub(super) fn recovery_view(
             .or_else(|| view.resolve_target_agent(&step.node_id));
         if let Some(agent_id) = agent_id {
             if let Some(blocker) =
-                crate::db::agent_node::circuit_lifecycle_blocker_inner(db, agent_id)
-                    .map_err(|error| error.to_string())?
+                crate::db::agent_node::circuit_lifecycle_blocker_inner(db, agent_id)?
             {
-                let encoded = serde_json::to_string(&blocker).map_err(|error| error.to_string())?;
+                let encoded = serde_json::to_string(&blocker)?;
                 view.context.set_lifecycle_blocker(&step.node_id, encoded);
             }
         }
@@ -265,12 +263,12 @@ fn checkpoint_actions(
     graph: &crate::circuit::model::CircuitGraph,
     view: &crate::circuit::stepper::RunView,
     step: &crate::models::AutopilotCircuitRunStep,
-) -> Result<Vec<CheckpointAction>, String> {
+) -> Result<Vec<CheckpointAction>, DbError> {
     use crate::circuit::model::CircuitNodeKind;
     let actions = match graph.node(&step.node_id).map(|n| &n.kind) {
         Some(kind @ (CircuitNodeKind::GithubAction { .. } | CircuitNodeKind::InjectPty { .. })) => {
             let not_performed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM circuit_effects WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND state='not_performed')",
-                params![run_id,step.node_id,step.attempt], |r| r.get(0)).map_err(|e| e.to_string())?;
+                params![run_id,step.node_id,step.attempt], |r| r.get(0))?;
             let mut actions = vec![CheckpointAction::NotPerformed];
             if matches!(
                 kind,
@@ -279,8 +277,7 @@ fn checkpoint_actions(
                     ..
                 }
             ) {
-                let has_target = has_effect_target(db, run_id, &step.node_id, step.attempt)
-                    .map_err(|error| error.to_string())?;
+                let has_target = has_effect_target(db, run_id, &step.node_id, step.attempt)?;
                 if has_target {
                     actions.insert(0, CheckpointAction::Recheck);
                 }
@@ -294,7 +291,7 @@ fn checkpoint_actions(
         }
         Some(CircuitNodeKind::SpawnAgentNode { .. }) if step.agent_node_id.is_none() => {
             let not_performed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM circuit_effects WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind='spawn' AND state='not_performed')",
-                params![run_id,step.node_id,step.attempt], |row| row.get(0)).map_err(|e| e.to_string())?;
+                params![run_id,step.node_id,step.attempt], |row| row.get(0))?;
             let mut actions = vec![CheckpointAction::Recheck, CheckpointAction::NotPerformed];
             if not_performed {
                 actions.push(CheckpointAction::Retry);
@@ -334,19 +331,17 @@ fn checkpoint_actions(
 fn evidence_view_unresolved(
     db: &Connection,
     run_id: i64,
-) -> Result<(CircuitEvidenceView, PendingCapabilities), String> {
+) -> Result<(CircuitEvidenceView, PendingCapabilities), DbError> {
     let mut pending = PendingCapabilities::new();
-    let entries = history_inner(db, run_id).map_err(|e| e.to_string())?;
-    let run = super::ledger::get_circuit_run_inner(db, run_id)
-        .map_err(|e| e.to_string())?
-        .ok_or("Run no longer exists.")?;
+    let entries = history_inner(db, run_id)?;
+    let run = super::ledger::get_circuit_run_inner(db, run_id)?
+        .ok_or_else(|| DbError::not_found("Run no longer exists."))?;
     let mut checkpoints = Vec::new();
     let mut coverage = Vec::new();
     {
         let graph = run_graph(db, run_id)?;
         let context = crate::circuit::context::CircuitContext::from_json(&run.context_json)?;
-        let steps =
-            super::ledger::list_circuit_run_steps_inner(db, run_id).map_err(|e| e.to_string())?;
+        let steps = super::ledger::list_circuit_run_steps_inner(db, run_id)?;
         let view = recovery_view(db, &run)?;
         let continuation = super::recovery::review_continuation_supported(&run, &graph);
         for step in steps {
@@ -354,9 +349,8 @@ fn evidence_view_unresolved(
                 .agent_node_id
                 .or_else(|| view.resolve_target_agent(&step.node_id))
             {
-                let agent = crate::db::agent_node::get_agent_node_by_id_inner(db, agent_id)
-                    .optional()
-                    .map_err(|e| e.to_string())?;
+                let agent =
+                    crate::db::agent_node::get_agent_node_by_id_inner(db, agent_id).optional()?;
                 let (platform, capabilities, stored) = match agent {
                     Some(agent) => (
                         format!("{} host / {} launch", std::env::consts::OS, agent.env),
@@ -449,21 +443,22 @@ pub struct CircuitRunAttention {
     pub pushes: Vec<super::operator_push::CircuitStepPush>,
 }
 
-pub fn attention(run_id: i64) -> Result<CircuitRunAttention, String> {
+pub fn attention(run_id: i64) -> Result<CircuitRunAttention, DbError> {
     let db = crate::db::read_conn();
-    let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let tx = db.unchecked_transaction()?;
     let view = attention_inner(&tx, run_id)?;
-    tx.commit().map_err(|e| e.to_string())?;
+    tx.commit()?;
     Ok(view)
 }
 
-pub(crate) fn attention_inner(db: &Connection, run_id: i64) -> Result<CircuitRunAttention, String> {
-    let run = super::ledger::get_circuit_run_inner(db, run_id)
-        .map_err(|e| e.to_string())?
-        .ok_or("Run no longer exists.")?;
+pub(crate) fn attention_inner(
+    db: &Connection,
+    run_id: i64,
+) -> Result<CircuitRunAttention, DbError> {
+    let run = super::ledger::get_circuit_run_inner(db, run_id)?
+        .ok_or_else(|| DbError::not_found("Run no longer exists."))?;
     let graph = run_graph(db, run_id)?;
-    let steps =
-        super::ledger::list_circuit_run_steps_inner(db, run_id).map_err(|e| e.to_string())?;
+    let steps = super::ledger::list_circuit_run_steps_inner(db, run_id)?;
     let mut checkpoints = Vec::new();
     let mut pushes = Vec::new();
     let continuation = super::recovery::review_continuation_supported(&run, &graph);
@@ -483,7 +478,7 @@ pub(crate) fn attention_inner(db: &Connection, run_id: i64) -> Result<CircuitRun
         }
     }
     Ok(CircuitRunAttention {
-        revision: revision_inner(db, run_id).map_err(|e| e.to_string())?,
+        revision: revision_inner(db, run_id)?,
         checkpoints,
         recovery: super::step_recovery::build_recovery(db, &run, &graph, &steps)?,
         pushes,
@@ -511,7 +506,7 @@ pub(super) fn history_inner(db: &Connection, run_id: i64) -> SqlResult<Vec<Circu
 
 pub(crate) fn receive_native_hook(
     receipt: &crate::services::circuit_worker::native_hooks::NativeReceipt,
-) -> Result<(), String> {
+) -> Result<(), DbError> {
     let mut db = crate::db::write_conn();
     receive_native_hook_locked(&mut db, receipt)
 }
@@ -546,7 +541,7 @@ pub(crate) fn record_prompt_submission(
     node_id: &str,
     attempt: i32,
     prompt: &crate::circuit::delivery::PreparedPrompt,
-) -> Result<i64, String> {
+) -> Result<i64, DbError> {
     let db = crate::db::write_conn();
     record_prompt_submission_locked(
         &db,
@@ -565,7 +560,7 @@ pub(crate) fn record_prompt_submission_locked(
     attempt: i32,
     agent_node_id: i64,
     prompt: &str,
-) -> Result<i64, String> {
+) -> Result<i64, DbError> {
     // The ordinal is per agent node, not per run: the fence that matters is
     // "has Buildmesh submitted to this terminal again", which is a property
     // of the PTY rather than of any one run. Allocating it under the same
@@ -583,15 +578,14 @@ pub(crate) fn record_prompt_submission_locked(
         Some(node_id),
         Some(attempt),
         "prompt_submitted",
-        &serde_json::to_string(&submission).map_err(|e| e.to_string())?,
+        &serde_json::to_string(&submission)?,
         Some(SOURCE_PROMPT_SUBMISSION),
         Some(DISPOSITION_RECORDED),
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
     // This history entry advances the same revision used by transition fences.
     // Return it under the writer lock so the dispatcher's own write cannot
     // invalidate its subsequent PromptDelivered transition.
-    revision_inner(db, run_id).map_err(|e| e.to_string())
+    Ok(revision_inner(db, run_id)?)
 }
 
 /// The SQL `newest_submission_seq` runs, kept as a constant so the plan test
@@ -607,11 +601,10 @@ const NEWEST_SUBMISSION_SEQ_SQL: &str =
          FROM circuit_run_history
          WHERE kind='prompt_submitted' AND json_extract(detail,'$.agent_node_id')=?1";
 
-fn newest_submission_seq(db: &Connection, agent_node_id: i64) -> Result<i64, String> {
+fn newest_submission_seq(db: &Connection, agent_node_id: i64) -> SqlResult<i64> {
     db.query_row(NEWEST_SUBMISSION_SEQ_SQL, params![agent_node_id], |row| {
         row.get(0)
     })
-    .map_err(|e| e.to_string())
 }
 
 /// What a receipt established about the Buildmesh submission its turn belongs
@@ -634,7 +627,7 @@ fn recorded_turn_binding(
     node_id: &str,
     attempt: i32,
     receipt: &crate::services::circuit_worker::native_hooks::NativeReceipt,
-) -> Result<Option<SubmissionBinding>, String> {
+) -> SqlResult<Option<SubmissionBinding>> {
     db.query_row(
         "SELECT json_extract(detail,'$.input_stamp'),
                 json_extract(detail,'$.submission_seq')
@@ -659,7 +652,6 @@ fn recorded_turn_binding(
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
     .optional()
-    .map_err(|e| e.to_string())
 }
 
 /// Decide whether a `UserPromptSubmit` receipt provably acknowledges a
@@ -694,7 +686,7 @@ fn earn_turn_binding(
     node_id: &str,
     attempt: i32,
     receipt: &crate::services::circuit_worker::native_hooks::NativeReceipt,
-) -> Result<Option<SubmissionBinding>, String> {
+) -> SqlResult<Option<SubmissionBinding>> {
     let hook = &receipt.hook;
     let (Some(turn_id), Some(digest)) = (hook.turn_id.as_deref(), hook.prompt_digest.as_deref())
     else {
@@ -714,8 +706,7 @@ fn earn_turn_binding(
             params![run_id, node_id, attempt, receipt.agent_node_id, digest],
             |row| row.get::<_, String>(0),
         )
-        .optional()
-        .map_err(|e| e.to_string())?
+        .optional()?
         .and_then(|detail| serde_json::from_str(&detail).ok());
     let Some(submission) = submission else {
         return Ok(None);
@@ -729,32 +720,27 @@ fn earn_turn_binding(
     // generation's claim cannot block a re-submission into a restarted
     // session, and a later submission starts with an empty claim set.
     let claimed: Vec<String> = {
-        let mut stmt = db
-            .prepare(
-                "SELECT json_extract(detail,'$.hook.turn_id') FROM circuit_run_history
+        let mut stmt = db.prepare(
+            "SELECT json_extract(detail,'$.hook.turn_id') FROM circuit_run_history
              WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind='native_hook_received'
              AND json_extract(detail,'$.agent_node_id')=?4
              AND json_extract(detail,'$.session_incarnation') IS ?5
              AND json_extract(detail,'$.hook.event')='UserPromptSubmit'
              AND json_extract(detail,'$.submission_correlated')=1
              AND json_extract(detail,'$.submission_seq')=?6",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(
-                params![
-                    run_id,
-                    node_id,
-                    attempt,
-                    receipt.agent_node_id,
-                    receipt.session_incarnation,
-                    submission.submission_seq
-                ],
-                |row| row.get::<_, String>(0),
-            )
-            .map_err(|e| e.to_string())?;
-        rows.collect::<SqlResult<Vec<_>>>()
-            .map_err(|e| e.to_string())?
+        )?;
+        let rows = stmt.query_map(
+            params![
+                run_id,
+                node_id,
+                attempt,
+                receipt.agent_node_id,
+                receipt.session_incarnation,
+                submission.submission_seq
+            ],
+            |row| row.get::<_, String>(0),
+        )?;
+        rows.collect::<SqlResult<Vec<_>>>()?
     };
     if !claimed.iter().any(|turn| turn == turn_id) && !claimed.is_empty() {
         return Ok(None);
@@ -765,16 +751,13 @@ fn earn_turn_binding(
 pub(crate) fn receive_native_hook_locked(
     db: &mut Connection,
     receipt: &crate::services::circuit_worker::native_hooks::NativeReceipt,
-) -> Result<(), String> {
-    let tx = db.transaction().map_err(|e| e.to_string())?;
+) -> Result<(), DbError> {
+    let tx = db.transaction()?;
     let run_ids = {
         let mut stmt = tx.prepare("SELECT id FROM autopilot_circuit_runs r WHERE r.state IN ('running','paused')
-            AND (r.source_agent_node_id=?1 OR EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s WHERE s.run_id=r.id AND s.agent_node_id=?1))").map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([receipt.agent_node_id], |r| r.get::<_, i64>(0))
-            .map_err(|e| e.to_string())?;
-        rows.collect::<SqlResult<Vec<_>>>()
-            .map_err(|e| e.to_string())?
+            AND (r.source_agent_node_id=?1 OR EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s WHERE s.run_id=r.id AND s.agent_node_id=?1))")?;
+        let rows = stmt.query_map([receipt.agent_node_id], |r| r.get::<_, i64>(0))?;
+        rows.collect::<SqlResult<Vec<_>>>()?
     };
     let mut targets = Vec::new();
     for run_id in run_ids {
@@ -783,11 +766,9 @@ pub(crate) fn receive_native_hook_locked(
             model::StepOutcome,
             stepper::{RunState, RunView, StepStatus, StepView},
         };
-        let run = super::ledger::get_circuit_run_inner(&tx, run_id)
-            .map_err(|e| e.to_string())?
-            .ok_or("Run no longer exists")?;
-        let rows =
-            super::ledger::list_circuit_run_steps_inner(&tx, run_id).map_err(|e| e.to_string())?;
+        let run = super::ledger::get_circuit_run_inner(&tx, run_id)?
+            .ok_or_else(|| DbError::not_found("Run no longer exists"))?;
+        let rows = super::ledger::list_circuit_run_steps_inner(&tx, run_id)?;
         let view = RunView {
             run_id,
             state: RunState::from_db_str(&run.state),
@@ -845,10 +826,10 @@ pub(crate) fn receive_native_hook_locked(
                 receipt.submission_seq = None;
             }
         }
-        let detail = serde_json::to_string(&receipt).map_err(|e| e.to_string())?;
+        let detail = serde_json::to_string(&receipt)?;
         let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM circuit_run_history WHERE run_id=?1 AND node_id=?2 AND attempt=?3
             AND kind='native_hook_received' AND json_extract(detail,'$.source_id')=?4)",
-            params![run_id,node_id,attempt,receipt.source_id], |r| r.get(0)).map_err(|e| e.to_string())?;
+            params![run_id,node_id,attempt,receipt.source_id], |r| r.get(0))?;
         if !exists {
             append_history(
                 &tx,
@@ -859,11 +840,10 @@ pub(crate) fn receive_native_hook_locked(
                 &detail,
                 Some(SOURCE_NATIVE_HOOK),
                 Some(DISPOSITION_RECEIVED),
-            )
-            .map_err(|e| e.to_string())?;
+            )?;
         }
     }
-    tx.commit().map_err(|e| e.to_string())
+    Ok(tx.commit()?)
 }
 
 pub(crate) fn native_hook_receipts(run_id: i64, after: i64) -> SqlResult<Vec<CircuitHistoryEntry>> {
@@ -909,7 +889,7 @@ pub struct CheckpointRequest {
     pub reason: String,
 }
 
-pub fn record_outcome(request: &CheckpointRequest) -> Result<(), String> {
+pub fn record_outcome(request: &CheckpointRequest) -> Result<(), DbError> {
     let mut db = crate::db::write_conn();
     record_outcome_locked(&mut db, request)
 }
@@ -917,7 +897,7 @@ pub fn record_outcome(request: &CheckpointRequest) -> Result<(), String> {
 pub(super) fn record_outcome_locked(
     db: &mut Connection,
     request: &CheckpointRequest,
-) -> Result<(), String> {
+) -> Result<(), DbError> {
     // For an acknowledgement the note annotates the history entry when given;
     // every branch below therefore renders a sensible sentence without one. A
     // review verdict is different: it is a person's judgement about someone
@@ -929,25 +909,29 @@ pub(super) fn record_outcome_locked(
             CheckpointAction::ReviewPass | CheckpointAction::ReviewFail
         )
     {
-        return Err("Give the evidence behind your review decision.".into());
+        return Err(DbError::invalid(
+            "Give the evidence behind your review decision.",
+        ));
     }
-    let tx = db.transaction().map_err(|e| e.to_string())?;
-    if revision_moved(&tx, request.run_id, request.expected_revision).map_err(|e| e.to_string())? {
-        return Err("The run changed. Refresh its evidence before acting.".into());
+    let tx = db.transaction()?;
+    if revision_moved(&tx, request.run_id, request.expected_revision)? {
+        return Err(DbError::conflict(
+            "The run changed. Refresh its evidence before acting.",
+        ));
     }
-    let run = super::ledger::get_circuit_run_inner(&tx, request.run_id)
-        .map_err(|e| e.to_string())?
-        .ok_or("Run no longer exists.")?;
+    let run = super::ledger::get_circuit_run_inner(&tx, request.run_id)?
+        .ok_or_else(|| DbError::not_found("Run no longer exists."))?;
     if run.state != "running" {
-        return Err("Only an active run can resolve a checkpoint.".into());
+        return Err(DbError::invalid(
+            "Only an active run can resolve a checkpoint.",
+        ));
     }
-    let step = super::ledger::list_circuit_run_steps_inner(&tx, request.run_id)
-        .map_err(|e| e.to_string())?
+    let step = super::ledger::list_circuit_run_steps_inner(&tx, request.run_id)?
         .into_iter()
         .find(|s| {
             s.node_id == request.node_id && s.attempt == request.attempt && s.status == "unverified"
         })
-        .ok_or("This checkpoint changed. Refresh before acting.")?;
+        .ok_or_else(|| DbError::conflict("This checkpoint changed. Refresh before acting."))?;
     let graph = run_graph(&tx, run.id)?;
     // Review decisions are explicitly attributed to the operator, never the agent.
     if matches!(
@@ -963,7 +947,9 @@ pub(super) fn record_outcome_locked(
         };
         let mut view = recovery_view(&tx, &run)?;
         if let Err(reason) = view.check_review_decision(&step.node_id, outcome) {
-            return Err(format!("This review cannot accept that verdict. {reason}"));
+            return Err(DbError::invalid(format!(
+                "This review cannot accept that verdict. {reason}"
+            )));
         }
         let verdict = if passed {
             "approved"
@@ -1010,10 +996,11 @@ pub(super) fn record_outcome_locked(
                 agent_node_id: None,
                 fresh_attempt: false,
             }],
-        )
-        .map_err(|error| error.to_string())?;
+        )?;
         if !commit.applied {
-            return Err("The run changed before the verdict was recorded.".into());
+            return Err(DbError::conflict(
+                "The run changed before the verdict was recorded.",
+            ));
         }
         append_history(
             &tx,
@@ -1024,9 +1011,8 @@ pub(super) fn record_outcome_locked(
             &format!("Human review {verdict}: {}", request.reason.trim()),
             Some(SOURCE_OPERATOR),
             Some(verdict),
-        )
-        .map_err(|error| error.to_string())?;
-        return tx.commit().map_err(|error| error.to_string());
+        )?;
+        return Ok(tx.commit()?);
     }
     // A completion attestation cannot authorize tool use or supply a review verdict.
     use crate::circuit::model::CircuitNodeKind;
@@ -1047,7 +1033,7 @@ pub(super) fn record_outcome_locked(
     {
         let mut view = recovery_view(&tx, &run)?;
         if !view.can_attest_completion(&request.node_id) {
-            return Err("Resolve outstanding work, input requests and conflicting evidence before recording completion.".into());
+            return Err(DbError::invalid("Resolve outstanding work, input requests and conflicting evidence before recording completion."));
         }
         let reason = if note.is_empty() {
             "Operator recorded this checkpoint as completed.".to_string()
@@ -1076,8 +1062,7 @@ pub(super) fn record_outcome_locked(
                 agent_node_id: None,
                 fresh_attempt: false,
             }],
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
         append_history(
             &tx,
             run.id,
@@ -1087,9 +1072,8 @@ pub(super) fn record_outcome_locked(
             &reason,
             Some(SOURCE_OPERATOR),
             Some("completed"),
-        )
-        .map_err(|e| e.to_string())?;
-        return tx.commit().map_err(|e| e.to_string());
+        )?;
+        return Ok(tx.commit()?);
     }
     if matches!(request.action, CheckpointAction::Recheck) {
         let kind = graph.node(&request.node_id).map(|n| &n.kind);
@@ -1101,8 +1085,7 @@ pub(super) fn record_outcome_locked(
             })
         );
         let has_open_pr_target = if open_pr {
-            has_effect_target(&tx, request.run_id, &request.node_id, request.attempt)
-                .map_err(|error| error.to_string())?
+            has_effect_target(&tx, request.run_id, &request.node_id, request.attempt)?
         } else {
             false
         };
@@ -1116,7 +1099,7 @@ pub(super) fn record_outcome_locked(
             )
         );
         if !(observed_recheck || (open_pr && has_open_pr_target)) {
-            return Err("This action has no authoritative automatic evidence recheck. Inspect the external result.".into());
+            return Err(DbError::invalid("This action has no authoritative automatic evidence recheck. Inspect the external result."));
         }
         let mut context = crate::circuit::context::CircuitContext::from_json(&run.context_json)?;
         context.set(&format!("node.{}.wait.attempt", step.node_id), "");
@@ -1149,10 +1132,11 @@ pub(super) fn record_outcome_locked(
             None,
             Some(&context.to_json()?),
             &[op],
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
         if !commit.applied {
-            return Err("Circuit run became terminal before evidence recheck commit".into());
+            return Err(DbError::conflict(
+                "Circuit run became terminal before evidence recheck commit",
+            ));
         }
         append_history(
             &tx,
@@ -1167,9 +1151,8 @@ pub(super) fn record_outcome_locked(
             },
             Some(SOURCE_OPERATOR),
             Some(DISPOSITION_REQUESTED),
-        )
-        .map_err(|e| e.to_string())?;
-        return tx.commit().map_err(|e| e.to_string());
+        )?;
+        return Ok(tx.commit()?);
     }
     let mut context = crate::circuit::context::CircuitContext::from_json(&run.context_json)?;
     context.set(&format!("node.{}.recheck_only", request.node_id), "0");
@@ -1177,10 +1160,10 @@ pub(super) fn record_outcome_locked(
         Some(CircuitNodeKind::GithubAction { .. }) => "github",
         Some(CircuitNodeKind::InjectPty { .. }) => "prompt",
         Some(CircuitNodeKind::SpawnAgentNode { .. }) if step.agent_node_id.is_none() => "spawn",
-        _ => return Err("This checkpoint requires authoritative agent evidence; an external-action attestation cannot resolve it.".into()),
+        _ => return Err(DbError::invalid("This checkpoint requires authoritative agent evidence; an external-action attestation cannot resolve it.")),
     };
     if effect_kind == "spawn" && matches!(request.action, CheckpointAction::Completed) {
-        return Err("Agent identity must be reconciled; attestation cannot establish a spawn attachment or completion.".into());
+        return Err(DbError::invalid("Agent identity must be reconciled; attestation cannot establish a spawn attachment or completion."));
     }
     if matches!(request.action, CheckpointAction::Completed)
         && matches!(
@@ -1191,19 +1174,19 @@ pub(super) fn record_outcome_locked(
             })
         )
     {
-        return Err(
-            "The pull request identity must be reconciled before this step can advance.".into(),
-        );
+        return Err(DbError::invalid(
+            "The pull request identity must be reconciled before this step can advance.",
+        ));
     }
     // This step was already admitted by the graph. Requiring every ancestor
     // verdict to be approved deadlocks the changes-requested feedback route
     // and alternative approval branches. Current human requests still block.
     let recovery = recovery_view(&tx, &run)?;
     if recovery.report_has_known_blockers(&request.node_id) {
-        return Err("Resolve outstanding work, input requests and conflicting evidence before recording an outcome.".into());
+        return Err(DbError::invalid("Resolve outstanding work, input requests and conflicting evidence before recording an outcome."));
     }
     let prior: Option<String> = tx.query_row("SELECT state FROM circuit_effects WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind=?4",
-        params![request.run_id,request.node_id,request.attempt,effect_kind], |r| r.get(0)).optional().map_err(|e| e.to_string())?;
+        params![request.run_id,request.node_id,request.attempt,effect_kind], |r| r.get(0)).optional()?;
     let (status, attempt, outcome) =
         match request.action {
             CheckpointAction::Completed => {
@@ -1216,8 +1199,7 @@ pub(super) fn record_outcome_locked(
                         request.attempt,
                         effect_kind
                     ],
-                )
-                .map_err(|e| e.to_string())?;
+                )?;
                 ("completed", step.attempt, Some(Some("completed".into())))
             }
             CheckpointAction::NotPerformed => {
@@ -1230,17 +1212,15 @@ pub(super) fn record_outcome_locked(
                         request.attempt,
                         effect_kind
                     ],
-                )
-                .map_err(|e| e.to_string())?;
+                )?;
                 ("unverified", step.attempt, None)
             }
             CheckpointAction::Retry if prior.as_deref() == Some("not_performed") => {
                 ("pending_slot", step.attempt + 1, Some(None))
             }
-            CheckpointAction::Retry => return Err(
-                "The earlier action must be recorded as not performed before a deliberate retry."
-                    .into(),
-            ),
+            CheckpointAction::Retry => return Err(DbError::invalid(
+                "The earlier action must be recorded as not performed before a deliberate retry.",
+            )),
             CheckpointAction::Recheck
             | CheckpointAction::ReviewPass
             | CheckpointAction::ReviewFail => unreachable!("handled above"),
@@ -1275,10 +1255,11 @@ pub(super) fn record_outcome_locked(
         None,
         Some(&context.to_json()?),
         &[op],
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
     if !commit.applied {
-        return Err("Circuit run became terminal before operator outcome commit".into());
+        return Err(DbError::conflict(
+            "Circuit run became terminal before operator outcome commit",
+        ));
     }
     append_history(
         &tx,
@@ -1289,9 +1270,8 @@ pub(super) fn record_outcome_locked(
         &reason,
         Some(SOURCE_OPERATOR),
         Some(disposition),
-    )
-    .map_err(|e| e.to_string())?;
-    tx.commit().map_err(|e| e.to_string())
+    )?;
+    Ok(tx.commit()?)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1647,12 +1627,12 @@ pub(super) fn record_wait_changes(
 pub(super) fn run_graph(
     db: &Connection,
     run_id: i64,
-) -> Result<crate::circuit::model::CircuitGraph, String> {
+) -> Result<crate::circuit::model::CircuitGraph, DbError> {
     let json = run_graph_json(db, run_id)?;
-    crate::circuit::model::CircuitGraph::from_json(&json)
+    Ok(crate::circuit::model::CircuitGraph::from_json(&json)?)
 }
 
-pub(super) fn run_graph_json(db: &Connection, run_id: i64) -> Result<String, String> {
+pub(super) fn run_graph_json(db: &Connection, run_id: i64) -> SqlResult<String> {
     db.query_row(
         "SELECT COALESCE(s.graph_json,c.graph_json)
         FROM autopilot_circuit_runs r JOIN autopilot_circuits c ON c.id=r.circuit_id
@@ -1660,7 +1640,6 @@ pub(super) fn run_graph_json(db: &Connection, run_id: i64) -> Result<String, Str
         [run_id],
         |r| r.get(0),
     )
-    .map_err(|e| e.to_string())
 }
 
 /// Append one Circuit Run History event. `source` and `disposition` are the
@@ -2172,7 +2151,7 @@ pub(crate) fn record_effect_target(
     node_id: &str,
     attempt: i32,
     detail: &str,
-) -> Result<i64, String> {
+) -> Result<i64, DbError> {
     let mut db = crate::db::write_conn();
     record_effect_target_locked(&mut db, run_id, node_id, attempt, detail)
 }
@@ -2183,8 +2162,8 @@ fn record_effect_target_locked(
     node_id: &str,
     attempt: i32,
     detail: &str,
-) -> Result<i64, String> {
-    let tx = db.transaction().map_err(|error| error.to_string())?;
+) -> Result<i64, DbError> {
+    let tx = db.transaction()?;
     let graph = run_graph(&tx, run_id)?;
     if !matches!(
         graph.node(node_id).map(|node| &node.kind),
@@ -2193,22 +2172,24 @@ fn record_effect_target_locked(
             ..
         })
     ) {
-        return Err("Effect target is only supported for an OpenPr step.".into());
+        return Err(DbError::invalid(
+            "Effect target is only supported for an OpenPr step.",
+        ));
     }
-    let dispatch_claimed: bool = tx
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM circuit_effects e
+    let dispatch_claimed: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM circuit_effects e
              JOIN autopilot_circuit_runs r ON r.id=e.run_id
              JOIN autopilot_circuit_run_steps s ON s.run_id=e.run_id AND s.node_id=e.node_id
              WHERE e.run_id=?1 AND e.node_id=?2 AND e.attempt=?3 AND e.kind='github'
                AND e.state='possible_dispatch' AND r.state='running'
                AND s.attempt=?3 AND s.status='running')",
-            params![run_id, node_id, attempt],
-            |row| row.get(0),
-        )
-        .map_err(|error| error.to_string())?;
+        params![run_id, node_id, attempt],
+        |row| row.get(0),
+    )?;
     if !dispatch_claimed {
-        return Err("OpenPr dispatch claim changed before its target was recorded.".into());
+        return Err(DbError::conflict(
+            "OpenPr dispatch claim changed before its target was recorded.",
+        ));
     }
     append_history(
         &tx,
@@ -2219,10 +2200,9 @@ fn record_effect_target_locked(
         detail,
         Some(SOURCE_GITHUB),
         Some(DISPOSITION_RECORDED),
-    )
-    .map_err(|error| error.to_string())?;
-    let revision = revision_inner(&tx, run_id).map_err(|error| error.to_string())?;
-    tx.commit().map_err(|error| error.to_string())?;
+    )?;
+    let revision = revision_inner(&tx, run_id)?;
+    tx.commit()?;
     Ok(revision)
 }
 
@@ -2230,9 +2210,9 @@ pub(crate) fn latest_effect_target(
     run_id: i64,
     node_id: &str,
     attempt: i32,
-) -> Result<Option<String>, String> {
+) -> SqlResult<Option<String>> {
     let db = crate::db::read_conn();
-    latest_effect_target_inner(&db, run_id, node_id, attempt).map_err(|error| error.to_string())
+    latest_effect_target_inner(&db, run_id, node_id, attempt)
 }
 
 fn latest_effect_target_inner(
