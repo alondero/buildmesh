@@ -209,8 +209,8 @@ export function validateReceipt(receipt, { tag, commit, releaseDir }) {
         }
       }
       if (update.fromVersion === update.toVersion) throw new Error(`${architecture} updater test versions must be distinct`);
-      requireValue(update.fromVersion, `${architecture}.updater.fromVersion`);
-      requireValue(update.toVersion, `${architecture}.updater.toVersion`);
+      requireObservedValue(update.fromVersion, `${architecture}.updater.fromVersion`);
+      requireObservedValue(update.toVersion, `${architecture}.updater.toVersion`);
       if (update.testBuildCommit?.toLowerCase() !== normalizedCommit) {
         throw new Error(`${architecture} updater test builds must use the candidate commit`);
       }

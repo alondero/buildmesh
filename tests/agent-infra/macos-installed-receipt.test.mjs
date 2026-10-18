@@ -231,6 +231,20 @@ test('PASS evidence rejects unchanged prompts and unverified values required by 
   assert.throws(() => verify(updaterKey), /updaterKeyFingerprint must be observed/);
 });
 
+test('passing updater checks require an observed from version', () => {
+  const receipt = makeReceipt();
+  markArchitecturePassed(receipt, 'aarch64');
+  receipt.architectures.aarch64.updater.fromVersion = 'UNVERIFIED';
+  assert.throws(() => verify(receipt), /updater\.fromVersion must be observed/);
+});
+
+test('passing updater checks require an observed to version', () => {
+  const receipt = makeReceipt();
+  markArchitecturePassed(receipt, 'aarch64');
+  receipt.architectures.aarch64.updater.toVersion = 'UNVERIFIED';
+  assert.throws(() => verify(receipt), /updater\.toVersion must be observed/);
+});
+
 test('a tested-architecture claim needs every runtime and updater check to pass', () => {
   const receipt = makeReceipt();
   receipt.supportClaims.testedArchitectures = ['aarch64'];
