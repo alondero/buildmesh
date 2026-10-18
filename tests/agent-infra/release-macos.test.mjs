@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { macOSChecksumAssetNames, macOSChecksumRows, macOSDmgName, macOSLocalUpdaterArchiveName, macOSUpdaterArchiveName } from '../../scripts/ci/macos-artifacts.mjs';
+import { macOSChecksumAssetNames, macOSChecksumRows, macOSDmgName, macOSUpdaterArchiveName } from '../../scripts/ci/macos-artifacts.mjs';
 import { buildManifest, createPublishedChecksumManifest } from '../../scripts/ci/publish-macos-checksums.mjs';
 
 const workflow = readFileSync(new URL('../../.github/workflows/release.yml', import.meta.url), 'utf8');
@@ -66,7 +66,6 @@ test('published Intel filenames use Tauri x64 names while architecture evidence 
   assert.equal(macOSUpdaterArchiveName('1.5.0', 'aarch64'), 'Buildmesh_1.5.0_aarch64.app.tar.gz');
   assert.equal(macOSDmgName('1.5.0', 'x86_64'), 'Buildmesh_1.5.0_x64.dmg');
   assert.equal(macOSUpdaterArchiveName('1.5.0', 'x86_64'), 'Buildmesh_1.5.0_x64.app.tar.gz');
-  assert.equal(macOSLocalUpdaterArchiveName(), 'Buildmesh.app.tar.gz');
 });
 
 test('macOS checksum rows use published release names and bytes', () => {

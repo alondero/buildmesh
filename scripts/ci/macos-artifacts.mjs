@@ -17,10 +17,6 @@ export function macOSUpdaterArchiveName(version, architecture) {
   return `Buildmesh_${version}_${releaseArch(architecture)}.app.tar.gz`;
 }
 
-export function macOSLocalUpdaterArchiveName() {
-  return 'Buildmesh.app.tar.gz';
-}
-
 export function macOSChecksumAssetNames({ tag, architecture, releaseAssetNames }) {
   if (!/^v\d+\.\d+\.\d+$/.test(tag)) throw new Error(`unsupported macOS release tag ${tag}`);
   if (!Array.isArray(releaseAssetNames)) throw new Error('release assets must be an array of names');
