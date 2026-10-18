@@ -13,7 +13,7 @@
  * without leaving, and traversed edges glow cyan.
  */
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 import { useUIStore } from '../../stores/uiStore';
 import { copyReviewBlueprint } from '../../lib/tauri/circuitBlueprint';
@@ -31,6 +31,7 @@ import {
   type OnConnectEnd,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
+import './CircuitFlowEditor.css';
 
 import type { AutopilotCircuit } from '../../lib/tauri';
 import type { CircuitRunDetail } from '../../lib/tauri';
@@ -66,6 +67,25 @@ import {
 // React Flow remount every card on any state change.
 const nodeTypes = { circuit: CircuitNodeCard };
 const edgeTypes = { outcome: OutcomeEdge };
+
+/**
+ * React Flow's own chrome — the zoom Controls and the attribution pill —
+ * ships light-mode literals, which painted white boxes on the dark canvas
+ * (issue #2460). Its documented theming seam is the `--xy-*` custom
+ * properties, so the fix is to resolve each one to the same token the rest
+ * of the app uses: `[data-theme="light"]` re-points the token and the canvas
+ * follows without a second code path. The Control glyphs paint with
+ * `fill: currentColor`, so one property covers icon, text and hover.
+ */
+const FLOW_CHROME_TOKENS = {
+  '--xy-controls-button-background-color': 'var(--color-bg-card)',
+  '--xy-controls-button-background-color-hover': 'var(--color-bg-card-hover)',
+  '--xy-controls-button-color': 'var(--color-text-secondary)',
+  '--xy-controls-button-color-hover': 'var(--color-text-primary)',
+  '--xy-controls-button-border-color': 'var(--color-border-default)',
+  '--xy-controls-box-shadow': 'var(--shadow-md)',
+  '--xy-attribution-background-color': 'var(--color-bg-card)',
+} as CSSProperties;
 
 interface EditorNodeDataSeed {
   graph: CircuitGraph;
@@ -650,6 +670,8 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
               setQuickConnect(null);
             }}
             fitView
+            className="circuit-flow-canvas"
+            style={FLOW_CHROME_TOKENS}
           >
             <Background variant={BackgroundVariant.Dots} gap={16} size={1} />
             <Controls showInteractive={false} />
