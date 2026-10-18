@@ -8,6 +8,8 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { macOSDmgName, macOSUpdaterArchiveName } from './macos-artifacts.mjs';
 
+const RECEIPT_TEMPLATE = JSON.parse(readFileSync(new URL('../../docs/release-evidence/macos-installed-candidate.template.json', import.meta.url), 'utf8'));
+
 const ARCHITECTURES = {
   aarch64: { cpu: 'arm64', minimumSystemVersion: '11.0' },
   x86_64: { cpu: 'x86_64', minimumSystemVersion: '10.13' },
@@ -46,7 +48,7 @@ function requireObject(value, label) {
   return value;
 }
 
-function requireStatus(check, label) {
+function requireStatus(check, label, templateEvidence) {
   requireObject(check, label);
   if (!['PASS', 'FAIL', 'UNVERIFIED'].includes(check.outcome)) {
     throw new Error(`${label}.outcome must be PASS, FAIL or UNVERIFIED`);
@@ -55,13 +57,19 @@ function requireStatus(check, label) {
   if (check.outcome === 'UNVERIFIED' && evidence.length < 12) {
     throw new Error(`${label} needs a reason when it is UNVERIFIED`);
   }
-  if (check.outcome === 'PASS' && /^record\s/i.test(evidence)) {
+  if (check.outcome === 'PASS' && (evidence === templateEvidence || /^record\s/i.test(evidence))) {
     throw new Error(`${label}.evidence must describe an observed result, not a receipt prompt`);
   }
   if (check.outcome === 'FAIL') {
     throw new Error(`${label} failed: ${evidence}`);
   }
   return check.outcome;
+}
+
+function requireObservedValue(value, label) {
+  const result = requireValue(value, label);
+  if (/^unverified\b/i.test(result)) throw new Error(`${label} must be observed, not UNVERIFIED`);
+  return result;
 }
 
 function readManifestHash(releaseDir, architecture, filename) {
@@ -153,7 +161,13 @@ export function validateReceipt(receipt, { tag, commit, releaseDir }) {
     requireValue(cli.name, `${architecture}.runtime.cli.name`);
     requireValue(cli.version, `${architecture}.runtime.cli.version`);
     const runtimeChecks = requireObject(runtime.checks, `${architecture}.runtime.checks`);
-    for (const name of RUNTIME_CHECKS) requireStatus(runtimeChecks[name], `${architecture}.runtime.checks.${name}`);
+    for (const name of RUNTIME_CHECKS) {
+      requireStatus(
+        runtimeChecks[name],
+        `${architecture}.runtime.checks.${name}`,
+        RECEIPT_TEMPLATE.architectures[architecture].runtime.checks[name].evidence,
+      );
+    }
     if (RUNTIME_CHECKS.some((name) => runtimeChecks[name].outcome === 'PASS')) {
       if (runtime.hostArchitecture !== ARCHITECTURES[architecture].cpu) {
         throw new Error(`${architecture} runtime evidence must come from a native ${ARCHITECTURES[architecture].cpu} host`);
@@ -166,7 +180,13 @@ export function validateReceipt(receipt, { tag, commit, releaseDir }) {
     const update = requireObject(entry.updater, `${architecture}.updater`);
     requireValue(update.feedEndpoint, `${architecture}.updater.feedEndpoint`);
     const updateChecks = requireObject(update.checks, `${architecture}.updater.checks`);
-    for (const name of UPDATE_CHECKS) requireStatus(updateChecks[name], `${architecture}.updater.checks.${name}`);
+    for (const name of UPDATE_CHECKS) {
+      requireStatus(
+        updateChecks[name],
+        `${architecture}.updater.checks.${name}`,
+        RECEIPT_TEMPLATE.architectures[architecture].updater.checks[name].evidence,
+      );
+    }
 
     if (updateChecks.isolatedFeed.outcome === 'PASS') {
       if (!/^https:\/\//i.test(update.feedEndpoint) || /releases\/latest/i.test(update.feedEndpoint)) {
@@ -177,7 +197,7 @@ export function validateReceipt(receipt, { tag, commit, releaseDir }) {
       if (update.bundleIdentifier !== 'com.alond.buildmesh') {
         throw new Error(`${architecture} updater test must use com.alond.buildmesh`);
       }
-      requireValue(update.updaterKeyFingerprint, `${architecture}.updater.updaterKeyFingerprint`);
+      requireObservedValue(update.updaterKeyFingerprint, `${architecture}.updater.updaterKeyFingerprint`);
     }
 
     const validUpdatePassed = updateChecks.validUpdateRelaunchedWithState.outcome === 'PASS';

@@ -991,7 +991,8 @@ jobs:
 
   # The required Rust gate. It does no work of its own: it certifies that the
   # compile, every shard, the non-shard pass (with its binding drift check),
-  # and Quality all succeeded. It keeps `if: always()` and an explicit result
+  # the native macOS candidate audit when this is a Rust-changing PR, and
+  # Quality all succeeded. It keeps `if: always()` and an explicit result
   # check rather than relying on the implicit skip: a required status check
   # that is *skipped* counts as satisfied by GitHub, so a silently skipped
   # aggregate would be a hole in the merge gate. It fails instead.
@@ -1004,7 +1005,7 @@ jobs:
   # fails with a reason instead.
   rust-bindings:
     name: Rust tests + TS bindings
-    needs: [quality, rust-build, rust-tests, rust-nonshard, changes]
+    needs: [quality, rust-build, rust-tests, rust-nonshard, changes, macos-candidate-audit-test]
     if: always() && inputs.profile == 'full' && !(needs.changes.outputs.rust == 'false' && needs.changes.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -1023,8 +1024,10 @@ jobs:
           RUST_BUILD_RESULT: ${{ needs.rust-build.result }}
           RUST_TESTS_RESULT: ${{ needs.rust-tests.result }}
           RUST_NONSHARD_RESULT: ${{ needs.rust-nonshard.result }}
+          MACOS_AUDIT_RESULT: ${{ needs.macos-candidate-audit-test.result }}
           CHANGES_RESULT: ${{ needs.changes.result }}
           RUST_CHANGED: ${{ needs.changes.outputs.rust }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           # A classification that did not succeed leaves empty outputs, which
           # would otherwise read as "Rust did not change" and silently skip
@@ -1038,7 +1041,11 @@ jobs:
             echo "::error::quality=$QUALITY_RESULT rust-build=$RUST_BUILD_RESULT rust-tests=$RUST_TESTS_RESULT rust-nonshard=$RUST_NONSHARD_RESULT - the Rust suite is not fully green."
             exit 1
           fi
-          echo "rust=$RUST_CHANGED quality=$QUALITY_RESULT rust-build=$RUST_BUILD_RESULT rust-tests=$RUST_TESTS_RESULT rust-nonshard=$RUST_NONSHARD_RESULT"
+          if [ "$EVENT_NAME" = pull_request ] && [ "$MACOS_AUDIT_RESULT" != success ]; then
+            echo "::error::macos-candidate-audit-test=$MACOS_AUDIT_RESULT - the native macOS candidate audit did not pass."
+            exit 1
+          fi
+          echo "rust=$RUST_CHANGED quality=$QUALITY_RESULT rust-build=$RUST_BUILD_RESULT rust-tests=$RUST_TESTS_RESULT rust-nonshard=$RUST_NONSHARD_RESULT macos-candidate-audit-test=$MACOS_AUDIT_RESULT"
 
   # Issue #1257 — the Playwright verify-smoke spec (issue #157) was
   # designed to run WITHOUT a Rust compile — it boots just Vite and
@@ -1209,8 +1216,10 @@ jobs:
         run: cargo test --locked --lib -- conpty_preserves_synchronized_cursor_frames agent::background::tests
         working-directory: src-tauri
 
-  # This success path uses native macOS utilities (especially PlistBuddy), and
-  # the Intel package build confirms the Tauri filenames used by release checks.
+  # This success path uses native macOS utilities (especially PlistBuddy). The
+  # Intel build checks the local Tauri DMG and updater archive names; the
+  # published release asset names are checked against GitHub's asset listing
+  # by the release workflow.
   macos-candidate-audit-test:
     name: macOS candidate audit and Intel bundle names
     needs: changes

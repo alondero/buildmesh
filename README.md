@@ -79,7 +79,7 @@ Windows installers are not signed with a trusted publisher identity. The macOS a
 - **Windows (SmartScreen)** — *"Windows protected your PC … unknown publisher."* Click **More info → Run anyway**.
 - **macOS (Gatekeeper)** — use [Apple's current approval steps](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac) for your macOS version. Depending on the version, Control-click the app in Applications and choose **Open**, or use **System Settings → Privacy & Security → Open Anyway**. Approve Buildmesh for this app only; do not disable Gatekeeper globally.
 
-The DMG's SHA-256 checksum detects a damaged or changed download. Minisign `.sig` files apply to updater archives; they are not Apple publisher signatures and are not a substitute for checking the DMG checksum. The full release verification procedure lives in [`docs/development/releasing.md`](docs/development/releasing.md).
+The DMG's SHA-256 checksum detects accidental damage during download. Because its manifest is published in the same release, it does not independently authenticate the source of the DMG. Minisign `.sig` files apply to updater archives; they are not Apple publisher signatures and are not a substitute for checking the DMG checksum. The full release verification procedure lives in [`docs/development/releasing.md`](docs/development/releasing.md).
 
 ### Data location, logs, backup, uninstall
 

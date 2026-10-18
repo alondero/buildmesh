@@ -167,6 +167,13 @@ test('native PR verification exercises the audit CLI and reports real Intel bund
   assert.match(job, /npm run tauri -- build --debug --target x86_64-apple-darwin/);
   assert.match(job, /Buildmesh_\$\{version\}_x64\.dmg/);
   assert.match(job, /Buildmesh\.app\.tar\.gz/);
+
+  const gate = verifyWorkflow.match(/\n {2}rust-bindings:\n([\s\S]*?)(?=\n {2}[a-z][\w-]*:\n)/)?.[1];
+  assert.ok(gate, 'verify.yml has no Rust tests + TS bindings aggregate');
+  assert.match(gate, /needs:\s+\[quality,\s+rust-build,\s+rust-tests,\s+rust-nonshard,\s+changes,\s+macos-candidate-audit-test\]/);
+  assert.match(gate, /MACOS_AUDIT_RESULT: \$\{\{ needs\.macos-candidate-audit-test\.result \}\}/);
+  assert.match(gate, /if\s+\[\s+"\$EVENT_NAME"\s+=\s+pull_request\s+\]\s+&&\s+\[\s+"\$MACOS_AUDIT_RESULT"\s+!=\s+success\s+\];\s+then/);
+  assert.match(gate, /the native macOS candidate audit did not pass/);
 });
 
 // The load-bearing invariant of the whole change: three jobs write one

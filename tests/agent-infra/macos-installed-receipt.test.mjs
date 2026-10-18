@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,6 +33,7 @@ const UPDATE_CHECKS = [
   'badSignatureRejectedWithoutReplacing',
 ];
 const RECEIPT_CLI = fileURLToPath(new URL('../../scripts/ci/verify-macos-installed-receipt.mjs', import.meta.url));
+const RECEIPT_TEMPLATE = JSON.parse(readFileSync(new URL('../../docs/release-evidence/macos-installed-candidate.template.json', import.meta.url), 'utf8'));
 
 let releaseDir;
 
@@ -199,6 +200,35 @@ test('PASS evidence must replace the template prompt with an observed result', (
     'Observed the app launch from Finder on a native arm64 Mac.',
   );
   assert.deepEqual(verify(receipt).verifiedArchitectures, ['aarch64']);
+});
+
+test('PASS evidence rejects unchanged prompts and unverified values required by the claim', () => {
+  const publicFeed = makeReceipt();
+  publicFeed.architectures.aarch64.updater.checks.publicLatestUntouched = status(
+    'PASS',
+    RECEIPT_TEMPLATE.architectures.aarch64.updater.checks.publicLatestUntouched.evidence,
+  );
+  assert.throws(() => verify(publicFeed), /must describe an observed result/);
+
+  const browserDownload = makeReceipt();
+  const runtime = browserDownload.architectures.aarch64.runtime;
+  runtime.hostMacOSVersion = '15.0';
+  runtime.hostArchitecture = 'arm64';
+  runtime.downloadBrowser = 'Safari';
+  runtime.downloadedArtifactSha256 = browserDownload.architectures.aarch64.artifact.sha256;
+  runtime.checks.browserDownloadQuarantine = status(
+    'PASS',
+    RECEIPT_TEMPLATE.architectures.aarch64.runtime.checks.browserDownloadQuarantine.evidence,
+  );
+  assert.throws(() => verify(browserDownload), /must describe an observed result/);
+
+  const updaterKey = makeReceipt();
+  updaterKey.architectures.aarch64.updater.bundleIdentifier = 'com.alond.buildmesh';
+  updaterKey.architectures.aarch64.updater.checks.sameBundleIdentifierAndUpdaterKey = status(
+    'PASS',
+    'Observed both test builds use the same bundle identifier and updater signing key.',
+  );
+  assert.throws(() => verify(updaterKey), /updaterKeyFingerprint must be observed/);
 });
 
 test('a tested-architecture claim needs every runtime and updater check to pass', () => {
