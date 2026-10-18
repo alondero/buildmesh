@@ -64,7 +64,11 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
   const [picking, setPicking] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const primaryButtonRef = useRef<HTMLButtonElement>(null);
+  // Issue #2463: initial focus targets the folder picker, the first required
+  // step of either flow. The submit button cannot take focus at mount — it is
+  // disabled until the form is complete, and `.focus()` on a disabled button
+  // is a no-op that leaves focus on the trigger behind the dialog.
+  const folderButtonRef = useRef<HTMLButtonElement>(null);
   // A clone outlives the dialog when it is dismissed: the backend runs it to
   // completion on the blocking pool. Tracking mount state lets the awaited
   // completion *report* its outcome instead of driving a form the user can no
@@ -164,7 +168,7 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
       labelledBy="mesh-create-title"
       maxWidth="max-w-md"
       closeOnBackdrop={false}
-      defaultFocusRef={primaryButtonRef}
+      defaultFocusRef={folderButtonRef}
     >
       <div className="flex items-start justify-between mb-4">
         <h2 id="mesh-create-title" className="text-sm font-semibold text-text-primary">
@@ -214,6 +218,7 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
           <div className="flex items-center gap-2">
             <button
               type="button"
+              ref={folderButtonRef}
               onClick={handleChooseFolder}
               disabled={picking || busy}
               className={PICKER_BUTTON}
@@ -261,6 +266,7 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
             <div className="flex items-center gap-2">
               <button
                 type="button"
+                ref={folderButtonRef}
                 onClick={handleChooseFolder}
                 disabled={picking || busy}
                 className={PICKER_BUTTON}
@@ -315,7 +321,6 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
           Cancel
         </button>
         <button
-          ref={primaryButtonRef}
           type="button"
           onClick={source === 'open' ? handleCreate : handleClone}
           disabled={!canSubmit || busy}

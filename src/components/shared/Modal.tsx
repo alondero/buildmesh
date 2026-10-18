@@ -59,7 +59,12 @@ interface ModalProps {
    * first form field) without coupling to `<ModalCloseButton>`'s chrome or
    * any other specific child. The ref MUST be pointing at a focusable
    * element at mount time — if it isn't (e.g. the consumer hasn't attached
-   * the ref yet), the modal falls back to the panel.
+   * the ref yet), the modal falls back to the panel. A target that exists but
+   * is `disabled` at mount is equally unusable, because `.focus()` on a
+   * disabled control is a no-op (issue #2463): the modal then focuses the
+   * panel's first tabbable descendant, so a submit button gated on an unfilled
+   * form does not leave focus on the trigger behind the dialog. Point the ref
+   * at the flow's first *actionable* step when that is where it opens.
    */
   defaultFocusRef?: RefObject<HTMLElement | null>;
   children: ReactNode;
@@ -84,6 +89,23 @@ function tabbableElements(root: HTMLElement): HTMLElement[] {
       return true;
     })
     .sort((a, b) => (a.tabIndex > 0 ? a.tabIndex : Number.MAX_SAFE_INTEGER) - (b.tabIndex > 0 ? b.tabIndex : Number.MAX_SAFE_INTEGER));
+}
+
+/**
+ * Where initial focus lands. Issue #2463: `.focus()` on a `disabled` control is
+ * a silent no-op, so a `defaultFocusRef` target gated on a form the user has
+ * not filled in yet (a submit button) left focus on the trigger *behind* the
+ * dialog. When the consumer named a disabled target, prefer the panel's first
+ * tabbable descendant; when they named none, keep the documented default of the
+ * panel itself.
+ */
+function initialFocusTarget(
+  requested: HTMLElement | null | undefined,
+  panel: HTMLElement | null,
+): HTMLElement | null {
+  if (!requested) return panel;
+  if (!requested.matches(':disabled')) return requested;
+  return (panel ? tabbableElements(panel)[0] : undefined) ?? panel;
 }
 
 /**
@@ -157,8 +179,9 @@ export function Modal({
     // render (which happens before this effect runs), so the consumer's
     // element is mounted by the time we read it. Falls back to the
     // panel itself when the consumer doesn't pass a ref (preserves the
-    // existing behaviour for every modal that doesn't opt in).
-    (defaultFocusRef?.current ?? panelRef.current)?.focus();
+    // existing behaviour for every modal that doesn't opt in), and to the
+    // first tabbable descendant when the named target is disabled (#2463).
+    initialFocusTarget(defaultFocusRef?.current, panelRef.current)?.focus();
 
     return () => {
       previouslyFocused?.focus?.();
