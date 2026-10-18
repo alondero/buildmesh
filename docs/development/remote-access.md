@@ -27,6 +27,22 @@ invitation. Android Keystore protects the persisted session. Foreground refreshe
 coalesce with owner/revision fences, and forgetting cancels pending actions. See
 [native Android client](android.md) for build and boundary details.
 
+## Mobile frontend composition
+
+`src/mobile/screens/NodeList.tsx` owns navigation, filtering, quick-create retry
+keys and request-bound reply state. Its rendering modules live under
+`src/mobile/components/nodeList/`: node rows, attention cards/deck and request
+previews, overview, per-mesh sections, provider picker, mesh actions sheet and
+snapshot/create notices. ESLint caps the screen at 600 lines.
+
+`useNodeListSnapshot` owns the mesh/node/Circuit reads, provider loading,
+visibility polling and WebSocket reconciliation. The screen passes its mounted
+ref into the hook, which owns the refresh revision fence. A failed secondary
+Circuit read keeps the last successful Circuit data, and an unavailable primary
+read keeps the visible list with a stale notice. Reply markers and create
+operation keys stay with the screen so extracting rendering modules does not
+reset pending work.
+
 ## LAN/VPN Exposure & Self-Signed TLS
 
 The embedded server binds **loopback only by default** (#496). An off-by-default
