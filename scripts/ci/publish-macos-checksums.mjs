@@ -23,6 +23,18 @@ export function buildManifest({ tag, architecture, releaseAssets, downloadedAsse
   return `${macOSChecksumRows({ tag, architecture, releaseAssetNames, sha256ByName }).join('\n')}\n`;
 }
 
+export function createPublishedChecksumManifest({ tag, architecture, releaseAssets, downloadAsset }) {
+  if (!Array.isArray(releaseAssets)) throw new Error('release assets JSON must contain an assets array');
+  if (typeof downloadAsset !== 'function') throw new Error('downloadAsset must be a function');
+  const releaseAssetNames = releaseAssets.map((asset) => asset?.name);
+  if (releaseAssetNames.some((name) => typeof name !== 'string' || basename(name) !== name)) {
+    throw new Error('release assets must have plain filenames');
+  }
+  const { dmg, updater } = macOSChecksumAssetNames({ tag, architecture, releaseAssetNames });
+  const downloadedAssets = Object.fromEntries([dmg, updater].map((name) => [name, downloadAsset(name)]));
+  return buildManifest({ tag, architecture, releaseAssets, downloadedAssets });
+}
+
 function main(argv) {
   const [tag, architecture, releaseAssetsPath, downloadDir, manifestPath, ...extra] = argv;
   if (!tag || !architecture || !releaseAssetsPath || !downloadDir || !manifestPath || extra.length) {
@@ -31,24 +43,17 @@ function main(argv) {
 
   const release = JSON.parse(readFileSync(releaseAssetsPath, 'utf8'));
   if (!Array.isArray(release.assets)) throw new Error('gh release view JSON did not contain an assets array');
-  const releaseAssetNames = release.assets.map((asset) => asset?.name);
-  // Check the exact target names against GitHub's current release listing before
-  // downloading anything. The checksum manifest must describe published files.
-  if (releaseAssetNames.some((name) => typeof name !== 'string' || basename(name) !== name)) {
-    throw new Error('release assets must have plain filenames');
-  }
   mkdirSync(downloadDir, { recursive: true });
 
-  // The names come from GitHub's release listing after checking them against
-  // the canonical names for this architecture.
-  const names = macOSChecksumAssetNames({ tag, architecture, releaseAssetNames });
-  const wanted = [names.dmg, names.updater];
-  for (const name of wanted) {
-    execFileSync('gh', ['release', 'download', tag, '--pattern', name, '--dir', downloadDir], { stdio: 'inherit' });
-  }
-
-  const downloadedAssets = Object.fromEntries(wanted.map((name) => [name, readFileSync(join(downloadDir, name))]));
-  const manifest = buildManifest({ tag, architecture, releaseAssets: release.assets, downloadedAssets });
+  const manifest = createPublishedChecksumManifest({
+    tag,
+    architecture,
+    releaseAssets: release.assets,
+    downloadAsset(name) {
+      execFileSync('gh', ['release', 'download', tag, '--pattern', name, '--dir', downloadDir], { stdio: 'inherit' });
+      return readFileSync(join(downloadDir, name));
+    },
+  });
   writeFileSync(manifestPath, manifest, 'utf8');
   process.stdout.write(manifest);
 }

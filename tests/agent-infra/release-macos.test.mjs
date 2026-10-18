@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { macOSChecksumAssetNames, macOSChecksumRows, macOSDmgName, macOSLocalUpdaterArchiveName, macOSUpdaterArchiveName } from '../../scripts/ci/macos-artifacts.mjs';
-import { buildManifest } from '../../scripts/ci/publish-macos-checksums.mjs';
+import { buildManifest, createPublishedChecksumManifest } from '../../scripts/ci/publish-macos-checksums.mjs';
 
 const workflow = readFileSync(new URL('../../.github/workflows/release.yml', import.meta.url), 'utf8');
 const verifyWorkflow = readFileSync(new URL('../../.github/workflows/verify.yml', import.meta.url), 'utf8');
@@ -107,6 +107,17 @@ test('macOS checksum rows use published release names and bytes', () => {
       'Buildmesh_1.5.0_x64.app.tar.gz': Buffer.from('published updater bytes'),
     },
   }), `${dmgDigest}  Buildmesh_1.5.0_x64.dmg\n${updaterDigest}  Buildmesh_1.5.0_x64.app.tar.gz\n`);
+  const downloaded = [];
+  assert.equal(createPublishedChecksumManifest({
+    tag: 'v1.5.0',
+    architecture: 'x86_64',
+    releaseAssets: assets.map((name) => ({ name })),
+    downloadAsset(name) {
+      downloaded.push(name);
+      return Buffer.from(name.endsWith('.dmg') ? 'published dmg bytes' : 'published updater bytes');
+    },
+  }), `${dmgDigest}  Buildmesh_1.5.0_x64.dmg\n${updaterDigest}  Buildmesh_1.5.0_x64.app.tar.gz\n`);
+  assert.deepEqual(downloaded, ['Buildmesh_1.5.0_x64.dmg', 'Buildmesh_1.5.0_x64.app.tar.gz']);
   assert.deepEqual(macOSChecksumAssetNames({
     tag: 'v1.5.0',
     architecture: 'aarch64',
@@ -129,6 +140,17 @@ test('macOS checksum rows use published release names and bytes', () => {
     downloadedAssets: {
       'Buildmesh_1.5.0_x64.dmg': Buffer.from('published dmg bytes'),
       'Buildmesh.app.tar.gz': Buffer.from('local archive bytes'),
+    },
+  }), /does not list expected updater archive/);
+  assert.throws(() => createPublishedChecksumManifest({
+    tag: 'v1.5.0',
+    architecture: 'x86_64',
+    releaseAssets: [
+      { name: 'Buildmesh_1.5.0_x64.dmg' },
+      { name: 'Buildmesh.app.tar.gz' },
+    ],
+    downloadAsset() {
+      assert.fail('must reject the missing published updater archive before downloading');
     },
   }), /does not list expected updater archive/);
 });
