@@ -472,7 +472,7 @@ fn create_node_circuit_run_with_recovery_locked(
     if let Some(continued_from) = continued_from {
         super::evidence::append_history(
             &tx,
-super::evidence::HistoryEvent {
+            super::evidence::HistoryEvent {
                 run_id,
                 node_id: None,
                 attempt: None,
