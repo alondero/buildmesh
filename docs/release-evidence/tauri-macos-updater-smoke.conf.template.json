@@ -1,0 +1,11 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "version": "<distinct-test-version>",
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://<isolated-test-feed>/buildmesh/{{target}}/{{arch}}/{{current_version}}"
+      ]
+    }
+  }
+}

@@ -65,6 +65,12 @@ and the authoritative required-status-check names — plus the release gate and
 emergency bypass — live in
 [the release procedure](docs/development/releasing.md#required-checks-and-branch-protection).
 
+Changes to the macOS release path must follow the [installed-candidate
+procedure](docs/development/releasing.md#before-publishing). A draft with Mac
+assets needs a receipt for that exact candidate before publication; missing
+native runtime evidence must remain explicitly unverified in the receipt and
+support claims.
+
 The [development harness](docs/agents/development-harness.md) adds task
 continuity, current-tree receipts, explicit outcomes and guarded completion.
 The `/verify` skill routes to this gate. Acceptance involving the real desktop

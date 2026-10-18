@@ -1,0 +1,185 @@
+{
+  "schemaVersion": 1,
+  "candidate": {
+    "tag": "<release-tag>",
+    "commit": "<full-tagged-commit-sha>",
+    "releaseUrl": "https://github.com/alondero/buildmesh/releases/tag/<release-tag>"
+  },
+  "architectures": {
+    "aarch64": {
+      "artifact": {
+        "file": "Buildmesh_<version>_aarch64.dmg",
+        "sha256": "<sha256-from-SHA256SUMS-macos-aarch64.txt>",
+        "auditAsset": "MACOS-CANDIDATE-AUDIT-aarch64.json"
+      },
+      "runtime": {
+        "hostMacOSVersion": "UNVERIFIED: record the native macOS version, or explain why this architecture could not be tested",
+        "hostArchitecture": "UNVERIFIED: confirm arm64 on the Mac that ran the app",
+        "downloadBrowser": "UNVERIFIED: record Safari/Chrome/Firefox and the download source",
+        "downloadedArtifactSha256": "UNVERIFIED: compute after downloading through the browser",
+        "cli": {
+          "name": "UNVERIFIED: record one supported agent CLI",
+          "version": "UNVERIFIED: record the CLI version"
+        },
+        "checks": {
+          "browserDownloadQuarantine": {
+            "outcome": "UNVERIFIED",
+            "evidence": "No clean native Apple Silicon Mac/browser was available; no quarantine result is claimed."
+          },
+          "gatekeeperApproval": {
+            "outcome": "UNVERIFIED",
+            "evidence": "Record the Gatekeeper message and the approval action observed on this macOS version."
+          },
+          "finderLaunch": {
+            "outcome": "UNVERIFIED",
+            "evidence": "Record whether the copied Applications app opened from Finder or Dock."
+          },
+          "cliDetected": {
+            "outcome": "UNVERIFIED",
+            "evidence": "Record whether Buildmesh detected the installed CLI after launch from Finder."
+          },
+          "cliAuthenticated": {
+            "outcome": "UNVERIFIED",
+            "evidence": "Record whether the CLI's own authenticated account worked; do not include credentials."
+          },
+          "taskAndDiff": {
+            "outcome": "UNVERIFIED",
+            "evidence": "Record a harmless repository task, PTY interaction, and the resulting changed-file diff."
+          },
+          "closeReopen": {
+            "outcome": "UNVERIFIED",
+            "evidence": "Record that the app closed and reopened and the same project/task identity remained."
+          },
+          "sessionResume": {
+            "outcome": "UNVERIFIED",
+            "evidence": "Record whether the supported CLI resumed the saved conversation after app restart; do not claim a live process survives reboot."
+          },
+          "terminalNonResumable": {
+            "outcome": "UNVERIFIED",
+            "evidence": "Record that a plain Terminal node is not offered or described as resumable."
+          }
+        }
+      },
+      "updater": {
+        "feedEndpoint": "UNVERIFIED: isolated HTTPS test feed; never releases/latest",
+        "testBuildCommit": "UNVERIFIED: build both smoke versions from the candidate commit",
+        "fromVersion": "UNVERIFIED",
+        "toVersion": "UNVERIFIED",
+        "bundleIdentifier": "UNVERIFIED: expected com.alond.buildmesh",
+        "updaterKeyFingerprint": "UNVERIFIED: record a non-secret fingerprint only",
+        "checks": {
+          "isolatedFeed": {
+            "outcome": "UNVERIFIED",
+            "evidence": "Record the isolated HTTPS test feed and confirm it is not the public latest feed."
+          },
+          "publicLatestUntouched": {
+            "outcome": "UNVERIFIED",
+            "evidence": "Confirm the test did not publish a release or modify releases/latest/latest.json."
+          },
+          "sameBundleIdentifierAndUpdaterKey": {
+            "outcome": "UNVERIFIED",
+            "evidence": "Confirm both test builds used com.alond.buildmesh and the same updater public key."
+          },
+          "validUpdateRelaunchedWithState": {
+            "outcome": "UNVERIFIED",
+            "evidence": "Record the two distinct versions, successful in-app install/relaunch, and retained workspace/task state."
+          },
+          "badSignatureRejectedWithoutReplacing": {
+            "outcome": "UNVERIFIED",
+            "evidence": "Record the deliberately invalid signature and confirm the installed version and workspace were unchanged."
+          }
+        }
+      }
+    },
+    "x86_64": {
+      "artifact": {
+        "file": "Buildmesh_<version>_x64.dmg",
+        "sha256": "<sha256-from-SHA256SUMS-macos-x86_64.txt>",
+        "auditAsset": "MACOS-CANDIDATE-AUDIT-x86_64.json"
+      },
+      "runtime": {
+        "hostMacOSVersion": "UNVERIFIED: record the native macOS version, or explain why this architecture could not be tested",
+        "hostArchitecture": "UNVERIFIED: confirm x86_64 on the Mac that ran the app",
+        "downloadBrowser": "UNVERIFIED: record Safari/Chrome/Firefox and the download source",
+        "downloadedArtifactSha256": "UNVERIFIED: compute after downloading through the browser",
+        "cli": {
+          "name": "UNVERIFIED: record one supported agent CLI",
+          "version": "UNVERIFIED: record the CLI version"
+        },
+        "checks": {
+          "browserDownloadQuarantine": {
+            "outcome": "UNVERIFIED",
+            "evidence": "No clean native Intel Mac/browser was available; no quarantine result is claimed."
+          },
+          "gatekeeperApproval": {
+            "outcome": "UNVERIFIED",
+            "evidence": "Record the Gatekeeper message and the approval action observed on this macOS version."
+          },
+          "finderLaunch": {
+            "outcome": "UNVERIFIED",
+            "evidence": "Record whether the copied Applications app opened from Finder or Dock."
+          },
+          "cliDetected": {
+            "outcome": "UNVERIFIED",
+            "evidence": "Record whether Buildmesh detected the installed CLI after launch from Finder."
+          },
+          "cliAuthenticated": {
+            "outcome": "UNVERIFIED",
+            "evidence": "Record whether the CLI's own authenticated account worked; do not include credentials."
+          },
+          "taskAndDiff": {
+            "outcome": "UNVERIFIED",
+            "evidence": "Record a harmless repository task, PTY interaction, and the resulting changed-file diff."
+          },
+          "closeReopen": {
+            "outcome": "UNVERIFIED",
+            "evidence": "Record that the app closed and reopened and the same project/task identity remained."
+          },
+          "sessionResume": {
+            "outcome": "UNVERIFIED",
+            "evidence": "Record whether the supported CLI resumed the saved conversation after app restart; do not claim a live process survives reboot."
+          },
+          "terminalNonResumable": {
+            "outcome": "UNVERIFIED",
+            "evidence": "Record that a plain Terminal node is not offered or described as resumable."
+          }
+        }
+      },
+      "updater": {
+        "feedEndpoint": "UNVERIFIED: isolated HTTPS test feed; never releases/latest",
+        "testBuildCommit": "UNVERIFIED: build both smoke versions from the candidate commit",
+        "fromVersion": "UNVERIFIED",
+        "toVersion": "UNVERIFIED",
+        "bundleIdentifier": "UNVERIFIED: expected com.alond.buildmesh",
+        "updaterKeyFingerprint": "UNVERIFIED: record a non-secret fingerprint only",
+        "checks": {
+          "isolatedFeed": {
+            "outcome": "UNVERIFIED",
+            "evidence": "Record the isolated HTTPS test feed and confirm it is not the public latest feed."
+          },
+          "publicLatestUntouched": {
+            "outcome": "UNVERIFIED",
+            "evidence": "Confirm the test did not publish a release or modify releases/latest/latest.json."
+          },
+          "sameBundleIdentifierAndUpdaterKey": {
+            "outcome": "UNVERIFIED",
+            "evidence": "Confirm both test builds used com.alond.buildmesh and the same updater public key."
+          },
+          "validUpdateRelaunchedWithState": {
+            "outcome": "UNVERIFIED",
+            "evidence": "Record the two distinct versions, successful in-app install/relaunch, and retained workspace/task state."
+          },
+          "badSignatureRejectedWithoutReplacing": {
+            "outcome": "UNVERIFIED",
+            "evidence": "Record the deliberately invalid signature and confirm the installed version and workspace were unchanged."
+          }
+        }
+      }
+    }
+  },
+  "supportClaims": {
+    "testedArchitectures": [],
+    "testedHarnesses": [],
+    "limitation": "No native macOS installed-app or updater evidence has been collected yet. Keep both published architectures labeled early access and unverified."
+  }
+}

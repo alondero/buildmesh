@@ -1,8 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { macOSDmgName, macOSLocalUpdaterArchiveName, macOSUpdaterArchiveName } from '../../scripts/ci/macos-artifacts.mjs';
 
 const workflow = readFileSync(new URL('../../.github/workflows/release.yml', import.meta.url), 'utf8');
+const verifyWorkflow = readFileSync(new URL('../../.github/workflows/verify.yml', import.meta.url), 'utf8');
+const candidateAudit = readFileSync(new URL('../../scripts/ci/audit-macos-candidate.mjs', import.meta.url), 'utf8');
+const candidateAuditPath = fileURLToPath(new URL('../../scripts/ci/audit-macos-candidate.mjs', import.meta.url));
 
 /** The body of one top-level `job:` block, so one job's steps are not read as another's. */
 function jobBlock(jobId) {
@@ -35,13 +41,6 @@ function readConfig(name) {
 const ARM_CONFIG = 'tauri.macos-release.conf.json';
 const INTEL_CONFIG = 'tauri.macos-release-intel.conf.json';
 
-// GitHub's macOS image labels, and what this workflow must and must not use.
-// `macos-13` was the historical Intel label and was retired in December 2025;
-// `macos-14` follows it on 2 November 2026. The Intel leg therefore runs on
-// `macos-15-intel`, which is the last Intel image the service offers before
-// x86_64 support ends in August 2027.
-const RETIRED_MACOS_LABELS = ['macos-13', 'macos-13-large', 'macos-14', 'macos-14-large', 'macos-14-xlarge'];
-
 test('the macOS release job builds both release architectures', () => {
   const job = jobBody('macos-release');
   assert.match(job, /runs-on: \$\{\{ matrix\.runner \}\}/);
@@ -53,13 +52,30 @@ test('the macOS release job builds both release architectures', () => {
   assert.match(job, /- runner: macos-15-intel\n\s+target: x86_64-apple-darwin\n\s+config: src-tauri\/tauri\.macos-release-intel\.conf\.json\n\s+arch: x86_64/);
 });
 
-test('the macOS release job runs on no retired macOS image', () => {
+test('the macOS release job uses the configured native runner labels', () => {
   const job = jobBody('macos-release');
   const runners = [...job.matchAll(/runner: (\S+)/g)].map((match) => match[1]);
   assert.deepEqual(runners.sort(), ['macos-15', 'macos-15-intel']);
-  for (const retired of RETIRED_MACOS_LABELS) {
-    assert.ok(!job.includes(retired), `macos-release must not use the retired \`${retired}\` label`);
-  }
+});
+
+test('published Intel filenames use Tauri x64 names while architecture evidence stays x86_64', () => {
+  assert.equal(macOSDmgName('1.5.0', 'aarch64'), 'Buildmesh_1.5.0_aarch64.dmg');
+  assert.equal(macOSDmgName('1.5.0', 'x86_64'), 'Buildmesh_1.5.0_x64.dmg');
+  assert.equal(macOSUpdaterArchiveName('1.5.0', 'x86_64'), 'Buildmesh_1.5.0_x64.app.tar.gz');
+  assert.equal(macOSLocalUpdaterArchiveName('x86_64'), 'Buildmesh_x64.app.tar.gz');
+});
+
+test('native PR verification exercises the audit CLI and reports real Intel bundle filenames', () => {
+  const marker = '\n  macos-candidate-audit-test:\n';
+  const start = verifyWorkflow.indexOf(marker);
+  assert.notEqual(start, -1, 'verify.yml has no macOS candidate audit job');
+  const job = verifyWorkflow.slice(start);
+  assert.match(job, /if: github\.event_name == 'pull_request'/);
+  assert.match(job, /runs-on: macos-15-intel/);
+  assert.match(job, /node --test tests\/agent-infra\/macos-candidate-audit\.test\.mjs/);
+  assert.match(job, /npm run tauri -- build --debug --target x86_64-apple-darwin/);
+  assert.match(job, /Buildmesh_\$\{version\}_x64\.dmg/);
+  assert.match(job, /Buildmesh_x64\.app\.tar\.gz/);
 });
 
 // The load-bearing invariant of the whole change: three jobs write one
@@ -73,7 +89,43 @@ test('only one macOS leg builds at a time, so the shared feed cannot race', () =
 
 test('the Windows job is ordered ahead of every other feed writer', () => {
   assert.match(jobBody('macos-release'), /needs: release/);
-  assert.match(jobBody('updater-feed'), /needs: \[release, macos-release\]/);
+  assert.match(jobBody('updater-feed'), /needs: \[release, macos-release, macos-candidate-audit\]/);
+});
+
+test('the draft DMGs are downloaded and audited natively after upload', () => {
+  const job = jobBody('macos-candidate-audit');
+  assert.match(job, /needs: macos-release/);
+  assert.match(job, /- runner: macos-15\n\s+arch: aarch64\n\s+minimum: "11\.0"/);
+  assert.match(job, /- runner: macos-15-intel\n\s+arch: x86_64\n\s+minimum: "10\.13"/);
+  assert.match(job, /node --test tests\/agent-infra\/macos-candidate-audit\.test\.mjs/);
+  assert.match(job, /audit-macos-candidate\.mjs/);
+  assert.match(candidateAudit, /gh', \[/);
+  assert.match(candidateAudit, /'release', 'download'/);
+  assert.match(candidateAudit, /'hdiutil'/);
+  assert.match(candidateAudit, /'codesign'/);
+  assert.match(candidateAudit, /'lipo'/);
+  assert.match(candidateAudit, /'gh', \['release', 'upload'/);
+  assert.match(candidateAudit, /browserDownloadAndQuarantine: 'MANUAL_REQUIRED/);
+  assert.match(candidateAudit, /finderLaunch: 'MANUAL_REQUIRED/);
+  assert.match(candidateAudit, /gatekeeperApproval: 'MANUAL_REQUIRED/);
+  assert.doesNotMatch(job, /latest\.json|uploadUpdaterJson/);
+});
+
+test('candidate audit entrypoint rejects an unsupported host or architecture before release operations', () => {
+  const expectedFailure = process.platform === 'darwin'
+    ? /unsupported architecture invalid/
+    : /must run on a native macOS runner/;
+  const result = spawnSync(process.execPath, [
+    candidateAuditPath,
+    '--tag', 'v1.5.0',
+    '--commit', 'a'.repeat(40),
+    '--arch', 'invalid',
+    '--minimum-macos', '11.0',
+    '--repo', 'alondero/buildmesh',
+  ], { encoding: 'utf8' });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, expectedFailure);
+  assert.doesNotMatch(result.stderr, /\n\s+at .+\.mjs:/, 'CLI errors should not include an uncaught stack trace');
 });
 
 test('exactly the two jobs that merge the feed declare an updater json upload', () => {
@@ -193,7 +245,7 @@ test('the macOS job asserts the signature is ad-hoc rather than trusting codesig
 
 test('the feed check runs after every packaging job and names all three platforms', () => {
   const job = jobBody('updater-feed');
-  assert.match(job, /needs: \[release, macos-release\]/);
+  assert.match(job, /needs: \[release, macos-release, macos-candidate-audit\]/);
   assert.match(job, /verify-updater-feed\.mjs/);
   for (const entry of ['windows-x86_64', 'darwin-aarch64', 'darwin-x86_64']) {
     assert.ok(job.includes(`--require ${entry}`), `updater-feed must require ${entry}`);

@@ -42,7 +42,7 @@ git tag vX.Y.Z <merge-sha-on-origin-main>
 git push origin vX.Y.Z
 ```
 
-The tag must be reachable from `main` or the workflow rejects it. Do not move or reuse a pushed tag. Find the run with `gh run list --workflow release.yml --limit 1` and watch it with `gh run watch <id> --exit-status` in the background. Job order: `Verification` (about 7 min), then `release` (Windows draft, about 17 min), then `macOS ad-hoc signed` (two legs, **serialised** — one build each, so budget roughly double a single leg), `Android signed APK` (about 3 min), then `Verify updater feed`. The macOS legs are sequential by design: all three packaging jobs write the same `latest.json`, and merging is delete-then-upload, so a longer macOS job is the cost of not shipping a half-written feed.
+The tag must be reachable from `main` or the workflow rejects it. Do not move or reuse a pushed tag. Find the run with `gh run list --workflow release.yml --limit 1` and watch it with `gh run watch <id> --exit-status` in the background. `Verification` runs first, followed by `release` (the Windows draft). After that, the two `macOS ad-hoc signed` legs run **serially** while `Android signed APK` runs in parallel. The native downloaded-candidate audit follows the macOS legs. `Verify updater feed` waits for the Mac audit and may run in parallel with Android. The macOS package legs are sequential by design: all three packaging jobs write the same `latest.json`, and merging is delete-then-upload, so a longer macOS job is the cost of not shipping a half-written feed.
 
 ## 4. If the Android job fails
 
@@ -59,11 +59,11 @@ Read `gh run view <id> --log-failed`.
 
 ## 5. Verify the draft before publishing
 
-`gh release view vX.Y.Z --json isDraft,assets` must list all of: `Buildmesh_X.Y.Z_x64-setup.exe` (+`.sig`), `Buildmesh_X.Y.Z_x64_en-US.msi` (+`.sig`), `latest.json`, `SHA256SUMS.txt`, `Buildmesh_X.Y.Z_android.apk` and `Buildmesh_X.Y.Z_android.apk.sha256`, plus both macOS sets: `Buildmesh_X.Y.Z_aarch64.dmg`, `Buildmesh_X.Y.Z_aarch64.app.tar.gz` (+`.sig`), `Buildmesh_X.Y.Z_x86_64.dmg`, `Buildmesh_X.Y.Z_x86_64.app.tar.gz` (+`.sig`), `SHA256SUMS-macos-aarch64.txt` and `SHA256SUMS-macos-x86_64.txt`.
+`gh release view vX.Y.Z --json isDraft,assets` must list all of: `Buildmesh_X.Y.Z_x64-setup.exe` (+`.sig`), `Buildmesh_X.Y.Z_x64_en-US.msi` (+`.sig`), `latest.json`, `SHA256SUMS.txt`, `Buildmesh_X.Y.Z_android.apk` and `Buildmesh_X.Y.Z_android.apk.sha256`, plus both macOS sets: `Buildmesh_X.Y.Z_aarch64.dmg`, `Buildmesh_X.Y.Z_aarch64.app.tar.gz` (+`.sig`), `Buildmesh_X.Y.Z_x64.dmg`, `Buildmesh_X.Y.Z_x64.app.tar.gz` (+`.sig`), `SHA256SUMS-macos-aarch64.txt`, `SHA256SUMS-macos-x86_64.txt`, and `MACOS-CANDIDATE-AUDIT-aarch64.json` / `MACOS-CANDIDATE-AUDIT-x86_64.json`. Tauri names Intel files with the `x64` suffix; `x86_64` remains the CPU and updater platform label. The installed-app receipt is added in step 6.
 
 The `Verify updater feed` job must be green — it fails unless `latest.json` carries a signed, resolvable entry for `windows-x86_64`, `darwin-aarch64` and `darwin-x86_64`. If it is red, the draft is not publishable; read `gh run view <id> --log-failed` and fix before doing anything else.
 
-Confirm the macOS job actually signed ad-hoc rather than trusting the green run: `gh run view <id> --log` on the `macOS ad-hoc signed` job shows `Signature=adhoc` from `codesign -dv` and the `LSMinimumSystemVersion` each bundle declared. Record those two numbers — they are the evidence for what the release supports, not an assumption.
+Confirm the `Downloaded macOS candidate audit` job passed on both native runners. It downloads each DMG from the draft, compares the exact bytes with the release checksum, mounts the DMG, checks `Signature=adhoc`, executable architecture and `LSMinimumSystemVersion`, then uploads its JSON record to the draft. The record distinguishes those automated checks from browser quarantine, Gatekeeper and Finder checks, which require a human Mac session.
 
 Download the APK into a scratch directory and check it with the Android SDK tools in `%LOCALAPPDATA%\Android\Sdk\build-tools\35.0.0`:
 
@@ -71,17 +71,32 @@ Download the APK into a scratch directory and check it with the Android SDK tool
 - `aapt2.exe dump badging <apk>` reports `versionName='X.Y.Z'`.
 - The SHA-256 of the file equals the sidecar.
 
-## 6. macOS install validation is a publication prerequisite
+## 6. macOS installed-candidate receipt is a publication prerequisite
 
-Before publishing a draft that carries Mac artifacts, the Mac download-and-run check must be done against **that** candidate: download the DMG, mount it, confirm the bundle's `codesign --verify --deep --strict` passes, launch it, and run one real update through the in-app updater. Record the result in the tracking issue.
+Read [the installed-candidate procedure](../../../docs/development/releasing.md#before-publishing). The native workflow audit proves the exact uploaded DMG's checksum, ad-hoc signature, executable architecture and declared minimum OS. It does not prove browser quarantine, Gatekeeper approval, Finder launch, an authenticated CLI task, resume, or the in-app update flow.
 
-Packaging evidence is not installed-app runtime evidence, and this is the split that keeps the two honest. The release workflow proves the bundle was built and the feed is well-formed; it cannot prove a Mac launches the app or that the updater replaces it. Keep the Mac assets in the **draft** until that check is done — do not publish, and do not treat "the macOS job was green" as a substitute. Do not claim a minimum macOS version, a working Finder launch or a working update path on the strength of the CI logs alone.
+Before publishing the draft:
+
+1. Download both `MACOS-CANDIDATE-AUDIT-<arch>.json` files and both macOS checksum manifests from **that** draft.
+2. Fill `docs/release-evidence/macos-installed-candidate.template.json` from clean native Mac user accounts. Record the browser-downloaded DMG digest, Gatekeeper/Finder result, one supported authenticated CLI task and diff, app close/reopen/session-resume result, and plain Terminal non-resumability. Do not claim live-process survival through reboot.
+3. For each architecture, run the two-version updater smoke against a private HTTPS test feed using the tagged source, the same bundle identifier and updater key, and distinct versions. Verify successful install/relaunch with workspace state retained, then a bad-signature rejection that leaves the installed version unchanged. Keep the public `releases/latest` feed untouched. The procedure includes the config overlay and commands.
+4. Set every receipt outcome to `PASS`, `FAIL` or `UNVERIFIED` with evidence. `FAIL` blocks publication. `UNVERIFIED` is allowed only with a reason and means that architecture/workflow remains early access and untested.
+5. Validate the receipt and upload it to the draft as `MACOS-INSTALLED-RECEIPT.json`:
+   ```sh
+   COMMIT="$(git rev-parse "${TAG}^{commit}")"
+   node scripts/ci/verify-macos-installed-receipt.mjs .tmp/macos-installed-candidate.json --tag "$TAG" --commit "$COMMIT" --release-dir .tmp/macos-release-evidence
+   cp .tmp/macos-installed-candidate.json .tmp/MACOS-INSTALLED-RECEIPT.json
+   gh release upload "$TAG" .tmp/MACOS-INSTALLED-RECEIPT.json --repo alondero/buildmesh --clobber
+   ```
+6. Set tested-support claims only for the architecture and CLI evidence that passed; one tested harness does not establish parity for the others.
+
+Keep the Mac assets in the **draft** until the receipt validates. Do not infer installed runtime support from the build or feed jobs. If suitable native hardware is unavailable, attach the receipt with explicit unverified coverage and keep public support claims narrow; never report skipped checks as passes.
 
 ## 7. Publish and bump back
 
 1. `gh release edit vX.Y.Z --draft=false --latest`, then `curl -sL https://github.com/alondero/buildmesh/releases/latest/download/latest.json` and confirm `"version": "X.Y.Z"` **and** that `platforms` contains `windows-x86_64`, `darwin-aarch64` and `darwin-x86_64`.
 2. New branch from `origin/main`: `npm run version:set -- <next minor>.0-0` (after 1.4.1 that is `1.5.0-0`), `npm run check:versions`, commit `package-lock.json` with the rest as `chore(release): vX.Y.Z post-release version bump`. The message must carry `docs: none — version bump only` (a plain hyphen also passes the guard), because no docs are staged. Open the PR the same way as step 1.6 (body file, template sections), wait for checks, squash-merge with the same `docs:` line in `--body`.
-3. Comment on the tracking issue with the release URL, what was verified, and — for a release carrying Mac artifacts — the macOS install/upgrade result and the `LSMinimumSystemVersion` observed.
+3. Comment on the tracking issue with the release URL, the installed receipt, what was verified, and — for a release carrying Mac artifacts — the native architectures, tested CLI, update/rejection outcomes and any unverified coverage. Include the declared `LSMinimumSystemVersion`, clearly labeled as a bundle value rather than a runtime minimum when native runtime evidence is absent.
 
 ## Report to the user
 

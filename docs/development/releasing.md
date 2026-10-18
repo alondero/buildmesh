@@ -96,11 +96,11 @@ output.)
    Release containing the installer, its `.sig`, and `latest.json`. If
    verification fails on the tag, nothing is built and no release exists —
    see [What blocks a release](#what-blocks-a-release).
-6. A `macOS ad-hoc signed` job then builds the macOS installers and updater
+6. A `macOS ad-hoc signed` job builds the macOS installers and updater
    archives — one architecture per leg, ad-hoc signed, no Apple account
    involved. It runs after the Windows job because that job is what creates the
    draft. See [macOS release packaging](#macos-release-packaging).
-7. An `Android signed APK` job builds `assembleRelease` and uploads
+7. In parallel, an `Android signed APK` job builds `assembleRelease` and uploads
    `Buildmesh_<version>_android.apk` plus a `.sha256` sidecar to that draft.
    It runs *after* the Windows job, for the same reason. When
    `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEY_ALIAS` and
@@ -109,7 +109,7 @@ output.)
    would strand it as a draft. The APK is **not** added to `latest.json`; that
    feed is the Tauri updater and covers Windows and macOS only. See
    [Android release signing](android.md#release-signing-and-distribution).
-8. A `Verify updater feed` job reads the draft's real `latest.json` back off the
+8. A `Verify updater feed` job, which waits for the macOS audit, reads the draft's real `latest.json` back off the
    release and fails unless every packaged platform is present, signed, and
    pointing at an artifact the release actually carries. This is the last gate
    before a human publishes, and it is the one that catches a macOS archive that
@@ -466,12 +466,9 @@ Apple Silicon hardware starts at macOS 11, so Tauri's 10.13 default floor is
 not a linkable deployment target for that architecture and the overlay asks for
 `11.0`. Intel keeps Tauri's documented minimum.
 
-**Intel has a deadline.** `macos-13` was the historical Intel label and was
-retired in December 2025; `macos-15-intel` is the last Intel image GitHub
-offers, and x86_64 hosted runners go away in **August 2027**. When that happens
-the Intel leg has to move to a self-hosted or larger runner or be dropped, and
-the release skill's expected asset list changes with it. This is a dated
-constraint, not a preference.
+The Intel release leg currently uses GitHub's `macos-15-intel` runner label.
+Check current GitHub runner availability before planning future Intel release
+builds.
 
 Those two numbers are what the bundles *declare*: the macOS job reads
 `LSMinimumSystemVersion` out of each built `Info.plist` and prints it into the
@@ -516,20 +513,164 @@ Per-platform manifests, so no job can overwrite another's:
 | `SHA256SUMS-macos-aarch64.txt` | the Apple Silicon leg |
 | `SHA256SUMS-macos-x86_64.txt` | the Intel leg |
 
-The macOS manifests cover both the `.dmg` a person installs and the
-`.app.tar.gz` the updater fetches. The Android job keeps its own `.sha256`
+The macOS manifests cover both the `.dmg` a person installs and the versioned
+`.app.tar.gz` release asset the updater fetches. Intel release assets use the
+Tauri `x64` filename suffix while the updater platform key and receipt continue
+to identify that CPU as `x86_64`. The Android job keeps its own `.sha256`
 sidecar.
 
 ### Before publishing
 
-Packaging evidence is not installed-app runtime evidence. Keep the Mac assets in
-the draft until the download-and-run check in issue #2484 — downloaded app,
-Finder launch, CLI/session workflow, and a real update through the updater — has
-been done against that candidate. Publishing the draft without it turns
-"packaging works" into a support claim nobody has tested. Validating the
-packaging is not on its own a reason to flip the updater feed early, and the
-feed is not flipped by this job at all: `latest.json` only becomes
-`releases/latest` when the draft is published.
+Packaging evidence is not installed-app runtime evidence. Before publishing a
+draft that carries Mac assets, complete and attach a receipt for that exact tag.
+The `macos-candidate-audit` job downloads each uploaded DMG back from the draft
+on native Apple Silicon and Intel runners. It compares the file with its
+architecture's published checksum manifest, mounts it read-only, verifies the
+ad-hoc bundle signature and records the app version, executable architecture,
+bundle identifier and declared minimum macOS version. It uploads
+`MACOS-CANDIDATE-AUDIT-aarch64.json` and
+`MACOS-CANDIDATE-AUDIT-x86_64.json` to the draft. This uses `gh` to download the
+asset; it does not model a browser's quarantine flag or prove that a person
+approved and opened the app from Finder. Those checks stay explicit in the
+human receipt.
+
+#### Prepare and validate the receipt
+
+Download the per-architecture audit JSON and checksum manifests from the draft
+release into a scratch directory, then copy the
+[receipt template](../release-evidence/macos-installed-candidate.template.json)
+to an ignored `.tmp/` path:
+
+```sh
+TAG=vX.Y.Z
+mkdir -p .tmp/macos-release-evidence
+gh release download "$TAG" --repo alondero/buildmesh --pattern 'SHA256SUMS-macos-aarch64.txt' --pattern 'SHA256SUMS-macos-x86_64.txt' --pattern 'MACOS-CANDIDATE-AUDIT-aarch64.json' --pattern 'MACOS-CANDIDATE-AUDIT-x86_64.json' --dir .tmp/macos-release-evidence
+cp docs/release-evidence/macos-installed-candidate.template.json .tmp/macos-installed-candidate.json
+COMMIT="$(git rev-parse "${TAG}^{commit}")"
+```
+
+Open `.tmp/macos-installed-candidate.json` and fill it from the browser,
+Finder/Gatekeeper, CLI/session, and updater checks below. Replace each
+`UNVERIFIED` value only when you have the matching observation and evidence.
+After editing the receipt, run the validator:
+
+```sh
+node scripts/ci/verify-macos-installed-receipt.mjs .tmp/macos-installed-candidate.json --tag "$TAG" --commit "$COMMIT" --release-dir .tmp/macos-release-evidence
+```
+
+Use a clean macOS user account or a test Mac for each native architecture. From
+a browser, download the matching DMG and record its SHA-256 alongside the exact
+manifest row. Do not remove the download quarantine attribute. Mount the image,
+copy Buildmesh to Applications, eject it, then launch it from Finder or Dock.
+Record the Gatekeeper prompt and the per-app approval path used; Apple maintains
+the [instructions for opening an app from an unidentified developer](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac).
+Do not disable Gatekeeper globally. The DMG checksum and ad-hoc signature
+establish file consistency, not Apple publisher trust; the minisign signature
+belongs to updater archives, not the DMG or Gatekeeper.
+
+Use a harmless test repository and one installed, authenticated supported CLI.
+Record its name/version and runtime, that Finder-launched Buildmesh opened the
+repository and detected and started the CLI. Confirm a PTY task produced a real
+changed-file diff, then close and reopen Buildmesh and verify the project/task
+identity remains and the saved conversation resumes. Also confirm a plain
+Terminal node is not represented as resumable. App restart can relaunch a
+saved harness conversation; it does not
+keep the original CLI process alive through app close or reboot. Redact
+repository names, credentials, prompts, and private paths from the receipt.
+
+#### Test the updater without the public latest feed
+
+The public Buildmesh bundle identifier and updater key come from the base Tauri
+config. For the runtime test, make three temporary copies of the
+[updater smoke config template](../release-evidence/tauri-macos-updater-smoke.conf.template.json):
+use distinct versions such as `X.Y.Z-smoke.1`, `X.Y.Z-smoke.2`, and
+`X.Y.Z-smoke.3`, and point each at one private HTTPS test-feed endpoint that is
+not under `releases/latest`. Keep the checked-in bundle identifier and updater
+public key unchanged. Do not enable insecure HTTP. Load the existing updater
+signing secret through a local secret manager and inject
+`TAURI_SIGNING_PRIVATE_KEY` plus `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` into the
+build process. The commands below inherit those variables. Never put the key or
+password in a config template, command text, shell history, receipt or logs.
+
+Each architecture-specific feed response uses the static Tauri manifest shape;
+the `signature` value is the exact text of that updater archive's `.sig` file:
+
+```json
+{
+  "version": "1.5.1-smoke.2",
+  "notes": "Isolated updater smoke",
+  "platforms": {
+    "darwin-aarch64": {
+      "signature": "<contents of Buildmesh_aarch64.app.tar.gz.sig>",
+      "url": "https://<isolated-test-feed>/assets/Buildmesh_aarch64.app.tar.gz"
+    }
+  }
+}
+```
+
+Use `darwin-x86_64` with `Buildmesh_x64.app.tar.gz` and its `.sig` in the Intel response. For the
+rejection check, announce smoke version 3 and point to its archive, but replace
+the manifest's `signature` value with deliberately invalid text. First serve
+the valid version 2 manifest to the installed version 1 app. After it updates,
+serve the invalid version 3 manifest to the installed version 2 app.
+
+Build each version from the exact tagged commit, using its matching native
+release overlay and temporary updater config. For Apple Silicon, for example:
+
+```sh
+npm run tauri -- build --target aarch64-apple-darwin --config src-tauri/tauri.macos-release.conf.json --config .tmp/tauri-macos-updater-smoke-1.json
+npm run tauri -- build --target aarch64-apple-darwin --config src-tauri/tauri.macos-release.conf.json --config .tmp/tauri-macos-updater-smoke-2.json
+npm run tauri -- build --target aarch64-apple-darwin --config src-tauri/tauri.macos-release.conf.json --config .tmp/tauri-macos-updater-smoke-3.json
+```
+
+Use `tauri.macos-release-intel.conf.json` and `x86_64-apple-darwin` on a native
+Intel Mac. Each build writes `Buildmesh_x64.app.tar.gz` and its adjacent `.sig`
+under `src-tauri/target/<target>/release/bundle/macos/`. Apple Silicon writes
+`Buildmesh_aarch64.app.tar.gz`. Copy both files to the isolated HTTPS origin's
+`/assets/` path, preserving those local build names in the manifest URLs above.
+Configure the endpoint route from the template
+(`buildmesh/<target>/<arch>/<current_version>`) to return the version 2
+manifest for installed version 1, then the version 3 manifest for installed
+version 2. The response must use `darwin-aarch64` or `darwin-x86_64` as its
+platform key and include the exact `.sig` contents for version 2.
+
+Install the first smoke build in a disposable user account and confirm the
+in-app update prompt installs and relaunches version 2 with the same workspace
+and saved task. Then copy the version 3 archive and signature to `/assets/`,
+change the route response to announce version 3 and its archive URL, and
+replace the response's signature value with deliberately invalid text.
+Confirm the update is rejected and the installed app remains on version 2 with
+its workspace intact. These test builds use the tagged source, production
+bundle identity and the same updater signing key, while their endpoint and
+versions are temporary. They must never publish to or write
+`releases/latest/latest.json`.
+
+Fill every required outcome in the receipt as `PASS`, `FAIL` or `UNVERIFIED`,
+with a short evidence note. `FAIL` blocks publication. `UNVERIFIED` is allowed
+only with its reason and keeps that architecture/workflow out of tested-support
+claims. Set `supportClaims.testedArchitectures` and
+`supportClaims.testedHarnesses` only for evidence that passed in the receipt;
+one working CLI is not evidence for every harness. If native Intel or Apple
+Silicon hardware is unavailable, say so in the corresponding fields and keep
+the public macOS status at early access without claiming that architecture's
+installed workflow or minimum OS has been verified.
+
+Run the receipt validator again after editing, upload the completed file to the
+draft as `MACOS-INSTALLED-RECEIPT.json`, and leave the draft unpublished until
+the check succeeds and the claims match the outcomes:
+
+```sh
+node scripts/ci/verify-macos-installed-receipt.mjs .tmp/macos-installed-candidate.json --tag "$TAG" --commit "$COMMIT" --release-dir .tmp/macos-release-evidence
+cp .tmp/macos-installed-candidate.json .tmp/MACOS-INSTALLED-RECEIPT.json
+gh release upload "$TAG" .tmp/MACOS-INSTALLED-RECEIPT.json --repo alondero/buildmesh --clobber
+```
+
+The validator checks both checksum manifests and both automated audit assets,
+rejects any failed scenario or mismatched tag/commit/digest, and rejects support
+claims that exceed passing native evidence. Explicitly unverified coverage can
+still be published as early access if the maintainer chooses; do not describe it
+as tested. The updater feed is not flipped by this job: `latest.json` only
+becomes `releases/latest` when the draft is published.
 
 ## What blocks a release
 
@@ -665,13 +806,13 @@ Get-Content .\SHA256SUMS.txt
 ```
 
 On a Mac, the same check runs against the updater archive rather than the DMG —
-the `.app.tar.gz` is the file the updater actually downloads, and it is the file
-`sha256sum -c SHA256SUMS-macos-aarch64.txt` covers:
+the `.app.tar.gz` is the file the updater actually downloads. The release
+manifest uses the versioned asset name for this archive:
 
 ```bash
 publicKey='RWTd0JrWj/hUt82KDADoxTpTfqs8p6/ay6iht36EPXl2feP892wH1aBG'
-minisign -Vm Buildmesh_*_aarch64.app.tar.gz \
-  -x Buildmesh_*_aarch64.app.tar.gz.sig \
+minisign -Vm Buildmesh_1.5.0_aarch64.app.tar.gz \
+  -x Buildmesh_1.5.0_aarch64.app.tar.gz.sig \
   -P "$publicKey"
 shasum -a 256 -c SHA256SUMS-macos-aarch64.txt
 codesign --verify --deep --strict /Volumes/Buildmesh/Buildmesh.app   # after install

@@ -190,7 +190,7 @@ test('an api-id entry resolves against the release ids, not its names', () => {
   const assets = [
     { name: 'Buildmesh_1.5.0_x64-setup.exe', url: 'https://api.github.com/repos/o/r/releases/assets/11' },
     { name: 'Buildmesh_1.5.0_aarch64.app.tar.gz', url: 'https://api.github.com/repos/o/r/releases/assets/22' },
-    { name: 'Buildmesh_1.5.0_x86_64.app.tar.gz', url: 'https://api.github.com/repos/o/r/releases/assets/33' },
+    { name: 'Buildmesh_1.5.0_x64.app.tar.gz', url: 'https://api.github.com/repos/o/r/releases/assets/33' },
   ];
   const problems = verifyFeed(feed(), { expectedVersion: '1.5.0', requiredEntries: REQUIRED, assets });
   assert.deepEqual(problems, []);
@@ -202,12 +202,12 @@ test('a browser-download filename entry resolves against the release names', () 
   const platforms = {
     'windows-x86_64': { signature: minisign(), url: 'https://github.com/o/r/releases/download/v1.5.0/Buildmesh_1.5.0_x64-setup.exe' },
     'darwin-aarch64': { signature: minisign(), url: 'https://github.com/o/r/releases/download/v1.5.0/Buildmesh_1.5.0_aarch64.app.tar.gz' },
-    'darwin-x86_64': { signature: minisign(), url: 'https://github.com/o/r/releases/download/v1.5.0/Buildmesh_1.5.0_x86_64.app.tar.gz' },
+    'darwin-x86_64': { signature: minisign(), url: 'https://github.com/o/r/releases/download/v1.5.0/Buildmesh_1.5.0_x64.app.tar.gz' },
   };
   const assets = [
     { name: 'Buildmesh_1.5.0_x64-setup.exe', url: 'https://api.github.com/repos/o/r/releases/assets/11' },
     { name: 'Buildmesh_1.5.0_aarch64.app.tar.gz', url: 'https://api.github.com/repos/o/r/releases/assets/22' },
-    { name: 'Buildmesh_1.5.0_x86_64.app.tar.gz', url: 'https://api.github.com/repos/o/r/releases/assets/33' },
+    { name: 'Buildmesh_1.5.0_x64.app.tar.gz', url: 'https://api.github.com/repos/o/r/releases/assets/33' },
   ];
   const problems = verifyFeed(feed(platforms), { expectedVersion: '1.5.0', requiredEntries: REQUIRED, assets });
   assert.deepEqual(problems, []);
@@ -282,7 +282,7 @@ function ghAssetsEnvelope() {
     assets: [
       ghAsset('Buildmesh_1.5.0_x64-setup.exe', 11),
       ghAsset('Buildmesh_1.5.0_aarch64.app.tar.gz', 22),
-      ghAsset('Buildmesh_1.5.0_x86_64.app.tar.gz', 33),
+      ghAsset('Buildmesh_1.5.0_x64.app.tar.gz', 33),
     ],
   };
 }
@@ -315,7 +315,7 @@ test('a feed pointing at real gh asset ids verifies against real gh output', () 
 
 test('an id the release does not carry is rejected against real gh output', () => {
   const envelope = ghAssetsEnvelope();
-  envelope.assets = envelope.assets.filter((asset) => !asset.name.includes('x86_64'));
+  envelope.assets = envelope.assets.filter((asset) => !asset.name.includes('_x64.app.tar.gz'));
   const problems = verifyFeed(feed(), {
     expectedVersion: '1.5.0',
     requiredEntries: REQUIRED,

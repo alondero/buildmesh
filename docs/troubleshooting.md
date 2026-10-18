@@ -18,6 +18,29 @@ Buildmesh only lists a harness it can detect in the selected runtime.
 
 The plain **Terminal** harness can still be used when no agent CLI is found.
 
+On macOS, Finder and Dock do not start the app from your interactive shell, so
+they can expose a different `PATH`. Buildmesh searches common user CLI locations
+and stores the detected executable path. Restart Buildmesh after installing or
+moving a CLI. If it appears in the Spawn Menu but does not start, report the CLI
+name/version, macOS version and the redacted `logs/buildmesh.log` from **Settings
+→ Data & Diagnostics → Open data folder**.
+
+## macOS blocks the app at first launch
+
+The early-access macOS app is signed ad hoc without an Apple Developer ID
+certificate or notarization. Gatekeeper may therefore ask you to approve this
+app the first time it opens. Follow [Apple's current instructions for opening
+an app from an unidentified developer](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac)
+for your macOS version. Approve Buildmesh for this app only; do not disable
+Gatekeeper globally.
+
+The in-app updater's minisign signature verifies update integrity. It is not an
+Apple publisher identity and does not replace Gatekeeper approval. If the app
+still does not open after the per-app approval, use **Settings → Data &
+Diagnostics → Open data folder** to find `logs/buildmesh.log`, then include the
+Buildmesh version, macOS version, processor architecture and a redacted excerpt
+when you ask for help.
+
 ## Settings → Providers is slow to load
 
 The tab shows a spinner while Buildmesh checks which harnesses and providers it
@@ -191,6 +214,11 @@ non-resumable. For a resumable node:
 - verify that the same harness and runtime are installed (native vs WSL matters);
 - inspect the node error and `logs\buildmesh.log` for the provider's launch
   failure.
+
+On macOS, open the stable app-data folder from **Settings → Data & Diagnostics
+→ Open data folder**; the log is `logs/buildmesh.log` there. A saved session can
+be resumed only when the harness supports it and has a saved session identity.
+The original CLI process itself does not survive app close or reboot.
 
 Do not delete a suspended node until you have reviewed its worktree and copied
 any changes you need.

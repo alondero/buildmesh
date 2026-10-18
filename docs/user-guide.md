@@ -104,6 +104,8 @@ Help contains the advanced keyboard shortcuts.
 
 1. Install Buildmesh from the [latest release](https://github.com/alondero/buildmesh/releases/latest),
    or follow the [source-build instructions](../README.md#build-from-source).
+   For a macOS download, follow the [early-access installation and Gatekeeper
+   steps](../README.md#install-buildmesh) first.
 2. Install at least one supported agent CLI on the runtime where it will run.
    Native Windows and WSL installations are detected separately, but the spawn
    menu offers WSL only for harnesses without native Windows support. Sign in
@@ -561,6 +563,10 @@ The current built-in catalog is:
 Capabilities can change with the installed CLI and runtime. Buildmesh hides
 controls that a harness cannot safely honor. After installing or removing a
 CLI, restart Buildmesh so detection and runtime identity are refreshed.
+
+Resume starts the harness with its saved session identity when that harness
+supports it; it does not keep the original process alive through app close or a
+reboot. A plain Terminal has no saved agent conversation to resume.
 
 For the complete harness-by-harness grid — resume, attention hooks, transcript
 support, model and effort controls, and platform availability — see the
@@ -1185,6 +1191,12 @@ devices need to sign in again.
 
 **Data folder location** shows your data directory, and **Open data folder**
 opens it in Explorer or Finder.
+
+On macOS the stable profile is `~/Library/Application Support/com.alond.buildmesh/`;
+its main log is `logs/buildmesh.log`. Use **Open data folder** to open the exact
+location for the running profile. Provider credentials saved by Buildmesh on
+macOS are in `preferences.json`, so include that file only in a private backup
+and never attach it to a support report.
 
 ### Uninstall
 

@@ -209,11 +209,8 @@ jobs:
   # Apple; notarization stays out of scope (#834).
   #
   # One leg per architecture because that is what GitHub's runner images give
-  # us: `macos-15` is arm64 and `macos-15-intel` is the last Intel image the
-  # service offers — it is scheduled to go away in August 2027, after which
-  # x86_64 cannot be built here at all and the Intel leg has to move or be
-  # dropped. `macos-13` would be the historical Intel label but was retired in
-  # December 2025. A universal bundle would compile both architectures on one
+  # us: `macos-15` is arm64 and `macos-15-intel` is Intel. A universal bundle
+  # would compile both architectures on one
   # runner anyway and then lipo them together, so it saves no build time while
   # adding a step that can only produce one updater entry for two platforms.
   macos-release:
@@ -245,12 +242,14 @@ jobs:
             target: aarch64-apple-darwin
             config: src-tauri/tauri.macos-release.conf.json
             arch: aarch64
+            asset_arch: aarch64
           # Intel. 10.13 is Tauri's documented minimum and the floor for this
           # architecture.
           - runner: macos-15-intel
             target: x86_64-apple-darwin
             config: src-tauri/tauri.macos-release-intel.conf.json
             arch: x86_64
+            asset_arch: x64
     runs-on: ${{ matrix.runner }}
 
     steps:
@@ -359,12 +358,68 @@ jobs:
           MANIFEST="SHA256SUMS-macos-${{ matrix.arch }}.txt"
           : > "$MANIFEST"
           while IFS= read -r asset; do
-            # shasum is the macOS spelling of sha256sum, and emits the same
-            # "hash  name" two-space format as the Windows manifest.
-            ( cd "$(dirname "$asset")" && shasum -a 256 "$(basename "$asset")" ) >> "$MANIFEST"
+            # The action adds a version and target architecture to updater
+            # archives when publishing them. Match that release name here.
+            asset_name="$(basename "$asset")"
+            if [[ "$asset_name" == *.app.tar.gz ]]; then
+              asset_name="Buildmesh_${GITHUB_REF_NAME#v}_${{ matrix.asset_arch }}.app.tar.gz"
+            fi
+            digest="$(shasum -a 256 "$asset" | awk '{ print $1 }')"
+            printf '%s  %s\n' "$digest" "$asset_name" >> "$MANIFEST"
           done < "$LIST"
           cat "$MANIFEST"
           gh release upload "${{ github.ref_name }}" "$MANIFEST" --clobber
+
+  # Download the DMG back from the draft on native runners. The build job's
+  # output alone does not prove that the uploaded bytes match their checksum or
+  # retain the expected app signature, architecture and deployment target.
+  # These audit assets deliberately label browser quarantine, Gatekeeper and
+  # Finder as manual; the hosted runner cannot establish those user-visible
+  # observations.
+  macos-candidate-audit:
+    name: Downloaded macOS candidate audit (${{ matrix.arch }})
+    needs: macos-release
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: aarch64
+            minimum: "11.0"
+          - runner: macos-15-intel
+            arch: x86_64
+            minimum: "10.13"
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "20"
+
+      - name: Verify candidate audit success path through its CLI
+        run: node --test tests/agent-infra/macos-candidate-audit.test.mjs
+
+      - name: Download, inspect and record the exact draft DMG
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+          ARCH: ${{ matrix.arch }}
+          MINIMUM_MACOS: ${{ matrix.minimum }}
+        run: |
+          set -euo pipefail
+          node scripts/ci/audit-macos-candidate.mjs \
+            --tag "$TAG" \
+            --commit "$COMMIT" \
+            --arch "$ARCH" \
+            --minimum-macos "$MINIMUM_MACOS" \
+            --repo "$GITHUB_REPOSITORY"
 
   # The feed is the one artifact a running install downloads on its own, so
   # nothing about it may be taken on trust from "the jobs were green". This
@@ -375,7 +430,7 @@ jobs:
   # green release whose macOS installs cannot update.
   updater-feed:
     name: Verify updater feed
-    needs: [release, macos-release]
+    needs: [release, macos-release, macos-candidate-audit]
     runs-on: ubuntu-latest
     permissions:
       # Write, not read, and not for anything this job does: GitHub only

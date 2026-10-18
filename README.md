@@ -30,20 +30,24 @@ Buildmesh is a Tauri desktop app for orchestrating multiple AI coding agents —
 
 ### Download
 
-Grab the latest installer from the [GitHub Releases page](https://github.com/alondero/buildmesh/releases/latest). Each release publishes **two** Windows installers (pick whichever you prefer) and **two** macOS DMGs:
+Grab the latest installer from the [GitHub Releases page](https://github.com/alondero/buildmesh/releases/latest). Each release publishes **two** Windows installers (pick whichever you prefer) and **two** macOS DMGs. macOS builds are early access; choose the artifact for your Mac's processor:
 
 | File | Platform | Format | Notes |
 |---|---|---|---|
 | `Buildmesh_<version>_x64-setup.exe` | Windows x64 | NSIS `.exe` | Smallest download; per-user install. |
 | `Buildmesh_<version>_x64_en-US.msi` | Windows x64 | Windows Installer `.msi` | MSI deployment; per-machine install. |
-| `Buildmesh_<version>_aarch64.dmg` | macOS Apple Silicon | `.dmg` | Drag **Buildmesh** to Applications. |
-| `Buildmesh_<version>_x86_64.dmg` | macOS Intel | `.dmg` | Drag **Buildmesh** to Applications. |
+| `Buildmesh_<version>_aarch64.dmg` | macOS Apple Silicon | `.dmg` | Early-access build for arm64 Macs; drag **Buildmesh** to Applications. |
+| `Buildmesh_<version>_x64.dmg` | macOS Intel | `.dmg` | Early-access build for Intel Macs; drag **Buildmesh** to Applications. |
 
-Each installer ships with its matching `.sig` (the **auto-updater** signature — see [Upgrade](#upgrade)) and a `latest.json` updater feed; existing installs read that feed to detect new releases. Checksums are published per platform as `SHA256SUMS.txt` (Windows) and `SHA256SUMS-macos-aarch64.txt` / `SHA256SUMS-macos-x86_64.txt` (macOS).
+The `.app.tar.gz` updater archives, rather than the DMGs, ship with `.sig` files used by the **in-app updater**. SHA-256 checksum manifests cover the downloadable DMGs and updater archives: `SHA256SUMS.txt` (Windows), `SHA256SUMS-macos-aarch64.txt`, and `SHA256SUMS-macos-x86_64.txt` (macOS).
 
 ## Install Buildmesh
 
-Buildmesh ships as a Windows installer or a macOS `.dmg` through GitHub Releases and is upgraded in place by the in-app updater. Each release publishes an updater feed, and every update is verified with the app's own minisign signature before it installs. OS code-signing with a trusted publisher identity is **not** in place yet, so first launch shows a SmartScreen / Gatekeeper warning — see [SmartScreen & Gatekeeper warnings](#smartscreen--gatekeeper-warnings-unsigned-installers).
+Buildmesh ships as a Windows installer or a macOS `.dmg` through GitHub Releases. The macOS download is free and does not require an Apple Developer membership. Each release publishes an updater feed, and the app's in-app updater checks a minisign signature before installing an update. That signature protects update integrity; it does not identify Buildmesh as an Apple-trusted publisher. macOS apps are signed ad hoc, without an Apple Developer ID certificate or notarization, so Gatekeeper approval is expected on first launch.
+
+On macOS, open the downloaded DMG, drag **Buildmesh** to **Applications**, then eject the disk image. Launch Buildmesh from Finder or Dock. Follow [Apple's current steps for opening an app from an unidentified developer](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac) if Gatekeeper blocks it. Do not turn off Gatekeeper globally. The [Tauri ad-hoc signing guidance](https://v2.tauri.app/distribute/sign/macos/#ad-hoc-signing) explains what this signature does and does not establish.
+
+To check the download, get the matching `SHA256SUMS-macos-aarch64.txt` or `SHA256SUMS-macos-x86_64.txt` from the same release. Run `shasum -a 256` on the DMG and compare its digest with that DMG's row in the manifest. Each manifest also lists the updater archive; it is normal for a checksum command over the whole manifest to report that archive missing if you downloaded only the DMG.
 
 ### Supported platforms
 
@@ -51,7 +55,7 @@ Buildmesh ships as a Windows installer or a macOS `.dmg` through GitHub Releases
 |---|---|---|
 | **Windows 10/11** (x64) | **Early access** — installer shipped on every tag. | Download from the Releases page above. |
 | **WSL2** (hybrid Windows/WSL mode) | **Early access** on Windows 10/11 hosts — Linux agents run inside WSL2, the Windows-side backend drives the UI. | Install Windows first, then enable WSL2 from Mesh settings. |
-| macOS (Apple Silicon + Intel) | **Preview** — an ad-hoc-signed `.dmg` ships on every tag, but no Mac has yet been run through install/upgrade validation. | Download the `.dmg` matching your Mac from the Releases page above; first launch needs the Gatekeeper override below. |
+| macOS (Apple Silicon + Intel) | **Early access** — native DMGs and updater metadata are published for both architectures. Downloaded-app installation, Gatekeeper/Finder launch, CLI workflows, session resume, and in-app updates still need native Mac runtime evidence; no minimum macOS version is claimed from compilation alone. | Download the `.dmg` matching your Mac from the Releases page above, install it in Applications, then use Apple's approval steps if Gatekeeper blocks first launch. |
 | Linux (Ubuntu) | **Preview** — no release artifacts yet; the bundle compiles in CI. | [Build from source](#build-from-source). |
 
 ### First-run prerequisites
@@ -63,17 +67,19 @@ Buildmesh itself has no host dependencies — it bundles WebView2 on Win 11 and 
 
 Buildmesh shows one entry per detected harness, preferring the host's native installation. On Windows, it also checks the default WSL distribution and adds **(WSL: distribution)** entries only for harnesses absent natively, such as Muse. Native Windows harnesses can run in WSL-backed meshes too. When Buildmesh itself runs inside WSL, Windows-only installations appear as **(Windows)** entries if Windows interoperability and `powershell.exe` are available. Restart Buildmesh after installing or removing a harness. Sign in inside the selected runtime. Cross-runtime worktrees stay managed by Buildmesh; use Buildmesh to remove them. WSL-backed repositories must be trusted by Windows Git, and Windows harnesses must support network-share paths. Muse supports fresh prompts and session resume; transcript display and turn-completion hooks are not yet available. Cross-runtime Grok attention hooks require mirrored networking. Process sandboxing cannot contain a harness across the Windows/WSL boundary.
 
+On macOS, install and sign in to the CLI in your macOS user account before opening Buildmesh. Finder and Dock launch a different environment from an interactive shell; Buildmesh records the resolved executable path when it detects a CLI, but each CLI still needs a native launch check before it can be described as verified. A plain Terminal node has no provider session to resume.
+
 - **(Optional) `gh` CLI** — only required for the GitHub Issues / PR features.
 - **(Optional) WSL2** — only for hybrid Windows/WSL meshes.
 
-### SmartScreen & Gatekeeper warnings (unsigned installers)
+### SmartScreen & Gatekeeper warnings
 
-Buildmesh installers are **not** OS-code-signed yet. This is **expected** for now and is unrelated to the in-app updater — every update is verified with the app's own minisign signature regardless. To get past the OS trust prompt:
+Windows installers are not signed with a trusted publisher identity. The macOS app carries an ad-hoc code signature, which does not provide Apple publisher trust or remove Gatekeeper approval. These first-launch checks are separate from the in-app updater, which uses Buildmesh's minisign key to check update integrity. To approve the app:
 
 - **Windows (SmartScreen)** — *"Windows protected your PC … unknown publisher."* Click **More info → Run anyway**.
-- **macOS (Gatekeeper)** — *"cannot be opened because the developer cannot be verified."* Right-click the app → **Open** → **Open** again (or System Settings → Privacy & Security → **Open Anyway**).
+- **macOS (Gatekeeper)** — use [Apple's current approval steps](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac) for your macOS version. Depending on the version, Control-click the app in Applications and choose **Open**, or use **System Settings → Privacy & Security → Open Anyway**. Approve Buildmesh for this app only; do not disable Gatekeeper globally.
 
-Verify the installer against its `.sig` with [minisign](https://jedisct1.github.io/minisign/) before bypassing the prompt on a machine you don't fully control. The full verification command lives in [`docs/development/releasing.md`](docs/development/releasing.md).
+The DMG's SHA-256 checksum detects a damaged or changed download. Minisign `.sig` files apply to updater archives; they are not Apple publisher signatures and are not a substitute for checking the DMG checksum. The full release verification procedure lives in [`docs/development/releasing.md`](docs/development/releasing.md).
 
 ### Data location, logs, backup, uninstall
 
@@ -81,6 +87,8 @@ Buildmesh stores everything under a single per-profile directory. The stable and
 
 - **Windows stable** — `%APPDATA%\com.alond.buildmesh\`
 - **Windows dev profile** — `%APPDATA%\com.alond.buildmesh.dev\`
+- **macOS stable** — `~/Library/Application Support/com.alond.buildmesh/`
+- **macOS dev profile** — `~/Library/Application Support/com.alond.buildmesh.dev/`
 
 Inside:
 
@@ -90,11 +98,11 @@ Inside:
 | `snapshots\` | Automatic state snapshots (newest 3 kept). One is taken before each schema upgrade. |
 | `preferences.json` | Provider accounts, launch configurations, worktree directory. |
 | `tls\` | LAN HTTPS certificate chain, including the root CA private key. |
-| `logs\buildmesh.log` | Rotating Rust + frontend log, size-bounded and name-stable. The `/use`, `/verify`, and `scripts\tail-dev-log.ps1` helpers tail this exact file. |
+| `logs/buildmesh.log` | Rotating Rust + frontend log, size-bounded and name-stable. On macOS, open the stable profile folder in Finder from **Settings → Data & Diagnostics → Open data folder**, then open `logs/buildmesh.log`. |
 | `logs\panic.log` | External crash-watchdog dump (Windows only). |
 | `circuits\finish.md` | Shared Circuit wrap-up template. |
 
-OAuth secrets and provider API keys are stored in the **Windows Credential Manager** (catch-all `CRED_TYPE_GENERIC` entries, *not* in this directory). If Credential Manager is unreachable, API keys stay in `preferences.json` until it is.
+On Windows, OAuth secrets and provider API keys are stored in **Windows Credential Manager** when available. macOS has no Buildmesh credential-store integration, so provider keys configured in Buildmesh remain in `preferences.json` in the profile folder. Treat that folder as sensitive.
 
 **Back up and restore from inside the app.** **Settings → Data & Diagnostics**
 checks your stored state, takes snapshots, and exports a portable copy with
@@ -108,9 +116,9 @@ To **uninstall** Buildmesh and **remove all user data**: uninstall from *Windows
 
 ### Upgrade
 
-Existing installs check the updater feed at `https://github.com/alondero/buildmesh/releases/latest/download/latest.json` on launch and surface an *"Update available"* prompt. Install the update from inside the app — no separate download needed. Locally-built dev builds disable the updater via their `.dev` bundle identifier, so they never nag you about a release you already have.
+Installed apps check the release updater feed on launch and surface an *"Update available"* prompt. Windows uses the in-app updater for supported releases. The macOS updater path is part of early access and has not yet been confirmed on both native architectures; if an update is unavailable or fails, download the newer DMG and drag its **Buildmesh.app** over the copy in Applications. Locally-built dev builds disable the updater via their `.dev` bundle identifier.
 
-To upgrade manually on Windows, install the new `.msi` or `-setup.exe` over the existing install — both installers support in-place upgrade. On macOS, drag the new `Buildmesh.app` from the newer `.dmg` over the one in Applications (or run the in-app updater, which replaces it for you).
+To upgrade manually on Windows, install the new `.msi` or `-setup.exe` over the existing install — both installers support in-place upgrade. On macOS, drag the new `Buildmesh.app` from the newer `.dmg` over the one in Applications. Do not infer that the in-app update path worked from a successful DMG build.
 
 ### Get help
 
