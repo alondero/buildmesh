@@ -984,22 +984,23 @@ fn register_live_agent(node_id: i64, mesh_id: i64, db: &str) -> OwnedTree {
     std::fs::write(format!("{db}.owned-pid"), format!("{pid}\n{sleeper_pid}\n"))
         .expect("record the contained processes");
     let (writer_tx, _writer_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
-    let process = crate::agent::process::AgentProcess::new(
-        child,
-        writer_tx,
-        // Issue #1530: the byte gauge the enqueue path bounds against. This
-        // fixture never drains the channel — it exists to prove the crash
-        // reaps the process tree — so a fresh gauge is all it needs.
-        std::sync::Arc::new(crate::agent::process::InputQueueGauge::default()),
-        None,
-        pair.master,
-        Arc::new(AtomicBool::new(true)),
-        Arc::new(AtomicBool::new(false)),
-        job,
-        None,
-        std::time::Instant::now(),
-        mesh_id,
-    );
+    let process =
+        crate::agent::process::AgentProcess::new(crate::agent::process::AgentProcessParams {
+            child,
+            writer_tx,
+            // Issue #1530: the byte gauge the enqueue path bounds against. This
+            // fixture never drains the channel — it exists to prove the crash
+            // reaps the process tree — so a fresh gauge is all it needs.
+            queue: std::sync::Arc::new(crate::agent::process::InputQueueGauge::default()),
+            writer_handle: None,
+            master: pair.master,
+            reader_alive: Arc::new(AtomicBool::new(true)),
+            deliberate_kill: Arc::new(AtomicBool::new(false)),
+            job,
+            reader_handle: None,
+            spawn_start: std::time::Instant::now(),
+            mesh_id,
+        });
     crate::agent::process::PROCESS_REGISTRY.insert(node_id, process);
     let process = crate::agent::process::PROCESS_REGISTRY
         .get(&node_id)

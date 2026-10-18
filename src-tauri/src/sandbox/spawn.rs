@@ -518,7 +518,7 @@ mod tests {
     }
 
     /// LIVE VERIFICATION (ignored by default) — drive the *real* production path
-    /// (`build_spawn_command` → `spawn_sandboxed`) for a sandboxed Anthropic node
+    /// (`build_spawn_command_prepared` → `spawn_sandboxed`) for a sandboxed Anthropic node
     /// and confirm claude.exe boots inside the AppContainer instead of dying in
     /// the loader the way `cwrap → bash` did. A booted claude streams its TUI and
     /// stays alive (exit_code stays None); a failure exits fast with an error in
@@ -531,7 +531,7 @@ mod tests {
     #[test]
     #[ignore = "live: spawns real claude.exe into an AppContainer; needs the dev host toolchain"]
     fn repro_anthropic_sandbox_direct_boots() {
-        use crate::agent::spawn::{build_spawn_command, SessionIdMode};
+        use crate::agent::spawn::{build_spawn_command_prepared, SessionIdMode, SpawnCommandInput};
         use crate::env::ResolvedPath;
         use crate::models::{EnvType, Provider};
         use std::io::Read;
@@ -549,17 +549,18 @@ mod tests {
             env_type: EnvType::Windows,
         };
         let session_id: i64 = -987_655;
-        let cmd = build_spawn_command(
-            &resolved,
-            Provider::Anthropic,
-            &[], // no per-profile backend env (built-in Anthropic subscription)
-            &SessionIdMode::None,
+        let cmd = build_spawn_command_prepared(SpawnCommandInput {
+            resolved: &resolved,
+            provider: Provider::Anthropic,
+            // no per-profile backend env (built-in Anthropic subscription)
+            routing: &crate::agent::launch_routing::PreparedLaunchRouting::environment(&[]),
+            session_id_mode: &SessionIdMode::None,
             session_id,
-            &crate::agent::capabilities::ResolvedAgentConfig::default(),
-            None,
-            true, // sandbox
-            crate::agent::spawn::ResumeCause::Explicit,
-        )
+            config: &crate::agent::capabilities::ResolvedAgentConfig::default(),
+            prefill: None,
+            sandbox: true,
+            resume_cause: crate::agent::spawn::ResumeCause::Explicit,
+        })
         .expect("sandboxed command assembly (run with BUILDMESH_SANDBOX=1)");
         eprintln!(
             "REPRO direct argv: {:?}",
@@ -936,7 +937,7 @@ mod tests {
     #[test]
     #[ignore = "live: spawns real claude.exe under a restricted token; needs the dev host toolchain"]
     fn spike_restricted_token_claude_boots() {
-        use crate::agent::spawn::{build_spawn_command, SessionIdMode};
+        use crate::agent::spawn::{build_spawn_command_prepared, SessionIdMode, SpawnCommandInput};
         use crate::env::ResolvedPath;
         use crate::models::{EnvType, Provider};
 
@@ -951,17 +952,18 @@ mod tests {
             env_type: EnvType::Windows,
         };
         let session_id: i64 = -987_644;
-        let cmd = build_spawn_command(
-            &resolved,
-            Provider::Anthropic,
-            &[], // no per-profile backend env (built-in Anthropic subscription)
-            &SessionIdMode::None,
+        let cmd = build_spawn_command_prepared(SpawnCommandInput {
+            resolved: &resolved,
+            provider: Provider::Anthropic,
+            // no per-profile backend env (built-in Anthropic subscription)
+            routing: &crate::agent::launch_routing::PreparedLaunchRouting::environment(&[]),
+            session_id_mode: &SessionIdMode::None,
             session_id,
-            &crate::agent::capabilities::ResolvedAgentConfig::default(),
-            None,
-            true, // sandbox
-            crate::agent::spawn::ResumeCause::Explicit,
-        )
+            config: &crate::agent::capabilities::ResolvedAgentConfig::default(),
+            prefill: None,
+            sandbox: true,
+            resume_cause: crate::agent::spawn::ResumeCause::Explicit,
+        })
         .expect("sandboxed command assembly (run with BUILDMESH_SANDBOX=1)");
         eprintln!(
             "SPIKE claude argv: {:?}",

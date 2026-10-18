@@ -59,3 +59,4 @@ pub mod state_recovery;
 #[cfg(any(debug_assertions, feature = "dev-tools"))]
 pub mod test;
 pub mod usage;
+pub mod wire_payload;

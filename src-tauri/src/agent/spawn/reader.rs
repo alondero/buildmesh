@@ -1,8 +1,7 @@
 use crate::agent::session_lifecycle;
 use crate::db;
 use portable_pty::{native_pty_system, PtyPair, PtySize};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 /// Threshold for the PTY reader thread's early-exit heuristic (issue #654).
 /// If the reader thread exits within this window the agent is flagged
@@ -296,6 +295,39 @@ pub fn pump_pty_output(mut reader: Box<dyn std::io::Read + Send>, mut on_chunk: 
     }
 }
 
+/// Everything the PTY reader thread needs, as one named value. The session
+/// half ([`SpawnedSession`]) is built once in
+/// [`super::streams::start_streams`] so this thread and the registry entry
+/// share one flag instance and one spawn clock.
+pub(super) struct ReaderStart {
+    pub session: super::process::SpawnedSession,
+    /// The PTY master-side reader this thread drains exclusively.
+    pub reader: Box<dyn std::io::Read + Send>,
+    /// Process-creation time (`Instant::now()` right after `spawn_child`
+    /// returns). Used by the 3-second early-exit heuristic to detect a
+    /// likely-failed `--resume`. **Must NOT be unified with**
+    /// `spawn_start`: a slow 14s spawn pipeline followed by an agent
+    /// dying 1s after process creation must still trigger `resume-failed`,
+    /// and the original "3s after process creation" semantic preserves
+    /// that detection.
+    pub spawned_at: std::time::Instant,
+    /// Whether this incarnation still has to capture its `--session-id`
+    /// from the PTY banner (see [`reader_should_capture_session_id`]).
+    pub needs_session_capture: bool,
+    /// A plain terminal harness (Terminal) gets a bare status flip on exit;
+    /// an agent harness does not (see [`post_exit_action`]).
+    pub is_plain_terminal: bool,
+    /// The registry generation `register_agent` returned, used by the
+    /// epilogue's compare-and-remove reap (issue #1531).
+    pub generation: u64,
+    /// This incarnation was launched with `--resume
+    /// <stored id>`. The epilogue's resume guard (issue #2137) only
+    /// invalidates a session identity that was actually asked for: a fresh
+    /// spawn's pre-assigned UUID is not evidence that the conversation it
+    /// names is missing.
+    pub resume_attempt: bool,
+}
+
 /// Start the PTY reader thread. Returns the `JoinHandle` so the caller
 /// can store it on `AgentProcess` and let `kill_session` join with a
 /// bounded timeout (issue #300).
@@ -317,30 +349,36 @@ pub fn pump_pty_output(mut reader: Box<dyn std::io::Read + Send>, mut on_chunk: 
 ///   dying 1s after process creation must still trigger `resume-failed`,
 ///   and the original "3s after process creation" semantic preserves
 ///   that detection.
-/// * `spawn_start` — the original `SpawnTimer.start` from the top of
-///   `spawn_agent_inner`. Used by the `first_pty_output` checkpoint log
-///   so it lines up with every other `spawn_timing:` line (all
-///   measured against the same "user clicked Spawn" instant).
+/// * `spawn_start` (on `ReaderStart::session`) — the original
+///   `SpawnTimer.start` from the top of `spawn_agent_inner`. Used by the
+///   `first_pty_output` checkpoint log so it lines up with every other
+///   `spawn_timing:` line (all measured against the same "user clicked
+///   Spawn" instant).
 /// * `resume_attempt` — this incarnation was launched with `--resume
 ///   <stored id>`. The epilogue's resume guard (issue #2137) only
 ///   invalidates a session identity that was actually asked for: a fresh
 ///   spawn's pre-assigned UUID is not evidence that the conversation it
 ///   names is missing.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn start_reader(
     app: tauri::AppHandle,
-    session_id: i64,
-    needs_session_capture: bool,
-    reader: Box<dyn std::io::Read + Send>,
-    spawned_at: std::time::Instant,
-    reader_alive: Arc<AtomicBool>,
-    is_plain_terminal: bool,
-    spawn_start: std::time::Instant,
-    mesh_id: i64,
-    deliberate_kill: Arc<AtomicBool>,
-    generation: u64,
-    resume_attempt: bool,
+    start: ReaderStart,
 ) -> std::thread::JoinHandle<()> {
+    let ReaderStart {
+        session,
+        reader,
+        spawned_at,
+        needs_session_capture,
+        is_plain_terminal,
+        generation,
+        resume_attempt,
+    } = start;
+    let super::process::SpawnedSession {
+        session_id,
+        reader_alive,
+        deliberate_kill,
+        spawn_start,
+        mesh_id,
+    } = session;
     let app_clone = app;
     let reader_alive_clone = reader_alive;
     // Issue #1221: stateful wrapper that stitches PTY chunks so the

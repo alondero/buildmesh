@@ -5,7 +5,7 @@
  *
  * The capability contract: a resolved effort value is only forwarded when
  * the selected harness's control kind matches. The resolver masks
- * unsupported values before they reach `build_spawn_command`, so a harness
+ * unsupported values before they reach `build_spawn_command_prepared`, so a harness
  * with no effort control never receives a synthetic `--effort` argument.
  *
  * `Closed` matches harnesses like Claude Code whose CLI surface exposes a

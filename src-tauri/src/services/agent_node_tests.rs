@@ -838,16 +838,24 @@ fn spawn_configurations_snapshot_reaches_idle_and_pending_nodes() {
     };
     for pending in [false, true] {
         let node = create_blocking_configured(
-            mesh_id,
-            Some("codex"),
-            Some("main"),
-            None,
-            None,
-            Some(false),
+            NodeCreateParams {
+                mesh_id,
+                // The runner reads the path from the mesh row it looks up.
+                path: "",
+                branch: "main",
+                provider: Some("codex"),
+                source_issue: None,
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree_override: Some(false),
+                name_override: None,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration: Some(&configuration),
+                initial_prompt: None,
+                operation: None,
+            },
             pending,
-            Some(&configuration),
-            None,
-            None,
         )
         .unwrap()
         .node;
@@ -868,16 +876,24 @@ fn spawn_configurations_snapshot_reaches_idle_and_pending_nodes() {
         assert_eq!(saved.resolved.unwrap().harness.harness, "codex");
     }
     let node = create_blocking_configured(
-        mesh_id,
-        Some("codex"),
-        Some("main"),
-        None,
-        None,
-        Some(false),
+        NodeCreateParams {
+            mesh_id,
+            // The runner reads the path from the mesh row it looks up.
+            path: "",
+            branch: "main",
+            provider: Some("codex"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: Some(false),
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: Some(&configuration),
+            initial_prompt: None,
+            operation: None,
+        },
         false,
-        Some(&configuration),
-        None,
-        None,
     )
     .unwrap()
     .node;
@@ -899,14 +915,24 @@ fn spawn_configurations_snapshot_reaches_idle_and_pending_nodes() {
         .unwrap()
         .is_none());
     let defaults = create_blocking(
-        mesh_id,
-        Some("codex"),
-        Some("main"),
-        None,
-        None,
-        Some(false),
+        NodeCreateParams {
+            mesh_id,
+            // The runner reads the path from the mesh row it looks up.
+            path: "",
+            branch: "main",
+            provider: Some("codex"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: Some(false),
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        },
         false,
-        None,
     )
     .unwrap();
     assert_eq!(
@@ -947,17 +973,22 @@ fn create_returns_node_with_source_pr_none() {
     let _db = crate::db::test_support::isolated();
     let mesh_id = fresh_mesh();
 
-    let node = create(
+    let node = create(NodeCreateParams {
         mesh_id,
-        "/tmp/buildmesh_invariant_test",
-        "main",
-        Some("anthropic"),
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
+        path: "/tmp/buildmesh_invariant_test",
+        branch: "main",
+        provider: Some("anthropic"),
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree_override: None,
+        name_override: None,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        configuration: None,
+        initial_prompt: None,
+        operation: None,
+    })
     .expect("create with source_pr=None must succeed");
 
     assert_eq!(
@@ -982,16 +1013,22 @@ fn create_pending_returns_node_with_source_pr_none_and_pending_status() {
     let _db = crate::db::test_support::isolated();
     let mesh_id = fresh_mesh();
 
-    let node = create_pending(
+    let node = create_pending(NodeCreateParams {
         mesh_id,
-        "/tmp/buildmesh_invariant_test",
-        "main",
-        Some("anthropic"),
-        None,
-        None,
-        None,
-        None,
-    )
+        path: "/tmp/buildmesh_invariant_test",
+        branch: "main",
+        provider: Some("anthropic"),
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree_override: None,
+        name_override: None,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        configuration: None,
+        initial_prompt: None,
+        operation: None,
+    })
     .expect("create_pending with source_pr=None must succeed");
 
     assert_eq!(
@@ -1018,17 +1055,22 @@ fn create_with_source_issue_set_keeps_source_pr_independent() {
     let _db = crate::db::test_support::isolated();
     let mesh_id = fresh_mesh();
 
-    let node = create(
+    let node = create(NodeCreateParams {
         mesh_id,
-        "/tmp/buildmesh_invariant_test",
-        "main",
-        Some("anthropic"),
-        Some(123),
-        None,
-        None,
-        None,
-        Some("gh123-test-slug"),
-    )
+        path: "/tmp/buildmesh_invariant_test",
+        branch: "main",
+        provider: Some("anthropic"),
+        source_issue: Some(123),
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree_override: None,
+        name_override: Some("gh123-test-slug"),
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        configuration: None,
+        initial_prompt: None,
+        operation: None,
+    })
     .expect("create with source_issue=Some(N), source_pr=None must succeed");
 
     assert_eq!(
@@ -1052,32 +1094,43 @@ fn create_rejects_source_pr_some() {
     // silently persist it. The assertion fires before any DB call, so
     // we don't even need `db::test_support::isolated()` here — a missing DB is the
     // strongest possible failure signal for this regression.
-    let _ = create(
-        /* mesh_id */ 0,
-        "/tmp/never-read",
-        "main",
-        None,
-        None,
-        Some(42),
-        None,
-        None,
-        None,
-    );
+    let _ = create(NodeCreateParams {
+        mesh_id: 0, // never read — the assert fires before any DB call
+        path: "/tmp/never-read",
+        branch: "main",
+        provider: None,
+        source_issue: None,
+        source_pr: Some(42),
+        source_pr_pinned_sha: None,
+        use_worktree_override: None,
+        name_override: None,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        configuration: None,
+        initial_prompt: None,
+        operation: None,
+    });
 }
 
 #[test]
 #[should_panic(expected = "source_pr=Some(_)")]
 fn create_pending_rejects_source_pr_some() {
-    let _ = create_pending(
-        /* mesh_id */ 0,
-        "/tmp/never-read",
-        "main",
-        None,
-        None,
-        Some(42),
-        None,
-        None,
-    );
+    let _ = create_pending(NodeCreateParams {
+        mesh_id: 0, // never read — the assert fires before any DB call
+        path: "/tmp/never-read",
+        branch: "main",
+        provider: None,
+        source_issue: None,
+        source_pr: Some(42),
+        source_pr_pinned_sha: None,
+        use_worktree_override: None,
+        name_override: None,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        configuration: None,
+        initial_prompt: None,
+        operation: None,
+    });
 }
 
 #[test]
@@ -1086,17 +1139,22 @@ fn create_rejects_source_pr_pinned_sha_some() {
     // Same boundary for the SHA-pinning field (#444) — a caller that
     // tries to pin the head SHA on a non-PR spawn gets the same
     // refused-at-entry treatment.
-    let _ = create(
-        /* mesh_id */ 0,
-        "/tmp/never-read",
-        "main",
-        None,
-        None,
-        None,
-        Some("deadbeef"),
-        None,
-        None,
-    );
+    let _ = create(NodeCreateParams {
+        mesh_id: 0, // never read — the assert fires before any DB call
+        path: "/tmp/never-read",
+        branch: "main",
+        provider: None,
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: Some("deadbeef"),
+        use_worktree_override: None,
+        name_override: None,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        configuration: None,
+        initial_prompt: None,
+        operation: None,
+    });
 }
 
 // -----------------------------------------------------------------------
@@ -1123,28 +1181,43 @@ fn create_blocking_with_branch_override_matches_legacy_create_row() {
     let mesh_id = fresh_mesh();
 
     let explicit_branch_row = create_blocking(
-        mesh_id,
-        Some("anthropic"),
-        Some("main"),
-        None,
-        None,
-        None,
-        false, /* pending */
-        None,
+        NodeCreateParams {
+            mesh_id,
+            // The runner reads the path from the mesh row it looks up.
+            path: "",
+            branch: "main",
+            provider: Some("anthropic"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: None,
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        },
+        false,
     )
     .expect("create_blocking with explicit branch must succeed");
 
-    let legacy_row = create(
+    let legacy_row = create(NodeCreateParams {
         mesh_id,
-        "/tmp/buildmesh_invariant_test",
-        "main",
-        Some("anthropic"),
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
+        path: "/tmp/buildmesh_invariant_test",
+        branch: "main",
+        provider: Some("anthropic"),
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree_override: None,
+        name_override: None,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        configuration: None,
+        initial_prompt: None,
+        operation: None,
+    })
     .expect("legacy create must succeed for the same inputs");
 
     assert_eq!(
@@ -1178,14 +1251,24 @@ fn create_blocking_with_pending_true_returns_pending_status() {
     let mesh_id = fresh_mesh();
 
     let node = create_blocking(
-        mesh_id,
-        Some("anthropic"),
-        Some("main"),
-        Some(123), /* source_issue */
-        Some("gh123-test-slug"),
-        None,
-        true, /* pending */
-        None,
+        NodeCreateParams {
+            mesh_id,
+            // The runner reads the path from the mesh row it looks up.
+            path: "",
+            branch: "main",
+            provider: Some("anthropic"),
+            source_issue: Some(123),
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: None,
+            name_override: Some("gh123-test-slug"),
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        },
+        true,
     )
     .expect("create_blocking with pending=true must succeed");
 
@@ -1221,14 +1304,24 @@ fn create_blocking_returns_mesh_not_found_for_unknown_mesh_id() {
     // would surface as "500 Internal Server Error" on the SPA
     // even though the user typo'd a mesh id.
     let err = create_blocking(
-        /* mesh_id */ -1, /* not in the per-test DB */
-        Some("anthropic"),
-        Some("main"),
-        None,
-        None,
-        None,
-        false, /* pending */
-        None,
+        NodeCreateParams {
+            mesh_id: -1, // not in the per-test DB
+            // The runner reads the path from the mesh row it looks up.
+            path: "",
+            branch: "main",
+            provider: Some("anthropic"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: None,
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        },
+        false,
     )
     .expect_err("create_blocking on unknown mesh_id must return Err");
 
@@ -1259,14 +1352,24 @@ fn create_blocking_with_branch_override_none_resolves_via_git() {
     let mesh_id = fresh_mesh();
 
     let node = create_blocking(
-        mesh_id,
-        Some("anthropic"),
-        /* branch_override = */ None,
-        None,
-        None,
-        None,
-        false, /* pending */
-        None,
+        NodeCreateParams {
+            mesh_id,
+            // The runner reads the path from the mesh row it looks up.
+            path: "",
+            branch: "", // branch_override = none
+            provider: Some("anthropic"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: None,
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        },
+        false,
     )
     .expect("create_blocking with branch_override=None must succeed");
 
@@ -1291,14 +1394,24 @@ fn create_blocking_propagates_use_worktree_override_on_idle_path() {
     let mesh_id = fresh_mesh();
 
     let node = create_blocking(
-        mesh_id,
-        Some("anthropic"),
-        Some("main"),
-        None,
-        None,
-        /* use_worktree_override = */ Some(false),
-        false, /* pending */
-        None,
+        NodeCreateParams {
+            mesh_id,
+            // The runner reads the path from the mesh row it looks up.
+            path: "",
+            branch: "main",
+            provider: Some("anthropic"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: Some(false), // use_worktree_override
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        },
+        false,
     )
     .expect("create_blocking on idle path must succeed");
 
@@ -1330,14 +1443,24 @@ fn create_blocking_propagates_use_worktree_override_on_pending_path() {
     let mesh_id = fresh_mesh();
 
     let node = create_blocking(
-        mesh_id,
-        Some("anthropic"),
-        Some("main"),
-        None,
-        None,
-        /* use_worktree_override = */ Some(false),
-        true, /* pending */
-        None,
+        NodeCreateParams {
+            mesh_id,
+            // The runner reads the path from the mesh row it looks up.
+            path: "",
+            branch: "main",
+            provider: Some("anthropic"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: Some(false), // use_worktree_override
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        },
+        true,
     )
     .expect("create_blocking on pending path must succeed");
 
@@ -1368,14 +1491,24 @@ fn prompted_terminal_create_rejects_and_inserts_nothing() {
     let _db = crate::db::test_support::isolated();
     let mesh_id = fresh_mesh();
     let err = create_blocking(
-        mesh_id,
-        Some("terminal"),
-        Some("main"),
-        None,
-        None,
-        Some(false),
+        NodeCreateParams {
+            mesh_id,
+            // The runner reads the path from the mesh row it looks up.
+            path: "",
+            branch: "main",
+            provider: Some("terminal"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: Some(false),
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: Some("ship this"),
+            operation: None,
+        },
         false,
-        Some("ship this"),
     )
     .expect_err("a prompt for Terminal must be rejected");
     assert!(matches!(err, AgentNodeError::InitialPromptUnsupported));
@@ -1388,26 +1521,46 @@ fn unprompted_terminal_create_still_inserts() {
     let _db = crate::db::test_support::isolated();
     let mesh_id = fresh_mesh();
     let node = create_blocking(
-        mesh_id,
-        Some("terminal"),
-        Some("main"),
-        None,
-        None,
-        Some(false),
+        NodeCreateParams {
+            mesh_id,
+            // The runner reads the path from the mesh row it looks up.
+            path: "",
+            branch: "main",
+            provider: Some("terminal"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: Some(false),
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        },
         false,
-        None,
     )
     .expect("Terminal without a prompt is a normal create");
     assert_eq!(node.provider, "terminal");
     let blank = create_blocking(
-        mesh_id,
-        Some("terminal"),
-        Some("main"),
-        None,
-        None,
-        Some(false),
+        NodeCreateParams {
+            mesh_id,
+            // The runner reads the path from the mesh row it looks up.
+            path: "",
+            branch: "main",
+            provider: Some("terminal"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: Some(false),
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: Some("   "),
+            operation: None,
+        },
         false,
-        Some("   "),
     )
     .expect("whitespace is not an initial prompt");
     assert_eq!(blank.provider, "terminal");
@@ -1418,14 +1571,24 @@ fn prompted_codex_create_succeeds_without_the_install_menu() {
     let _db = crate::db::test_support::isolated();
     let mesh_id = fresh_mesh();
     let node = create_blocking(
-        mesh_id,
-        Some("codex"),
-        Some("main"),
-        None,
-        None,
-        Some(false),
+        NodeCreateParams {
+            mesh_id,
+            // The runner reads the path from the mesh row it looks up.
+            path: "",
+            branch: "main",
+            provider: Some("codex"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: Some(false),
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: Some("review the diff"),
+            operation: None,
+        },
         false,
-        Some("review the diff"),
     )
     .expect("codex accepts an initial prompt even when the CLI is absent");
     assert_eq!(node.provider, "codex");
@@ -1435,14 +1598,24 @@ fn prompted_codex_create_succeeds_without_the_install_menu() {
 fn prompted_create_of_an_unknown_mesh_is_mesh_not_found() {
     let _db = crate::db::test_support::isolated();
     let err = create_blocking(
-        -1,
-        Some("terminal"),
-        Some("main"),
-        None,
-        None,
-        None,
+        NodeCreateParams {
+            mesh_id: -1,
+            // The runner reads the path from the mesh row it looks up.
+            path: "",
+            branch: "main",
+            provider: Some("terminal"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: None,
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: Some("hello"),
+            operation: None,
+        },
         false,
-        Some("hello"),
     )
     .expect_err("unknown mesh wins over the prompt rule");
     assert!(matches!(err, AgentNodeError::MeshNotFound(-1)));
@@ -1454,14 +1627,24 @@ fn create_persists_default_worktree_path() {
     let mesh_id = fresh_mesh();
     let mesh = db::get_mesh_by_id(mesh_id).unwrap();
     let node = create_blocking(
-        mesh_id,
-        Some("codex"),
-        Some("main"),
-        None,
-        Some("new-node"),
-        Some(true),
+        NodeCreateParams {
+            mesh_id,
+            // The runner reads the path from the mesh row it looks up.
+            path: "",
+            branch: "main",
+            provider: Some("codex"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: Some(true),
+            name_override: Some("new-node"),
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        },
         false,
-        None,
     )
     .expect("create a default worktree node");
     let expected = format!("{}/.worktrees/new-node", mesh.path);
@@ -1564,14 +1747,24 @@ fn blank_worktree_name_on_create_stores_no_path() {
     let _db = crate::db::test_support::isolated();
     let mesh_id = fresh_mesh();
     let node = create_blocking(
-        mesh_id,
-        Some("anthropic"),
-        Some("main"),
-        None,
-        Some("   "),
-        Some(true),
+        NodeCreateParams {
+            mesh_id,
+            // The runner reads the path from the mesh row it looks up.
+            path: "",
+            branch: "main",
+            provider: Some("anthropic"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: Some(true),
+            name_override: Some("   "),
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        },
         false,
-        None,
     )
     .expect("a whitespace name still creates");
     assert_eq!(node.worktree_name.as_deref(), Some("   "));
@@ -1958,17 +2151,22 @@ fn set_agent_node_provider_persists_and_round_trips() {
     // idempotent (the function comment claims it as a property).
     let _db = crate::db::test_support::isolated();
     let mesh_id = fresh_mesh();
-    let node = create(
+    let node = create(NodeCreateParams {
         mesh_id,
-        "/tmp/buildmesh_provider_test",
-        "main",
-        Some("anthropic"),
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
+        path: "/tmp/buildmesh_provider_test",
+        branch: "main",
+        provider: Some("anthropic"),
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree_override: None,
+        name_override: None,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        configuration: None,
+        initial_prompt: None,
+        operation: None,
+    })
     .expect("seed node should succeed");
     assert_eq!(node.provider, "anthropic");
 
@@ -1997,17 +2195,22 @@ fn close_phase1_then_phase2_is_idempotent_for_both_worktree_modes() {
     for remove_worktree in [false, true] {
         let _db = crate::db::test_support::isolated();
         let mesh_id = fresh_mesh();
-        let node = create(
+        let node = create(NodeCreateParams {
             mesh_id,
-            &format!("/tmp/buildmesh_close_idempotent_{remove_worktree}"),
-            "main",
-            Some("anthropic"),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+            path: &format!("/tmp/buildmesh_close_idempotent_{remove_worktree}"),
+            branch: "main",
+            provider: Some("anthropic"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: None,
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        })
         .expect("seed node should succeed");
 
         let state_owner = crate::agent::hook_state::for_node(node.id);
@@ -2112,17 +2315,22 @@ fn regenerate_load_blocking_returns_old_provider_and_skip_kill() {
     // Idle node: provider is captured verbatim, kill is NOT skipped.
     let _db = crate::db::test_support::isolated();
     let mesh_id = fresh_mesh();
-    let idle_node = create(
+    let idle_node = create(NodeCreateParams {
         mesh_id,
-        "/tmp/buildmesh_regen_load_idle",
-        "main",
-        Some("anthropic"),
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
+        path: "/tmp/buildmesh_regen_load_idle",
+        branch: "main",
+        provider: Some("anthropic"),
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree_override: None,
+        name_override: None,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        configuration: None,
+        initial_prompt: None,
+        operation: None,
+    })
     .expect("seed idle node");
     let (old_provider, skip_kill) =
         regenerate_load_blocking(idle_node.id).expect("load should succeed");
@@ -2135,17 +2343,22 @@ fn regenerate_load_blocking_returns_old_provider_and_skip_kill() {
     // Suspended node: skip_kill must be true (this is the whole
     // point of the helper — `kill_agent_blocking`'s `on_idle`
     // tail would clobber Suspended→Idle if we killed).
-    let suspended_node = create(
+    let suspended_node = create(NodeCreateParams {
         mesh_id,
-        "/tmp/buildmesh_regen_load_suspended",
-        "main",
-        Some("anthropic"),
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
+        path: "/tmp/buildmesh_regen_load_suspended",
+        branch: "main",
+        provider: Some("anthropic"),
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree_override: None,
+        name_override: None,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        configuration: None,
+        initial_prompt: None,
+        operation: None,
+    })
     .expect("seed suspended node");
     db::update_agent_node_status(suspended_node.id, SessionStatus::Suspended)
         .expect("set suspended status");
@@ -2162,17 +2375,22 @@ fn regenerate_load_blocking_rejects_spawning_status() {
     // "regenerate unavailable: node is in X state" toast.
     let _db = crate::db::test_support::isolated();
     let mesh_id = fresh_mesh();
-    let node = create(
+    let node = create(NodeCreateParams {
         mesh_id,
-        "/tmp/buildmesh_regen_load_spawning",
-        "main",
-        Some("anthropic"),
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
+        path: "/tmp/buildmesh_regen_load_spawning",
+        branch: "main",
+        provider: Some("anthropic"),
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree_override: None,
+        name_override: None,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        configuration: None,
+        initial_prompt: None,
+        operation: None,
+    })
     .expect("seed node");
     db::update_agent_node_status(node.id, SessionStatus::Spawning).expect("set spawning status");
     let err = regenerate_load_blocking(node.id).unwrap_err();
@@ -2199,17 +2417,22 @@ fn regenerate_apply_blocking_writes_provider_and_decides_resume() {
     // session for same-harness swaps).
     let _db = crate::db::test_support::isolated();
     let mesh_id = fresh_mesh();
-    let node = create(
+    let node = create(NodeCreateParams {
         mesh_id,
-        "/tmp/buildmesh_regen_apply",
-        "main",
-        Some("claude"),
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
+        path: "/tmp/buildmesh_regen_apply",
+        branch: "main",
+        provider: Some("claude"),
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree_override: None,
+        name_override: None,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        configuration: None,
+        initial_prompt: None,
+        operation: None,
+    })
     .expect("seed node");
     db::update_cli_session_id(node.id, "sess-abc").expect("set cli_session_id");
 
@@ -2237,17 +2460,22 @@ fn regenerate_apply_blocking_starts_fresh_on_cross_harness() {
     // Codex id, so the apply step must report `resume = false`.
     let _db = crate::db::test_support::isolated();
     let mesh_id = fresh_mesh();
-    let node = create(
+    let node = create(NodeCreateParams {
         mesh_id,
-        "/tmp/buildmesh_regen_apply_cross",
-        "main",
-        Some("claude"),
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
+        path: "/tmp/buildmesh_regen_apply_cross",
+        branch: "main",
+        provider: Some("claude"),
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree_override: None,
+        name_override: None,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        configuration: None,
+        initial_prompt: None,
+        operation: None,
+    })
     .expect("seed node");
     db::update_cli_session_id(node.id, "claude-uuid").expect("set cli_session_id");
 
@@ -2266,17 +2494,22 @@ fn regenerate_reload_blocking_returns_fresh_node() {
     // to the frontend store.
     let _db = crate::db::test_support::isolated();
     let mesh_id = fresh_mesh();
-    let node = create(
+    let node = create(NodeCreateParams {
         mesh_id,
-        "/tmp/buildmesh_regen_reload",
-        "main",
-        Some("anthropic"),
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
+        path: "/tmp/buildmesh_regen_reload",
+        branch: "main",
+        provider: Some("anthropic"),
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree_override: None,
+        name_override: None,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        configuration: None,
+        initial_prompt: None,
+        operation: None,
+    })
     .expect("seed node");
     let reloaded = regenerate_reload_blocking(node.id).expect("reload should succeed");
     assert_eq!(reloaded.id, node.id);

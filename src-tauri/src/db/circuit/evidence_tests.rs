@@ -65,25 +65,29 @@ fn legacy_projection_conflicts_restore_only_from_matching_history_and_attempt() 
         serde_json::json!({"observation":observation,"disposition":"conflicting"}).to_string();
     append_history(
         &db,
-        1,
-        Some("gate"),
-        Some(2),
-        "observation",
-        &detail,
-        Some("agent_status_projection"),
-        Some("conflicting"),
+        HistoryEvent {
+            run_id: 1,
+            node_id: Some("gate"),
+            attempt: Some(2),
+            kind: "observation",
+            detail: &detail,
+            source: Some("agent_status_projection"),
+            disposition: Some("conflicting"),
+        },
     )
     .unwrap();
     assert!(!restore_projection_conflicts_inner(&db, 1, "gate", 1, &mut evidence).unwrap());
     append_history(
         &db,
-        1,
-        Some("gate"),
-        Some(1),
-        "observation",
-        &detail,
-        Some("agent_status_projection"),
-        Some("conflicting"),
+        HistoryEvent {
+            run_id: 1,
+            node_id: Some("gate"),
+            attempt: Some(1),
+            kind: "observation",
+            detail: &detail,
+            source: Some("agent_status_projection"),
+            disposition: Some("conflicting"),
+        },
     )
     .unwrap();
     assert!(restore_projection_conflicts_inner(&db, 1, "gate", 1, &mut evidence).unwrap());
@@ -2823,13 +2827,15 @@ fn prompt_acknowledgement_survives_restart_and_fences_cancelled_or_retried_steps
     );
     append_history(
         &db,
-        1,
-        Some("feedback"),
-        Some(1),
-        "native_hook",
-        "{}",
-        None,
-        None,
+        HistoryEvent {
+            run_id: 1,
+            node_id: Some("feedback"),
+            attempt: Some(1),
+            kind: "native_hook",
+            detail: "{}",
+            source: None,
+            disposition: None,
+        },
     )
     .unwrap();
     assert!(

@@ -1,8 +1,8 @@
-//! Tests for `build_spawn_command` — the function that composes a provider's
+//! Tests for `build_spawn_command_prepared` — the function that composes a provider's
 //! spawn recipe with session-id mode, model/effort/prefill overrides, and the
 //! runtime-environment wrapper into the final `CommandBuilder`.
 //!
-//! These tests call the real `build_spawn_command` and assert on the resulting
+//! These tests call the real `build_spawn_command_prepared` and assert on the resulting
 //! `CommandBuilder` (argv / cwd / env). They are NOT re-implementations of the
 //! logic under test: every expectation is a literal value, so a mutation to the
 //! composition (dropping `--session-id`, mis-ordering args, applying an override
@@ -17,8 +17,7 @@
 mod tests {
     use crate::agent::launch_routing::PreparedLaunchRouting;
     use crate::agent::spawn::{
-        build_spawn_command, build_spawn_command_prepared, open_pty_pair, spawn_child,
-        SessionIdMode,
+        build_spawn_command_prepared, open_pty_pair, spawn_child, SessionIdMode, SpawnCommandInput,
     };
     use crate::env::ResolvedPath;
     use crate::models::{EnvType, Provider};
@@ -202,7 +201,8 @@ mod tests {
         v
     }
 
-    /// `build_spawn_command` with no per-profile backend env — the default for
+    /// `build_spawn_command_prepared` with no per-profile backend env — the
+    /// default for
     /// argv / recipe / session-id assertions, which don't depend on backend
     /// selection. The `ANTHROPIC_*` injection from a custom provider account has
     /// its own focused tests (`*_injects_backend_env`). Keeps the bulk of the
@@ -210,19 +210,25 @@ mod tests {
     ///
     /// Model + effort run through the per-field cascade (issue #1149): the
     /// resolver masks unsupported values before they reach
-    /// `build_spawn_command`. Tests that want to verify the resolver
+    /// `build_spawn_command_prepared`. Tests that want to verify the resolver
     /// itself use [`crate::agent::capabilities`] directly.
-    #[allow(clippy::too_many_arguments)]
+    /// The two per-field cascade inputs [`cmd_for`] feeds the resolver,
+    /// bundled so the helper's parameter list names one concept per line.
+    struct ModelEffort<'a> {
+        model: Option<&'a str>,
+        effort: Option<&'a str>,
+    }
+
     fn cmd_for(
         resolved: &ResolvedPath,
         provider: Provider,
         mode: &SessionIdMode,
         session_id: i64,
-        model: Option<&str>,
-        effort: Option<&str>,
+        model_effort: ModelEffort<'_>,
         prefill: Option<&str>,
         sandbox: bool,
     ) -> portable_pty::CommandBuilder {
+        let ModelEffort { model, effort } = model_effort;
         let capabilities = crate::agent::capabilities::capabilities_for(provider.adapter());
         let config = crate::agent::capabilities::resolve_agent_config(
             &capabilities,
@@ -241,17 +247,19 @@ mod tests {
             },
             None,
         );
-        build_spawn_command(
+        // The empty backend env is this suite's default routing.
+        let routing = PreparedLaunchRouting::environment(&[]);
+        build_spawn_command_prepared(SpawnCommandInput {
             resolved,
             provider,
-            &[],
-            mode,
+            routing: &routing,
+            session_id_mode: mode,
             session_id,
-            &config,
+            config: &config,
             prefill,
             sandbox,
-            crate::agent::spawn::ResumeCause::Explicit,
-        )
+            resume_cause: crate::agent::spawn::ResumeCause::Explicit,
+        })
         .expect("command assembly")
     }
 
@@ -265,8 +273,10 @@ mod tests {
             Provider::Anthropic,
             &SessionIdMode::Assign("uuid-assign".to_string()),
             SESSION_ID,
-            None,
-            None,
+            ModelEffort {
+                model: None,
+                effort: None,
+            },
             None,
             false,
         );
@@ -290,8 +300,10 @@ mod tests {
             Provider::Anthropic,
             &SessionIdMode::Assign("uuid-assign".to_string()),
             SESSION_ID,
-            None,
-            None,
+            ModelEffort {
+                model: None,
+                effort: None,
+            },
             None,
             true,
         );
@@ -311,8 +323,10 @@ mod tests {
             Provider::Anthropic,
             &SessionIdMode::Resume("uuid-resume".to_string()),
             SESSION_ID,
-            None,
-            None,
+            ModelEffort {
+                model: None,
+                effort: None,
+            },
             None,
             false,
         );
@@ -346,17 +360,18 @@ mod tests {
             ),
             ("ANTHROPIC_MODEL".to_string(), "MiniMax-M3[1m]".to_string()),
         ];
-        let cmd = build_spawn_command(
-            &wsl_resolved(),
-            Provider::Anthropic,
-            &backend_env,
-            &SessionIdMode::Assign("mm-1".to_string()),
-            SESSION_ID,
-            &crate::agent::capabilities::ResolvedAgentConfig::default(),
-            None,
-            false,
-            crate::agent::spawn::ResumeCause::Explicit,
-        )
+        let routing = PreparedLaunchRouting::environment(&backend_env);
+        let cmd = build_spawn_command_prepared(SpawnCommandInput {
+            resolved: &wsl_resolved(),
+            provider: Provider::Anthropic,
+            routing: &routing,
+            session_id_mode: &SessionIdMode::Assign("mm-1".to_string()),
+            session_id: SESSION_ID,
+            config: &crate::agent::capabilities::ResolvedAgentConfig::default(),
+            prefill: None,
+            sandbox: false,
+            resume_cause: crate::agent::spawn::ResumeCause::Explicit,
+        })
         .expect("command assembly");
 
         // Plain claude recipe — the backend is selected via env, not argv.
@@ -389,17 +404,17 @@ mod tests {
     /// `ANTHROPIC_*` overrides and leaves WSLENV untouched — vanilla claude.
     #[test]
     fn empty_backend_env_injects_nothing() {
-        let cmd = build_spawn_command(
-            &wsl_resolved(),
-            Provider::Anthropic,
-            &[],
-            &SessionIdMode::None,
-            SESSION_ID,
-            &crate::agent::capabilities::ResolvedAgentConfig::default(),
-            None,
-            false,
-            crate::agent::spawn::ResumeCause::Explicit,
-        )
+        let cmd = build_spawn_command_prepared(SpawnCommandInput {
+            resolved: &wsl_resolved(),
+            provider: Provider::Anthropic,
+            routing: &PreparedLaunchRouting::environment(&[]),
+            session_id_mode: &SessionIdMode::None,
+            session_id: SESSION_ID,
+            config: &crate::agent::capabilities::ResolvedAgentConfig::default(),
+            prefill: None,
+            sandbox: false,
+            resume_cause: crate::agent::spawn::ResumeCause::Explicit,
+        })
         .expect("command assembly");
         assert!(env_of(&cmd, "ANTHROPIC_BASE_URL").is_none());
         assert!(env_of(&cmd, "ANTHROPIC_AUTH_TOKEN").is_none());
@@ -415,17 +430,17 @@ mod tests {
             SessionIdMode::None,
             SessionIdMode::Resume("codex-session".into()),
         ] {
-            let cmd = build_spawn_command_prepared(
-                &wsl_resolved(),
-                Provider::Codex,
-                &routing,
-                &mode,
-                SESSION_ID,
-                &crate::agent::capabilities::ResolvedAgentConfig::default(),
-                None,
-                false,
-                crate::agent::spawn::ResumeCause::Explicit,
-            )
+            let cmd = build_spawn_command_prepared(SpawnCommandInput {
+                resolved: &wsl_resolved(),
+                provider: Provider::Codex,
+                routing: &routing,
+                session_id_mode: &mode,
+                session_id: SESSION_ID,
+                config: &crate::agent::capabilities::ResolvedAgentConfig::default(),
+                prefill: None,
+                sandbox: false,
+                resume_cause: crate::agent::spawn::ResumeCause::Explicit,
+            })
             .expect("command assembly");
             let args = argv(&cmd);
             let mut expected = expected_wsl("/usr/bin/codex", &[]);
@@ -483,17 +498,17 @@ mod tests {
                 ("fresh", SessionIdMode::None),
                 ("resume", SessionIdMode::Resume("codex-session".into())),
             ] {
-                let cmd = build_spawn_command_prepared(
-                    &wsl_resolved(),
-                    Provider::Codex,
-                    &codex_proxy("buildmesh_1234", "sentinel-secret"),
-                    &mode,
-                    SESSION_ID,
-                    &config,
-                    None,
-                    false,
-                    crate::agent::spawn::ResumeCause::Explicit,
-                )
+                let cmd = build_spawn_command_prepared(SpawnCommandInput {
+                    resolved: &wsl_resolved(),
+                    provider: Provider::Codex,
+                    routing: &codex_proxy("buildmesh_1234", "sentinel-secret"),
+                    session_id_mode: &mode,
+                    session_id: SESSION_ID,
+                    config: &config,
+                    prefill: None,
+                    sandbox: false,
+                    resume_cause: crate::agent::spawn::ResumeCause::Explicit,
+                })
                 .expect("command assembly");
                 let args = argv(&cmd);
                 let flags: Vec<usize> = args
@@ -525,17 +540,17 @@ mod tests {
 
     #[test]
     fn native_codex_receives_no_proxy_routing() {
-        let cmd = build_spawn_command_prepared(
-            &wsl_resolved(),
-            Provider::Codex,
-            &PreparedLaunchRouting::Native { executable: None },
-            &SessionIdMode::None,
-            SESSION_ID,
-            &crate::agent::capabilities::ResolvedAgentConfig::default(),
-            None,
-            false,
-            crate::agent::spawn::ResumeCause::Explicit,
-        )
+        let cmd = build_spawn_command_prepared(SpawnCommandInput {
+            resolved: &wsl_resolved(),
+            provider: Provider::Codex,
+            routing: &PreparedLaunchRouting::Native { executable: None },
+            session_id_mode: &SessionIdMode::None,
+            session_id: SESSION_ID,
+            config: &crate::agent::capabilities::ResolvedAgentConfig::default(),
+            prefill: None,
+            sandbox: false,
+            resume_cause: crate::agent::spawn::ResumeCause::Explicit,
+        })
         .expect("command assembly");
         let args = argv(&cmd);
         assert!(!args.iter().any(|arg| arg == "--profile"));
@@ -551,22 +566,22 @@ mod tests {
         }
         for mode in [SessionIdMode::None, SessionIdMode::Resume("session".into())] {
             for effort in ["none", "high"] {
-                let cmd = build_spawn_command_prepared(
-                    &wsl_resolved(),
-                    Provider::Codex,
-                    &routing,
-                    &mode,
-                    SESSION_ID,
-                    &crate::agent::capabilities::ResolvedAgentConfig {
+                let cmd = build_spawn_command_prepared(SpawnCommandInput {
+                    resolved: &wsl_resolved(),
+                    provider: Provider::Codex,
+                    routing: &routing,
+                    session_id_mode: &mode,
+                    session_id: SESSION_ID,
+                    config: &crate::agent::capabilities::ResolvedAgentConfig {
                         model: Some("MiniMax-M3".into()),
                         effort: Some(effort.into()),
                         extra_args: None,
                         permission_mode: None,
                     },
-                    None,
-                    false,
-                    crate::agent::spawn::ResumeCause::Explicit,
-                )
+                    prefill: None,
+                    sandbox: false,
+                    resume_cause: crate::agent::spawn::ResumeCause::Explicit,
+                })
                 .expect("command assembly");
                 let args = argv(&cmd);
                 assert!(args
@@ -595,19 +610,19 @@ mod tests {
         std::fs::write(&fake_binary, b"placeholder").unwrap();
         let fake_binary_str = fake_binary.to_string_lossy().into_owned();
 
-        let cmd = build_spawn_command_prepared(
-            &windows_resolved(),
-            Provider::Cline,
-            &PreparedLaunchRouting::Native {
+        let cmd = build_spawn_command_prepared(SpawnCommandInput {
+            resolved: &windows_resolved(),
+            provider: Provider::Cline,
+            routing: &PreparedLaunchRouting::Native {
                 executable: Some(fake_binary.clone()),
             },
-            &SessionIdMode::None,
-            SESSION_ID,
-            &crate::agent::capabilities::ResolvedAgentConfig::default(),
-            None,
-            false,
-            crate::agent::spawn::ResumeCause::Explicit,
-        )
+            session_id_mode: &SessionIdMode::None,
+            session_id: SESSION_ID,
+            config: &crate::agent::capabilities::ResolvedAgentConfig::default(),
+            prefill: None,
+            sandbox: false,
+            resume_cause: crate::agent::spawn::ResumeCause::Explicit,
+        })
         .expect("command assembly");
         let args = argv(&cmd);
         // Windows wraps the resolved path with `cmd.exe /c`; Unix spawns it
@@ -650,17 +665,17 @@ mod tests {
     #[test]
     fn proxied_codex_credentials_are_isolated_per_command() {
         let command_for = |profile: &str, credential: &str| {
-            build_spawn_command_prepared(
-                &wsl_resolved(),
-                Provider::Codex,
-                &codex_proxy(profile, credential),
-                &SessionIdMode::None,
-                SESSION_ID,
-                &crate::agent::capabilities::ResolvedAgentConfig::default(),
-                None,
-                false,
-                crate::agent::spawn::ResumeCause::Explicit,
-            )
+            build_spawn_command_prepared(SpawnCommandInput {
+                resolved: &wsl_resolved(),
+                provider: Provider::Codex,
+                routing: &codex_proxy(profile, credential),
+                session_id_mode: &SessionIdMode::None,
+                session_id: SESSION_ID,
+                config: &crate::agent::capabilities::ResolvedAgentConfig::default(),
+                prefill: None,
+                sandbox: false,
+                resume_cause: crate::agent::spawn::ResumeCause::Explicit,
+            })
             .expect("command assembly")
         };
         let first = command_for("buildmesh_first", "first-secret");
@@ -698,17 +713,17 @@ mod tests {
         .enumerate()
         {
             let routing = native_fake_proxy(&executable, &format!("credential-{index}"));
-            let mut command = build_spawn_command_prepared(
-                &resolved,
-                Provider::Codex,
-                &routing,
-                &mode,
-                -915_4300 - index as i64,
-                &crate::agent::capabilities::ResolvedAgentConfig::default(),
-                None,
-                false,
-                crate::agent::spawn::ResumeCause::Explicit,
-            )
+            let mut command = build_spawn_command_prepared(SpawnCommandInput {
+                resolved: &resolved,
+                provider: Provider::Codex,
+                routing: &routing,
+                session_id_mode: &mode,
+                session_id: -915_4300 - index as i64,
+                config: &crate::agent::capabilities::ResolvedAgentConfig::default(),
+                prefill: None,
+                sandbox: false,
+                resume_cause: crate::agent::spawn::ResumeCause::Explicit,
+            })
             .expect("command assembly");
             let log = temp.path().join(format!("invocation-{index}.log"));
             command.env("FAKE_CODEX_LOG", &log);
@@ -756,8 +771,10 @@ mod tests {
             Provider::Anthropic,
             &SessionIdMode::Assign("mm-2".to_string()),
             SESSION_ID,
-            Some("opus"),
-            Some("high"),
+            ModelEffort {
+                model: Some("opus"),
+                effort: Some("high"),
+            },
             None,
             false,
         );
@@ -787,8 +804,10 @@ mod tests {
             Provider::Anthropic,
             &SessionIdMode::None,
             SESSION_ID,
-            None,
-            None,
+            ModelEffort {
+                model: None,
+                effort: None,
+            },
             Some("hello world"),
             false,
         );
@@ -810,8 +829,10 @@ mod tests {
             Provider::Anthropic,
             &SessionIdMode::None,
             SESSION_ID,
-            None,
-            None,
+            ModelEffort {
+                model: None,
+                effort: None,
+            },
             Some("Title\r\n\r\nLine 1\r\nLine 2\rLine 3"),
             false,
         );
@@ -848,8 +869,10 @@ mod tests {
             Provider::Anthropic,
             &SessionIdMode::Assign("uuid-assign".to_string()),
             SESSION_ID,
-            None,
-            None,
+            ModelEffort {
+                model: None,
+                effort: None,
+            },
             None,
             false,
         );
@@ -888,8 +911,10 @@ mod tests {
             Provider::Anthropic,
             &SessionIdMode::None,
             SESSION_ID,
-            None,
-            None,
+            ModelEffort {
+                model: None,
+                effort: None,
+            },
             Some("Title\r\n\r\nLine 1\rLine 2"),
             false,
         );
@@ -936,17 +961,18 @@ mod tests {
             ),
             ("ANTHROPIC_MODEL".to_string(), "MiniMax-M3[1m]".to_string()),
         ];
-        let cmd = build_spawn_command(
-            &windows_resolved(),
-            Provider::Anthropic,
-            &backend_env,
-            &SessionIdMode::None,
-            SESSION_ID,
-            &crate::agent::capabilities::ResolvedAgentConfig::default(),
-            None,
-            false,
-            crate::agent::spawn::ResumeCause::Explicit,
-        )
+        let routing = PreparedLaunchRouting::environment(&backend_env);
+        let cmd = build_spawn_command_prepared(SpawnCommandInput {
+            resolved: &windows_resolved(),
+            provider: Provider::Anthropic,
+            routing: &routing,
+            session_id_mode: &SessionIdMode::None,
+            session_id: SESSION_ID,
+            config: &crate::agent::capabilities::ResolvedAgentConfig::default(),
+            prefill: None,
+            sandbox: false,
+            resume_cause: crate::agent::spawn::ResumeCause::Explicit,
+        })
         .expect("command assembly");
 
         let args = argv(&cmd);
@@ -978,8 +1004,10 @@ mod tests {
             Provider::Anthropic,
             &SessionIdMode::Assign("uuid".to_string()),
             SESSION_ID,
-            None,
-            None,
+            ModelEffort {
+                model: None,
+                effort: None,
+            },
             None,
             false,
         );
@@ -1020,8 +1048,10 @@ mod tests {
             Provider::Anthropic,
             &SessionIdMode::None,
             SESSION_ID,
-            None,
-            None,
+            ModelEffort {
+                model: None,
+                effort: None,
+            },
             None,
             false,
         );
@@ -1056,8 +1086,10 @@ mod tests {
             Provider::Anthropic,
             &SessionIdMode::None,
             SESSION_ID,
-            None,
-            None,
+            ModelEffort {
+                model: None,
+                effort: None,
+            },
             Some("hello world"),
             false,
         );
@@ -1083,8 +1115,10 @@ mod tests {
             Provider::Anthropic,
             &SessionIdMode::None,
             SESSION_ID,
-            Some(""),
-            Some(""),
+            ModelEffort {
+                model: Some(""),
+                effort: Some(""),
+            },
             Some(""),
             false,
         );
@@ -1103,16 +1137,18 @@ mod tests {
             Provider::Agy,
             &SessionIdMode::None,
             SESSION_ID,
-            Some("opus"),
-            // Issue #1286: AGY's CLI accepts `--effort <low|medium|high>`.
-            // This test focuses on model + prefill only (effort layer is
-            // None). The end-to-end pin that AGY *does* forward `--effort`
-            // when the layer is set lives in
-            // `adapters::agy::tests::agy_recipe_appends_effort_arg_when_resolved`;
-            // the "non-effort harness drops effort" pin is the matrix-level
-            // `resolver_drops_effort_for_harness_without_effort_control` in
-            // `capabilities::tests`.
-            None,
+            ModelEffort {
+                model: Some("opus"),
+                // Issue #1286: AGY's CLI accepts `--effort <low|medium|high>`.
+                // This test focuses on model + prefill only (effort layer is
+                // None). The end-to-end pin that AGY *does* forward `--effort`
+                // when the layer is set lives in
+                // `adapters::agy::tests::agy_recipe_appends_effort_arg_when_resolved`;
+                // the "non-effort harness drops effort" pin is the matrix-level
+                // `resolver_drops_effort_for_harness_without_effort_control` in
+                // `capabilities::tests`.
+                effort: None,
+            },
             Some("prefill text"),
             false,
         );
@@ -1146,8 +1182,10 @@ mod tests {
             Provider::Agy,
             &SessionIdMode::Assign("ignored".to_string()),
             SESSION_ID,
-            None,
-            None,
+            ModelEffort {
+                model: None,
+                effort: None,
+            },
             None,
             false,
         );
@@ -1206,7 +1244,7 @@ mod tests {
     }
 
     /// Codex provides a dedicated resume recipe (`codex resume [OPTIONS] <id>`)
-    /// via `spawn_recipe_for_resume`, which `build_spawn_command` must use
+    /// via `spawn_recipe_for_resume`, which `build_spawn_command_prepared` must use
     /// instead of the default `spawn_recipe` + `--resume`.
     #[test]
     fn codex_resume_uses_resume_recipe() {
@@ -1215,8 +1253,10 @@ mod tests {
             Provider::Codex,
             &SessionIdMode::Resume("codex-sess".to_string()),
             SESSION_ID,
-            None,
-            None,
+            ModelEffort {
+                model: None,
+                effort: None,
+            },
             None,
             false,
         );
@@ -1247,8 +1287,10 @@ mod tests {
             Provider::Codex,
             &SessionIdMode::Assign("ignored".to_string()),
             SESSION_ID,
-            None,
-            None,
+            ModelEffort {
+                model: None,
+                effort: None,
+            },
             None,
             false,
         );
@@ -1281,8 +1323,10 @@ mod tests {
             Provider::Codex,
             &SessionIdMode::None,
             SESSION_ID,
-            Some("gpt-5.6-sol"),
-            Some("xhigh"),
+            ModelEffort {
+                model: Some("gpt-5.6-sol"),
+                effort: Some("xhigh"),
+            },
             None,
             false,
         );
@@ -1337,8 +1381,10 @@ mod tests {
             Provider::Codex,
             &SessionIdMode::Resume("ps-1".to_string()),
             SESSION_ID,
-            None,
-            None,
+            ModelEffort {
+                model: None,
+                effort: None,
+            },
             None,
             false,
         );
@@ -1372,8 +1418,10 @@ mod tests {
             Provider::Anthropic,
             &SessionIdMode::Assign("mm-env".to_string()),
             SESSION_ID,
-            None,
-            None,
+            ModelEffort {
+                model: None,
+                effort: None,
+            },
             None,
             false,
         );
@@ -1432,8 +1480,10 @@ mod tests {
                         Provider::Anthropic,
                         &SessionIdMode::None,
                         SESSION_ID,
-                        None,
-                        None,
+                        ModelEffort {
+                            model: None,
+                            effort: None,
+                        },
                         None,
                         false,
                     );
@@ -1474,8 +1524,10 @@ mod tests {
             Provider::CommandCode,
             &SessionIdMode::None,
             SESSION_ID,
-            None,
-            None,
+            ModelEffort {
+                model: None,
+                effort: None,
+            },
             None,
             false,
         );
@@ -1496,8 +1548,10 @@ mod tests {
             Provider::CommandCode,
             &SessionIdMode::None,
             SESSION_ID,
-            None,
-            None,
+            ModelEffort {
+                model: None,
+                effort: None,
+            },
             None,
             false,
         );

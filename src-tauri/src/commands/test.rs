@@ -621,22 +621,23 @@ fn handle_create_agent_node(args: &serde_json::Value, app: AppHandle) -> String 
 
     use crate::models::EnvType;
 
-    match crate::db::create_agent_node(
+    match crate::db::create_agent_node(crate::db::NewAgentNode {
         mesh_id,
         name,
         path,
         branch,
-        EnvType::Windows,
+        env: EnvType::Windows,
         provider,
-        Some(name),
-        None,
-        None,
-        None, // source_pr_pinned_sha — test fixture; no PR SHA
+        worktree_name: Some(name),
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None, // source_pr_pinned_sha — test fixture; no PR SHA
         use_worktree,
-        None,
-        None,
-        None,
-    ) {
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        worktree_path: None,
+        spawn_configuration: None,
+    }) {
         Ok(node) => {
             // Emit event so frontend agent-node store can refetch via invoke()
             let _ = app.emit(

@@ -236,16 +236,26 @@ async fn spawn_new_agent_impl(
     let initial_prompt = intent.initial_prompt().map(|prompt| prompt.into_string());
     let node = crate::commands::run_blocking("spawn_new_agent_impl_create", move || {
         crate::services::agent_node::create_blocking(
-            mesh_id,
-            Some(&effective_provider_str),
-            Some(&branch_str),
-            source_issue,
-            // Move `initial_name` into the closure so `as_deref()`
-            // borrows from an owned `Option<String>`.
-            initial_name.as_deref(),
-            None,
+            crate::services::agent_node::NodeCreateParams {
+                mesh_id,
+                // The runner reads the path from the mesh row it looks up.
+                path: "",
+                branch: &branch_str,
+                provider: Some(&effective_provider_str),
+                source_issue,
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree_override: None,
+                // Move `initial_name` into the closure so `as_deref()`
+                // borrows from an owned `Option<String>`.
+                name_override: initial_name.as_deref(),
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration: None,
+                initial_prompt: initial_prompt.as_deref(),
+                operation: None,
+            },
             false, // pending — Idle matches the prior create(...) semantics
-            initial_prompt.as_deref(),
         )
         .map_err(|e| e.to_string())
     })
@@ -613,16 +623,25 @@ pub(crate) fn create_issue_node_impl(
     )
     .map_err(|error| error.to_string())?;
     let node = crate::services::agent_node::create_blocking_configured(
-        mesh.id,
-        Some(&effective_provider),
-        /* branch_override = */ None,
-        Some(issue_number),
-        Some(&initial_name),
-        None, // use_worktree_override — falls back to mesh default
+        crate::services::agent_node::NodeCreateParams {
+            mesh_id: mesh.id,
+            // The runner reads the path from the mesh row it looks up.
+            path: "",
+            // branch_override = none — the helper owns the resolution.
+            branch: "",
+            provider: Some(&effective_provider),
+            source_issue: Some(issue_number),
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: None, // falls back to mesh default
+            name_override: Some(&initial_name),
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: configuration.as_ref(),
+            initial_prompt: Some(prefill.as_str()),
+            operation: None,
+        },
         true, // pending — Pending matches the prior create_pending(...) semantics
-        configuration.as_ref(),
-        Some(prefill.as_str()),
-        /* operation = */ None,
     )
     .map_err(|e| e.to_string())?
     .node;
@@ -721,6 +740,38 @@ pub(crate) fn validate_pr_spawn_inputs(
     Ok((head_ref, head_repo_owner, head_repo_clone_url))
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatePrNodeRequest {
+    pub mesh_id: i64,
+    pub pr_number: i64,
+    pub pr_title: String,
+    pub head_ref: String,
+    pub head_sha: String,
+    /// Every optional field defaults, which is what Tauri's own per-key
+    /// extraction does for an `Option` parameter whose key the caller
+    /// omitted (`createPrNode` in `src/lib/tauri.ts` sends `?? null`
+    /// optionals, but an absent key must still mean `None`).
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub head_repo_owner: Option<String>,
+    #[serde(default)]
+    pub head_repo_clone_url: Option<String>,
+    #[serde(default)]
+    pub configuration_id: Option<String>,
+    /// `true` spawns a *reviewer sibling* for the PR (the PR pill's "Spawn
+    /// reviewer agent" row). Same intent and head pinning as the implementation
+    /// spawn, but named distinctly — see the naming block in the body, and
+    /// `git::worktree::provision_for_spawn` for why a shared worktree name is
+    /// destructive rather than merely inconvenient. On a Root-Node mesh
+    /// (`use_worktree = false`) there is no worktree to separate, so the
+    /// distinct name only keeps the two rows distinguishable. `None`/`false` is
+    /// the Pull Requests probe's `+` behaviour, byte-for-byte unchanged.
+    #[serde(default)]
+    pub reviewer: Option<bool>,
+}
+
 /// Fast stage-1 of the PR-spawn flow. Creates a `Pending` agent node row
 /// with the originating PR number stamped on `source_pr` and the PR's head
 /// ref stored in `branch`. The caller is expected to invoke
@@ -751,28 +802,24 @@ pub(crate) fn validate_pr_spawn_inputs(
 /// `validate_pr_spawn_inputs` extraction in #471 — same pattern: a pure
 /// inner function is testable in isolation, the `#[command]` macro wraps it
 /// with the AppHandle-bound event emission.
+/// The `create_pr_node` invoke payload. Tauri IPC commands carry every
+/// primitive as a separate wire parameter, so this stays flat on the wire
+/// (issue #2449) and is read in one piece through `WirePayload` rather than
+/// collapsing into a nested payload parameter.
 #[command]
-#[allow(clippy::too_many_arguments)]
 pub fn create_pr_node(
     app: tauri::AppHandle,
-    mesh_id: i64,
-    pr_number: i64,
-    pr_title: String,
-    head_ref: String,
-    head_sha: String,
-    provider: Option<String>,
-    head_repo_owner: Option<String>,
-    head_repo_clone_url: Option<String>,
-    configuration_id: Option<String>,
-    // `true` spawns a *reviewer sibling* for the PR (the PR pill's "Spawn
-    // reviewer agent" row). Same intent and head pinning as the implementation
-    // spawn, but named distinctly — see the naming block in the body, and
-    // `git::worktree::provision_for_spawn` for why a shared worktree name is
-    // destructive rather than merely inconvenient. On a Root-Node mesh
-    // (`use_worktree = false`) there is no worktree to separate, so the
-    // distinct name only keeps the two rows distinguishable. `None`/`false` is
-    // the Pull Requests probe's `+` behaviour, byte-for-byte unchanged.
-    reviewer: Option<bool>,
+    payload: crate::commands::wire_payload::WirePayload<CreatePrNodeRequest>,
+) -> Result<IssueNodeDraft, String> {
+    create_pr_node_for_request(app, payload.into_inner())
+}
+
+/// The body of [`create_pr_node`] behind the transport wrapper, so an
+/// in-process caller (`http/routes/pr.rs`, which already holds the request
+/// fields) does not have to construct a `WirePayload` to reach it.
+pub fn create_pr_node_for_request(
+    app: tauri::AppHandle,
+    request: CreatePrNodeRequest,
 ) -> Result<IssueNodeDraft, String> {
     // Issue #1180 — the impl now returns the `SpawnIntent::PullRequest`
     // it built (owner/repo resolved from the mesh + the supplied
@@ -782,18 +829,7 @@ pub fn create_pr_node(
     // prefill text. Previously the wrapper re-built the intent here
     // and the impl called `format_pr_prefill` independently — a silent
     // drift waiting to happen.
-    let (draft, intent) = create_pr_node_impl_configured(
-        mesh_id,
-        pr_number,
-        pr_title,
-        head_ref,
-        head_sha,
-        provider,
-        head_repo_owner,
-        head_repo_clone_url,
-        configuration_id,
-        reviewer.unwrap_or(false),
-    )?;
+    let (draft, intent) = create_pr_node_impl_configured(request)?;
     let _ = app.emit("node-created", NodeCreatedPayload { id: draft.node.id });
 
     let app_for_spawn = app.clone();
@@ -825,29 +861,14 @@ pub fn create_pr_node(
 /// [`SpawnIntent::initial_prompt`] — the single source of truth shared
 /// with the background launch path and the Circuit worker.
 #[cfg(test)]
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn create_pr_node_impl(
-    mesh_id: i64,
-    pr_number: i64,
-    pr_title: String,
-    head_ref: String,
-    head_sha: String,
-    provider: Option<String>,
-    head_repo_owner: Option<String>,
-    head_repo_clone_url: Option<String>,
+    request: CreatePrNodeRequest,
 ) -> Result<(IssueNodeDraft, SpawnIntent), String> {
-    create_pr_node_impl_configured(
-        mesh_id,
-        pr_number,
-        pr_title,
-        head_ref,
-        head_sha,
-        provider,
-        head_repo_owner,
-        head_repo_clone_url,
-        None,
-        false,
-    )
+    create_pr_node_impl_configured(CreatePrNodeRequest {
+        configuration_id: None,
+        reviewer: None,
+        ..request
+    })
 }
 
 /// Reviewer-sibling counterpart of [`create_pr_node_impl`] — same args, but
@@ -855,18 +876,20 @@ pub(crate) fn create_pr_node_impl(
 /// disambiguated against the mesh's existing worktree names. Test-only: this
 /// is the seam the PR pill's "Spawn reviewer agent" row exercises.
 #[cfg(test)]
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn create_pr_reviewer_node_impl(
-    mesh_id: i64,
-    pr_number: i64,
-    pr_title: String,
-    head_ref: String,
-    head_sha: String,
-    provider: Option<String>,
-    head_repo_owner: Option<String>,
-    head_repo_clone_url: Option<String>,
+    request: CreatePrNodeRequest,
 ) -> Result<(IssueNodeDraft, SpawnIntent), String> {
-    create_pr_node_impl_configured(
+    create_pr_node_impl_configured(CreatePrNodeRequest {
+        configuration_id: None,
+        reviewer: Some(true),
+        ..request
+    })
+}
+
+pub(crate) fn create_pr_node_impl_configured(
+    request: CreatePrNodeRequest,
+) -> Result<(IssueNodeDraft, SpawnIntent), String> {
+    let CreatePrNodeRequest {
         mesh_id,
         pr_number,
         pr_title,
@@ -875,24 +898,10 @@ pub(crate) fn create_pr_reviewer_node_impl(
         provider,
         head_repo_owner,
         head_repo_clone_url,
-        None,
-        true,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn create_pr_node_impl_configured(
-    mesh_id: i64,
-    pr_number: i64,
-    pr_title: String,
-    head_ref: String,
-    head_sha: String,
-    provider: Option<String>,
-    head_repo_owner: Option<String>,
-    head_repo_clone_url: Option<String>,
-    configuration_id: Option<String>,
-    reviewer: bool,
-) -> Result<(IssueNodeDraft, SpawnIntent), String> {
+        configuration_id,
+        reviewer,
+    } = request;
+    let reviewer = reviewer.unwrap_or(false);
     // Issue #471 — the gate is split into two independent rejections. See
     // `validate_pr_spawn_inputs` for the truth table; both guards are tested
     // exhaustively in `commands::agent_tests`. The helper also returns the
@@ -983,18 +992,22 @@ pub(crate) fn create_pr_node_impl_configured(
     )
     .map_err(|error| error.to_string())?;
     let node = crate::services::agent_node::create_pending_with_source_pr_fork_configured(
-        mesh.id,
-        &mesh.path,
-        &head_ref,
-        Some(&effective_provider),
-        None,            // source_issue
-        Some(pr_number), // source_pr — the key field for stage-2 worktree adoption
-        pinned_sha_opt,  // source_pr_pinned_sha — exact-pinning handle (issue #444)
-        Some(&initial_name),
-        head_repo_owner.as_deref(), // fork meta (issue #443) — None for same-repo PRs
-        head_repo_clone_url.as_deref(),
-        configuration.as_ref(),
-        Some(prefill.as_str()),
+        crate::services::agent_node::NodeCreateParams {
+            mesh_id: mesh.id,
+            path: &mesh.path,
+            branch: &head_ref,
+            provider: Some(&effective_provider),
+            source_issue: None,                   // source_issue
+            source_pr: Some(pr_number), // source_pr — the key field for stage-2 worktree adoption
+            source_pr_pinned_sha: pinned_sha_opt, // exact-pinning handle (issue #444)
+            use_worktree_override: None,
+            name_override: Some(&initial_name),
+            head_repo_owner: head_repo_owner.as_deref(), // fork meta (issue #443) — None for same-repo PRs
+            head_repo_clone_url: head_repo_clone_url.as_deref(),
+            configuration: configuration.as_ref(),
+            initial_prompt: Some(prefill.as_str()),
+            operation: None,
+        },
     )
     .map_err(|e| e.to_string())?;
 
@@ -1145,6 +1158,84 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
 mod tests {
     use super::*;
 
+    // ----- create_pr_node wire contract (issue #2449) --------------------
+    //
+    // `create_pr_node` reads its ten fields through `WirePayload` so the
+    // Rust signature stops being a positional bag. The wire itself is the
+    // contract — `createPrNode` in `src/lib/tauri.ts`, the e2e specs and a
+    // dozen vitest suites send it flat — so it is pinned here.
+
+    /// The payload `createPrNode` sends, `?? null` optionals included.
+    #[test]
+    fn create_pr_node_still_reads_the_flat_frontend_payload() {
+        use super::CreatePrNodeRequest;
+        let wire = serde_json::json!({
+            "meshId": 4,
+            "prNumber": 420,
+            "prTitle": "Add the wobble fix",
+            "headRef": "feat/420",
+            "headSha": "abcdef01",
+            "provider": "codex",
+            "headRepoOwner": "alice",
+            "headRepoCloneUrl": "https://github.com/alice/buildmesh.git",
+            "configurationId": "launch/codex",
+            "reviewer": true,
+        });
+        let request: CreatePrNodeRequest =
+            serde_json::from_value(wire).expect("flat invoke payload still parses");
+        assert_eq!(request.mesh_id, 4);
+        assert_eq!(request.pr_number, 420);
+        assert_eq!(request.pr_title, "Add the wobble fix");
+        assert_eq!(request.head_ref, "feat/420");
+        assert_eq!(request.head_sha, "abcdef01");
+        assert_eq!(request.provider.as_deref(), Some("codex"));
+        assert_eq!(request.head_repo_owner.as_deref(), Some("alice"));
+        assert_eq!(
+            request.head_repo_clone_url.as_deref(),
+            Some("https://github.com/alice/buildmesh.git")
+        );
+        assert_eq!(request.configuration_id.as_deref(), Some("launch/codex"));
+        assert_eq!(request.reviewer, Some(true));
+    }
+
+    /// A same-repo PR from the Pull Requests probe's `+` row sends no fork
+    /// info and no reviewer flag. Both shapes (explicit `null` and an
+    /// absent key) must land on `None`, matching Tauri's own per-key
+    /// extraction for an `Option` parameter.
+    #[test]
+    fn create_pr_node_accepts_null_and_omitted_optional_fields() {
+        use super::CreatePrNodeRequest;
+        let nulled: CreatePrNodeRequest = serde_json::from_value(serde_json::json!({
+            "meshId": 1,
+            "prNumber": 7,
+            "prTitle": "t",
+            "headRef": "feat/x",
+            "headSha": "",
+            "provider": null,
+            "headRepoOwner": null,
+            "headRepoCloneUrl": null,
+            "configurationId": null,
+            "reviewer": null,
+        }))
+        .expect("null optionals parse");
+        assert_eq!(nulled.provider, None);
+        assert_eq!(nulled.head_repo_owner, None);
+        assert_eq!(nulled.head_repo_clone_url, None);
+        assert_eq!(nulled.configuration_id, None);
+        assert_eq!(nulled.reviewer, None);
+
+        let omitted: CreatePrNodeRequest = serde_json::from_value(serde_json::json!({
+            "meshId": 1,
+            "prNumber": 7,
+            "prTitle": "t",
+            "headRef": "feat/x",
+            "headSha": "",
+        }))
+        .expect("omitted optionals default to None");
+        assert_eq!(omitted.provider, None);
+        assert_eq!(omitted.reviewer, None);
+    }
+
     // ----- create_pr_node_impl seams (issue #445) -----------------------
     //
     // `create_pr_node` is a Tauri command that needs an `AppHandle` only to
@@ -1214,16 +1305,19 @@ mod tests {
     fn create_pr_node_impl_rejects_empty_head_ref() {
         let _db = ensure_pr_db();
 
-        let err = create_pr_node_impl(
-            1, // mesh_id — irrelevant; gate short-circuits before DB read
-            420,
-            "any title".to_string(),
-            "".to_string(),
-            "".to_string(),
-            None,
-            None,
-            None,
-        )
+        let err = create_pr_node_impl(CreatePrNodeRequest {
+            // mesh_id — irrelevant; gate short-circuits before DB read
+            mesh_id: 1,
+            pr_number: 420,
+            pr_title: "any title".to_string(),
+            head_ref: "".to_string(),
+            head_sha: "".to_string(),
+            provider: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration_id: None,
+            reviewer: None,
+        })
         .expect_err("head_ref=\"\" must be rejected (cannot check out branch \"\")");
 
         assert!(
@@ -1249,16 +1343,18 @@ mod tests {
     fn create_pr_node_impl_rejects_incomplete_fork_info() {
         let _db = ensure_pr_db();
 
-        let err = create_pr_node_impl(
-            1,
-            420,
-            "any title".to_string(),
-            "feat/443-fork".to_string(),
-            "".to_string(),
-            None,
-            Some("alice".to_string()), // owner present
-            None,                      // clone_url MISSING — XOR violation
-        )
+        let err = create_pr_node_impl(CreatePrNodeRequest {
+            mesh_id: 1,
+            pr_number: 420,
+            pr_title: "any title".to_string(),
+            head_ref: "feat/443-fork".to_string(),
+            head_sha: "".to_string(),
+            provider: None,
+            head_repo_owner: Some("alice".to_string()), // owner present
+            head_repo_clone_url: None,                  // clone_url MISSING — XOR violation
+            configuration_id: None,
+            reviewer: None,
+        })
         .expect_err("owner without clone_url must be rejected");
 
         assert!(
@@ -1278,16 +1374,18 @@ mod tests {
 
         // Use a mesh id that the freshly-init'd DB cannot possibly have
         // (no `create_mesh` was called in this test).
-        let err = create_pr_node_impl(
-            999_999_999,
-            420,
-            "any title".to_string(),
-            "feat/420-pr-spawn".to_string(),
-            "".to_string(),
-            None,
-            None,
-            None,
-        )
+        let err = create_pr_node_impl(CreatePrNodeRequest {
+            mesh_id: 999_999_999,
+            pr_number: 420,
+            pr_title: "any title".to_string(),
+            head_ref: "feat/420-pr-spawn".to_string(),
+            head_sha: "".to_string(),
+            provider: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration_id: None,
+            reviewer: None,
+        })
         .expect_err("unknown mesh_id must be rejected");
 
         // `db::get_mesh_by_id` returns a rusqlite error containing
@@ -1329,16 +1427,18 @@ mod tests {
         let _db = ensure_pr_db();
         let (_tmp, mesh_id) = create_test_mesh("pr-terminal-prompt", "https://github.com/x/y.git");
 
-        let err = create_pr_node_impl(
+        let err = create_pr_node_impl(CreatePrNodeRequest {
             mesh_id,
-            7,
-            "review the race".to_string(),
-            "feat/x".to_string(),
-            "".to_string(),
-            Some("terminal".to_string()),
-            None,
-            None,
-        )
+            pr_number: 7,
+            pr_title: "review the race".to_string(),
+            head_ref: "feat/x".to_string(),
+            head_sha: "".to_string(),
+            provider: Some("terminal".to_string()),
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration_id: None,
+            reviewer: None,
+        })
         .expect_err("Terminal cannot take a PR-spawn prompt");
 
         assert_eq!(err, crate::services::agent_node::INITIAL_PROMPT_UNSUPPORTED);
@@ -1368,16 +1468,18 @@ mod tests {
         let pr_number: i64 = 445;
         let pr_title = "test(pr-spawn): Rust unit tests for create_pr_node + fetch_single_ref";
 
-        let (draft, intent) = create_pr_node_impl(
+        let (draft, intent) = create_pr_node_impl(CreatePrNodeRequest {
             mesh_id,
             pr_number,
-            pr_title.to_string(),
-            "feat/445-pr-spawn".to_string(),
-            "0123456789abcdef0123456789abcdef01234567".to_string(),
-            None,
-            None,
-            None,
-        )
+            pr_title: pr_title.to_string(),
+            head_ref: "feat/445-pr-spawn".to_string(),
+            head_sha: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            provider: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration_id: None,
+            reviewer: None,
+        })
         .expect("create_pr_node_impl with valid inputs must succeed");
 
         // Prefill seam: matches the SpawnIntent's `initial_prompt()`
@@ -1444,16 +1546,18 @@ mod tests {
         let pr_number: i64 = 90210;
         let pr_title = "add reviewer spawn";
 
-        let (first, _intent) = create_pr_reviewer_node_impl(
+        let (first, _intent) = create_pr_reviewer_node_impl(CreatePrNodeRequest {
             mesh_id,
             pr_number,
-            pr_title.to_string(),
-            "feat/90210-review".to_string(),
-            "".to_string(),
-            None,
-            None,
-            None,
-        )
+            pr_title: pr_title.to_string(),
+            head_ref: "feat/90210-review".to_string(),
+            head_sha: "".to_string(),
+            provider: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration_id: None,
+            reviewer: Some(true),
+        })
         .expect("first reviewer spawn must succeed");
 
         let expected_base = crate::session_naming::pr_reviewer_node_name(pr_number, pr_title);
@@ -1479,16 +1583,18 @@ mod tests {
             "the name drives the worktree directory, so worktree_name must carry it"
         );
 
-        let (second, _intent) = create_pr_reviewer_node_impl(
+        let (second, _intent) = create_pr_reviewer_node_impl(CreatePrNodeRequest {
             mesh_id,
             pr_number,
-            pr_title.to_string(),
-            "feat/90210-review".to_string(),
-            "".to_string(),
-            None,
-            None,
-            None,
-        )
+            pr_title: pr_title.to_string(),
+            head_ref: "feat/90210-review".to_string(),
+            head_sha: "".to_string(),
+            provider: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration_id: None,
+            reviewer: Some(true),
+        })
         .expect("a repeat reviewer spawn must still succeed");
 
         assert_ne!(
@@ -1516,16 +1622,18 @@ mod tests {
         // Case 1: explicit caller value wins (no mesh, no app default).
         let (_tmp, mesh_id) =
             create_test_mesh("pr-provider-explicit", "https://github.com/x/y.git");
-        let draft = create_pr_node_impl(
+        let draft = create_pr_node_impl(CreatePrNodeRequest {
             mesh_id,
-            1,
-            "t".to_string(),
-            "feat/a".to_string(),
-            "".to_string(),
-            Some("codex".to_string()), // explicit native selection
-            None,
-            None,
-        )
+            pr_number: 1,
+            pr_title: "t".to_string(),
+            head_ref: "feat/a".to_string(),
+            head_sha: "".to_string(),
+            provider: Some("codex".to_string()),
+            head_repo_owner: None, // explicit native selection
+            head_repo_clone_url: None,
+            configuration_id: None,
+            reviewer: None,
+        })
         .map(|(draft, _intent)| draft)
         .expect("explicit provider must be accepted");
         assert_eq!(
@@ -1549,16 +1657,18 @@ mod tests {
         )
         .expect("set default_provider");
         drop(db);
-        let draft = create_pr_node_impl(
-            mesh_id2,
-            2,
-            "t".to_string(),
-            "feat/b".to_string(),
-            "".to_string(),
-            None, // no explicit — fall through
-            None,
-            None,
-        )
+        let draft = create_pr_node_impl(CreatePrNodeRequest {
+            mesh_id: mesh_id2,
+            pr_number: 2,
+            pr_title: "t".to_string(),
+            head_ref: "feat/b".to_string(),
+            head_sha: "".to_string(),
+            provider: None,
+            head_repo_owner: None, // no explicit — fall through
+            head_repo_clone_url: None,
+            configuration_id: None,
+            reviewer: None,
+        })
         .map(|(draft, _intent)| draft)
         .expect("mesh default must be accepted");
         assert_eq!(
@@ -1585,16 +1695,18 @@ mod tests {
         // Case A: non-empty head_sha persists verbatim.
         let (_tmp_a, mesh_id_a) = create_test_mesh("pr-sha-pin-a", "https://github.com/x/y.git");
         let sha = "abcdef0123456789abcdef0123456789abcdef01";
-        let draft_a = create_pr_node_impl(
-            mesh_id_a,
-            1,
-            "t".to_string(),
-            "feat/a".to_string(),
-            sha.to_string(),
-            None,
-            None,
-            None,
-        )
+        let draft_a = create_pr_node_impl(CreatePrNodeRequest {
+            mesh_id: mesh_id_a,
+            pr_number: 1,
+            pr_title: "t".to_string(),
+            head_ref: "feat/a".to_string(),
+            head_sha: sha.to_string(),
+            provider: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration_id: None,
+            reviewer: None,
+        })
         .map(|(draft, _intent)| draft)
         .expect("non-empty head_sha must be accepted");
         assert_eq!(
@@ -1605,16 +1717,18 @@ mod tests {
 
         // Case B: empty head_sha persists as None.
         let (_tmp_b, mesh_id_b) = create_test_mesh("pr-sha-pin-b", "https://github.com/x/y.git");
-        let draft_b = create_pr_node_impl(
-            mesh_id_b,
-            2,
-            "t".to_string(),
-            "feat/b".to_string(),
-            "".to_string(),
-            None,
-            None,
-            None,
-        )
+        let draft_b = create_pr_node_impl(CreatePrNodeRequest {
+            mesh_id: mesh_id_b,
+            pr_number: 2,
+            pr_title: "t".to_string(),
+            head_ref: "feat/b".to_string(),
+            head_sha: "".to_string(),
+            provider: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration_id: None,
+            reviewer: None,
+        })
         .map(|(draft, _intent)| draft)
         .expect("empty head_sha must be accepted (drift check skipped)");
         assert_eq!(
@@ -1765,16 +1879,24 @@ mod tests {
     fn fresh_pending_node(name: &str) -> (tempfile::TempDir, i64) {
         let (_tmp, mesh_id) = create_test_mesh(name, "https://github.com/alondero/buildmesh.git");
         let node = crate::services::agent_node::create_blocking_configured(
-            mesh_id,
-            Some("claude"),
-            /* branch_override = */ None,
-            /* source_issue = */ None,
-            Some(name),
-            /* use_worktree_override = */ None,
-            /* pending = */ true,
-            /* configuration = */ None,
-            /* initial_prompt = */ None,
-            /* operation = */ None,
+            crate::services::agent_node::NodeCreateParams {
+                mesh_id,
+                // The runner reads the path from the mesh row it looks up.
+                path: "",
+                branch: "", // branch_override = none — the helper resolves it
+                provider: Some("claude"),
+                source_issue: None,
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree_override: None,
+                name_override: Some(name),
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration: None,
+                initial_prompt: None,
+                operation: None,
+            },
+            true, // pending
         )
         .expect("create pending node")
         .node;

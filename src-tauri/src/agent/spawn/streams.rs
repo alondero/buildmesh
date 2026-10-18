@@ -5,9 +5,10 @@
 //! and emits `agent-spawned`.
 
 use super::launch::LaunchedProcess;
-use super::process::register_agent;
+use super::process::{register_agent, SpawnedSession};
 use super::reader::{
-    reader_should_capture_session_id, start_reader, SessionIdMode, SpawnTimer, EARLY_EXIT_WINDOW,
+    reader_should_capture_session_id, start_reader, ReaderStart, SessionIdMode, SpawnTimer,
+    EARLY_EXIT_WINDOW,
 };
 use super::AgentSpawnedPayload;
 use crate::agent::process::PROCESS_REGISTRY;
@@ -68,28 +69,26 @@ pub(super) async fn start_streams(
     // One flag instance shared three ways: the registry entry (kill_session
     // sets it), the reader thread (its epilogue reads it), and nothing else.
     let deliberate_kill = Arc::new(AtomicBool::new(false));
-    let generation = register_agent(
+    // The session-scoped state both the registry insert and the reader thread
+    // read, owned by one value so the two halves cannot drift. `spawn_start`
+    // is the original SpawnTimer reference, used by the reader-thread
+    // `first_pty_output` checkpoint log for timeline alignment with every
+    // other `spawn_timing:` line. Distinct from `spawned_at`
+    // (process-creation time) which the early-exit heuristic needs — see
+    // `start_reader` doc comment.
+    let spawned_session = SpawnedSession {
         session_id,
-        child,
-        writer,
-        master,
-        reader_alive.clone(),
-        job,
-        timer.start(),
+        reader_alive,
+        deliberate_kill,
+        spawn_start: timer.start(),
         mesh_id,
-        deliberate_kill.clone(),
-    );
+    };
+    let generation = register_agent(spawned_session.clone(), child, writer, master, job);
     tracing::info!("start_streams: stored agent process");
 
     // Start the reader thread after register so `is_agent_already_running`
     // sees the entry (the pre-#300 order that closes the TOCTOU window).
     let spawned_at = std::time::Instant::now();
-    // `spawn_start` is the original SpawnTimer reference, used by the
-    // reader-thread `first_pty_output` checkpoint log for timeline
-    // alignment with every other `spawn_timing:` line. Distinct from
-    // `spawned_at` (process-creation time) which the early-exit
-    // heuristic needs — see `start_reader` doc comment.
-    let spawn_start = timer.start();
     tracing::debug!(
         "start_streams: starting reader thread for session {}",
         session_id
@@ -111,17 +110,15 @@ pub(super) async fn start_streams(
     let resume_attempt = matches!(session_id_mode, SessionIdMode::Resume(_));
     let reader_handle = start_reader(
         app.clone(),
-        session_id,
-        needs_session_capture,
-        reader,
-        spawned_at,
-        reader_alive,
-        adapter.is_plain_terminal(),
-        spawn_start,
-        mesh_id,
-        deliberate_kill,
-        generation,
-        resume_attempt,
+        ReaderStart {
+            session: spawned_session,
+            reader,
+            spawned_at,
+            needs_session_capture,
+            is_plain_terminal: adapter.is_plain_terminal(),
+            generation,
+            resume_attempt,
+        },
     );
 
     // Natural-exit watcher (issue #287). On Windows ConPTY

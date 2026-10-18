@@ -8,66 +8,61 @@ use crate::models::{EnvType, Provider};
 use portable_pty::CommandBuilder;
 use std::borrow::Cow;
 
+/// Everything [`build_spawn_command_prepared`] composes the launch from.
+///
+/// The inputs arrive as one named value rather than nine positional ones, so
+/// the routing choice (`routing`) is an explicit field the caller fills and
+/// every spawn site writes the same set.
+pub struct SpawnCommandInput<'a> {
+    pub resolved: &'a env::ResolvedPath,
+    pub provider: Provider,
+    /// The per-profile backend env, a Codex Proxy pairing, or a native
+    /// executable override — one value for all three, so this function stays a
+    /// pure composition of its inputs (no disk / preferences-cache access) and
+    /// the env injection can be unit-tested with an explicit list.
+    ///
+    /// `PreparedLaunchRouting::Environment`'s values are the per-profile backend
+    /// selection resolved by the caller
+    /// (`preferences::resolve_provider_env(&node.provider)`): the
+    /// `ANTHROPIC_*` variables a custom Claude-compatible profile
+    /// (MiniMax/DeepSeek) needs to target its endpoint. Empty for the built-in
+    /// Anthropic subscription and for the native-binary providers (Codex, Grok,
+    /// Kimi Code, Antigravity, OpenCode).
+    pub routing: &'a crate::agent::launch_routing::PreparedLaunchRouting,
+    pub session_id_mode: &'a SessionIdMode,
+    pub session_id: i64,
+    /// The **already-resolved, capability-masked** model and effort values
+    /// (issue #1149). The caller runs
+    /// [`crate::agent::capabilities::resolve_agent_config`] with the harness's
+    /// capability descriptor and the per-field cascade inputs; this function
+    /// validates adapter-owned model syntax and forwards accepted values
+    /// verbatim, without re-consulting capability flags. Empty / whitespace
+    /// inputs and unsupported values are masked before they reach here.
+    pub config: &'a crate::agent::capabilities::ResolvedAgentConfig,
+    pub prefill: Option<&'a str>,
+    pub sandbox: bool,
+    pub resume_cause: ResumeCause,
+}
+
 /// Build the spawn command by composing the provider's recipe with the runtime environment.
-///
-/// `backend_env` is the per-profile backend selection resolved by the caller
-/// (`preferences::resolve_provider_env(&node.provider)`): the `ANTHROPIC_*`
-/// variables a custom Claude-compatible profile (MiniMax/DeepSeek) needs to
-/// target its endpoint. Empty for the built-in Anthropic subscription and for
-/// the native-binary providers (Codex, Grok, Kimi Code, Antigravity, OpenCode).
-/// Passed in (rather than resolved here) so this
-/// function stays a pure composition of its inputs — no disk / preferences-cache
-/// access — and the env injection can be unit-tested with an explicit list.
-///
-/// `config` carries the **already-resolved, capability-masked** model and
-/// effort values (issue #1149). The caller runs
-/// [`crate::agent::capabilities::resolve_agent_config`] with the harness's
-/// capability descriptor and the per-field cascade inputs; this function
-/// validates adapter-owned model syntax and forwards accepted values verbatim,
-/// without re-consulting capability
-/// flags. Empty / whitespace inputs and unsupported values are masked before
-/// they reach here.
 ///
 /// `Err` means the spawn cannot be assembled safely, including an invalid model
 /// reference or a macOS Seatbelt profile-write failure, which must not degrade
 /// into an unsandboxed launch (#2034). The caller surfaces it as a spawn error.
-#[allow(clippy::too_many_arguments)]
-pub fn build_spawn_command(
-    resolved: &env::ResolvedPath,
-    provider_enum: Provider,
-    backend_env: &[(String, String)],
-    session_id_mode: &SessionIdMode,
-    session_id: i64,
-    config: &crate::agent::capabilities::ResolvedAgentConfig,
-    prefill: Option<&str>,
-    sandbox: bool,
-    resume_cause: ResumeCause,
+pub fn build_spawn_command_prepared(
+    input: SpawnCommandInput<'_>,
 ) -> Result<CommandBuilder, String> {
-    build_spawn_command_prepared(
+    let SpawnCommandInput {
         resolved,
-        provider_enum,
-        &crate::agent::launch_routing::PreparedLaunchRouting::environment(backend_env),
+        provider: provider_enum,
+        routing,
         session_id_mode,
         session_id,
         config,
         prefill,
         sandbox,
         resume_cause,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn build_spawn_command_prepared(
-    resolved: &env::ResolvedPath,
-    provider_enum: Provider,
-    routing: &crate::agent::launch_routing::PreparedLaunchRouting,
-    session_id_mode: &SessionIdMode,
-    session_id: i64,
-    config: &crate::agent::capabilities::ResolvedAgentConfig,
-    prefill: Option<&str>,
-    sandbox: bool,
-    resume_cause: ResumeCause,
-) -> Result<CommandBuilder, String> {
+    } = input;
     let adapter = provider_enum.adapter();
     let platform = if resolved.env_type == EnvType::Wsl {
         Platform::Linux

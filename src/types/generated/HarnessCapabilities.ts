@@ -9,7 +9,7 @@ import type { PermissionModeOption } from "./PermissionModeOption";
  * #1148). One descriptor per Agent Harness — the same descriptor drives:
  *
  * 1. The configuration resolver (`resolve_agent_config`): masks unsupported
- *    values before they reach `build_spawn_command`.
+ *    values before they reach `build_spawn_command_prepared`.
  * 2. The Spawn Menu (`ProviderInfo.capabilities`): the frontend can render
  *    only the controls each harness actually supports, so a Codex row offers
  *    the inline-config effort knob and an OpenCode row offers model (but
