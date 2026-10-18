@@ -268,16 +268,16 @@ pub(crate) fn app_identifier() -> Option<String> {
 /// notifications (issue #587). Stores the realized loopback binds so a
 /// post-toggle `get_network_status` can still report "loopback only" when
 /// the interface side is empty.
+// `shutdown` + `handles` are kept for the future graceful-shutdown path
+// (signal the loopback accept loops, await their exit). Today the OS process
+// exit drops the runtime, which drops the listeners, so those two fields are
+// stored but not read. Keeping them is the contract — "the skeleton is
+// structurally teardown-able if we ever need to" — so the lint is allowed on
+// the struct with that reason; `port` and `realized` have readers today
+// (issue #2450).
+#[allow(dead_code)]
 pub(crate) struct LoopbackSkeleton {
-    // `shutdown` + `handles` are kept for the future graceful-shutdown path
-    // (signal the loopback accept loops, await their exit). Today the OS
-    // process exit drops the runtime, which drops the listeners, so the
-    // fields are stored but not read. Marking `dead_code` rather than
-    // removing them: the design intent — "the skeleton is structurally
-    // teardown-able if we ever need to" — is part of the contract.
-    #[allow(dead_code)]
     pub shutdown: watch::Sender<bool>,
-    #[allow(dead_code)]
     pub handles: Vec<tauri::async_runtime::JoinHandle<()>>,
     pub port: u16,
     pub realized: Vec<RealizedBind>,

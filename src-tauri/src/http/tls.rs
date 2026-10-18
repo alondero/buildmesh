@@ -46,7 +46,6 @@ pub struct SelfSignedCert {
     pub key_der: Vec<u8>,
 }
 
-#[allow(dead_code)] // root fields are read by tests + the mobileconfig signer
 /// A root CA + leaf-cert pair. The root is what the user installs on their
 /// phone as a trusted root CA (Android refuses a CA install unless the cert
 /// declares `CA:TRUE`; iOS wants the same via `.p12`); the leaf is what
@@ -172,10 +171,10 @@ fn build_root_ca_params() -> Result<CertificateParams, rcgen::Error> {
 /// validates the leaf, it isn't itself a TLS endpoint.
 ///
 /// Low-level primitive; **not** the normal hot path. The normal entry point is
-/// [`load_or_renew_leaf`], which keeps the root stable across leaf renewals.
-/// `generate` exists for tests that want a fresh chain without touching disk
-/// (and for the [`RootKeyPair::create`] reset path).
-#[allow(dead_code)] // used by tests; production hot path is `load_or_renew_leaf`
+/// [`load_or_renew_leaf`], which keeps the root stable across leaf renewals
+/// (the reset path is [`RootKeyPair::create`]). Only the tests mint a chain
+/// without touching disk, so this is compiled for tests alone (issue #2450).
+#[cfg(test)]
 pub fn generate(interface_ips: &[IpAddr]) -> Result<CertChain, rcgen::Error> {
     // Root CA — self-signed with CA:TRUE.
     let root_params = build_root_ca_params()?;
@@ -557,14 +556,11 @@ fn persisted_covers(sans_path: &Path, wanted: &[String]) -> bool {
     wanted.iter().all(|ip| have.contains(ip.as_str()))
 }
 
-/// Backwards-compatible alias for [`load_or_renew_leaf`].
-///
-/// Older call sites (and most existing tests) were written against the
-/// pre-#1527 name. The new entry point splits root and leaf lifecycles,
-/// but the wire contract — "give me a cert chain covering these IPs,
-/// reusing what's on disk" — is identical. The alias lets us rename the
-/// internals without churning every call site in the same patch.
-#[allow(dead_code)] // used by tests + `routes::certs` / `routes::mobileconfig` test fixtures
+/// Pre-#1527 name for [`load_or_renew_leaf`], kept only for the tests written
+/// against it. Production calls [`load_or_renew_leaf`] directly and
+/// [`reset_trusted_certificates`] for the reset path, so the alias is compiled
+/// for tests alone (issue #2450).
+#[cfg(test)]
 pub fn load_or_generate(dir: &Path, interface_ips: &[IpAddr]) -> io::Result<CertChain> {
     load_or_renew_leaf(dir, interface_ips)
 }

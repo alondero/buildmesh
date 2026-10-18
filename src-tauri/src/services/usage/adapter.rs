@@ -301,10 +301,9 @@ where
         Ok(r) if matches!(r.status().as_u16(), 401 | 403) => {
             let status = r.status().as_u16();
             let body = r.text().unwrap_or_default();
-            let reason = format!("API error {status}: {body}");
+            let hint = format!("API error {status}: {body}");
             match auth_policy {
-                AuthPolicy::Rejected => UsageOutcome::Rejected { hint: reason },
-                AuthPolicy::NoCredential => UsageOutcome::NoCredential { hint: reason },
+                AuthPolicy::Rejected => UsageOutcome::Rejected { hint },
             }
         }
         Ok(r) if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {

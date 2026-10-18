@@ -59,43 +59,44 @@ pub use warm_pool::*;
 
 pub(crate) use auth::{COORDINATOR_DRIVE_TOKEN_KEY, COORDINATOR_READ_TOKEN_KEY};
 
-#[allow(unused_imports)]
+// The `_inner` helpers take an explicit `&Connection`: production reaches them
+// through the locking wrapper in their own module, while cross-module callers
+// and tests reach them through `db::*` (a `pub use` glob cannot carry a
+// `pub(crate)` item). Each name is gated to the configurations that actually
+// call it, so neither build carries an import nothing in it can see
+// (issue #2450).
+#[cfg(test)]
 pub(crate) use mesh::{
-    get_mesh_by_id_inner, get_mesh_scratchpad_inner, set_mesh_sandbox_inner,
-    set_mesh_scratchpad_inner, set_mesh_worktree_directory_inner,
+    create_mesh_inner, delete_mesh_inner, get_mesh_by_id_inner, get_mesh_scratchpad_inner,
+    set_mesh_sandbox_inner, set_mesh_scratchpad_inner, set_mesh_worktree_directory_inner,
+    update_mesh_positions_batch_inner,
 };
 
-#[allow(unused_imports)]
+#[cfg(test)]
 pub(crate) use agent_node::{
-    adopt_manual_pool_slug_with_path_inner, agent_turn_stamp, clear_cli_session_id_inner,
-    cli_session_id_present_inner, delete_agent_node_enqueueing_removal_inner,
-    delete_pending_worktree_removal_inner, enqueue_worktree_removal_inner,
-    get_agent_node_by_id_inner, list_pending_worktree_removals_inner, list_suspended_nodes_inner,
-    mark_agent_node_signal_unverified_inner, recover_live_cli_session_id,
+    adopt_manual_pool_slug_inner, adopt_manual_pool_slug_with_path_inner,
+    clear_cli_session_id_inner, cli_session_id_present_inner, create_agent_node_inner,
+    delete_agent_node_enqueueing_removal_inner, delete_pending_worktree_removal_inner,
+    enqueue_worktree_removal_inner, get_agent_node_by_id_inner,
+    list_pending_worktree_removals_inner, list_suspended_nodes_inner,
     recover_live_cli_session_id_inner, recover_suspended_cli_session_id_inner,
     set_agent_node_pinned_inner, set_cli_session_id_if_missing_inner,
-    toggle_agent_node_pinned_inner, update_agent_node_signal_health_inner,
+    toggle_agent_node_pinned_inner, update_agent_node_positions_batch_inner,
+    update_agent_node_signal_health_inner,
 };
 
-#[cfg(test)]
-pub(crate) use agent_node::{
-    adopt_manual_pool_slug_inner, create_agent_node_inner, update_agent_node_positions_batch_inner,
-};
+pub(crate) use agent_node::{agent_turn_stamp, recover_live_cli_session_id};
 
 #[cfg(test)]
-pub(crate) use mesh::{create_mesh_inner, delete_mesh_inner, update_mesh_positions_batch_inner};
-
-#[allow(unused_imports)]
 pub(crate) use warm_pool::{
     batch_delete_warm_worktrees_by_id, claim_warm_entry_for_mesh_inner,
     count_available_warm_for_mesh_inner, count_droppable_warm_entries_for_mesh_inner,
     delete_orphaned_claimed_warm_worktrees_inner, delete_warm_worktree_inner,
     delete_warm_worktrees_for_mesh_inner, insert_warm_worktree_inner, is_warm_pool_path_inner,
-    list_all_droppable_warm_entries_for_mesh_inner, list_available_warm_for_mesh_inner,
     list_oldest_warm_entries_for_mesh_inner, list_warm_paths_for_mesh_droppable_inner,
     list_warm_paths_for_mesh_inner, list_warm_worktrees_to_reconcile_inner,
     list_worktree_enabled_meshes_for_warm_inner, mark_warm_worktree_available_inner,
-    mark_warm_worktree_refreshing_inner, warm_pool_claims_path_inner,
+    warm_pool_claims_path_inner,
 };
 
 pub(crate) mod legacy_retirement;
@@ -1149,10 +1150,6 @@ pub(crate) fn try_write_conn() -> Option<std::sync::MutexGuard<'static, Connecti
 /// double-init as a bug — this is purely a test-orchestration
 /// affordance, not a permission to call `init` from production more
 /// than once.
-#[allow(dead_code)] // Test-only consumer (`commands::agent::tests`); clippy's
-                    // lib-build dead-code check doesn't see across the test
-                    // boundary, so we have to opt out. Same pattern as
-                    // `set_lan_exposure_enabled` above.
 pub fn is_initialized() -> bool {
     // A test that installed an isolated database is initialized even though
     // the process-global `OnceCell` is still empty (issue #2048).

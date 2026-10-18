@@ -212,17 +212,19 @@ impl GitHubClient {
     /// [`GitHubIncompleteReason::Cancelled`](super::pagination::GitHubIncompleteReason::Cancelled).
     /// One-shot and idempotent: a client is single-use per read today, so there
     /// is no reset, and a second `cancel()` is a no-op rather than an error.
-    // The caller that would invoke this — a command that holds the client
-    // across a cancellable UI read — lives in `commands::pr`, which is outside
-    // this module. `#[cfg_attr(not(test), allow(dead_code))]` matches the
-    // `PROBE_FETCH_TTL` precedent below for the same situation: the seam and
-    // its tests exist, the wiring lands with the command change.
-    #[cfg_attr(not(test), allow(dead_code))]
+    // No production caller requests a cancellation yet — the command that
+    // would hold a client across a cancellable UI read lives in
+    // `commands::pr`, outside this module. The *mechanism* is live though:
+    // the page walk polls `is_cancelled()` on every request, so deleting this
+    // setter would turn that production poll into a tautology and strand
+    // `GitHubIncompleteReason::Cancelled`. The trigger lands with that
+    // command (issue #2450).
+    #[allow(dead_code)]
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
     }
 
-    /// Whether [`Self::cancel`] has been called on this client.
+    /// Whether [`Self::cancel`] has been asked to stop this read.
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
     }
@@ -541,12 +543,14 @@ fn is_valid_repo_name(name: &str) -> bool {
 /// process start is always stale, the same rule as the spawn-time fetch
 /// TTL (a restart must not trust a snapshot from a previous run).
 ///
-/// Live list methods do not consult this yet; they fetch every time.
-#[cfg_attr(not(test), allow(dead_code))]
+/// The live list methods below call the GitHub client unconditionally, so
+/// they do not consult this constant; it is compiled for its tests alone
+/// rather than carried in every release binary (issue #2450).
+#[cfg(test)]
 pub const PROBE_FETCH_TTL: Duration = Duration::from_secs(60);
 
 /// Whether a probe refresh should hit the network.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefreshDecision {
     /// Last success is still inside [`PROBE_FETCH_TTL`].
@@ -562,7 +566,7 @@ pub enum RefreshDecision {
 /// when some other refresh is in flight — an in-flight call must not hide
 /// a read that already succeeded. Once the snapshot is stale, an in-flight
 /// refresh coalesces further callers onto that one request.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub fn refresh_decision(age: Option<Duration>, refresh_in_flight: bool) -> RefreshDecision {
     if matches!(age, Some(age) if age < PROBE_FETCH_TTL) {
         return RefreshDecision::ServeCached;
@@ -574,7 +578,7 @@ pub fn refresh_decision(age: Option<Duration>, refresh_in_flight: bool) -> Refre
 }
 
 /// What a probe should show after a live attempt and an optional snapshot.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeRead<T, E> {
     /// The live fetch succeeded. Show this, not the cache.
@@ -591,8 +595,9 @@ pub enum ProbeRead<T, E> {
 /// or older than [`PROBE_FETCH_TTL`]. The cache is consulted only after
 /// the live fetch fails, and a missing cache then surfaces that failure
 /// rather than an empty success. That is the #1073 rule: a fallback must
-/// not discard a live result that already succeeded.
-#[cfg_attr(not(test), allow(dead_code))]
+/// not discard a live result that already succeeded — and the four tests
+/// below are what hold it there (issue #2450).
+#[cfg(test)]
 pub fn combine_live_and_cache<T, E>(live: Result<T, E>, cache: Option<T>) -> ProbeRead<T, E> {
     match live {
         Ok(value) => ProbeRead::Live(value),

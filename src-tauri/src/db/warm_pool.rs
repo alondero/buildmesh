@@ -260,16 +260,9 @@ pub(crate) fn delete_warm_worktrees_for_mesh_inner(
 /// for that path (#642.1).
 ///
 /// Returns absolute host paths. Cheap: a `SELECT path` over a small index.
-/// `#[allow(dead_code)]` because no production code path currently needs
-/// the everything view; preserving the public surface so diagnostic tools
-/// and the next issue can reach it without going through the `pub(crate)`
-/// inner.
-#[allow(dead_code)]
-pub fn list_warm_paths_for_mesh(mesh_id: i64) -> SqlResult<Vec<String>> {
-    let db = read_conn();
-    list_warm_paths_for_mesh_inner(&db, mesh_id)
-}
-
+/// Test-only — production force-removal goes through the droppable view
+/// (#642.1), so this is not compiled into a release binary (issue #2450).
+#[cfg(test)]
 pub(crate) fn list_warm_paths_for_mesh_inner(
     conn: &Connection,
     mesh_id: i64,
@@ -510,11 +503,9 @@ pub fn delete_orphaned_claimed_warm_worktrees() -> SqlResult<usize> {
 ///
 /// Production goes through `delete_orphaned_claimed_warm_worktrees` (above),
 /// which composes the same helpers but releases the DB mutex between the
-/// classify and FS phases — see issue #1228.
-#[allow(dead_code)] // Test-only consumer (`warm_pool_tests`); clippy's
-                    // lib-build dead-code check doesn't see across the
-                    // #[cfg(test)] boundary, so we have to opt out. Same
-                    // pattern as `is_initialized` above.
+/// classify and FS phases — see issue #1228. Test-only, so it is not compiled
+/// into a release binary (issue #2450).
+#[cfg(test)]
 pub(crate) fn delete_orphaned_claimed_warm_worktrees_inner(
     conn: &Connection,
     live_session_ids: &[i64],

@@ -58,18 +58,15 @@ pub enum AuthOutcome {
     Unavailable,
 }
 
-/// Resolve the role proven by a request's headers. A request carrying no cookie
-/// and no bearer token returns `None` *without* touching the DB — so an
-/// unauthenticated probe never reaches a lookup (and the inline dispatcher
-/// tests, which run without an initialized global DB, stay DB-free). Otherwise it
-/// locks the DB once and delegates to [`resolve_role_inner`], the single
-/// resolution implementation the unit tests also drive against a seeded
-/// connection — so there is no production/test logic to keep in lockstep.
-#[allow(dead_code)]
-pub fn resolve_role(headers: &str) -> Option<Role> {
-    resolve_role_result(headers).ok().flatten()
-}
-
+/// Resolve the role proven by a request's headers into `Result` so the
+/// dispatcher can turn a DB-pool exhaustion into 503 rather than 401. A request
+/// carrying no cookie and no bearer token returns `Ok(None)` *without* touching
+/// the DB — so an unauthenticated probe does not reach a lookup (the
+/// dispatcher tests below run without an initialized global DB, so the
+/// early return is also what keeps them DB-free). Otherwise it locks the DB
+/// once and delegates to [`resolve_role_inner`], the single resolution
+/// implementation the unit tests also drive against a seeded connection — so
+/// there is no production/test logic to keep in lockstep.
 fn resolve_role_result(headers: &str) -> Result<Option<Role>, ()> {
     if request::extract_token_from_cookies(headers).is_none()
         && request::bearer_token(headers).is_none()
@@ -126,17 +123,14 @@ fn resolve_role_inner(conn: &Connection, headers: &str) -> Option<Role> {
 }
 
 /// Recover the device-session id a request authenticates as, if any (issue
-/// #502). Returns `None` for the root token (which has no device row and is
-/// unrevocable) and for every coordinator credential. The dispatcher uses this
-/// to stamp `last_active` and to bind a minted WS ticket to the device, so a
-/// later revocation can find and kick that device's live socket. Mirrors
-/// [`resolve_role`]'s DB-free fast path for unauthenticated probes.
-#[allow(dead_code)]
-pub fn resolve_device_session(headers: &str) -> Option<i64> {
-    resolve_device_session_result(headers).ok().flatten()
-}
-
-/// Resolve a device id while preserving reader-pool failures for HTTP callers.
+/// #502), while preserving reader-pool failures for HTTP callers. Returns
+/// `None` for the root token (which has no device row and is unrevocable) and
+/// for a coordinator credential (the bearer branch above returns before the
+/// device lookup). The dispatcher uses this to stamp `last_active` and to bind
+/// a minted WS ticket to the device, so a later revocation can find and kick
+/// that device's live socket. Mirrors [`resolve_role_result`]'s DB-free fast
+/// path for unauthenticated probes.
+///
 /// Returning `None` for both "root credential" and "pool unavailable" would
 /// silently mint an unrevocable root-bound WebSocket ticket for a device.
 pub fn resolve_device_session_result(headers: &str) -> Result<Option<i64>, ()> {

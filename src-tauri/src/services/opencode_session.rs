@@ -69,7 +69,6 @@ pub fn select_id_for_directory<'a>(
 // on what an OpenCode session id looks like or where its DB lives
 // because both call into the same adapter surface.
 
-#[allow(dead_code)]
 /// Wall-clock ms subtracted from spawn time so a TUI that minted the row
 /// a few ms before we sampled still matches. Must stay small: a large
 /// window would admit a session the user closed seconds earlier in the

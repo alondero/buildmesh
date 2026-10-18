@@ -28,8 +28,11 @@ use super::{
 pub(super) struct DispatchedEffects {
     pub outcomes: Vec<CircuitEvent>,
     /// Captured while the batch permit is still alive. Recovery tests read it;
-    /// the production pass only uses [`Self::outcomes`].
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// the production pass only uses [`Self::outcomes`]. The field must be
+    /// written in the production pass too — it is read while the permit is
+    /// alive — so the lint is allowed here rather than the write removed
+    /// (issue #2450).
+    #[allow(dead_code)]
     pub batch_cancelled: bool,
 }
 

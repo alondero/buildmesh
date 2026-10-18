@@ -801,6 +801,12 @@ mod platform {
     /// Holds the locked file open for as long as the claim lives. The contents
     /// are never read — being open *is* the claim — so the field is deliberately
     /// unread rather than accidentally so.
+    ///
+    /// `dead_code` is allowed on the field alone: the lint fires because no code
+    /// reads the field — it is constructed by `acquire` and dropped with the
+    /// guard — but the `File` is the lock (its `Drop` releases `flock`), so
+    /// renaming it to `_file` or deleting it would drop the exclusive claim
+    /// (issue #2450).
     pub struct PlatformGuard(#[allow(dead_code)] std::fs::File);
 
     pub fn acquire(path: &str) -> io::Result<Acquired> {

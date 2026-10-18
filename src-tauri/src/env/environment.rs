@@ -198,24 +198,6 @@ pub fn wsl_login_shell() -> Option<&'static str> {
     *DETECTED_WSL_LOGIN_SHELL
 }
 
-// ── Windows username ───────────────────────────────────────────────────────
-
-/// The Windows username, cached after first lookup
-#[allow(dead_code)]
-static WINDOWS_USERNAME: Lazy<Option<String>> = Lazy::new(get_windows_username_impl);
-
-/// Get the Windows username (used for path construction)
-#[allow(dead_code)]
-fn get_windows_username_impl() -> Option<String> {
-    env::var("USERNAME").ok()
-}
-
-/// Get the cached Windows username
-#[allow(dead_code)]
-fn get_windows_username() -> Option<String> {
-    WINDOWS_USERNAME.clone()
-}
-
 // ── Environment enum + detection ───────────────────────────────────────────
 
 /// The detected runtime environment for this process

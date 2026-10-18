@@ -180,8 +180,9 @@ fn reject_unsupported_initial_prompt(
 ///
 /// Pass `None` for `source_pr` / `source_pr_pinned_sha` /
 /// `head_repo_owner` / `head_repo_clone_url` on non-PR spawns (issue-spawn,
-/// handover, hand-spawn). Fork PRs call [`create_with_source_pr_fork`]
-/// directly with the fork fields populated (issue #443). `source_pr_pinned_sha`
+/// handover, hand-spawn). Fork PRs reach
+/// [`create_with_source_pr_fork_configured`] with the fork fields populated
+/// (issue #443). `source_pr_pinned_sha`
 /// (issue #444) is the exact-pinning handle — `None` skips the drift check.
 ///
 /// `source_pr` and `source_pr_pinned_sha` are **structurally** rejected here
@@ -189,16 +190,17 @@ fn reject_unsupported_initial_prompt(
 /// `Some(_)` for either — an importer, a migration script — fails loudly
 /// at the boundary rather than silently writing a
 /// `source_pr` onto a node that didn't actually come from a PR. The PR-spawn
-/// entry point is [`create_with_source_pr_fork`], which is the only function
+/// entry point is the `_configured` form, the only function
 /// that should ever pass `Some(_)` for these fields. Pinning test lives in
 /// `services::agent_node::tests` (issue #448).
 ///
 /// **Issue #1658 step 5:** every live caller now reaches the create
 /// sequence via [`create_blocking`], the shared runner. `create` is
 /// retained for the structural `source_pr = Some(_)` boundary assert
-/// test coverage (`create_rejects_source_pr_some` et al.); `#[allow]`
-/// keeps the dead-code lint quiet.
-#[allow(dead_code, clippy::too_many_arguments)]
+/// test coverage (`create_rejects_source_pr_some` et al.), so it is
+/// compiled only for tests (issue #2450).
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub fn create(
     mesh_id: i64,
     path: &str,
@@ -243,6 +245,10 @@ pub fn create(
 /// these to register `fork-<owner>` as a remote and fetch the head ref.
 /// For same-repo PRs, pass `None` for both fork fields and call [`create`]
 /// instead — the spawn path then takes the #420 `origin/<head_ref>` branch.
+///
+/// Only the test-only [`create`] reaches this wrapper; the live PR-spawn path
+/// calls [`create_with_source_pr_fork_configured`] directly (issue #2450).
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn create_with_source_pr_fork(
     mesh_id: i64,
@@ -644,13 +650,14 @@ pub fn create_blocking_configured(
 /// `Running` on success or `Error` on failure. The source-pr / fork-repo
 /// fields follow the same contract as [`create`]: `source_pr` and
 /// `source_pr_pinned_sha` must be `None` here; the PR-spawn entry point
-/// is [`create_pending_with_source_pr_fork`] (issue #448).
+/// is [`create_pending_with_source_pr_fork_configured`] (issue #448).
 ///
 /// **Issue #1658 step 5:** every live caller now reaches the Pending-status
 /// path through [`create_blocking`] with `pending: true`. `create_pending`
 /// is retained for the structural `source_pr = Some(_)` boundary assert
-/// test coverage; `#[allow]` keeps the dead-code lint quiet.
-#[allow(dead_code, clippy::too_many_arguments)]
+/// test coverage, so it is compiled only for tests (issue #2450).
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub fn create_pending(
     mesh_id: i64,
     path: &str,
@@ -720,9 +727,11 @@ pub fn create_pending_with_worktree_override_configured(
 
 /// Like [`create_pending`], but also records the fork's owner login and
 /// clone URL when the PR is from a fork (issue #443) and the PR's head
-/// commit SHA for exact-pinning (issue #444). `commands::agent::create_pr_node`
-/// calls this directly with the fork fields populated for fork PRs and
-/// `None, None` for same-repo PRs.
+/// commit SHA for exact-pinning (issue #444). The live caller is
+/// `commands::agent::create_pr_node`, which reaches
+/// [`create_pending_with_source_pr_fork_configured`] directly; only the
+/// test-only [`create_pending`] comes through this wrapper (issue #2450).
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn create_pending_with_source_pr_fork(
     mesh_id: i64,
@@ -3129,8 +3138,8 @@ mod tests {
         // `create_with_source_pr_fork` writes `use_worktree` only if
         // `session_name` is non-empty AND the override is not None.
         // `Some(false)` writes `false` (Root Node shape — `worktree_name = None`).
-        assert_eq!(
-            node.use_worktree, false,
+        assert!(
+            !node.use_worktree,
             "use_worktree_override=Some(false) must persist as use_worktree=false on the row"
         );
         assert_eq!(
@@ -3165,8 +3174,8 @@ mod tests {
         )
         .expect("create_blocking on pending path must succeed");
 
-        assert_eq!(
-            node.use_worktree, false,
+        assert!(
+            !node.use_worktree,
             "use_worktree_override=Some(false) must persist as use_worktree=false \
              on the Pending row too — Finding #1's regression"
         );

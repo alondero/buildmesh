@@ -200,9 +200,9 @@ pub fn coordinator_read_token_inner(conn: &Connection) -> SqlResult<Option<Strin
 /// Validate a presented token for READ access. Rejects unless the API is
 /// enabled AND the token matches the minted read token — so disabling the
 /// master switch instantly cuts off all read access even with a valid token.
-/// Only the `_inner` form exists: the HTTP auth layer (`http::auth::resolve_role`,
-/// issue #500) locks the DB once and calls it, so a separate self-locking
-/// wrapper would only invite a nested-lock deadlock.
+/// Only the `_inner` form exists: the HTTP auth layer (`http::auth`'s role
+/// resolver, issue #500) locks the DB once and calls it, so a separate
+/// self-locking wrapper would only invite a nested-lock deadlock.
 pub fn validate_coordinator_read_token_inner(conn: &Connection, token: &str) -> SqlResult<bool> {
     if token.is_empty() || !coordinator_api_enabled_inner(conn)? {
         return Ok(false);
@@ -292,7 +292,7 @@ pub fn coordinator_drive_token_inner(conn: &Connection) -> SqlResult<Option<Stri
 /// master switch is on AND the drive kill-switch is on AND the token matches the
 /// minted drive token. Because the drive token is stored under its own key, a
 /// read-scoped token never validates here — drive is its own capability. Only the
-/// `_inner` form exists (locked once by `http::auth::resolve_role`, issue #500).
+/// `_inner` form exists (locked once by `http::auth`'s role resolver, issue #500).
 pub fn validate_coordinator_drive_token_inner(conn: &Connection, token: &str) -> SqlResult<bool> {
     if token.is_empty()
         || !coordinator_api_enabled_inner(conn)?
@@ -345,7 +345,7 @@ pub fn pair_device_session_inner(
 /// it. A revoked device's row is deleted, so a revoked token resolves to `None`
 /// here — which is exactly what makes the next request fail auth. An empty token
 /// never matches. Only the `_inner` form exists: the auth layer
-/// (`http::auth::resolve_role`) already locks the DB once and passes the
+/// (`http::auth`'s role resolver) already locks the DB once and passes the
 /// connection through.
 pub fn validate_device_token_inner(conn: &Connection, token: &str) -> SqlResult<Option<i64>> {
     if token.is_empty() {

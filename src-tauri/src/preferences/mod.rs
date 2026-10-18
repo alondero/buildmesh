@@ -40,71 +40,72 @@ pub mod storage;
 #[cfg(test)]
 mod tests;
 
+// `mod preferences` is private to the crate, so a `pub use` in it has
+// crate-internal reachability and the `dead_code` / `unused_imports` lints are
+// accurate about it. Each slab below therefore names only what a build can
+// actually see, and a name reachable only from a `#[cfg(test)]` module carries
+// the same `cfg` gate instead of being silenced (issue #2450).
+
 // ----- Re-exports: model ------------------------------------------------
 
-#[allow(unused_imports)]
+#[cfg(test)]
+pub use model::BillingMode;
 pub use model::{
-    ApiSurface, AppPreferences, BillingMode, HarnessConfigValue, HarnessProfile, ModelTiers,
+    ApiSurface, AppPreferences, HarnessConfigValue, HarnessProfile, ModelTiers,
     PairingVerification, PairingVerificationStatus, ProviderAccount, ProviderPairing,
     ProxiedProviderOrder, SurfaceEndpoint,
 };
 
 // ----- Re-exports: storage ----------------------------------------------
 
-#[allow(unused_imports)]
 pub(crate) use storage::ensure_default_provider_normalized;
-#[allow(unused_imports)]
 pub use storage::{
     app_data_dir, circuit_agent_pool_size, default_provider, generation, health, init,
     issue_spawn_prompt, load, naming_provider, pr_spawn_prompt, preferences_directory, reset,
-    restore_backup, reviewer_provider, save, update, worktree_directory, LoadState,
+    restore_backup, reviewer_provider, save, update, worktree_directory,
 };
 #[cfg(test)]
 pub(crate) use storage::{init_for_tests, reset_for_tests};
 
 // ----- Re-exports: recovery ----------------------------------------------
 
+#[cfg(test)]
+pub use recovery::PreferencesStatus;
 /// The recovery wire types are only consumed by the Tauri commands and the
-/// tests today, so the block carries an `allow` like its siblings above.
-#[allow(unused_imports)]
-pub use recovery::{
-    CorruptionInfo, CorruptionReason, PreferencesHealth, PreferencesStatus, RecoveryOutcome,
-};
+/// tests today.
+pub use recovery::{PreferencesHealth, RecoveryOutcome};
 
 // ----- Re-exports: resolver ---------------------------------------------
 
-#[allow(unused_imports)]
-pub use resolver::{
-    apply_capability_mask, field_inputs, harness_config_str, resolve_field,
-    CapabilityMaskForResolver, HarnessConfigField, ResolvedCascadeLayer, ResolvedCascadeView,
-};
-#[allow(unused_imports)]
-pub(crate) use resolver::{
-    claude_harness_id_from, deepseek_default_tiers, keyed_first_class_template, kimi_default_tiers,
-    minimax_default_tiers, BUILTIN_PROVIDER_ACCOUNTS,
-};
-#[allow(unused_imports)]
+pub(crate) use resolver::effective_pairings;
+pub(crate) use resolver::{claude_harness_id_from, minimax_default_tiers};
 pub use resolver::{
     compatible_providers_by_harness, compatible_providers_for_harness, default_harness_profiles,
-    default_provider_accounts, effective_provider_pairings, endpoint_model_descriptor,
-    first_class_surfaces, harness_capabilities_for, harness_order, harness_profiles,
-    harness_runtime, harness_surface, is_claude_compatible_id, is_known_harness_id,
+    effective_provider_pairings, endpoint_model_descriptor, first_class_surfaces,
+    harness_capabilities_for, harness_order, harness_profiles, harness_runtime, harness_surface,
     keyed_first_class_catalog, merge_detected_profiles, minimax_api_key_resolved,
     pairing_compatibility, pairing_for, provider_accounts,
     provider_accounts_with_keys_in_preferences, provider_pairings, provider_surfaces,
-    proxied_order_for, proxied_provider_order, remove_provider_account, remove_provider_pairing,
+    proxied_provider_order, remove_provider_account, remove_provider_pairing,
     resolve_default_provider, resolve_harness_provider, resolve_harness_provider_for,
     resolve_stored_pairing_and_account, resolved_harness_profile, set_account_key_if_absent,
     set_harness_order, set_proxied_provider_order, surface_for_executor, upsert_provider_account,
     upsert_provider_pairing,
 };
-#[allow(unused_imports)]
-pub(crate) use resolver::{effective_pairings, pairing_can_potentially_match};
+pub use resolver::{CapabilityMaskForResolver, HarnessConfigField, ResolvedCascadeView};
+
+// Reached from the `#[cfg(test)]` suites through `preferences::*`; a release
+// build has no reader for any of them. The cascade helpers and the recovery /
+// storage types they used to sit here are reached through their own submodule
+// paths instead (`resolver::cascade::*`, `super::storage::*`).
+#[cfg(test)]
+pub(crate) use resolver::BUILTIN_PROVIDER_ACCOUNTS;
+#[cfg(test)]
+pub use resolver::{is_claude_compatible_id, proxied_order_for};
 
 // ----- Re-exports: compatibility ----------------------------------------
 
-#[allow(unused_imports)]
 pub use compatibility::{
-    harness_default_for, normalize_harness_default, preflight_resolve_provider_env,
-    remove_harness_default, resolve_provider_env, upsert_harness_default, validate_harness_default,
+    harness_default_for, preflight_resolve_provider_env, remove_harness_default,
+    resolve_provider_env, upsert_harness_default, validate_harness_default,
 };

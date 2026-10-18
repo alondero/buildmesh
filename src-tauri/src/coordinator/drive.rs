@@ -43,10 +43,10 @@ pub enum Verdict {
 
 impl Verdict {
     /// The wire/DB string form — the same token the response serializes to, so
-    /// the idempotency ledger stores exactly what a replay returns.
-    #[allow(dead_code)] // used by the in-memory `FakeStore` in tests; the
-                        // production `DbIdempotencyStore` goes through
-                        // [`Verdict::as_verdict_str`] instead.
+    /// the idempotency ledger stores exactly what a replay returns. The
+    /// production [`DbIdempotencyStore`] persists through [`Self::from_db_str`],
+    /// so only the in-memory test fake writes this direction.
+    #[cfg(test)]
     pub fn as_db_str(self) -> &'static str {
         match self {
             Verdict::Delivered => "delivered",
@@ -754,20 +754,15 @@ mod tests {
     // --- Idempotency layer (issues #320 + #750) ---
 
     /// In-memory [`IdempotencyStore`] mirroring the DB ledger's
-    /// claim/finalize/release protocol. `hold_pending` keeps the row in
-    /// `pending` (simulates a peer mid-send); `fail_claim` simulates an
-    /// unreadable ledger (the fail-safe path).
+    /// claim/finalize/release protocol. A row whose `status` is `"pending"`
+    /// models a peer mid-send (`claim` reports `InProgress` for it);
+    /// `fail_claim` simulates an unreadable ledger (the fail-safe path).
     #[derive(Default)]
     struct FakeStore {
         /// `(node_id, key, prompt_hash, status)`. Terminal rows carry
         /// `status="delivered"|"unverified"`; mid-send rows use
         /// `status="pending"`.
         recorded: RefCell<Vec<(i64, String, String, String)>>,
-        /// When true, `claim` keeps returning `InProgress` for any
-        /// pre-existing `pending` row even after time passes — used by the
-        /// wait-timeout test to model a peer that never finalizes.
-        #[allow(dead_code)]
-        hold_pending: bool,
         /// When true, `claim` always errors with `LedgerUnavailable` —
         /// models a DB read failure (the fail-safe path).
         fail_claim: bool,
@@ -1072,16 +1067,13 @@ mod tests {
     }
 
     /// Item 1: the orchestrator briefly waits for a peer holding a `pending`
-    /// row to finalize before giving up. The FakeStore's `hold_pending`
+    /// row to finalize before giving up. A `"pending"` row in the FakeStore
     /// models the peer's mid-send window. This test exercises the wait
     /// path's semantics: `claim` returns `InProgress` while pending, then
     /// `Replay` once we finalize.
     #[test]
     fn claim_returns_in_progress_until_peer_finalizes() {
-        let store = FakeStore {
-            hold_pending: true,
-            ..Default::default()
-        };
+        let store = FakeStore::default();
         // Pre-populate a pending row to simulate a peer mid-send.
         store.recorded.borrow_mut().push((
             7,
@@ -1113,10 +1105,7 @@ mod tests {
     #[test]
     #[ignore = "exercises the real IN_PROGRESS_WAIT_TIMEOUT; run with `cargo test -- --ignored`"]
     fn in_progress_surfaces_after_wait_timeout() {
-        let store = FakeStore {
-            hold_pending: true,
-            ..Default::default()
-        };
+        let store = FakeStore::default();
         let driver = awaiting_driver();
 
         // Pre-populate a pending row.

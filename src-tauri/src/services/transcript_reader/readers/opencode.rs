@@ -449,10 +449,9 @@ pub(crate) fn parse_opencode_messages_with_text_limit(
 /// [`read_opencode_messages`] (which returns `Vec<serde_json::Value>`
 /// directly, with no envelope) and feeds that to
 /// [`parse_opencode_messages`] without going through this wrapper. The
-/// fixture + parser contract tests are the only callers; cargo's
-/// `dead_code` analysis doesn't see `#[cfg(test)]` use-sites in some
-/// versions, hence the `#[allow(dead_code)]`.
-#[allow(dead_code)]
+/// fixture + parser contract tests are the only callers, so it is compiled
+/// for tests alone (issue #2450).
+#[cfg(test)]
 pub(crate) fn parse_opencode_export(export: &serde_json::Value, keep: usize) -> Parsed {
     match export.get("messages").and_then(|m| m.as_array()) {
         Some(messages) => parse_opencode_messages(messages, keep),

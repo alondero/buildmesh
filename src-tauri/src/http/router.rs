@@ -30,12 +30,11 @@ const MAX_DEBUG_BODY_CHARS: usize = 512;
 /// the head and (when the route asks) the body; handlers never see the stream.
 #[derive(Debug, Clone)]
 pub struct ParsedRequest {
-    /// HTTP method on the request line. Read by the dispatcher for route
-    /// matching; kept on the public type because the test seam
+    /// HTTP method on the request line. Read by `match_route` and again here,
+    /// where the Origin check below rejects a mutating cross-origin request;
+    /// kept on the public type because the test seam
     /// ([`ParsedRequest::test_get`] / [`ParsedRequest::test_post`]) needs to
-    /// populate it for handler assertions, even though production callers
-    /// (server-side) only forward `req` after `match_route` already used it.
-    #[allow(dead_code)] // test-seam field: production callers never read it directly
+    /// populate it for handler assertions.
     pub method: String,
     /// Path without the query string.
     pub path: String,
@@ -819,10 +818,11 @@ pub(crate) fn match_route(method: &str, path: &str) -> MatchedRoute {
 
 /// Dispatch a parsed request. Tests call this directly — no sockets.
 /// The server uses [`dispatch_matched`] so it can reuse the
-/// [`BodyPolicy`] it already resolved to size the body read; this public
-/// entry exists for the test seam (tests construct a `ParsedRequest`
-/// directly and need to round-trip without first calling `match_route`).
-#[allow(dead_code)] // only invoked by tests in this module
+/// [`BodyPolicy`] it already resolved to size the body read; this entry exists
+/// for the test seam (tests construct a `ParsedRequest` directly and need to
+/// round-trip without first calling `match_route`), so it is compiled for tests
+/// alone (issue #2450).
+#[cfg(test)]
 pub async fn dispatch(req: ParsedRequest) -> DispatchResult {
     let matched = match_route(&req.method, &req.path);
     dispatch_matched(req, matched).await

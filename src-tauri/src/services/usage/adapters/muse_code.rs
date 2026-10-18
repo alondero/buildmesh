@@ -100,9 +100,8 @@ fn fetch_with_token(token: &str, endpoint: &str) -> UsageOutcome {
             .send()
             .map_err(|_| "Cannot reach Muse subscription service.".to_string())?;
         // 401/403 here means the OAuth token itself is bad/expired (we
-        // already verified an OAuth token exists). Per the
-        // `AuthPolicy::NoCredential` above, this collapses to
-        // `NoCredential` so the row is dropped — there is no API key to
+        // already verified an OAuth token exists), so this collapses to
+        // `NoCredential` rather than `Rejected` — there is no API key to
         // re-enter (Muse Code is OAuth-only).
         if matches!(response.status().as_u16(), 401 | 403) {
             return Ok(UsageOutcome::NoCredential {

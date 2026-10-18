@@ -65,7 +65,10 @@ pub fn proxied_provider_order() -> Vec<ProxiedProviderOrder> {
 /// single `HashMap` lookup) for performance, but a UI surface that wants
 /// "what's the order under harness X?" can reach for this without parsing
 /// the full vector.
-#[allow(dead_code)]
+///
+/// No production surface asks the single-harness form yet, so it is compiled
+/// for tests alone (issue #2450).
+#[cfg(test)]
 pub fn proxied_order_for(harness_id: &str) -> Option<Vec<String>> {
     proxied_provider_order()
         .into_iter()

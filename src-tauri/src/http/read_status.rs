@@ -150,7 +150,6 @@ mod tests {
         // encodes it as `null`, so the value serializes fine.)
         #[derive(serde::Serialize)]
         struct Unrepresentable {
-            #[allow(dead_code)]
             keys: std::collections::HashMap<(u8, u8), u8>,
         }
         let value = Unrepresentable {

@@ -69,9 +69,10 @@ use crate::services::windows_cred;
 // The OpenCode OAuth DTO + parser were extracted to `services::opencode_oauth`
 // for #956 so the OAuth dance and the live fetcher don't share a private
 // helper. The constant `OPENCODE_CONSOLE_CRED_TARGET` was lifted along with
-// it; the parser stays qualified (call sites read
-// `opencode_oauth::parse_opencode_console_credential(...)`) to make the
-// module boundary obvious at every read site.
+// it; the parser stays qualified (the live call site reads
+// `opencode_oauth::parse_opencode_console_full_credential(...)` through
+// `opencode_live_request_parts`) to make the module boundary obvious at every
+// read site.
 use crate::services::opencode_oauth::device_flow;
 use crate::services::opencode_oauth::OpenCodeConsoleCred;
 use crate::services::opencode_oauth::OPENCODE_CONSOLE_CRED_TARGET;
@@ -568,15 +569,9 @@ struct GrokVal {
 }
 
 #[derive(Deserialize, Debug)]
-#[allow(dead_code)] // fields are populated by serde during JSON deserialization
-                    // but the grok billing parser (parse_grok_response_*) doesn't
-                    // surface them yet — kept in the struct so a future ticket
-                    // can render "resets <end>" without re-parsing the response.
 struct GrokPeriod {
     #[serde(rename = "type")]
     period_type: Option<String>,
-    start: Option<String>,
-    end: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -1128,7 +1123,7 @@ fn needs_retry_on_401(live: Option<&UsageOutcome>) -> bool {
 /// degrade the live probe's `X-Server-Id` header.
 ///
 /// Test-only: the call site in `opencode_usage_impl_with_hosts` passes
-/// the prior credential's fields; the `try_refresh` path in
+/// the prior credential's fields; the refresh path in
 /// `services::opencode_oauth` writes the same shape via
 /// `persist_token_response` so the live probe sees the same wiring
 /// whether the credential was just refreshed or freshly issued.
@@ -1241,7 +1236,7 @@ fn read_opencode_console_credential_full() -> Result<OpenCodeConsoleCred, UsageE
 }
 
 /// Refresh-seam gate (issue #970): pure function deciding whether
-/// `opencode_usage_impl` should call `try_refresh()` before its live `_server
+/// `opencode_usage_impl` should refresh the bearer before its live `_server
 /// billing.get` HTTP fetch. True when EITHER:
 ///
 ///   1. The credential's `expires_at` is in the past — a 401 is imminent,
@@ -2711,7 +2706,7 @@ pub(crate) mod tests {
 
     // ── Refresh seam gate (issue #970) ──────────────────────────────────
     //
-    // The seam in `opencode_usage_impl` runs `try_refresh()` before the live
+    // The seam in `opencode_usage_impl` refreshes the bearer before the live
     // `_server billing.get` HTTP call when EITHER:
     //   - the cached credential's `expires_at` is in the past, OR
     //   - the cached live-fetch result is older than REFRESH_TTL (the credential

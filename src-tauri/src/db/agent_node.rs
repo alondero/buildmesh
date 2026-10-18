@@ -1076,7 +1076,8 @@ fn resolve_spawn_env(
 /// env depends on the harness config and worktree path; test callers
 /// pass the env directly because the test knows the env it wants and
 /// does not need harness-runtime fallback.
-#[allow(dead_code, clippy::too_many_arguments)]
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn create_agent_node_inner(
     db: &Connection,
     mesh_id: i64,

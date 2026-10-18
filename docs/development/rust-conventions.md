@@ -55,6 +55,19 @@ Debug and `dev-tools` builds read `BUILDMESH_PROFILE_DIR` before `app_data_dir()
 
 A dev-only command must not have a wrapper in `src/`, because `src/lib/tauri.ts` and the stores ship with the app and the wrapper would only fail at runtime. `tests/unit/ipc-contract.test.ts` enforces both halves: the exact set of dev-gated handler entries, and no `invoke('…')` in `src/` targeting one.
 
+## Dead code policy
+
+`#[allow(dead_code)]` and `#[allow(unused_imports)]` are decisions, not plumbing. Each one in `src-tauri/src` asserts that an item is still worth carrying, and a bare attribute makes that claim unreadable and unverifiable. Both lints are the compiler telling you the truth about a build you are not looking at: `dead_code` is evaluated per configuration, so an allow justified by a test-only caller is a claim about the **release** binary that nobody checked, and an `unused_imports` allow on a re-export slab hides a name that no call site has used since the slab was written. Untracked dead code is worse than none: it gets edited, "maintained", and shipped, it rots test-coverage metrics, and it makes the `grep` archaeology this repo relies on (issue numbers in comments) lie about what the program does.
+
+Resolve each one in this order (issue #2450 purged the backlog):
+
+1. **Genuinely dead** — no reference anywhere, tests included. Delete the item and everything only it reaches. Confirm with `cargo check --all-targets` after the deletion.
+2. **Test-only** — put the item (or the `use` that feeds it) behind `#[cfg(test)]`, matching the dev-only convention above. This is the fix for the `#[allow(dead_code)] // Used by unit tests in this module only` shape: an item the release profile compiles but no release path calls is code the user ships with no caller.
+3. **Module-root re-export that nothing imports** — delete the name from the `pub use` slab instead of silencing the slab. `mod preferences`, `mod http` and `mod db` are private to the crate, so a `pub use` in them has crate-internal reachability and *does* warn when unused; the allow was covering the whole list, including the entries no call site wanted.
+4. **A real false positive on a live item** — keep the allow, with an inline justification naming what breaks without it and the tracked issue that owns the follow-up. The live cases that survive today are an RAII-hold field whose value is only dropped (`instance_guard::PlatformGuard`), a setter whose production consumer is the *poll* rather than the write (`GitHubClient::cancel`), two `TS` payloads the frontend imports although Rust never constructs them, payload/envelope types production fills but only tests read, and one enum variant that a non-Windows-only arm constructs.
+
+An allow that carries neither a reason nor an issue number does not survive review. `tests/unit/rust-dead-code-policy.test.ts` enforces exactly that: every `allow(dead_code)` / `allow(unused_imports)` attribute in `src-tauri/src` must sit next to a comment citing an issue, and `allow(unused_imports)` must be absent entirely. Note that `dead_code` fires per configuration — check the *release* shape too (`cargo build --release`, or a `cfg_attr(not(debug_assertions))` item), because a default-profile `cargo check` compiles the callers that the release binary omits.
+
 ## Injectable Caches (avoid process-global statics)
 
 The frontend Git-query caches share one `GIT_CHANGED` bus in

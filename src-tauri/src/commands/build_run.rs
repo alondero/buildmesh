@@ -29,7 +29,12 @@ use ts_rs::TS;
 /// is imported by `src/components/Terminal/BuildRunTerminalRegistry.ts`.
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export, export_to = "BuildRunOutputPayload.ts")]
-#[allow(dead_code)] // ts-rs wire type; production bytes use the Channel
+// Rust never constructs this: production emits the base64 `String` form and
+// the object shape exists so the generated TS type stays in the contract for
+// `BuildRunTerminalRegistry`'s `string | BuildRunOutputPayload` union. Deleting
+// it would delete `src/types/generated/BuildRunOutputPayload.ts` with it
+// (issue #2450).
+#[allow(dead_code)]
 pub struct BuildRunOutputPayload {
     pub data: String,
 }
@@ -280,11 +285,10 @@ impl BuildRunRegistry {
         true
     }
 
-    /// Predicate exposed for the test surface and for any future
-    /// pre-write checks. Marked `#[allow(dead_code)]` so clippy on
-    /// `--lib` doesn't flag it — the tests under `mod tests` exercise
-    /// it, but `--lib` analysis does not see test-only usage.
-    #[allow(dead_code)]
+    /// Predicate for the test surface and for any future pre-write check.
+    /// Compiled for tests alone, since no production caller asks whether a
+    /// session is still registered (issue #2450).
+    #[cfg(test)]
     fn contains(&self, node_id: &i64) -> bool {
         self.processes.contains(node_id)
     }
