@@ -72,10 +72,10 @@ pub(crate) enum OAuthError {
     /// carries the credential target name so a higher layer can render a
     /// stable surface-level message.
     //
-    // Windows has no Credential Manager, so the `#[cfg(not(windows))]` arms
-    // that build it are not compiled in this build — and the Windows arms
-    // return `Shape` instead. The variant stays so the non-Windows contract
-    // is one enum, not two (issue #2450).
+    // Credential Manager is Windows-only, so the arms that construct this are
+    // `#[cfg(not(windows))]` and the Windows arms return `Shape` instead — the
+    // variant is never built on this target. It stays so the non-Windows
+    // contract is one enum rather than two (issue #2450).
     #[cfg_attr(windows, allow(dead_code))]
     NoCredential(String),
     /// Transport-level failure (DNS, TLS, connection refused, timeout).

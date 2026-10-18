@@ -21,8 +21,14 @@ import { join, relative } from "node:path";
 
 const RUST_ROOT = join(process.cwd(), "src-tauri", "src");
 
-const SUPPRESSED_LINTS = /allow\((dead_code|unused_imports)\)/;
-const ATTRIBUTE_LINE = /^\s*#\[/;
+// `allow(...)` / `expect(...)` with the lint anywhere in the list —
+// `allow(dead_code)`, `allow(dead_code, clippy::too_many_arguments)` and
+// `allow(clippy::foo, dead_code)` must all match. Anchoring on the lint alone
+// (rather than on the whole `allow(lint)` group) is what closes that gap.
+const SUPPRESSED_ATTRIBUTE = /(allow|expect)\(([^)]*)\)/;
+// Outer attributes (`#[...]`) and inner ones (`#![...]` on a module or crate).
+const ATTRIBUTE_LINE = /^\s*#!?\[/;
+const SUPPRESSED = /\b(dead_code|unused_imports)\b/;
 const ISSUE_REFERENCE = /#\d+/;
 const CONTEXT_ABOVE = 4;
 const CONTEXT_BELOW = 1;
@@ -44,12 +50,26 @@ function scan(text: string): Finding[] {
     // A doc comment or prose mention is not an attribute. `/// #[allow(..)]`
     // and `// `#[allow(dead_code)]` retired` must not trip the guard.
     if (!ATTRIBUTE_LINE.test(raw)) return;
-    const lint = raw.match(SUPPRESSED_LINTS)?.[1];
-    if (!lint) return;
+    // Only the lint list inside `allow(…)` counts, so an unrelated attribute
+    // that merely mentions a lint name does not trip it.
+    const parts = raw.match(SUPPRESSED_ATTRIBUTE);
+    if (!parts) return;
+    const [, keyword, body] = parts;
+    const lints = body
+      .split(",")
+      .map((part) => part.trim())
+      .filter((lint) => SUPPRESSED.test(lint));
+    if (!lints?.length) return;
+    const lint = lints[0];
     const window = lines
       .slice(Math.max(0, index - CONTEXT_ABOVE), index + 1 + CONTEXT_BELOW)
       .join("\n");
-    if (lint === "unused_imports" || !ISSUE_REFERENCE.test(window)) {
+    // `#[expect(lint, reason = "…")]` is the compiler-enforced spelling: the
+    // build fails once the lint stops firing, and the `reason` is the written
+    // justification. It is accepted on that basis; an `expect` without a
+    // reason is as bare as an `allow` and is still flagged.
+    const justifiedByReason = keyword === "expect" && /\breason\s*=\s*"[^"]+"/.test(body);
+    if (lint === "unused_imports" || (!justifiedByReason && !ISSUE_REFERENCE.test(window))) {
       findings.push({ file: "", line: index + 1, lint, window });
     }
   });
@@ -110,6 +130,37 @@ describe("rust suppression policy (#2450)", () => {
 
     it("ignores other lints in a mixed allow", () => {
       expect(scan("#[allow(clippy::too_many_arguments)]\nfn wide() {}")).toEqual([]);
+    });
+
+    // The three gaps a reviewer found: a mixed allow naming the lint after
+    // another lint, the same with the lint first, and an inner attribute.
+    it("flags dead_code inside a mixed allow with another lint", () => {
+      expect(scan("#[allow(dead_code, clippy::too_many_arguments)]\nfn orphan() {}").length).toBe(1);
+      expect(scan("#[allow(clippy::too_many_arguments, dead_code)]\nfn orphan() {}").length).toBe(1);
+    });
+
+    it("accepts a mixed allow naming dead_code when an issue is cited", () => {
+      const source = ["// #2450: only the test suite reads this.", "#[allow(clippy::too_many_arguments, dead_code)]", "fn seam() {}"].join("\n");
+      expect(scan(source)).toEqual([]);
+    });
+
+    it("flags an inner attribute", () => {
+      expect(scan("#![allow(dead_code)]\nfn orphan() {}").length).toBe(1);
+      expect(scan("#![allow(unused_imports)]\nmod m {}").length).toBe(1);
+    });
+
+    it("flags an expect attribute without a stated reason", () => {
+      // `#[expect(dead_code)]` with no `reason` is as bare as an `allow`; the
+      // scan must see it rather than pass it through.
+      const source = ["#[expect(dead_code)]", "fn orphan() {}"].join("\n");
+      expect(scan(source).length).toBe(1);
+    });
+
+    it("accepts an expect attribute that states its reason", () => {
+      // The compiler-enforced spelling: the build fails once the lint stops
+      // firing, so the reason is the justification.
+      const source = ["#[expect(dead_code, reason = \"Contract-test surface\")]", "fn seam() {}"].join("\n");
+      expect(scan(source)).toEqual([]);
     });
 
     it("flags an unjustified allow that sits too far from its issue", () => {

@@ -68,6 +68,15 @@ Resolve each one in this order (issue #2450 purged the backlog):
 
 An allow that carries neither a reason nor an issue number does not survive review. `tests/unit/rust-dead-code-policy.test.ts` enforces exactly that: every `allow(dead_code)` / `allow(unused_imports)` attribute in `src-tauri/src` must sit next to a comment citing an issue, and `allow(unused_imports)` must be absent entirely. Note that `dead_code` fires per configuration — check the *release* shape too (`cargo build --release`, or a `cfg_attr(not(debug_assertions))` item), because a default-profile `cargo check` compiles the callers that the release binary omits.
 
+### Test-only items live in a `*_tests` module, at the bottom of the file
+
+An item with no production caller belongs behind `#[cfg(test)]` — but put it in a sibling module declared with `#[cfg(test)] mod <name>_tests;`, and declare that module **after** the production code, not among it. Two reasons, both enforced:
+
+- **Source-scanning guards stay simple.** `agent::output::process_lifecycle_does_not_unregister_node_output_subscription` walks `src/` looking for call sites a release build compiles, and takes a file's production text as everything before its first `#[cfg(test)]` attribute line. That shortcut is only sound while gated items come last; `sink_call_sites_are_not_followed_by_a_gated_item` asserts it on every file the walk visits. A gated function dropped mid-file would otherwise hide every call site after it. The alternative — a hand-rolled brace/string tokenizer to resolve gates structurally — is a Rust parser written in the wrong place, and it broke twice before it was right.
+- **The reader can tell production from test by position.** A file whose first 900 lines are `#[cfg(test)]` tells you nothing about what ships.
+
+`#[cfg(test)]` inside a production module is still fine for a single test helper that is genuinely co-located with what it tests; the rule is about the long-lived test support modules.
+
 ## Injectable Caches (avoid process-global statics)
 
 The frontend Git-query caches share one `GIT_CHANGED` bus in

@@ -120,117 +120,83 @@ mod tests {
     }
 
     /// Walk a `.rs` file and record the lines that call
-    /// `pty::sink::unregister_node_sinks(`, skipping anything the
-    /// `#[cfg(test)]` gate compiles out of a release build.
+    /// `pty::sink::unregister_node_sinks(` in code a release build compiles.
     ///
-    /// The gate is resolved structurally, by brace depth from each
-    /// `#[cfg(test)]` item, not by "everything after the first
-    /// `#[cfg(test)]` in the file". A file is free to carry a
-    /// `#[cfg(test)]` function above production code — `services/agent_node.rs`
-    /// does (issue #2450) — and a positional split silently dropped the real
-    /// production call site from the scan, which turned this guard into a
-    /// false failure rather than a real one.
-    ///
-    /// `depth` is signed and updated with `{` minus `}` on every line: a
-    /// monotonic counter cannot return to the depth a gate was armed at, so a
-    /// `mod tests {` block would leave the gate latched for the rest of the
-    /// file and hide every later production call site.
-    ///
-    /// A gate closes in one of two ways. Either the item had a body — the
-    /// depth went positive and unwound back past the armed depth — or it did
-    /// not, and the item's own line ended in `;` (`#[cfg(test)] use …;`).
-    /// Without the second case the gate would latch on a braceless item and
-    /// hide the rest of the file; without the first it would close on a
-    /// multi-line signature whose line carries no brace, and the gated body
-    /// would be scanned as production.
+    /// Production is the text before the file's first `#[cfg(test)]`. That split
+    /// is only sound while gated items come last, so this function does not try
+    /// to be clever about gates: it relies on a layout invariant, and
+    /// `no_gated_item_precedes_a_production_sink_call` asserts the invariant on
+    /// every file the walk visits. An earlier version of this guard resolved
+    /// gates with a brace-depth state machine, which is a Rust tokenizer
+    /// written in the wrong place — the layout it had to cope with was itself
+    /// created by `#[cfg(test)]` wrappers sitting mid-file in
+    /// `services/agent_node.rs`, and those now live in a `*_tests` module
+    /// (issue #2450).
     fn collect_calls_in_source(
         source: &str,
         path: &std::path::Path,
         src_root: &std::path::Path,
         out: &mut Vec<(std::path::PathBuf, usize)>,
     ) {
-        let mut depth = 0i32;
-        // Set when a `#[cfg(test)]` attribute is seen, with the depth it was
-        // armed at and whether the gated item's body has been entered.
-        let mut gate: Option<(i32, bool)> = None;
-        // A string literal can span lines, so this is loop-carried: without it
-        // the continuation lines of a multi-line literal are read as code and
-        // their braces corrupt the depth.
+        let production = production_prefix(source);
         let mut in_string = false;
-        for (idx, line) in source.lines().enumerate() {
-            let trimmed = line.trim();
-            let code = strip_comment(line);
-            let countable = strip_string_literals(code, &mut in_string);
-
-            match gate {
-                Some((open_at, mut entered)) => {
-                    if trimmed.is_empty() || trimmed.starts_with("#[") || trimmed.starts_with("//")
-                    {
-                        continue;
-                    }
-                    let delta = brace_delta(&countable);
-                    entered |= delta > 0;
-                    depth += delta;
-                    let braceless_item = delta == 0 && countable.trim_end().ends_with(';');
-                    if (entered && depth <= open_at) || braceless_item {
-                        gate = None;
-                    }
-                }
-                None => {
-                    if trimmed.starts_with("#[cfg(test)]") {
-                        gate = Some((depth, false));
-                        continue;
-                    }
-                    // Match the comment- AND string-stripped line: a commented-out call is not
-                    // a live call site, and neither is one inside a string literal —
-                    // including this file's own `contains` needle below, which is
-                    // exactly why the scan of this file must not match itself.
-                    if countable.contains("pty::sink::unregister_node_sinks(") {
-                        let rel = path.strip_prefix(src_root).unwrap_or(path).to_path_buf();
-                        out.push((rel, idx + 1));
-                    }
-                    depth += brace_delta(&countable);
-                }
+        for (idx, line) in production.lines().enumerate() {
+            // Match the noise-stripped line: a commented-out call is not a live
+            // call site, and neither is the needle quoted in a string literal.
+            if strip_noise(line, &mut in_string).contains("pty::sink::unregister_node_sinks(") {
+                let rel = path.strip_prefix(src_root).unwrap_or(path).to_path_buf();
+                out.push((rel, idx + 1));
             }
         }
     }
 
-    /// The line's code with any trailing `//` comment removed.
-    fn strip_comment(line: &str) -> &str {
-        line.split("//").next().unwrap_or("")
+    /// Everything before the file's first `#[cfg(test)]` attribute line.
+    ///
+    /// The gate is matched in attribute position — a line whose trimmed text
+    /// starts with `#[cfg(test)]` — not as a bare substring. A doc comment that
+    /// *names* the gate (several in this file do) must not truncate production,
+    /// or the scan silently loses every call site after it.
+    fn production_prefix(source: &str) -> &str {
+        let mut offset = 0usize;
+        for line in source.split_inclusive('\n') {
+            if line.trim_start().starts_with("#[cfg(test)]") {
+                return &source[..offset];
+            }
+            offset += line.len();
+        }
+        source
     }
 
-    /// Drop `"…"` spans so a brace inside a string literal cannot corrupt the
-    /// depth. Escaped quotes are skipped. `in_string` is carried across lines
-    /// because a literal may span several of them; a `//` comment inside a
-    /// literal is not treated as a comment, which only makes the scan more
-    /// conservative.
-    fn strip_string_literals(code: &str, in_string: &mut bool) -> String {
-        let mut out = String::with_capacity(code.len());
-        let mut chars = code.chars();
-        while let Some(c) = chars.next() {
+    /// The line with comments and string literals removed, in one left-to-right
+    /// pass.
+    ///
+    /// Order matters and is the whole point: stripping `//` first would cut a
+    /// line at the `//` inside `"https://…"`, sever the closing quote, and leave
+    /// the scanner believing a string is still open. `in_string` is loop-carried
+    /// because a literal may span lines.
+    fn strip_noise(line: &str, in_string: &mut bool) -> String {
+        let mut out = String::with_capacity(line.len());
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
             if *in_string {
                 match c {
-                    '\\' => {
-                        chars.next();
-                    }
+                    '\\' => i += 1,
                     '"' => *in_string = false,
                     _ => {}
                 }
+                i += 1;
                 continue;
             }
             match c {
                 '"' => *in_string = true,
+                '/' if chars.get(i + 1) == Some(&'/') => break,
                 _ => out.push(c),
             }
+            i += 1;
         }
         out
-    }
-
-    /// `{` minus `}` on a line. Signed, so a closing brace can unwind a depth
-    /// that an earlier line opened.
-    fn brace_delta(code: &str) -> i32 {
-        code.matches('{').count() as i32 - code.matches('}').count() as i32
     }
 
     /// This file's own path, as `collect_sink_unregister_sites` sees it: the
@@ -274,17 +240,68 @@ mod tests {
         }
     }
 
-    /// The scanner is the guard, so pin its behaviour on synthetic source:
-    /// each case below fails if the gate resolution regresses to the
-    /// positional split or to an unsigned depth counter.
+    /// The layout invariant `collect_calls_in_source` depends on, asserted on
+    /// every file the walk visits.
     ///
-    /// The fixtures spell braces as `@{` / `@}` and expand them with
-    /// [`fixture`] before scanning. Writing real braces here would put
-    /// unbalanced `{` / `}` inside this file's own string literals, and the
-    /// scanner — which walks every file under `src/` including this one —
-    /// would read them as real code and mis-count its own depth.
+    /// Production is found by taking the text before the file's first
+    /// `#[cfg(test)]` attribute, so a gated item placed above a production call
+    /// site would hide it. Rather than make the scanner understand gates, this
+    /// fails and names the file: move the gated item into a `*_tests` module at
+    /// the bottom of its file. The one call site in the tree is in
+    /// `services/agent_node.rs`, above that file's test modules.
+    ///
+    /// This file is skipped for the same reason the walk skips it: its own
+    /// source quotes the needle.
     #[test]
-    fn source_scanner_separates_production_from_gated_items() {
+    fn sink_call_sites_are_not_followed_by_a_gated_item() {
+        let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders = Vec::new();
+        let mut queue = vec![src_root.clone()];
+        while let Some(dir) = queue.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read src tree") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    queue.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs")
+                    || path.ends_with(self_path())
+                {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("read rust file");
+                let production = production_prefix(&source);
+                let rel = path
+                    .strip_prefix(&src_root)
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string();
+                for (idx, line) in source.lines().enumerate() {
+                    if !line.contains("pty::sink::unregister_node_sinks(") {
+                        continue;
+                    }
+                    let byte_at: usize = source.lines().take(idx).map(|l| l.len() + 1).sum();
+                    if byte_at >= production.len() && production.len() < source.len() {
+                        offenders.push(format!(
+                            "{rel}:{} — this call sits after the file's first \
+                             #[cfg(test)], so the production scan cannot see it",
+                            idx + 1
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "a gated item must not sit above a call the guard is meant to find \
+             (issue #2450): {offenders:?}"
+        );
+    }
+
+    /// `strip_noise` removes comments and string literals in one pass, so a
+    /// `//` inside a literal cannot cut the line and leave a string "open".
+    #[test]
+    fn noise_stripping_handles_a_comment_start_inside_a_literal() {
         let scan = |source: &str| -> Vec<usize> {
             let mut out = Vec::new();
             collect_calls_in_source(
@@ -295,84 +312,41 @@ mod tests {
             );
             out.into_iter().map(|(_, line)| line).collect()
         };
-        let fixture = |body: &str| body.replace("@{", "{").replace("@}", "}");
 
-        // A `#[cfg(test)] mod tests {` block must not latch the gate for the
-        // rest of the file: the production call after it is still found.
-        let after_test_module = fixture(
-            "\
-fn production_early() @{
+        // A URL literal on line 2 must not swallow line 3's call. Stripping
+        // comments first would split line 2 at `//` in `https://`, drop the
+        // closing quote, and hide everything after.
+        let url_then_call = "\
+fn f() {
+    let u = \"https://example.test/path\";
     crate::pty::sink::unregister_node_sinks(1);
-@}
-#[cfg(test)]
-mod tests @{
-    #[test]
-    fn t() @{
-        crate::pty::sink::unregister_node_sinks(2);
-    @}
-@}
-fn production_late() @{
-    crate::pty::sink::unregister_node_sinks(3);
-@}
-",
-        );
-        assert_eq!(
-            scan(&after_test_module),
-            vec![2, 12],
-            "production calls on both sides of a test module must be found; the \
-             one inside `mod tests` (line 8) must not"
-        );
+}
+";
+        assert_eq!(scan(url_then_call), vec![3]);
 
-        // A multi-line `#[cfg(test)] fn` signature carries no braces, so the
-        // gate must survive the signature instead of clearing on it and
-        // scanning the body as production.
-        let multiline_signature = fixture(
-            "\
-#[cfg(test)]
-fn gated(
-    a: i32,
-) -> i32 @{
+        // A commented-out call is not a live call site, and a call quoted in a
+        // literal is not either.
+        let inert = "\
+// crate::pty::sink::unregister_node_sinks(2);
+fn f() {
+    let doc = \"see pty::sink::unregister_node_sinks(3) for details\";
+}
+";
+        assert_eq!(scan(inert), Vec::<usize>::new());
+
+        // Everything past the first `#[cfg(test)]` is test code by construction.
+        let gated = "\
+fn production() {
     crate::pty::sink::unregister_node_sinks(4);
-    a
-@}
-fn production() @{
-    crate::pty::sink::unregister_node_sinks(5);
-@}
-",
-        );
-        assert_eq!(
-            scan(&multiline_signature),
-            vec![9],
-            "only the ungated body is a production call site"
-        );
-
-        // A commented-out call is not a live call site.
-        let commented_out = fixture(
-            "\
-// crate::pty::sink::unregister_node_sinks(6);
-fn f() @{
-    let url = \"https://example.test\"; // inert
-@}
-",
-        );
-        assert_eq!(scan(&commented_out), Vec::<usize>::new());
-
-        // A braceless gated item (`#[cfg(test)] use …;`) must not latch the
-        // gate: the production call below it is still found.
-        let braceless_gate = fixture(
-            "\
+}
 #[cfg(test)]
-use std::path::Path;
-fn production() @{
-    crate::pty::sink::unregister_node_sinks(7);
-@}
-",
-        );
-        assert_eq!(
-            scan(&braceless_gate),
-            vec![4],
-            "a `use` gate must close on its own line"
-        );
+mod tests {
+    fn t() {
+        crate::pty::sink::unregister_node_sinks(5);
+    }
+}
+";
+        assert_eq!(scan(gated), vec![2]);
     }
 
     #[test]
