@@ -75,6 +75,16 @@ of the session-only working set. Agent History reads all database nodes,
 including archived rows; reopen restores Suspended without spawning and adopts
 the returned row into the live store. See [ADR 0039](../adr/0039-desktop-audit-navigation-and-readiness.md).
 
+Agent History's two modes — the Lifecycle list and the discovered-sessions list —
+share one destination but not one toolbar. The Lifecycle mode owns the header's
+Refresh; the discovered list is `ArchivedNodesTab`, which brings its own
+`ProbeToolbar` and Refresh, so the header renders its Refresh only in Lifecycle
+mode. The mode pair is a labelled segmented group whose active member owns a
+background and text colour, matching the Sidebar view switcher, and the
+repository filter renders only when it has an option to offer. Card timestamps
+use `formatListTimestamp` (`src/lib/time.ts`) rather than the stored RFC 3339
+value, which carries Rust nanosecond precision.
+
 Routing defaults use `list_routing_options`, a preferences/cached-installation
 catalog that does no subprocess or WSL probing. Unverified OpenAI routes stay
 disabled pending the live provider menu. Settings owns separate preference,

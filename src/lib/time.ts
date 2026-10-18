@@ -63,3 +63,34 @@ export function formatRelativeAge(
   const days = Math.floor(hours / 24);
   return `${days}d ago`;
 }
+
+/**
+ * The timestamp label a *list row* shows: relative age while the row is
+ * young, an absolute date once "Nd ago" stops meaning anything.
+ *
+ * The 30-day cut is the historical "days never reset" convention the Archive
+ * list already rendered. `formatRelativeAge` floors at 24h + `days`
+ * indefinitely, so the older-of-the-two tier has to be handled here.
+ *
+ * Lives beside `formatRelativeAge` rather than in one tab because the raw
+ * value the backend stores (`created_at`, `lifecycle.timestamp`) is an
+ * RFC 3339 string with Rust nanosecond precision — `2026-10-17T22:43:58.211596700Z`.
+ * Printing it verbatim is what the Probe agent-history cards did until
+ * issue #2461, and it is unreadable at 240px.
+ *
+ * An unparseable value passes through unchanged rather than becoming
+ * "NaNd ago", so this formatter yields a usable label on every path.
+ *
+ * Deliberately not the single timestamp renderer: the status tooltip in
+ * `lib/status.ts` quotes the stored value on purpose (full precision under a
+ * hover), the mobile Archive screen keeps its own no-date-cut relative label,
+ * and the recovery log prints a file-snapshot stamp. Route a new list row
+ * here; leave those as they are.
+ */
+export function formatListTimestamp(iso: string, now: Date = new Date()): string {
+  const then = new Date(iso);
+  if (Number.isNaN(then.getTime())) return iso;
+  const days = Math.floor((now.getTime() - then.getTime()) / (24 * 60 * 60 * 1000));
+  if (days >= 30) return then.toLocaleDateString();
+  return formatRelativeAge(then, now);
+}

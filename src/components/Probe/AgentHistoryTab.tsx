@@ -4,12 +4,24 @@ import { useMeshStore } from '../../stores/meshStore';
 import { focusAgentNode } from '../../lib/focusAgentNode';
 import { listAgentHistory, reopenAgentNode } from '../../lib/tauri/history';
 import { formatError } from '../../lib/errorUtils';
+import { formatListTimestamp } from '../../lib/time';
 import { getNodeStatusConfig, STATUS_CONFIG } from '../../lib/status';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import type { AgentNode } from '../../types/generated/AgentNode';
 import { ArchivedNodesTab } from './ArchivedNodesTab';
 import { ProbeTabBody } from './ProbeTabBody';
 import { LoadingState, RefreshControl } from '../shared/Spinner';
+
+// Issue #2461 — the card timestamp used to print the stored value verbatim
+// (`2026-10-17T22:43:58.211596700Z`; the backend stores RFC 3339 at Rust
+// nanosecond precision). Nine fractional digits inside a 240px panel is
+// noise. The visible label is the same relative age the Archive list shows,
+// and the exact instant moves to the tooltip so the sub-minute precision the
+// raw string used to carry is still one hover away.
+function absoluteTimestamp(iso: string): string | undefined {
+  const then = new Date(iso);
+  return Number.isNaN(then.getTime()) ? undefined : then.toLocaleString();
+}
 
 export function AgentHistoryTab() {
   const live = useAllAgentNodes();
@@ -64,13 +76,29 @@ export function AgentHistoryTab() {
   return <div className="flex h-full min-h-0 min-w-0 flex-col">
     <div className="shrink-0 space-y-2 border-b border-border-subtle p-3">
       <div className="flex gap-2">
-        <button type="button" aria-pressed={!discovered} onClick={() => setDiscovered(false)} className="min-h-[24px] rounded-md px-2 text-xs text-text-primary hover:bg-bg-card-hover">Lifecycle</button>
-        <button type="button" aria-pressed={discovered} onClick={() => setDiscovered(true)} className="min-h-[24px] rounded-md px-2 text-xs text-text-primary hover:bg-bg-card-hover">Discovered sessions</button>
-        <RefreshControl onRefresh={() => setReload(v => v + 1)} isRefreshing={loading} ariaLabel="Refresh agent history" />
+        {/* Issue #2461 — the mode pair is one segmented group: `role="group"`
+            carries the name to assistive technology (a generic div's
+            `aria-label` is ignored — the same fix the Sidebar view switcher
+            took in #2467), and the selected mode owns a background and text
+            colour so the current view is visible rather than inferred from
+            `aria-pressed`. Same active/inactive tokens as Sidebar. */}
+        <div role="group" aria-label="Agent history view" className="flex gap-1">
+          <button type="button" aria-pressed={!discovered} onClick={() => setDiscovered(false)} className={`min-h-[24px] rounded-md px-2 text-xs ${!discovered ? 'bg-bg-card text-text-primary font-medium' : 'text-text-secondary hover:bg-bg-card-hover'}`}>Lifecycle</button>
+          <button type="button" aria-pressed={discovered} onClick={() => setDiscovered(true)} className={`min-h-[24px] rounded-md px-2 text-xs ${discovered ? 'bg-bg-card text-text-primary font-medium' : 'text-text-secondary hover:bg-bg-card-hover'}`}>Discovered sessions</button>
+        </div>
+        {/* Issue #2461 — Discovered sessions mounts `ArchivedNodesTab`, which
+            renders its own `ProbeToolbar` and Refresh control (issue #813).
+            A second one here stacked two Refresh buttons ~50px apart. */}
+        {!discovered && <RefreshControl onRefresh={() => setReload(v => v + 1)} isRefreshing={loading} ariaLabel="Refresh agent history" />}
       </div>
-      <select aria-label="History repository" value={discovered ? String(selectedMesh?.id ?? '') : scope} className={fieldClass} onChange={e => setScope(e.target.value)}>
+      {/* Issue #2461 — the "All repositories" option is Lifecycle-only, so in
+          Discovered sessions this select was a blank zero-option control above
+          the "add a repository" empty state. With nothing to choose between
+          there is no honest value to show: render the control only when it has
+          an option. */}
+      {(!discovered || meshes.length > 0) && <select aria-label="History repository" value={discovered ? String(selectedMesh?.id ?? '') : scope} className={fieldClass} onChange={e => setScope(e.target.value)}>
         {!discovered && <option value="">All repositories</option>}{meshes.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
-      </select>
+      </select>}
       {!discovered && <>
         <input type="search" aria-label="Search agent history" placeholder="Agent, repository, branch or session" value={search} onChange={e => setSearch(e.target.value)} className={fieldClass} />
         <select aria-label="History status" value={statusFilter} onChange={e => setStatusFilter(e.target.value)} className={fieldClass}>
@@ -88,11 +116,15 @@ export function AgentHistoryTab() {
         {loading && history.length === 0 && live.length === 0 ? <LoadingState label="Loading agent history…" /> : nodes.length === 0 ? <p className="text-xs text-text-secondary">{error ? 'Agent history unavailable.' : search || scope || statusFilter ? 'No matching agents. Clear search or filters to see more.' : 'No agent history yet.'}</p>
           : <div className="space-y-2">{nodes.map(node => {
             const config = getNodeStatusConfig(node);
+            // Issue #2461 — `break-words`, not `break-all`: the label is prose
+            // ("Created 3h ago") with word boundaries, and `break-all` split
+            // the raw timestamp's trailing `Z` onto a line of its own.
+            const observedAt = node.lifecycle?.timestamp ?? node.created_at;
             return <div key={node.id} className="min-w-0 rounded-md border border-border-default p-2">
               <p className="break-all text-sm text-text-primary">{node.name}</p>
               <p className="break-all text-xs text-text-secondary">{meshes.find(m => m.id === node.mesh_id)?.name ?? `Missing repository ${node.mesh_id}`} · {node.branch}</p>
               <p className={`text-xs ${config.color}`} title={config.title}>{config.label}</p>
-              <p className="break-all text-2xs text-text-secondary">{node.lifecycle ? `Last observed ${node.lifecycle.timestamp}` : `Created ${node.created_at}`}</p>
+              <p className="break-words text-2xs text-text-secondary" title={absoluteTimestamp(observedAt)}>{node.lifecycle ? 'Last observed' : 'Created'} {formatListTimestamp(observedAt)}</p>
               <div className="mt-2 flex flex-wrap gap-2">
                 {node.status !== 'archived' && <button type="button" onClick={() => activate(node.id)} className="min-h-[24px] rounded-md border border-border-default px-2 text-xs text-text-primary hover:bg-bg-card-hover">Open terminal</button>}
                 {['archived', 'suspended', 'error', 'lost'].includes(node.status) && <button type="button" disabled={busy !== null} onClick={() => void recover(node)}
