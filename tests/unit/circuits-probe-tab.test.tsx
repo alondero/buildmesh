@@ -225,6 +225,20 @@ queueWaits?: Record<string, string>;
   });
 }
 
+/** Hold the initial snapshot so status assertions exercise the loaded state. */
+function deferCircuitProbe() {
+  const fallback = vi.mocked(invoke).getMockImplementation();
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+    if (cmd === 'list_circuit_probe') {
+      return pending.then(() => fallback?.(cmd, args) ?? Promise.resolve({ cmd }));
+    }
+    return fallback?.(cmd, args) ?? Promise.resolve({ cmd });
+  });
+  return release;
+}
+
 beforeEach(() => {
   useMeshStore.setState({
     meshes: [MESH],
@@ -1218,16 +1232,22 @@ describe('CircuitsProbeTab', () => {
       // The idle count is the fallback when no attention/active/queued part is
       // present, so the circuit needs a finished run rather than a live one.
       mockBackend({ circuits: [CIRCUIT], runs: [RUN_DONE] });
+      const releaseProbe = deferCircuitProbe();
       openProbeDestination('circuits');
 
-      expect((await screen.findByTestId('circuits-status')).textContent).toBe('1 circuit idle');
+      expect((await screen.findByTestId('circuits-status')).textContent).toBe('Loading circuits…');
+      await act(async () => { releaseProbe(); });
+      expect(await screen.findByText('1 circuit idle')).toBeTruthy();
     });
 
     it('keeps the plural idle count for more than one circuit', async () => {
       mockBackend({ circuits: [CIRCUIT, { ...CIRCUIT, id: 8, name: 'review' }], runs: [RUN_DONE] });
+      const releaseProbe = deferCircuitProbe();
       openProbeDestination('circuits');
 
-      expect((await screen.findByTestId('circuits-status')).textContent).toBe('2 circuits idle');
+      expect((await screen.findByTestId('circuits-status')).textContent).toBe('Loading circuits…');
+      await act(async () => { releaseProbe(); });
+      expect(await screen.findByText('2 circuits idle')).toBeTruthy();
     });
 
     it('points the Manage empty state at the Create disclosure, not at Manage', async () => {
