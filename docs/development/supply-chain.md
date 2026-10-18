@@ -283,8 +283,9 @@ The rule has a second outcome, reached when the feature switch does not exist.
 Turning the dependency's default features off then leaves the crate in the tree,
 and the honest statement narrows to where the subtree *ships*: name the artifacts
 this repository actually releases and show the code is not linked into them. For
-the worked example below that is the Windows installers and the Android APK, per
-the extension assertions in `release.yml`. Note what such a claim does **not**
+the worked example below that is the Windows installers, the macOS installers and
+the Android APK, per the extension assertions in `release.yml`. Note what such a
+claim does **not**
 cover — `verify.yml` still compiles the Linux target in its `ubuntu-latest` Rust
 jobs, so "not released" is not "not built" and must not be written as though it
 were.

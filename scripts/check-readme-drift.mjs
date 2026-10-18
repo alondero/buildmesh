@@ -211,7 +211,8 @@ export function checkReadmeDrift({ readme, providerTypes, harnessLabel }) {
     failures.push(failure(
       'windows-stable-channel',
       'README.md is missing the Windows 10/11 supported-platforms claim. ' +
-        '.github/workflows/release.yml publishes only Windows installers; the README must reflect that.'
+        '.github/workflows/release.yml publishes Windows installers plus ad-hoc-signed macOS ' +
+        'installers; the README must reflect that.'
     ));
   }
 

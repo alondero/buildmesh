@@ -96,21 +96,30 @@ output.)
    Release containing the installer, its `.sig`, and `latest.json`. If
    verification fails on the tag, nothing is built and no release exists —
    see [What blocks a release](#what-blocks-a-release).
-6. An `Android signed APK` job then builds `assembleRelease` and uploads
+6. A `macOS ad-hoc signed` job then builds the macOS installers and updater
+   archives — one architecture per leg, ad-hoc signed, no Apple account
+   involved. It runs after the Windows job because that job is what creates the
+   draft. See [macOS release packaging](#macos-release-packaging).
+7. An `Android signed APK` job builds `assembleRelease` and uploads
    `Buildmesh_<version>_android.apk` plus a `.sha256` sidecar to that draft.
-   It runs *after* the Windows job, because `tauri-action` is what creates the
-   draft to upload to. When `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEY_ALIAS` and
+   It runs *after* the Windows job, for the same reason. When
+   `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEY_ALIAS` and
    `ANDROID_KEY_PASSWORD` are absent it warns and exits 0 instead of failing,
    because the Windows release is already published by that point and failing
    would strand it as a draft. The APK is **not** added to `latest.json`; that
-   feed is the Tauri updater and stays Windows-only. See
+   feed is the Tauri updater and covers Windows and macOS only. See
    [Android release signing](android.md#release-signing-and-distribution).
-7. Review the draft release on GitHub and **publish** it. Once published,
+8. A `Verify updater feed` job reads the draft's real `latest.json` back off the
+   release and fails unless every packaged platform is present, signed, and
+   pointing at an artifact the release actually carries. This is the last gate
+   before a human publishes, and it is the one that catches a macOS archive that
+   was uploaded but never made it into the feed.
+9. Review the draft release on GitHub and **publish** it. Once published,
    `…/releases/latest/download/latest.json` serves the feed, and running installs
    will show the "Update available" prompt on next launch.
-8. Point the [release-notes guide](../releases/README.md) at the next draft
+10. Point the [release-notes guide](../releases/README.md) at the next draft
    when one is ready. Do not rewrite the published note to describe later work.
-9. **Immediately bump back to the next `-0` version**:
+11. **Immediately bump back to the next `-0` version**:
    ```
    npm run version:set -- 1.3.0-0
    ```
@@ -405,6 +414,123 @@ If the weekly packaging stops appearing, check the workflow is still `active`
 (re-enable it under **Actions → Build → … → Enable workflow**) rather than
 assuming the packages are fine.
 
+## macOS release packaging
+
+Issue #2483. A tagged release publishes macOS installers and updater archives
+for Apple Silicon and Intel, **without an Apple Developer Program membership,
+a Developer ID certificate, an Apple ID, a team, an API key, or notarization**,
+and without buying any of them. Linux release artifacts remain the later slice
+of issue #835.
+
+### Ad-hoc signing, and what it does not buy
+
+`src-tauri/tauri.macos-release.conf.json` (Apple Silicon) and
+`src-tauri/tauri.macos-release-intel.conf.json` (Intel) set
+`bundle.macOS.signingIdentity` to `-`, which is Tauri/Tauri Action's ad-hoc
+identity: the bundle carries a real, locally-computed code signature with no
+certificate behind it. Consequences, stated plainly because they are easy to
+misreport:
+
+- The app bundle **is** signed, and `codesign --verify --deep --strict`
+  succeeds. The macOS job asserts `Signature=adhoc` rather than accepting any
+  successful signature, so a runner that happened to hold a Developer ID
+  identity cannot quietly produce a differently-signed release.
+- There is **no** Developer ID trust and **no** notarization. Gatekeeper still
+  blocks the first launch, exactly as for an unsigned Windows installer under
+  SmartScreen. Users right-click the app → **Open** → **Open**, or use System
+  Settings → Privacy & Security → **Open Anyway**.
+- This is *not* a Gatekeeper bypass. Ad-hoc signing does not remove the
+  restriction; it makes the bundle self-consistent and archivable. Any
+  documentation claiming the macOS release is "signed" without this caveat is
+  wrong.
+- The minisign `.sig` beside each archive is the app's own update-integrity
+  signature and is unrelated to all of the above, on macOS as on Windows.
+
+The overlay file names are deliberate. Tauri Action auto-merges
+`tauri.<platform>.conf.json` for **every** build on that platform, so naming
+these `tauri.macos.conf.json` would silently ad-hoc-sign *and* turn on updater
+artifacts for the weekly package smoke, which has no signing secret. The
+release workflow passes them explicitly with `--config`.
+
+### Architectures and the minimum macOS version
+
+One native build per architecture, because that is what GitHub's runner images
+provide:
+
+| Leg | Runner | Rust target | `minimumSystemVersion` |
+|---|---|---|---|
+| Apple Silicon | `macos-15` (arm64) | `aarch64-apple-darwin` | `11.0` |
+| Intel | `macos-15-intel` (x64) | `x86_64-apple-darwin` | `10.13` |
+
+Apple Silicon hardware starts at macOS 11, so Tauri's 10.13 default floor is
+not a linkable deployment target for that architecture and the overlay asks for
+`11.0`. Intel keeps Tauri's documented minimum.
+
+**Intel has a deadline.** `macos-13` was the historical Intel label and was
+retired in December 2025; `macos-15-intel` is the last Intel image GitHub
+offers, and x86_64 hosted runners go away in **August 2027**. When that happens
+the Intel leg has to move to a self-hosted or larger runner or be dropped, and
+the release skill's expected asset list changes with it. This is a dated
+constraint, not a preference.
+
+Those two numbers are what the bundles *declare*: the macOS job reads
+`LSMinimumSystemVersion` out of each built `Info.plist` and prints it into the
+run log, so the recorded value is evidence rather than an assumption. Whether
+an Intel Mac actually running macOS 10.13 launches the app is a question for
+real hardware, tracked in issue #2484 — do not claim a minimum macOS version
+that no Mac has been run on.
+
+### The updater feed has three writers
+
+`latest.json` is one release asset written by three jobs. `tauri-action`
+**merges** it — it re-reads the published asset and keeps its `platforms`
+object before adding its own `{os}-{arch}` keys — but it merges by
+delete-then-upload, which two concurrent writers would interleave into a lost
+update. The workflow therefore serialises every writer:
+
+- `macos-release` has `needs: release`, ordering the Windows writer first and
+  putting the macOS legs after the draft exists.
+- Its matrix sets `max-parallel: 1`, ordering the two macOS legs against each
+  other. This is a correctness constraint, not a speed knob.
+- `updater-feed` then downloads the assembled feed and runs
+  `scripts/ci/verify-updater-feed.mjs`, which fails unless
+  `windows-x86_64`, `darwin-aarch64` and `darwin-x86_64` are all present, signed
+  with a well-formed minisign signature, versioned to the tag, and pointing at
+  assets the release really carries.
+
+The job that reads a draft needs `contents: write` even though it only reads:
+GitHub returns a draft release only to a token with push access, so a read-only
+token gets a 404 on the very draft it has to inspect.
+
+`tests/agent-infra/release-macos.test.mjs` pins this shape (one leg per
+architecture, no retired image label, `max-parallel: 1`, both feeds required) and
+`tests/agent-infra/verify-updater-feed.test.mjs` covers the feed checker itself.
+
+### Checksums
+
+Per-platform manifests, so no job can overwrite another's:
+
+| Manifest | Written by |
+|---|---|
+| `SHA256SUMS.txt` | the Windows job (EXE/MSI, unchanged) |
+| `SHA256SUMS-macos-aarch64.txt` | the Apple Silicon leg |
+| `SHA256SUMS-macos-x86_64.txt` | the Intel leg |
+
+The macOS manifests cover both the `.dmg` a person installs and the
+`.app.tar.gz` the updater fetches. The Android job keeps its own `.sha256`
+sidecar.
+
+### Before publishing
+
+Packaging evidence is not installed-app runtime evidence. Keep the Mac assets in
+the draft until the download-and-run check in issue #2484 — downloaded app,
+Finder launch, CLI/session workflow, and a real update through the updater — has
+been done against that candidate. Publishing the draft without it turns
+"packaging works" into a support claim nobody has tested. Validating the
+packaging is not on its own a reason to flip the updater feed early, and the
+feed is not flipped by this job at all: `latest.json` only becomes
+`releases/latest` when the draft is published.
+
 ## What blocks a release
 
 `release.yml` never builds or publishes from an unverified commit:
@@ -422,6 +548,11 @@ assuming the packages are fine.
 3. Mainline — the tagged commit must be reachable from `main`. A tag cut from a
    side branch, or from a commit that never went through the ruleset, fails
    before the build.
+4. A complete updater feed — after every packaging job, `Verify updater feed`
+   fails the run unless `latest.json` carries a signed, resolvable entry for
+   each packaged platform. A failed packaging job already fails the workflow;
+   this is what catches the case where every job was green and the merged feed
+   is still missing an architecture.
 
 Verifying on the tag rather than trusting the earlier push-to-main run is
 deliberate: it is the tag's own SHA that becomes the shipped artifact. The
@@ -429,8 +560,9 @@ tag-specific steps (pinned-Codex contract smoke, WSL profile contract) are
 `workflow_dispatch`-only and do not run for a release.
 
 Packaging the installer and launching the installed application is a separate
-gate tracked in issue #1522; until that lands, a release proves the tree is
-sound and the bundle is produced, not that a clean install boots.
+gate: issue #1522 for Windows, issue #2484 for macOS. Until those land, a
+release proves the tree is sound and the bundle is produced, not that a clean
+install boots.
 
 ## Emergency bypass procedure
 
@@ -492,9 +624,10 @@ regenerate with a password, set it here.) Keep the private key file backed up
 somewhere safe and **never commit it** — `src-tauri/.gitignore` blocks `*.key`
 as a net.
 
-## SmartScreen / Gatekeeper warnings (unsigned installers)
+## SmartScreen / Gatekeeper warnings (not Developer ID-signed)
 
-Buildmesh installers are **not** OS-code-signed, so first launch shows:
+Buildmesh installers are **not** OS-code-signed with a trusted publisher
+identity, so first launch shows:
 
 - **Windows** — SmartScreen: *"Windows protected your PC … unknown publisher."*
   Click **More info → Run anyway**.
@@ -502,10 +635,13 @@ Buildmesh installers are **not** OS-code-signed, so first launch shows:
   verified."* Right-click the app → **Open**, then **Open** again; or
   System Settings → Privacy & Security → **Open Anyway**.
 
-This is expected for an internal tool. OS code signing (Authenticode /
-Apple notarization) would remove these warnings but requires paid certificates —
-it is deferred (tracked in issue #834). The auto-updater is unaffected by
-this: it verifies updates with its own minisign signature regardless.
+This is expected for an internal tool. The macOS bundle *is* ad-hoc signed —
+see [macOS release packaging](#macos-release-packaging) — but ad-hoc signing
+carries no certificate and confers no Gatekeeper trust, so the prompt is
+identical to the unsigned case. Paying for Authenticode / Apple notarization
+would remove these warnings; it is deferred (tracked in issue #834) and is
+deliberately not required to publish a release. The auto-updater is unaffected:
+it verifies updates with its own minisign signature regardless.
 
 ## Verify a published installer
 
@@ -528,8 +664,21 @@ Get-FileHash $installer.FullName -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
+On a Mac, the same check runs against the updater archive rather than the DMG —
+the `.app.tar.gz` is the file the updater actually downloads, and it is the file
+`sha256sum -c SHA256SUMS-macos-aarch64.txt` covers:
+
+```bash
+publicKey='RWTd0JrWj/hUt82KDADoxTpTfqs8p6/ay6iht36EPXl2feP892wH1aBG'
+minisign -Vm Buildmesh_*_aarch64.app.tar.gz \
+  -x Buildmesh_*_aarch64.app.tar.gz.sig \
+  -P "$publicKey"
+shasum -a 256 -c SHA256SUMS-macos-aarch64.txt
+codesign --verify --deep --strict /Volumes/Buildmesh/Buildmesh.app   # after install
+```
+
 The command must report a valid signature before installation. Compare the
-SHA-256 output with the matching filename in the published `SHA256SUMS.txt`.
-Never replace the public key with a key copied from an untrusted release
-comment. The checksum file is a second download-integrity check; it does not
-replace the cryptographic signature.
+SHA-256 output with the matching filename in the published manifest. Never
+replace the public key with a key copied from an untrusted release comment. The
+checksum file is a second download-integrity check; it does not replace the
+cryptographic signature.

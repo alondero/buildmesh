@@ -27,9 +27,13 @@ env:
 
 # Least privilege (issue #1541). This workflow holds the updater signing keys,
 # so its default token must be read-only rather than inheriting a read-write
-# repository default. Only the `release` job below needs `contents: write`, and
-# it declares that itself — job-level permissions replace this block rather than
+# repository default. Only the jobs below that touch the release declare
+# `contents: write` — job-level permissions replace this block rather than
 # adding to it, so the `verify` job cannot escalate through it.
+#
+# `updater-feed` needs write and does nothing but read: GitHub only returns a
+# draft release to a token with push access, so a read-only token cannot see
+# the draft it has to inspect.
 #
 # This workflow runs only on a `v*` tag, never on a pull request, which is what
 # keeps untrusted pull-request code away from the signing keys entirely.
@@ -51,8 +55,9 @@ jobs:
       contents: read
 
   release:
-    # Windows-only for now — the app is Windows/WSL-centric and this keeps
-    # releases cheap. macOS/Linux release builds are tracked separately.
+    # The Windows installer job, and the one that creates the draft release
+    # every other job uploads to. macOS packaging is `macos-release` below
+    # (issue #2483); Linux is still the later slice of #835.
     needs: verify
     runs-on: windows-latest
     permissions:
@@ -164,7 +169,17 @@ jobs:
           # signing secret.
           args: --config src-tauri/tauri.release.conf.json
           # Generate + upload latest.json (the updater feed the app polls) and
-          # the per-artifact .sig signatures. Both default true; pinned for clarity.
+          # the per-artifact .sig signatures.
+          #
+          # Three jobs write this one asset. tauri-action *merges* rather than
+          # overwrites — it re-reads the published latest.json and keeps its
+          # `platforms` object before writing this job's own keys — so each job
+          # adds its entry without dropping the others'. It merges by
+          # delete-then-upload though, which two concurrent writers would
+          # interleave into a lost update, so every writer is serialised:
+          # `needs: release` orders Windows ahead of macOS, `max-parallel: 1`
+          # orders the macOS legs against each other, and `updater-feed` below
+          # then checks the merged result before anyone can publish it.
           uploadUpdaterJson: true
 
       - name: Publish SHA-256 checksums
@@ -183,6 +198,219 @@ jobs:
           }
           $lines | Set-Content SHA256SUMS.txt -Encoding ascii
           gh release upload "${{ github.ref_name }}" SHA256SUMS.txt --clobber
+
+  # macOS installers and updater archives (issue #2483).
+  #
+  # Ad-hoc signed, deliberately and permanently: the overlay config carries the
+  # `-` signing identity, which needs no Apple membership, certificate, Apple
+  # ID, team or API key. What it does *not* give is Developer ID trust, so
+  # Gatekeeper still blocks the first launch until the user opens the app by
+  # hand. That is the accepted cost of shipping macOS builds without paying
+  # Apple; notarization stays out of scope (#834).
+  #
+  # One leg per architecture because that is what GitHub's runner images give
+  # us: `macos-15` is arm64 and `macos-15-intel` is the last Intel image the
+  # service offers — it is scheduled to go away in August 2027, after which
+  # x86_64 cannot be built here at all and the Intel leg has to move or be
+  # dropped. `macos-13` would be the historical Intel label but was retired in
+  # December 2025. A universal bundle would compile both architectures on one
+  # runner anyway and then lipo them together, so it saves no build time while
+  # adding a step that can only produce one updater entry for two platforms.
+  macos-release:
+    name: macOS ad-hoc signed
+    # Serialised behind the Windows job because that job's tauri-action is what
+    # creates the draft release this one uploads to. verify is waited on
+    # transitively, exactly as android-release does.
+    needs: release
+    permissions:
+      # Uploading the DMG, the .app.tar.gz updater archive, the .sig and the
+      # merged latest.json to the draft the previous job created.
+      contents: write
+    strategy:
+      # Load-bearing, not a speed knob: every packaging job writes the same
+      # latest.json asset and tauri-action merges it by delete-then-upload, so
+      # two writers running at once interleave into a lost update — each
+      # re-reading a feed the other has already deleted. The Windows leg is
+      # ordered ahead by `needs`; this orders the two macOS legs.
+      max-parallel: 1
+      # Do not cancel the surviving leg: a failed release should cost a second
+      # build's log, not hide the reason the first one failed.
+      fail-fast: false
+      matrix:
+        include:
+          # Apple Silicon. Apple Silicon hardware starts at macOS 11, so the
+          # overlay asks for 11.0 rather than Tauri's 10.13 default floor,
+          # which is not a linkable deployment target for this architecture.
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            config: src-tauri/tauri.macos-release.conf.json
+            arch: aarch64
+          # Intel. 10.13 is Tauri's documented minimum and the floor for this
+          # architecture.
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            config: src-tauri/tauri.macos-release-intel.conf.json
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+
+      # No Swatinem/rust-cache here on purpose. Its own documentation lists
+      # macOS target directories as a source of corrupted caches, and
+      # docs/development/releasing.md already records that the macOS platform
+      # smoke keeps no target cache for the same reason. This leg runs a handful
+      # of times a year and eats the cold build; a flaky release is worse.
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build + publish ad-hoc signed release
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The same app-owned minisign updater key the Windows job uses. This
+          # is update integrity, not OS signing: it proves the archive matches
+          # the one in the feed and does nothing for Gatekeeper.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Buildmesh ${{ github.ref_name }}"
+          # No releaseBody here. The notes are loaded and applied by the Windows
+          # job's `release-notes` step, and this job has no such step to read
+          # them from. Today that would be harmless rather than destructive —
+          # tauri-action rewrites a release's name and body only when it is NOT
+          # a draft — but an empty body would blank the published notes the
+          # moment anyone turned releaseDraft off. Leave it out rather than
+          # leave it out wrongly.
+          releaseDraft: true
+          prerelease: false
+          # --config selects the overlay that turns on updater artifacts and
+          # sets the ad-hoc signing identity and this architecture's minimum
+          # macOS version. --target keeps the build native to the runner, which
+          # is why the two legs are two architectures rather than one universal
+          # bundle.
+          args: --target ${{ matrix.target }} --config ${{ matrix.config }}
+          # Same merge contract as the Windows job above — this leg adds
+          # `darwin-<arch>` to the shared feed rather than replacing it.
+          uploadUpdaterJson: true
+
+      # Proves the artifact carries a real signature and that it is the ad-hoc
+      # kind. Asserting the *kind* matters: an unsigned bundle also passes
+      # `codesign --verify` on some setups, and a runner that happened to hold a
+      # Developer ID identity must not quietly produce a differently-signed
+      # release than the one documented.
+      - name: Verify the ad-hoc signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="src-tauri/target/${{ matrix.target }}/release/bundle/macos/Buildmesh.app"
+          if [[ ! -d "$APP" ]]; then
+            echo "::error::No application bundle at $APP"
+            exit 1
+          fi
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          codesign -dv --verbose=4 "$APP" 2>&1 | tee "$RUNNER_TEMP/codesign.txt"
+          if ! grep -q 'Signature=adhoc' "$RUNNER_TEMP/codesign.txt"; then
+            echo "::error::Expected an ad-hoc signature (Signature=adhoc) and got something else. Do not publish a macOS release signed by an identity this workflow does not document."
+            exit 1
+          fi
+          # Record the minimum macOS version the bundle actually declares, so
+          # the number in the docs is evidence rather than an assumption. This
+          # is what LSMinimumSystemVersion gates at launch; whether a real Mac
+          # of that version runs the app is issue #2484's question.
+          /usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$APP/Contents/Info.plist" \
+            | tee "$RUNNER_TEMP/lsminimumsystemversion.txt"
+
+      # Covers the DMG a person installs and the .app.tar.gz the updater
+      # fetches. A separate file per architecture so neither leg can overwrite
+      # the other's, and neither touches the Windows SHA256SUMS.txt.
+      - name: Publish SHA-256 checksums
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          BUNDLE="src-tauri/target/${{ matrix.target }}/release/bundle"
+          # No `mapfile`: macOS still ships bash 3.2 as /bin/bash, which has no
+          # such builtin. A read loop over a file works on every bash.
+          LIST="$RUNNER_TEMP/macos-bundle-assets.txt"
+          find "$BUNDLE" -type f \( -name '*.dmg' -o -name '*.app.tar.gz' \) | sort > "$LIST"
+          if [[ ! -s "$LIST" ]]; then
+            echo "::error::No DMG or .app.tar.gz found under $BUNDLE"
+            exit 1
+          fi
+          MANIFEST="SHA256SUMS-macos-${{ matrix.arch }}.txt"
+          : > "$MANIFEST"
+          while IFS= read -r asset; do
+            # shasum is the macOS spelling of sha256sum, and emits the same
+            # "hash  name" two-space format as the Windows manifest.
+            ( cd "$(dirname "$asset")" && shasum -a 256 "$(basename "$asset")" ) >> "$MANIFEST"
+          done < "$LIST"
+          cat "$MANIFEST"
+          gh release upload "${{ github.ref_name }}" "$MANIFEST" --clobber
+
+  # The feed is the one artifact a running install downloads on its own, so
+  # nothing about it may be taken on trust from "the jobs were green". This
+  # reads the draft's real latest.json back off the release and checks that
+  # every packaged platform is present, signed and pointing at an artifact that
+  # exists — the failure being a macOS leg that uploaded its archive but whose
+  # entry never made it into the merged feed, which would otherwise ship as a
+  # green release whose macOS installs cannot update.
+  updater-feed:
+    name: Verify updater feed
+    needs: [release, macos-release]
+    runs-on: ubuntu-latest
+    permissions:
+      # Write, not read, and not for anything this job does: GitHub only
+      # returns a draft release to a token with push access, so a read-only
+      # token gets a 404 on the very draft it is meant to inspect. The job
+      # below only ever reads — it corrects nothing, it reports whether the
+      # draft is publishable.
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "20"
+
+      - name: Download the draft feed and its asset list
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/feed"
+          gh release download "$TAG" --pattern latest.json --dir "$RUNNER_TEMP/feed"
+          gh release view "$TAG" --json assets > "$RUNNER_TEMP/assets.json"
+
+      - name: Check every packaged platform is in the feed
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          node scripts/ci/verify-updater-feed.mjs "$RUNNER_TEMP/feed/latest.json" \
+            --expect-version "${TAG#v}" \
+            --require windows-x86_64 \
+            --require darwin-aarch64 \
+            --require darwin-x86_64 \
+            --assets "$RUNNER_TEMP/assets.json"
 
   # The native Android client ships beside the Windows installers, signed with a
   # developer-owned key that is never stored in this repository. `needs: release`

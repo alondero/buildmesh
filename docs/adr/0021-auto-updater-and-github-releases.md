@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (2026-07-16). Amended 2026-10-17 (issue #2438) — see [Amendment](#amendment-2026-10-17-the-updaters-zip-extraction-feature-stays-off). Decisions 1–3 are unchanged.
+Accepted (2026-07-16). Amended 2026-10-17 (issue #2438) — see [Amendment](#amendment-2026-10-17-the-updaters-zip-extraction-feature-stays-off). Amended 2026-10-18 (issue #2483) — see [Amendment](#amendment-2026-10-18-macos-joins-the-updater-feed). Decisions 1–3 are unchanged.
 
 ## Context
 
@@ -68,6 +68,9 @@ an update package is authentic. We can ship auto-update now with zero paid certs
    this ADR is about stays Windows-only either way. See
    [`docs/development/android.md`](../development/android.md#release-signing-and-distribution)
    and [`docs/development/releasing.md`](../development/releasing.md).
+   *(Superseded in part by the 2026-10-18 amendment below: the feed now also
+   carries the two macOS entries, so "Windows-only" describes the feed as of
+   this decision, not as published today.)*
 
 ## Amendment (2026-10-17): the updater's ZIP extraction feature stays off
 
@@ -125,6 +128,40 @@ is in
   build red rather than silently regressing. A regression test in
   `tests/agent-infra/supply-chain-gates.test.mjs` additionally asserts `zip` stays
   out of `Cargo.lock` and out of the dependency line.
+
+## Amendment (2026-10-18): macOS joins the updater feed
+
+Issue #2483. This narrows decision 5's "Windows-only" feed rather than
+reversing it, and it changes no decision about how the feed is signed or
+served.
+
+`latest.json` now carries `darwin-aarch64` and `darwin-x86_64` beside
+`windows-x86_64`, published from a new `macos-release` job that builds one
+native macOS bundle per architecture. The updater archives are `.app.tar.gz`
+with a matching minisign `.sig`, signed with the **same** app-owned key as
+Windows — decision 4 and the signing-keys section are unchanged, and no new
+key is introduced.
+
+What is deliberately *not* changed:
+
+- **No Apple Developer Program membership, Developer ID certificate, Apple ID,
+  team, API key, or notarization.** The macOS bundle is ad-hoc signed
+  (`signingIdentity: "-"`), which needs no credential. It therefore carries no
+  Developer ID trust and Gatekeeper still blocks first launch. Issue #834
+  (paid signing) remains deferred and is not a prerequisite for this slice.
+- **No change to how the feed is served.** `latest.json` still comes from the
+  shared GitHub `latest.json` endpoint, is still written to a draft release, and
+  still only becomes `releases/latest` when a human publishes that draft.
+- **Android stays out of the feed**, exactly as above.
+
+The operational consequence is that three jobs now write one feed asset.
+`tauri-action` merges it per `{os}-{arch}` key, but merges by
+delete-then-upload, so the workflow serialises the writers (`needs:` plus
+`max-parallel: 1`) and adds a `Verify updater feed` job that reads the merged
+feed back and fails unless every platform entry is present, signed and
+resolvable. Packaging evidence is not installed-app runtime evidence: real
+Mac launch and a real in-app update are issue #2484's gate before any public
+support claim.
 
 ## Signing keys
 

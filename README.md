@@ -30,18 +30,20 @@ Buildmesh is a Tauri desktop app for orchestrating multiple AI coding agents —
 
 ### Download
 
-Grab the latest installer from the [GitHub Releases page](https://github.com/alondero/buildmesh/releases/latest). Each Windows release publishes **two** installers (pick whichever you prefer):
+Grab the latest installer from the [GitHub Releases page](https://github.com/alondero/buildmesh/releases/latest). Each release publishes **two** Windows installers (pick whichever you prefer) and **two** macOS DMGs:
 
-| File | Format | Notes |
-|---|---|---|
-| `Buildmesh_<version>_x64-setup.exe` | NSIS `.exe` | Smallest download; per-user install. |
-| `Buildmesh_<version>_x64_en-US.msi` | Windows Installer `.msi` | MSI deployment; per-machine install. |
+| File | Platform | Format | Notes |
+|---|---|---|---|
+| `Buildmesh_<version>_x64-setup.exe` | Windows x64 | NSIS `.exe` | Smallest download; per-user install. |
+| `Buildmesh_<version>_x64_en-US.msi` | Windows x64 | Windows Installer `.msi` | MSI deployment; per-machine install. |
+| `Buildmesh_<version>_aarch64.dmg` | macOS Apple Silicon | `.dmg` | Drag **Buildmesh** to Applications. |
+| `Buildmesh_<version>_x86_64.dmg` | macOS Intel | `.dmg` | Drag **Buildmesh** to Applications. |
 
-Each installer ships with its matching `.sig` (the **auto-updater** signature — see [Upgrade](#upgrade)) and a `latest.json` updater feed; existing installs read that feed to detect new releases.
+Each installer ships with its matching `.sig` (the **auto-updater** signature — see [Upgrade](#upgrade)) and a `latest.json` updater feed; existing installs read that feed to detect new releases. Checksums are published per platform as `SHA256SUMS.txt` (Windows) and `SHA256SUMS-macos-aarch64.txt` / `SHA256SUMS-macos-x86_64.txt` (macOS).
 
 ## Install Buildmesh
 
-Buildmesh ships as a Windows installer through GitHub Releases and is upgraded in place by the in-app updater. Each release publishes an updater feed, and every update is verified with the app's own minisign signature before it installs. OS code-signing is **not** in place yet, so first launch shows a SmartScreen / Gatekeeper warning — see [SmartScreen & Gatekeeper warnings](#smartscreen--gatekeeper-warnings-unsigned-installers).
+Buildmesh ships as a Windows installer or a macOS `.dmg` through GitHub Releases and is upgraded in place by the in-app updater. Each release publishes an updater feed, and every update is verified with the app's own minisign signature before it installs. OS code-signing with a trusted publisher identity is **not** in place yet, so first launch shows a SmartScreen / Gatekeeper warning — see [SmartScreen & Gatekeeper warnings](#smartscreen--gatekeeper-warnings-unsigned-installers).
 
 ### Supported platforms
 
@@ -49,8 +51,8 @@ Buildmesh ships as a Windows installer through GitHub Releases and is upgraded i
 |---|---|---|
 | **Windows 10/11** (x64) | **Early access** — installer shipped on every tag. | Download from the Releases page above. |
 | **WSL2** (hybrid Windows/WSL mode) | **Early access** on Windows 10/11 hosts — Linux agents run inside WSL2, the Windows-side backend drives the UI. | Install Windows first, then enable WSL2 from Mesh settings. |
-| macOS (Apple Silicon + Intel) | **Preview** — the macOS bundles compile on every weekly CI smoke run, but no signed `.dmg` is published yet. | [Build from source](#build-from-source). |
-| Linux (Ubuntu) | **Preview** — same caveat as macOS. | [Build from source](#build-from-source). |
+| macOS (Apple Silicon + Intel) | **Preview** — an ad-hoc-signed `.dmg` ships on every tag, but no Mac has yet been run through install/upgrade validation. | Download the `.dmg` matching your Mac from the Releases page above; first launch needs the Gatekeeper override below. |
+| Linux (Ubuntu) | **Preview** — no release artifacts yet; the bundle compiles in CI. | [Build from source](#build-from-source). |
 
 ### First-run prerequisites
 
@@ -108,7 +110,7 @@ To **uninstall** Buildmesh and **remove all user data**: uninstall from *Windows
 
 Existing installs check the updater feed at `https://github.com/alondero/buildmesh/releases/latest/download/latest.json` on launch and surface an *"Update available"* prompt. Install the update from inside the app — no separate download needed. Locally-built dev builds disable the updater via their `.dev` bundle identifier, so they never nag you about a release you already have.
 
-To upgrade manually, install the new `.msi` or `-setup.exe` over the existing install — both installers support in-place upgrade.
+To upgrade manually on Windows, install the new `.msi` or `-setup.exe` over the existing install — both installers support in-place upgrade. On macOS, drag the new `Buildmesh.app` from the newer `.dmg` over the one in Applications (or run the in-app updater, which replaces it for you).
 
 ### Get help
 
@@ -243,12 +245,12 @@ so every binding works the same way on Windows, Linux, and macOS.
 - **Frontend** — React 19, Zustand 5, xterm.js 6, Tailwind 4, TypeScript ~5.8, Vite 7
 - **Backend** — Tauri 2, Rust, `portable-pty`, `rusqlite` (SQLite), `git2`
 - **Persistence** — local SQLite (`app_settings`, `meshes`, `agent_nodes`)
-- **Runtime** — Windows 10/11, with optional WSL2 support
+- **Runtime** — Windows 10/11, with optional WSL2 support; macOS ships as an ad-hoc-signed app
 - **Testing** — Vitest (unit + integration) + Playwright (e2e)
 
 ## Build from source
 
-This section is for contributors and for users on macOS/Linux (which aren't published as releases yet — see [Supported platforms](#supported-platforms)).
+This section is for contributors and for users on macOS/Linux (Linux is not published as a release yet, and macOS is — see [Supported platforms](#supported-platforms)).
 
 ### Prerequisites
 

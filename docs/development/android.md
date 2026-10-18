@@ -79,11 +79,13 @@ Two deliberate choices in the `release` build type:
   minification stays off until keep rules are written and verified against the
   live device suite, which would otherwise silently strip the WebSocket and
   Compose paths this app depends on.
-- **Not added to `latest.json`.** That feed is the Tauri updater and is
-  Windows-only; the Android client updates by sideloading a newer APK.
+- **Not added to `latest.json`.** That feed is the Tauri updater and covers the
+  Windows and macOS desktop clients; the Android client updates by sideloading
+  a newer APK.
 
-The APK is published with a sidecar `<name>.sha256`. `SHA256SUMS.txt` still
-covers the Windows installers only, because that file is written before this
+The APK is published with a sidecar `<name>.sha256`. `SHA256SUMS.txt` covers the
+Windows installers, and the macOS legs publish their own
+`SHA256SUMS-macos-<arch>.txt` manifests, because that file is written before this
 job runs.
 
 ## Pairing and transport
