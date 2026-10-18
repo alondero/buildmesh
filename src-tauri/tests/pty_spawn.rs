@@ -23,7 +23,9 @@ use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use buildmesh_lib::agent::process::{AgentProcess, InputQueueGauge, PROCESS_REGISTRY};
+use buildmesh_lib::agent::process::{
+    AgentProcess, AgentProcessParams, InputQueueGauge, PROCESS_REGISTRY,
+};
 use buildmesh_lib::agent::provider::{SpawnRecipe, WindowsShell};
 use buildmesh_lib::agent::spawn::{open_pty_pair, pump_pty_output, spawn_child};
 use buildmesh_lib::agent::spawn_environment;
@@ -129,19 +131,19 @@ fn run_recipe_through_pty(session_id: i64, recipe: SpawnRecipe, expected: &str) 
     let (writer_tx, writer_handle, queue) = make_test_writer_thread(writer);
     PROCESS_REGISTRY.insert(
         session_id,
-        AgentProcess::new(
+        AgentProcess::new(AgentProcessParams {
             child,
             writer_tx,
             queue,
-            Some(writer_handle),
+            writer_handle: Some(writer_handle),
             master,
-            reader_alive.clone(),
-            Arc::new(AtomicBool::new(false)),
-            None,
-            None,
-            std::time::Instant::now(),
-            0,
-        ),
+            reader_alive: reader_alive.clone(),
+            deliberate_kill: Arc::new(AtomicBool::new(false)),
+            job: None,
+            reader_handle: None,
+            spawn_start: std::time::Instant::now(),
+            mesh_id: 0,
+        }),
     );
 
     // Drain output on a background thread using the production read loop.
@@ -362,19 +364,19 @@ fn run_kill_mid_session_test(session_id: i64, recipe: SpawnRecipe) {
     let (writer_tx, _writer_thread, queue) = make_test_writer_thread(writer);
     PROCESS_REGISTRY.insert(
         session_id,
-        AgentProcess::new(
+        AgentProcess::new(AgentProcessParams {
             child,
             writer_tx,
             queue,
-            Some(_writer_thread),
+            writer_handle: Some(_writer_thread),
             master,
-            reader_alive.clone(),
-            Arc::new(AtomicBool::new(false)),
-            None,
-            Some(reader_handle),
-            std::time::Instant::now(),
-            0,
-        ),
+            reader_alive: reader_alive.clone(),
+            deliberate_kill: Arc::new(AtomicBool::new(false)),
+            job: None,
+            reader_handle: Some(reader_handle),
+            spawn_start: std::time::Instant::now(),
+            mesh_id: 0,
+        }),
     );
 
     // Give the reader a moment to be actively blocked on `read()`
@@ -451,19 +453,19 @@ fn windows_kill_session_closes_master() {
     let (writer_tx, _writer_thread, queue) = make_test_writer_thread(writer);
     PROCESS_REGISTRY.insert(
         session_id,
-        AgentProcess::new(
+        AgentProcess::new(AgentProcessParams {
             child,
             writer_tx,
             queue,
-            Some(_writer_thread),
+            writer_handle: Some(_writer_thread),
             master,
-            reader_alive.clone(),
-            Arc::new(AtomicBool::new(false)),
-            None,
-            Some(reader_handle),
-            std::time::Instant::now(),
-            0,
-        ),
+            reader_alive: reader_alive.clone(),
+            deliberate_kill: Arc::new(AtomicBool::new(false)),
+            job: None,
+            reader_handle: Some(reader_handle),
+            spawn_start: std::time::Instant::now(),
+            mesh_id: 0,
+        }),
     );
 
     // Hold our own Arc clone of the master so we can probe its
@@ -701,19 +703,19 @@ fn windows_pi_interactive_tui() {
     let (writer_tx, writer_handle, queue) = make_test_writer_thread(writer);
     PROCESS_REGISTRY.insert(
         session_id,
-        AgentProcess::new(
+        AgentProcess::new(AgentProcessParams {
             child,
             writer_tx,
             queue,
-            Some(writer_handle),
+            writer_handle: Some(writer_handle),
             master,
-            reader_alive.clone(),
-            Arc::new(AtomicBool::new(false)),
-            None,
-            None,
-            std::time::Instant::now(),
-            0,
-        ),
+            reader_alive: reader_alive.clone(),
+            deliberate_kill: Arc::new(AtomicBool::new(false)),
+            job: None,
+            reader_handle: None,
+            spawn_start: std::time::Instant::now(),
+            mesh_id: 0,
+        }),
     );
 
     // Drain output on a background thread
@@ -804,19 +806,19 @@ fn wsl_pi_interactive_tui() {
     let (writer_tx, writer_handle, queue) = make_test_writer_thread(writer);
     PROCESS_REGISTRY.insert(
         session_id,
-        AgentProcess::new(
+        AgentProcess::new(AgentProcessParams {
             child,
             writer_tx,
             queue,
-            Some(writer_handle),
+            writer_handle: Some(writer_handle),
             master,
-            reader_alive.clone(),
-            Arc::new(AtomicBool::new(false)),
-            None,
-            None,
-            std::time::Instant::now(),
-            0,
-        ),
+            reader_alive: reader_alive.clone(),
+            deliberate_kill: Arc::new(AtomicBool::new(false)),
+            job: None,
+            reader_handle: None,
+            spawn_start: std::time::Instant::now(),
+            mesh_id: 0,
+        }),
     );
 
     // Drain output on a background thread

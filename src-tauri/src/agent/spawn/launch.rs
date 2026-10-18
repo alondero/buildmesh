@@ -4,7 +4,7 @@
 //! `command`), then opens a PTY and starts the child (via `process`).
 //! Registry insert and the reader thread belong to `streams`.
 
-use super::command::{build_spawn_command_prepared, resolve_spawn_config};
+use super::command::{build_spawn_command_prepared, resolve_spawn_config, SpawnCommandInput};
 use super::intent::ResumeCause;
 use super::preflight::{ensure_spawn_binary, Preflight};
 use super::process::{sandbox_spawn, spawn_child};
@@ -145,7 +145,7 @@ pub(super) async fn launch_process(
 
     // Resolve configuration values through the per-field cascade (issue
     // #1149 prefactor; #1150 fills the application slot). The resolver
-    // applies the capability mask, so `build_spawn_command` receives values
+    // applies the capability mask, so `build_spawn_command_prepared` receives values
     // the harness actually accepts — unsupported values never reach the
     // harness process regardless of which layer supplied them. The
     // application slot reads the latest in-process preferences cache (no
@@ -189,17 +189,17 @@ pub(super) async fn launch_process(
     // A sandbox-setup failure must not reach the PTY at all, so the error is
     // raised here rather than carried as a poisoned command (#2034).
     let launch_prompt = launch_carries_prompt(adapter.supports_prefill(), prefill.as_deref());
-    let cmd = build_spawn_command_prepared(
-        &resolved,
+    let cmd = build_spawn_command_prepared(SpawnCommandInput {
+        resolved: &resolved,
         provider,
-        &routing,
-        &session_id_mode,
+        routing: &routing,
+        session_id_mode: &session_id_mode,
         session_id,
-        &resolved_config,
-        prefill.as_deref(),
+        config: &resolved_config,
+        prefill: prefill.as_deref(),
         sandbox,
         resume_cause,
-    )
+    })
     .inspect_err(|error| {
         adapter.on_process_terminated(session_id);
         emit_provider_error(app, session_id, provider, error);

@@ -1178,6 +1178,73 @@ describe('CircuitsProbeTab', () => {
     expect(await screen.findByText('No circuits yet')).toBeTruthy();
   });
 
+  describe('list framing and copy (#2462)', () => {
+    it('drops the Recent outcomes header when History has no finished runs', async () => {
+      // One circuit with only a live run: the panel has rows to model, but no
+      // finished outcome to list. The header used to render above an empty
+      // list, directly under the empty state.
+      mockBackend({ circuits: [CIRCUIT], runs: [RUN_RUNNING] });
+      openProbeDestination('circuits');
+      fireEvent.click(await screen.findByTestId('circuits-view-history'));
+
+      expect(await screen.findByText('No finished runs yet')).toBeTruthy();
+      expect(screen.queryByText('Recent outcomes · attention first')).toBeNull();
+      expect(screen.queryByTestId('circuit-row')).toBeNull();
+    });
+
+    it('keeps the Recent outcomes header once History has a finished run', async () => {
+      mockBackend({ circuits: [CIRCUIT], runs: [RUN_DONE, RUN_RUNNING] });
+      openProbeDestination('circuits');
+      fireEvent.click(await screen.findByTestId('circuits-view-history'));
+
+      expect(await screen.findByTestId('run-card-11')).toBeTruthy();
+      expect(screen.getByText('Recent outcomes · attention first')).toBeTruthy();
+    });
+
+    it('labels the Create a circuit disclosure once, with no repeated heading', async () => {
+      mockBackend();
+      openProbeDestination('circuits');
+      fireEvent.click(await screen.findByTestId('circuits-view-manage'));
+
+      // The summary is the form's only heading; a second "Create a circuit"
+      // line inside the expanded panel duplicated it verbatim.
+      const labels = screen.getAllByText('Create a circuit');
+      expect(labels).toHaveLength(1);
+      expect(labels[0].tagName).toBe('SUMMARY');
+      expect(screen.getByTestId('circuit-create-form').textContent).not.toContain('Create a circuit');
+    });
+
+    it('counts idle circuits in the singular for a single circuit', async () => {
+      // The idle count is the fallback when no attention/active/queued part is
+      // present, so the circuit needs a finished run rather than a live one.
+      mockBackend({ circuits: [CIRCUIT], runs: [RUN_DONE] });
+      openProbeDestination('circuits');
+
+      expect((await screen.findByTestId('circuits-status')).textContent).toBe('1 circuit idle');
+    });
+
+    it('keeps the plural idle count for more than one circuit', async () => {
+      mockBackend({ circuits: [CIRCUIT, { ...CIRCUIT, id: 8, name: 'review' }], runs: [RUN_DONE] });
+      openProbeDestination('circuits');
+
+      expect((await screen.findByTestId('circuits-status')).textContent).toBe('2 circuits idle');
+    });
+
+    it('points the Manage empty state at the Create disclosure, not at Manage', async () => {
+      mockBackend({ circuits: [], runs: [] });
+      openProbeDestination('circuits');
+
+      // Arriving from Activity, the hint names the tab to open.
+      expect(await screen.findByText('Open Manage to create a circuit in the flow editor.')).toBeTruthy();
+      fireEvent.click(screen.getByTestId('circuits-view-manage'));
+
+      // Already on Manage: "Open Manage" would send the user nowhere.
+      expect(screen.queryByText('Open Manage to create a circuit in the flow editor.')).toBeNull();
+      expect(screen.getByText('Expand Create a circuit above to add one to the flow editor.')).toBeTruthy();
+      expect(screen.getByText('Create a circuit').tagName).toBe('SUMMARY');
+    });
+  });
+
   // -- human-in-the-loop (#1207) ------------------------------------------------
 
   it('shows unresolved evidence as a warning without approval or failure controls', async () => {

@@ -114,6 +114,34 @@ describe('AiContextSection', () => {
     expect(screen.getByText(/amending \.gitignore/i)).toBeTruthy();
   });
 
+  it('wraps the status rows instead of overflowing the card at 240px (#2465)', async () => {
+    // jsdom has no layout engine, so this pins the *contract* the geometry
+    // depends on — each status row wraps, and each break style suits its
+    // content. The measurement lives in
+    // tests/e2e/ai-context-portability.spec.ts.
+    mockBackend({ status: FULL_CLAUDE });
+    render(<AiContextSection meshId={1} meshPath="/repo" isAuthenticated={true} />);
+
+    const rows = [
+      await screen.findByText('CLAUDE.md'),
+      await screen.findByText('.claude/skills'),
+      await screen.findByText('.gitignore'),
+    ].map((node) => node.closest('div')!);
+
+    for (const row of rows) {
+      expect(row.className).toContain('flex-wrap');
+      expect(row.className).toContain('min-w-0');
+      // truncate + flex-wrap are contradictory; the checklist forbids the pair.
+      expect(row.className).not.toContain('truncate');
+    }
+
+    // Unspaced identifiers have no word boundary to break on, so they need
+    // break-all; the prose label breaks on spaces.
+    expect(screen.getByText('.agents/skills').className).toContain('break-all');
+    expect(screen.getByText('(agent harness runtime rules)').className).toContain('break-words');
+    expect(screen.getByText('(will create, 3 skills)').className).toContain('break-words');
+  });
+
   it('hides the .gitignore row text "(will update)" when the block already exists', async () => {
     mockBackend({
       status: {

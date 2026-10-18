@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
-use crate::circuit::context::CircuitContext;
+use crate::circuit::context::{CircuitContext, PrContext};
 use crate::circuit::model::{CircuitGraph, CircuitNodeKind};
 use crate::circuit::security::{gate_trigger, CircuitTrigger, GateDecision};
 use crate::db;
@@ -348,15 +348,15 @@ fn ingest_pull_requests(circuit: &AutopilotCircuit, label: &str) {
     mint_unseen_runs(circuit, &fetched, |number| {
         prs.iter().find(|p| p.number == number).map(|p| {
             let mut ctx = base_context(circuit);
-            ctx.with_pr(
-                p.number,
-                &p.title,
-                &p.body,
-                &p.author,
-                &p.html_url,
-                &p.head_ref,
-                &[],
-            );
+            ctx.with_pr(PrContext {
+                number: p.number,
+                title: &p.title,
+                body: &p.body,
+                author: &p.author,
+                url: &p.html_url,
+                head_ref: &p.head_ref,
+                labels: &[],
+            });
             ctx
         })
     });

@@ -335,22 +335,47 @@ pub fn list_circuit_probe(
 /// restrictions — the review blueprint's GitHub-issue-label trigger
 /// requirement, interval clamp, label trim — live in
 /// [`crate::circuit::model::validate_circuit_request`].
-/// This Tauri command is a dumb router: parse → call the model →
-/// persist → wake the GitHub poll for labelled circuits.
-// Tauri IPC commands carry every primitive as a separate wire parameter;
-// collapsing into a struct would change the wire shape.
-#[allow(clippy::too_many_arguments)]
-#[command]
-pub fn create_circuit(
+/// The `create_circuit` invoke payload. Tauri IPC commands carry every
+/// primitive as a separate wire parameter, so this stays flat on the wire
+/// (issue #2449) and is read in one piece through `WirePayload` rather than
+/// collapsing into a nested payload parameter.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateCircuitRequest {
     mesh_id: i64,
     name: String,
     description: String,
     initial_prompt: String,
+    /// Every optional field defaults, which is what Tauri's own per-key
+    /// extraction does for an `Option` parameter whose key the caller
+    /// omitted (`createCircuit` in `src/lib/tauri.ts` omits nothing today,
+    /// but a partial payload must not turn into a hard error).
+    #[serde(default)]
     trigger_kind: Option<CircuitTriggerKind>,
+    #[serde(default)]
     trigger_label: Option<String>,
+    #[serde(default)]
     interval_seconds: Option<i64>,
+    #[serde(default)]
     blueprint: Option<CircuitBlueprintKind>,
+}
+
+/// This Tauri command is a dumb router: parse → call the model →
+/// persist → wake the GitHub poll for labelled circuits.
+#[command]
+pub fn create_circuit(
+    payload: crate::commands::wire_payload::WirePayload<CreateCircuitRequest>,
 ) -> Result<AutopilotCircuit, String> {
+    let CreateCircuitRequest {
+        mesh_id,
+        name,
+        description,
+        initial_prompt,
+        trigger_kind,
+        trigger_label,
+        interval_seconds,
+        blueprint,
+    } = payload.into_inner();
     let name = name.trim();
     if name.is_empty() {
         return Err("circuit name must not be empty".to_string());
@@ -998,6 +1023,75 @@ pub fn approve_circuit_step(run_id: i64, node_id: String) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::retire_cancelled_agents_with;
+
+    /// Issue #2449: `create_circuit` reads its eight fields through
+    /// `WirePayload` so the Rust signature stops being a positional bag,
+    /// and the wire is asserted here so that refactor can never quietly
+    /// become an IPC change. This payload is exactly what
+    /// `createCircuit` in `src/lib/tauri.ts` sends, `?? null` optionals
+    /// included.
+    #[test]
+    fn create_circuit_still_reads_the_flat_frontend_payload() {
+        use super::CreateCircuitRequest;
+        use crate::circuit::model::{CircuitBlueprintKind, CircuitTriggerKind};
+        let wire = serde_json::json!({
+            "meshId": 4,
+            "name": "  nightly review  ",
+            "description": "review open PRs",
+            "initialPrompt": "start",
+            "triggerKind": "github_issue_label",
+            "triggerLabel": "ready",
+            "intervalSeconds": 3600,
+            "blueprint": "walking_skeleton",
+        });
+        let request: CreateCircuitRequest =
+            serde_json::from_value(wire).expect("flat invoke payload still parses");
+        assert_eq!(request.mesh_id, 4);
+        assert_eq!(request.name.trim(), "nightly review");
+        assert_eq!(request.description, "review open PRs");
+        assert_eq!(request.initial_prompt, "start");
+        assert_eq!(
+            request.trigger_kind,
+            Some(CircuitTriggerKind::GithubIssueLabel)
+        );
+        assert_eq!(request.trigger_label.as_deref(), Some("ready"));
+        assert_eq!(request.interval_seconds, Some(3600));
+        assert_eq!(
+            request.blueprint,
+            Some(CircuitBlueprintKind::WalkingSkeleton)
+        );
+    }
+
+    /// The frontend wrapper substitutes `null` for absent optionals and
+    /// `undefined` keys never reach the wire, so both shapes must land on
+    /// `None` rather than failing the whole command.
+    #[test]
+    fn create_circuit_accepts_null_and_omitted_optional_fields() {
+        use super::CreateCircuitRequest;
+        let nulled: CreateCircuitRequest = serde_json::from_value(serde_json::json!({
+            "meshId": 1,
+            "name": "n",
+            "description": "",
+            "initialPrompt": "",
+            "triggerKind": "manual",
+            "triggerLabel": null,
+            "intervalSeconds": null,
+            "blueprint": "walking_skeleton",
+        }))
+        .expect("null optionals parse");
+        assert_eq!(nulled.trigger_label, None);
+        assert_eq!(nulled.interval_seconds, None);
+
+        let omitted: CreateCircuitRequest = serde_json::from_value(serde_json::json!({
+            "meshId": 1,
+            "name": "n",
+            "description": "",
+            "initialPrompt": "",
+        }))
+        .expect("omitted optionals default to None");
+        assert_eq!(omitted.trigger_kind, None);
+        assert_eq!(omitted.blueprint, None);
+    }
 
     #[test]
     fn saving_a_legacy_graph_applies_the_full_upgrade_sequence_and_preserves_authored_text() {

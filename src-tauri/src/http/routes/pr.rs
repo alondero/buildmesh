@@ -123,18 +123,23 @@ pub async fn spawn(req: &ParsedRequest) -> Response {
     };
     spawn_with(req, |mesh_id, pr_number, body| async move {
         crate::commands::run_blocking("http_spawn_pull_request", move || {
-            crate::commands::agent::create_pr_node(
+            crate::commands::agent::create_pr_node_for_request(
                 app.clone(),
-                mesh_id,
-                pr_number,
-                body.title,
-                body.head_ref,
-                body.head_sha,
-                body.provider,
-                body.head_repo_owner,
-                body.head_repo_clone_url,
-                body.configuration_id,
-                None,
+                // The HTTP route already holds the request fields the desktop
+                // IPC payload deserializes into (issue #2449), so it calls the
+                // body directly rather than rebuilding a wire wrapper.
+                crate::commands::agent::CreatePrNodeRequest {
+                    mesh_id,
+                    pr_number,
+                    pr_title: body.title,
+                    head_ref: body.head_ref,
+                    head_sha: body.head_sha,
+                    provider: body.provider,
+                    head_repo_owner: body.head_repo_owner,
+                    head_repo_clone_url: body.head_repo_clone_url,
+                    configuration_id: body.configuration_id,
+                    reviewer: None,
+                },
             )
             .map(|draft| draft.node)
         })
@@ -336,22 +341,23 @@ mod tests {
     }
 
     fn node_in(mesh_id: i64, name: &str) -> crate::models::AgentNode {
-        crate::db::create_agent_node(
+        crate::db::create_agent_node(crate::db::NewAgentNode {
             mesh_id,
             name,
-            &format!("/tmp/buildmesh-route-test/{mesh_id}/{name}"),
-            "main",
-            EnvType::Windows,
-            "claude",
-            Some(name),
-            None,
-            None,
-            None,
-            true,
-            None,
-            None,
-            None,
-        )
+            path: &format!("/tmp/buildmesh-route-test/{mesh_id}/{name}"),
+            branch: "main",
+            env: EnvType::Windows,
+            provider: "claude",
+            worktree_name: Some(name),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree: true,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            worktree_path: None,
+            spawn_configuration: None,
+        })
         .expect("create agent node")
     }
 
@@ -471,23 +477,24 @@ mod tests {
             true,
         )
         .expect("create mesh");
-        let node = crate::db::create_agent_node(
-            mesh.id,
-            "agent-1",
-            dir.path().to_str().expect("utf-8 path"),
-            "main",
-            EnvType::Windows,
-            "claude",
-            Some("agent-1"),
-            None,
-            None,
-            None,
+        let node = crate::db::create_agent_node(crate::db::NewAgentNode {
+            mesh_id: mesh.id,
+            name: "agent-1",
+            path: dir.path().to_str().expect("utf-8 path"),
+            branch: "main",
+            env: EnvType::Windows,
+            provider: "claude",
+            worktree_name: Some("agent-1"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
             // Not a worktree node, so the node's working path is the checkout.
-            false,
-            None,
-            None,
-            None,
-        )
+            use_worktree: false,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            worktree_path: None,
+            spawn_configuration: None,
+        })
         .expect("create agent node");
 
         let response = block_on(pr_source(&source_request(

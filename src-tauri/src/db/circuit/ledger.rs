@@ -472,13 +472,15 @@ fn create_node_circuit_run_with_recovery_locked(
     if let Some(continued_from) = continued_from {
         super::evidence::append_history(
             &tx,
-            run_id,
-            None,
-            None,
-            "review_continuation",
-            &serde_json::json!({ "from_run_id": continued_from }).to_string(),
-            Some(super::evidence::SOURCE_OPERATOR),
-            Some(super::evidence::DISPOSITION_APPLIED),
+super::evidence::HistoryEvent {
+                run_id,
+                node_id: None,
+                attempt: None,
+                kind: "review_continuation",
+                detail: &serde_json::json!({ "from_run_id": continued_from }).to_string(),
+                source: Some(super::evidence::SOURCE_OPERATOR),
+                disposition: Some(super::evidence::DISPOSITION_APPLIED),
+            },
         )?;
     }
     tx.commit()?;
@@ -1865,13 +1867,15 @@ pub(crate) fn commit_circuit_advance_inner(
         if durable_state.as_deref() != Some(state) {
             super::evidence::append_history(
                 tx,
-                run_id,
-                None,
-                None,
-                "run_transition",
-                state,
-                Some(super::evidence::SOURCE_CIRCUIT_WORKER),
-                Some(super::evidence::DISPOSITION_APPLIED),
+                super::evidence::HistoryEvent {
+                    run_id,
+                    node_id: None,
+                    attempt: None,
+                    kind: "run_transition",
+                    detail: state,
+                    source: Some(super::evidence::SOURCE_CIRCUIT_WORKER),
+                    disposition: Some(super::evidence::DISPOSITION_APPLIED),
+                },
             )?;
         }
     }
@@ -1915,13 +1919,15 @@ pub(crate) fn commit_circuit_advance_inner(
     for op in step_ops {
         super::evidence::append_history(
             tx,
-            run_id,
-            Some(&op.node_id),
-            Some(op.attempt),
-            "step_transition",
-            &op.status,
-            Some(super::evidence::SOURCE_CIRCUIT_WORKER),
-            Some(super::evidence::DISPOSITION_APPLIED),
+            super::evidence::HistoryEvent {
+                run_id,
+                node_id: Some(&op.node_id),
+                attempt: Some(op.attempt),
+                kind: "step_transition",
+                detail: &op.status,
+                source: Some(super::evidence::SOURCE_CIRCUIT_WORKER),
+                disposition: Some(super::evidence::DISPOSITION_APPLIED),
+            },
         )?;
         if op.status == "unverified" {
             if let Some(Some(reason)) = &op.error {
@@ -1929,13 +1935,15 @@ pub(crate) fn commit_circuit_advance_inner(
                 // the original delivery or evidence failure diagnosable.
                 super::evidence::append_history(
                     tx,
-                    run_id,
-                    Some(&op.node_id),
-                    Some(op.attempt),
-                    "checkpoint_reason",
-                    &crate::secret_scrubber::SecretScrubber::scrub(reason),
-                    Some(super::evidence::SOURCE_CIRCUIT_WORKER),
-                    Some("waiting"),
+                    super::evidence::HistoryEvent {
+                        run_id,
+                        node_id: Some(&op.node_id),
+                        attempt: Some(op.attempt),
+                        kind: "checkpoint_reason",
+                        detail: &crate::secret_scrubber::SecretScrubber::scrub(reason),
+                        source: Some(super::evidence::SOURCE_CIRCUIT_WORKER),
+                        disposition: Some("waiting"),
+                    },
                 )?;
             }
         }
@@ -1950,13 +1958,15 @@ pub(crate) fn commit_circuit_advance_inner(
             if changed > 0 {
                 super::evidence::append_history(
                     tx,
-                    run_id,
-                    Some(&op.node_id),
-                    Some(op.attempt),
-                    "effect_result",
-                    state,
-                    Some(super::evidence::SOURCE_CIRCUIT_WORKER),
-                    Some(state),
+                    super::evidence::HistoryEvent {
+                        run_id,
+                        node_id: Some(&op.node_id),
+                        attempt: Some(op.attempt),
+                        kind: "effect_result",
+                        detail: state,
+                        source: Some(super::evidence::SOURCE_CIRCUIT_WORKER),
+                        disposition: Some(state),
+                    },
                 )?;
             }
         }
@@ -2197,20 +2207,23 @@ mod reviewer_tests {
                 .unwrap();
             let source = crate::db::create_agent_node_inner(
                 &db,
-                mesh.id,
-                "Source",
-                &mesh.path,
-                "main",
-                crate::models::EnvType::Windows,
-                harness,
-                None,
-                None,
-                None,
-                None,
-                false,
-                None,
-                None,
-                None,
+                crate::db::NewAgentNode {
+                    mesh_id: mesh.id,
+                    name: "Source",
+                    path: &mesh.path,
+                    branch: "main",
+                    env: crate::models::EnvType::Windows,
+                    provider: harness,
+                    worktree_name: None,
+                    source_issue: None,
+                    source_pr: None,
+                    source_pr_pinned_sha: None,
+                    use_worktree: false,
+                    head_repo_owner: None,
+                    head_repo_clone_url: None,
+                    worktree_path: None,
+                    spawn_configuration: None,
+                },
             )
             .unwrap();
             crate::db::update_agent_node_status_inner(
@@ -2387,20 +2400,23 @@ mod reviewer_tests {
             crate::db::create_mesh_inner(&db, "frozen review", "/tmp/frozen-review").unwrap();
         let source = crate::db::create_agent_node_inner(
             &db,
-            mesh.id,
-            "Source",
-            &mesh.path,
-            "main",
-            crate::models::EnvType::Windows,
-            "codex",
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
+            crate::db::NewAgentNode {
+                mesh_id: mesh.id,
+                name: "Source",
+                path: &mesh.path,
+                branch: "main",
+                env: crate::models::EnvType::Windows,
+                provider: "codex",
+                worktree_name: None,
+                source_issue: None,
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree: false,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                worktree_path: None,
+                spawn_configuration: None,
+            },
         )
         .unwrap();
         crate::db::update_agent_node_status_inner(
@@ -2533,20 +2549,23 @@ mod reviewer_tests {
             crate::db::create_mesh_inner(&db, "recovery reopen", "/tmp/recovery-reopen").unwrap();
         let source = crate::db::create_agent_node_inner(
             &db,
-            mesh.id,
-            "Source",
-            &mesh.path,
-            "main",
-            crate::models::EnvType::Windows,
-            "codex",
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
+            crate::db::NewAgentNode {
+                mesh_id: mesh.id,
+                name: "Source",
+                path: &mesh.path,
+                branch: "main",
+                env: crate::models::EnvType::Windows,
+                provider: "codex",
+                worktree_name: None,
+                source_issue: None,
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree: false,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                worktree_path: None,
+                spawn_configuration: None,
+            },
         )
         .unwrap();
         crate::db::update_agent_node_status_inner(

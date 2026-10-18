@@ -44,22 +44,23 @@ fn scoped_mesh_prune_protects_live_sibling_checkout() {
     let owned = td.path().join("owned").to_string_lossy().to_string();
     crate::git::worktree::create_git_worktree(&selected, &owned, "owned", "branched", "HEAD")
         .unwrap();
-    db::create_agent_node(
-        mesh.id,
-        "owned",
-        &selected,
-        "owned",
-        crate::models::EnvType::Windows,
-        "anthropic",
-        Some("owned"),
-        None,
-        None,
-        None,
-        true,
-        None,
-        None,
-        Some(&owned),
-    )
+    db::create_agent_node(db::NewAgentNode {
+        mesh_id: mesh.id,
+        name: "owned",
+        path: &selected,
+        branch: "owned",
+        env: crate::models::EnvType::Windows,
+        provider: "anthropic",
+        worktree_name: Some("owned"),
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree: true,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        worktree_path: Some(&owned),
+        spawn_configuration: None,
+    })
     .unwrap();
     for mesh_id in [main.id, mesh.id] {
         let info = get_git_prune_info_blocking(mesh_id).unwrap();

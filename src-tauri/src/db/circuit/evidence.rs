@@ -574,13 +574,15 @@ pub(crate) fn record_prompt_submission_locked(
     };
     append_history(
         db,
-        run_id,
-        Some(node_id),
-        Some(attempt),
-        "prompt_submitted",
-        &serde_json::to_string(&submission)?,
-        Some(SOURCE_PROMPT_SUBMISSION),
-        Some(DISPOSITION_RECORDED),
+        HistoryEvent {
+            run_id,
+            node_id: Some(node_id),
+            attempt: Some(attempt),
+            kind: "prompt_submitted",
+            detail: &serde_json::to_string(&submission)?,
+            source: Some(SOURCE_PROMPT_SUBMISSION),
+            disposition: Some(DISPOSITION_RECORDED),
+        },
     )?;
     // This history entry advances the same revision used by transition fences.
     // Return it under the writer lock so the dispatcher's own write cannot
@@ -833,13 +835,15 @@ pub(crate) fn receive_native_hook_locked(
         if !exists {
             append_history(
                 &tx,
-                run_id,
-                Some(&node_id),
-                Some(attempt),
-                "native_hook_received",
-                &detail,
-                Some(SOURCE_NATIVE_HOOK),
-                Some(DISPOSITION_RECEIVED),
+                HistoryEvent {
+                    run_id,
+                    node_id: Some(&node_id),
+                    attempt: Some(attempt),
+                    kind: "native_hook_received",
+                    detail: &detail,
+                    source: Some(SOURCE_NATIVE_HOOK),
+                    disposition: Some(DISPOSITION_RECEIVED),
+                },
             )?;
         }
     }
@@ -1004,13 +1008,15 @@ pub(super) fn record_outcome_locked(
         }
         append_history(
             &tx,
-            run.id,
-            Some(&step.node_id),
-            Some(step.attempt),
-            "operator_review",
-            &format!("Human review {verdict}: {}", request.reason.trim()),
-            Some(SOURCE_OPERATOR),
-            Some(verdict),
+            HistoryEvent {
+                run_id: run.id,
+                node_id: Some(&step.node_id),
+                attempt: Some(step.attempt),
+                kind: "operator_review",
+                detail: &format!("Human review {verdict}: {}", request.reason.trim()),
+                source: Some(SOURCE_OPERATOR),
+                disposition: Some(verdict),
+            },
         )?;
         return Ok(tx.commit()?);
     }
@@ -1065,13 +1071,15 @@ pub(super) fn record_outcome_locked(
         )?;
         append_history(
             &tx,
-            run.id,
-            Some(&step.node_id),
-            Some(step.attempt),
-            "operator_attestation",
-            &reason,
-            Some(SOURCE_OPERATOR),
-            Some("completed"),
+            HistoryEvent {
+                run_id: run.id,
+                node_id: Some(&step.node_id),
+                attempt: Some(step.attempt),
+                kind: "operator_attestation",
+                detail: &reason,
+                source: Some(SOURCE_OPERATOR),
+                disposition: Some("completed"),
+            },
         )?;
         return Ok(tx.commit()?);
     }
@@ -1140,17 +1148,19 @@ pub(super) fn record_outcome_locked(
         }
         append_history(
             &tx,
-            request.run_id,
-            Some(&request.node_id),
-            Some(request.attempt),
-            "evidence_recheck",
-            if note.is_empty() {
-                "Operator requested an evidence recheck."
-            } else {
-                note
+            HistoryEvent {
+                run_id: request.run_id,
+                node_id: Some(&request.node_id),
+                attempt: Some(request.attempt),
+                kind: "evidence_recheck",
+                detail: if note.is_empty() {
+                    "Operator requested an evidence recheck."
+                } else {
+                    note
+                },
+                source: Some(SOURCE_OPERATOR),
+                disposition: Some(DISPOSITION_REQUESTED),
             },
-            Some(SOURCE_OPERATOR),
-            Some(DISPOSITION_REQUESTED),
         )?;
         return Ok(tx.commit()?);
     }
@@ -1263,13 +1273,15 @@ pub(super) fn record_outcome_locked(
     }
     append_history(
         &tx,
-        request.run_id,
-        Some(&request.node_id),
-        Some(request.attempt),
-        "operator_attestation",
-        &reason,
-        Some(SOURCE_OPERATOR),
-        Some(disposition),
+        HistoryEvent {
+            run_id: request.run_id,
+            node_id: Some(&request.node_id),
+            attempt: Some(request.attempt),
+            kind: "operator_attestation",
+            detail: &reason,
+            source: Some(SOURCE_OPERATOR),
+            disposition: Some(disposition),
+        },
     )?;
     Ok(tx.commit()?)
 }
@@ -1380,13 +1392,15 @@ fn record_queue_wait_locked(
     if previous.as_deref() != Some(&detail) {
         append_history(
             &tx,
-            run_id,
-            None,
-            None,
-            "queue_wait",
-            &detail,
-            Some(SOURCE_ADMISSION),
-            Some(DISPOSITION_WAITING),
+            HistoryEvent {
+                run_id,
+                node_id: None,
+                attempt: None,
+                kind: "queue_wait",
+                detail: &detail,
+                source: Some(SOURCE_ADMISSION),
+                disposition: Some(DISPOSITION_WAITING),
+            },
         )?;
     }
     tx.commit()
@@ -1418,17 +1432,19 @@ pub(super) fn pin_graph(db: &Connection, run_id: i64) -> SqlResult<()> {
     }).collect();
     append_history(
         db,
-        run_id,
-        None,
-        None,
-        "configuration_pinned",
-        &serde_json::json!({
-            "behavior_revision":1,"graph_sha256":hex::encode(Sha256::digest(graph.as_bytes())),
-            "reviewers":reviewers
-        })
-        .to_string(),
-        Some(SOURCE_RUN_CONFIGURATION),
-        Some(DISPOSITION_APPLIED),
+        HistoryEvent {
+            run_id,
+            node_id: None,
+            attempt: None,
+            kind: "configuration_pinned",
+            detail: &serde_json::json!({
+                "behavior_revision":1,"graph_sha256":hex::encode(Sha256::digest(graph.as_bytes())),
+                "reviewers":reviewers
+            })
+            .to_string(),
+            source: Some(SOURCE_RUN_CONFIGURATION),
+            disposition: Some(DISPOSITION_APPLIED),
+        },
     )?;
     Ok(())
 }
@@ -1474,22 +1490,35 @@ pub(super) fn record_wait_changes(
             if state == "possible_dispatch"
                 && previous.get(key).map(String::as_str) != Some("pending")
             {
-                append_history(db,run_id,Some(node),attempt,"continuation_effect",&serde_json::json!({
-                    "effect":"continuation_prompt","state":"intent","ordinal":next.get(&count_key)
-                }).to_string(),Some(SOURCE_CIRCUIT_WORKER),Some(DISPOSITION_INTENT))?;
+                append_history(
+                    db,
+                    HistoryEvent {
+                        run_id,
+                        node_id: Some(node),
+                        attempt,
+                        kind: "continuation_effect",
+                        detail: &serde_json::json!({
+                            "effect":"continuation_prompt","state":"intent","ordinal":next.get(&count_key)
+                        }).to_string(),
+                        source: Some(SOURCE_CIRCUIT_WORKER),
+                        disposition: Some(DISPOSITION_INTENT),
+                    },
+                )?;
             }
             append_history(
                 db,
-                run_id,
-                Some(node),
-                attempt,
-                "continuation_effect",
-                &serde_json::json!({
-                    "effect":"continuation_prompt","state":state,"ordinal":next.get(&count_key)
-                })
-                .to_string(),
-                Some(SOURCE_CIRCUIT_WORKER),
-                Some(state),
+                HistoryEvent {
+                    run_id,
+                    node_id: Some(node),
+                    attempt,
+                    kind: "continuation_effect",
+                    detail: &serde_json::json!({
+                        "effect":"continuation_prompt","state":state,"ordinal":next.get(&count_key)
+                    })
+                    .to_string(),
+                    source: Some(SOURCE_CIRCUIT_WORKER),
+                    disposition: Some(state),
+                },
             )?;
         }
     }
@@ -1522,13 +1551,15 @@ pub(super) fn record_wait_changes(
         let detail = serde_json::json!({"blocker": blocker, "message": blocker.as_ref().map(|blocker| blocker.message())});
         append_history(
             db,
-            run_id,
-            Some(node),
-            attempt,
-            "observation_readiness",
-            &detail.to_string(),
-            Some(SOURCE_RECONCILIATION),
-            Some(wait_disposition(blocker.is_some())),
+            HistoryEvent {
+                run_id,
+                node_id: Some(node),
+                attempt,
+                kind: "observation_readiness",
+                detail: &detail.to_string(),
+                source: Some(SOURCE_RECONCILIATION),
+                disposition: Some(wait_disposition(blocker.is_some())),
+            },
         )?;
     }
     let capacity_keys: std::collections::BTreeSet<&String> = previous
@@ -1562,13 +1593,16 @@ pub(super) fn record_wait_changes(
                 .is_some_and(|value| value["agent_limit"].as_bool().unwrap_or(false));
             append_history(
                 db,
-                run_id,
-                node,
-                attempt,
-                "step_capacity_wait",
-                &serde_json::json!({"before":previous.get(key),"after":next.get(key)}).to_string(),
-                Some(SOURCE_CAPACITY),
-                Some(wait_disposition(binding)),
+                HistoryEvent {
+                    run_id,
+                    node_id: node,
+                    attempt,
+                    kind: "step_capacity_wait",
+                    detail: &serde_json::json!({"before":previous.get(key),"after":next.get(key)})
+                        .to_string(),
+                    source: Some(SOURCE_CAPACITY),
+                    disposition: Some(wait_disposition(binding)),
+                },
             )?;
         }
     }
@@ -1611,13 +1645,15 @@ pub(super) fn record_wait_changes(
                 .is_some_and(|value| !value.is_empty());
             append_history(
                 db,
-                run_id,
-                Some(node),
-                attempt,
-                "evidence_window_changed",
-                &serde_json::json!({"before":before,"after":after}).to_string(),
-                Some(SOURCE_RECONCILIATION),
-                Some(wait_disposition(binding)),
+                HistoryEvent {
+                    run_id,
+                    node_id: Some(node),
+                    attempt,
+                    kind: "evidence_window_changed",
+                    detail: &serde_json::json!({"before":before,"after":after}).to_string(),
+                    source: Some(SOURCE_RECONCILIATION),
+                    disposition: Some(wait_disposition(binding)),
+                },
             )?;
         }
     }
@@ -1642,26 +1678,36 @@ pub(super) fn run_graph_json(db: &Connection, run_id: i64) -> SqlResult<String> 
     )
 }
 
-/// Append one Circuit Run History event. `source` and `disposition` are the
-/// provenance vocabulary above; both are nullable for pre-v45 rows (issue
-/// #1909 / #1847). `observed_at` defaults to the append time, which for these
-/// synchronous events is the observed time.
+/// One Circuit Run History event: the single row [`append_history`] writes.
 ///
-/// The 7-arg signature covers run/node/attempt/kind/detail/source/disposition;
-/// the helper has a single, narrow INSERT and a 1-line body, so wrapping the
-/// arguments in a struct would just push the wiring to every call site. The
-/// allow is intentional and scoped to this function.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn append_history(
-    db: &Connection,
-    run_id: i64,
-    node_id: Option<&str>,
-    attempt: Option<i32>,
-    kind: &str,
-    detail: &str,
-    source: Option<&str>,
-    disposition: Option<&str>,
-) -> SqlResult<()> {
+/// `source` and `disposition` are the provenance vocabulary above; both are
+/// nullable for pre-v45 rows (issue #1909 / #1847). `observed_at` defaults to
+/// the append time, which for these synchronous events is the observed time.
+///
+/// A history event is a named thing rather than a tuple: every call site
+/// spells out its provenance fields instead of trusting a positional order,
+/// so a field added later cannot be transposed into the wrong column.
+pub(super) struct HistoryEvent<'a> {
+    pub(super) run_id: i64,
+    pub(super) node_id: Option<&'a str>,
+    pub(super) attempt: Option<i32>,
+    pub(super) kind: &'a str,
+    pub(super) detail: &'a str,
+    pub(super) source: Option<&'a str>,
+    pub(super) disposition: Option<&'a str>,
+}
+
+/// Append one Circuit Run History event.
+pub(super) fn append_history(db: &Connection, event: HistoryEvent<'_>) -> SqlResult<()> {
+    let HistoryEvent {
+        run_id,
+        node_id,
+        attempt,
+        kind,
+        detail,
+        source,
+        disposition,
+    } = event;
     db.execute("INSERT INTO circuit_run_history (run_id,node_id,attempt,kind,detail,source,disposition) VALUES (?1,?2,?3,?4,?5,?6,?7)",
         params![run_id, node_id, attempt, kind, crate::secret_scrubber::SecretScrubber::scrub(detail), source, disposition])?;
     Ok(())
@@ -1916,20 +1962,22 @@ pub(crate) fn commit_transition_locked(
         crate::db::update_agent_node_status_inner(&tx, effect.agent_node_id, effect.status)?;
         append_history(
             &tx,
-            run_id,
-            Some(&effect.node_id),
-            Some(effect.attempt),
-            "effect_result",
-            &serde_json::json!({
-                "effect": "set_node_status",
-                "state": "acknowledged",
-                "agent_node_id": effect.agent_node_id,
-                "status": effect.status.to_db_str(),
-                "meaning": "Agent status and Circuit step committed atomically"
-            })
-            .to_string(),
-            Some(SOURCE_CIRCUIT_WORKER),
-            Some(DISPOSITION_ACKNOWLEDGED),
+            HistoryEvent {
+                run_id,
+                node_id: Some(&effect.node_id),
+                attempt: Some(effect.attempt),
+                kind: "effect_result",
+                detail: &serde_json::json!({
+                    "effect": "set_node_status",
+                    "state": "acknowledged",
+                    "agent_node_id": effect.agent_node_id,
+                    "status": effect.status.to_db_str(),
+                    "meaning": "Agent status and Circuit step committed atomically"
+                })
+                .to_string(),
+                source: Some(SOURCE_CIRCUIT_WORKER),
+                disposition: Some(DISPOSITION_ACKNOWLEDGED),
+            },
         )?;
     }
     for observation in evidence.observations {
@@ -1942,13 +1990,15 @@ pub(crate) fn commit_transition_locked(
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         append_history(
             &tx,
-            run_id,
-            Some(&identity.step_id),
-            Some(identity.attempt),
-            "observation",
-            &detail,
-            Some(observation.observation.source.as_str()),
-            Some(observation_disposition_str(observation.disposition)),
+            HistoryEvent {
+                run_id,
+                node_id: Some(&identity.step_id),
+                attempt: Some(identity.attempt),
+                kind: "observation",
+                detail: &detail,
+                source: Some(observation.observation.source.as_str()),
+                disposition: Some(observation_disposition_str(observation.disposition)),
+            },
         )?;
     }
     for classification in evidence.classifications {
@@ -1956,13 +2006,15 @@ pub(crate) fn commit_transition_locked(
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         append_history(
             &tx,
-            run_id,
-            Some(&classification.step_id),
-            Some(classification.attempt),
-            "classification",
-            &detail,
-            Some(SOURCE_CLASSIFIER),
-            Some(DISPOSITION_INTERPRETED),
+            HistoryEvent {
+                run_id,
+                node_id: Some(&classification.step_id),
+                attempt: Some(classification.attempt),
+                kind: "classification",
+                detail: &detail,
+                source: Some(SOURCE_CLASSIFIER),
+                disposition: Some(DISPOSITION_INTERPRETED),
+            },
         )?;
     }
     for effect in evidence.reconciled_effects {
@@ -1996,13 +2048,15 @@ pub(crate) fn commit_transition_locked(
         if changed == 1 {
             append_history(
                 &tx,
-                run_id,
-                Some(&effect.intent.node_id),
-                Some(effect.intent.attempt),
-                "effect_reconciled",
-                &effect.detail,
-                Some(SOURCE_GITHUB),
-                Some(DISPOSITION_RECONCILED),
+                HistoryEvent {
+                    run_id,
+                    node_id: Some(&effect.intent.node_id),
+                    attempt: Some(effect.intent.attempt),
+                    kind: "effect_reconciled",
+                    detail: &effect.detail,
+                    source: Some(SOURCE_GITHUB),
+                    disposition: Some(DISPOSITION_RECONCILED),
+                },
             )?;
         } else {
             return Err(rusqlite::Error::InvalidQuery);
@@ -2017,13 +2071,15 @@ pub(crate) fn commit_transition_locked(
         if inserted == 1 {
             append_history(
                 &tx,
-                run_id,
-                Some(&intent.node_id),
-                Some(intent.attempt),
-                "effect_intent",
-                intent.kind.as_db_str(),
-                Some(SOURCE_CIRCUIT_WORKER),
-                Some(DISPOSITION_INTENT),
+                HistoryEvent {
+                    run_id,
+                    node_id: Some(&intent.node_id),
+                    attempt: Some(intent.attempt),
+                    kind: "effect_intent",
+                    detail: intent.kind.as_db_str(),
+                    source: Some(SOURCE_CIRCUIT_WORKER),
+                    disposition: Some(DISPOSITION_INTENT),
+                },
             )?;
         }
     }
@@ -2077,11 +2133,20 @@ fn acknowledge_spawn_attachment_locked(
         ON CONFLICT(run_id,node_id,attempt,kind) DO UPDATE SET state='acknowledged' WHERE state='possible_dispatch'",
         params![run_id,node_id,attempt])?;
     if acknowledged > 0 {
-        append_history(&tx, run_id, Some(node_id), Some(attempt), "effect_result",
-            &serde_json::json!({"effect":"spawn","state":"acknowledged","agent_node_id":agent_node_id,
-                "meaning":if expected_agent_node_id == Some(agent_node_id) { "Prompt delivered to retained agent; completion still requires evidence" }
-                    else { "Agent allocation attached; foreground and owned work completion still require evidence" }}).to_string(),
-            Some(SOURCE_CIRCUIT_WORKER), Some(DISPOSITION_ACKNOWLEDGED))?;
+        append_history(
+            &tx,
+            HistoryEvent {
+                run_id,
+                node_id: Some(node_id),
+                attempt: Some(attempt),
+                kind: "effect_result",
+                detail: &serde_json::json!({"effect":"spawn","state":"acknowledged","agent_node_id":agent_node_id,
+                    "meaning":if expected_agent_node_id == Some(agent_node_id) { "Prompt delivered to retained agent; completion still requires evidence" }
+                        else { "Agent allocation attached; foreground and owned work completion still require evidence" }}).to_string(),
+                source: Some(SOURCE_CIRCUIT_WORKER),
+                disposition: Some(DISPOSITION_ACKNOWLEDGED),
+            },
+        )?;
     }
     let revision = revision_inner(&tx, run_id)?;
     tx.commit()?;
@@ -2119,13 +2184,15 @@ fn acknowledge_prompt_delivery_locked(
     }
     append_history(
         &tx,
-        run_id,
-        Some(node_id),
-        Some(attempt),
-        "effect_result",
-        "acknowledged",
-        Some(SOURCE_CIRCUIT_WORKER),
-        Some(DISPOSITION_ACKNOWLEDGED),
+        HistoryEvent {
+            run_id,
+            node_id: Some(node_id),
+            attempt: Some(attempt),
+            kind: "effect_result",
+            detail: "acknowledged",
+            source: Some(SOURCE_CIRCUIT_WORKER),
+            disposition: Some(DISPOSITION_ACKNOWLEDGED),
+        },
     )?;
     let revision = revision_inner(&tx, run_id)?;
     tx.commit()?;
@@ -2193,13 +2260,15 @@ fn record_effect_target_locked(
     }
     append_history(
         &tx,
-        run_id,
-        Some(node_id),
-        Some(attempt),
-        "effect_target",
-        detail,
-        Some(SOURCE_GITHUB),
-        Some(DISPOSITION_RECORDED),
+        HistoryEvent {
+            run_id,
+            node_id: Some(node_id),
+            attempt: Some(attempt),
+            kind: "effect_target",
+            detail,
+            source: Some(SOURCE_GITHUB),
+            disposition: Some(DISPOSITION_RECORDED),
+        },
     )?;
     let revision = revision_inner(&tx, run_id)?;
     tx.commit()?;
@@ -2253,13 +2322,15 @@ fn claim_effect_locked(
     if claimed {
         append_history(
             &tx,
-            run_id,
-            Some(&intent.node_id),
-            Some(intent.attempt),
-            "effect_possible_dispatch",
-            intent.kind.as_db_str(),
-            Some(SOURCE_CIRCUIT_WORKER),
-            Some(DISPOSITION_POSSIBLE_DISPATCH),
+            HistoryEvent {
+                run_id,
+                node_id: Some(&intent.node_id),
+                attempt: Some(intent.attempt),
+                kind: "effect_possible_dispatch",
+                detail: intent.kind.as_db_str(),
+                source: Some(SOURCE_CIRCUIT_WORKER),
+                disposition: Some(DISPOSITION_POSSIBLE_DISPATCH),
+            },
         )?;
     }
     let revision = revision_inner(&tx, run_id)?;

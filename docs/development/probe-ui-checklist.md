@@ -90,6 +90,12 @@ The dock resizes between **240px and 720px** (`PROBE_PANEL_BOUNDS` in
       diagnosis. If the reason can be derived honestly, show it; if it is an
       inference rather than a fact, say so in the code comment and name the
       issue that will make it authoritative.
+- [ ] **Counts agree with their noun.** One circuit is "1 circuit idle", not
+      "1 circuits idle" — derive the plural from the same expression that
+      produced the number.
+- [ ] **An empty state speaks from the view the user is on.** A hint that says
+      "open Manage" is a dead end while Manage is rendering the hint; name the
+      control that is actually on screen instead.
 
 ## 4. Actions
 
@@ -117,6 +123,11 @@ The dock resizes between **240px and 720px** (`PROBE_PANEL_BOUNDS` in
       default-open item does nothing visible and needs a second.
 - [ ] **A failure is never only behind a disclosure.** Surface a clamped
       excerpt while collapsed.
+- [ ] **A list header belongs to a list.** Render the header ("Recent
+      outcomes · attention first") and the rows it labels from one derivation,
+      so no header is left above zero items beside an empty state.
+- [ ] **A disclosure labels its own panel.** Don't repeat the `<summary>`
+      wording as a heading inside the panel; the summary is the label.
 
 ## 6. Tests
 

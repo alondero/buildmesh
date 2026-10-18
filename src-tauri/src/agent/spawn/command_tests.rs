@@ -11,7 +11,7 @@ use crate::preferences::HarnessConfigValue;
 
 #[test]
 fn claude_prompted_spawn_submits_instead_of_staging_for_enter() {
-    use super::command::build_spawn_command;
+    use super::command::{build_spawn_command_prepared, SpawnCommandInput};
     use super::reader::SessionIdMode;
 
     let resolved = crate::env::ResolvedPath {
@@ -31,17 +31,17 @@ fn claude_prompted_spawn_submits_instead_of_staging_for_enter() {
             "Handover: finish the implementation\nthen run tests",
             "- review this diff\n+ added line",
         ] {
-            let cmd = build_spawn_command(
-                &resolved,
-                Provider::Anthropic,
-                &[],
-                &session,
-                1,
-                &config,
-                Some(prompt),
-                false,
-                super::ResumeCause::Explicit,
-            )
+            let cmd = build_spawn_command_prepared(SpawnCommandInput {
+                resolved: &resolved,
+                provider: Provider::Anthropic,
+                routing: &crate::agent::launch_routing::PreparedLaunchRouting::environment(&[]),
+                session_id_mode: &session,
+                session_id: 1,
+                config: &config,
+                prefill: Some(prompt),
+                sandbox: false,
+                resume_cause: super::ResumeCause::Explicit,
+            })
             .unwrap();
             let argv: Vec<_> = cmd
                 .get_argv()
@@ -64,7 +64,7 @@ fn claude_prompted_spawn_submits_instead_of_staging_for_enter() {
 
 #[test]
 fn mcode_spawn_validates_final_model_for_fresh_and_resumed_sessions() {
-    use super::command::build_spawn_command;
+    use super::command::{build_spawn_command_prepared, SpawnCommandInput};
     use super::reader::SessionIdMode;
 
     for runtime in [EnvType::Windows, EnvType::WindowsInterop, EnvType::Wsl] {
@@ -82,17 +82,17 @@ fn mcode_spawn_validates_final_model_for_fresh_and_resumed_sessions() {
                 model: Some("minimax/MiniMax-M3#variant".into()),
                 ..Default::default()
             };
-            let command = build_spawn_command(
-                &resolved,
-                Provider::Mcode,
-                &[],
-                &session,
-                1,
-                &config,
-                Some("prompt"),
-                false,
-                crate::agent::spawn::ResumeCause::Explicit,
-            )
+            let command = build_spawn_command_prepared(SpawnCommandInput {
+                resolved: &resolved,
+                provider: Provider::Mcode,
+                routing: &crate::agent::launch_routing::PreparedLaunchRouting::environment(&[]),
+                session_id_mode: &session,
+                session_id: 1,
+                config: &config,
+                prefill: Some("prompt"),
+                sandbox: false,
+                resume_cause: crate::agent::spawn::ResumeCause::Explicit,
+            })
             .unwrap();
             let argv: Vec<_> = command
                 .get_argv()
@@ -144,17 +144,17 @@ fn mcode_spawn_validates_final_model_for_fresh_and_resumed_sessions() {
                 "minimax/M3#variant&echo",
             ] {
                 config.model = Some(invalid.into());
-                let error = build_spawn_command(
-                    &resolved,
-                    Provider::Mcode,
-                    &[],
-                    &session,
-                    1,
-                    &config,
-                    None,
-                    false,
-                    crate::agent::spawn::ResumeCause::Explicit,
-                )
+                let error = build_spawn_command_prepared(SpawnCommandInput {
+                    resolved: &resolved,
+                    provider: Provider::Mcode,
+                    routing: &crate::agent::launch_routing::PreparedLaunchRouting::environment(&[]),
+                    session_id_mode: &session,
+                    session_id: 1,
+                    config: &config,
+                    prefill: None,
+                    sandbox: false,
+                    resume_cause: crate::agent::spawn::ResumeCause::Explicit,
+                })
                 .expect_err("invalid model must fail before building a command");
                 assert!(
                     error.contains("model reference"),
@@ -171,7 +171,7 @@ fn mcode_spawn_validates_final_model_for_fresh_and_resumed_sessions() {
 /// character process limit even with a long initial prompt.
 #[test]
 fn codex_spawn_carries_attention_hooks_for_the_launched_node() {
-    use super::command::build_spawn_command;
+    use super::command::{build_spawn_command_prepared, SpawnCommandInput};
     use super::reader::SessionIdMode;
 
     for runtime in [EnvType::Windows, EnvType::WindowsInterop, EnvType::Wsl] {
@@ -188,17 +188,17 @@ fn codex_spawn_carries_attention_hooks_for_the_launched_node() {
                 SessionIdMode::Resume("019dcb2e-1111-7222-8333-444455556666".into()),
             ),
         ] {
-            let command = build_spawn_command(
-                &resolved,
-                Provider::Codex,
-                &[],
-                &session,
-                4242,
-                &ResolvedAgentConfig::default(),
-                None,
-                false,
-                crate::agent::spawn::ResumeCause::Explicit,
-            )
+            let command = build_spawn_command_prepared(SpawnCommandInput {
+                resolved: &resolved,
+                provider: Provider::Codex,
+                routing: &crate::agent::launch_routing::PreparedLaunchRouting::environment(&[]),
+                session_id_mode: &session,
+                session_id: 4242,
+                config: &ResolvedAgentConfig::default(),
+                prefill: None,
+                sandbox: false,
+                resume_cause: crate::agent::spawn::ResumeCause::Explicit,
+            })
             .unwrap();
             let argv: Vec<String> = command
                 .get_argv()
@@ -256,7 +256,7 @@ fn codex_spawn_carries_attention_hooks_for_the_launched_node() {
 /// prompt still reaches the launch at all, alongside every attention hook.
 #[test]
 fn codex_launch_carries_the_review_prompt_next_to_its_attention_hooks() {
-    use super::command::build_spawn_command;
+    use super::command::{build_spawn_command_prepared, SpawnCommandInput};
     use super::reader::SessionIdMode;
 
     for runtime in [EnvType::Windows, EnvType::WindowsInterop, EnvType::Wsl] {
@@ -270,17 +270,17 @@ fn codex_launch_carries_the_review_prompt_next_to_its_attention_hooks() {
             "Review PR #2261\n{}\nhttps://github.com/alondero/buildmesh/pull/2261",
             crate::review_contract::REVIEW_POLICY
         );
-        let command = build_spawn_command(
-            &resolved,
-            Provider::Codex,
-            &[],
-            &SessionIdMode::None,
-            5351,
-            &ResolvedAgentConfig::default(),
-            Some(&prompt),
-            false,
-            crate::agent::spawn::ResumeCause::Explicit,
-        )
+        let command = build_spawn_command_prepared(SpawnCommandInput {
+            resolved: &resolved,
+            provider: Provider::Codex,
+            routing: &crate::agent::launch_routing::PreparedLaunchRouting::environment(&[]),
+            session_id_mode: &SessionIdMode::None,
+            session_id: 5351,
+            config: &ResolvedAgentConfig::default(),
+            prefill: Some(&prompt),
+            sandbox: false,
+            resume_cause: crate::agent::spawn::ResumeCause::Explicit,
+        })
         .unwrap();
         let argv: Vec<String> = command
             .get_argv()

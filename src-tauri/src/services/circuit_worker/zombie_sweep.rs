@@ -536,22 +536,23 @@ mod tests {
     fn notify_dispatches_after_the_writer_lock_is_released() {
         let _db = db::test_support::isolated();
         let mesh = db::create_mesh("reap-global", "/tmp/reap-global").unwrap();
-        let node = db::create_agent_node(
-            mesh.id,
-            "global-zombie",
-            "/tmp/reap-global/node",
-            "main",
-            crate::models::EnvType::Windows,
-            "anthropic",
-            None,
-            None,
-            None,
-            None,
-            true,
-            None,
-            None,
-            None,
-        )
+        let node = db::create_agent_node(db::NewAgentNode {
+            mesh_id: mesh.id,
+            name: "global-zombie",
+            path: "/tmp/reap-global/node",
+            branch: "main",
+            env: crate::models::EnvType::Windows,
+            provider: "anthropic",
+            worktree_name: None,
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree: true,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            worktree_path: None,
+            spawn_configuration: None,
+        })
         .unwrap();
         db::update_agent_node_status(node.id, SessionStatus::Running).unwrap();
 
@@ -583,22 +584,23 @@ mod tests {
     fn no_notification_when_nothing_is_reaped() {
         let _db = db::test_support::isolated();
         let mesh = db::create_mesh("reap-global-noop", "/tmp/reap-global-noop").unwrap();
-        let node = db::create_agent_node(
-            mesh.id,
-            "global-idle",
-            "/tmp/reap-global-noop/node",
-            "main",
-            crate::models::EnvType::Windows,
-            "anthropic",
-            None,
-            None,
-            None,
-            None,
-            true,
-            None,
-            None,
-            None,
-        )
+        let node = db::create_agent_node(db::NewAgentNode {
+            mesh_id: mesh.id,
+            name: "global-idle",
+            path: "/tmp/reap-global-noop/node",
+            branch: "main",
+            env: crate::models::EnvType::Windows,
+            provider: "anthropic",
+            worktree_name: None,
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree: true,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            worktree_path: None,
+            spawn_configuration: None,
+        })
         .unwrap();
         db::update_agent_node_status(node.id, SessionStatus::Idle).unwrap();
 

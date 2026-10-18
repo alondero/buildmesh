@@ -58,6 +58,14 @@ let land silently.
 
 - Bundle grows by React Flow + dagre (~150 kB gzipped); acceptable for a
   desktop Tauri app.
+- React Flow styles part of its own chrome: the zoom Controls and the
+  attribution pill ship light-mode literals, which read as `#fefefe` boxes on
+  the dark canvas (issue #2460). The editor binds React Flow's `--xy-*`
+  custom properties to Buildmesh tokens on the flow root, so
+  `[data-theme="light"]` flips it with the rest of the app; the one value
+  upstream hard-codes rather than exposes (the attribution link) needs a
+  scoped rule in `CircuitFlowEditor.css`. See DESIGN.md → Third-party
+  surfaces.
 - Testing React Flow under vitest/jsdom needs polyfills (ResizeObserver that
   reports real dimensions, DOMMatrixReadOnly) — see
   `docs/learning/react-flow-vitest-jsdom.md`.
