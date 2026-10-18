@@ -51,6 +51,25 @@ describe('MeshCreateModal', () => {
     expect(screen.queryByLabelText('Repository')).toBeNull();
   });
 
+  it('moves focus inside the dialog to the first required step on open (issue #2463)', () => {
+    // Reproduces the reported path: before the fix, opening the dialog left
+    // focus on the sidebar trigger, because the submit button the modal
+    // targeted is disabled until a folder is picked — and `.focus()` on a
+    // disabled button is a silent no-op.
+    const trigger = document.createElement('button');
+    trigger.textContent = '+ New mesh';
+    document.body.appendChild(trigger);
+    trigger.focus();
+    expect(document.activeElement).toBe(trigger);
+
+    render(<MeshCreateModal onClose={() => {}} />);
+
+    const dialog = screen.getByRole('dialog');
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: /choose folder/i }));
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    trigger.remove();
+  });
+
   it('creates a mesh from a chosen folder in open mode', async () => {
     mockInvoke
       .mockResolvedValueOnce({ path: '/repos/app', name: 'app' }) // pick_mesh_folder
