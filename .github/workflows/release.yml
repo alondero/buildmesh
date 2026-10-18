@@ -242,14 +242,12 @@ jobs:
             target: aarch64-apple-darwin
             config: src-tauri/tauri.macos-release.conf.json
             arch: aarch64
-            asset_arch: aarch64
           # Intel. 10.13 is Tauri's documented minimum and the floor for this
           # architecture.
           - runner: macos-15-intel
             target: x86_64-apple-darwin
             config: src-tauri/tauri.macos-release-intel.conf.json
             arch: x86_64
-            asset_arch: x64
     runs-on: ${{ matrix.runner }}
 
     steps:
@@ -346,29 +344,17 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          BUNDLE="src-tauri/target/${{ matrix.target }}/release/bundle"
-          # No `mapfile`: macOS still ships bash 3.2 as /bin/bash, which has no
-          # such builtin. A read loop over a file works on every bash.
-          LIST="$RUNNER_TEMP/macos-bundle-assets.txt"
-          find "$BUNDLE" -type f \( -name '*.dmg' -o -name '*.app.tar.gz' \) | sort > "$LIST"
-          if [[ ! -s "$LIST" ]]; then
-            echo "::error::No DMG or .app.tar.gz found under $BUNDLE"
-            exit 1
-          fi
+          TAG="${GITHUB_REF_NAME}"
+          RELEASE_ASSETS="$RUNNER_TEMP/macos-release-assets.json"
           MANIFEST="SHA256SUMS-macos-${{ matrix.arch }}.txt"
-          : > "$MANIFEST"
-          while IFS= read -r asset; do
-            # The action adds a version and target architecture to updater
-            # archives when publishing them. Match that release name here.
-            asset_name="$(basename "$asset")"
-            if [[ "$asset_name" == *.app.tar.gz ]]; then
-              asset_name="Buildmesh_${GITHUB_REF_NAME#v}_${{ matrix.asset_arch }}.app.tar.gz"
-            fi
-            digest="$(shasum -a 256 "$asset" | awk '{ print $1 }')"
-            printf '%s  %s\n' "$digest" "$asset_name" >> "$MANIFEST"
-          done < "$LIST"
-          cat "$MANIFEST"
-          gh release upload "${{ github.ref_name }}" "$MANIFEST" --clobber
+          # Read back the release action's actual asset names and hash the
+          # downloaded published bytes. Never synthesize a manifest filename
+          # from the local bundle name.
+          gh release view "$TAG" --json assets > "$RELEASE_ASSETS"
+          node scripts/ci/publish-macos-checksums.mjs \
+            "$TAG" "${{ matrix.arch }}" "$RELEASE_ASSETS" \
+            "$RUNNER_TEMP/macos-release-assets" "$MANIFEST"
+          gh release upload "$TAG" "$MANIFEST" --clobber
 
   # Download the DMG back from the draft on native runners. The build job's
   # output alone does not prove that the uploaded bytes match their checksum or

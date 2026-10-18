@@ -1213,7 +1213,11 @@ jobs:
   # the Intel package build confirms the Tauri filenames used by release checks.
   macos-candidate-audit-test:
     name: macOS candidate audit and Intel bundle names
-    if: github.event_name == 'pull_request'
+    needs: changes
+    # A cold native Tauri build costs about nine minutes. Run it for Rust,
+    # workflow, script, and other unknown changes; skip it when Rust is
+    # explicitly unchanged (docs-only or frontend-only PRs).
+    if: github.event_name == 'pull_request' && needs.changes.outputs.rust != 'false'
     runs-on: macos-15-intel
     timeout-minutes: 35
 

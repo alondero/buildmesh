@@ -516,8 +516,12 @@ Per-platform manifests, so no job can overwrite another's:
 The macOS manifests cover both the `.dmg` a person installs and the versioned
 `.app.tar.gz` release asset the updater fetches. Intel release assets use the
 Tauri `x64` filename suffix while the updater platform key and receipt continue
-to identify that CPU as `x86_64`. The Android job keeps its own `.sha256`
-sidecar.
+to identify that CPU as `x86_64`. After Tauri uploads each architecture's
+assets, the release job reads `gh release view "$TAG" --json assets`, requires
+the expected DMG and updater archive to appear in that listing, downloads those
+published assets, and hashes the downloaded bytes into the manifest. If either
+expected asset is absent, the packaging job fails before publishing its
+manifest. The Android job keeps its own `.sha256` sidecar.
 
 ### Before publishing
 
