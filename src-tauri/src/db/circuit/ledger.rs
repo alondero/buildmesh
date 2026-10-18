@@ -5,7 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashSet;
 
 use crate::circuit::vocabulary::{RunState, StepStatus};
-use crate::db::SqlResult;
+use crate::db::{DbError, SqlResult};
 use crate::models::{AutopilotCircuit, AutopilotCircuitRun, AutopilotCircuitRunStep};
 
 // Circuits — CRUD for the blueprint rows.
@@ -26,14 +26,14 @@ use crate::models::{AutopilotCircuit, AutopilotCircuitRun, AutopilotCircuitRunSt
 /// `circuit::compatibility::evaluate`, minus its fail-closed unknown arm
 /// (see `reviewer_harness_reason`) — not a Terminal-only denylist.
 #[cfg(test)]
-fn normalize_reviewer_provider(value: Option<String>) -> Result<Option<String>, String> {
+fn normalize_reviewer_provider(value: Option<String>) -> Result<Option<String>, DbError> {
     normalize_prepared_reviewer(value, &crate::preferences::AppPreferences::default())
 }
 
 fn validate_prepared_reviewer(
     value: &str,
     preferences: &crate::preferences::AppPreferences,
-) -> Result<(), String> {
+) -> Result<(), DbError> {
     let value = value.trim();
     if value.is_empty() {
         return Ok(());
@@ -45,17 +45,17 @@ fn validate_prepared_reviewer(
     {
         Some(configuration) => configuration.spawn_option_id.as_str(),
         None if value.starts_with("launch/") => {
-            return Err(
-                "Launch Configuration no longer exists; select another configuration".into(),
-            )
+            return Err(DbError::not_found(
+                "Launch Configuration no longer exists; select another configuration",
+            ))
         }
         None => value,
     };
     let id = crate::agent::provider::SpawnOptionId::from(option);
     match crate::circuit::compatibility::reviewer_harness_reason(id.harness_id()) {
-        Some(reason) => Err(crate::circuit::compatibility::reviewer_refusal_message(
-            &reason,
-        )),
+        Some(reason) => {
+            Err(crate::circuit::compatibility::reviewer_refusal_message(&reason).into())
+        }
         None => Ok(()),
     }
 }
@@ -63,7 +63,7 @@ fn validate_prepared_reviewer(
 fn normalize_prepared_reviewer(
     value: Option<String>,
     preferences: &crate::preferences::AppPreferences,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, DbError> {
     let Some(value) = value else { return Ok(None) };
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -90,14 +90,16 @@ fn resolve_preset_reviewer(
     reviewer_provider: Option<String>,
     stored_app_wide: Option<String>,
     preferences: &crate::preferences::AppPreferences,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, DbError> {
     let picked = normalize_prepared_reviewer(reviewer_provider, preferences)?;
     if picked.is_some() {
         return Ok(picked);
     }
     if let Some(stored) = stored_app_wide.as_deref() {
         validate_prepared_reviewer(stored, preferences).map_err(|message| {
-            format!("{message} It is stored as the app-wide Reviewer provider — pick another in Settings.")
+            DbError::invalid(format!(
+                "{message} It is stored as the app-wide Reviewer provider — pick another in Settings."
+            ))
         })?;
     }
     Ok(None)
@@ -145,14 +147,12 @@ pub fn create_node_circuit_run(
     selected_circuit_id: Option<i64>,
     max_rounds: i32,
     reviewer_provider: Option<String>,
-) -> Result<i64, String> {
+) -> Result<i64, DbError> {
     // First-writer-wins dedupe (#1660) on the process-global reader so the
     // writer mutex is not held for a pure read.
     {
         let db = crate::db::read_conn();
-        if let Some(existing) =
-            find_live_run_for_source_inner(&db, node_id).map_err(|e| e.to_string())?
-        {
+        if let Some(existing) = find_live_run_for_source_inner(&db, node_id)? {
             return Ok(existing);
         }
     }
@@ -189,7 +189,7 @@ pub(crate) fn create_node_circuit_run_locked(
     selected_circuit_id: Option<i64>,
     max_rounds: i32,
     reviewer_provider: Option<String>,
-) -> Result<i64, String> {
+) -> Result<i64, DbError> {
     let preferences = crate::preferences::load().unwrap_or_default();
     create_node_circuit_run_with_recovery_locked(
         db,
@@ -209,7 +209,7 @@ pub(crate) fn create_node_circuit_run_recovery_locked(
     db: &mut Connection,
     recovery: super::recovery::ReviewRecovery,
     max_rounds: i32,
-) -> Result<i64, String> {
+) -> Result<i64, DbError> {
     // Legacy fixture path: re-resolve the lineage under the writer lock so
     // overlapping fixture requests collapse onto one successor. The user
     // command now extends the failed run instead of calling this helper.
@@ -258,7 +258,7 @@ fn create_node_circuit_run_with_recovery_locked(
     max_rounds: i32,
     reviewer: (Option<String>, Option<&crate::preferences::AppPreferences>),
     recovery: Option<super::recovery::ReviewRecovery>,
-) -> Result<i64, String> {
+) -> Result<i64, DbError> {
     let continued_from = recovery.as_ref().map(|recovery| recovery.run_id);
     let (reviewer_provider, preferences) = reviewer;
     let app_reviewer = preferences.and_then(|p| p.reviewer_provider.clone());
@@ -271,16 +271,12 @@ fn create_node_circuit_run_with_recovery_locked(
     } else {
         None
     };
-    let tx = db.transaction().map_err(|e| e.to_string())?;
-    let node = crate::db::agent_node::get_agent_node_by_id_inner(&tx, node_id)
-        .map_err(|e| e.to_string())?;
-    if crate::db::legacy_retirement::pending_inner(&tx, node_id)
-        .map_err(|error| error.to_string())?
-    {
-        return Err(
-            "Legacy retirement is still stopping the source node. Retry after cleanup finishes."
-                .into(),
-        );
+    let tx = db.transaction()?;
+    let node = crate::db::agent_node::get_agent_node_by_id_inner(&tx, node_id)?;
+    if crate::db::legacy_retirement::pending_inner(&tx, node_id)? {
+        return Err(DbError::conflict(
+            "Legacy retirement is still stopping the source node. Retry after cleanup finishes.",
+        ));
     }
     if recovery.is_some() {
         // An already-live source can still be owned by terminal cleanup.
@@ -289,30 +285,29 @@ fn create_node_circuit_run_with_recovery_locked(
         let cleaning: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM agent_node_lifecycle_leases WHERE node_id=?1 AND cleanup_generation IS NOT NULL)",
             params![node_id], |row| row.get(0),
-        ).map_err(|e| e.to_string())?;
+        )?;
         if cleaning {
-            return Err("The implementation agent is still being stopped. Try Continue review again in a moment.".into());
+            return Err(DbError::conflict("The implementation agent is still being stopped. Try Continue review again in a moment."));
         }
     }
-    let existing: Option<i64> =
-        find_live_run_for_source_inner(&tx, node_id).map_err(|e| e.to_string())?;
+    let existing: Option<i64> = find_live_run_for_source_inner(&tx, node_id)?;
     if let Some(id) = existing {
         return Ok(id);
     }
-    let owned: bool = tx
-        .query_row(
-            &format!(
-                "SELECT EXISTS(SELECT 1 FROM autopilot_circuit_run_steps s \
+    let owned: bool = tx.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM autopilot_circuit_run_steps s \
              JOIN autopilot_circuit_runs r ON r.id = s.run_id \
              WHERE s.agent_node_id = ?1 AND r.state IN ({}))",
-                RunState::SQL_IN_LIVE
-            ),
-            params![node_id],
-            |row| row.get(0),
-        )
-        .map_err(|e| e.to_string())?;
+            RunState::SQL_IN_LIVE
+        ),
+        params![node_id],
+        |row| row.get(0),
+    )?;
     if owned {
-        return Err("This agent is already controlled by an active Circuit run.".into());
+        return Err(DbError::conflict(
+            "This agent is already controlled by an active Circuit run.",
+        ));
     }
     if !matches!(
         node.status,
@@ -321,23 +316,24 @@ fn create_node_circuit_run_with_recovery_locked(
             | crate::models::SessionStatus::Completed
             | crate::models::SessionStatus::Ready
     ) {
-        return Err("Resume the agent before starting a review.".into());
+        return Err(DbError::invalid(
+            "Resume the agent before starting a review.",
+        ));
     }
     let review_config: Option<(Option<String>, Option<String>)> = if selected_circuit_id.is_none() {
         Some(tx.query_row(
             "SELECT NULLIF(TRIM(model), ''), NULLIF(TRIM(effort), '') FROM meshes WHERE id = ?1",
             params![node.mesh_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
-        ).map_err(|e| e.to_string())?)
+        )?)
     } else {
         None
     };
     let (circuit_id, name) = if let Some(recovery) = &recovery {
         super::recovery::recovery_circuit_inner(&tx, node.mesh_id, recovery)?
     } else if let Some(id) = selected_circuit_id {
-        let circuit = get_autopilot_circuit_inner(&tx, id)
-            .map_err(|e| e.to_string())?
-            .ok_or("Circuit no longer exists")?;
+        let circuit = get_autopilot_circuit_inner(&tx, id)?
+            .ok_or_else(|| DbError::not_found("Circuit no longer exists"))?;
         let graph = crate::circuit::model::CircuitGraph::from_json(&circuit.graph_json)?;
         graph.validate()?;
         if circuit.mesh_id != node.mesh_id
@@ -347,7 +343,9 @@ fn create_node_circuit_run_with_recovery_locked(
                 .iter()
                 .any(|n| !matches!(n.kind, crate::circuit::model::CircuitNodeKind::Manual))
         {
-            return Err("Select a manual Circuit from this agent's Mesh.".into());
+            return Err(DbError::invalid(
+                "Select a manual Circuit from this agent's Mesh.",
+            ));
         }
         (id, circuit.name)
     } else {
@@ -368,8 +366,7 @@ fn create_node_circuit_run_with_recovery_locked(
                 params![node.mesh_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .optional()
-            .map_err(|e| e.to_string())?;
+            .optional()?;
         if let Some((id, existing_name)) = existing {
             (id, existing_name)
         } else {
@@ -378,8 +375,7 @@ fn create_node_circuit_run_with_recovery_locked(
                  (mesh_id, name, description, enabled, graph_json, is_preset)
                  VALUES (?1, ?2, ?3, 0, ?4, 1)",
                 params![node.mesh_id, name, description, graph.to_json()?],
-            )
-            .map_err(|e| e.to_string())?;
+            )?;
             (tx.last_insert_rowid(), name)
         }
     };
@@ -392,13 +388,11 @@ fn create_node_circuit_run_with_recovery_locked(
         "source.path",
         crate::env::node_working_path(&node).spawn_path,
     );
-    let base_ref: String = tx
-        .query_row(
-            "SELECT base_ref FROM meshes WHERE id = ?1",
-            params![node.mesh_id],
-            |r| r.get(0),
-        )
-        .map_err(|e| e.to_string())?;
+    let base_ref: String = tx.query_row(
+        "SELECT base_ref FROM meshes WHERE id = ?1",
+        params![node.mesh_id],
+        |r| r.get(0),
+    )?;
     context.set("source.base_ref", base_ref);
     if selected_circuit_id.is_none() && recovery.is_none() {
         if let Some(provider) = reviewer_override.as_deref() {
@@ -464,9 +458,9 @@ fn create_node_circuit_run_with_recovery_locked(
                  (SELECT COALESCE(MAX(queue_position),0)+1 FROM autopilot_circuit_runs WHERE mesh_id=?2),
                  ?5)",
         params![circuit_id, node.mesh_id, format!("manual:agent:{node_id}:{}", uuid::Uuid::new_v4()), context.to_json()?, node_id],
-    ).map_err(|e| e.to_string())?;
+    )?;
     let run_id = tx.last_insert_rowid();
-    super::evidence::pin_graph(&tx, run_id).map_err(|e| e.to_string())?;
+    super::evidence::pin_graph(&tx, run_id)?;
     // The lineage is also written to this run's own append-only history, so an
     // operator reading Circuit Run History sees which run this one follows
     // without having to read run context. It is an audit record, not a lookup
@@ -485,10 +479,9 @@ fn create_node_circuit_run_with_recovery_locked(
             &serde_json::json!({ "from_run_id": continued_from }).to_string(),
             Some(super::evidence::SOURCE_OPERATOR),
             Some(super::evidence::DISPOSITION_APPLIED),
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
     }
-    tx.commit().map_err(|e| e.to_string())?;
+    tx.commit()?;
     Ok(run_id)
 }
 
@@ -499,7 +492,7 @@ fn pin_review_launches(
     source_configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
     preferences: &crate::preferences::AppPreferences,
     context: &mut crate::circuit::context::CircuitContext,
-) -> Result<(), String> {
+) -> Result<(), DbError> {
     use crate::circuit::model::{CircuitGraph, CircuitNodeKind};
     use crate::preferences::launch_configurations::{capture, snapshot, LaunchOverrides};
     let inherited_configuration = source_configuration.filter(|source| {
@@ -512,9 +505,8 @@ fn pin_review_launches(
     if let Some(configuration) = inherited_configuration {
         preferences.spawn_configurations.push(configuration.clone());
     }
-    let circuit = get_autopilot_circuit_inner(db, circuit_id)
-        .map_err(|e| e.to_string())?
-        .ok_or("Circuit no longer exists")?;
+    let circuit = get_autopilot_circuit_inner(db, circuit_id)?
+        .ok_or_else(|| DbError::not_found("Circuit no longer exists"))?;
     let graph = CircuitGraph::from_json(&circuit.graph_json)?;
     for node in &graph.nodes {
         let CircuitNodeKind::SpawnAgentNode {
@@ -575,10 +567,7 @@ fn pin_review_launches(
         }
         let plan = capture(&launch_preferences, selection, &overrides)?;
         let key = format!("review.launch.{}", node.id);
-        context.set(
-            &key,
-            serde_json::to_string(&snapshot(plan)).map_err(|e| e.to_string())?,
-        );
+        context.set(&key, serde_json::to_string(&snapshot(plan))?);
     }
     Ok(())
 }
@@ -593,7 +582,7 @@ pub fn create_autopilot_circuit(
     create_autopilot_circuit_inner(&db, mesh_id, name, description, graph_json)
 }
 
-pub fn copy_review_blueprint(circuit_id: i64, name: &str) -> Result<AutopilotCircuit, String> {
+pub fn copy_review_blueprint(circuit_id: i64, name: &str) -> Result<AutopilotCircuit, DbError> {
     let mut db = crate::db::write_conn();
     copy_review_blueprint_locked(&mut db, circuit_id, name)
 }
@@ -602,15 +591,14 @@ pub(crate) fn copy_review_blueprint_locked(
     db: &mut Connection,
     circuit_id: i64,
     name: &str,
-) -> Result<AutopilotCircuit, String> {
+) -> Result<AutopilotCircuit, DbError> {
     if name.trim().is_empty() {
-        return Err("Give the Circuit a name.".into());
+        return Err(DbError::invalid("Give the Circuit a name."));
     }
-    let tx = db.transaction().map_err(|error| error.to_string())?;
-    let original = get_autopilot_circuit_inner(&tx, circuit_id)
-        .map_err(|error| error.to_string())?
+    let tx = db.transaction()?;
+    let original = get_autopilot_circuit_inner(&tx, circuit_id)?
         .filter(|circuit| circuit.is_preset)
-        .ok_or("Select a built-in Review Blueprint to copy.")?;
+        .ok_or_else(|| DbError::invalid("Select a built-in Review Blueprint to copy."))?;
     let mut graph = crate::circuit::model::CircuitGraph::from_json(&original.graph_json)?;
     let roots: Vec<String> = graph.roots().iter().map(|node| node.id.clone()).collect();
     for node in &mut graph.nodes {
@@ -625,9 +613,8 @@ pub(crate) fn copy_review_blueprint_locked(
         name.trim(),
         "Independent copy of the Review Blueprint",
         &graph.to_json()?,
-    )
-    .map_err(|error| error.to_string())?;
-    tx.commit().map_err(|error| error.to_string())?;
+    )?;
+    tx.commit()?;
     Ok(copied)
 }
 
@@ -1164,6 +1151,10 @@ pub(crate) fn create_circuit_run_prepared_locked(
             context.set("review.provider", provider);
         }
     }
+    // This function reports `SqlResult`, so the launch-pinning and context
+    // encoders keep the sentinel this module already uses for a non-SQLite
+    // failure — carrying the original message as the sentinel's payload, so
+    // what the frontend sees is unchanged — rather than widening the signature.
     pin_review_launches(
         &tx,
         circuit_id,
@@ -1172,7 +1163,7 @@ pub(crate) fn create_circuit_run_prepared_locked(
         preferences,
         &mut context,
     )
-    .map_err(rusqlite::Error::InvalidParameterName)?;
+    .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
     let context_json = context
         .to_json()
         .map_err(rusqlite::Error::InvalidParameterName)?;
@@ -2702,6 +2693,7 @@ mod reviewer_tests {
                     "{id:?} was accepted but has no turn-completion signal"
                 ),
                 Err(err) => {
+                    let err = err.to_string();
                     assert!(blocked, "{id:?} was rejected but can yield a turn: {err:?}");
                     if caps.is_plain_terminal {
                         assert!(
@@ -2730,7 +2722,9 @@ mod reviewer_tests {
             "Terminal",
             "TERMINAL:foo",
         ] {
-            let err = normalize_reviewer_provider(Some(picked.into())).unwrap_err();
+            let err = normalize_reviewer_provider(Some(picked.into()))
+                .unwrap_err()
+                .to_string();
             assert_eq!(
                 err, "Terminal cannot be used as the reviewer provider.",
                 "{picked:?} must keep the Terminal message"
@@ -2753,7 +2747,9 @@ mod reviewer_tests {
             ("freebuff:minimax", "Freebuff"),
             ("  freebuff  ", "Freebuff"),
         ] {
-            let err = normalize_reviewer_provider(Some(picked.into())).unwrap_err();
+            let err = normalize_reviewer_provider(Some(picked.into()))
+                .unwrap_err()
+                .to_string();
             assert!(
                 err.contains(name),
                 "{picked:?} must name the harness ({name}), got {err:?}"
@@ -2826,7 +2822,8 @@ mod reviewer_tests {
         );
         // Ineligible override refused with the harness-named reason.
         let err = resolve_preset_reviewer(Some("freebuff".into()), None, &Default::default())
-            .unwrap_err();
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("Freebuff"), "got {err:?}");
         assert!(
             !err.contains("Settings"),
@@ -2835,7 +2832,8 @@ mod reviewer_tests {
         // Blank override + ineligible stored value: refuse with guidance.
         for blank in [None, Some("   ".to_string())] {
             let err = resolve_preset_reviewer(blank, Some("freebuff".into()), &Default::default())
-                .unwrap_err();
+                .unwrap_err()
+                .to_string();
             assert!(err.contains("Freebuff"), "got {err:?}");
             assert!(
                 err.contains("Settings"),

@@ -42,7 +42,7 @@ pub fn circuit_run_history(
 
 #[command]
 pub fn copy_review_blueprint(circuit_id: i64, name: String) -> Result<AutopilotCircuit, String> {
-    crate::db::circuit::ledger::copy_review_blueprint(circuit_id, &name)
+    crate::db::circuit::ledger::copy_review_blueprint(circuit_id, &name).map_err(String::from)
 }
 
 /// Tell the desktop windows a run changed under them. The mobile HTTP routes
@@ -85,7 +85,7 @@ pub fn record_circuit_outcome(
 pub fn circuit_run_overview(
     run_id: i64,
 ) -> Result<crate::db::circuit::overview::CircuitRunOverview, String> {
-    crate::db::circuit::overview::overview(run_id)
+    crate::db::circuit::overview::overview(run_id).map_err(String::from)
 }
 
 /// Move a stuck agent wait or classifier step on to the outcome a person
@@ -109,7 +109,7 @@ pub fn push_circuit_step(
 pub fn circuit_run_attention(
     run_id: i64,
 ) -> Result<crate::db::circuit::evidence::CircuitRunAttention, String> {
-    crate::db::circuit::evidence::attention(run_id)
+    crate::db::circuit::evidence::attention(run_id).map_err(String::from)
 }
 
 /// How many runs on this mesh are still asking for attention.
@@ -883,14 +883,14 @@ pub async fn continue_circuit_review(
         return Err("Additional review rounds must be between 1 and 10.".into());
     }
     if let Some(existing) = crate::commands::run_blocking("existing_review_target", move || {
-        crate::db::circuit::recovery::existing_review_target(run_id)
+        crate::db::circuit::recovery::existing_review_target(run_id).map_err(String::from)
     })
     .await?
     {
         return Ok(existing);
     }
     let source_id = crate::commands::run_blocking("review_recovery_source", move || {
-        crate::db::circuit::recovery::review_recovery_source(run_id)
+        crate::db::circuit::recovery::review_recovery_source(run_id).map_err(String::from)
     })
     .await?;
     if !crate::agent::process::PROCESS_REGISTRY.is_alive(&source_id) {

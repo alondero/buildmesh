@@ -370,6 +370,7 @@ pub(crate) async fn spawn_with_intent(
                 node_id,
                 &crate::preferences::launch_configurations::snapshot(resolved),
             )
+            .map_err(String::from)
         })
         .await?;
     }

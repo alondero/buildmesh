@@ -170,7 +170,7 @@ fn request(db: &Connection, outcome: StepPushOutcome) -> CircuitStepPushRequest 
 
 fn push(db: &mut Connection, outcome: StepPushOutcome) -> Result<(), String> {
     let request = request(db, outcome);
-    push_step_locked(db, &request, NOW_MS)
+    push_step_locked(db, &request, NOW_MS).map_err(String::from)
 }
 
 /// Run one worker tick over the durable state and return which successor
@@ -383,14 +383,18 @@ fn duplicate_observation_history_does_not_block_recording_the_step() {
         action: CheckpointAction::Completed,
         reason: String::new(),
     };
-    let error = super::evidence::record_outcome_locked(&mut blocked, &attest).unwrap_err();
+    let error = super::evidence::record_outcome_locked(&mut blocked, &attest)
+        .unwrap_err()
+        .to_string();
     assert!(
         error.contains("The run changed. Refresh its evidence before acting."),
         "{error}"
     );
     let mut move_on = request(&blocked, StepPushOutcome::Completed);
     move_on.expected_revision = seen;
-    let error = push_step_locked(&mut blocked, &move_on, NOW_MS).unwrap_err();
+    let error = push_step_locked(&mut blocked, &move_on, NOW_MS)
+        .unwrap_err()
+        .to_string();
     assert!(
         error.contains("The run changed. Refresh it before acting."),
         "{error}"
@@ -728,7 +732,9 @@ fn a_custom_review_loop_on_its_last_round_does_not_promise_review_again() {
         [],
     )
     .unwrap();
-    let refused = super::recovery::review_recovery_inner(&db, 1, 1).unwrap_err();
+    let refused = super::recovery::review_recovery_inner(&db, 1, 1)
+        .unwrap_err()
+        .to_string();
     assert!(
         refused.contains("This custom circuit needs manual recovery. Open its implementation agent and inspect the failed step."),
         "{refused}"

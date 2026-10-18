@@ -1007,6 +1007,7 @@ fn dispatch_open_pr(
                 &dispatch_target_detail(head),
             )
             .map(|_| ())
+            .map_err(|error| error.to_string())
         },
         |head| {
             client
