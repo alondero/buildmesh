@@ -83,41 +83,47 @@ export function AiContextSection({ meshId, meshPath, isAuthenticated }: AiContex
   }
 
   return (
-    <div className="rounded-md border border-border-default p-3 space-y-2">
+    <div className="rounded-md border border-border-default p-3 space-y-2" data-testid="ai-context-card">
       <p className="text-xs font-medium text-text-primary">AI context portability</p>
 
+      {/* Issue #2465 — the dock resizes to 240px (`PROBE_PANEL_BOUNDS`), where
+          these rows are wider than the card: `.claude/skills → .agents/skills
+          ✓` measured scrollWidth 204 against clientWidth 189. They wrap instead
+          of overflowing — `flex-wrap` for the row, `break-all` on the unspaced
+          path spans (a word-boundary break has nowhere to land) and `break-words`
+          on the prose label that used to squash into a one-word column. */}
       <div className="space-y-0.5 text-xs text-text-secondary">
         {status.claude_md_exists && (
-          <div className="flex items-center gap-2">
-            <span className="font-mono text-text-primary">CLAUDE.md</span>
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
+            <span className="font-mono text-text-primary break-all min-w-0">CLAUDE.md</span>
             <span>→</span>
-            <span className="font-mono text-text-primary">AGENTS.md</span>
+            <span className="font-mono text-text-primary break-all min-w-0">AGENTS.md</span>
             {status.agents_md_exists ? (
               <span className="text-status-success">✓</span>
             ) : (
-              <span className="text-text-muted">(will create)</span>
+              <span className="text-text-muted break-words min-w-0">(will create)</span>
             )}
           </div>
         )}
         {status.skills_dir_exists && (
-          <div className="flex items-center gap-2">
-            <span className="font-mono text-text-primary">.claude/skills</span>
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
+            <span className="font-mono text-text-primary break-all min-w-0">.claude/skills</span>
             <span>→</span>
-            <span className="font-mono text-text-primary">.agents/skills</span>
+            <span className="font-mono text-text-primary break-all min-w-0">.agents/skills</span>
             {status.agents_skills_exists ? (
               <span className="text-status-success">✓</span>
             ) : (
-              <span className="text-text-muted">(will create, {status.skill_count} skills)</span>
+              <span className="text-text-muted break-words min-w-0">(will create, {status.skill_count} skills)</span>
             )}
           </div>
         )}
-        <div className="flex items-center gap-2">
-          <span className="font-mono text-text-primary">.gitignore</span>
-          <span className="text-text-muted">(agent harness runtime rules)</span>
+        <div className="flex flex-wrap items-center gap-2 min-w-0">
+          <span className="font-mono text-text-primary break-all min-w-0">.gitignore</span>
+          <span className="text-text-muted break-words min-w-0">(agent harness runtime rules)</span>
           {status.gitignore_has_agent_patterns ? (
             <span className="text-status-success">✓</span>
           ) : (
-            <span className="text-text-muted">(will update)</span>
+            <span className="text-text-muted break-words min-w-0">(will update)</span>
           )}
         </div>
       </div>

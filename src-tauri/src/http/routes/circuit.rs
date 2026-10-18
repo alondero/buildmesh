@@ -218,10 +218,9 @@ fn list_reply(runs: Result<Vec<NodeCircuitRun>, String>) -> Response {
 /// `GET /api/circuit-runs` — see [`NodeCircuitRun`].
 pub async fn list(_req: &ParsedRequest) -> Response {
     list_reply(
-        crate::commands::run_blocking(
-            "http_list_node_circuit_runs",
-            node_run::list_node_circuit_runs,
-        )
+        crate::commands::run_blocking("http_list_node_circuit_runs", || {
+            node_run::list_node_circuit_runs().map_err(String::from)
+        })
         .await,
     )
 }
@@ -549,7 +548,7 @@ mod tests {
     }
 
     fn listing() -> Response {
-        list_reply(node_run::list_node_circuit_runs())
+        list_reply(node_run::list_node_circuit_runs().map_err(String::from))
     }
 
     #[test]

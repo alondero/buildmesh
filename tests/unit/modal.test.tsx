@@ -242,6 +242,27 @@ describe('Modal defaultFocusRef (issue #748)', () => {
     expect(document.activeElement).not.toBe(getByRole('dialog'));
   });
 
+  it('falls back to the first tabbable control when defaultFocusRef points at a disabled button (issue #2463)', () => {
+    // `.focus()` on a disabled control is a silent no-op, so a consumer whose
+    // target is gated on an unfilled form used to leave focus on the trigger
+    // behind the dialog. The modal moves focus to the first enabled control
+    // instead of giving up.
+    function Harness() {
+      const ctaRef = useRef<HTMLButtonElement>(null);
+      return (
+        <Modal onClose={() => {}} ariaLabel="t" defaultFocusRef={ctaRef}>
+          <button type="button">first step</button>
+          <button type="button" ref={ctaRef} disabled>submit</button>
+        </Modal>
+      );
+    }
+    const { getByText, getByRole } = render(<Harness />);
+    expect(document.activeElement).toBe(getByText('first step'));
+    // Not the panel either — an enabled control inside beats the fallback
+    // shell when the consumer named a disabled target.
+    expect(document.activeElement).not.toBe(getByRole('dialog'));
+  });
+
   it('falls back to the panel when defaultFocusRef points at nothing', () => {
     // Consumer wires the prop but the ref hasn't attached yet (e.g. the
     // element is conditionally rendered). The modal must still focus

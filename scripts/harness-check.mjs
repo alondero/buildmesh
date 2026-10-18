@@ -77,12 +77,26 @@ export function frontendInScope(paths) {
 // Rust diff itself, not only the one CI happens to run (review of PR #2232).
 export const RUST_PATH_INCLUDES = {
   'src-tauri/src/agent/terminal_input.rs': 'agent::process::terminal_input',
+  'src-tauri/src/agent/process_tests.rs': 'agent::process::tests',
+  'src-tauri/src/agent/provider_menu_tests.rs': 'agent::provider_menu::tests',
+  'src-tauri/src/agent/spawn_environment_tests.rs': 'agent::spawn_environment::tests',
+  'src-tauri/src/agent/provider/adapters/codex_tests.rs': 'agent::provider::adapters::codex::tests',
+  'src-tauri/src/agent/provider/adapters/mcode_tests.rs': 'agent::provider::adapters::mcode::tests',
+  'src-tauri/src/circuit/delivery_tests.rs': 'circuit::delivery::tests',
   'src-tauri/src/commands/git_status_bench.rs': 'commands::git_tests',
   'src-tauri/src/commands/git_status_counts_tests.rs': 'commands::git_tests::status_counts',
+  'src-tauri/src/commands/pr_tests.rs': 'commands::pr::tests',
+  'src-tauri/src/db/circuit/evidence_tests.rs': 'db::circuit::evidence::tests',
   'src-tauri/src/git/fetch_origin_tests.rs': 'git::sync::fetch_origin_tests',
   'src-tauri/src/git/mesh_health_tests.rs': 'git::health::mesh_health_tests',
+  'src-tauri/src/git/worktree/worktree_tests.rs': 'git::worktree::tests',
   'src-tauri/src/commands/prune_tests.rs': 'commands::prune::prune_tests',
+  'src-tauri/src/http/ws_tests.rs': 'http::ws::tests',
+  'src-tauri/src/services/agent_node_tests.rs': 'services::agent_node::tests',
+  'src-tauri/src/services/agent_node_discovery_tests.rs': 'services::agent_node_discovery::tests',
+  'src-tauri/src/services/circuit_worker/native_hooks_tests.rs': 'services::circuit_worker::native_hooks::tests',
   'src-tauri/src/services/legacy_retirement/retirement_crash_tests.rs': 'services::legacy_retirement::retirement_crash_tests',
+  'src-tauri/src/services/transcript_reader/report_snapshot_tests.rs': 'services::transcript_reader::report_snapshot::tests',
 };
 
 // Every `#[path = "..."]` module in the crate, as repo-relative paths. Entries

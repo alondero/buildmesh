@@ -7,7 +7,7 @@ use rusqlite::{params, Connection};
 
 use crate::models::*;
 
-use super::{read_conn, try_read_conn, write_conn, SqlResult};
+use super::{read_conn, try_read_conn, write_conn, DbError, SqlResult};
 
 /// Preferences are prepared by the caller before acquiring the database writer.
 pub fn migrate_launch_selections(
@@ -1356,13 +1356,15 @@ pub fn replace_node_launch(
     id: i64,
     value: &crate::preferences::spawn_configurations::SpawnConfiguration,
     runtime: EnvType,
-) -> Result<(), String> {
-    let json = serde_json::to_string(value).map_err(|e| e.to_string())?;
+) -> Result<(), DbError> {
+    let json = serde_json::to_string(value)?;
     let db = write_conn();
-    let changed = db.execute("UPDATE agent_nodes SET provider = ?1, env = ?2, spawn_configuration = ?3 WHERE id = ?4",
-        params![value.spawn_option_id, runtime.to_string(), json, id]).map_err(|e| e.to_string())?;
+    let changed = db.execute(
+        "UPDATE agent_nodes SET provider = ?1, env = ?2, spawn_configuration = ?3 WHERE id = ?4",
+        params![value.spawn_option_id, runtime.to_string(), json, id],
+    )?;
     if changed == 0 {
-        return Err("Agent Node no longer exists".into());
+        return Err(DbError::not_found("Agent Node no longer exists"));
     }
     Ok(())
 }
@@ -2629,14 +2631,13 @@ pub(crate) fn migrate_agent_node_provider_id_custom_accounts(
 pub fn set_node_launch_snapshot(
     node_id: i64,
     value: &crate::preferences::spawn_configurations::SpawnConfiguration,
-) -> Result<(), String> {
-    let raw = serde_json::to_string(value).map_err(|e| e.to_string())?;
+) -> Result<(), DbError> {
+    let raw = serde_json::to_string(value)?;
     let db = write_conn();
     db.execute(
         "UPDATE agent_nodes SET spawn_configuration = ?1 WHERE id = ?2 AND provider = ?3",
         params![raw, node_id, value.spawn_option_id],
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
     Ok(())
 }
 
@@ -2650,8 +2651,8 @@ pub fn legacy_launch_nodes() -> SqlResult<Vec<AgentNode>> {
 pub fn node_spawn_configuration(
     node_id: i64,
     provider: &str,
-) -> Result<Option<crate::preferences::spawn_configurations::SpawnConfiguration>, String> {
-    let db = super::try_read_conn().map_err(|e| e.to_string())?;
+) -> Result<Option<crate::preferences::spawn_configurations::SpawnConfiguration>, DbError> {
+    let db = super::try_read_conn()?;
     let raw: Option<String> = match db.query_row(
         "SELECT spawn_configuration FROM agent_nodes WHERE id = ?1 AND provider = ?2",
         params![node_id, provider],
@@ -2659,14 +2660,13 @@ pub fn node_spawn_configuration(
     ) {
         Ok(value) => value,
         Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
-        Err(error) => return Err(error.to_string()),
+        Err(error) => return Err(error.into()),
     };
     let value = raw
         .map(|s| {
             serde_json::from_str::<crate::preferences::spawn_configurations::SpawnConfiguration>(&s)
         })
-        .transpose()
-        .map_err(|e| e.to_string())?;
+        .transpose()?;
     Ok(value.filter(|c| c.spawn_option_id == provider))
 }
 
