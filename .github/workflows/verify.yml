@@ -1246,13 +1246,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # This throwaway key only enables archive generation; its signature
+          # intentionally does not match the app's release updater public key.
           export TAURI_SIGNING_PRIVATE_KEY="$RUNNER_TEMP/macos-audit-test.key"
           npm run tauri -- build --debug --target x86_64-apple-darwin --config src-tauri/tauri.macos-release-intel.conf.json
           bundle_root="src-tauri/target/x86_64-apple-darwin/debug/bundle"
           find "$bundle_root" -type f \( -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.app.tar.gz.sig' \) | sort | tee "$RUNNER_TEMP/macos-intel-bundle-files.txt"
           version="$(node -p "JSON.parse(require('node:fs').readFileSync('src-tauri/tauri.conf.json', 'utf8')).version")"
           test -n "$(find "$bundle_root" -type f -name "Buildmesh_${version}_x64.dmg" -print -quit)"
-          test -n "$(find "$bundle_root" -type f -name 'Buildmesh_x64.app.tar.gz' -print -quit)"
+          test -n "$(find "$bundle_root" -type f -name 'Buildmesh.app.tar.gz' -print -quit)"
           if find "$bundle_root" -type f -name "Buildmesh_${version}_x86_64.dmg" -print -quit | grep -q .; then
             echo "::error::Tauri emitted an unexpected x86_64 DMG suffix"
             exit 1

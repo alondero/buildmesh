@@ -62,7 +62,7 @@ test('published Intel filenames use Tauri x64 names while architecture evidence 
   assert.equal(macOSDmgName('1.5.0', 'aarch64'), 'Buildmesh_1.5.0_aarch64.dmg');
   assert.equal(macOSDmgName('1.5.0', 'x86_64'), 'Buildmesh_1.5.0_x64.dmg');
   assert.equal(macOSUpdaterArchiveName('1.5.0', 'x86_64'), 'Buildmesh_1.5.0_x64.app.tar.gz');
-  assert.equal(macOSLocalUpdaterArchiveName('x86_64'), 'Buildmesh_x64.app.tar.gz');
+  assert.equal(macOSLocalUpdaterArchiveName(), 'Buildmesh.app.tar.gz');
 });
 
 test('native PR verification exercises the audit CLI and reports real Intel bundle filenames', () => {
@@ -75,7 +75,7 @@ test('native PR verification exercises the audit CLI and reports real Intel bund
   assert.match(job, /node --test tests\/agent-infra\/macos-candidate-audit\.test\.mjs/);
   assert.match(job, /npm run tauri -- build --debug --target x86_64-apple-darwin/);
   assert.match(job, /Buildmesh_\$\{version\}_x64\.dmg/);
-  assert.match(job, /Buildmesh_x64\.app\.tar\.gz/);
+  assert.match(job, /Buildmesh\.app\.tar\.gz/);
 });
 
 // The load-bearing invariant of the whole change: three jobs write one

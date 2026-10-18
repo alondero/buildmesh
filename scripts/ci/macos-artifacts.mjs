@@ -17,6 +17,6 @@ export function macOSUpdaterArchiveName(version, architecture) {
   return `Buildmesh_${version}_${releaseArch(architecture)}.app.tar.gz`;
 }
 
-export function macOSLocalUpdaterArchiveName(architecture) {
-  return `Buildmesh_${releaseArch(architecture)}.app.tar.gz`;
+export function macOSLocalUpdaterArchiveName() {
+  return 'Buildmesh.app.tar.gz';
 }

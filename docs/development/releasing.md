@@ -601,14 +601,14 @@ the `signature` value is the exact text of that updater archive's `.sig` file:
   "notes": "Isolated updater smoke",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "<contents of Buildmesh_aarch64.app.tar.gz.sig>",
-      "url": "https://<isolated-test-feed>/assets/Buildmesh_aarch64.app.tar.gz"
+      "signature": "<contents of Buildmesh.app.tar.gz.sig>",
+      "url": "https://<isolated-test-feed>/assets/Buildmesh.app.tar.gz"
     }
   }
 }
 ```
 
-Use `darwin-x86_64` with `Buildmesh_x64.app.tar.gz` and its `.sig` in the Intel response. For the
+Use `darwin-x86_64` with `Buildmesh.app.tar.gz` and its `.sig` in the Intel response. For the
 rejection check, announce smoke version 3 and point to its archive, but replace
 the manifest's `signature` value with deliberately invalid text. First serve
 the valid version 2 manifest to the installed version 1 app. After it updates,
@@ -624,11 +624,12 @@ npm run tauri -- build --target aarch64-apple-darwin --config src-tauri/tauri.ma
 ```
 
 Use `tauri.macos-release-intel.conf.json` and `x86_64-apple-darwin` on a native
-Intel Mac. Each build writes `Buildmesh_x64.app.tar.gz` and its adjacent `.sig`
-under `src-tauri/target/<target>/release/bundle/macos/`. Apple Silicon writes
-`Buildmesh_aarch64.app.tar.gz`. Copy both files to the isolated HTTPS origin's
-`/assets/` path, preserving those local build names in the manifest URLs above.
-Configure the endpoint route from the template
+Intel Mac. Each local build writes `Buildmesh.app.tar.gz` and its adjacent
+`.sig` under `src-tauri/target/<target>/release/bundle/macos/`. Apple Silicon
+uses the same local filename. Copy both files to the isolated HTTPS origin's
+`/assets/` path, preserving that local build name in the manifest URLs above.
+The release action adds the version and architecture suffix to the published
+archive name. Configure the endpoint route from the template
 (`buildmesh/<target>/<arch>/<current_version>`) to return the version 2
 manifest for installed version 1, then the version 3 manifest for installed
 version 2. The response must use `darwin-aarch64` or `darwin-x86_64` as its
