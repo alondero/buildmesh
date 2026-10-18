@@ -28,8 +28,11 @@ use super::{
 pub(super) struct DispatchedEffects {
     pub outcomes: Vec<CircuitEvent>,
     /// Captured while the batch permit is still alive. Recovery tests read it;
-    /// the production pass only uses [`Self::outcomes`].
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// the production pass only uses [`Self::outcomes`]. The field must be
+    /// written in the production pass too — it is read while the permit is
+    /// alive — so the lint is allowed here rather than the write removed
+    /// (issue #2450).
+    #[allow(dead_code)]
     pub batch_cancelled: bool,
 }
 
@@ -939,22 +942,23 @@ mod tests {
         }
 
         fn agent(&self) -> crate::models::AgentNode {
-            db::create_agent_node(
-                self.mesh_id,
-                &format!("dispatch-agent-{}-{}", std::process::id(), seq()),
-                &self.path,
-                "work",
-                EnvType::Windows,
-                "grok",
-                None,
-                None,
-                None,
-                None,
-                false,
-                None,
-                None,
-                None,
-            )
+            db::create_agent_node(db::NewAgentNode {
+                mesh_id: self.mesh_id,
+                name: &format!("dispatch-agent-{}-{}", std::process::id(), seq()),
+                path: &self.path,
+                branch: "work",
+                env: EnvType::Windows,
+                provider: "grok",
+                worktree_name: None,
+                source_issue: None,
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree: false,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                worktree_path: None,
+                spawn_configuration: None,
+            })
             .unwrap()
         }
 

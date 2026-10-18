@@ -27,6 +27,19 @@ pub struct CircuitContext {
     runtime_lifecycle_blockers: BTreeMap<String, String>,
 }
 
+/// The pull request a run was triggered by: the fields the `pr.*` namespace
+/// exposes 1:1, bundled so [`CircuitContext::with_pr`] mirrors that field set
+/// instead of taking seven positional arguments.
+pub struct PrContext<'a> {
+    pub number: i64,
+    pub title: &'a str,
+    pub body: &'a str,
+    pub author: &'a str,
+    pub url: &'a str,
+    pub head_ref: &'a str,
+    pub labels: &'a [String],
+}
+
 impl CircuitContext {
     pub fn new() -> Self {
         Self::default()
@@ -160,17 +173,16 @@ impl CircuitContext {
     }
 
     /// Populate the `pr.*` namespace for a GitHub PR-triggered run.
-    #[allow(clippy::too_many_arguments)] // mirrors the pr.* field set 1:1
-    pub fn with_pr(
-        &mut self,
-        number: i64,
-        title: &str,
-        body: &str,
-        author: &str,
-        url: &str,
-        head_ref: &str,
-        labels: &[String],
-    ) -> &mut Self {
+    pub fn with_pr(&mut self, pr: PrContext<'_>) -> &mut Self {
+        let PrContext {
+            number,
+            title,
+            body,
+            author,
+            url,
+            head_ref,
+            labels,
+        } = pr;
         self.set("pr.number", number.to_string());
         self.set("pr.title", title);
         self.set("pr.body", body);
@@ -372,15 +384,15 @@ mod tests {
     #[test]
     fn pr_namespace_resolves_every_documented_field() {
         let mut ctx = CircuitContext::new();
-        ctx.with_pr(
-            1213,
-            "walking skeleton",
-            "",
-            "octocat",
-            "https://github.com/alondero/buildmesh/pull/1213",
-            "feat/circuits",
-            &[],
-        );
+        ctx.with_pr(PrContext {
+            number: 1213,
+            title: "walking skeleton",
+            body: "",
+            author: "octocat",
+            url: "https://github.com/alondero/buildmesh/pull/1213",
+            head_ref: "feat/circuits",
+            labels: &[],
+        });
         assert_eq!(ctx.resolve("{{pr.number}}"), "1213");
         assert_eq!(ctx.resolve("{{pr.head_ref}}"), "feat/circuits");
         assert_eq!(ctx.resolve("{{pr.title}}"), "walking skeleton");
@@ -398,7 +410,15 @@ mod tests {
         ctx.with_circuit(7, "nightly", 3);
         ctx.with_run(42);
         ctx.with_issue(9, "t", "b", "a", "u", &["l".to_string()]);
-        ctx.with_pr(10, "pt", "", "pa", "pu", "head", &[]);
+        ctx.with_pr(PrContext {
+            number: 10,
+            title: "pt",
+            body: "",
+            author: "pa",
+            url: "pu",
+            head_ref: "head",
+            labels: &[],
+        });
         let back = CircuitContext::from_json(&ctx.to_json().unwrap()).unwrap();
         assert_eq!(back, ctx);
         assert_eq!(

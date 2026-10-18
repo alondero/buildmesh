@@ -288,7 +288,6 @@ pub fn build_graph(
 /// is forced to be exhaustive over its `match` arms. Adding a new
 /// variant to [`CircuitBlueprintKind`] without extending this match
 /// (and adding a `BlueprintContract` for it) is a build failure.
-#[allow(dead_code)]
 const _: () = {
     /// One arm per `CircuitBlueprintKind` variant. The closure's body
     /// returns the index of the matching entry in [`BUILT_IN_CATALOG`].
@@ -301,7 +300,7 @@ const _: () = {
     }
     // Reference `catalog_index` from a second const block so the
     // compiler actually instantiates it; the `let _ = ...` is enough
-    // to drag the dead-code check past the `#[allow(dead_code)]`.
+    // to drag the dead-code check past the const item's own reachability.
     let _ = catalog_index;
 };
 

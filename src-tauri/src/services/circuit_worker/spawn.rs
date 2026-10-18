@@ -444,8 +444,8 @@ async fn wait_for_initial_prompt(run_id: i64, node_id: i64) -> Result<Option<Str
     }
 }
 
-/// Inputs the background spawn task needs. Bundled to keep
-/// `spawn_circuit_agent_in_background` under clippy::too_many_arguments.
+/// Inputs the background spawn task needs. Bundled into one struct so the
+/// launch parameters cannot be transposed at the call site.
 /// Owned fields because the value moves into a `'static` async task.
 pub(super) struct CircuitBackgroundSpawn {
     pub run_id: i64,
@@ -819,19 +819,27 @@ pub(super) fn spawn_step_agent(
             };
             let new_node =
                 crate::services::agent_node::create_pending_with_worktree_override_configured(
-                    mesh_id,
-                    &old_node.path,
-                    &old_node.branch,
-                    Some(provider.as_str()),
-                    source_issue,
-                    node_name.as_deref(),
-                    use_worktree_override,
-                    inherited_configuration.as_ref().or_else(|| {
-                        old_node
-                            .launch_configuration
-                            .as_ref()
-                            .filter(|c| c.id == provider)
-                    }),
+                    crate::services::agent_node::NodeCreateParams {
+                        mesh_id,
+                        path: &old_node.path,
+                        branch: &old_node.branch,
+                        provider: Some(provider.as_str()),
+                        source_issue,
+                        source_pr: None,
+                        source_pr_pinned_sha: None,
+                        use_worktree_override,
+                        name_override: node_name.as_deref(),
+                        head_repo_owner: None,
+                        head_repo_clone_url: None,
+                        configuration: inherited_configuration.as_ref().or_else(|| {
+                            old_node
+                                .launch_configuration
+                                .as_ref()
+                                .filter(|c| c.id == provider)
+                        }),
+                        initial_prompt: None,
+                        operation: None,
+                    },
                 )
                 .map_err(|e| e.to_string())?;
 
@@ -890,15 +898,23 @@ pub(super) fn spawn_step_agent(
         return Ok(());
     };
     let node = crate::services::agent_node::create_pending_with_worktree_override_configured(
-        mesh.id,
-        &mesh.path,
-        &branch,
-        // Issue #1358: per-node provider override flows here.
-        Some(provider.as_str()),
-        source_issue,
-        node_name.as_deref(),
-        use_worktree_override,
-        inherited_configuration.as_ref(),
+        crate::services::agent_node::NodeCreateParams {
+            mesh_id: mesh.id,
+            path: &mesh.path,
+            branch: &branch,
+            // Issue #1358: per-node provider override flows here.
+            provider: Some(provider.as_str()),
+            source_issue,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override,
+            name_override: node_name.as_deref(),
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: inherited_configuration.as_ref(),
+            initial_prompt: None,
+            operation: None,
+        },
     )
     .map_err(|e| e.to_string())?;
 

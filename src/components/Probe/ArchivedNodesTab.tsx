@@ -80,19 +80,14 @@ import { ProbeTabBody } from './ProbeTabBody';
 import { ProbeToolbar } from './ProbeToolbar';
 import { mapBackendProviders, type SpawnOption } from '../../lib/groups';
 import { dropdownId } from '../../lib/dropdownId';
-import { formatRelativeAge } from '../../lib/time';
+import { formatListTimestamp } from '../../lib/time';
 import { adapterIdFromProvider, archiveHarnessLabel, resumeOptionForHarness } from '../../lib/archiveProvenance';
 
-// The Archive tab renders a `date` fallback for items older than 30
-// days (the historical "days never reset" convention). The shared
-// helper floors at 24h + `days` indefinitely, so we only delegate
-// the first four tiers and handle `days >= 30` locally.
-function timeAgo(isoString: string): string {
-  const then = new Date(isoString);
-  const days = Math.floor((Date.now() - then.getTime()) / (24 * 60 * 60 * 1000));
-  if (days >= 30) return then.toLocaleDateString();
-  return formatRelativeAge(then, new Date());
-}
+// Issue #2461 — `timeAgo` used to live here: the relative age this tab
+// renders, with a local `days >= 30` cut to an absolute date (the
+// historical "days never reset" convention). The Agent History cards need
+// the identical label, so it moved to `lib/time.ts` as
+// `formatListTimestamp` rather than becoming a second copy.
 
 // Issue #1264 — `ResumableProvider` was a hand-rolled projection that
 // duplicated `SpawnOption`'s 8 fields field-for-field and added a
@@ -377,7 +372,7 @@ export function ArchivedNodesTab({ meshId, meshPath }: { meshId?: number; meshPa
                         </span>
                       )}
                       {session.timestamp && (
-                        <span className="text-2xs text-text-secondary tabular-nums">{timeAgo(session.timestamp)}</span>
+                        <span className="text-2xs text-text-secondary tabular-nums">{formatListTimestamp(session.timestamp)}</span>
                       )}
                     </div>
                   </div>

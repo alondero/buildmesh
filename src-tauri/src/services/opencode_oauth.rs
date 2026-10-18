@@ -9,20 +9,23 @@
 //! - the lazy-refresh TTL (`REFRESH_TTL = 300s`, aligned with `CACHE_TTL` in
 //!   `services::usage`),
 //!
-//! Future siblings this module will host:
-//! - `start_device_flow` / `poll_for_token` — RFC 8628 device authorization,
-//! - `try_refresh` — `refresh_token` → new access_token + expires_at,
+//! Siblings this module hosts:
+//! - `start_device_flow` / `poll_for_token_once` — RFC 8628 device
+//!   authorization; the poll is stateless (React owns the in-flight window,
+//!   issue #956),
+//! - `try_refresh_against` — `refresh_token` → new access_token + expires_at,
 //! - `fetch_workspaces` — `GET /api/user` + `/api/orgs` enumeration,
 //! - `revoke` — `windows_cred::delete(OPENCODE_CONSOLE_CRED_TARGET)`.
 //!
-//! Compiles on every platform; specific fns that touch the OS credential
-//! store or persist tokens (`persist_token_response`, `try_refresh`) are
-//! `#[cfg(windows)]`-gated and surface `OAuthError::NoCredential` on the
-//! non-Windows arms (mirrors the locked #956 design decision and the agy
-//! precedent at `services::usage::read_agy_token`). The HTTP-only fns
-//! (`start_device_flow`, `fetch_workspaces`, `poll_for_token`) are
-//! platform-agnostic by design — the upstream host is reachable on every
-//! OS, even though the credential sink isn't.
+//! The module itself compiles on both platforms; the fns that touch the OS
+//! credential store or persist tokens (`persist_token_response`,
+//! `set_active_workspace`, `read_opencode_console_full_credential`) are
+//! `#[cfg(windows)]`-gated and their `#[cfg(not(windows))]` arms return
+//! `OAuthError::NoCredential` (mirrors the locked #956 design decision and the
+//! agy precedent at `services::usage::read_agy_token`). The HTTP-only fns
+//! (`start_device_flow`, `fetch_workspaces`, `poll_for_token_once`) carry no
+//! platform gate — the upstream host is reachable on every OS, even though the
+//! credential sink is not.
 
 use crate::services::http_client::blocking_client_builder;
 use crate::services::usage::types::UsageError;
@@ -52,22 +55,27 @@ pub(crate) mod device_flow {
 
 /// A typed OAuth error distinct from [`UsageError`]. `UsageError` carries
 /// "no credential / shape mismatch" semantics for the fetcher; the OAuth
-/// dance has its own failure modes (network, server error, polling terminal
-/// states like `access_denied` / `expired_token`) that deserve their own
-/// diagnostics. Serializes to `String` at the IPC boundary.
+/// dance has its own failure modes (network, server error, missing
+/// credential) that deserve their own diagnostics. Serializes to `String`
+/// at the IPC boundary.
+///
+/// The RFC 8628 terminal states (`access_denied`, `expired_token`) are not
+/// variants here: the polling path reports them as
+/// [`OpenCodeDeviceCodeStatus`], which the device-code status endpoint and the
+/// React settings surface already speak.
 #[derive(Debug)]
 pub(crate) enum OAuthError {
-    /// The user took too long at `verification_uri_complete` and the
-    /// short-lived device code expired. Re-start the flow.
-    CodeExpired,
-    /// The user clicked "Deny" on the consent screen.
-    AccessDenied,
     /// No credential available for this operation. The non-Windows path
-    /// uses this for `try_refresh` / `persist_token_response` to mirror the
-    /// agy precedent at `services::usage::read_agy_token` (the locked #956
-    /// decision: "non-Windows = agy-style NoCredential"). String carries
-    /// the credential target name so a higher layer can render a stable
-    /// surface-level message.
+    /// uses this for `persist_token_response` / `set_active_workspace` to
+    /// mirror the agy precedent at `services::usage::read_agy_token` (the
+    /// locked #956 decision: "non-Windows = agy-style NoCredential"). String
+    /// carries the credential target name so a higher layer can render a
+    /// stable surface-level message.
+    //
+    // Credential Manager is Windows-only, so the arms that construct this are
+    // `#[cfg(not(windows))]` and the Windows arms return `Shape` instead — the
+    // variant is never built on this target. It stays so the non-Windows
+    // contract is one enum rather than two (issue #2450).
     #[cfg_attr(windows, allow(dead_code))]
     NoCredential(String),
     /// Transport-level failure (DNS, TLS, connection refused, timeout).
@@ -82,12 +90,6 @@ pub(crate) enum OAuthError {
 impl std::fmt::Display for OAuthError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            OAuthError::CodeExpired => {
-                write!(f, "OpenCode OAuth: device code expired before activation")
-            }
-            OAuthError::AccessDenied => {
-                write!(f, "OpenCode OAuth: user denied the device-flow consent")
-            }
             OAuthError::NoCredential(target) => {
                 write!(f, "OpenCode OAuth: no credential at {target}")
             }
@@ -143,7 +145,6 @@ struct DeviceCodeResp {
 /// `https://`, so a future server returning absolute URLs is preserved
 /// (defensive against the CLI's potential `${host}${url}` double-prefix
 /// regression).
-#[allow(dead_code)] // Used by unit tests in this module only.
 pub(crate) fn parse_device_code_response(body: &str) -> Result<DeviceCode, OAuthError> {
     let resp: DeviceCodeResp = serde_json::from_str(body)
         .map_err(|e| OAuthError::Shape(format!("/auth/device/code body: {e}")))?;
@@ -200,9 +201,6 @@ pub(crate) struct TokenResponse {
 struct TokenResp {
     access_token: String,
     refresh_token: String,
-    #[serde(default)]
-    #[allow(dead_code)] // server sends it; we don't use it; tolerate its absence
-    token_type: Option<String>,
     expires_in: i64,
 }
 
@@ -211,7 +209,6 @@ struct TokenResp {
 /// (`authorization_pending` → keep polling, `slow_down` → bump interval,
 /// `access_denied` / `expired_token` / `invalid_grant` → terminal) —
 /// `parse_token_response` only sees the success branch.
-#[allow(dead_code)] // Used by unit tests in this module only.
 pub(crate) fn parse_token_response(body: &str) -> Result<TokenResponse, OAuthError> {
     let resp: TokenResp = serde_json::from_str(body)
         .map_err(|e| OAuthError::Shape(format!("/auth/device/token body: {e}")))?;
@@ -343,7 +340,7 @@ pub(crate) fn parse_user_workspace(body: &str) -> Result<OpenCodeWorkspace, OAut
 /// `refresh_url`. Pure HTTP — does NOT read from or write to Windows
 /// Credential Manager; the caller is responsible for both. Production
 /// callers pin `OPENCODE_CONSOLE_HOST + device_flow::TOKEN_PATH` via
-/// [`try_refresh`]; tests substitute a loopback `tiny_http` listener so
+/// [`try_refresh_against`]; tests substitute a loopback `tiny_http` listener so
 /// the full refresh round-trip is exercised without hitting the live
 /// server (issue #971).
 ///
@@ -381,67 +378,10 @@ pub(crate) fn try_refresh_against(
     parse_token_response(&body)
 }
 
-/// Refreshes an existing access token. The OAuth server accepts the
-/// `refresh_token` issued by the device-flow exchange and returns a new
-/// `(access_token, refresh_token, expires_in, workspace_id, server_id)`
-/// bundle. The lazy refresh strategy in `services::usage` calls this
-/// when the cached credential is `is_expired()` OR `cached_age > REFRESH_TTL`
-/// and the live probe returns 401.
-///
-/// Atomicity note: this function reads the prior `refresh_token` from the
-/// credential blob and writes the response back. The Credential Manager
-/// doesn't transactionally swap, so a concurrent refresh could clobber
-/// each other. Acceptable risk for a desktop app; follow-up PR may add
-/// per-target locking if profiling shows contention.
-#[cfg(windows)]
-#[allow(dead_code)] // Retained as the documented public seam (issue #970); the live refresh
-                    // path in `services::usage` now calls `try_refresh_against` directly
-                    // (#971) so this wrapper is currently unused.
-pub(crate) fn try_refresh() -> Result<TokenResponse, OAuthError> {
-    use crate::services::windows_cred;
-    let blob = windows_cred::read(OPENCODE_CONSOLE_CRED_TARGET)
-        .map_err(|e| OAuthError::Shape(format!("refresh read failed: {e}")))?;
-    let cred = parse_opencode_console_full_credential(&blob)
-        .map_err(|e| OAuthError::Shape(format!("refresh parse failed: {e}")))?;
-    let refresh_token = cred.refresh_token.ok_or_else(|| {
-        OAuthError::Shape("refresh requires refresh_token in stored credential".to_string())
-    })?;
-    let token = try_refresh_against(
-        &format!("{}{}", OPENCODE_CONSOLE_HOST, device_flow::TOKEN_PATH),
-        &refresh_token,
-    )?;
-    // Refresh keeps the OAuth scope stable — the prior workspace_id stays
-    // the workspace_id, and the server_id is the same SolidStart deployment
-    // (the legacy OPENCODE_SERVER_ID constant from services::usage is the
-    // documented default). Thread both from the existing credential so the
-    // new bundle has the same live-probe wiring as the old one.
-    persist_token_response(
-        &token,
-        cred.workspace_id.as_deref(),
-        cred.server_id.as_deref(),
-    )?;
-    Ok(token)
-}
-
-#[cfg(not(windows))]
-#[allow(dead_code)] // Same retention rationale as the Windows arm above.
-pub(crate) fn try_refresh() -> Result<TokenResponse, OAuthError> {
-    // Per the locked #956 design decision, non-Windows mirrors the agy
-    // precedent at services::usage::read_agy_token and returns a typed
-    // NoCredential rather than a Shape error. The user can't be signed
-    // in on this platform (Credential Manager doesn't exist), so the
-    // refresh-on-401 fallback would be a no-op anyway; surfacing
-    // NoCredential tells the higher layer to keep the SQLite (#953)
-    // path active.
-    Err(OAuthError::NoCredential(format!(
-        "{OPENCODE_CONSOLE_CRED_TARGET}: refresh not available on this platform"
-    )))
-}
-
 /// Composes the credential blob from a fresh `TokenResponse` and writes
-/// it to the Windows Credential Manager. Used by both the device-flow
-/// dance (after `poll_for_token` returns a token) and the refresh seam
-/// (after `try_refresh` issues a new bundle).
+/// it to the Windows Credential Manager. Used by the device-flow dance
+/// (after `poll_for_token_once` returns a token) and by the refresh path
+/// (after `try_refresh_against` issues a new bundle).
 ///
 /// `workspace_id` and `server_id` are no longer in the token response
 /// (verified 2026-07-23 against console.opencode.ai). The caller supplies
@@ -490,12 +430,12 @@ pub(crate) fn persist_token_response(
     _workspace_id: Option<&str>,
     _server_id: Option<&str>,
 ) -> Result<(), OAuthError> {
-    // Same design choice as try_refresh — non-Windows is NoCredential,
+    // Same design choice as the refresh path — non-Windows is NoCredential,
     // not Shape. The persist path is only reached after a successful
     // dance (a fresh TokenResponse); on non-Windows the dance can be
     // initiated (the host is reachable) but the credential has nowhere
     // to land, so this arms as NoCredential to keep the higher layer's
-    // error-matching symmetric with try_refresh and the live probe.
+    // error-matching symmetric with the live probe.
     Err(OAuthError::NoCredential(format!(
         "{OPENCODE_CONSOLE_CRED_TARGET}: credential storage not available on this platform"
     )))
@@ -773,93 +713,6 @@ fn device_code_is_expired(started_at_ms: i64, original_expires_in_secs: u32, now
     now_ms.saturating_sub(started_at_ms) >= (original_expires_in_secs as i64).saturating_mul(1000)
 }
 
-/// Polls `POST /auth/device/token` honoring RFC 8628 §3.5 backoff rules.
-/// Returns the [`TokenResponse`] on success, [`OAuthError::CodeExpired`]
-/// when the device code's window lapses, [`OAuthError::AccessDenied`]
-/// when the user denies consent, [`OAuthError::Shape`] on unrecoverable
-/// server contract drift, [`OAuthError::Transport`] on network failure.
-///
-/// `now_fn` is injected for testability (real callers pass
-/// `std::time::Instant::now`, tests pin the clock). The polling loop calls
-/// `sleep_until(deadline)` between requests; per RFC 8628 §3.5
-/// `slow_down` increments `interval` by at least 5 seconds and we honor
-/// that as soon as the server asks.
-#[allow(dead_code)] // superseded by `poll_for_token_once` (stateless IPC seam); kept for the loop's test coverage.
-pub(crate) fn poll_for_token(
-    client: &Client,
-    device_code: &str,
-    initial_interval: Duration,
-    expires_in: Duration,
-    started_at: std::time::Instant,
-    now_fn: impl Fn() -> std::time::Instant,
-    sleep_fn: impl Fn(Duration),
-) -> Result<TokenResponse, OAuthError> {
-    let mut interval = initial_interval;
-    loop {
-        // Out of time? Bail with the typed CodeExpired error. The caller
-        // decides whether to surface "please restart the flow" UI or
-        // silently retry.
-        if now_fn().duration_since(started_at) >= expires_in {
-            return Err(OAuthError::CodeExpired);
-        }
-        let response = client
-            .post(format!(
-                "{OPENCODE_CONSOLE_HOST}{}",
-                device_flow::TOKEN_PATH
-            ))
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .form(&[
-                (
-                    "grant_type",
-                    "urn:ietf:params:oauth:grant-type:device_code".to_string(),
-                ),
-                ("client_id", OPENCODE_OAUTH_CLIENT_ID.to_string()),
-                ("device_code", device_code.to_string()),
-            ])
-            .send()
-            .map_err(|e| OAuthError::Transport(format!("/auth/device/token send: {e}")))?;
-        let status = response.status();
-        let body = response
-            .text()
-            .map_err(|e| OAuthError::Transport(format!("/auth/device/token body: {e}")))?;
-        // RFC 8628 §3.5: error responses are 400 + JSON {"error": "..."}.
-        // We don't fail on 400 alone — we route on the `error` field.
-        if status.is_success() {
-            return parse_token_response(&body);
-        }
-        // Surface all non-success statuses into the body-error namespace.
-        if status.as_u16() == 400 {
-            if let Ok(err_json) = serde_json::from_str::<serde_json::Value>(&body).map_err(|_| ()) {
-                let err_code = err_json.get("error").and_then(|v| v.as_str()).unwrap_or("");
-                match err_code {
-                    "authorization_pending" => {
-                        sleep_fn(interval);
-                        continue;
-                    }
-                    "slow_down" => {
-                        // RFC 8628 §3.5: bump interval by 5 seconds minimum.
-                        interval += Duration::from_secs(5);
-                        sleep_fn(interval);
-                        continue;
-                    }
-                    "access_denied" => return Err(OAuthError::AccessDenied),
-                    "expired_token" => return Err(OAuthError::CodeExpired),
-                    _ => {
-                        return Err(OAuthError::Shape(format!(
-                            "/auth/device/token unknown error code: {err_code}"
-                        )));
-                    }
-                }
-            }
-        }
-        // Anything outside the documented RFC 8628 polling protocol is a
-        // contract change — the OAuth dance cannot proceed.
-        return Err(OAuthError::Shape(format!(
-            "/auth/device/token HTTP {status}: {body}"
-        )));
-    }
-}
-
 /// Stateless one-shot poll for `commands::opencode_oauth::poll_opencode_device_token`.
 /// React owns the `(device_code, current_interval_secs, original_expires_in_secs,
 /// started_at_ms)` quadruple in component state and asks Rust to advance the
@@ -882,8 +735,9 @@ pub(crate) fn poll_for_token(
 /// `now_ms` is computed via `SystemTime::now()` inside the function; callers
 /// that need deterministic clocking for tests should pass `started_at_ms` and
 /// set `original_expires_in_secs` short enough that the expiry gate fires. The
-/// `current_interval_secs` argument is held for symmetry with `poll_for_token`
-/// and to pin a future pre-emptive backoff — it's not consumed today.
+/// `current_interval_secs` argument is held for symmetry with the RFC 8628
+/// loop this replaced and to pin a future pre-emptive backoff — it's not
+/// consumed today.
 pub(crate) fn poll_for_token_once(
     device_code: &str,
     current_interval_secs: u32,
@@ -904,8 +758,7 @@ pub(crate) fn poll_for_token_once(
 /// substitute a loopback `tiny_http` listener so the full round-trip
 /// (status routing, error-code routing, body parse) is exercised without
 /// touching the live server. Mirrors the `fetch_workspaces` →
-/// `fetch_workspaces_against` and `try_refresh` → `try_refresh_against`
-/// pattern in this module.
+/// `fetch_workspaces_against` pattern in this module.
 pub(crate) fn poll_for_token_once_against(
     base_url: &str,
     device_code: &str,
@@ -995,7 +848,6 @@ pub(crate) const OPENCODE_CONSOLE_CRED_TARGET: &str = "opencode:console";
 /// `CACHE_TTL` of `services::usage` so the OAuth lifecycle and the cache
 /// lifecycle agree — refreshing at minute N doesn't poison a stale cache hit
 /// at minute N+1.
-#[allow(dead_code)] // awaiting refresh-on-401 seam in services::usage (issue #956 task 6)
 pub(crate) const REFRESH_TTL: Duration = Duration::from_secs(300);
 
 /// Tauri event name emitted by the OpenCode OAuth commands after a successful
@@ -1036,9 +888,9 @@ pub(crate) struct OpenCodeConsoleCred {
 
 /// Parses the OpenCode Console credential blob into the full DTO. Every
 /// field is optional in JSON; load-bearing-ness is decided by the helper
-/// that consumes this — `parse_opencode_console_credential` for the live
-/// fetcher (needs `access_token` + `workspace_id`), `try_refresh` (needs
-/// `refresh_token` + `expires_at` + `workspace_id`).
+/// that consumes this — the live fetcher needs `access_token` +
+/// `workspace_id`, the refresh path needs `refresh_token` + `expires_at` +
+/// `workspace_id`.
 ///
 /// Contract:
 /// - Non-UTF-8 bytes → `UsageError::Shape`
@@ -1098,12 +950,13 @@ pub(crate) fn read_opencode_console_full_credential() -> Result<Option<OpenCodeC
 /// (#953) takes over with whatever partial state the user has on disk.
 ///
 /// Thin wrapper over [`parse_opencode_console_full_credential`] — the full
-/// DTO path is the contract; this exists so `services::usage` keeps its
+/// DTO path is the contract; this exists so the parser's own tests keep a
 /// single-statement read path (`parse(...).map(|...| (token, workspace))`)
-/// without leaking the optional-field plumbing into the fetcher.
-#[allow(dead_code)] // narrow helper retained for the parser unit tests; the live
-                    // fetcher moved to `services::usage::opencode_live_request_parts`
-                    // (issue #972) and no longer needs the tuple shape.
+/// without leaking the optional-field plumbing. The live fetcher moved to
+/// `services::usage::opencode_live_request_parts` (#972), which reads the
+/// DTO fields it needs, so this wrapper has no caller outside its tests and
+/// is compiled for tests alone (issue #2450).
+#[cfg(test)]
 pub(crate) fn parse_opencode_console_credential(
     blob: &[u8],
 ) -> Result<(String, String), UsageError> {

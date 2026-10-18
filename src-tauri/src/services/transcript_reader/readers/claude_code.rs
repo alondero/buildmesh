@@ -546,9 +546,6 @@ pub(crate) fn pending_background_task_ids(lines: impl Iterator<Item = String>) -
     launched
 }
 
-#[allow(unused_imports)]
-use crate::services::transcript_reader::types::TranscriptTail as _UnusedTranscriptTail; // keep type accessible from tests
-
 #[cfg(test)]
 mod interrupt_tests {
     use super::*;

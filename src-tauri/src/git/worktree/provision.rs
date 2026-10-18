@@ -829,8 +829,9 @@ impl ProvisionSink for NullSink {
 /// `host_path` and `elapsed_ms` are part of the public API contract — the
 /// orchestrator currently matches on the variant name (not the payload), but
 /// future callers (telemetry, post-spawn logging, unit tests asserting
-/// per-branch timing) read them. The `#[allow(dead_code)]` keeps the
-/// warnings out without trimming the payload.
+/// per-branch timing) read them. Trimming the payload would change the seam the
+/// next caller writes against, so the lint is allowed here with that reason
+/// rather than the fields removed (issue #2450).
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum ProvisionOutcome {

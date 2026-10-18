@@ -119,6 +119,95 @@ mod tests {
         );
     }
 
+    /// Walk a `.rs` file and record the lines that call
+    /// `pty::sink::unregister_node_sinks(` in code a release build compiles.
+    ///
+    /// Production is the text before the file's first `#[cfg(test)]`. That split
+    /// is only sound while gated items come last, so this function does not try
+    /// to be clever about gates: it relies on a layout invariant, and
+    /// `no_gated_item_precedes_a_production_sink_call` asserts the invariant on
+    /// every file the walk visits. An earlier version of this guard resolved
+    /// gates with a brace-depth state machine, which is a Rust tokenizer
+    /// written in the wrong place — the layout it had to cope with was itself
+    /// created by `#[cfg(test)]` wrappers sitting mid-file in
+    /// `services/agent_node.rs`, and those now live in a `*_tests` module
+    /// (issue #2450).
+    fn collect_calls_in_source(
+        source: &str,
+        path: &std::path::Path,
+        src_root: &std::path::Path,
+        out: &mut Vec<(std::path::PathBuf, usize)>,
+    ) {
+        let production = production_prefix(source);
+        let mut in_string = false;
+        for (idx, line) in production.lines().enumerate() {
+            // Match the noise-stripped line: a commented-out call is not a live
+            // call site, and neither is the needle quoted in a string literal.
+            if strip_noise(line, &mut in_string).contains("pty::sink::unregister_node_sinks(") {
+                let rel = path.strip_prefix(src_root).unwrap_or(path).to_path_buf();
+                out.push((rel, idx + 1));
+            }
+        }
+    }
+
+    /// Everything before the file's first `#[cfg(test)]` attribute line.
+    ///
+    /// The gate is matched in attribute position — a line whose trimmed text
+    /// starts with `#[cfg(test)]` — not as a bare substring. A doc comment that
+    /// *names* the gate (several in this file do) must not truncate production,
+    /// or the scan silently loses every call site after it.
+    fn production_prefix(source: &str) -> &str {
+        let mut offset = 0usize;
+        for line in source.split_inclusive('\n') {
+            if line.trim_start().starts_with("#[cfg(test)]") {
+                return &source[..offset];
+            }
+            offset += line.len();
+        }
+        source
+    }
+
+    /// The line with comments and string literals removed, in one left-to-right
+    /// pass.
+    ///
+    /// Order matters and is the whole point: stripping `//` first would cut a
+    /// line at the `//` inside `"https://…"`, sever the closing quote, and leave
+    /// the scanner believing a string is still open. `in_string` is loop-carried
+    /// because a literal may span lines.
+    fn strip_noise(line: &str, in_string: &mut bool) -> String {
+        let mut out = String::with_capacity(line.len());
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            if *in_string {
+                match c {
+                    '\\' => i += 1,
+                    '"' => *in_string = false,
+                    _ => {}
+                }
+                i += 1;
+                continue;
+            }
+            match c {
+                '"' => *in_string = true,
+                '/' if chars.get(i + 1) == Some(&'/') => break,
+                _ => out.push(c),
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// This file's own path, as `collect_sink_unregister_sites` sees it: the
+    /// `src/`-relative `file!()` joined onto the walk root. The scan skips it
+    /// so the guard does not match its own needle literal and fixtures.
+    fn self_path() -> std::path::PathBuf {
+        // `file!()` is crate-root-relative (`src/agent/output.rs`), so joining it
+        // onto the manifest root reproduces the path the walk hands us.
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file!())
+    }
+
     fn collect_sink_unregister_sites(
         dir: &std::path::Path,
         src_root: &std::path::Path,
@@ -134,15 +223,130 @@ mod tests {
             if path.extension().and_then(|e| e.to_str()) != Some("rs") {
                 continue;
             }
+            // Exempt this file. Its own source necessarily contains the needle
+            // literal (in `collect_calls_in_source` and in the synthetic
+            // fixtures below), and a source scanner cannot reliably parse the
+            // source that implements it — the fixtures are deliberately
+            // brace-free and quote-delimited, which is exactly the shape the
+            // scanner's own string/depth bookkeeping has to reason about.
+            // `source_scanner_separates_production_from_gated_items` is the
+            // guard for the scanner itself: it pins the behaviour on synthetic
+            // input, so the exemption removes a self-reference, not coverage.
+            if path.ends_with(self_path()) {
+                continue;
+            }
             let source = std::fs::read_to_string(&path).expect("read rust file");
-            let production = source.split("#[cfg(test)]").next().unwrap_or(&source);
-            for (idx, line) in production.lines().enumerate() {
-                if line.contains("pty::sink::unregister_node_sinks(") {
-                    let rel = path.strip_prefix(src_root).unwrap_or(&path).to_path_buf();
-                    out.push((rel, idx + 1));
+            collect_calls_in_source(&source, &path, src_root, out);
+        }
+    }
+
+    /// The layout invariant `collect_calls_in_source` depends on, asserted on
+    /// every file the walk visits.
+    ///
+    /// Production is found by taking the text before the file's first
+    /// `#[cfg(test)]` attribute, so a gated item placed above a production call
+    /// site would hide it. Rather than make the scanner understand gates, this
+    /// fails and names the file: move the gated item into a `*_tests` module at
+    /// the bottom of its file. The one call site in the tree is in
+    /// `services/agent_node.rs`, above that file's test modules.
+    ///
+    /// This file is skipped for the same reason the walk skips it: its own
+    /// source quotes the needle.
+    #[test]
+    fn sink_call_sites_are_not_followed_by_a_gated_item() {
+        let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders = Vec::new();
+        let mut queue = vec![src_root.clone()];
+        while let Some(dir) = queue.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read src tree") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    queue.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs")
+                    || path.ends_with(self_path())
+                {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("read rust file");
+                let production = production_prefix(&source);
+                let rel = path
+                    .strip_prefix(&src_root)
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string();
+                for (idx, line) in source.lines().enumerate() {
+                    if !line.contains("pty::sink::unregister_node_sinks(") {
+                        continue;
+                    }
+                    let byte_at: usize = source.lines().take(idx).map(|l| l.len() + 1).sum();
+                    if byte_at >= production.len() && production.len() < source.len() {
+                        offenders.push(format!(
+                            "{rel}:{} — this call sits after the file's first \
+                             #[cfg(test)], so the production scan cannot see it",
+                            idx + 1
+                        ));
+                    }
                 }
             }
         }
+        assert!(
+            offenders.is_empty(),
+            "a gated item must not sit above a call the guard is meant to find \
+             (issue #2450): {offenders:?}"
+        );
+    }
+
+    /// `strip_noise` removes comments and string literals in one pass, so a
+    /// `//` inside a literal cannot cut the line and leave a string "open".
+    #[test]
+    fn noise_stripping_handles_a_comment_start_inside_a_literal() {
+        let scan = |source: &str| -> Vec<usize> {
+            let mut out = Vec::new();
+            collect_calls_in_source(
+                source,
+                std::path::Path::new("probe.rs"),
+                std::path::Path::new(""),
+                &mut out,
+            );
+            out.into_iter().map(|(_, line)| line).collect()
+        };
+
+        // A URL literal on line 2 must not swallow line 3's call. Stripping
+        // comments first would split line 2 at `//` in `https://`, drop the
+        // closing quote, and hide everything after.
+        let url_then_call = "\
+fn f() {
+    let u = \"https://example.test/path\";
+    crate::pty::sink::unregister_node_sinks(1);
+}
+";
+        assert_eq!(scan(url_then_call), vec![3]);
+
+        // A commented-out call is not a live call site, and a call quoted in a
+        // literal is not either.
+        let inert = "\
+// crate::pty::sink::unregister_node_sinks(2);
+fn f() {
+    let doc = \"see pty::sink::unregister_node_sinks(3) for details\";
+}
+";
+        assert_eq!(scan(inert), Vec::<usize>::new());
+
+        // Everything past the first `#[cfg(test)]` is test code by construction.
+        let gated = "\
+fn production() {
+    crate::pty::sink::unregister_node_sinks(4);
+}
+#[cfg(test)]
+mod tests {
+    fn t() {
+        crate::pty::sink::unregister_node_sinks(5);
+    }
+}
+";
+        assert_eq!(scan(gated), vec![2]);
     }
 
     #[test]

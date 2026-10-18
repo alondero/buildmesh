@@ -311,13 +311,15 @@ fn duplicate_observation_history_does_not_block_recording_the_step() {
     for _ in 0..3 {
         super::evidence::append_history(
             &db,
-            1,
-            Some("await"),
-            Some(1),
-            "observation",
-            "{}",
-            Some("codex_rollout"),
-            Some("duplicate"),
+            super::evidence::HistoryEvent {
+                run_id: 1,
+                node_id: Some("await"),
+                attempt: Some(1),
+                kind: "observation",
+                detail: "{}",
+                source: Some("codex_rollout"),
+                disposition: Some("duplicate"),
+            },
         )
         .unwrap();
     }
@@ -344,13 +346,15 @@ fn duplicate_observation_history_does_not_block_recording_the_step() {
     let seen = revision(&pushed);
     super::evidence::append_history(
         &pushed,
-        1,
-        Some("await"),
-        Some(1),
-        "observation",
-        "{}",
-        Some("agent_status_projection"),
-        Some("duplicate"),
+        super::evidence::HistoryEvent {
+            run_id: 1,
+            node_id: Some("await"),
+            attempt: Some(1),
+            kind: "observation",
+            detail: "{}",
+            source: Some("agent_status_projection"),
+            disposition: Some("duplicate"),
+        },
     )
     .unwrap();
     let mut move_on = request(&pushed, StepPushOutcome::Completed);
@@ -366,13 +370,15 @@ fn duplicate_observation_history_does_not_block_recording_the_step() {
     let seen = revision(&blocked);
     super::evidence::append_history(
         &blocked,
-        1,
-        Some("await"),
-        Some(1),
-        "observation",
-        "{}",
-        Some("codex_rollout"),
-        Some("accepted"),
+        super::evidence::HistoryEvent {
+            run_id: 1,
+            node_id: Some("await"),
+            attempt: Some(1),
+            kind: "observation",
+            detail: "{}",
+            source: Some("codex_rollout"),
+            disposition: Some("accepted"),
+        },
     )
     .unwrap();
     let attest = CheckpointRequest {

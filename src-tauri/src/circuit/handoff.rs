@@ -15,13 +15,6 @@ pub(crate) fn run_dir_in(root: &Path, run_id: i64) -> PathBuf {
         .join(format!("run-{run_id}"))
 }
 
-/// The run directory under the app data dir, or `None` when no data dir is known.
-// Used by the result-file slice of #2134.
-#[allow(dead_code)]
-pub(crate) fn run_dir(run_id: i64) -> Option<PathBuf> {
-    crate::preferences::app_data_dir().map(|root| run_dir_in(&root, run_id))
-}
-
 /// The prompt and result files for one step attempt.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct HandoffPaths {
@@ -50,13 +43,6 @@ pub(crate) fn paths_in(root: &Path, run_id: i64, node_id: &str, attempt: i32) ->
         prompt: dir.join(format!("{stem}.prompt.md")),
         result: dir.join(format!("{stem}.result.md")),
     }
-}
-
-/// The step attempt's handoff paths under the app data dir, or `None` when no data dir is known.
-// Used by the result-file slice of #2134.
-#[allow(dead_code)]
-pub(crate) fn paths(run_id: i64, node_id: &str, attempt: i32) -> Option<HandoffPaths> {
-    crate::preferences::app_data_dir().map(|root| paths_in(&root, run_id, node_id, attempt))
 }
 
 /// A WSL agent runs inside Linux, so it needs the `/mnt/<drive>/...` form.

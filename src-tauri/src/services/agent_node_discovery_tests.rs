@@ -1125,22 +1125,23 @@ fn seed_archived_node(
     cli_session_id: Option<&str>,
 ) -> (crate::models::Mesh, crate::models::AgentNode) {
     let mesh = db::create_mesh("demo", "/repos/demo").unwrap();
-    let node = db::create_agent_node(
-        mesh.id,
+    let node = db::create_agent_node(db::NewAgentNode {
+        mesh_id: mesh.id,
         name,
-        "/repos/demo/.claude/worktrees/brave-fox",
-        "feat/1065",
-        EnvType::Windows,
-        "terminal",
-        Some("brave-fox"),
-        None,
-        None,
-        None,
-        true,
-        None,
-        None,
-        None,
-    )
+        path: "/repos/demo/.claude/worktrees/brave-fox",
+        branch: "feat/1065",
+        env: EnvType::Windows,
+        provider: "terminal",
+        worktree_name: Some("brave-fox"),
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree: true,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        worktree_path: None,
+        spawn_configuration: None,
+    })
     .unwrap();
     if let Some(session_id) = cli_session_id {
         db::update_cli_session_id(node.id, session_id).unwrap();
@@ -1453,22 +1454,23 @@ fn a_merged_disk_entry_keeps_its_harness_and_gains_the_node_reference() {
 fn a_durable_row_without_a_provider_reports_unknown_provenance() {
     let _db = db::test_support::isolated();
     let mesh = db::create_mesh("demo", "/repos/demo").unwrap();
-    let node = db::create_agent_node(
-        mesh.id,
-        "no-provider",
-        "/repos/demo",
-        "main",
-        EnvType::Windows,
-        "",
-        None,
-        None,
-        None,
-        None,
-        false,
-        None,
-        None,
-        None,
-    )
+    let node = db::create_agent_node(db::NewAgentNode {
+        mesh_id: mesh.id,
+        name: "no-provider",
+        path: "/repos/demo",
+        branch: "main",
+        env: EnvType::Windows,
+        provider: "",
+        worktree_name: None,
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree: false,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        worktree_path: None,
+        spawn_configuration: None,
+    })
     .unwrap();
     db::archive_agent_node(node.id).unwrap();
 
@@ -1488,22 +1490,23 @@ fn live_nodes_never_reach_the_durable_archive_list() {
     // excluded from the Archive view exactly as before.
     let _db = db::test_support::isolated();
     let mesh = db::create_mesh("demo", "/repos/demo").unwrap();
-    db::create_agent_node(
-        mesh.id,
-        "live",
-        "/repos/demo",
-        "main",
-        EnvType::Windows,
-        "terminal",
-        None,
-        None,
-        None,
-        None,
-        false,
-        None,
-        None,
-        None,
-    )
+    db::create_agent_node(db::NewAgentNode {
+        mesh_id: mesh.id,
+        name: "live",
+        path: "/repos/demo",
+        branch: "main",
+        env: EnvType::Windows,
+        provider: "terminal",
+        worktree_name: None,
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree: false,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        worktree_path: None,
+        spawn_configuration: None,
+    })
     .unwrap();
 
     let listed = durable_archived_entries(&mut [], &db::list_agent_nodes_by_mesh(mesh.id).unwrap());

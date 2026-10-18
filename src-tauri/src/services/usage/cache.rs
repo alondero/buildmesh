@@ -323,7 +323,7 @@ pub fn invalidate_cache() {
 }
 
 /// Targeted single-provider cache invalidation (issue #970). The refresh
-/// seam in the OpenCode adapter calls this on a successful `try_refresh()`
+/// seam in the OpenCode adapter calls this after it rotates the bearer
 /// so the next cache lookup cannot return a stale envelope
 /// minted before the bearer was rotated. Distinct from [`invalidate_cache`]
 /// (which clears every provider) so a refresh on one provider doesn't force

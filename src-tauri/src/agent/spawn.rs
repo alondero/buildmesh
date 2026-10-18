@@ -30,7 +30,7 @@ pub(crate) mod resume_guard;
 mod streams;
 mod wire;
 
-pub use command::{build_spawn_command, build_spawn_command_prepared};
+pub use command::{build_spawn_command_prepared, SpawnCommandInput};
 pub(crate) use orchestrator::spawn_with_intent;
 pub(crate) use prepare::resolve_base_ref_for_spawn;
 pub use prepare::DEFAULT_WORKTREE_MODE;

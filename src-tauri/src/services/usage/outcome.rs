@@ -34,13 +34,11 @@ use std::collections::HashSet;
 /// the structural class of bug the seam prevents — see
 /// [`super::adapters::muse_code::missing`] for the pre-#1745 dead sentinel.
 ///
-/// `#[allow(dead_code)]` silences `clippy::variant_size_differences` false
-/// positives for `NoCredential` and `ManagedExternally`: both are
-/// constructed in `into_usage_table_per_variant` (the table-test enforcing
-/// the projection across all 7 variants); `NoCredential` is constructed
-/// by every adapter's missing-credential path, and `ManagedExternally`
-/// by the Anthropic adapter's cloud/API-platform arm (issue #1758).
-#[allow(dead_code)]
+/// Each variant has a constructor, so `cargo check --all-targets` reports no
+/// never-constructed variant: `NoCredential` on each adapter's
+/// missing-credential path, `ManagedExternally` by the Anthropic adapter's
+/// cloud/API-platform arm (issue #1758), and the rest through the
+/// `UsageOutcome::*` constructors above (issue #2450).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum UsageOutcome {
     /// A real reading. Empty `windows` + `balance` + `meters` is valid (e.g.
@@ -93,18 +91,6 @@ pub(crate) enum AuthPolicy {
     /// that return `logged_out` on 401/403 today).
     #[default]
     Rejected,
-    /// 401/403 is indistinguishable from a missing credential for this
-    /// provider. Used when the credential store and the API are decoupled
-    /// (e.g. Muse Code: an OAuth token's absence cannot be distinguished from
-    /// "API key configured" via HTTP status alone — the auth source is
-    /// separate from the API key path).
-    // No adapter passes this today (every `fetch_usage` call site passes
-    // `AuthPolicy` explicitly, all `Rejected`); it stays as the
-    // documented second classifier for credential-store/API-decoupled
-    // providers. Clippy can't see the driver match arm as construction —
-    // the allow is a false-positive suppression.
-    #[allow(dead_code)]
-    NoCredential,
 }
 
 // Migration shim removed (issue #1758): `From<ProviderUsage> for

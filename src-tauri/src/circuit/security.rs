@@ -1,7 +1,11 @@
 //! Collaborator trust policy for issue-triggered Circuits.
 
 use crate::models::SessionStatus;
-use crate::services::github::{GitHubClient, GitHubError, Issue, PullRequest};
+use crate::services::github::{GitHubClient, GitHubError, Issue};
+// Only `CircuitTrigger::from_pull_request` names `PullRequest`, and that
+// constructor is compiled for its tests alone (issue #2450).
+#[cfg(test)]
+use crate::services::github::PullRequest;
 
 // Re-export so external callers (and the integration test) can name the gate's
 // input type through the public `circuit` path even though `services` is a
@@ -47,9 +51,10 @@ impl CircuitTrigger {
     /// Build a trigger from a fetched [`PullRequest`]. The gate checks *who
     /// opened the PR* (`pr.author`), not the fork owner — the two usually match
     /// but the author is the trust-relevant identity.
-    // The Circuit poller currently builds issue triggers. This constructor
-    // keeps pull-request identity normalization covered for future trigger use.
-    #[allow(dead_code)]
+    // The Circuit poller currently builds issue triggers, so this constructor
+    // exists only to keep pull-request identity normalization covered. Compiled
+    // for tests alone until a PR trigger ships (issue #2450).
+    #[cfg(test)]
     pub(crate) fn from_pull_request(owner: &str, repo: &str, pr: &PullRequest) -> Self {
         Self {
             owner: owner.to_string(),

@@ -1,0 +1,18 @@
+/* Issue #2460 — the canvas chrome React Flow styles for itself.
+ *
+ * Zoom Controls and the attribution pill are rendered by @xyflow/react,
+ * whose stylesheet hard-codes a light palette (#fefefe buttons, a
+ * rgba(255,255,255,.5) pill). Those surfaces are themed through the
+ * `--xy-*` custom properties set on the flow root in CircuitFlowEditor.tsx;
+ * the link colour inside the pill is the one upstream value that is a
+ * literal rather than a custom property, so it needs a rule here.
+ * `.circuit-flow-canvas` outranks `.react-flow__attribution a` on
+ * specificity, so no `!important` and no import-order dependency.
+ * Every colour is a token, so [data-theme="light"] flips it with the
+ * rest of the app. */
+.circuit-flow-canvas .react-flow__attribution a {
+  color: var(--color-text-muted);
+}
+.circuit-flow-canvas .react-flow__attribution a:hover {
+  color: var(--color-text-primary);
+}

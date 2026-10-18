@@ -27,10 +27,11 @@
 //!   after a fetch advances a mesh's base ref, `on_fetch_completed` →
 //!   `refresh_stale_warm_worktrees` `git reset --hard`s the pool's available
 //!   worktrees onto the new commit so a claim never lands on a stale ref.
-//! * Idle background maintenance (issue #613): `maintain_all_pools`, driven by
-//!   `services::pool_worker`'s debounced worker thread, tops every mesh's pool
-//!   back to target while the app is idle — the pool self-heals without
-//!   waiting for the next claim or app restart.
+//! * Idle background maintenance (issue #613): `drain_and_fill_for_mesh`, driven
+//!   per mesh by `services::pool_worker`'s debounced worker thread so each mesh's
+//!   own idle gate can gate its own fill, tops that mesh's pool back to target
+//!   while the app is idle — the pool self-heals without waiting for the next
+//!   claim or app restart.
 //! * A Mesh whose folder cannot be opened as a git working repository is not
 //!   poolable: [`mesh_repo_unusable`] gates the two paths that create a
 //!   worktree or fetch — the idle fill and the ADR 0020 background sync
@@ -47,9 +48,10 @@
 //! each worktree-enabled mesh drains any excess (downsize) and fills up
 //! to the per-mesh target.
 //!
-//! `maintain_all_pools` — the idle worker's per-tick body (issue #613): drains
-//! and fills every worktree-enabled mesh to target. Serialized behind the fill
-//! lock and gated on idleness by the caller (`services::pool_worker`).
+//! `drain_and_fill_for_mesh` — the idle worker's per-mesh body (issue #613):
+//! drains and fills one worktree-enabled mesh to target. Serialized behind the
+//! fill lock and gated on idleness by the caller (`services::pool_worker`), which
+//! is why each mesh can gate its own fill (issue #634).
 //!
 //! `refresh_stale_warm_worktrees` / `on_fetch_completed` — the post-fetch
 //! ref-freshness pass (issue #613): hard-reset available pool worktrees onto a
@@ -74,6 +76,7 @@
 use crate::db::{self, WarmWorktreeStatus};
 use crate::session_naming::on_spawn;
 use once_cell::sync::Lazy;
+#[cfg(test)]
 use rusqlite::Connection;
 use std::collections::HashSet;
 use std::path::Path;
@@ -92,10 +95,10 @@ pub const POOL_COUNT_CHANGED_EVENT: &str = "pool-count-changed";
 /// unfocused) must never fail a pool mutation, so the `let _` swallows
 /// any emission error.
 ///
-/// `maintain_all_pools` and `post_spawn_maintenance` deliberately do
-/// NOT emit at end-of-pass — every state change inside them already
-/// fires this, and an unconditional end-of-pass emit would wake the
-/// listener every idle tick (~2s) for no reason.
+/// The idle fill and `post_spawn_maintenance` deliberately do NOT emit at
+/// end-of-pass — every state change inside them already fires this, and an
+/// unconditional end-of-pass emit would wake the listener every idle tick
+/// (~2s) for no reason.
 pub fn emit_pool_changed(app: &tauri::AppHandle, mesh_id: i64) {
     let _ = app.emit(POOL_COUNT_CHANGED_EVENT, mesh_id);
 }
@@ -260,8 +263,9 @@ pub fn recheck_after_claim(id: i64, path: &str) -> bool {
 
 /// `_inner`-style testable variant. Takes the row-delete and tombstone-cancel
 /// functions as injected dependencies so a test can run against an in-memory
-/// `Connection` without touching the global DB writer.
-#[cfg_attr(not(test), allow(dead_code))]
+/// `Connection` without touching the global DB writer. Compiled for tests
+/// alone (issue #2450).
+#[cfg(test)]
 pub(crate) fn recheck_after_claim_inner(conn: &Connection, id: i64, path: &str) -> bool {
     let delete_row = |row_id: i64| db::delete_warm_worktree_inner(conn, row_id);
     let cancel_tombstone = |p: &str| db::delete_pending_worktree_removal_inner(conn, p);
@@ -1013,26 +1017,6 @@ fn fill_mesh_to_target(app: &tauri::AppHandle, mesh: &db::WarmPoolMeshRow) -> us
 /// end-of-pass emit would wake the listener every idle tick (every ~2s)
 /// even when nothing changed.
 ///
-/// Kept as a public API (the integration test in
-/// `tests/warm_pool_maintenance.rs` drives it directly to exercise the
-/// all-meshes fan-out path) but no longer called by the production
-/// worker — `services::pool_worker::start_background_worker` now calls
-/// `drain_and_fill_for_mesh` per-mesh so each mesh's per-mesh idle gate
-/// can gate ITS OWN fill (issue #634).
-#[allow(dead_code)]
-pub fn maintain_all_pools(app: &tauri::AppHandle) {
-    let meshes = match db::list_worktree_enabled_meshes_for_warm() {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!("warm_pool: maintain list meshes failed: {}", e);
-            return;
-        }
-    };
-    for mesh in meshes {
-        fill_mesh_to_target(app, &mesh);
-    }
-}
-
 /// Run the startup reconcile pass (issue #610): prune crash-orphaned rows
 /// (and their Git worktree metadata) + fill any mesh that is below the
 /// per-mesh target.
@@ -1254,8 +1238,8 @@ pub fn post_spawn_maintenance(
 /// count and the candidate scan filter `status != 'claimed'`.
 ///
 /// Returns the number of entries dropped (0 when droppable ≤ target).
-/// Idempotent: safe to call from `reconcile_on_startup`, `maintain_all_pools`,
-/// and `refill_after_claim`.
+/// Idempotent: safe to call from `reconcile_on_startup`, the idle
+/// `drain_and_fill_for_mesh` pass, and `refill_after_claim`.
 ///
 /// Emits `pool-count-changed` IFF any rows were actually dropped — a no-op
 /// drain (already at or below target) doesn't change the count and so

@@ -25,8 +25,11 @@ pub(crate) use native_completion::{
     read_native_turn_completion, NativeTurnCompletion, NativeTurnSnapshot,
 };
 pub(crate) use types::AssistantReport;
-#[allow(unused_imports)]
-pub use types::{ToolCall, TranscriptTail, Turn, UnavailableReason};
+pub use types::{TranscriptTail, Turn, UnavailableReason};
+// Named by the scrubbing suites, which build a synthetic tail to assert on
+// (issue #2450).
+#[cfg(test)]
+pub use types::ToolCall;
 
 /// A wired on-disk transcript format, selected from the resolved harness id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

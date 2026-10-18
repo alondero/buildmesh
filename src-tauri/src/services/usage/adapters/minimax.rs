@@ -10,7 +10,10 @@ use crate::preferences::ProviderAccount;
 use crate::services::usage::adapter::{api_key_for, fetch_usage, UsageAdapter};
 use crate::services::usage::outcome::{AuthPolicy, UsageOutcome};
 use crate::services::usage::types::UsagePage;
-use crate::services::usage::types::{BillingBalance, UsageError, UsageWindow};
+use crate::services::usage::types::{UsageError, UsageWindow};
+// Only the test-only `parse_minimax_balance` below names `BillingBalance`.
+#[cfg(test)]
+use crate::services::usage::types::BillingBalance;
 use serde::Deserialize;
 
 /// Drop-in [`UsageAdapter`] for `minimax`.
@@ -118,8 +121,9 @@ fn parse_minimax_response(body: &str) -> Result<(Vec<UsageWindow>, Option<String
 // known `token_plan/remains` endpoint returns plan percentages, not cash. This
 // parser + its mock tests prove the BillingBalance pipeline; wiring an actual
 // HTTP fetch is deferred per the agreed slice (real endpoint not yet confirmed).
-// `allow(dead_code)`: exercised by the mock tests below, not yet by a live fetch.
-#[allow(dead_code)]
+// `cfg(test)`: exercised by the mock tests below, not yet by a live fetch
+// (issue #2450).
+#[cfg(test)]
 fn parse_minimax_balance(body: &str) -> Result<BillingBalance, UsageError> {
     #[derive(Deserialize)]
     struct BalanceInfo {

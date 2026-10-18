@@ -43,32 +43,24 @@ pub mod ws_ticket;
 
 pub use stream::MaybeTls;
 
-#[allow(unused_imports)] // public API + ts-rs exports used outside this module
-pub use state::{
-    current_http_port, fulfill_snapshot, port_offset, port_profile_label, realized_binds,
-    RealizedBind, SerializeTerminalRequestPayload, HTTP_PORT_DEFAULT,
-};
+pub use state::{current_http_port, fulfill_snapshot, port_offset, realized_binds, RealizedBind};
 
-// `enumerate_interfaces` is consumed by `interface_watcher::sorted_snapshot`
-// and `interface_rank::enumerate_with_classes`, both `#[cfg(not(windows))]`
-// — so on Windows lib builds (which exclude `#[cfg(test)]`) the import is
-// technically unused. The re-export still has to exist on Windows for the
-// regression test in `interface_watcher::tests` to resolve
-// `super::super::enumerate_interfaces()`. Scope the suppression to Windows
-// so any genuine future regression on non-Windows surfaces immediately.
-#[cfg_attr(target_os = "windows", allow(unused_imports))]
 pub(crate) use state::{
-    app_handle, enumerate_interfaces, enumerate_interfaces_with_classes_fallback,
-    local_classes_if_populated, local_interface_ips, read_interface_override_for_test,
-    request_terminal_snapshot,
+    app_handle, enumerate_interfaces_with_classes_fallback, local_classes_if_populated,
+    local_interface_ips, read_interface_override_for_test, request_terminal_snapshot,
 };
 
-#[cfg(test)]
-#[allow(unused_imports)]
-pub(crate) use state::set_interface_enumerator_for_testing;
+// `enumerate_interfaces` has two distinct consumers: the production
+// `#[cfg(not(target_os = "windows"))]` paths (`interface_watcher::sorted_snapshot`
+// and `interface_rank::enumerate_with_classes`), and — on Windows, where those
+// blocks are compiled out — the regression test in `interface_watcher::tests`
+// that resolves `super::super::enumerate_interfaces()`. The attribute that used
+// to sit here silenced the unused-import lint on Windows alone; gating to the
+// configurations that actually resolve the name says the same thing without a
+// suppression (issue #2450).
+#[cfg(any(test, not(target_os = "windows")))]
+pub(crate) use state::enumerate_interfaces;
 
-#[allow(unused_imports)]
-pub use server::bind_specs;
 pub(crate) use server::{clear_cached_acceptor, is_link_local};
 
 /// Start the HTTP server, trying ports 1992→1993→1994 until one binds.

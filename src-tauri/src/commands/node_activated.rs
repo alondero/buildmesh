@@ -16,6 +16,11 @@ use ts_rs::TS;
 /// is imported by `src/stores/agentNodeListeners.ts`.
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export, export_to = "NodeActivatedPayload.ts")]
+// The only constructor is the `#[cfg(any(debug_assertions, feature =
+// "dev-tools"))]` test bridge, so a release build has nothing that builds this.
+// The type still has to exist there or ts-rs would drop
+// `src/types/generated/NodeActivatedPayload.ts` from the release build's
+// generated set (issue #2153, #2450).
 #[cfg_attr(not(any(debug_assertions, feature = "dev-tools")), allow(dead_code))]
 pub struct NodeActivatedPayload {
     #[ts(as = "i32")]

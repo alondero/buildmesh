@@ -122,20 +122,6 @@ pub struct ModelTiers {
     pub haiku: Option<String>,
 }
 
-impl ModelTiers {
-    /// True when no tier is set.
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        let blank = |s: &Option<String>| s.as_deref().is_none_or(|v| v.is_empty());
-        blank(&self.default)
-            && blank(&self.small_fast)
-            && blank(&self.sonnet)
-            && blank(&self.opus)
-            && blank(&self.fable)
-            && blank(&self.haiku)
-    }
-}
-
 /// A **Compatible API surface** — the wire protocol a harness expects of its
 /// backend (CONTEXT.md, ADR-0016 §4, issue #576).
 ///

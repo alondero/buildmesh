@@ -176,7 +176,8 @@ archived nodes. Search by name, repository, branch or session, and filter by
 repository or lifecycle state. **Reopen** restores an archived node to the
 workspace without starting its process; **Resume** starts it separately using
 its saved session when available. **Discovered sessions** scans CLI history
-for the explicitly selected repository.
+for the explicitly selected repository. The highlighted button is the view you
+are in, and each view has its own **Refresh**.
 
 ## See which scope you are looking at
 

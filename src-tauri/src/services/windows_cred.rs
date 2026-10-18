@@ -180,13 +180,9 @@ pub(crate) fn delete(target: &str) -> Result<(), UsageError> {
 /// once a successful probe write+delete round-trip lands; subsequent calls
 /// reuse the cached verdict. Lives in `pub(crate)` so the opencode_oauth
 /// tests — which persist through `persist_token_response_to` and therefore
-/// depend on the same Credential Manager seam — can share the probe. Gated
-/// to `#[cfg(any(test, windows))]` so a non-Windows build doesn't carry
-/// the Win32-only body; `dead_code` is allow-ed because the function is
-/// genuinely test-only and clippy's lib-only check doesn't see the
-/// `#[cfg(test)]` call sites.
-#[cfg(any(test, windows))]
-#[allow(dead_code)] // only consumed from #[cfg(test)] modules
+/// depend on the same Credential Manager seam — can share the probe. Only
+/// those tests call it, so it is compiled for tests alone (issue #2450).
+#[cfg(test)]
 pub(crate) fn credential_manager_available() -> bool {
     use std::sync::OnceLock;
     static AVAILABLE: OnceLock<bool> = OnceLock::new();

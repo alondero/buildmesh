@@ -1,5 +1,5 @@
 use crate::agent::managed_config;
-use crate::agent::process::{AgentProcess, PROCESS_REGISTRY};
+use crate::agent::process::{AgentProcess, AgentProcessParams, PROCESS_REGISTRY};
 use portable_pty::{CommandBuilder, PtyPair};
 use std::io::Write;
 use std::path::Path;
@@ -320,18 +320,37 @@ pub(super) fn pty_writer_thread(
 /// dedicated thread exists.
 pub const PTY_WRITER_CHANNEL_CAPACITY: usize = 64;
 
-#[allow(clippy::too_many_arguments)]
+/// The session-scoped state the registry insert and the reader thread both
+/// need. Built once in [`super::streams::start_streams`] so the two cannot
+/// drift apart: `reader_alive` and `deliberate_kill` are one flag instance
+/// shared three ways (the registry entry — `kill_session` sets it — the reader
+/// thread's epilogue reads it, and nothing else), and `spawn_start` is the
+/// original `SpawnTimer.start` clone.
+#[derive(Clone)]
+pub(super) struct SpawnedSession {
+    pub session_id: i64,
+    pub reader_alive: Arc<AtomicBool>,
+    pub deliberate_kill: Arc<AtomicBool>,
+    pub spawn_start: std::time::Instant,
+    pub mesh_id: i64,
+}
+
+/// Insert the agent into [`PROCESS_REGISTRY`] and return the generation the
+/// registry assigned to the entry.
 pub(super) fn register_agent(
-    session_id: i64,
+    session: SpawnedSession,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     writer: Box<dyn std::io::Write + Send>,
     master: Box<dyn portable_pty::MasterPty + Send>,
-    reader_alive: Arc<AtomicBool>,
     job: Option<crate::process_util::JobHandle>,
-    spawn_start: std::time::Instant,
-    mesh_id: i64,
-    deliberate_kill: Arc<AtomicBool>,
 ) -> u64 {
+    let SpawnedSession {
+        session_id,
+        reader_alive,
+        deliberate_kill,
+        spawn_start,
+        mesh_id,
+    } = session;
     // Issue #1122: spawn the dedicated PTY writer thread and stand up
     // the bounded channel *before* the registry `insert` so a concurrent
     // `write_bytes` call (visible the moment the entry exists) can never
@@ -352,19 +371,21 @@ pub(super) fn register_agent(
 
     PROCESS_REGISTRY.insert(
         session_id,
-        AgentProcess::new(
+        // The reader thread gets its own handles to the shared flags, so the
+        // registry entry and the reader keep observing one flag instance.
+        AgentProcess::new(AgentProcessParams {
             child,
             writer_tx,
             queue,
-            Some(writer_handle),
+            writer_handle: Some(writer_handle),
             master,
-            reader_alive,
-            deliberate_kill,
+            reader_alive: Arc::clone(&reader_alive),
+            deliberate_kill: Arc::clone(&deliberate_kill),
             job,
-            None,
+            reader_handle: None,
             spawn_start,
             mesh_id,
-        ),
+        }),
     )
 }
 
@@ -469,18 +490,20 @@ mod tests {
         drop(pair.master.take_writer().expect("take writer"));
 
         super::register_agent(
-            session_id,
+            super::SpawnedSession {
+                session_id,
+                reader_alive: Arc::new(AtomicBool::new(true)),
+                deliberate_kill: Arc::new(AtomicBool::new(false)),
+                spawn_start: std::time::Instant::now(),
+                mesh_id: 0,
+            },
             child,
             Box::new(RecordingWriter {
                 chunks: chunks.clone(),
                 flushed: flushed_tx,
             }),
             pair.master,
-            Arc::new(AtomicBool::new(true)),
             None,
-            std::time::Instant::now(),
-            0,
-            Arc::new(AtomicBool::new(false)),
         );
         let _stop = KillSession(session_id);
 

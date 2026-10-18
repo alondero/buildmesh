@@ -378,22 +378,23 @@ mod tests {
     fn an_unreadable_transcript_stays_a_200_unavailable_envelope() {
         let _db = crate::db::test_support::isolated();
         let mesh = crate::db::create_mesh("demo", "/tmp/bm-2330-coord").unwrap();
-        let node = crate::db::create_agent_node(
-            mesh.id,
-            "agent-1",
-            "/tmp/bm-2330-coord",
-            "main",
-            crate::models::EnvType::Windows,
-            "terminal",
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-        )
+        let node = crate::db::create_agent_node(crate::db::NewAgentNode {
+            mesh_id: mesh.id,
+            name: "agent-1",
+            path: "/tmp/bm-2330-coord",
+            branch: "main",
+            env: crate::models::EnvType::Windows,
+            provider: "terminal",
+            worktree_name: None,
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree: false,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            worktree_path: None,
+            spawn_configuration: None,
+        })
         .unwrap();
 
         let resp = super::log_json(node.id, 5).expect("the node resolved, so this is not absence");

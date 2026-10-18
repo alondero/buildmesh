@@ -17,22 +17,23 @@ use std::path::Path;
 pub(crate) fn create_mobile_review_approval_fixture(name: &str) -> Result<Value, String> {
     let mesh = crate::services::mesh::create_test(name).map_err(|e| e.to_string())?;
     let result = (|| {
-        let source = crate::db::create_agent_node(
-            mesh.id,
-            "Phone approval implementation",
-            &mesh.path,
-            "main",
-            EnvType::Windows,
-            "codex",
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-        )
+        let source = crate::db::create_agent_node(crate::db::NewAgentNode {
+            mesh_id: mesh.id,
+            name: "Phone approval implementation",
+            path: &mesh.path,
+            branch: "main",
+            env: EnvType::Windows,
+            provider: "codex",
+            worktree_name: None,
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree: false,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            worktree_path: None,
+            spawn_configuration: None,
+        })
         .map_err(|e| e.to_string())?;
         crate::db::update_agent_node_status(source.id, SessionStatus::Ready)
             .map_err(|e| e.to_string())?;
@@ -169,22 +170,23 @@ fn create_review_activity_pair(
     label: &str,
     kind: ReviewFixtureKind,
 ) -> Result<Value, String> {
-    let source = crate::db::create_agent_node(
+    let source = crate::db::create_agent_node(crate::db::NewAgentNode {
         mesh_id,
-        &format!("{label} implementation"),
-        &mesh.path,
-        "main",
-        EnvType::Windows,
-        "codex",
-        Some(&format!("{label} implementation")),
-        None,
-        None,
-        None,
-        false,
-        None,
-        None,
-        None,
-    )
+        name: &format!("{label} implementation"),
+        path: &mesh.path,
+        branch: "main",
+        env: EnvType::Windows,
+        provider: "codex",
+        worktree_name: Some(&format!("{label} implementation")),
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree: false,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        worktree_path: None,
+        spawn_configuration: None,
+    })
     .map_err(|error| error.to_string())?;
     // Stamp a `cli_session_id` so the source mirrors a real agent whose
     // worker has captured a session identity.
@@ -193,22 +195,23 @@ fn create_review_activity_pair(
     crate::db::update_agent_node_status(source.id, SessionStatus::Completed)
         .map_err(|error| error.to_string())?;
 
-    let reviewer = crate::db::create_agent_node(
+    let reviewer = crate::db::create_agent_node(crate::db::NewAgentNode {
         mesh_id,
-        &format!("{label} reviewer"),
-        &mesh.path,
-        "main",
-        EnvType::Windows,
-        "codex",
-        Some(&format!("{label} reviewer")),
-        None,
-        None,
-        None,
-        false,
-        None,
-        None,
-        None,
-    )
+        name: &format!("{label} reviewer"),
+        path: &mesh.path,
+        branch: "main",
+        env: EnvType::Windows,
+        provider: "codex",
+        worktree_name: Some(&format!("{label} reviewer")),
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree: false,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        worktree_path: None,
+        spawn_configuration: None,
+    })
     .map_err(|error| error.to_string())?;
 
     let (run_id, parent_id) = match kind {

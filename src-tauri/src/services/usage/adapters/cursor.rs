@@ -528,14 +528,6 @@ struct CursorPlanUsage {
     remaining: Option<CursorNumber>,
     #[serde(default)]
     total_percent_used: Option<CursorNumber>,
-    /// Wire-only for now: Cursor reports per-model-family percentages, but the
-    /// glanceable panel keeps one included-allowance meter per account.
-    #[serde(default)]
-    #[allow(dead_code)]
-    auto_percent_used: Option<CursorNumber>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    api_percent_used: Option<CursorNumber>,
 }
 
 /// Cursor reports individual and pooled (team) spend limits separately. They
@@ -545,11 +537,6 @@ struct CursorPlanUsage {
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct CursorSpendLimitUsage {
-    /// Wire-only for now: the individual/pooled amounts below already carry the
-    /// cap distinction the meter needs.
-    #[serde(default)]
-    #[allow(dead_code)]
-    limit_type: Option<String>,
     #[serde(default)]
     individual_limit: Option<CursorNumber>,
     #[serde(default)]
@@ -852,11 +839,6 @@ struct CursorModelUsage {
     num_slow_requests: Option<f64>,
     #[serde(rename = "maxRequestUsage", default)]
     max_request_usage: Option<f64>,
-    /// Wire-only: the legacy response can carry a token cap, but the probe has
-    /// always surfaced the request allowance.
-    #[serde(rename = "maxTokenUsage", default)]
-    #[allow(dead_code)]
-    max_token_usage: Option<f64>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
