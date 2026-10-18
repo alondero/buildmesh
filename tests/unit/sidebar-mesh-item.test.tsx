@@ -288,15 +288,18 @@ describe('MeshItem', () => {
     expect(props.onOpenSessionHistoryProbe).toHaveBeenCalledWith(3);
   });
 
-  it('opens the probe panel on the files tab when "File Explorer" is chosen (#376)', async () => {
+  it('opens the probe panel on the files tab when "File Explorer" is chosen (#376, #2459)', async () => {
     // Issue #376 — the "File Explorer" right-click item used to call the
     // legacy `onToggleFileExplorer` (which opened FileExplorerPanel in the
-    // SessionView left pane). After the port it calls `onOpenFilesProbe`,
-    // which Sidebar wires to `openProbeTab('files')`.
+    // SessionView left pane). After the port it calls `onOpenFilesProbe`.
+    // Issue #2459 — the id is the load-bearing part: the handler used to take
+    // none, so an unselected Mesh's menu entry opened Project Files for
+    // whichever Mesh was already active. The row must name its own Mesh.
     const { props } = renderMeshItem();
     fireEvent.contextMenu(screen.getByText('my-mesh'));
     await userEvent.click(screen.getByText('File Explorer'));
     expect(props.onOpenFilesProbe).toHaveBeenCalledTimes(1);
+    expect(props.onOpenFilesProbe).toHaveBeenCalledWith(3);
   });
 
   it('routes the right-click "Properties" entry to the Probe Panel (issue #375)', async () => {

@@ -94,6 +94,14 @@ function clickMeshRow(id: number) {
   fireEvent.click(name);
 }
 
+/** Open the sidebar's right-click menu on a Mesh row — the real gesture,
+ *  through the real MeshItem menu. */
+function openMeshMenu(meshId: number) {
+  const row = document.getElementById(`mesh-item-name-${meshId}`);
+  if (!row) throw new Error(`mesh row ${meshId} not rendered`);
+  fireEvent.contextMenu(row.parentElement!);
+}
+
 beforeEach(() => {
   cleanup();
 });
@@ -217,14 +225,6 @@ describe('Sidebar Probe destinations agree with the palette about Mesh scope (#2
     };
   }
 
-  /** Open the sidebar's right-click menu on a Mesh row — the real gesture,
-   *  through the real MeshItem menu. */
-  function openMeshMenu(meshId: number) {
-    const row = document.getElementById(`mesh-item-name-${meshId}`);
-    if (!row) throw new Error(`mesh row ${meshId} not rendered`);
-    fireEvent.contextMenu(row.parentElement!);
-  }
-
   /** Open the sidebar's right-click menu on a Mesh row and choose
    *  **Properties** — the real gesture, through the real MeshItem menu. */
   async function openPropertiesFromSidebar(meshId: number) {
@@ -269,13 +269,16 @@ describe('Sidebar Probe destinations agree with the palette about Mesh scope (#2
     expect(fromPalette).toEqual(fromSidebar);
   });
 
-  // The other three destinations carry the same Mesh id for the same reason
+  // The other destinations carry the same Mesh id for the same reason
   // (a Mesh-lens tab resolves its subject from `selectedMeshId`), so they
   // move together. Driven through the real gestures, not by calling the
-  // handlers: Properties and GitHub Issues are context-menu entries,
-  // Archive is too, and the Worktree Manager is the drift badge (which needs
-  // a drifted Mesh before it renders).
+  // handlers: Properties, File Explorer, and GitHub Issues are context-menu
+  // entries, Archive is too, and the Worktree Manager is the drift badge
+  // (which needs a drifted Mesh before it renders). Project Files joined the
+  // list in issue #2459 — it was the one context-menu destination that named
+  // no Mesh, so the canvas stayed wherever the user last was.
   it.each([
+    ['files', 'File Explorer', 'menuitem'],
     ['issues', 'GitHub Issues', 'menuitem'],
     ['sessions', 'Archive', 'menuitem'],
   ] as const)(
@@ -312,5 +315,53 @@ describe('Sidebar Probe destinations agree with the palette about Mesh scope (#2
     } finally {
       meshHealth.value = null;
     }
+  });
+});
+
+/**
+ * Issue #2459 — right-clicking an *unselected* Mesh and choosing
+ * **File Explorer** opened Project Files for whichever Mesh was already
+ * active, because that one menu item dropped the Mesh id every sibling
+ * carries (`enterMesh(id, { probeTab: 'files' })` vs a bare
+ * `openProbeTab('files')`).
+ *
+ * Both cases below drive the real gesture through the real `Sidebar`, and
+ * both right-click a Mesh the user is *not* in: on the selected Mesh's own
+ * row both behaviours land on the same place, so only the cross-Mesh case
+ * tells them apart.
+ */
+describe('Sidebar right-click "File Explorer" opens the right-clicked Mesh (#2459)', () => {
+  it('enters the Mesh that was right-clicked, not the active one', async () => {
+    seed('mesh', GAMMA.id);
+    expect(useMeshStore.getState().selectedMeshId).toBe(GAMMA.id);
+    await renderSidebar();
+
+    openMeshMenu(BETA.id);
+    fireEvent.click(screen.getByRole('menuitem', { name: /file explorer/i }));
+    for (let i = 0; i < 5; i++) await act(async () => {});
+
+    // Pre-#2459 the selection and the canvas stayed on GAMMA here — only the
+    // tab moved — so Project Files resolved GAMMA's repository.
+    expect(useMeshStore.getState().selectedMeshId).toBe(BETA.id);
+    expect(useUIStore.getState().viewMode).toBe('mesh');
+    expect(useUIStore.getState().probeTab).toBe('files');
+  });
+
+  it('gives Project Files a Mesh to show when the user has none selected', async () => {
+    // The other half of the report: with no active Mesh, the bare
+    // `openProbeTab('files')` left the destination with no Mesh to read,
+    // which the bug report saw as "No project selected" — no entry had
+    // named a Mesh for it.
+    seed('all', null);
+    expect(useMeshStore.getState().selectedMeshId).toBeNull();
+    await renderSidebar();
+
+    openMeshMenu(ALPHA.id);
+    fireEvent.click(screen.getByRole('menuitem', { name: /file explorer/i }));
+    for (let i = 0; i < 5; i++) await act(async () => {});
+
+    expect(useMeshStore.getState().selectedMeshId).toBe(ALPHA.id);
+    expect(useUIStore.getState().viewMode).toBe('mesh');
+    expect(useUIStore.getState().probeTab).toBe('files');
   });
 });

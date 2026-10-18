@@ -68,7 +68,9 @@ interface MeshItemProps {
   // Issue #376: opens the unified Probe Panel on the 📁 (Project Files) tab
   // for this mesh. Replaces the legacy `onToggleFileExplorer` prop, which
   // toggled the deleted SessionView left-pane `FileExplorerPanel`.
-  onOpenFilesProbe: () => void;
+  // Issue #2459: carries the Mesh id like every sibling Probe destination, so
+  // the menu entry scopes the canvas to the Mesh that was right-clicked.
+  onOpenFilesProbe: (meshId: number) => void;
   /** Paired agents share one Node Activity card, and the sidebar clusters them
    *  under a connector rail so the pairing is visible here too. Derived in
    *  `Sidebar` from the same `activityRootId` resolver the grid uses (via
@@ -727,7 +729,7 @@ function MeshItemView({
           <button
             role="menuitem"
             tabIndex={activeIndex === 1 ? 0 : -1}
-            onClick={() => { closeContextMenu(); onOpenFilesProbe(); }}
+            onClick={() => { closeContextMenu(); onOpenFilesProbe(mesh.id); }}
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card-hover flex items-center gap-2"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

@@ -126,11 +126,6 @@ export function Sidebar() {
   const activateNode = useCallback((nodeId: number) => { focusNode(nodeId, { view: 'mesh' }); }, []);
   const selectProviderForMesh = useAgentNodeStore(state => state.selectProviderForMesh);
   const deleteAgentNode = useAgentNodeStore(state => state.deleteAgentNode);
-  // Issue #376 / #378: open the unified Probe Panel on a specific tab.
-  // The `openProbeTab` helper atomically sets the tab and opens the panel.
-  // The action reference is stable across renders (zustand), so we bind
-  // the tab at the prop site without an extra closure layer.
-  const openProbeTab = useUIStore(s => s.openProbeTab);
   // Issue #1264 — the open-id is a pre-prefixed string (built via
   // `dropdownId('mesh', mesh.id)`) so the sidebar spawn picker's
   // `data-dropdown-for` can't collide with a node- or terminal-keyed
@@ -176,15 +171,20 @@ export function Sidebar() {
     setOpenDropdownFor(prev => (prev === key ? null : key));
   }, []);
 
-  // Issue #375 — the right-click "Properties" entry opens the Probe
-  // Panel on the ⚙️ Mesh Properties tab. We select the mesh first so
-  // `useProbeContext` resolves to the right row, then flip the probe open.
-  // Issue #767 split out the drift `!` badge (see handleOpenWorktreesProbe
-  // below) — the two intents ("edit config" vs "fix the drift") must
-  // not share a handler.
-  const handleOpenFilesProbe = useCallback(() => {
-    openProbeTab('files');
-  }, [openProbeTab]);
+  // Each right-click Probe destination — Properties, File Explorer, Archive,
+  // GitHub Issues — names the Mesh it acts on: `enterMesh` selects that Mesh
+  // (so `useProbeContext` resolves to the right row) and flips the panel to
+  // the destination tab in one step. Issue #375 owns the Properties entry;
+  // #767 split out the drift `!` badge (see handleOpenWorktreesProbe below)
+  // because the two intents ("edit config" vs "fix the drift") must not
+  // share a handler.
+  // Issue #2459 — "File Explorer" joined that set. It used to call bare
+  // `openProbeTab('files')`, so right-clicking an *unselected* Mesh
+  // opened Project Files for whichever Mesh was already active (or
+  // reported no subject when none was).
+  const handleOpenFilesProbe = useCallback((meshId: number) => {
+    enterMesh(meshId, { probeTab: 'files' });
+  }, []);
 
   const handleOpenPropertiesProbe = useCallback((meshId: number) => {
     enterMesh(meshId, { probeTab: 'properties' });

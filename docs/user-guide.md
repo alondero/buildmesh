@@ -444,7 +444,10 @@ shorten with an ellipsis to fit narrow sidebars; the tooltip shows the full name
 The empty-mesh status stays on one line so revealing the name keeps the button
 in place. Right-click the card for Properties, File Explorer, Force sync from
 upstream, Archive, GitHub Issues, and — for a mesh with a GitHub origin — View
-on GitHub.
+on GitHub. Every entry acts on the mesh whose card you right-clicked: picking
+Properties, File Explorer, Archive, or GitHub Issues on a mesh you are not
+currently in also switches the canvas to that mesh, so the destination you land
+on is scoped to the mesh you pointed at.
 
 Forcing a sync always reports back, one way or another. A toast says what
 happened: how many commits were pulled, that the mesh was already up to date,
