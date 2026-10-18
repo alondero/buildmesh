@@ -301,6 +301,28 @@ tokens: dark `#0a0a0e` / `#e2e8f0` / cyan cursor; light `#fafafa` /
 Font: JetBrains Mono at 500 weight; desktop size is user-adjustable 8–18px
 (default 10), mobile fixed 13px.
 
+### Third-party surfaces
+
+A vendored UI library that styles its own chrome ships light-mode
+literals. The Circuits canvas is the current case: React Flow's zoom
+Controls and attribution pill default to `#fefefe` buttons and a
+`rgba(255,255,255,.5)` pill, which read as white boxes on the dark canvas
+(issue #2460).
+
+Theme them through the library's own custom properties rather than by
+overriding its class selectors — React Flow exposes `--xy-*` properties
+(`--xy-controls-button-background-color`, `--xy-controls-button-color`,
+`--xy-controls-button-border-color`, `--xy-controls-box-shadow`,
+`--xy-attribution-background-color`, …) and resolves them itself, so the
+Control icon glyph (`fill: currentColor`) follows the button colour. Point
+them at tokens (`var(--color-bg-card)`, `var(--color-text-secondary)`,
+`var(--color-border-default)`, `var(--shadow-md)`) on the flow root, so
+`[data-theme="light"]` re-points the token and both themes follow. Values
+upstream hard-codes rather than exposes — the attribution link is `#999`,
+~2.6:1 on a light card — still need a scoped rule in the component's own
+stylesheet. Selector overrides lose to the vendored stylesheet on
+specificity and import order; custom properties don't.
+
 ## Accessibility
 
 - WCAG AA (4.5:1) is the floor for body text; 3:1 for non-text UI

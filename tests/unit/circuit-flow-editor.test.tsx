@@ -187,6 +187,38 @@ describe('CircuitFlowEditor', () => {
     expect(screen.getByText('Joins')).toBeTruthy();
   });
 
+  // Issue #2460 — the zoom Controls and the attribution pill are the only
+  // surfaces on the canvas React Flow styles for itself, and its shipped
+  // literals are light-mode (#fefefe buttons on a dark canvas). The fix
+  // binds React Flow's `--xy-*` properties to Buildmesh tokens, so this
+  // asserts the binding rather than the absence of a hex: deleting it puts
+  // the buttons back to #fefefe while a themed assert on computed colour
+  // stays impossible in jsdom (Vitest does not inject the stylesheets).
+  it('binds the React Flow zoom controls and attribution badge to theme tokens', () => {
+    renderEditor();
+    const flow = document.querySelector<HTMLElement>('.react-flow');
+    expect(flow).not.toBeNull();
+    // The class is the hook CircuitFlowEditor.css scopes the attribution
+    // link colour to; upstream ships that one colour as a literal #999.
+    expect(flow!.classList.contains('circuit-flow-canvas')).toBe(true);
+    expect(document.querySelector('.react-flow__controls-button')).not.toBeNull();
+    expect(document.querySelector('.react-flow__attribution')).not.toBeNull();
+
+    const tokens: Record<string, string> = {
+      '--xy-controls-button-background-color': '--color-bg-card',
+      '--xy-controls-button-background-color-hover': '--color-bg-card-hover',
+      '--xy-controls-button-color': '--color-text-secondary',
+      '--xy-controls-button-color-hover': '--color-text-primary',
+      '--xy-controls-button-border-color': '--color-border-default',
+      '--xy-controls-box-shadow': '--shadow-md',
+      '--xy-attribution-background-color': '--color-bg-card',
+    };
+    for (const [xyProperty, token] of Object.entries(tokens)) {
+      const value = flow!.style.getPropertyValue(xyProperty);
+      expect(value, xyProperty).toBe(`var(${token})`);
+    }
+  });
+
   it('adds a node through the palette and includes it in the saved graph', async () => {
     renderEditor();
 
