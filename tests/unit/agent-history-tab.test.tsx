@@ -18,7 +18,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, within } from '@testing-library/react';
+import { act, render, screen, fireEvent, within } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { AgentHistoryTab } from '../../src/components/Probe/AgentHistoryTab';
 import { useMeshStore } from '../../src/stores/meshStore';
@@ -82,6 +82,27 @@ function hasClass(el: Element, token: string): boolean {
   return el.className.split(/\s+/).includes(token);
 }
 
+/**
+ * Drain the reads the mounted tabs started before a test body returns.
+ *
+ * Rendering `AgentHistoryTab` fires `list_agent_history`; switching to
+ * Discovered sessions mounts `ArchivedNodesTab`, which fires
+ * `discover_agent_nodes` and `list_providers`. Every mock here resolves
+ * immediately, so their `setHistory` / `setLoading` / `setSessions` /
+ * `setProviderList` updates land in the microtask queue. A synchronous test
+ * body returns before that queue drains, so the updates run outside React's
+ * act boundary: React logs "not wrapped in act(...)" into stderr and the
+ * orphaned render is still live when the next test mounts, which is the
+ * cross-test leak the review flagged. Awaiting inside `act` keeps every one
+ * of those updates inside the test that caused it.
+ *
+ * Which test the warning lands on is a race, so each test settles its own
+ * reads rather than relying on the next one to absorb them.
+ */
+async function settleReads() {
+  await act(async () => {});
+}
+
 describe('AgentHistoryTab (#2461)', () => {
   beforeEach(() => {
     useUIStore.setState({ probeOpen: true, probeTab: 'sessions', activeDiffFile: null });
@@ -93,7 +114,7 @@ describe('AgentHistoryTab (#2461)', () => {
     seedAgentNodes([]);
   });
 
-  it('gives the selected mode its own background and text colour, in a named group', () => {
+  it('gives the selected mode its own background and text colour, in a named group', async () => {
     mockBackend();
     render(<AgentHistoryTab />);
 
@@ -115,6 +136,10 @@ describe('AgentHistoryTab (#2461)', () => {
     expect(swapped.lifecycle.getAttribute('aria-pressed')).toBe('false');
     expect(hasClass(swapped.lifecycle, 'bg-bg-card')).toBe(false);
     expect(hasClass(swapped.lifecycle, 'text-text-secondary')).toBe(true);
+
+    // The click mounted `ArchivedNodesTab`; its own reads belong to this test.
+    await screen.findByRole('button', { name: 'Refresh archived sessions' });
+    await settleReads();
   });
 
   it('renders exactly one Refresh control in Discovered sessions mode', async () => {
@@ -132,9 +157,10 @@ describe('AgentHistoryTab (#2461)', () => {
     const refreshes = screen.getAllByRole('button', { name: /^Refresh/ });
     expect(refreshes).toHaveLength(1);
     expect(refreshes[0].getAttribute('aria-label')).toBe('Refresh archived sessions');
+    await settleReads();
   });
 
-  it('never renders a zero-option repository select in Discovered sessions mode', () => {
+  it('never renders a zero-option repository select in Discovered sessions mode', async () => {
     useMeshStore.setState({ selectedMeshId: null, meshes: [] as never, meshesById: new Map() as never });
     mockBackend();
     render(<AgentHistoryTab />);
@@ -149,19 +175,25 @@ describe('AgentHistoryTab (#2461)', () => {
 
     // That option is discovered-mode-invisible, so the control would be a
     // blank zero-option select above the empty state.
-    expect(screen.getByText('Add a repository to discover previous sessions.')).toBeTruthy();
+    expect(await screen.findByText('Add a repository to discover previous sessions.')).toBeTruthy();
     expect(screen.queryByLabelText('History repository')).toBeNull();
+    // No `ArchivedNodesTab` mounts without a repository, but this tab's own
+    // history read is still in flight here.
+    await settleReads();
   });
 
-  it('keeps the repository select when discovered sessions have repositories to choose', () => {
+  it('keeps the repository select when discovered sessions have repositories to choose', async () => {
     mockBackend();
     render(<AgentHistoryTab />);
 
     fireEvent.click(screen.getByRole('button', { name: 'Discovered sessions' }));
 
+    expect(await screen.findByLabelText('History repository')).toBeTruthy();
     const select = screen.getByLabelText('History repository') as HTMLSelectElement;
     expect(select.options).toHaveLength(1);
     expect(select.options[0].textContent).toBe('api');
+    await screen.findByRole('button', { name: 'Refresh archived sessions' });
+    await settleReads();
   });
 
   it('shows a readable relative timestamp instead of the stored nanosecond string', async () => {
@@ -175,6 +207,7 @@ describe('AgentHistoryTab (#2461)', () => {
     // push onto a line of their own.
     expect(card.textContent).not.toContain('596700');
     expect(card.textContent).not.toMatch(/\dZ\b/);
+    await settleReads();
   });
 
   it('formats the created timestamp and wraps the metadata line on word boundaries', async () => {
@@ -189,5 +222,6 @@ describe('AgentHistoryTab (#2461)', () => {
     expect(metadata!.className).not.toContain('break-all');
     // The exact instant stays available without cluttering the panel.
     expect(metadata!.getAttribute('title')).toBe(new Date(createdAt).toLocaleString());
+    await settleReads();
   });
 });
