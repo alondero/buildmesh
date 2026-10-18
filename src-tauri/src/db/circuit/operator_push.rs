@@ -18,6 +18,7 @@ use super::evidence::{append_history, recovery_view, revision_moved, SOURCE_OPER
 use crate::circuit::model::StepOutcome;
 use crate::circuit::observation::{CircuitObservationBlocker, WorkEvidence};
 use crate::circuit::stepper::RunView;
+use crate::db::DbError;
 
 /// The outcome a person can give a pushed step. A subset of the routed gate
 /// outcomes: a person can say the work finished, is still in progress, or
@@ -122,7 +123,7 @@ fn holding_evidence(view: &RunView, node_id: &str) -> Option<CircuitObservationB
     })
 }
 
-pub fn push_step(request: &CircuitStepPushRequest) -> Result<(), String> {
+pub fn push_step(request: &CircuitStepPushRequest) -> Result<(), DbError> {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let mut db = crate::db::write_conn();
     push_step_locked(&mut db, request, now_ms)
@@ -132,17 +133,18 @@ pub(crate) fn push_step_locked(
     db: &mut Connection,
     request: &CircuitStepPushRequest,
     now_ms: i64,
-) -> Result<(), String> {
+) -> Result<(), DbError> {
     let note = request.reason.trim();
-    let tx = db.transaction().map_err(|e| e.to_string())?;
-    if revision_moved(&tx, request.run_id, request.expected_revision).map_err(|e| e.to_string())? {
-        return Err("The run changed. Refresh it before acting.".into());
+    let tx = db.transaction()?;
+    if revision_moved(&tx, request.run_id, request.expected_revision)? {
+        return Err(DbError::conflict(
+            "The run changed. Refresh it before acting.",
+        ));
     }
-    let run = super::ledger::get_circuit_run_inner(&tx, request.run_id)
-        .map_err(|e| e.to_string())?
-        .ok_or("Run no longer exists.")?;
+    let run = super::ledger::get_circuit_run_inner(&tx, request.run_id)?
+        .ok_or_else(|| DbError::not_found("Run no longer exists."))?;
     if run.state != "running" {
-        return Err("Only a running run can be moved on.".into());
+        return Err(DbError::invalid("Only a running run can be moved on."));
     }
     let mut view = recovery_view(&tx, &run)?;
     let outcome = request.outcome.step_outcome();
@@ -151,15 +153,17 @@ pub(crate) fn push_step_locked(
         .filter(|step| step.attempt == request.attempt)
         .cloned()
     else {
-        return Err("This step changed. Refresh it before acting.".into());
+        return Err(DbError::conflict(
+            "This step changed. Refresh it before acting.",
+        ));
     };
     if !view
         .operator_push_outcomes(&request.node_id)
         .contains(&outcome)
     {
-        return Err(
-            "This step can no longer be moved on that way. Refresh it before acting.".into(),
-        );
+        return Err(DbError::conflict(
+            "This step can no longer be moved on that way. Refresh it before acting.",
+        ));
     }
     let overridden = holding_evidence(&view, &request.node_id);
     let agent = step
@@ -193,10 +197,11 @@ pub(crate) fn push_step_locked(
             agent_node_id: None,
             fresh_attempt: false,
         }],
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
     if !commit.applied {
-        return Err("The run finished before this step could be moved on.".into());
+        return Err(DbError::conflict(
+            "The run finished before this step could be moved on.",
+        ));
     }
     let mut detail = format!("Operator moved this step on as {}.", outcome.as_db_str());
     if let Some(blocker) = &overridden {
@@ -217,16 +222,15 @@ pub(crate) fn push_step_locked(
         &detail,
         Some(SOURCE_OPERATOR),
         Some(outcome.as_db_str()),
-    )
-    .map_err(|e| e.to_string())?;
-    tx.commit().map_err(|e| e.to_string())
+    )?;
+    Ok(tx.commit()?)
 }
 
 /// Mark the outstanding work and open input waits on every step reporting on
 /// `agent` as finished. This is the same scope [`RunView::report_blocker`]
 /// reads, so the evidence the person overrode cannot hold the successor gates
 /// on that agent. New observations still record new work after this point.
-fn settle_stale_evidence(view: &mut RunView, agent: i64, now_ms: i64) -> Result<(), String> {
+fn settle_stale_evidence(view: &mut RunView, agent: i64, now_ms: i64) -> Result<(), DbError> {
     let keys: Vec<(String, String)> = view
         .steps
         .iter()
@@ -268,7 +272,7 @@ fn settle_stale_evidence(view: &mut RunView, agent: i64, now_ms: i64) -> Result<
         for wait in &mut evidence.human_waits {
             wait.resolved_at_ms.get_or_insert(now_ms);
         }
-        let encoded = serde_json::to_string(&evidence).map_err(|e| e.to_string())?;
+        let encoded = serde_json::to_string(&evidence)?;
         view.context.set(&evidence_key, encoded);
     }
     Ok(())
@@ -277,9 +281,8 @@ fn settle_stale_evidence(view: &mut RunView, agent: i64, now_ms: i64) -> Result<
 /// Drop the agent's last lifecycle report when it is the one vetoing the
 /// Circuit (background work running, or a permission or question pending).
 /// The next harness report replaces it as usual. Returns whether it cleared.
-fn clear_blocking_lifecycle(db: &Connection, agent: i64) -> Result<bool, String> {
-    let blocker = crate::db::agent_node::circuit_lifecycle_blocker_inner(db, agent)
-        .map_err(|e| e.to_string())?;
+fn clear_blocking_lifecycle(db: &Connection, agent: i64) -> Result<bool, DbError> {
+    let blocker = crate::db::agent_node::circuit_lifecycle_blocker_inner(db, agent)?;
     if !matches!(
         blocker,
         Some(
@@ -292,7 +295,6 @@ fn clear_blocking_lifecycle(db: &Connection, agent: i64) -> Result<bool, String>
     db.execute(
         "UPDATE agent_nodes SET lifecycle_snapshot=NULL WHERE id=?1",
         [agent],
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
     Ok(true)
 }

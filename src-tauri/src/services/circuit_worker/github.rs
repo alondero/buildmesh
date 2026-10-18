@@ -270,7 +270,8 @@ fn reconcile_open_pr_effect_with_lookup(
     find: impl FnOnce(&str, &str, &str) -> Result<Option<crate::services::github::PullRequest>, String>,
 ) -> Result<CircuitEvent, String> {
     let attempt = view.step(node_id).map_or(1, |step| step.attempt);
-    let detail = db::circuit::evidence::latest_effect_target(active.run.id, node_id, attempt)?
+    let detail = db::circuit::evidence::latest_effect_target(active.run.id, node_id, attempt)
+        .map_err(|error| error.to_string())?
         .ok_or_else(|| {
             "No durable OpenPr target is recorded for this attempt; no GitHub request was made."
                 .to_string()

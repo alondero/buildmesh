@@ -159,6 +159,156 @@ fn query_sql_lives_in_domain_modules() {
     assert!(include_str!("agent_node.rs").contains("UPDATE agent_nodes"));
 }
 
+/// The error type as written in a `-> Result<…, E>` signature, or `None` when
+/// the line is not one or the signature cannot say which type is the error.
+///
+/// Nesting is counted so `Result<Option<String>, DbError>` closes at the right
+/// angle bracket and its payload is never mistaken for its error type. A
+/// single-argument `Result<String>` is genuinely ambiguous — one type, no
+/// position — so it is left alone rather than guessed at.
+fn signature_error_type(line: &str) -> Option<&str> {
+    let start = line.find("-> Result<")? + "-> Result<".len();
+    let rest = &line[start..];
+    let mut depth = 1usize;
+    let mut end = rest.len();
+    let mut commas = 0usize;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '<' => depth += 1,
+            ',' if depth == 1 => commas += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    // No top-level comma: `Result<T>` cannot be read as `Result<T, E>`.
+    if commas == 0 {
+        return None;
+    }
+    rest[..end]
+        .rsplit(',')
+        .next()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+}
+
+/// The check itself, on the shapes that made the original grep unusable.
+#[test]
+fn signature_error_type_separates_payload_from_error() {
+    // A String *payload* is fine and is not an error position.
+    assert_eq!(
+        signature_error_type("fn a() -> SqlResult<Option<String>> {"),
+        None
+    );
+    assert_eq!(
+        signature_error_type("fn a() -> SqlResult<HashMap<String, String>> {"),
+        None
+    );
+    // One argument and no position: ambiguous, so not claimed.
+    assert_eq!(signature_error_type("fn a() -> Result<String> {"), None);
+    // Nested generics: the error is still the last argument.
+    assert_eq!(
+        signature_error_type("fn a() -> Result<Option<crate::models::X>, DbError> {"),
+        Some("DbError")
+    );
+    // The case the original `Result<[^,(]*String` pattern missed.
+    assert_eq!(
+        signature_error_type("fn a() -> Result<usize, String> {"),
+        Some("String")
+    );
+    assert_eq!(
+        signature_error_type("pub fn a() -> Result<(), String>"),
+        Some("String")
+    );
+    // A payload String alongside a String error: only the error position counts.
+    assert_eq!(
+        signature_error_type("fn a() -> Result<Option<String>, String> {"),
+        Some("String")
+    );
+    assert_eq!(signature_error_type("fn a() {}"), None);
+}
+
+/// Persistence failures are typed (issue #2448): the db layer reports
+/// `DbError` or `SqlResult`, never a hand-written `String`.
+///
+/// The obvious grep for this — `Result<[^,(]*String` — is wrong in both
+/// directions, which is how the slice that introduced `DbError` shipped a file
+/// list that named four files with no String errors and missed five that had
+/// them: the pattern matches `SqlResult<String>` (a String *payload*), and it
+/// misses `Result<usize, String>` (a comma before the `String`). So the check
+/// walks each signature's generic arguments instead and looks at the last one,
+/// which is the error type.
+///
+/// The file list is walked at runtime rather than `include_str!`-ed, so a new
+/// module under `db/` is covered the day it lands instead of the day someone
+/// remembers to add it here.
+#[test]
+fn db_reports_no_stringly_typed_errors() {
+    fn db_sources() -> Vec<(String, String)> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/db");
+        let mut found = Vec::new();
+        let mut dirs = vec![root.clone()];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).expect("db/ source tree must be readable") {
+                let path = entry.expect("db/ entry must be readable").path();
+                if path.is_dir() {
+                    dirs.push(path);
+                    continue;
+                }
+                // Test modules may keep asserting on legacy String helpers, and
+                // `test_support.rs` is fixtures.
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+                if path.extension().and_then(|e| e.to_str()) != Some("rs")
+                    || name.ends_with("_tests.rs")
+                    || name == "test_support.rs"
+                {
+                    continue;
+                }
+                let label = path
+                    .strip_prefix(&root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                found.push((
+                    label,
+                    std::fs::read_to_string(&path).expect("db/ source readable"),
+                ));
+            }
+        }
+        found.sort();
+        assert!(
+            found.len() >= 20,
+            "the db/ walk found only {} files - it is not scanning the layer",
+            found.len()
+        );
+        found
+    }
+
+    let mut offenders = Vec::new();
+    for (name, src) in db_sources() {
+        for (i, line) in src.lines().enumerate() {
+            // A `String` payload is fine — only the error position is gated.
+            if let Some(error) = signature_error_type(line) {
+                if error == "String" {
+                    offenders.push(format!("{name}:{}: {error}", i + 1));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "db/ must report DbError or SqlResult, not Result<_, String>: {offenders:?}"
+    );
+}
+
 #[test]
 fn terminal_run_state_defers_to_stepper() {
     use crate::circuit::stepper::RunState;

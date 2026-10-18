@@ -227,6 +227,29 @@ describe('Settings > Data & Diagnostics (issue #1537)', () => {
     expect(result.textContent).toMatch(/Not included:.*credentials/i);
   });
 
+  it('separates what redaction omits from what no export can carry (#2466)', async () => {
+    mockBackend();
+    const pane = await openPane();
+    const help = within(pane).getByTestId('settings-data-recovery-redact-help').textContent ?? '';
+
+    // These three are controlled BY the checkbox — omitted while it is ticked,
+    // carried while it is not. The old copy folded them into one blanket claim
+    // about what an export can hold, which is what made the "untick it"
+    // sentence contradict the sentence above it.
+    expect(help).toMatch(/provider API keys/);
+    expect(help).toMatch(/remote-access token/);
+    expect(help).toMatch(/paired devices/);
+    expect(help).not.toMatch(/never contains/i);
+
+    // These two have no toggle to set: state_recovery/mod.rs:57-61 records
+    // that the LAN private key ships with no "include secrets" escape hatch,
+    // and mod.rs:64-67 that durable state holds no transcripts at all. The
+    // copy therefore has to name them separately from the redaction claim.
+    expect(help).toMatch(/never exported/i);
+    expect(help).toMatch(/LAN HTTPS certificate and its private key/);
+    expect(help).toMatch(/terminal transcripts/);
+  });
+
   it('treats a cancelled export dialog as a no-op, not an error', async () => {
     mockBackend({ exportCancelled: true });
     const pane = await openPane();
@@ -248,6 +271,21 @@ describe('Settings > Data & Diagnostics (issue #1537)', () => {
     // Reading a bundle must not stage it.
     expect(calls['stage_state_restore']).toBeUndefined();
     expect(within(pane).getByTestId('settings-data-recovery-stage')).toBeTruthy();
+  });
+
+  it('paints the destructive restore button white-on-error (#2466)', async () => {
+    mockBackend();
+    const pane = await openPane();
+    await userEvent.click(within(pane).getByTestId('settings-data-recovery-inspect'));
+    const stage = await within(pane).findByTestId('settings-data-recovery-stage');
+    // Design-system parity with the other destructive confirmations —
+    // Modal.tsx:349, RemoteAccessPane.tsx:464 and WorktreeCloseDialog.tsx:113
+    // are each white-on-error. A surface token here (text-bg-card) instead
+    // flips its meaning with the theme, and it sat on the one button whose
+    // label commits the user to replacing their whole state.
+    expect(stage.className).toMatch(/\bbg-status-error\b/);
+    expect(stage.className).toMatch(/\btext-white\b/);
+    expect(stage.className).not.toMatch(/\btext-bg-/);
   });
 
   it('warns that a credential-free export costs a re-auth on restore', async () => {
