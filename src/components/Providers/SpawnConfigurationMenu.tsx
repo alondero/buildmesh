@@ -11,6 +11,13 @@ function belongsToHarness(configuration: SpawnConfiguration, harnessId: string):
   return (configuration.harness_id ?? configuration.spawn_option_id.split(':')[0]) === harnessId;
 }
 
+/**
+ * Room the submenu needs below its harness row before it opens above the row
+ * instead. Below this the panel would be a sliver, so flipping up (with the
+ * panel's bottom edge on the row) reads better than a scrollbar in a strip.
+ */
+const MIN_ROOM_BELOW = 120;
+
 export function SpawnConfigurationMenu({ option, anchor, keyboard, configurationRows, decorate, onSelect, onClose, onDismiss, onEditingChange }: {
   option: SpawnOption;
   anchor: HTMLElement;
@@ -31,7 +38,7 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
   const [activeMenuIndex, setActiveMenuIndex] = useState(0);
   const panel = useRef<HTMLDivElement>(null);
   const draftSession = useRef(0);
-  const [position, setPosition] = useState({ left: 0, top: 0 });
+  const [placement, setPlacement] = useState<{ left: number; top: number; maxHeight: number } | null>(null);
   const [unavailableById, setUnavailableById] = useState(() => new Map(configurationRows.map((row) => [row.id, row.unavailable_reason])));
   const mounted = useRef(false);
 
@@ -76,13 +83,37 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
     panel.current?.showPopover?.();
     const place = () => {
       const rect = anchor.getBoundingClientRect();
+      // A detached or hidden anchor has no layout. Keep the last placement
+      // instead of measuring a zero rect, which used to snap the panel to the
+      // top-left corner of the screen, far from the row it belongs to.
+      if (rect.width === 0 && rect.height === 0) return;
+      const margin = 8;
       const width = panel.current?.offsetWidth ?? 280;
-      const height = panel.current?.offsetHeight ?? 300;
-      const left = rect.right + width <= window.innerWidth - 8 ? rect.right : rect.left - width;
-      setPosition({
-        left: Math.max(8, Math.min(left, window.innerWidth - width - 8)),
-        top: Math.max(8, Math.min(rect.top, window.innerHeight - height - 8)),
-      });
+      // `scrollHeight` is the panel's natural content height; `offsetHeight`
+      // would report the height already capped by the previous placement.
+      const height = panel.current?.scrollHeight ?? 0;
+      // Horizontal: the panel is a side flyout of the harness row. Open it to
+      // the right of the row; flip to the left only when that side fits on
+      // screen, otherwise keep the row's left edge so the panel stays on the
+      // row it was opened from.
+      let left = rect.right;
+      if (left + width > window.innerWidth - margin) {
+        const flipped = rect.left - width;
+        left = flipped >= margin ? flipped : rect.left;
+      }
+      left = Math.max(margin, Math.min(left, window.innerWidth - width - margin));
+      // Vertical: hang from the row's top line and scroll inside the panel.
+      // Open above the row only when there is no usable room below it and
+      // more room above, so the panel keeps touching the row.
+      const roomBelow = window.innerHeight - rect.top - margin;
+      const roomAbove = rect.bottom - margin;
+      let top = Math.max(margin, rect.top);
+      let maxHeight = roomBelow;
+      if (roomBelow < MIN_ROOM_BELOW && roomAbove > roomBelow) {
+        top = Math.max(margin, rect.bottom - Math.min(height, roomAbove));
+        maxHeight = roomAbove;
+      }
+      setPlacement({ left, top, maxHeight: Math.max(maxHeight, 0) });
     };
     place();
     window.addEventListener('resize', place);
@@ -180,7 +211,14 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
       popover={typeof HTMLElement.prototype.showPopover === 'function' ? 'manual' : undefined}
       data-dropdown-for={anchor.closest('[data-dropdown-for]')?.getAttribute('data-dropdown-for') ?? undefined}
       data-testid="spawn-configurations"
-      style={{ position: 'fixed', margin: 0, right: 'auto', bottom: 'auto', ...position, width: 'min(280px, calc(100vw - 16px))', maxHeight: 'calc(100vh - 16px)', zIndex: 1000 }}
+      style={{
+        position: 'fixed', margin: 0, right: 'auto', bottom: 'auto',
+        left: placement?.left ?? 0,
+        top: placement?.top ?? 0,
+        width: 'min(280px, calc(100vw - 16px))',
+        maxHeight: placement ? `${placement.maxHeight}px` : 'calc(100vh - 16px)',
+        zIndex: 1000,
+      }}
       className="overflow-y-auto rounded-md border border-border-default bg-bg-overlay shadow-md"
       onClick={(e) => e.stopPropagation()}
       onKeyDown={(e) => {

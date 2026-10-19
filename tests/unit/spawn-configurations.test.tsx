@@ -330,3 +330,86 @@ describe('Spawn configurations', () => {
     expect(screen.queryByTestId('spawn-configurations')).toBeNull();
   });
 });
+
+/**
+ * The configuration submenu is a side flyout of the harness row it was
+ * opened from. It used to place itself with two viewport clamps — flip left
+ * when the row had no room on the right, pull up when the panel was taller
+ * than the space below the row — and both clamps could strand the panel in
+ * the top-left corner of the screen, far from its row.
+ */
+describe('Spawn configuration submenu placement', () => {
+  const rowRect = { top: 400, bottom: 424, left: 100, right: 220, width: 120, height: 24, x: 100, y: 400, toJSON: () => ({}) };
+  const collapsedRect = { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) };
+
+  const setViewport = (width: number, height: number) => {
+    Object.defineProperty(window, 'innerWidth', { value: width, configurable: true });
+    Object.defineProperty(window, 'innerHeight', { value: height, configurable: true });
+  };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    setViewport(1024, 768);
+  });
+
+  it('keeps the panel on the harness row instead of the viewport corner', async () => {
+    // A cramped viewport: the row sits low and there is no room for the
+    // panel to the right of it.
+    setViewport(400, 768);
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(rowRect as DOMRect);
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(280);
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(600);
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(600);
+
+    render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    const panel = await screen.findByTestId('spawn-configurations');
+
+    // The panel hangs off the row: it keeps the row's left edge (not the
+    // viewport margin) and the row's top line (not the viewport top). The
+    // tall editor scrolls inside the capped panel.
+    expect(panel.style.left).toBe('100px');
+    expect(panel.style.top).toBe('400px');
+    expect(panel.style.maxHeight).toBe('360px');
+  });
+
+  it('opens above the row when there is no usable room below it', async () => {
+    // The row sits at the bottom of the viewport: hanging below it would
+    // leave a sliver, so the panel opens upwards with its bottom edge on the
+    // row instead of drifting to the top of the screen.
+    setViewport(1024, 768);
+    const lowRow = { top: 700, bottom: 724, left: 100, right: 220, width: 120, height: 24, x: 100, y: 700, toJSON: () => ({}) };
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(lowRow as DOMRect);
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(280);
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(600);
+
+    render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    const panel = await screen.findByTestId('spawn-configurations');
+
+    expect(panel.style.left).toBe('220px');
+    expect(panel.style.top).toBe('124px');
+    expect(panel.style.maxHeight).toBe('716px');
+  });
+
+  it('keeps the last placement when the anchor loses its layout', async () => {
+    setViewport(1024, 768);
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(rowRect as DOMRect);
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(280);
+
+    render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    const panel = await screen.findByTestId('spawn-configurations');
+    expect(panel.style.left).toBe('220px');
+    expect(panel.style.top).toBe('400px');
+
+    // The row is replaced while the submenu is open, so the captured anchor
+    // has no layout any more. Measuring it would report a zero rect and
+    // snap the panel to the top-left corner of the screen.
+    rect.mockReturnValue(collapsedRect as DOMRect);
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Clone Sol Max' }));
+    await screen.findByLabelText('Model');
+    expect(panel.style.left).toBe('220px');
+    expect(panel.style.top).toBe('400px');
+  });
+});
