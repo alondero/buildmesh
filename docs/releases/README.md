@@ -6,7 +6,7 @@ This directory contains the user-visible release notes for Buildmesh. Each
 release has one file named `vX.Y.Z.md`; the matching Git tag and file are the
 release's versioned source of truth.
 
-The next release is [v1.5.0](v1.5.0.md); later notes are drafted at release time
+The next release is [v1.5.1](v1.5.1.md); later notes are drafted at release time
 (see [Drafting a release](#drafting-a-release)).
 
 ## Drafting a release
