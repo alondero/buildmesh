@@ -527,7 +527,11 @@ it('derives the wrapper deadline from the phase budgets instead of hand-summing 
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain('Closing the browser did not finish within 200ms');
     // It waited both windows and no more, so the hand-off is bounded too.
-    expect(elapsed).toBeGreaterThanOrEqual(200);
+    // A timer can fire a millisecond early against `Date.now()`'s millisecond
+    // clock, so the two 100ms windows can measure 199ms on a loaded runner.
+    // One millisecond of slack per window keeps this bound about the hand-off
+    // rather than about timer rounding.
+    expect(elapsed).toBeGreaterThanOrEqual(200 - 2);
     expect(elapsed).toBeLessThan(5000);
   }, 60000);
 
