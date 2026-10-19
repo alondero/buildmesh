@@ -16,6 +16,184 @@ use crate::agent::provider::{SpawnRecipe, WindowsShell};
 use crate::models::EnvType;
 use base64::Engine;
 
+#[test]
+fn unresolved_agent_paths_keep_the_inherited_path() {
+    let _env = crate::env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // portable-pty refreshes Windows PATH from the registry, so its baseline
+    // can differ from the environment of this test process.
+    let inherited = portable_pty::CommandBuilder::new("codex")
+        .get_env("PATH")
+        .map(std::ffi::OsStr::to_os_string);
+    for executable in [None, Some("relative/codex")] {
+        let recipe = SpawnRecipe {
+            binary: "codex",
+            base_args: vec![],
+            trailing_args: vec![],
+            windows_shell: WindowsShell::Direct,
+        };
+        let background =
+            super::background_command(&recipe, executable.map(std::path::Path::new)).unwrap();
+        assert!(!background.get_envs().any(|(key, _)| key == "PATH"));
+        let command =
+            super::wrap(recipe, EnvType::Windows, None, executable, ".", 4242, false).unwrap();
+        assert_eq!(command.get_env("PATH"), inherited.as_deref());
+    }
+}
+
+#[test]
+fn windows_runtime_path_is_not_enriched_with_host_directories() {
+    let _env = crate::env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let inherited = portable_pty::CommandBuilder::new("codex")
+        .get_env("PATH")
+        .map(std::ffi::OsStr::to_os_string);
+    let directory = tempfile::tempdir().unwrap();
+    let executable = directory.path().join("codex.exe");
+    let runtimes: &[EnvType] = if cfg!(windows) {
+        &[EnvType::Windows, EnvType::WindowsInterop, EnvType::Wsl]
+    } else {
+        &[EnvType::WindowsInterop]
+    };
+    for runtime in runtimes {
+        let recipe = SpawnRecipe {
+            binary: "codex",
+            base_args: vec![],
+            trailing_args: vec![],
+            windows_shell: WindowsShell::Direct,
+        };
+        let command = super::wrap(
+            recipe,
+            *runtime,
+            None,
+            executable.to_str(),
+            ".",
+            4242,
+            false,
+        )
+        .unwrap();
+        assert_eq!(command.get_env("PATH"), inherited.as_deref());
+    }
+}
+
+/// Re-exec isolates the Finder-style PATH from other tests that spawn tools.
+#[cfg(unix)]
+#[test]
+fn gui_launch_path_supports_pty_and_background_agents() {
+    if std::env::var_os("BUILDMESH_GUI_PATH_TEST").is_none() {
+        for path in [Some("/usr/bin:/bin"), Some(""), None] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command.args([
+                "--exact",
+                "agent::spawn_environment::tests::gui_launch_path_supports_pty_and_background_agents",
+                "--nocapture",
+            ]);
+            command.env("BUILDMESH_GUI_PATH_TEST", "1");
+            match path {
+                Some(path) => command.env("PATH", path),
+                None => command.env_remove("PATH"),
+            };
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "PATH {path:?} subprocess failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    } else {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::Builder::new()
+            .prefix("buildmesh gui path ")
+            .tempdir()
+            .unwrap();
+        let bin = directory.path().join("nvm/versions/node/v22.18.0/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        // A minimal Node stand-in executes the fixture as shell code. The real
+        // /usr/bin/env shebang must still find it beside the discovered agent.
+        let executable = bin.join("codex");
+        for (path, script) in [
+            (bin.join("node"), "#!/bin/sh\nexec /bin/sh \"$@\"\n"),
+            (
+                executable.clone(),
+                "#!/usr/bin/env node\nprintf '%s\\n' \"$@\" > \"$BUILDMESH_PATH_TEST_OUTPUT\"\n",
+            ),
+        ] {
+            std::fs::write(&path, script).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let inherited_path = std::env::var_os("PATH");
+        let mut expected_path = bin.as_os_str().to_os_string();
+        if let Some(path) = &inherited_path {
+            expected_path.push(":");
+            expected_path.push(path);
+        }
+        for mode in ["fresh", "resume"] {
+            let recipe = SpawnRecipe {
+                binary: "codex",
+                base_args: vec![mode.into()],
+                trailing_args: vec!["literal $HOME 'quotes' ; &".into()],
+                windows_shell: WindowsShell::Direct,
+            };
+            let result = directory.path().join(format!("{mode}.txt"));
+            let mut background = super::background_command(&recipe, Some(&executable)).unwrap();
+            let background_path = background
+                .get_envs()
+                .find(|(key, _)| *key == "PATH")
+                .and_then(|(_, value)| value);
+            assert_eq!(background_path, Some(expected_path.as_os_str()));
+            background.env("BUILDMESH_PATH_TEST_OUTPUT", &result);
+            let output = background.output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(
+                std::fs::read_to_string(&result).unwrap(),
+                format!("{mode}\nliteral $HOME 'quotes' ; &\n")
+            );
+            std::fs::remove_file(&result).unwrap();
+
+            let mut command = super::wrap(
+                recipe,
+                if cfg!(target_os = "macos") {
+                    EnvType::Windows
+                } else {
+                    EnvType::Wsl
+                },
+                None,
+                Some(executable.to_str().unwrap()),
+                directory.path().to_str().unwrap(),
+                4242,
+                false,
+            )
+            .unwrap();
+            assert_eq!(command.get_env("PATH"), Some(expected_path.as_os_str()));
+            command.env("BUILDMESH_PATH_TEST_OUTPUT", &result);
+            let pair = crate::agent::spawn::open_pty_pair(24, 80).unwrap();
+            let mut child = crate::agent::spawn::spawn_child(&pair, command).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                if std::time::Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    let _ = child.wait();
+                    panic!("restricted-PATH PTY launch timed out");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            };
+            assert!(status.success(), "{status:?}");
+            assert_eq!(
+                std::fs::read_to_string(&result).unwrap(),
+                format!("{mode}\nliteral $HOME 'quotes' ; &\n")
+            );
+        }
+        assert_eq!(std::env::var_os("PATH"), inherited_path);
+    }
+}
+
 /// Every marker as an explicit "present with this value" env override, so a
 /// test can assert the scrub cleared something that was genuinely
 /// inherited rather than something the command never carried.

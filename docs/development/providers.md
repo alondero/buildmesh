@@ -301,6 +301,20 @@ The Buildmesh-managed OAuth secrets live in Windows Credential Manager under `CR
   3. **`CRED_PERSIST_SESSION` is wrong for OAuth tokens.** A credential with this flag is gone after logoff — fine for session-only secrets (the kind cwrap adapters carry), wrong for a long-lived refresh token.
   4. **The Rust blob format is implicit.** Buildmesh's parser (`services::opencode_oauth::parse_opencode_console_full_credential`) currently shapes a 5-field blob: `access_token` + `workspace_id` + `refresh_token` + `expires_at` + `server_id`. The first two are required for the live probe (see `parse_opencode_console_full_credential`); the last three ride along for the refresh path and the `X-Server-Id` header fallback. Any future extension that adds a sixth field must update both the writer (`services::opencode_oauth::persist_token_response`) AND the parsers atomically, or the live probe will silently drop the field (serde defaults — `skip_serializing_if = "Option::is_none"` on the writer + `#[serde(default)]` on the reader means both sides tolerate missing keys but never notice renamed ones). `parse_full_credential_round_trips_all_five_fields` pins the contract; CI's `git diff --exit-code src/types/generated/` is the wire-shape gate, but not the Rust-side wire-shape gate — keep both directories in sync by hand until both ts-rs exports and Rust struct shape are auto-derived.
 
+## Agent runtime PATH on macOS and Linux
+
+Finder and Dock launches can inherit a minimal PATH even when discovery finds
+an agent in an NVM version directory. An absolute agent path alone does not
+help a `#!/usr/bin/env node` entrypoint find its runtime.
+
+For native Unix PTY and background agent launches, `agent::spawn_environment`
+prepends the resolved executable's directory to the child's PATH. This lets
+the agent use its sibling runtime, including the Node version that owns an NVM
+install. Inherited PATH entries remain after it; the app's own environment is
+unchanged. Bare command names and relative executable paths retain their
+inherited PATH. Windows and cross-runtime launches keep their existing
+environment handling.
+
 ## Agent Spawning on Windows
 
 The shell a provider spawns through is **adapter-owned, and deliberately not

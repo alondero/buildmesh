@@ -627,6 +627,28 @@ fn maps_directory_with_pushd(
     }
 }
 
+/// Discovery can find an NVM entrypoint outside a GUI app's PATH, but its
+/// `#!/usr/bin/env node` shebang still needs the sibling runtime on PATH.
+fn path_with_executable_dir(
+    executable: &str,
+    inherited: Option<&std::ffi::OsStr>,
+) -> Result<Option<std::ffi::OsString>, String> {
+    let executable = std::path::Path::new(executable);
+    if !executable.is_absolute() {
+        return Ok(None);
+    }
+    let Some(directory) = executable.parent() else {
+        return Ok(None);
+    };
+    let mut directories = vec![directory.to_path_buf()];
+    if let Some(path) = inherited {
+        directories.extend(std::env::split_paths(path));
+    }
+    std::env::join_paths(directories)
+        .map(Some)
+        .map_err(|error| format!("Cannot add agent directory to PATH: {error}"))
+}
+
 /// Pipe-based background tasks still need the adapter's Windows shell for npm shims.
 pub(crate) fn background_command(
     recipe: &SpawnRecipe,
@@ -665,7 +687,7 @@ pub(crate) fn background_command(
             if cfg!(windows) {
                 ensure_windows_command_line_fits(WindowsShell::Direct, &executable, &args, None)?;
             }
-            crate::process_util::command_no_window(executable)
+            crate::process_util::command_no_window(&executable)
         };
         cmd.args(args);
         cmd
@@ -673,6 +695,13 @@ pub(crate) fn background_command(
     // The recipe's own deliberate env is applied by the caller afterwards, so
     // scrubbing here clears only what the launching session contributed.
     strip_claude_session_markers_from_command(&mut cmd);
+    if cfg!(unix) {
+        if let Some(path) =
+            path_with_executable_dir(&executable, std::env::var_os("PATH").as_deref())?
+        {
+            cmd.env("PATH", path);
+        }
+    }
     // The guard signals this process's group (`kill(-pid)`). A child that
     // merely inherited our group has no group whose id is its pid, so that
     // signal is ESRCH and cancellation would leave descendants running.
@@ -914,6 +943,13 @@ pub fn wrap(
     }
     if crate::env::is_wsl_host() && env_type != EnvType::WindowsInterop {
         if let Some(path) = crate::agent::detection::native_wsl_path() {
+            cmd.env("PATH", path);
+        }
+    }
+    // Use the command's PATH so a native WSL launch retains its detected
+    // environment. Host directories must not cross into a Windows runtime.
+    if cfg!(unix) && env_type != EnvType::WindowsInterop {
+        if let Some(path) = path_with_executable_dir(executable, cmd.get_env("PATH"))? {
             cmd.env("PATH", path);
         }
     }
