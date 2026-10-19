@@ -88,6 +88,8 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
       // top-left corner of the screen, far from the row it belongs to.
       if (rect.width === 0 && rect.height === 0) return;
       const margin = 8;
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
       const width = panel.current?.offsetWidth ?? 280;
       // `scrollHeight` is the panel's natural content height; `offsetHeight`
       // would report the height already capped by the previous placement.
@@ -97,30 +99,55 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
       // screen, otherwise keep the row's left edge so the panel stays on the
       // row it was opened from.
       let left = rect.right;
-      if (left + width > window.innerWidth - margin) {
+      if (left + width > viewportWidth - margin) {
         const flipped = rect.left - width;
         left = flipped >= margin ? flipped : rect.left;
       }
-      left = Math.max(margin, Math.min(left, window.innerWidth - width - margin));
+      left = Math.max(margin, Math.min(left, viewportWidth - width - margin));
       // Vertical: hang from the row's top line and scroll inside the panel.
       // Open above the row only when there is no usable room below it and
-      // more room above, so the panel keeps touching the row.
-      const roomBelow = window.innerHeight - rect.top - margin;
-      const roomAbove = rect.bottom - margin;
-      let top = Math.max(margin, rect.top);
+      // more room above, so the panel keeps touching the row. The anchor edges
+      // are clipped to the viewport: a row that is only partly visible at a
+      // scroll boundary must not hand the panel room past the viewport edge.
+      const anchorTop = Math.min(Math.max(rect.top, margin), viewportHeight - margin);
+      const anchorBottom = Math.min(Math.max(rect.bottom, margin), viewportHeight - margin);
+      const roomBelow = viewportHeight - margin - anchorTop;
+      const roomAbove = anchorBottom - margin;
+      let top = anchorTop;
       let maxHeight = roomBelow;
       if (roomBelow < MIN_ROOM_BELOW && roomAbove > roomBelow) {
-        top = Math.max(margin, rect.bottom - Math.min(height, roomAbove));
+        top = Math.max(margin, anchorBottom - Math.min(height, roomAbove));
         maxHeight = roomAbove;
       }
-      setPlacement({ left, top, maxHeight: Math.max(maxHeight, 0) });
+      setPlacement((current) => current
+        && current.left === left
+        && current.top === top
+        && current.maxHeight === maxHeight
+        ? current
+        : { left, top, maxHeight });
     };
     place();
     window.addEventListener('resize', place);
     window.addEventListener('scroll', place, true);
+    // The editor owns its own draft state: switching to a routed provider adds
+    // endpoint fields without changing this component's props, so the panel's
+    // content is observed for size changes and the placement follows it.
+    let frame: number | null = null;
+    const schedulePlace = () => {
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(() => { frame = null; place(); });
+    };
+    const Observer = typeof ResizeObserver === 'undefined' ? null : ResizeObserver;
+    const observer = Observer ? new Observer(schedulePlace) : null;
+    if (panel.current) {
+      observer?.observe(panel.current);
+      for (const child of Array.from(panel.current.children)) observer?.observe(child);
+    }
     return () => {
       window.removeEventListener('resize', place);
       window.removeEventListener('scroll', place, true);
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      observer?.disconnect();
     };
   }, [anchor, draft, configurations, error, targetError, targets, loaded]);
 
