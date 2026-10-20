@@ -73,11 +73,13 @@ fn no_working_directory_reason(selected: &str, repo: &Repository) -> String {
 /// device it lives on, or on Windows its creation time — was staged from a
 /// real file, and that file is still there. The identity is used rather than
 /// the cached size and timestamps, which go stale as soon as a file is
-/// edited. A bare repository's index carries no identity, so it does not pass
-/// that check whatever its index says and whatever file happens to sit beside
-/// it. The flag is read from the repository's config rather than assumed, so a
-/// repository that reports no working directory for some other reason keeps
-/// the plain bare-repository wording.
+/// edited. A file that *replaced* the tracked one has a new identity, so the
+/// repository's own record of having had a work tree settles that case; a
+/// bare repository has no such record, so it does not pass whatever its index
+/// says and whatever file happens to sit beside it. The flag is read from the
+/// repository's config rather than assumed, so a repository that reports no
+/// working directory for some other reason keeps the plain bare-repository
+/// wording.
 fn working_tree_flagged_bare(repo: &Repository, selected: &str) -> bool {
     let flagged = repo
         .config()
@@ -167,18 +169,24 @@ fn gitlink_points_at(link: &std::path::Path, git_dir: &std::path::Path) -> bool 
 /// is not proof of one on its own. Git keeps the size, the timestamps and the
 /// mode there as a *cache* for change detection, and that cache goes stale the
 /// moment a file is edited, so comparing it against the file on disk reports
-/// a dirty checkout as missing. What names the file itself is its identity:
-/// the inode and the device it lives on (Unix), or the creation time
-/// (Windows, where git caches the creation time because the platform has no
-/// stable inode to record). An identity survives an edit, a checkout filter
-/// and a line-ending conversion, and an unrelated file that happens to share
-/// a tracked path, a size and a modification time does not share it.
+/// a dirty checkout as missing. Two kinds of evidence settle it instead.
 ///
-/// An index that carries no identity names no file: `git read-tree` writes
-/// tree data without touching the filesystem, so a bare repository's index
-/// carries no identity and does not pass this check. An index copied out of a
-/// checkout does carry one, but it names the files of *that* checkout, so the
-/// files beside a bare repository still do not match.
+/// **The file's identity.** What names the file itself is its identity: the
+/// inode and the device it lives on (Unix), or the creation time (Windows,
+/// where git caches the creation time because the platform has no stable
+/// inode to record). An identity survives an edit, a checkout filter and a
+/// line-ending conversion, and an unrelated file that happens to share a
+/// tracked path, a size and a modification time does not share it.
+///
+/// **The repository's own record of a work tree.** An identity does not
+/// survive a file that was *replaced* rather than edited: an editor that
+/// saves by writing a temporary file and renaming it over the tracked path
+/// leaves the path holding a valid, dirty working-tree file under a new
+/// identity. Git records whether a repository was set up with a work tree —
+/// it writes `core.logallrefupdates` for one, and such a repository keeps a
+/// reflog of HEAD's moves — while a repository created as bare writes no
+/// reflog configuration and keeps no reflog. So the evidence stays with the
+/// checkout rather than with a file that merely reuses a tracked path.
 ///
 /// The scan is bounded: a diagnostic must not walk a whole repository, and it
 /// reads no file content at all, so a large tracked file is not loaded into memory.
@@ -189,6 +197,8 @@ fn tracked_files_present(repo: &Repository, root: &std::path::Path) -> bool {
     let Ok(index) = repo.index() else {
         return false;
     };
+    let symlinks_emulated = symlinks_are_emulated(repo);
+    let used_with_work_tree = used_with_a_work_tree(repo);
     let mut examined = 0usize;
     for entry in index.iter() {
         if entry.mode == GITLINK_MODE || entry.mode == SPARSE_DIR_MODE {
@@ -197,20 +207,17 @@ fn tracked_files_present(repo: &Repository, root: &std::path::Path) -> bool {
         if entry.flags_extended & SKIP_WORKTREE != 0 {
             continue;
         }
-        // No identity means git did not stage a file for this path.
-        if !entry_has_identity(&entry) {
-            continue;
-        }
         examined += 1;
         if examined > MAX_ENTRIES {
             break;
         }
-        let name = String::from_utf8_lossy(&entry.path);
-        if name.is_empty() {
-            continue;
+        let path = tracked_path(root, &entry.path);
+        if same_file_as_indexed(&entry, &path, symlinks_emulated) {
+            return true;
         }
-        let path = root.join(name.as_ref());
-        if same_file_as_indexed(&entry, &path) {
+        // A file that replaced the tracked one has a new identity, so the
+        // repository's own record of a work tree is what settles it.
+        if used_with_work_tree && tracked_path_occupied(&path) {
             return true;
         }
     }
@@ -230,6 +237,70 @@ const SPARSE_DIR_MODE: u32 = 0o040000;
 /// `GIT_INDEX_ENTRY_SKIP_WORKTREE`: the path is excluded from the working
 /// tree by a sparse checkout, so it is not evidence of one.
 const SKIP_WORKTREE: u16 = 1 << 14;
+
+/// The path of an indexed entry under the checkout root.
+///
+/// Git pathnames are byte sequences on Unix and are not required to be valid
+/// UTF-8, so the raw bytes are used there: decoding them lossily replaces
+/// the invalid bytes and looks up a different path, which misses the tracked
+/// file. Windows paths are Unicode, so the bytes are decoded there.
+fn tracked_path(root: &std::path::Path, name: &[u8]) -> std::path::PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        root.join(std::ffi::OsStr::from_bytes(name))
+    }
+    #[cfg(not(unix))]
+    {
+        root.join(String::from_utf8_lossy(name).as_ref())
+    }
+}
+
+/// Whether a tracked path is occupied by a file on disk.
+fn tracked_path_occupied(path: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| {
+        let file_type = meta.file_type();
+        file_type.is_file() || file_type.is_symlink()
+    })
+}
+
+/// Whether the repository records that it was set up with a work tree.
+///
+/// Git writes `core.logallrefupdates` for a repository it created with a work
+/// tree, and such a repository keeps a reflog of HEAD's moves. A repository
+/// created as bare writes no reflog configuration and keeps no reflog:
+/// `git init --bare` and `git clone --bare` produce a repository without
+/// either.
+///
+/// The repository's *own* configuration is read, not the merged one: a global
+/// `core.logallrefupdates` would make the bare repositories on the machine
+/// look like working ones.
+fn used_with_a_work_tree(repo: &Repository) -> bool {
+    let configured = repo
+        .config()
+        .ok()
+        .and_then(|config| config.open_level(git2::ConfigLevel::Local).ok())
+        .and_then(|config| config.get_bool("core.logallrefupdates").ok())
+        .unwrap_or(false);
+    configured || repo.path().join("logs").join("HEAD").is_file()
+}
+
+/// Whether git checks tracked symlinks out as plain files here.
+///
+/// Git writes a tracked symlink as a plain file holding the link text when
+/// `core.symlinks` is false, which is the default on Windows; elsewhere the
+/// default is a real symlink.
+fn symlinks_are_emulated(repo: &Repository) -> bool {
+    let configured = repo
+        .config()
+        .ok()
+        .and_then(|config| config.open_level(git2::ConfigLevel::Local).ok())
+        .and_then(|config| config.get_bool("core.symlinks").ok());
+    match configured {
+        Some(value) => !value,
+        None => cfg!(windows),
+    }
+}
 
 /// Whether the index recorded enough identity data to name a file.
 ///
@@ -261,12 +332,16 @@ enum OnDisk {
 ///
 /// A tracked symlink must be a symlink on disk, and a tracked regular file
 /// must be a regular file on disk: a symlink standing where the index
-/// records a file is a different file, not a working tree.
-fn matches_entry_kind(mode: u32, on_disk: OnDisk) -> bool {
-    matches!(
-        (mode, on_disk),
-        (SYMLINK_MODE, OnDisk::Symlink) | (REGULAR_MODE | EXECUTABLE_MODE, OnDisk::File)
-    )
+/// records a file is a different file, not a working tree. The exception is
+/// git's symlink emulation, where a tracked symlink is checked out as a
+/// plain file holding the link text.
+fn matches_entry_kind(mode: u32, on_disk: OnDisk, symlinks_emulated: bool) -> bool {
+    match (mode, on_disk) {
+        (SYMLINK_MODE, OnDisk::Symlink) => true,
+        (SYMLINK_MODE, OnDisk::File) => symlinks_emulated,
+        (REGULAR_MODE | EXECUTABLE_MODE, OnDisk::File) => true,
+        _ => false,
+    }
 }
 
 /// Whether the file on disk is the same file the index staged.
@@ -275,7 +350,14 @@ fn matches_entry_kind(mode: u32, on_disk: OnDisk) -> bool {
 /// file holds, and they move when the file is edited, when git rewrites it
 /// through a filter, or when it converts the file's line endings. Identity
 /// names the file itself, and only the file the index staged has it.
-fn same_file_as_indexed(entry: &git2::IndexEntry, path: &std::path::Path) -> bool {
+fn same_file_as_indexed(
+    entry: &git2::IndexEntry,
+    path: &std::path::Path,
+    symlinks_emulated: bool,
+) -> bool {
+    if !entry_has_identity(entry) {
+        return false;
+    }
     // `symlink_metadata` does not follow the link: git stages a symlink from
     // the link itself, so the link's own metadata is the evidence — and a
     // broken symlink still has metadata to compare.
@@ -290,7 +372,7 @@ fn same_file_as_indexed(entry: &git2::IndexEntry, path: &std::path::Path) -> boo
     } else {
         OnDisk::Other
     };
-    if !matches_entry_kind(entry.mode, on_disk) {
+    if !matches_entry_kind(entry.mode, on_disk, symlinks_emulated) {
         return false;
     }
     identity_matches(entry, &meta)
@@ -451,6 +533,18 @@ pub fn scope_for_checkout(
 mod tests {
     use super::*;
     use crate::env::test_helpers::{init_repo_with_commit, TestDir};
+
+    /// The output of a git command, with its trailing newline removed.
+    fn git_output(args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .expect("git");
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
 
     #[test]
     fn legacy_resume_and_explicit_husk_retry_preserve_scope_intent() {
@@ -1157,21 +1251,171 @@ mod tests {
         );
     }
 
+    /// An editor that saves by writing a temporary file and renaming it over
+    /// the tracked path leaves the path holding a valid, dirty working-tree
+    /// file — under a new identity, because the file was replaced rather than
+    /// edited. The repository's own record of having had a work tree is what
+    /// settles it; the file's identity does not survive the replacement.
+    #[test]
+    fn an_atomically_replaced_file_is_still_a_working_tree() {
+        let td = TestDir::new("project-flagged-replaced");
+        init_repo_with_commit(td.path(), &[("file.txt", "content\n")]);
+        // Save the way an editor does: write a temporary file and rename it
+        // over the tracked path.
+        let temp = td.path().join("file.txt.tmp");
+        std::fs::write(&temp, "edited content\n").unwrap();
+        std::fs::rename(&temp, td.path().join("file.txt")).unwrap();
+
+        let repo = Repository::open(td.path()).unwrap();
+        repo.config().unwrap().set_bool("core.bare", true).unwrap();
+        drop(repo);
+
+        let reason = resolve(td.path().to_str().unwrap()).unwrap_err();
+        assert!(
+            reason.contains("core.bare=true"),
+            "a checkout whose file was replaced still holds a working tree: {reason}"
+        );
+    }
+
+    /// With `core.symlinks=false` — git's default on Windows — a tracked
+    /// symlink is checked out as a plain file holding the link text, and the
+    /// index still records the entry as a symlink. The check has to accept
+    /// that representation, or a checkout whose only tracked evidence is an
+    /// emulated symlink is reported as bare.
+    #[test]
+    fn an_emulated_symlink_is_still_a_working_tree() {
+        let td = TestDir::new("project-flagged-emulated-symlink");
+        let dir = td.path().to_str().unwrap().to_string();
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("git");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&["init", &dir]);
+        run(&["-C", &dir, "config", "core.symlinks", "false"]);
+        // Stage the symlink without needing the privilege to create one: git
+        // keeps the link target as a blob and the entry as a symlink.
+        std::fs::write(td.path().join("link-target.txt"), "target/elsewhere.txt").unwrap();
+        let blob = git_output(&["-C", &dir, "hash-object", "-w", "link-target.txt"]);
+        let cacheinfo = format!("120000,{blob},link");
+        run(&[
+            "-C",
+            &dir,
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &cacheinfo,
+        ]);
+        run(&[
+            "-C",
+            &dir,
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=test",
+            "commit",
+            "-m",
+            "initial",
+        ]);
+        // Git checks the entry out as the plain file the emulation produces.
+        run(&["-C", &dir, "checkout", "--", "link"]);
+        // The fixture drops the repository's record of having had a work tree,
+        // so the checked-out file itself is the only evidence left.
+        run(&["-C", &dir, "config", "core.logallrefupdates", "false"]);
+        std::fs::remove_dir_all(td.path().join(".git").join("logs")).unwrap();
+        run(&["-C", &dir, "config", "core.bare", "true"]);
+
+        let reason = resolve(&dir).unwrap_err();
+        assert!(
+            reason.contains("core.bare=true"),
+            "a checkout whose only tracked file is an emulated symlink still holds a working tree: {reason}"
+        );
+    }
+
+    /// Git pathnames are byte sequences on Unix and need not be valid UTF-8.
+    /// Decoding them lossily replaces the invalid bytes and looks up a
+    /// different path, so a checkout whose only tracked evidence has such a
+    /// name was reported as bare.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_tracked_name_is_still_a_working_tree() {
+        use std::os::unix::ffi::OsStrExt;
+        let td = TestDir::new("project-flagged-non-utf8");
+        let dir = td.path().to_str().unwrap().to_string();
+        let name = std::ffi::OsStr::from_bytes(b"weird\xffname.txt");
+        std::fs::write(td.path().join(name), b"content\n").unwrap();
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("git");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&["init", &dir]);
+        // The name is not valid UTF-8, so it is handed to git as raw bytes.
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .arg("add")
+            .arg(name)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("git add");
+        assert!(status.success(), "git add failed");
+        run(&[
+            "-C",
+            &dir,
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=test",
+            "commit",
+            "-m",
+            "initial",
+        ]);
+        run(&["-C", &dir, "config", "core.bare", "true"]);
+
+        let reason = resolve(&dir).unwrap_err();
+        assert!(
+            reason.contains("core.bare=true"),
+            "a checkout whose tracked file has a non-UTF-8 name still holds a working tree: {reason}"
+        );
+    }
+
     /// The index's mode and the file on disk must agree on what kind of file
     /// it is: a symlink standing where the index records a regular file is a
     /// different file, and a regular file standing where the index records a
-    /// symlink is a different file too.
+    /// symlink is a different file too — unless git emulates the symlink as a
+    /// plain file.
     #[test]
     fn entry_kind_matching_separates_symlinks_from_regular_files() {
-        assert!(matches_entry_kind(SYMLINK_MODE, OnDisk::Symlink));
-        assert!(!matches_entry_kind(SYMLINK_MODE, OnDisk::File));
-        assert!(!matches_entry_kind(SYMLINK_MODE, OnDisk::Other));
-        assert!(matches_entry_kind(REGULAR_MODE, OnDisk::File));
-        assert!(matches_entry_kind(EXECUTABLE_MODE, OnDisk::File));
-        assert!(!matches_entry_kind(REGULAR_MODE, OnDisk::Symlink));
-        assert!(!matches_entry_kind(REGULAR_MODE, OnDisk::Other));
-        assert!(!matches_entry_kind(GITLINK_MODE, OnDisk::File));
-        assert!(!matches_entry_kind(SPARSE_DIR_MODE, OnDisk::Other));
+        assert!(matches_entry_kind(SYMLINK_MODE, OnDisk::Symlink, false));
+        assert!(!matches_entry_kind(SYMLINK_MODE, OnDisk::File, false));
+        assert!(matches_entry_kind(SYMLINK_MODE, OnDisk::File, true));
+        assert!(!matches_entry_kind(SYMLINK_MODE, OnDisk::Other, true));
+        assert!(matches_entry_kind(REGULAR_MODE, OnDisk::File, false));
+        assert!(matches_entry_kind(EXECUTABLE_MODE, OnDisk::File, false));
+        assert!(!matches_entry_kind(REGULAR_MODE, OnDisk::Symlink, false));
+        assert!(!matches_entry_kind(REGULAR_MODE, OnDisk::Other, false));
+        assert!(!matches_entry_kind(GITLINK_MODE, OnDisk::File, false));
+        assert!(!matches_entry_kind(SPARSE_DIR_MODE, OnDisk::Other, false));
+    }
+
+    /// The path of an indexed entry keeps the bytes git recorded, so a
+    /// tracked name that is not valid UTF-8 still names the file on disk.
+    #[cfg(unix)]
+    #[test]
+    fn tracked_paths_keep_the_index_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let path = tracked_path(std::path::Path::new("/root"), b"weird\xffname.txt");
+        assert_eq!(path.as_os_str().as_bytes(), b"/root/weird\xffname.txt");
     }
 
     /// A checkout whose Git data lives in a separate directory still holds a

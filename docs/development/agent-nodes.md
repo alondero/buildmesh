@@ -302,21 +302,34 @@ config sets `core.bare=true` reports no working directory even though the folder
 holds a full checkout; git then refuses the commands that need a work tree
 ("this operation must be run in a work tree"), so `git status` in that folder
 fails and the checkout is invisible to git's working-tree commands.
-`git::project::resolve` tells the two cases apart by the **identity of the files
-the index names**: an index entry that carries the identity of a file — its
-inode and the device it lives on, or on Windows its creation time — was staged
-from a real file, and that file is still there. The flag itself is read from the
+`git::project::resolve` tells the two cases apart by two kinds of evidence:
+the **identity of the files the index names**, and the **repository's own
+record of having had a work tree**. The flag itself is read from the
 repository's config rather than assumed.
 
-The identity is the evidence, not the cached size and timestamps. Git keeps
-those as a *change-detection cache*, and it goes stale on the first edit, so
-comparing it against the file on disk reports a dirty checkout as missing; the
-same comparison lets a file beside a bare repository pass when it happens to
-share a tracked path, a size and a modification time. Identity survives an
-edit, a checkout filter and a line-ending conversion, which is why the
+The identity is the first evidence, and not the cached size and timestamps. Git
+keeps those as a *change-detection cache*, and it goes stale on the first edit,
+so comparing it against the file on disk reports a dirty checkout as missing;
+the same comparison lets a file beside a bare repository pass when it happens
+to share a tracked path, a size and a modification time. An identity — the
+inode and the device it lives on, or on Windows the creation time — survives
+an edit, a checkout filter and a line-ending conversion, which is why the
 diagnosis reads no file content at all: the bytes on disk need not hash to the
 blob the index records — git itself reports such a file as modified — and
 reading them would cost a read of each candidate file.
+
+The second evidence covers a file that was *replaced* rather than edited: an
+editor that saves by writing a temporary file and renaming it over the tracked
+path leaves the path holding a valid, dirty working-tree file under a new
+identity, which no identity comparison can recognise. Git records whether a
+repository was set up with a work tree — it writes `core.logallrefupdates` for
+one, and such a repository keeps a reflog of HEAD's moves — while a repository
+created as bare writes no reflog configuration and keeps no reflog, so the
+evidence stays with the checkout rather than with a file that merely reuses a
+tracked path. The repository's *own*
+configuration file is read for that, not the merged one: a global
+`core.logallrefupdates` would otherwise make the bare repositories on the
+machine look like working ones.
 
 Three cheaper signals are not evidence. The Git directory's *name* is not: a
 checkout may keep its data in a separate directory (`--separate-git-dir`), and
@@ -335,7 +348,13 @@ a path that an unrelated file beside it happens to use.
 A tracked symlink is staged from the link itself, so the check reads the
 link's own metadata instead of following it: a broken symlink is still evidence of
 a working tree, and a symlink standing where the index records a regular file
-is a different file, not a working tree. The scan is bounded and reads no
+is a different file, not a working tree. Git's symlink emulation is the
+exception: with `core.symlinks=false` — the default on Windows — a tracked
+symlink is checked out as a plain file holding the link text, and the check
+accepts that representation. An indexed pathname is looked up with the bytes
+git recorded: on Unix a pathname is a byte sequence and need not be valid
+UTF-8, and decoding it lossily would replace the invalid bytes and look up a
+different path. The scan is bounded and reads no
 file content, so a large tracked file is not loaded into memory.
 
 A checkout whose tracked files are not on disk keeps the plain
