@@ -636,13 +636,7 @@ pub(super) fn dispatch_effects(
                             node_id,
                             error
                         );
-                        outcome_events.push(CircuitEvent::ContinuationDeferred {
-                            node_id: node_id.clone(),
-                            attempt: view
-                                .step(node_id)
-                                .map(|step| step.attempt)
-                                .unwrap_or_default(),
-                        });
+                        defer_effect(view, effect, &mut outcome_events);
                         continue;
                     }
                 };
@@ -656,13 +650,7 @@ pub(super) fn dispatch_effects(
                             node_id,
                             error
                         );
-                        outcome_events.push(CircuitEvent::ContinuationDeferred {
-                            node_id: node_id.clone(),
-                            attempt: view
-                                .step(node_id)
-                                .map(|step| step.attempt)
-                                .unwrap_or_default(),
-                        });
+                        defer_effect(view, effect, &mut outcome_events);
                         continue;
                     }
                 };
@@ -702,13 +690,7 @@ pub(super) fn dispatch_effects(
                             active.run.id,
                             error
                         );
-                        outcome_events.push(CircuitEvent::ContinuationDeferred {
-                            node_id: node_id.clone(),
-                            attempt: view
-                                .step(node_id)
-                                .map(|step| step.attempt)
-                                .unwrap_or_default(),
-                        });
+                        defer_effect(view, effect, &mut outcome_events);
                         continue;
                     }
                 }
@@ -792,10 +774,7 @@ pub(super) fn dispatch_effects(
                             node_id,
                             error
                         );
-                        outcome_events.push(CircuitEvent::NudgeDeferred {
-                            node_id: node_id.clone(),
-                            attempt,
-                        });
+                        defer_effect(view, effect, &mut outcome_events);
                         continue;
                     }
                 };
@@ -812,10 +791,7 @@ pub(super) fn dispatch_effects(
                             node_id,
                             error
                         );
-                        outcome_events.push(CircuitEvent::NudgeDeferred {
-                            node_id: node_id.clone(),
-                            attempt,
-                        });
+                        defer_effect(view, effect, &mut outcome_events);
                         continue;
                     }
                 };
@@ -829,10 +805,7 @@ pub(super) fn dispatch_effects(
                             node_id,
                             error
                         );
-                        outcome_events.push(CircuitEvent::NudgeDeferred {
-                            node_id: node_id.clone(),
-                            attempt,
-                        });
+                        defer_effect(view, effect, &mut outcome_events);
                         continue;
                     }
                 };
@@ -856,10 +829,7 @@ pub(super) fn dispatch_effects(
                                 node_id,
                                 error
                             );
-                            outcome_events.push(CircuitEvent::NudgeDeferred {
-                                node_id: node_id.clone(),
-                                attempt,
-                            });
+                            defer_effect(view, effect, &mut outcome_events);
                             continue;
                         }
                     };
@@ -904,10 +874,7 @@ pub(super) fn dispatch_effects(
                             active.run.id,
                             error
                         );
-                        outcome_events.push(CircuitEvent::NudgeDeferred {
-                            node_id: node_id.clone(),
-                            attempt,
-                        });
+                        defer_effect(view, effect, &mut outcome_events);
                         continue;
                     }
                 }
