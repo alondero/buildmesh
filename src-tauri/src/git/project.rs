@@ -69,13 +69,15 @@ fn no_working_directory_reason(selected: &str, repo: &Repository) -> String {
 /// would break the one thing it is: a repository with no working tree.
 ///
 /// The evidence that settles it is the index's own record of the working
-/// tree: an entry that carries stat data was staged from a file that existed
-/// on disk, and that file is still there. A bare repository's index carries
-/// no stat data, so it does not pass that check whatever its index says and
-/// whatever file happens to sit beside it. The flag is read from the
-/// repository's config rather than assumed, so a repository that reports no
-/// working directory for some other reason keeps the plain bare-repository
-/// wording.
+/// tree: an entry that carries the identity of a file — its inode and the
+/// device it lives on, or on Windows its creation time — was staged from a
+/// real file, and that file is still there. The identity is used rather than
+/// the cached size and timestamps, which go stale as soon as a file is
+/// edited. A bare repository's index carries no identity, so it does not pass
+/// that check whatever its index says and whatever file happens to sit beside
+/// it. The flag is read from the repository's config rather than assumed, so a
+/// repository that reports no working directory for some other reason keeps
+/// the plain bare-repository wording.
 fn working_tree_flagged_bare(repo: &Repository, selected: &str) -> bool {
     let flagged = repo
         .config()
@@ -101,8 +103,8 @@ fn working_tree_flagged_bare(repo: &Repository, selected: &str) -> bool {
 /// The standard layout is the fallback: the Git data lives in a `.git`
 /// directory inside the checkout, so the checkout is the Git directory's
 /// parent. A bare repository reaches that fallback only when no `.git` file
-/// points at it, and it is then separated from a checkout by the stat check
-/// in [`tracked_files_present`].
+/// points at it, and it is then separated from a checkout by the identity
+/// check in [`tracked_files_present`].
 fn checkout_root(repo: &Repository, selected: &str) -> Option<std::path::PathBuf> {
     let git_dir = repo.path();
     if let Some(root) = gitlink_checkout_root(git_dir, selected) {
@@ -161,30 +163,26 @@ fn gitlink_points_at(link: &std::path::Path, git_dir: &std::path::Path) -> bool 
 
 /// Whether the repository's tracked files are on disk under `root`.
 ///
-/// The index is git's record of the working tree. An entry that carries stat
-/// data — the size and timestamps of a file that existed on disk — was staged
-/// from a real file, and that file is still there. A bare repository's index
-/// carries no stat data (`git read-tree` writes tree data without touching
-/// the filesystem), so a bare repository does not pass this check, whatever its
-/// index says and whatever file happens to sit beside it.
+/// The index is git's record of the working tree, but what the index records
+/// is not proof of one on its own. Git keeps the size, the timestamps and the
+/// mode there as a *cache* for change detection, and that cache goes stale the
+/// moment a file is edited, so comparing it against the file on disk reports
+/// a dirty checkout as missing. What names the file itself is its identity:
+/// the inode and the device it lives on (Unix), or the creation time
+/// (Windows, where git caches the creation time because the platform has no
+/// stable inode to record). An identity survives an edit, a checkout filter
+/// and a line-ending conversion, and an unrelated file that happens to share
+/// a tracked path, a size and a modification time does not share it.
 ///
-/// The comparison is stat-based rather than content-based, on purpose. Git may
-/// have converted line endings or applied a checkout filter when it wrote the
-/// working tree, so the bytes on disk need not hash to the blob the index
-/// records — git itself reports such a file as modified. The index records the
-/// *working tree's* size, not the blob's, so the stat survives a smudge
-/// filter. What this check asks about is presence, not identity.
+/// An index that carries no identity names no file: `git read-tree` writes
+/// tree data without touching the filesystem, so a bare repository's index
+/// carries no identity and does not pass this check. An index copied out of a
+/// checkout does carry one, but it names the files of *that* checkout, so the
+/// files beside a bare repository still do not match.
 ///
 /// The scan is bounded: a diagnostic must not walk a whole repository, and it
 /// reads no file content at all, so a large tracked file is not loaded into memory.
 fn tracked_files_present(repo: &Repository, root: &std::path::Path) -> bool {
-    /// The index mode of a submodule (gitlink) entry.
-    const GITLINK_MODE: u32 = 0o160000;
-    /// The index mode of a sparse-index directory entry.
-    const SPARSE_DIR_MODE: u32 = 0o040000;
-    /// `GIT_INDEX_ENTRY_SKIP_WORKTREE`: the path is excluded from the working
-    /// tree by a sparse checkout, so it is not evidence of one.
-    const SKIP_WORKTREE: u16 = 1 << 14;
     /// How many index entries the check may examine.
     const MAX_ENTRIES: usize = 4096;
 
@@ -199,8 +197,8 @@ fn tracked_files_present(repo: &Repository, root: &std::path::Path) -> bool {
         if entry.flags_extended & SKIP_WORKTREE != 0 {
             continue;
         }
-        // No stat data means git did not stage a file for this path.
-        if !entry_has_stat_data(&entry) {
+        // No identity means git did not stage a file for this path.
+        if !entry_has_identity(&entry) {
             continue;
         }
         examined += 1;
@@ -212,49 +210,135 @@ fn tracked_files_present(repo: &Repository, root: &std::path::Path) -> bool {
             continue;
         }
         let path = root.join(name.as_ref());
-        let Ok(meta) = std::fs::metadata(&path) else {
-            continue;
-        };
-        if !meta.is_file() {
-            continue;
+        if same_file_as_indexed(&entry, &path) {
+            return true;
         }
-        if meta.len() != u64::from(entry.file_size) {
-            continue;
-        }
-        if !mtime_matches(&meta, &entry.mtime) {
-            continue;
-        }
-        return true;
     }
     false
 }
 
-/// Whether the index recorded stat data for this entry — the sign that git
-/// staged it from a file that existed on disk.
-fn entry_has_stat_data(entry: &git2::IndexEntry) -> bool {
-    entry.file_size != 0
-        || entry.mtime.seconds() != 0
-        || entry.ctime.seconds() != 0
-        || entry.ino != 0
-        || entry.dev != 0
+/// The index mode of a tracked symbolic link.
+const SYMLINK_MODE: u32 = 0o120000;
+/// The index mode of a regular file.
+const REGULAR_MODE: u32 = 0o100644;
+/// The index mode of an executable regular file.
+const EXECUTABLE_MODE: u32 = 0o100755;
+/// The index mode of a submodule (gitlink) entry.
+const GITLINK_MODE: u32 = 0o160000;
+/// The index mode of a sparse-index directory entry.
+const SPARSE_DIR_MODE: u32 = 0o040000;
+/// `GIT_INDEX_ENTRY_SKIP_WORKTREE`: the path is excluded from the working
+/// tree by a sparse checkout, so it is not evidence of one.
+const SKIP_WORKTREE: u16 = 1 << 14;
+
+/// Whether the index recorded enough identity data to name a file.
+///
+/// Git records the file's inode and the device it lives on; on Windows, where
+/// there is no stable inode, it records the file's creation time instead. An
+/// index written by `git read-tree` carries no identity, so it names no file.
+fn entry_has_identity(entry: &git2::IndexEntry) -> bool {
+    if cfg!(unix) {
+        entry.ino != 0 && entry.dev != 0
+    } else {
+        // Windows has no stable inode to record, so git caches the file's
+        // creation time instead.
+        entry.ctime.seconds() != 0
+    }
 }
 
-/// Whether the file's modification time is the one the index recorded.
+/// What the file on disk is, as the index's mode is compared against it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnDisk {
+    /// A regular file.
+    File,
+    /// A symbolic link, read without following it.
+    Symlink,
+    /// Anything else — a directory, a socket, a device.
+    Other,
+}
+
+/// Whether the file on disk is the kind of file the index recorded.
 ///
-/// The seconds must match. The nanoseconds are compared only when the index
-/// recorded them: a filesystem with a coarse timestamp writes none, and the
-/// index then holds none either.
-fn mtime_matches(meta: &std::fs::Metadata, recorded: &git2::IndexTime) -> bool {
-    let Ok(modified) = meta.modified() else {
+/// A tracked symlink must be a symlink on disk, and a tracked regular file
+/// must be a regular file on disk: a symlink standing where the index
+/// records a file is a different file, not a working tree.
+fn matches_entry_kind(mode: u32, on_disk: OnDisk) -> bool {
+    matches!(
+        (mode, on_disk),
+        (SYMLINK_MODE, OnDisk::Symlink) | (REGULAR_MODE | EXECUTABLE_MODE, OnDisk::File)
+    )
+}
+
+/// Whether the file on disk is the same file the index staged.
+///
+/// Identity, not size, modification time or content: those describe what the
+/// file holds, and they move when the file is edited, when git rewrites it
+/// through a filter, or when it converts the file's line endings. Identity
+/// names the file itself, and only the file the index staged has it.
+fn same_file_as_indexed(entry: &git2::IndexEntry, path: &std::path::Path) -> bool {
+    // `symlink_metadata` does not follow the link: git stages a symlink from
+    // the link itself, so the link's own metadata is the evidence — and a
+    // broken symlink still has metadata to compare.
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
         return false;
     };
-    let Ok(since_epoch) = modified.duration_since(std::time::UNIX_EPOCH) else {
-        return false;
+    let file_type = meta.file_type();
+    let on_disk = if file_type.is_symlink() {
+        OnDisk::Symlink
+    } else if file_type.is_file() {
+        OnDisk::File
+    } else {
+        OnDisk::Other
     };
-    if since_epoch.as_secs() as i64 != i64::from(recorded.seconds()) {
+    if !matches_entry_kind(entry.mode, on_disk) {
         return false;
     }
-    recorded.nanoseconds() == 0 || since_epoch.subsec_nanos() == recorded.nanoseconds()
+    identity_matches(entry, &meta)
+}
+
+/// Whether the file's identity is the one the index recorded.
+///
+/// The inode and the device name the file itself, and git stages a symlink
+/// from the link, so the link's own inode is what the index records. The
+/// comparison truncates to 32 bits, the width the index format stores, and
+/// compares the way git's own `ce_match_stat` does.
+#[cfg(unix)]
+fn identity_matches(entry: &git2::IndexEntry, meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    meta.ino() as u32 == entry.ino && meta.dev() as u32 == entry.dev
+}
+
+/// Whether the file's identity is the one the index recorded.
+///
+/// Windows has no stable inode to cache, so git caches the file's creation
+/// time instead — the C runtime reports the creation time as the change time,
+/// and it does not move when the file is edited.
+#[cfg(not(unix))]
+fn identity_matches(entry: &git2::IndexEntry, meta: &std::fs::Metadata) -> bool {
+    creation_time_matches(meta, &entry.ctime)
+}
+
+/// Whether the file's creation time is the one the index recorded.
+///
+/// The seconds must match. The nanoseconds are compared only when the index
+/// recorded them, and within one 100-nanosecond tick: Windows records time in
+/// those ticks, so a difference of one is a rounding difference and not a
+/// different file.
+#[cfg(not(unix))]
+fn creation_time_matches(meta: &std::fs::Metadata, recorded: &git2::IndexTime) -> bool {
+    let Ok(created) = meta.created() else {
+        return false;
+    };
+    let Ok(since_epoch) = created.duration_since(std::time::UNIX_EPOCH) else {
+        return false;
+    };
+    // Git stores the seconds as an unsigned 32-bit value, so compare in that
+    // width and let a date past 2038 wrap the same way on both sides.
+    if since_epoch.as_secs() as u32 != recorded.seconds() as u32 {
+        return false;
+    }
+    recorded.nanoseconds() == 0
+        || since_epoch.subsec_nanos().abs_diff(recorded.nanoseconds()) <= 100
 }
 
 fn repository_identity(repo: &Repository) -> Result<String, String> {
@@ -701,6 +785,39 @@ mod tests {
         );
     }
 
+    /// A checkout whose tracked file was edited after the index was written is
+    /// still a working tree. Git's cached size and modification time are a
+    /// change-detection cache, and they go stale on the first edit, so
+    /// comparing them against the file on disk reports a dirty checkout as
+    /// missing. The file is the same file, and its identity is the evidence.
+    #[test]
+    fn a_dirty_checkout_is_still_a_working_tree() {
+        let td = TestDir::new("project-flagged-dirty");
+        init_repo_with_commit(td.path(), &[("file.txt", "content\n")]);
+        // Edit the file in place: the same file, with a different size and a
+        // different modification time. A file that is *replaced* rather than
+        // edited is a different file, and that is a different question.
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(td.path().join("file.txt"))
+                .unwrap();
+            file.set_len(0).unwrap();
+            file.write_all(b"edited, and longer than it was\n").unwrap();
+        }
+
+        let repo = Repository::open(td.path()).unwrap();
+        repo.config().unwrap().set_bool("core.bare", true).unwrap();
+        drop(repo);
+
+        let reason = resolve(td.path().to_str().unwrap()).unwrap_err();
+        assert!(
+            reason.contains("core.bare=true"),
+            "a checkout whose file was edited still holds a working tree: {reason}"
+        );
+    }
+
     /// A sparse working tree leaves tracked paths out of the working tree
     /// while the index keeps them, so the evidence can sit past a long run of
     /// paths that are not there.
@@ -890,6 +1007,171 @@ mod tests {
             !reason.contains("core.bare=true"),
             "a file that merely shares a path with an index entry is not a working tree: {reason}"
         );
+    }
+
+    /// An index copied out of a checkout carries the identity of *that*
+    /// checkout's files, so a bare repository that keeps one can stand
+    /// beside an unrelated file that uses a tracked path. The file shares
+    /// everything the cached stat data describes — the path, the size, the
+    /// modification time — and not the file's identity, so the
+    /// repository is not told that it holds a working tree: that advice
+    /// would break the one thing it is.
+    #[test]
+    fn a_bare_repository_with_a_copied_index_is_not_told_it_holds_a_working_tree() {
+        let td = TestDir::new("project-bare-copied-index");
+        init_repo_with_commit(td.path(), &[("file.txt", "content\n")]);
+        let container = td.path().join("container");
+        let bare = container.join(".git");
+        std::fs::create_dir_all(&container).unwrap();
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("git");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&[
+            "clone",
+            "--bare",
+            td.path().to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ]);
+        // The bare repository now carries the checkout's index, stat data and
+        // all: an entry that names a real file, elsewhere.
+        std::fs::copy(td.path().join(".git").join("index"), bare.join("index")).unwrap();
+
+        let entry = Repository::open(td.path())
+            .unwrap()
+            .index()
+            .unwrap()
+            .get_path(std::path::Path::new("file.txt"), 0)
+            .unwrap();
+        // An unrelated file that shares the tracked path, the tracked size and
+        // the tracked modification time.
+        let unrelated = container.join("file.txt");
+        std::fs::write(&unrelated, "CONTENT\n").unwrap();
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&unrelated)
+            .unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(
+            std::time::UNIX_EPOCH
+                + std::time::Duration::new(
+                    u64::from(entry.mtime.seconds() as u32),
+                    entry.mtime.nanoseconds(),
+                ),
+        ))
+        .unwrap();
+        drop(file);
+
+        // Fixture preconditions: the file matches the cached stat data the
+        // index carries, and it does not share the file's identity. That is
+        // the case a cached-stat comparison does not see.
+        let meta = std::fs::metadata(&unrelated).unwrap();
+        assert_eq!(
+            meta.len(),
+            u64::from(entry.file_size),
+            "fixture precondition: the unrelated file must share the tracked size"
+        );
+        let modified = meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        assert_eq!(
+            (modified.as_secs() as u32, modified.subsec_nanos()),
+            (entry.mtime.seconds() as u32, entry.mtime.nanoseconds()),
+            "fixture precondition: the unrelated file must share the tracked modification time"
+        );
+        assert!(
+            !identity_matches(&entry, &meta),
+            "fixture precondition: the unrelated file must not share the tracked identity"
+        );
+        let clone = Repository::discover(&bare).unwrap();
+        assert!(
+            clone
+                .config()
+                .unwrap()
+                .get_bool("core.bare")
+                .unwrap_or(false),
+            "fixture precondition: the bare clone must carry the flagged config"
+        );
+        drop(clone);
+
+        let reason = resolve(bare.to_str().unwrap()).unwrap_err();
+        assert!(
+            reason.contains("is a bare repository, not a project working directory"),
+            "a genuine bare repository keeps the plain wording: {reason}"
+        );
+        assert!(
+            !reason.contains("core.bare=true"),
+            "an unrelated file beside a bare repository is not a working tree: {reason}"
+        );
+    }
+
+    /// A tracked symlink is staged from the link itself, so a broken link is
+    /// still evidence of a working tree. Reading the link's *target* — the
+    /// way a plain metadata lookup does — fails outright on a broken link and
+    /// compares the wrong file's size and timestamps on a live one.
+    #[cfg(unix)]
+    #[test]
+    fn a_broken_tracked_symlink_is_still_a_working_tree() {
+        let td = TestDir::new("project-flagged-broken-symlink");
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("git");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&["init", td.path().to_str().unwrap()]);
+        std::os::unix::fs::symlink("missing-target", td.path().join("link")).unwrap();
+        run(&["-C", td.path().to_str().unwrap(), "add", "link"]);
+        run(&[
+            "-C",
+            td.path().to_str().unwrap(),
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=test",
+            "commit",
+            "-m",
+            "initial",
+        ]);
+        run(&[
+            "-C",
+            td.path().to_str().unwrap(),
+            "config",
+            "core.bare",
+            "true",
+        ]);
+
+        let reason = resolve(td.path().to_str().unwrap()).unwrap_err();
+        assert!(
+            reason.contains("core.bare=true"),
+            "a checkout whose only tracked file is a broken symlink still holds a working tree: {reason}"
+        );
+    }
+
+    /// The index's mode and the file on disk must agree on what kind of file
+    /// it is: a symlink standing where the index records a regular file is a
+    /// different file, and a regular file standing where the index records a
+    /// symlink is a different file too.
+    #[test]
+    fn entry_kind_matching_separates_symlinks_from_regular_files() {
+        assert!(matches_entry_kind(SYMLINK_MODE, OnDisk::Symlink));
+        assert!(!matches_entry_kind(SYMLINK_MODE, OnDisk::File));
+        assert!(!matches_entry_kind(SYMLINK_MODE, OnDisk::Other));
+        assert!(matches_entry_kind(REGULAR_MODE, OnDisk::File));
+        assert!(matches_entry_kind(EXECUTABLE_MODE, OnDisk::File));
+        assert!(!matches_entry_kind(REGULAR_MODE, OnDisk::Symlink));
+        assert!(!matches_entry_kind(REGULAR_MODE, OnDisk::Other));
+        assert!(!matches_entry_kind(GITLINK_MODE, OnDisk::File));
+        assert!(!matches_entry_kind(SPARSE_DIR_MODE, OnDisk::Other));
     }
 
     /// A checkout whose Git data lives in a separate directory still holds a

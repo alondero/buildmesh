@@ -302,13 +302,21 @@ config sets `core.bare=true` reports no working directory even though the folder
 holds a full checkout; git then refuses the commands that need a work tree
 ("this operation must be run in a work tree"), so `git status` in that folder
 fails and the checkout is invisible to git's working-tree commands.
-`git::project::resolve` tells the two cases apart by the **index's own record of
-the working tree**: an index entry that carries stat data — the size and
-timestamps of a file that existed on disk — was staged from a real file, and
-that file is still there. A bare repository's index carries no stat data (`git
-read-tree` writes tree data without touching the filesystem), so it does not pass
-that check whatever its index says and whatever file happens to sit beside it.
-The flag itself is read from the repository's config rather than assumed.
+`git::project::resolve` tells the two cases apart by the **identity of the files
+the index names**: an index entry that carries the identity of a file — its
+inode and the device it lives on, or on Windows its creation time — was staged
+from a real file, and that file is still there. The flag itself is read from the
+repository's config rather than assumed.
+
+The identity is the evidence, not the cached size and timestamps. Git keeps
+those as a *change-detection cache*, and it goes stale on the first edit, so
+comparing it against the file on disk reports a dirty checkout as missing; the
+same comparison lets a file beside a bare repository pass when it happens to
+share a tracked path, a size and a modification time. Identity survives an
+edit, a checkout filter and a line-ending conversion, which is why the
+diagnosis reads no file content at all: the bytes on disk need not hash to the
+blob the index records — git itself reports such a file as modified — and
+reading them would cost a read of each candidate file.
 
 Three cheaper signals are not evidence. The Git directory's *name* is not: a
 checkout may keep its data in a separate directory (`--separate-git-dir`), and
@@ -319,15 +327,15 @@ directory that holds the link file (the way git resolves it) rather than from
 the process working directory. The **index** is not evidence either: `git
 read-tree` fills a bare repository's index with tree data without writing a
 single file, and git only says an index is *usually* absent from a bare
-repository. A *path* is not evidence either: a bare repository's index can name
+repository; an index copied out of a checkout does carry identities, but they
+name that checkout's files, not the ones standing beside the bare repository.
+A *path* is not evidence either: a bare repository's index can name
 a path that an unrelated file beside it happens to use.
 
-The comparison is **stat-based, not content-based**, on purpose. Git may have
-converted line endings or applied a checkout filter when it wrote the working
-tree, so the bytes on disk need not hash to the blob the index records — the
-index records the *working tree's* size, so the stat survives a smudge filter,
-and git itself reports such a file as modified: present, but differing from the blob.
-Presence is what the diagnosis asks about. The scan is bounded and reads no
+A tracked symlink is staged from the link itself, so the check reads the
+link's own metadata instead of following it: a broken symlink is still evidence of
+a working tree, and a symlink standing where the index records a regular file
+is a different file, not a working tree. The scan is bounded and reads no
 file content, so a large tracked file is not loaded into memory.
 
 A checkout whose tracked files are not on disk keeps the plain
