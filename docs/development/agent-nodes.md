@@ -303,15 +303,24 @@ holds a full checkout; git then refuses the commands that need a work tree
 ("this operation must be run in a work tree"), so `git status` in that folder
 fails and the checkout is invisible to git's working-tree commands.
 `git::project::resolve` tells the two cases apart by the **tracked files on
-disk**: a checkout holds them, a bare repository holds no working-tree file at
-all, and the flag only stops git from *using* the working tree, it does not
-delete it. The flag itself is read from the repository's config rather than
-assumed. Two cheaper signals are not evidence: the Git directory's *name* (a
-checkout may keep its data in a separate directory (`--separate-git-dir`), and a
-bare repository may live in a folder called `.git`), and the **index** (`git
+disk and their content**: a checkout holds them, a bare repository holds no
+working-tree file at all, and the flag only stops git from *using* the working
+tree, it does not delete it. The flag itself is read from the repository's
+config rather than assumed.
+
+Two cheaper signals are not evidence. The Git directory's *name* is not: a
+checkout may keep its data in a separate directory (`--separate-git-dir`), and
+that directory may itself be named `.git`, so the name alone does not stand in for the
+checkout relationship — the `.git` **file** is the only pointer back to the
+checkout, and it is resolved first. The **index** is not evidence either: `git
 read-tree` fills a bare repository's index with tree data without writing a
 single file, and git only says an index is *usually* absent from a bare
-repository). A checkout whose tracked files are not on disk keeps the plain
+repository. A *path* is not evidence either: a bare repository's index can name
+a path that an unrelated file beside it happens to use, so the file's content
+must match the blob the index records (line-ending conversion undone, because
+git may have written the working tree with CRLF while the blob keeps LF).
+
+A checkout whose tracked files are not on disk keeps the plain
 wording: there is no evidence it was ever a checkout. For the
 mis-flagged checkout the message names the flag and the repair
 (`git -C "<path>" config core.bare false`) instead of calling the user's project
