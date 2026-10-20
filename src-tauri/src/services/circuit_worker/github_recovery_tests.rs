@@ -605,7 +605,7 @@ fn open_pr_late_lookup_after_cancellation_is_rejected_through_worker_handoff() {
         let client = crate::services::github::GitHubClient::for_test(&base_url, "fake-token")
             .expect("test client");
         let pass = super::dispatch::dispatch_effects(
-            &super::dispatch::FakeHost::default(),
+            &super::dispatch::tests::FakeHost::default(),
             &thread_active,
             &mut view,
             std::slice::from_ref(&effect),
@@ -723,7 +723,7 @@ fn open_pr_late_lookup_after_cancellation_is_rejected_through_worker_handoff() {
         crate::services::github::GitHubClient::for_test(&endpoint.base_url, "fake-token")
             .expect("test client");
     let retry = super::dispatch::dispatch_effects(
-        &super::dispatch::FakeHost::default(),
+        &super::dispatch::tests::FakeHost::default(),
         &active,
         &mut restarted,
         std::slice::from_ref(&effect),

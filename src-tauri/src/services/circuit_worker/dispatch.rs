@@ -5,9 +5,6 @@
 //! the external call. Commit-before-effect stays in the worker pass: this
 //! module only runs effects the transition has already committed.
 
-#[cfg(test)]
-use std::cell::{Cell, RefCell};
-
 use tauri::{AppHandle, Emitter};
 
 use crate::circuit::delivery::PreparedPrompt;
@@ -135,115 +132,6 @@ impl EffectHost for AppEffectHost<'_> {
 
 /// Recorded external calls. A missing write override means the prompt was
 /// accepted (`Ok(true)`); `Ok(false)` is a real ownership miss and must not
-/// be the default.
-#[cfg(test)]
-#[derive(Default)]
-pub(super) struct FakeHost {
-    pub spawns: RefCell<Vec<(i64, i64, String)>>,
-    pub prompts: RefCell<Vec<RecordedPrompt>>,
-    pub notifications: RefCell<Vec<(i64, String, String)>>,
-    pub pr_ready: RefCell<Vec<(i64, i64)>>,
-    pub attention: RefCell<Vec<i64>>,
-    pub spawn_error: RefCell<Option<String>>,
-    pub write_override: RefCell<Option<Result<bool, String>>>,
-    pub alive: Cell<bool>,
-    pub input_stamp_value: RefCell<Option<String>>,
-    pub stalled_task: RefCell<Option<String>>,
-    pub report_revision: RefCell<Option<String>>,
-    pub quiet_ms: Cell<Option<u128>>,
-    /// Invoked at the start of each external call so a test can read the
-    /// journal at the moment dispatch begins.
-    pub at_external: RefCell<Option<Box<dyn FnMut()>>>,
-}
-
-#[cfg(test)]
-pub(super) struct RecordedPrompt {
-    pub agent_id: i64,
-    pub text: String,
-    pub expected_input: Option<String>,
-}
-
-#[cfg(test)]
-impl FakeHost {
-    fn note_external(&self) {
-        if let Some(hook) = self.at_external.borrow_mut().as_mut() {
-            hook();
-        }
-    }
-}
-
-#[cfg(test)]
-impl EffectHost for FakeHost {
-    fn emit_notification(&self, run_id: i64, message: String, severity: String) {
-        self.note_external();
-        self.notifications
-            .borrow_mut()
-            .push((run_id, message, severity));
-    }
-
-    fn emit_pr_ready(&self, run_id: i64, node_id: i64) {
-        self.note_external();
-        self.pr_ready.borrow_mut().push((run_id, node_id));
-    }
-
-    fn mark_attention(&self, node_id: i64) {
-        self.note_external();
-        self.attention.borrow_mut().push(node_id);
-    }
-
-    fn spawn_step_agent(
-        &self,
-        run_id: i64,
-        mesh_id: i64,
-        _view: &mut RunView,
-        node_id: &str,
-    ) -> Result<(), String> {
-        self.note_external();
-        self.spawns
-            .borrow_mut()
-            .push((run_id, mesh_id, node_id.to_string()));
-        match self.spawn_error.borrow().clone() {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
-    }
-
-    fn input_stamp(&self, _agent_id: i64) -> Option<String> {
-        self.input_stamp_value.borrow().clone()
-    }
-
-    fn write_prompt(
-        &self,
-        prepared: &PreparedPrompt,
-        expected_input: Option<&str>,
-    ) -> Result<bool, String> {
-        self.note_external();
-        self.prompts.borrow_mut().push(RecordedPrompt {
-            agent_id: prepared.node_id(),
-            text: prepared.text().to_string(),
-            expected_input: expected_input.map(str::to_string),
-        });
-        self.write_override.borrow().clone().unwrap_or(Ok(true))
-    }
-
-    fn agent_alive(&self, _agent_id: i64) -> bool {
-        self.alive.get()
-    }
-
-    fn millis_since_last_output(&self, _agent_id: i64) -> Option<u128> {
-        self.quiet_ms.get()
-    }
-
-    fn stalled_background_task(&self, _node: &AgentNode) -> Option<String> {
-        self.stalled_task.borrow().clone()
-    }
-
-    fn assistant_revision(&self, _node: &AgentNode) -> Option<String> {
-        self.report_revision.borrow().clone()
-    }
-}
-
-/// Claim one journalled effect and record the evidence revision on the view.
 /// `Ok(None)` means the row was not `intent` on a running step, so the caller
 /// skips dispatch. The attempt is the step's current attempt.
 ///
@@ -1102,4 +990,4 @@ pub(super) fn effect_allowed_in_state(
 
 #[cfg(test)]
 #[path = "dispatch_tests.rs"]
-mod tests;
+pub(super) mod tests;
