@@ -368,7 +368,8 @@ impl RunView {
         let Some(max_retries) = retry_gate_max(self, gate_id) else {
             return false;
         };
-        retry_target_attempt(self, gate_id) < max_retries
+        (max_retries == 0 && self.context.get("review.round_limit") == Some("0"))
+            || retry_target_attempt(self, gate_id) < max_retries
     }
 
     /// Read-path availability is structural; the write boundary validates delivery.
@@ -686,6 +687,14 @@ impl RunView {
         stamp: &str,
     ) -> NudgeDecision {
         if self.state != RunState::Running || self.has_human_wait(node_id) {
+            return NudgeDecision::Ignore;
+        }
+        // A wake-up is only claimable with a fence the dispatch side can
+        // match: it re-reads the stamp and the revision and rejects a claim
+        // that does not match (issue #1533). An empty half is not a fence the
+        // dispatch side can ever match, so claiming one would spend the
+        // attempt's nudge budget on a wake that is only ever judged obsolete.
+        if revision.is_empty() || stamp.is_empty() {
             return NudgeDecision::Ignore;
         }
         // A wake-up claimed for this attempt is settled by the
@@ -1018,6 +1027,19 @@ pub enum CircuitEvent {
         attempt: i32,
         error: String,
     },
+    /// The continuation could not be dispatched because the database was
+    /// unavailable.
+    ///
+    /// The prompt was never sent, so the claim is *released* rather than
+    /// settled: the delivery key returns to `pending`, which the observation
+    /// reads as "owed", and its retry re-creates the effect on a later pass
+    /// (issue #1533). A claim left at `claimed` would be settled by the
+    /// observation as *uncertain* — a false verdict about work that was never
+    /// attempted.
+    ContinuationDeferred {
+        node_id: String,
+        attempt: i32,
+    },
     /// An idle session has a finished background task it cannot learn about on
     /// its own (issue #2105). The stepper answers with one bounded wake-up
     /// prompt, fenced to the observed turn, and never repeats it.
@@ -1042,6 +1064,18 @@ pub enum CircuitEvent {
         node_id: String,
         attempt: i32,
         error: String,
+    },
+    /// The wake-up could not be dispatched because the database was
+    /// unavailable.
+    ///
+    /// The wake-up was never sent, so the claim is *released* rather than
+    /// settled, and the wake can be decided again on a later pass: the
+    /// delivery key returns to `pending`, and the wake counter and the turn
+    /// fence are cleared with it — both count wakes that were *sent*
+    /// (issue #1533).
+    NudgeDeferred {
+        node_id: String,
+        attempt: i32,
     },
     /// The agent's turn finished but the result file its prompt asked for is
     /// missing. The stepper answers with a bounded reminder, or fails the step
@@ -1911,6 +1945,22 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 t.context_changed = true;
             }
         }
+        CircuitEvent::ContinuationDeferred { node_id, attempt } => {
+            let key = format!("node.{node_id}.continuation.delivery");
+            if run.state == RunState::Running
+                && run
+                    .step(node_id)
+                    .is_some_and(|s| s.status == StepStatus::Running && s.attempt == *attempt)
+                && run.context.get(&key) == Some("claimed")
+            {
+                // Release the claim: the prompt was never sent, so the
+                // continuation is still owed. `pending` is what the
+                // observation reads as owed, and its retry re-creates the
+                // effect (issue #1533).
+                run.context.set(&key, "pending");
+                t.context_changed = true;
+            }
+        }
         CircuitEvent::NudgeIdleSession {
             node_id,
             attempt,
@@ -1977,6 +2027,27 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 if let CircuitEvent::NudgeUncertain { error, .. } = event {
                     unverify_step(run, &mut t, node_id, format!("Wake-up delivery is unverified: {error}. Inspect the agent; the wake-up will not be replayed."));
                 }
+                t.context_changed = true;
+            }
+        }
+        CircuitEvent::NudgeDeferred { node_id, attempt } => {
+            let key = format!("node.{node_id}.nudge.delivery");
+            if run.state == RunState::Running
+                && run
+                    .step(node_id)
+                    .is_some_and(|s| s.status == StepStatus::Running && s.attempt == *attempt)
+                && run.context.get(&key) == Some("claimed")
+            {
+                // Release the claim: the wake-up was never sent, so it can be
+                // decided again. The wake counter and the turn fence go with
+                // it — both of them count wakes that were *sent*, and this one
+                // was not (issue #1533).
+                run.context.set(&key, "pending");
+                run.context
+                    .remove(&format!("node.{node_id}.nudges.{attempt}"));
+                run.context
+                    .remove(&format!("node.{node_id}.nudge.revision"));
+                run.context.remove(&format!("node.{node_id}.nudge.stamp"));
                 t.context_changed = true;
             }
         }
@@ -3373,7 +3444,7 @@ fn feedback_scheduler_context(run: &RunView) -> CircuitContext {
     if run.context.get("source.review_preset") == Some("1") {
         context.set("source.review_preset", "1");
     }
-    for key in ["retry.max_retries", "retry.attempt"] {
+    for key in ["retry.max_retries", "retry.attempt", "review.round_limit"] {
         if let Some(value) = run
             .context
             .get(key)
@@ -4174,6 +4245,16 @@ fn retry_gate_max(run: &RunView, gate_id: &str) -> Option<i32> {
         Some(CircuitNodeKind::RetryLimit { max_retries }) => *max_retries,
         _ => return None,
     };
+    if review_retry_gate(&run.graph, gate_id) {
+        if let Some(limit) = run
+            .context
+            .get("review.round_limit")
+            .and_then(|v| v.parse::<i32>().ok())
+            .filter(|v| *v >= 0)
+        {
+            return Some(limit);
+        }
+    }
     Some(if run.context.get("source.review_preset") == Some("1") {
         run.context
             .get("retry.max_retries")
@@ -4201,8 +4282,17 @@ fn retry_target_attempt(run: &RunView, gate_id: &str) -> i32 {
 }
 
 fn execute_retry_limit(run: &mut RunView, t: &mut Transition, node_id: &str, max_retries: i32) {
-    run.context
-        .set("retry.max_retries", max_retries.to_string());
+    let unlimited = max_retries == 0
+        && run.context.get("review.round_limit") == Some("0")
+        && review_retry_gate(&run.graph, node_id);
+    run.context.set(
+        "retry.max_retries",
+        if unlimited {
+            "unlimited".into()
+        } else {
+            max_retries.to_string()
+        },
+    );
     let failed_parent = run
         .steps
         .iter()
@@ -4258,7 +4348,7 @@ fn execute_retry_limit(run: &mut RunView, t: &mut Transition, node_id: &str, max
     let target = retry_target.clone().unwrap_or(parent_node_id);
     let attempt = step_attempt(run, &target);
     run.context.set("retry.attempt", attempt.to_string());
-    if attempt < max_retries {
+    if unlimited || attempt < max_retries {
         let next_attempt = attempt + 1;
         run.context.set("retry.attempt", next_attempt.to_string());
         reset_step_for_retry(run, t, &target, next_attempt);
@@ -4278,6 +4368,39 @@ fn execute_retry_limit(run: &mut RunView, t: &mut Transition, node_id: &str, max
             format!("retry budget exhausted after {max_retries} attempts"),
         );
     }
+}
+
+/// Review allowances must never change publication or other retry budgets.
+pub(crate) fn review_retry_gate(graph: &CircuitGraph, gate_id: &str) -> bool {
+    if !matches!(
+        graph.node(gate_id).map(|node| &node.kind),
+        Some(CircuitNodeKind::RetryLimit { .. })
+    ) {
+        return false;
+    }
+    let Some(target) = graph.children(gate_id).into_iter().next() else {
+        return false;
+    };
+    let mut stack = vec![target];
+    let mut visited = std::collections::HashSet::new();
+    let mut loops = false;
+    let mut review = false;
+    while let Some(id) = stack.pop() {
+        if !visited.insert(id.clone()) {
+            continue;
+        }
+        if id == gate_id {
+            loops = true;
+            continue;
+        }
+        review |= graph.is_ancestor(gate_id, &id)
+            && matches!(
+                graph.node(&id).map(|node| &node.kind),
+                Some(CircuitNodeKind::ReviewVerdict { .. })
+            );
+        stack.extend(graph.children(&id));
+    }
+    loops && review
 }
 
 fn reaches_review_verdict(run: &RunView, start: &str) -> bool {

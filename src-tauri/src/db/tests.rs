@@ -11,6 +11,7 @@
 //! Run with: cargo test --package buildmesh --lib db::tests
 
 use std::collections::HashSet;
+use std::sync::atomic::Ordering;
 
 fn suspended_recovery_schema() -> rusqlite::Connection {
     let conn = pending_removal_schema();
@@ -274,23 +275,23 @@ fn hook_session_capture_only_fills_a_missing_cli_session_id() {
     );
 }
 
-/// Issue #1294 — two Root Nodes in the same mesh root share an OpenCode
-/// `directory`; the SQLite poller would conflate them (it matches on
-/// `directory` + `time_created`), but the OpenCode plugin POSTs each
-/// TUI's `session.created` event to a per-node URL
-/// (`/api/attention/<node_id>`, where `node_id` comes from
-/// `BUILDMESH_SESSION_ID` set per-agent by `spawn_environment`). The DB
-/// write is therefore per-row, not per-directory — the fill-only
-/// `UPDATE … WHERE id = ?2` clause in `set_cli_session_id_if_missing_inner`
-/// pins the right row from the URL path component. A regression that
-/// swapped `id` for a directory-derived id would re-introduce the
-/// two-Root-Node collision; the existing
-/// `set_cli_session_id_if_missing_basic_semantics` test pins the row
-/// semantics, and the route's `path_without_query.strip_prefix(
-/// "/api/attention/")` parse is the only place that derives `node_id`
-/// from the wire. Testing the route end-to-end requires the live HTTP
-/// harness (out of scope for an inner-helper unit test).
-
+// Issue #1294 — two Root Nodes in the same mesh root share an OpenCode
+// `directory`; the SQLite poller would conflate them (it matches on
+// `directory` + `time_created`), but the OpenCode plugin POSTs each
+// TUI's `session.created` event to a per-node URL
+// (`/api/attention/<node_id>`, where `node_id` comes from
+// `BUILDMESH_SESSION_ID` set per-agent by `spawn_environment`). The DB
+// write is therefore per-row, not per-directory — the fill-only
+// `UPDATE … WHERE id = ?2` clause in `set_cli_session_id_if_missing_inner`
+// pins the right row from the URL path component. A regression that
+// swapped `id` for a directory-derived id would re-introduce the
+// two-Root-Node collision; the existing
+// `set_cli_session_id_if_missing_basic_semantics` test pins the row
+// semantics, and the route's `path_without_query.strip_prefix(
+// "/api/attention/")` parse is the only place that derives `node_id`
+// from the wire. Testing the route end-to-end requires the live HTTP
+// harness (out of scope for an inner-helper unit test).
+//
 // File-level `#[cfg(test)]` is applied by the parent module's
 // `#[cfg(test)] mod tests;` declaration — no inner `mod tests {}` wrapper
 // needed (clippy::module_inception otherwise fires because the file is
@@ -1465,6 +1466,399 @@ fn reader_pool_times_out_when_exhausted() {
     drop(checked_out);
 }
 
+/// Issue #1533: an exhausted pool must report a **typed** busy error, not
+/// panic.
+///
+/// The panic is what killed a macOS laptop's Buildmesh: the accessor used to
+/// `expect` the checkout, and a release build panics with `panic = "abort"`,
+/// so a momentarily busy pool took the whole process with it. The error is
+/// typed (`SQLITE_BUSY`) so a caller can branch on "come back in a moment"
+/// instead of matching on prose.
+#[test]
+fn reader_pool_exhaustion_is_a_typed_busy_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("reader-busy.db");
+    let writer = rusqlite::Connection::open(&db_path).unwrap();
+    super::apply_connection_pragmas(&writer, false).unwrap();
+    writer
+        .execute("CREATE TABLE probe (value INTEGER NOT NULL)", [])
+        .unwrap();
+    let readers = super::ReaderPool::open(&db_path).unwrap();
+    let checked_out: Vec<_> = (0..super::READER_POOL_SIZE)
+        .map(|_| readers.checkout().unwrap())
+        .collect();
+
+    let error = match readers.checkout() {
+        Ok(_) => panic!("an exhausted pool must report an error, not a reader"),
+        Err(error) => error,
+    };
+    assert!(
+        crate::db::error::is_busy_error(&error),
+        "pool exhaustion must be a typed BUSY error, got: {error}"
+    );
+    assert_eq!(
+        error.to_string(),
+        super::READER_POOL_BUSY_MESSAGE,
+        "the user-facing copy must say the database is busy and that a retry may work"
+    );
+
+    // The same condition, one layer up: a caller holding a `DbError` reaches
+    // the same answer through the transparent `Sql` variant.
+    let wrapped = crate::db::DbError::from(error);
+    match &wrapped {
+        crate::db::DbError::Sql(inner) => assert!(
+            crate::db::error::is_busy_error(inner),
+            "a wrapped busy error must still be busy"
+        ),
+        other => panic!("a busy error must stay a busy error, got {other:?}"),
+    }
+
+    // Releasing one reader makes the next checkout succeed — the pool
+    // recovers, which is what makes "busy" a retryable answer.
+    drop(checked_out);
+    assert!(
+        readers.checkout().is_ok(),
+        "a released reader must serve the next waiter"
+    );
+}
+
+/// Issue #1533: the checkout deadline is **absolute**.
+///
+/// The old loop re-armed the full timeout on every wakeup, so a spurious
+/// condvar notification could stretch a nominal one-second wait across
+/// several seconds — a caller could be parked far longer than the budget it
+/// was promised.
+///
+/// The test drives the pool's **injected clock** rather than a stopwatch: the
+/// notifier advances the clock by one tick per wakeup, and the assertion is
+/// that the wait ended at the deadline — one budget of clock, not one budget
+/// per wakeup. A wall-clock ceiling would fail on a loaded runner even when
+/// the implementation is correct.
+///
+/// The notifier is *paced by the waiter*: a tick is only handed out after the
+/// waiter has read the clock since the previous one. That keeps the clock from
+/// running ahead of the waiter, so the measured wait is the waiter's and not
+/// the scheduler's. Without the pacing, a waiter that the runner had not
+/// scheduled yet would find the clock already past the deadline — a correct
+/// implementation failing on a busy machine.
+#[test]
+fn reader_pool_wait_ends_at_one_deadline_however_often_it_is_woken() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("reader-deadline.db");
+    let writer = rusqlite::Connection::open(&db_path).unwrap();
+    super::apply_connection_pragmas(&writer, false).unwrap();
+    writer
+        .execute("CREATE TABLE probe (value INTEGER NOT NULL)", [])
+        .unwrap();
+
+    // The pool's clock: the test advances it, so "time passing" is a fact the
+    // test owns rather than something the runner's scheduling decides. The
+    // clock counts ticks, and `seen` records the last tick the waiter read —
+    // that is the deadline the pool ended the wait on.
+    let budget = std::time::Duration::from_millis(300);
+    let tick = std::time::Duration::from_millis(100);
+    let tick_ms = tick.as_millis() as u64;
+    let base = std::time::Instant::now();
+    let ticks = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let reads = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let seen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let clock = {
+        let ticks = ticks.clone();
+        let reads = reads.clone();
+        let seen = seen.clone();
+        move || {
+            let tick = ticks.load(Ordering::Relaxed);
+            seen.store(tick, Ordering::Relaxed);
+            reads.fetch_add(1, Ordering::Relaxed);
+            base + std::time::Duration::from_millis(tick * tick_ms)
+        }
+    };
+    let readers =
+        super::ReaderPool::open_sized_with_clock(&db_path, 1, budget, std::sync::Arc::new(clock))
+            .unwrap();
+    let held = readers.checkout().unwrap();
+
+    // The notifier: a bounded burst of spurious wakeups, each advancing the
+    // clock by one tick. Bounded, so a waiter that re-armed its budget on
+    // every wakeup would still finish the test rather than hang in it.
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    std::thread::scope(|scope| {
+        let readers = &readers;
+        let ticks = ticks.clone();
+        let reads = reads.clone();
+        let notifier_done = done.clone();
+        scope.spawn(move || {
+            for step in 1..=20u64 {
+                if notifier_done.load(Ordering::Relaxed) {
+                    break;
+                }
+                let before = reads.load(Ordering::Relaxed);
+                ticks.store(step, Ordering::Relaxed);
+                readers.ready.notify_one();
+                // Hand out the next tick only once the waiter has read the
+                // clock again: the clock advances with the waiter, never
+                // ahead of it.
+                for _ in 0..100 {
+                    if reads.load(Ordering::Relaxed) > before
+                        || notifier_done.load(Ordering::Relaxed)
+                    {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+        });
+
+        let error = match readers.checkout() {
+            Ok(_) => panic!("the pool is exhausted for the whole wait"),
+            Err(error) => error,
+        };
+        done.store(true, Ordering::Relaxed);
+        assert!(
+            crate::db::error::is_busy_error(&error),
+            "the wait must end as a typed busy error, got: {error}"
+        );
+    });
+
+    // One deadline, not one per wakeup: the waiter reached the deadline and
+    // stopped there, however often the pool was woken. The tick in flight
+    // when the deadline was reached is the only slack allowed.
+    let waited = std::time::Duration::from_millis(seen.load(Ordering::Relaxed) * tick_ms);
+    assert!(
+        waited >= budget,
+        "the waiter must have reached the deadline, the clock reached {waited:?} \
+         for a {budget:?} budget"
+    );
+    assert!(
+        waited <= budget + tick,
+        "the wait must end at ONE deadline, not one per wakeup: the clock reached {waited:?} \
+         for a {budget:?} budget"
+    );
+
+    drop(held);
+}
+
+/// Issue #1533: the *public* read path under pool exhaustion returns an
+/// error — it must not panic, and it must not abort the process.
+///
+/// This is the crash this issue exists for: the accessor used to `expect`
+/// the checkout, so a saturated pool panicked on a runtime worker thread
+/// and, in a release build, took the whole application down.
+#[test]
+fn a_public_read_under_pool_exhaustion_returns_an_error_instead_of_panicking() {
+    let _db = crate::db::test_support::isolated();
+    let database = crate::db::test_support::installed_db().expect("the isolated database");
+
+    // Hold every reader the isolated pool has.
+    let mut held = Vec::new();
+    while let Ok(reader) = database.readers.checkout() {
+        held.push(reader);
+    }
+    assert!(
+        !held.is_empty(),
+        "the isolated database must have at least one reader to hold"
+    );
+
+    let error = match crate::db::read_conn() {
+        Ok(_) => panic!("a saturated pool must return an error, never a reader"),
+        Err(error) => error,
+    };
+    assert!(
+        crate::db::error::is_busy_error(&error),
+        "the public accessor must report a typed busy error, got: {error}"
+    );
+    assert_eq!(error.to_string(), crate::db::READER_POOL_BUSY_MESSAGE);
+
+    drop(held);
+}
+
+/// A pool clock the test advances by hand.
+///
+/// The pool reads time from here, so a lease can be made long and a wait can
+/// be measured without the runner sleeping: a wall-clock sleep asserts the
+/// machine's speed, not the code's behaviour (`docs/development/rust-conventions.md`
+/// asks for an injected time budget rather than a stopwatch).
+///
+/// `calls` counts how many times the pool has read the clock. The pool reads
+/// it when a checkout *starts*, so a test can wait until a particular caller
+/// has begun waiting — a state, not a duration.
+struct ManualClock {
+    clock: super::PoolClock,
+    millis: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    calls: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl ManualClock {
+    fn new() -> Self {
+        let base = std::time::Instant::now();
+        let millis = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let clock = {
+            let millis = millis.clone();
+            let calls = calls.clone();
+            move || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                base + std::time::Duration::from_millis(millis.load(Ordering::Relaxed))
+            }
+        };
+        Self {
+            clock: std::sync::Arc::new(clock),
+            millis,
+            calls,
+        }
+    }
+
+    /// Move the pool's clock forward.
+    fn advance_to(&self, millis: u64) {
+        self.millis.store(millis, Ordering::Relaxed);
+    }
+
+    /// How many times the pool has read the clock.
+    fn calls(&self) -> u64 {
+        self.calls.load(Ordering::Relaxed)
+    }
+}
+
+/// Wait for a *state*, not for a duration.
+///
+/// The bound is a safety net: the condition either becomes true (and the
+/// wait ends) or the test fails loudly instead of hanging. The poll sleeps
+/// rather than spinning — a busy spin steals the CPU the wait is competing
+/// for (`docs/development/rust-conventions.md`).
+fn wait_until(mut condition: impl FnMut() -> bool) {
+    for _ in 0..5_000 {
+        if condition() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    panic!("the condition never became true");
+}
+
+/// Issue #1533: the pool's saturation is observable.
+///
+/// Without these counters a pool exhaustion was a crash with no explanation;
+/// the diagnostics sampler now reports the same numbers, so "every reader was
+/// held" and "the slowest holder kept its reader for a second" are facts in
+/// the log rather than inferences.
+///
+/// The lease length is measured on an injected clock, so the assertion is
+/// about the code's behaviour rather than about how fast the runner is.
+#[test]
+fn reader_pool_stats_report_saturation_and_lease_length() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("reader-stats.db");
+    let writer = rusqlite::Connection::open(&db_path).unwrap();
+    super::apply_connection_pragmas(&writer, false).unwrap();
+    writer
+        .execute("CREATE TABLE probe (value INTEGER NOT NULL)", [])
+        .unwrap();
+    let manual = ManualClock::new();
+    let readers = super::ReaderPool::open_sized_with_clock(
+        &db_path,
+        super::READER_POOL_SIZE,
+        super::READER_CHECKOUT_TIMEOUT,
+        manual.clock.clone(),
+    )
+    .unwrap();
+
+    let idle = readers.stats();
+    assert_eq!(idle.in_use, 0);
+    assert_eq!(idle.available, super::READER_POOL_SIZE as u64);
+    assert_eq!(idle.checkouts, 0);
+    assert_eq!(idle.timeouts, 0);
+
+    let held = readers.checkout().unwrap();
+    let busy = readers.stats();
+    assert_eq!(busy.in_use, 1);
+    assert_eq!(busy.available, super::READER_POOL_SIZE as u64 - 1);
+    assert_eq!(busy.checkouts, 1);
+
+    // The lease length is measured, so a reader held across slow work shows
+    // up as the reason the pool ran dry. The clock moves by hand: the test
+    // asserts the pool's arithmetic, not the runner's speed.
+    manual.advance_to(120);
+    drop(held);
+    let after = readers.stats();
+    assert_eq!(after.in_use, 0, "a returned reader must not stay counted");
+    assert_eq!(
+        after.longest_lease_ms, 120,
+        "the lease length must be measured from the grant"
+    );
+}
+
+/// Issue #1533: the queueing time before a reader is handed out is **wait**
+/// time, not lease time.
+///
+/// The two are different facts. `longest_wait_ms` says how long a caller
+/// queued for a reader; `longest_lease_ms` says how long a reader was held
+/// once it was granted. Counting the queueing time as holding time made the
+/// slow-lease warning name a reader that was never actually held for long —
+/// the diagnostic that exists to explain a dry pool pointed at the wrong
+/// thing.
+#[test]
+fn a_queued_checkout_reports_the_wait_as_a_wait_not_as_a_lease() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("reader-lease.db");
+    let writer = rusqlite::Connection::open(&db_path).unwrap();
+    super::apply_connection_pragmas(&writer, false).unwrap();
+    writer
+        .execute("CREATE TABLE probe (value INTEGER NOT NULL)", [])
+        .unwrap();
+    let manual = ManualClock::new();
+    // One reader: the second caller has to queue for it.
+    let readers = super::ReaderPool::open_sized_with_clock(
+        &db_path,
+        1,
+        super::READER_CHECKOUT_TIMEOUT,
+        manual.clock.clone(),
+    )
+    .unwrap();
+
+    let held = readers.checkout().unwrap();
+    let calls_after_holder = manual.calls();
+
+    std::thread::scope(|scope| {
+        let readers = &readers;
+        let manual = &manual;
+        scope.spawn(move || {
+            let reader = readers
+                .checkout()
+                .expect("the released reader serves the queued caller");
+            // The queued caller holds its reader for 500ms of pool time.
+            manual.advance_to(800);
+            drop(reader);
+        });
+
+        // Wait until the queued caller has *started* its checkout: the pool
+        // reads the clock when a checkout starts, so its wait is measured
+        // from before the clock moves.
+        wait_until(|| manual.calls() > calls_after_holder);
+
+        // The holder releases the reader 300ms (of pool time) after taking it.
+        manual.advance_to(300);
+        drop(held);
+
+        // Keep the queued caller awake. A notification sent before it waits
+        // is lost, and it would otherwise sit out the whole real wait.
+        wait_until(|| {
+            readers.ready.notify_one();
+            readers.stats().checkouts >= 2
+        });
+    });
+
+    let stats = readers.stats();
+    assert_eq!(
+        stats.longest_wait_ms, 300,
+        "the time spent queueing for a reader is reported as a wait"
+    );
+    assert_eq!(
+        stats.longest_lease_ms, 500,
+        "the lease counts holding time only: the queued caller held its reader \
+         for 500ms, not for the 300ms it waited"
+    );
+}
+
 #[test]
 fn reader_pool_recycles_after_panic_unwind() {
     let temp = tempfile::tempdir().unwrap();
@@ -1555,4 +1949,134 @@ fn reader_pool_shares_named_memory_uri() {
             .unwrap(),
         0
     );
+}
+
+/// Issue #1533: a saturated pool hands every caller the typed busy error.
+///
+/// The mixed-boundary check below proves the same thing end to end; this one
+/// pins the accessor itself, so a boundary that starts swallowing the error
+/// cannot hide a broken pool.
+#[test]
+fn a_saturated_pool_answers_every_concurrent_caller_with_a_busy_error() {
+    let db = crate::db::test_support::isolated();
+    let held = crate::db::test_support::saturate_readers();
+    assert!(
+        !held.is_empty(),
+        "the isolated database must have at least one reader to hold"
+    );
+
+    let busy = std::sync::atomic::AtomicUsize::new(0);
+    let served = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..9 {
+            let handle = db.handle();
+            let busy = &busy;
+            let served = &served;
+            scope.spawn(move || {
+                // A spawned thread does not inherit the test's thread-local
+                // database; it adopts it by handle.
+                let _adopted = crate::db::test_support::adopt(&handle);
+                match super::read_conn() {
+                    Ok(_reader) => {
+                        served.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(error) => {
+                        assert!(
+                            super::error::is_busy_error(&error),
+                            "every caller must get a typed busy error, got: {error}"
+                        );
+                        assert!(
+                            error.to_string().contains(super::READER_POOL_BUSY_MESSAGE),
+                            "the busy answer must carry the retryable copy, got: {error}"
+                        );
+                        busy.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            });
+        }
+    });
+
+    assert_eq!(
+        served.load(Ordering::Relaxed),
+        0,
+        "a saturated pool must not hand out a reader"
+    );
+    assert_eq!(
+        busy.load(Ordering::Relaxed),
+        9,
+        "every concurrent caller must be told the database is busy"
+    );
+
+    drop(held);
+}
+
+/// Issue #1533: the mixed-boundary acceptance — the UI, the HTTP route and
+/// the background worker, concurrently, against one saturated pool.
+///
+/// This is the shape that crashed the application — three kinds of caller,
+/// three kinds of thread, one small pool — and it is the shape the issue's
+/// acceptance asks for. The assertions are per boundary: each one must answer
+/// with *its own* retryable shape, and the application must still serve reads
+/// once the pool drains.
+///
+/// A plain `#[tokio::test]` — the current-thread runtime — is the right one
+/// here: the offload seam captures this thread's isolated database and adopts
+/// it on the blocking pool, and a multi-threaded runtime would run the spawned
+/// tasks on threads that have no such install.
+#[tokio::test]
+async fn the_app_survives_a_saturated_pool_across_its_real_boundaries() {
+    let db = crate::db::test_support::isolated();
+    crate::db::create_mesh(
+        "pool stress",
+        &format!("C:/buildmesh-pool-stress-{}", std::process::id()),
+    )
+    .unwrap();
+    let held = crate::db::test_support::saturate_readers();
+
+    // The UI command: a Tauri command that offloads to the blocking pool.
+    let ui = tokio::spawn(async { crate::commands::mesh::list_meshes().await });
+
+    // The HTTP route: the same offload, plus the status mapping.
+    let http = tokio::spawn(async {
+        let request = crate::http::router::ParsedRequest::test_get("/api/nodes");
+        crate::http::routes::nodes::list(&request).await
+    });
+
+    // The background worker: a real worker pass, on a real worker thread.
+    let worker = {
+        let handle = db.handle();
+        tokio::task::spawn_blocking(move || {
+            // A spawned thread does not inherit the test's thread-local
+            // database; it adopts it by handle.
+            let _adopted = crate::db::test_support::adopt(&handle);
+            crate::services::circuit_triggers::run_interval_pass();
+        })
+    };
+
+    // The UI command answers with the retryable copy, not a panic.
+    let ui = ui.await.expect("the UI command task must not panic");
+    let error = ui.expect_err("a saturated pool cannot serve the UI command");
+    assert!(
+        error.contains(super::READER_POOL_BUSY_MESSAGE),
+        "the UI command must report the retryable busy copy, got: {error}"
+    );
+
+    // The HTTP route answers `503` — transient, so the client retries.
+    let http = http.await.expect("the HTTP route task must not panic");
+    assert_eq!(
+        http.status, "503 Service Unavailable",
+        "a busy database must be retryable at the HTTP boundary"
+    );
+
+    // The worker pass survives a failed read: it skips the pass instead of
+    // panicking, which in a release build would abort the process.
+    worker.await.expect("the worker pass task must not panic");
+
+    // The application is still responsive: with the readers released, the
+    // same command serves the read it could not serve before.
+    drop(held);
+    let meshes = crate::commands::mesh::list_meshes()
+        .await
+        .expect("the pool must serve reads again once the readers are back");
+    assert_eq!(meshes.len(), 1, "the seeded mesh must be visible again");
 }

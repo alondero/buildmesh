@@ -73,7 +73,7 @@ fn resolve_role_result(headers: &str) -> Result<Option<Role>, ()> {
     {
         return Ok(None);
     }
-    let conn = db::try_read_conn().map_err(|_| ())?;
+    let conn = db::read_conn().map_err(|_| ())?;
     Ok(resolve_role_inner(&conn, headers))
 }
 
@@ -139,13 +139,13 @@ pub fn resolve_device_session_result(headers: &str) -> Result<Option<i64>, ()> {
     {
         return Ok(None);
     }
-    let conn = db::try_read_conn().map_err(|_| ())?;
+    let conn = db::read_conn().map_err(|_| ())?;
     Ok(resolve_device_session_inner(&conn, headers))
 }
 
 /// A WebSocket invitation cannot outlive revocation of its issuing device.
 pub(crate) fn device_session_is_active(id: i64) -> Result<bool, ()> {
-    let conn = db::try_read_conn().map_err(|_| ())?;
+    let conn = db::read_conn().map_err(|_| ())?;
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM device_sessions WHERE id = ?1)",
         [id],

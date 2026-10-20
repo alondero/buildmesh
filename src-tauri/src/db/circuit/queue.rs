@@ -8,7 +8,7 @@ use crate::models::AutopilotCircuitRun;
 /// Pending Circuit Runs on one mesh in worker-admission order. The circuit
 /// name rides beside the canonical run row for the Probe's global queue.
 pub fn list_queued_circuit_runs(mesh_id: i64) -> SqlResult<Vec<(AutopilotCircuitRun, String)>> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     list_queued_circuit_runs_inner(&db, mesh_id)
 }
 

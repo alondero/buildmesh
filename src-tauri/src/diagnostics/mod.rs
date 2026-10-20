@@ -200,6 +200,17 @@ pub struct Sample {
     pub bg_sync_failures: u64,
     pub bg_sync_last_ms: u64,
     pub git_timeouts: u64,
+    /// The SQLite reader pool's saturation (issue #1533).
+    ///
+    /// This is the gauge that turns "the app died of a reader-pool timeout"
+    /// into a diagnosable event: `in_use` sitting at the pool size means
+    /// every reader was held, `timeouts` counts the checkouts that gave up,
+    /// and `longest_lease_ms` names how long the slowest holder kept its
+    /// connection — which is where a read held across slow work shows up.
+    ///
+    /// `None` before the database is initialised, so a pre-`db::init` sample
+    /// reports "no pool" instead of a pool that looks perfectly idle.
+    pub db_pool: Option<crate::db::ReaderPoolStats>,
 }
 
 /// Format one diagnostics line. Stable, greppable `DIAG` prefix and
@@ -211,10 +222,25 @@ pub fn format_line(s: &Sample) -> String {
     } else {
         0.0
     };
+    // The pool block is one field so a grep for `db_pool=` finds the whole
+    // saturation picture, and so an uninitialised pool reads as `off` rather
+    // than as a healthy pool of zeroes.
+    let db_pool = match s.db_pool {
+        Some(pool) => format!(
+            "use:{}/avail:{}/checkouts:{}/timeouts:{}/wait_ms:{}/lease_ms:{}",
+            pool.in_use,
+            pool.available,
+            pool.checkouts,
+            pool.timeouts,
+            pool.longest_wait_ms,
+            pool.longest_lease_ms
+        ),
+        None => "off".to_string(),
+    };
     format!(
         "DIAG uptime_s={} rss_mb={} priv_mb={} handles={} threads={} child_procs={} \
          watchers={} pty={} pty_qmsg={} pty_qbytes={} git_changed={}(+{}/{:.1}ps) \
-         bg_sync=att:{}/adv:{}/fail:{}/last_ms:{} git_timeouts={}",
+         bg_sync=att:{}/adv:{}/fail:{}/last_ms:{} git_timeouts={} db_pool={}",
         s.uptime_secs,
         s.vitals.working_set_bytes / (1024 * 1024),
         s.vitals.private_bytes / (1024 * 1024),
@@ -233,6 +259,7 @@ pub fn format_line(s: &Sample) -> String {
         s.bg_sync_failures,
         s.bg_sync_last_ms,
         s.git_timeouts,
+        db_pool,
     )
 }
 
@@ -328,6 +355,7 @@ fn run_sampler(log_dir: std::path::PathBuf, interval: Duration) {
             bg_sync_failures: BG_SYNC_FAILURES.load(Ordering::Relaxed),
             bg_sync_last_ms: BG_SYNC_LAST_MS.load(Ordering::Relaxed),
             git_timeouts: GIT_SUBPROCESS_TIMEOUTS.load(Ordering::Relaxed),
+            db_pool: crate::db::reader_pool_stats(),
         };
         prev_git_changed = git_changed_total;
 

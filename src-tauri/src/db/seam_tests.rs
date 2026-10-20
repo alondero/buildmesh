@@ -7,9 +7,13 @@ use std::collections::BTreeMap;
 const ALLOWED_PUB_FNS: &[&str] = &[
     "init",
     "read_conn",
-    "try_read_conn",
     "write_conn",
     "is_initialized",
+    // Issue #1533 — a saturation snapshot of the reader pool, for the
+    // diagnostics sampler. It runs no SQL and touches no row: it reads the
+    // pool's own counters, so it belongs to the connection surface this
+    // allowlist guards rather than to a domain module.
+    "reader_pool_stats",
 ];
 
 /// Baseline-DDL helpers — the `pub(crate)` API `mod.rs` owns so

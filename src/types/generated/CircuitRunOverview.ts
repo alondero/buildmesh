@@ -8,4 +8,4 @@ export type CircuitRunOverview = { run: AutopilotCircuitRun, steps: Array<Autopi
 /**
  * The graph this run executes.
  */
-graph: CircuitGraph, attention: CircuitRunAttention, };
+graph: CircuitGraph, attention: CircuitRunAttention, review_round_limit?: number, };

@@ -32,6 +32,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { CircuitEvidenceHistory } from '../Circuits/CircuitEvidenceHistory';
+import { ReviewRoundLimit, reviewRoundLabel } from '../Circuits/ReviewRoundLimit';
 import { RunNextSteps, runNeedsNextSteps } from '../Circuits/RunNextStepsPanel';
 import { describeProblem } from '../Circuits/runNextSteps';
 import { isTerminalStepStatus } from '../Circuits/circuitVocabulary';
@@ -163,6 +164,7 @@ interface CircuitRunCardProps {
   onPause: () => void;
   onResume: () => void;
   onContinueReview?: () => void;
+  onReviewRoundLimitChange?: (limit: number) => void;
   onCancel: () => void;
   onApprove: (nodeId: string) => void;
   reviewCircuit: ReviewCircuitMetadata | null;
@@ -196,6 +198,7 @@ export function CircuitRunCard({
   onPause,
   onResume,
   onContinueReview,
+  onReviewRoundLimitChange,
   onCancel,
   onApprove,
   reviewCircuit,
@@ -206,6 +209,7 @@ export function CircuitRunCard({
   focused = false,
 }: CircuitRunCardProps) {
   const { run, steps } = detail;
+  const roundLimit = detail.review_round_limit ?? null;
   const review = reviewResult(detail, reviewCircuit, context);
   const activity = runActivity(run, steps, capacity, review);
   const progress = runStepProgress(steps);
@@ -281,7 +285,7 @@ export function CircuitRunCard({
           </span>
           {reviewCircuit && context['retry.attempt'] && context['retry.max_retries'] && (
             <span className="text-2xs text-text-muted" data-testid={`run-review-rounds-${run.id}`}>
-              Round {context['retry.attempt']} of {context['retry.max_retries']}
+              {reviewRoundLabel(context)}
             </span>
           )}
         </span>
@@ -324,6 +328,12 @@ export function CircuitRunCard({
           </span>
         )}
       </button>
+
+      {roundLimit !== null && onReviewRoundLimitChange && !isTerminalRunState(run.state) && (
+        <div className="px-2 pb-1.5">
+          <ReviewRoundLimit value={roundLimit} busy={busy} onChange={onReviewRoundLimitChange} />
+        </div>
+      )}
 
       {prUrl && <a href={prUrl} onClick={(event) => { event.preventDefault(); void openUrl(prUrl); }} className="mx-2 mb-1 inline-flex min-h-[24px] items-center text-xs text-accent-cyan">
         Pull request {context['pr.number'] ? `#${context['pr.number']}` : ''}

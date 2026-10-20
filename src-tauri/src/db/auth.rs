@@ -91,7 +91,7 @@ pub(crate) const COORDINATOR_DRIVE_TOKEN_KEY: &str = "coordinator_drive_token";
 /// Is the coordinator read API enabled? Defaults to `false` (off) for a fresh
 /// install, so a naive setup is never an open endpoint.
 pub fn coordinator_api_enabled() -> SqlResult<bool> {
-    let db = read_conn();
+    let db = read_conn()?;
     coordinator_api_enabled_inner(&db)
 }
 
@@ -131,7 +131,7 @@ const LAN_EXPOSURE_ENABLED_KEY: &str = "lan_exposure_enabled";
 /// Is LAN/VPN exposure enabled? Defaults to `false` (loopback-only) so a naive
 /// setup is never reachable from another machine.
 pub fn lan_exposure_enabled() -> SqlResult<bool> {
-    let db = read_conn();
+    let db = read_conn()?;
     lan_exposure_enabled_inner(&db)
 }
 
@@ -182,7 +182,7 @@ pub fn generate_coordinator_read_token_inner(conn: &Connection) -> SqlResult<Str
 /// Used by the status command to report `has_token` — presence only; the value
 /// is a SHA-256 hash (#495), never the raw token.
 pub fn coordinator_read_token() -> SqlResult<Option<String>> {
-    let db = read_conn();
+    let db = read_conn()?;
     coordinator_read_token_inner(&db)
 }
 
@@ -381,7 +381,7 @@ pub fn touch_device_session_inner(conn: &Connection, id: i64, ip: Option<&str>) 
 /// List all paired devices, newest first, for the "Authorized Devices" panel.
 /// Returns the wire view (`DeviceSession`) — never the `token_hash`.
 pub fn list_device_sessions() -> SqlResult<Vec<DeviceSession>> {
-    let db = read_conn();
+    let db = read_conn()?;
     list_device_sessions_inner(&db)
 }
 

@@ -36,11 +36,13 @@ pub(crate) fn pending_inner(db: &Connection, node_id: i64) -> super::SqlResult<b
 }
 
 pub(crate) fn pending(node_id: i64) -> super::SqlResult<bool> {
-    pending_inner(&super::read_conn(), node_id)
+    let conn = super::read_conn()?;
+    pending_inner(&conn, node_id)
 }
 
 pub(crate) fn owns_stop(node_id: i64) -> super::SqlResult<bool> {
-    owns_stop_inner(&super::read_conn(), node_id)
+    let conn = super::read_conn()?;
+    owns_stop_inner(&conn, node_id)
 }
 
 fn owns_stop_inner(db: &Connection, node_id: i64) -> super::SqlResult<bool> {
@@ -88,7 +90,7 @@ fn complete_stop_locked(db: &mut Connection, node_id: i64) -> super::SqlResult<(
 
 /// Compatibility fence: retired nodes without a session identity must not auto-start.
 pub(crate) fn has_history(node_id: i64) -> rusqlite::Result<bool> {
-    let conn = super::read_conn();
+    let conn = super::read_conn()?;
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM autopilot_runs WHERE node_id=?1)",
         [node_id],

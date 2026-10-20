@@ -5,6 +5,7 @@ import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeSto
 import { useNodeActivityStore } from '../../src/stores/nodeActivityStore';
 import { NodeCard } from '../../src/components/AgentNodeView/NodeCard';
 import { CircuitRunOverview } from '../../src/components/Circuits/CircuitRunOverview';
+import { setCircuitReviewRoundLimit } from '../../src/lib/tauri/circuit';
 import { circuitRunOverview, pushCircuitStep } from '../../src/lib/tauri/circuitEvidence';
 import { approveCircuitStep, cancelCircuitRun, pauseCircuitRun, resumeCircuitRun } from '../../src/lib/tauri';
 import type { CircuitRunOverview as Overview } from '../../src/types/generated/CircuitRunOverview';
@@ -45,6 +46,11 @@ vi.mock('../../src/lib/tauri', async (importOriginal) => ({
   pauseCircuitRun: vi.fn(() => Promise.resolve()),
   resumeCircuitRun: vi.fn(() => Promise.resolve()),
   cancelCircuitRun: vi.fn(() => Promise.resolve()),
+}));
+
+vi.mock('../../src/lib/tauri/circuit', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/lib/tauri/circuit')>(),
+  setCircuitReviewRoundLimit: vi.fn(),
 }));
 
 const node = (id: number, overrides: Partial<AgentNode> = {}): AgentNode => ({
@@ -114,6 +120,7 @@ function card() {
 }
 
 beforeEach(() => {
+  vi.mocked(setCircuitReviewRoundLimit).mockReset();
   vi.mocked(circuitRunOverview).mockReset();
   vi.mocked(pushCircuitStep).mockReset();
   disposeUtility.mockClear();
@@ -125,6 +132,47 @@ beforeEach(() => {
 });
 
 describe('Overview tab on a circuit card', () => {
+  it('changes review rounds on a paused run, shows pending and errors, and refreshes saved values', async () => {
+    const review = overview();
+    review.review_round_limit = 5;
+    review.run.state = 'paused';
+    review.run.context_json = '{"retry.attempt":"4","retry.max_retries":"5"}';
+    review.graph = { version: 3, nodes: [
+      { id: 'verdict', type: { type: 'review_verdict', target_node_id: 'reviewer' } },
+      { id: 'retry', type: { type: 'retry_limit', max_retries: 5 } },
+    ], edges: [{ from: 'verdict', to: 'retry', condition: 'always' }, { from: 'retry', to: 'verdict', condition: 'always' }] };
+    const pending = deferred<void>();
+    vi.mocked(setCircuitReviewRoundLimit).mockReturnValueOnce(pending.promise);
+    const onRefresh = vi.fn();
+    const onChanged = vi.fn();
+    const props = { error: null, onRefresh, onChanged, onOpenAgent: vi.fn(), agentName: () => null };
+    const view = render(<CircuitRunOverview {...props} overview={review} />);
+    const select = screen.getByRole('combobox', { name: 'Review rounds' }) as HTMLSelectElement;
+    expect(select.value).toBe('5');
+    expect(within(select).getAllByRole('option').map((option) => option.textContent)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', 'Unlimited']);
+    fireEvent.change(select, { target: { value: '1' } });
+    expect(setCircuitReviewRoundLimit).toHaveBeenCalledWith(10, 1);
+    expect(select.disabled).toBe(true);
+    await act(async () => pending.resolve());
+    expect(onChanged).toHaveBeenCalledOnce();
+    expect(onRefresh).toHaveBeenCalledOnce();
+    review.run.context_json = '{"retry.attempt":"4","review.round_limit":"1"}';
+    review.review_round_limit = 1;
+    view.rerender(<CircuitRunOverview {...props} overview={{ ...review }} />);
+    expect(select.value).toBe('1');
+    vi.mocked(setCircuitReviewRoundLimit).mockRejectedValueOnce(new Error('Could not save rounds'));
+    fireEvent.change(select, { target: { value: '0' } });
+    expect((await screen.findByRole('alert')).textContent).toContain('Could not save rounds');
+    expect(select.value).toBe('1');
+    expect(select.disabled).toBe(false);
+    review.run.context_json = '{"retry.attempt":"12","retry.max_retries":"unlimited","review.round_limit":"0"}';
+    review.review_round_limit = 0;
+    view.rerender(<CircuitRunOverview {...props} overview={{ ...review }} />);
+    expect(select.value).toBe('0');
+    expect(screen.getByText('Round 12 of unlimited')).toBeTruthy();
+    view.rerender(<CircuitRunOverview {...props} overview={{ ...review, run: { ...review.run, state: 'completed' } }} />);
+    expect(screen.queryByRole('combobox', { name: 'Review rounds' })).toBeNull();
+  });
   it('leads the tab strip, never steals the terminal, and switches back without disposing anything', async () => {
     vi.mocked(circuitRunOverview).mockResolvedValue(overview());
     render(card());

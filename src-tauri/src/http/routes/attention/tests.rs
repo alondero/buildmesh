@@ -523,7 +523,7 @@ fn stale_and_current_native_stops_follow_the_turn_fence() {
     assert!(current_receipt.turn_fenced);
     assert!(!current_receipt.explicit_turn_mismatch);
 
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn().unwrap();
     let status: String = db
         .query_row(
             "SELECT status FROM agent_nodes WHERE id = ?1",
@@ -2548,7 +2548,12 @@ fn mcode_native_attention_routes_legacy_and_shared_callbacks_before_capture() {
     let start = body("SessionStart", id, "f:\\repo\\implementation");
     let start_payload = HookPayload::parse(&start);
     let resolve = |id: &str, cwd: &str| {
-        crate::services::mcode_session::select_hook_target(&nodes, id, cwd, |_| true)
+        Ok(crate::services::mcode_session::select_hook_target(
+            &nodes,
+            id,
+            cwd,
+            |_| true,
+        ))
     };
     let legacy = resolve_attention_node(
         Some(nodes[1].clone()),
@@ -2556,8 +2561,11 @@ fn mcode_native_attention_routes_legacy_and_shared_callbacks_before_capture() {
         false,
         resolve,
     )
-    .unwrap();
-    let shared = resolve_attention_node(None, start_payload.as_ref(), true, resolve).unwrap();
+    .unwrap()
+    .expect("the addressed node resolves");
+    let shared = resolve_attention_node(None, start_payload.as_ref(), true, resolve)
+        .unwrap()
+        .expect("the shared address resolves");
     assert_eq!(
         legacy.id, 4724,
         "last-writer numeric URL cannot select node4725"
@@ -2602,13 +2610,28 @@ fn mcode_native_attention_routes_legacy_and_shared_callbacks_before_capture() {
         false,
         resolve
     )
+    .unwrap()
     .is_none());
-    assert!(resolve_attention_node(None, standalone_payload.as_ref(), true, resolve).is_none());
-    assert!(resolve_attention_node(None, missing_cwd_payload.as_ref(), true, resolve).is_none());
+    assert!(
+        resolve_attention_node(None, standalone_payload.as_ref(), true, resolve)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        resolve_attention_node(None, missing_cwd_payload.as_ref(), true, resolve)
+            .unwrap()
+            .is_none()
+    );
     assert!(
         resolve_attention_node(None, start_payload.as_ref(), true, |id, cwd| {
-            crate::services::mcode_session::select_hook_target(&nodes, id, cwd, |_| false)
+            Ok(crate::services::mcode_session::select_hook_target(
+                &nodes,
+                id,
+                cwd,
+                |_| false,
+            ))
         })
+        .unwrap()
         .is_none()
     );
 }
@@ -3425,6 +3448,35 @@ fn cline_hook_name_and_task_id_aliases_parse() {
         .expect("must parse");
     assert_eq!(payload.hook_event_name.as_deref(), Some("agent_end"));
     assert_eq!(payload.session_id.as_deref(), Some("1789757012702_7of3e"));
+}
+
+/// Issue #1533: a node row that is genuinely gone is **absence** — the route
+/// answers `404`, because the node really is gone.
+///
+/// A read that *failed* is **unknown**: it says nothing about the row, so it
+/// travels out and the route answers `503` ("come back later") instead of
+/// telling the harness its node was deleted.
+#[test]
+fn an_absent_addressed_node_is_absence_and_a_failed_read_is_not() {
+    let _db = crate::db::test_support::isolated();
+
+    // No session id: nothing was addressed.
+    assert!(super::addressed_node(None).unwrap().is_none());
+
+    // A session id whose row is gone: absence.
+    assert!(
+        super::addressed_node(Some(4242)).unwrap().is_none(),
+        "a row that is gone is absence, not an error"
+    );
+
+    // A busy reader pool: unknown.
+    let held = crate::db::test_support::saturate_readers();
+    let error = super::addressed_node(Some(4242)).expect_err("a busy pool is not absence");
+    assert!(
+        crate::db::error::is_busy_error(&error),
+        "the busy answer must stay typed, got: {error}"
+    );
+    drop(held);
 }
 
 fn classify(

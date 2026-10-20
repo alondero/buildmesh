@@ -134,6 +134,30 @@ pub(super) fn installed_db() -> Option<&'static super::Database> {
     INSTALLED.with(|slot| slot.borrow().as_ref().map(|installed| installed.db))
 }
 
+/// Hold every reader the installed database's pool has, so the next read
+/// fails with the typed busy error.
+///
+/// The readers go back to the pool when the returned vector is dropped, so a
+/// check can hold the pool dry for its duration and release it afterwards.
+/// This is how a test reproduces "the reader pool is momentarily empty" —
+/// the condition issue #1533 is about — without waiting for a real
+/// saturation.
+pub fn saturate_readers() -> Vec<super::ReadConnection<'static>> {
+    let database = installed_db().expect("the isolated database");
+    let size = database.readers.available.lock().len();
+    assert!(size > 0, "the isolated database must have readers to hold");
+    let mut held = Vec::with_capacity(size);
+    for _ in 0..size {
+        held.push(
+            database
+                .readers
+                .checkout()
+                .expect("a reader is free until the pool is saturated"),
+        );
+    }
+    held
+}
+
 /// The agent-node id range this thread's isolated database owns, `(first,
 /// last)` inclusive. `None` when the thread has not installed one.
 ///

@@ -41,6 +41,22 @@ The application automation runtime is a composable trigger-action graph. A **Cir
 
 ## Monitoring and intervening from Probe
 
+Active review runs offer a **Review rounds** selector in the Probe run card
+and the agent card's Circuit Overview tab, including while paused.
+Choose 1–9 rounds or **Unlimited**; changes save immediately for this run only.
+Lowering the limit below the current round lets that round finish and prevents
+another round. Unlimited keeps allowing another review when changes are
+requested; approval still follows the circuit's normal completion route.
+Completed or failed runs keep their history and recovery actions; use
+**Review again** to extend an exhausted run.
+
+The allowance lives in `review.round_limit` in the run context (zero means
+unlimited), applies only to retry loops containing a review verdict, and leaves
+the pinned graph and other retry budgets intact. Each edit appends operator
+history, invalidating worker decisions observed before the edit. Views refresh
+through `circuit-run-updated`; failed saves report an error and retain the last
+persisted value.
+
 The node card of an agent a run owns also carries an Overview tab with the run's
 step rail, its actions and a manual push for stuck agent steps; see
 [Overview tab](agent-node-circuits.md#overview-tab).

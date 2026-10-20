@@ -443,6 +443,7 @@ pub(super) fn observe_waits_with(
         let mut progress = None;
         let mut observed = None;
         let mut stalled_task_id = None;
+        let mut fence = None;
         let (reason, timeout_ms) = if step.status == StepStatus::Blocked {
             (
                 "Waiting for your approval. This gate does not expire while you are away."
@@ -460,6 +461,7 @@ pub(super) fn observe_waits_with(
             let observed_here = wait.observed;
             observed = Some(observed_here);
             stalled_task_id = wait.stalled_task_id;
+            fence = wait.fence;
             let yielded = wait.yielded;
             let reason = if !observed_here {
                 "Waiting for session identity and a readable report; retrying discovery every 10 seconds.".to_string()
@@ -524,17 +526,12 @@ pub(super) fn observe_waits_with(
             };
             // Same identity the continuation fence uses: the lifecycle stamp and
             // the assistant-report revision describe the turn being observed.
-            let stamp = db::agent_turn_stamp(agent_id)
-                .ok()
-                .flatten()
-                .unwrap_or_default();
-            let revision = db::get_agent_node_by_id(agent_id)
-                .ok()
-                .and_then(|node| {
-                    crate::coordinator::enrichment::assistant_report(&node)
-                        .map(|report| report.revision)
-                })
-                .unwrap_or_default();
+            // `live_wait` resolved both halves from the live session; a half it
+            // could not read is unknown, and an unknown fence must not be
+            // claimed (issue #1533).
+            let Some(fence) = fence else {
+                continue;
+            };
             let input_stamp = crate::agent::process::PROCESS_REGISTRY.input_stamp(agent_id);
             // Without a real input-ownership stamp the nudge cannot be
             // delivered safely: a terminal whose input is ambiguous (a staged
@@ -547,8 +544,8 @@ pub(super) fn observe_waits_with(
             events.push(CircuitEvent::NudgeIdleSession {
                 node_id: step.node_id.clone(),
                 attempt: step.attempt,
-                stamp,
-                revision: revision.to_string(),
+                stamp: fence.stamp,
+                revision: fence.revision,
                 input_stamp,
                 task_id,
             });
@@ -584,6 +581,20 @@ pub(super) fn observe_close_agent_retries(view: &RunView, events: &mut Vec<Circu
     }
 }
 
+/// The turn a wake-up is fenced to: the lifecycle stamp and the
+/// assistant-report revision of the turn that was observed.
+///
+/// Both halves are known, or the fence is absent. A read that *failed* is
+/// unknown, not an empty fence (issue #1533): the dispatch side re-reads both
+/// halves and rejects a wake whose claim does not match, so a claim carrying
+/// an empty fence spends the attempt's nudge budget on a wake that is then
+/// judged obsolete, and the finished background task goes unannounced until
+/// the wait times out.
+pub(super) struct TurnFence {
+    pub stamp: String,
+    pub revision: String,
+}
+
 pub(super) struct WaitObservation {
     pub progress: Option<String>,
     pub observed: bool,
@@ -595,6 +606,10 @@ pub(super) struct WaitObservation {
     /// delegate background work to the session, and while the session is still
     /// producing output.
     pub stalled_task_id: Option<String>,
+    /// The turn the wake-up for `stalled_task_id` is fenced to. `None` when
+    /// either half of the fence is unknown, which leaves the wake-up
+    /// unclaimed so a later observation pass can retry it.
+    pub fence: Option<TurnFence>,
 }
 
 pub(super) trait Observations {
@@ -739,14 +754,12 @@ pub(super) fn live_wait(view: &RunView, step: &StepView, id: i64) -> Option<Wait
     // whose wake-up is already spent, already claimed, or not owned would read
     // the whole transcript for a decision that cannot change. The revision and
     // stamp come from the report read above, so this gate costs no extra I/O.
-    let nudge_possible = match &progress {
-        Some(revision) => {
-            let stamp = db::agent_turn_stamp(id).ok().flatten().unwrap_or_default();
-            matches!(
-                view.nudge_decision(&step.node_id, step.attempt, revision, &stamp),
-                crate::circuit::stepper::NudgeDecision::Nudge
-            )
-        }
+    let fence = turn_fence(&node, progress.as_deref());
+    let nudge_possible = match &fence {
+        Some(fence) => matches!(
+            view.nudge_decision(&step.node_id, step.attempt, &fence.revision, &fence.stamp),
+            crate::circuit::stepper::NudgeDecision::Nudge
+        ),
         None => false,
     };
     let eligible = background_wake_status(
@@ -772,6 +785,27 @@ pub(super) fn live_wait(view: &RunView, step: &StepView, id: i64) -> Option<Wait
         yielded_budget_ms: i64::from(policy.yielded_budget_ms),
         active_budget_ms: i64::from(policy.active_budget_ms),
         stalled_task_id,
+        fence,
+    })
+}
+
+/// The fence a wake-up for `node` is bound to, or `None` when either half is
+/// unknown.
+///
+/// The revision is the live report the observation already read; the stamp is
+/// the lifecycle stamp of that turn. A stamp that cannot be read is unknown —
+/// the reader pool can be exhausted (issue #1533) — and an unknown fence must
+/// not be claimed: the dispatch side re-reads both halves and rejects a wake
+/// whose claim does not match.
+pub(super) fn turn_fence(
+    node: &crate::models::AgentNode,
+    revision: Option<&str>,
+) -> Option<TurnFence> {
+    let revision = revision?;
+    let stamp = db::agent_turn_stamp(node.id).ok().flatten()?;
+    Some(TurnFence {
+        stamp,
+        revision: revision.to_owned(),
     })
 }
 

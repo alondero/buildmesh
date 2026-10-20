@@ -175,6 +175,13 @@ pub async fn import_and_resume(req: &ParsedRequest) -> Response {
         Ok(Err(error @ crate::services::agent_node::AgentNodeError::UnresumableHarness(_))) => {
             return Response::json_error("400 Bad Request", &error.to_string());
         }
+        // Issue #1533: a busy reader pool is transient, so the client retries
+        // instead of treating the import as a broken build.
+        Ok(Err(crate::services::agent_node::AgentNodeError::Db(ref error)))
+            if crate::db::error::is_busy_error(error) =>
+        {
+            return crate::http::read_status::db_failure_response(error);
+        }
         Ok(Err(error)) => {
             return Response::json_error("500 Internal Server Error", &error.to_string());
         }

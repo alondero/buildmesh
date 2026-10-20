@@ -24,6 +24,8 @@ import { pushCircuitStep } from '../../lib/tauri/circuitEvidence';
 import { formatError } from '../../lib/errorUtils';
 import { LiveRunDuration } from '../Probe/CircuitRunCard';
 import { CircuitEvidenceHistory } from './CircuitEvidenceHistory';
+import { setCircuitReviewRoundLimit } from '../../lib/tauri/circuit';
+import { ReviewRoundLimit, reviewRoundLabel } from './ReviewRoundLimit';
 import { RunNextSteps, runNeedsNextSteps } from './RunNextStepsPanel';
 import { formatDurationMs, ledgerTimestampMs, statusTextClass, stepDurationMs } from './circuitGraphModel';
 import { runStateLabel, stepStatusLabel } from './circuitVocabulary';
@@ -86,6 +88,7 @@ export function CircuitRunOverview({ overview, error, onRefresh, onChanged, onOp
   };
   const detail = { run, steps: overview.steps };
   const review = reviewResult(detail, reviewCircuitMetadata({ graph_json: JSON.stringify(overview.graph) }), context);
+  const roundLimit = overview.review_round_limit ?? null;
   const blocked = run.state === 'running' || run.state === 'paused'
     ? overview.steps.filter((step) => step.status === 'blocked')
     : [];
@@ -114,11 +117,17 @@ export function CircuitRunOverview({ overview, error, onRefresh, onChanged, onOp
           {review?.label ?? runStateLabel(run.state)}
         </span>
         {context['retry.attempt'] && context['retry.max_retries'] && (
-          <span className="text-2xs text-text-muted">Round {context['retry.attempt']} of {context['retry.max_retries']}</span>
+          <span className="text-2xs text-text-muted">{reviewRoundLabel(context)}</span>
         )}
         <span className="inline-flex flex-wrap gap-x-2 text-2xs text-text-muted"><LiveRunDuration run={run} steps={overview.steps} compact /></span>
         <span className="text-2xs font-mono text-text-muted">#{run.id}</span>
       </header>
+
+      {roundLimit !== null && (live || run.state === 'pending') && (
+        <div className="mb-2">
+          <ReviewRoundLimit value={roundLimit} busy={busy} onChange={(limit) => void act(() => setCircuitReviewRoundLimit(run.id, limit))} />
+        </div>
+      )}
 
       {review !== null && <p className="mb-2 text-2xs text-text-secondary break-words">{review.detail}</p>}
       {error !== null && <p role="alert" className="mb-2 text-2xs text-status-error">Could not refresh: {error}</p>}

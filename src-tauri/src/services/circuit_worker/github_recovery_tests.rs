@@ -278,7 +278,7 @@ fn pull_request(head_ref: &str) -> crate::services::github::PullRequest {
 
 fn reopened_run(run_id: i64) -> crate::models::AutopilotCircuitRun {
     let path = {
-        let db = crate::db::read_conn();
+        let db = crate::db::read_conn().unwrap();
         db.query_row("PRAGMA database_list", [], |row| row.get::<_, String>(2))
             .unwrap()
     };
@@ -605,7 +605,7 @@ fn open_pr_late_lookup_after_cancellation_is_rejected_through_worker_handoff() {
         let client = crate::services::github::GitHubClient::for_test(&base_url, "fake-token")
             .expect("test client");
         let pass = super::dispatch::dispatch_effects(
-            &super::dispatch::FakeHost::default(),
+            &super::dispatch::tests::FakeHost::default(),
             &thread_active,
             &mut view,
             std::slice::from_ref(&effect),
@@ -723,7 +723,7 @@ fn open_pr_late_lookup_after_cancellation_is_rejected_through_worker_handoff() {
         crate::services::github::GitHubClient::for_test(&endpoint.base_url, "fake-token")
             .expect("test client");
     let retry = super::dispatch::dispatch_effects(
-        &super::dispatch::FakeHost::default(),
+        &super::dispatch::tests::FakeHost::default(),
         &active,
         &mut restarted,
         std::slice::from_ref(&effect),
@@ -1032,6 +1032,7 @@ fn dispatch_open_pr(
 
 fn history_count(run_id: i64, kind: &str) -> i64 {
     crate::db::read_conn()
+        .unwrap()
         .query_row(
             "SELECT COUNT(*) FROM circuit_run_history WHERE run_id=?1 AND kind=?2",
             rusqlite::params![run_id, kind],
@@ -1041,7 +1042,7 @@ fn history_count(run_id: i64, kind: &str) -> i64 {
 }
 
 fn effect_state(run_id: i64) -> String {
-    crate::db::read_conn()
+    crate::db::read_conn().unwrap()
         .query_row(
             "SELECT state FROM circuit_effects WHERE run_id=?1 AND node_id='open_pr' AND attempt=1 AND kind='github'",
             [run_id],
@@ -1052,6 +1053,7 @@ fn effect_state(run_id: i64) -> String {
 
 fn open_pr_step_status(run_id: i64) -> String {
     crate::db::read_conn()
+        .unwrap()
         .query_row(
             "SELECT status FROM autopilot_circuit_run_steps WHERE run_id=?1 AND node_id='open_pr'",
             [run_id],
@@ -1062,6 +1064,7 @@ fn open_pr_step_status(run_id: i64) -> String {
 
 fn open_pr_step_attempt(run_id: i64) -> i32 {
     crate::db::read_conn()
+        .unwrap()
         .query_row(
             "SELECT attempt FROM autopilot_circuit_run_steps WHERE run_id=?1 AND node_id='open_pr'",
             [run_id],

@@ -22,6 +22,18 @@
 //! [`From<DbError> for String`](error::DbError) is what keeps every
 //! `Result<_, String>` Tauri command boundary working unchanged.
 //!
+//! ## The reader pool (issue #1533)
+//!
+//! [`read_conn`] is **fallible**: when all eight readers are still checked out
+//! at the one-second deadline it returns SQLite's `SQLITE_BUSY` code, which
+//! [`error::is_busy_error`] recognises. There is deliberately no infallible
+//! accessor — a release build panics with `panic = "abort"`, so an `expect`ed
+//! checkout turns a momentary shortage into a whole-application crash instead
+//! of a failed request. The wait is bounded by an *absolute* deadline, the
+//! pool's saturation is reported by [`reader_pool_stats`] to the diagnostics
+//! sampler, and a reader held longer than [`SLOW_READER_LEASE`] is logged —
+//! that holder is the reason the pool ran dry.
+//!
 //! ## Schema evolution (issue #249)
 //!
 //! All schema migration lives in the single entry point
@@ -163,16 +175,23 @@ pub use rusqlite::Result as SqlResult;
 use rusqlite::{Connection, OpenFlags};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 // Eight handles cover the UI, HTTP, and worker polling fan-out while keeping
 // SQLite's file-descriptor and cache footprint bounded.
 const READER_POOL_SIZE: usize = 8;
-// Synchronous callers retain the historical accessor, but no checkout may
-// park a thread forever. Async callers use `try_read_conn()` to surface this
-// timeout as an error instead of blocking a runtime worker indefinitely.
+// No checkout may park a thread forever: a caller waits at most this long for
+// a free reader and is then told the pool is busy (issue #1533). The wait is
+// an *absolute* deadline — see [`ReaderPool::checkout`] — so a spurious
+// wakeup cannot hand the caller a fresh timeout.
 const READER_CHECKOUT_TIMEOUT: Duration = Duration::from_secs(1);
+// A reader held longer than this is doing work that does not belong behind a
+// database handle: a slow query, or filesystem/network work the caller forgot
+// to drop the connection for. Reported when the lease is returned, because the
+// holder is the reason the pool ran dry.
+const SLOW_READER_LEASE: Duration = Duration::from_secs(1);
 static INIT_LOCK: Mutex<()> = Mutex::new(());
 
 struct Database {
@@ -190,7 +209,55 @@ struct ReaderPool {
     ready: parking_lot::Condvar,
     db_path: PathBuf,
     flags: OpenFlags,
+    counters: PoolCounters,
+    /// How long a checkout waits for a free reader before reporting the pool
+    /// busy. Production uses [`READER_CHECKOUT_TIMEOUT`]; a test injects a
+    /// smaller budget so a wait it does not want to sit through is still
+    /// observable.
+    checkout_timeout: Duration,
+    /// The pool's clock. Production reads the system clock; a test injects one
+    /// it can advance, so the deadline can be exercised without a stopwatch —
+    /// the same shape the crash watchdog uses for its timestamps. A wall-clock
+    /// assertion here would fail on a loaded runner for a correct
+    /// implementation.
+    clock: PoolClock,
 }
+
+/// The pool's clock: a function the pool reads the current instant from.
+type PoolClock = Arc<dyn Fn() -> Instant + Send + Sync>;
+
+/// The pool's clock, reading the system clock.
+fn system_clock() -> PoolClock {
+    Arc::new(Instant::now)
+}
+
+/// Saturation counters for the reader pool (issue #1533).
+///
+/// Plain atomics on purpose: the diagnostics sampler reads them from its own
+/// thread while the pool is serving checkouts, and a counter that needed the
+/// pool's mutex would make the observer part of the contention it measures.
+#[derive(Default)]
+struct PoolCounters {
+    /// Readers currently checked out.
+    in_use: AtomicU64,
+    /// Checkouts served since startup.
+    checkouts: AtomicU64,
+    /// Checkouts that reached the deadline without a free reader.
+    timeouts: AtomicU64,
+    /// Longest time a caller waited for a reader.
+    longest_wait_ms: AtomicU64,
+    /// Longest time a reader was held.
+    longest_lease_ms: AtomicU64,
+}
+
+/// What the user is told when a read could not get a database connection.
+///
+/// This is the *retryable* half of a failed read: the pool was momentarily out
+/// of readers, which says nothing about the data. Copy that a retry may
+/// succeed is what keeps a transient pool shortage from reading as a broken
+/// database — and it is the copy the HTTP boundary hands a client alongside
+/// `503 Service Unavailable`.
+pub const READER_POOL_BUSY_MESSAGE: &str = "The database is busy. Try again in a moment.";
 
 impl ReaderPool {
     fn open(db_path: &Path) -> SqlResult<Self> {
@@ -204,6 +271,34 @@ impl ReaderPool {
     /// fan out as wide as the UI, HTTP and worker polling paths do, and a
     /// narrower pool bounds the cost of the leaked test database.
     fn open_sized(db_path: &Path, size: usize) -> SqlResult<Self> {
+        Self::open_sized_with_timeout(db_path, size, READER_CHECKOUT_TIMEOUT)
+    }
+
+    /// Open a pool of `size` read-only connections with an injected checkout
+    /// budget.
+    ///
+    /// The budget is a parameter so a test can assert the *mechanism* — that
+    /// the wait ends at one deadline however often the condvar wakes it — in
+    /// milliseconds instead of sitting through the production second.
+    fn open_sized_with_timeout(
+        db_path: &Path,
+        size: usize,
+        checkout_timeout: Duration,
+    ) -> SqlResult<Self> {
+        Self::open_sized_with_clock(db_path, size, checkout_timeout, system_clock())
+    }
+
+    /// Open a pool with an injected budget **and** an injected clock.
+    ///
+    /// The clock is what makes the deadline testable without a stopwatch: the
+    /// test advances it and asserts the wait ended at the deadline, instead of
+    /// measuring how long the runner happened to take.
+    fn open_sized_with_clock(
+        db_path: &Path,
+        size: usize,
+        checkout_timeout: Duration,
+        clock: PoolClock,
+    ) -> SqlResult<Self> {
         let mut flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         if db_path.to_string_lossy().starts_with("file:") {
             flags |= OpenFlags::SQLITE_OPEN_URI;
@@ -219,40 +314,137 @@ impl ReaderPool {
             ready: parking_lot::Condvar::new(),
             db_path: db_path.to_path_buf(),
             flags,
+            counters: PoolCounters::default(),
+            checkout_timeout,
+            clock,
         })
     }
 
+    /// The pool's current instant.
+    fn now(&self) -> Instant {
+        (self.clock)()
+    }
+
+    /// Check a reader out of the pool, waiting at most the pool's checkout
+    /// budget ([`READER_CHECKOUT_TIMEOUT`] in production) for one to come
+    /// free.
+    ///
+    /// The wait is bounded by an **absolute deadline**, not by a per-wait
+    /// timeout: the previous loop re-armed the full timeout on every wakeup,
+    /// so a spurious notification could stretch a nominal one-second wait
+    /// across several seconds (issue #1533). A caller now waits one second in
+    /// total, however often the condvar wakes it.
+    ///
+    /// A deadline that expires is a *typed busy error*, never a panic: the
+    /// pool being momentarily empty is a recoverable condition, and the old
+    /// accessor turned it into a process-wide abort (release builds use
+    /// `panic = "abort"`).
     fn checkout(&self) -> SqlResult<ReadConnection<'_>> {
         let mut available = self.available.lock();
-        let started = std::time::Instant::now();
+        let started = self.now();
+        let deadline = started + self.checkout_timeout;
         loop {
             if let Some(conn) = available.pop() {
-                if started.elapsed() >= Duration::from_millis(10) {
+                // The lease starts when the reader is *handed out*, not when
+                // the caller started waiting: a contended checkout would
+                // otherwise report the queueing time as holding time, and the
+                // slow-lease warning would name a reader that was never held
+                // for long (issue #1533).
+                let granted = self.now();
+                let waited = granted.saturating_duration_since(started);
+                self.counters.checkouts.fetch_add(1, Ordering::Relaxed);
+                self.counters.in_use.fetch_add(1, Ordering::Relaxed);
+                self.counters
+                    .longest_wait_ms
+                    .fetch_max(waited.as_millis() as u64, Ordering::Relaxed);
+                if waited >= Duration::from_millis(10) {
                     tracing::debug!(
-                        elapsed_ms = started.elapsed().as_millis(),
+                        elapsed_ms = waited.as_millis(),
                         "database reader pool contention ended"
                     );
                 }
                 return Ok(ReadConnection {
                     pool: self,
                     conn: Some(conn),
+                    leased_at: granted,
                 });
             }
-            let wait = self.ready.wait_for(&mut available, READER_CHECKOUT_TIMEOUT);
+            let now = self.now();
+            if now >= deadline {
+                return Err(self.checkout_timed_out(started));
+            }
+            let wait = self.ready.wait_for(&mut available, deadline - now);
             if wait.timed_out() {
-                tracing::warn!(
-                    elapsed_ms = started.elapsed().as_millis(),
-                    "database reader pool checkout timed out"
-                );
-                return Err(rusqlite::Error::InvalidQuery);
+                return Err(self.checkout_timed_out(started));
             }
         }
     }
+
+    /// The deadline expired: count the timeout, record how long the caller
+    /// actually waited, say so in the log, and hand back the typed busy error.
+    ///
+    /// The wait is recorded here as well as on the success path: a checkout
+    /// that *timed out* is the wait the diagnostics line must show. Leaving it
+    /// out made `wait_ms` stay at zero while every caller was waiting the full
+    /// deadline.
+    fn checkout_timed_out(&self, started: Instant) -> rusqlite::Error {
+        let waited = self.now().saturating_duration_since(started);
+        self.counters.timeouts.fetch_add(1, Ordering::Relaxed);
+        self.counters
+            .longest_wait_ms
+            .fetch_max(waited.as_millis() as u64, Ordering::Relaxed);
+        tracing::warn!(
+            elapsed_ms = waited.as_millis(),
+            in_use = self.counters.in_use.load(Ordering::Relaxed),
+            "database reader pool checkout timed out"
+        );
+        error::busy_error()
+    }
+
+    /// A snapshot of the pool's saturation.
+    fn stats(&self) -> ReaderPoolStats {
+        let available = self.available.lock().len() as u64;
+        ReaderPoolStats {
+            in_use: self.counters.in_use.load(Ordering::Relaxed),
+            available,
+            checkouts: self.counters.checkouts.load(Ordering::Relaxed),
+            timeouts: self.counters.timeouts.load(Ordering::Relaxed),
+            longest_wait_ms: self.counters.longest_wait_ms.load(Ordering::Relaxed),
+            longest_lease_ms: self.counters.longest_lease_ms.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// A snapshot of the reader pool's saturation, for the diagnostics sampler
+/// (issue #1533).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReaderPoolStats {
+    /// Readers currently checked out.
+    pub in_use: u64,
+    /// Readers available right now.
+    pub available: u64,
+    /// Checkouts served since startup.
+    pub checkouts: u64,
+    /// Checkouts that reached the deadline without a free reader.
+    pub timeouts: u64,
+    /// Longest time a caller waited for a reader.
+    pub longest_wait_ms: u64,
+    /// Longest time a reader was held.
+    pub longest_lease_ms: u64,
 }
 
 pub struct ReadConnection<'a> {
     pool: &'a ReaderPool,
     conn: Option<Connection>,
+    /// When this reader was **handed out**, so a lease that outlives
+    /// [`SLOW_READER_LEASE`] can be reported when it is returned.
+    ///
+    /// This is the grant time, not the start of the checkout: the time a
+    /// caller spent queueing for a reader is *waiting* time, which
+    /// [`ReaderPoolStats::longest_wait_ms`] already reports. Counting it as
+    /// holding time would make the slow-lease warning name a reader that was
+    /// never actually held for long (issue #1533).
+    leased_at: Instant,
 }
 
 impl Deref for ReadConnection<'_> {
@@ -268,6 +460,18 @@ impl Deref for ReadConnection<'_> {
 impl Drop for ReadConnection<'_> {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
+            let held = self.pool.now().saturating_duration_since(self.leased_at);
+            self.pool.counters.in_use.fetch_sub(1, Ordering::Relaxed);
+            self.pool
+                .counters
+                .longest_lease_ms
+                .fetch_max(held.as_millis() as u64, Ordering::Relaxed);
+            if held >= SLOW_READER_LEASE {
+                tracing::warn!(
+                    elapsed_ms = held.as_millis(),
+                    "database reader was held past the slow-lease threshold"
+                );
+            }
             let conn = if conn.is_autocommit() {
                 conn
             } else {
@@ -1077,27 +1281,48 @@ pub(crate) fn create_canonical_indexes_after_evolution(conn: &Connection) -> Sql
 // registry's always-run pass handles DBs that bypassed the version
 // gate (the v18→v19 bug class the doc-comment warned about).
 
-fn get() -> &'static Database {
+fn try_get() -> Option<&'static Database> {
     // Per-test isolation (issue #2048): a test that called
     // `test_support::isolated()` owns every `read_conn` / `write_conn` on
     // its own thread, so parallel tests cannot read each other's rows. The
     // `cfg(test)` gate keeps a release build on the single `OnceCell` path.
     #[cfg(test)]
     if let Some(db) = test_support::installed_db() {
-        return db;
+        return Some(db);
     }
-    DB.get().expect("database not initialized")
+    DB.get()
 }
 
-pub fn read_conn() -> ReadConnection<'static> {
-    try_read_conn().expect("database reader pool checkout failed")
+fn get() -> &'static Database {
+    try_get().expect("database not initialized")
 }
 
-/// Check out a read-only connection with bounded waiting. This is the safe
-/// entry point for async request paths, which must surface pool exhaustion
-/// instead of blocking a runtime worker indefinitely.
-pub fn try_read_conn() -> SqlResult<ReadConnection<'static>> {
+/// Check out a read-only connection from the eight-connection pool.
+///
+/// The checkout is **fallible**, and that is the whole point (issue #1533).
+/// When every reader is still checked out at the deadline this returns a typed
+/// SQLite `BUSY` error (see [`error::is_busy_error`]) instead of a connection.
+/// The accessor this replaced `expect`ed the result, so a pool shortage — a
+/// transient, recoverable condition, hit whenever more than eight reads
+/// overlap for longer than the deadline — became a panic; and a release build
+/// panics with `panic = "abort"`, which killed the whole application instead
+/// of failing one request. That is how a macOS laptop waking from sleep
+/// could take Buildmesh down with it.
+///
+/// Callers propagate the error. The HTTP boundary turns it into
+/// `503 Service Unavailable` (transient, retryable); a Tauri command turns it
+/// into [`READER_POOL_BUSY_MESSAGE`].
+pub fn read_conn() -> SqlResult<ReadConnection<'static>> {
     get().readers.checkout()
+}
+
+/// The reader pool's current saturation, or `None` before the database is
+/// initialised.
+///
+/// `None` rather than zeros: a sampler that reads this before `db::init`
+/// must not be told "the pool is idle" when the pool does not exist yet.
+pub fn reader_pool_stats() -> Option<ReaderPoolStats> {
+    try_get().map(|db| db.readers.stats())
 }
 
 /// Lock the dedicated writer connection, recovering from a poisoned mutex instead of

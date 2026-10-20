@@ -151,7 +151,7 @@ pub fn create_node_circuit_run(
     // First-writer-wins dedupe (#1660) on the process-global reader so the
     // writer mutex is not held for a pure read.
     {
-        let db = crate::db::read_conn();
+        let db = crate::db::read_conn()?;
         if let Some(existing) = find_live_run_for_source_inner(&db, node_id)? {
             return Ok(existing);
         }
@@ -660,7 +660,7 @@ pub(crate) fn get_autopilot_circuit_inner(
 }
 
 pub fn get_autopilot_circuit(id: i64) -> SqlResult<Option<AutopilotCircuit>> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     get_autopilot_circuit_inner(&db, id)
 }
 
@@ -679,7 +679,7 @@ fn map_circuit_row(row: &rusqlite::Row<'_>) -> SqlResult<AutopilotCircuit> {
 }
 
 pub fn list_autopilot_circuits(mesh_id: i64) -> SqlResult<Vec<AutopilotCircuit>> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     list_autopilot_circuits_inner(&db, mesh_id)
 }
 
@@ -702,7 +702,7 @@ pub(crate) fn list_autopilot_circuits_inner(
 /// mesh-scoped at the trigger layer: a circuit carries its own mesh_id,
 /// so one query serves the whole worker pass.
 pub fn list_enabled_circuits() -> SqlResult<Vec<AutopilotCircuit>> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     list_enabled_circuits_inner(&db)
 }
 
@@ -723,7 +723,7 @@ pub(crate) fn list_enabled_circuits_inner(db: &Connection) -> SqlResult<Vec<Auto
 /// Deliberately trigger-kind agnostic: ANY run (manual Trigger Now
 /// included) restarts the cadence, because the user just intervened.
 pub fn latest_circuit_run_created_at(circuit_id: i64) -> SqlResult<Option<String>> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     latest_circuit_run_created_at_inner(&db, circuit_id)
 }
 
@@ -744,7 +744,7 @@ pub(crate) fn latest_circuit_run_created_at_inner(
 /// constraint stays the authoritative backstop; this just keeps the pass
 /// from rewriting identical rows every cycle.
 pub fn list_circuit_trigger_identities(circuit_id: i64) -> SqlResult<Vec<String>> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     list_circuit_trigger_identities_inner(&db, circuit_id)
 }
 
@@ -764,6 +764,7 @@ pub(crate) fn list_circuit_trigger_identities_inner(
 pub struct CircuitRunLedger {
     pub run: AutopilotCircuitRun,
     pub steps: Vec<AutopilotCircuitRunStep>,
+    pub review_round_limit: Option<i32>,
 }
 
 /// Ensure the inspectable built-in exists before any review run is created.
@@ -789,7 +790,7 @@ pub fn list_circuits_with_recent_runs(
     runs_per_circuit: i64,
 ) -> SqlResult<Vec<(AutopilotCircuit, Vec<CircuitRunLedger>)>> {
     ensure_review_blueprint(mesh_id)?;
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     list_circuits_with_recent_runs_inner(&db, mesh_id, runs_per_circuit)
 }
 
@@ -923,11 +924,14 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
         let runs = runs_by_circuit.remove(&circuit.id).unwrap_or_default();
         let ledgers = runs
             .into_iter()
-            .map(|run| CircuitRunLedger {
-                steps: steps_by_run.remove(&run.id).unwrap_or_default(),
-                run,
+            .map(|run| {
+                Ok(CircuitRunLedger {
+                    review_round_limit: super::review_rounds::current_limit(db, &run)?,
+                    steps: steps_by_run.remove(&run.id).unwrap_or_default(),
+                    run,
+                })
             })
-            .collect();
+            .collect::<SqlResult<Vec<_>>>()?;
         out.push((circuit, ledgers));
     }
     Ok(out)
@@ -1369,7 +1373,7 @@ pub(crate) fn cancel_circuit_runs_locked(
 /// transient process/worktree cleanup failure without orphaning retained
 /// agents from a completed or failed run.
 pub fn list_circuit_run_ids_for_cleanup(circuit_id: i64) -> SqlResult<Vec<i64>> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     list_circuit_run_ids_for_cleanup_inner(&db, circuit_id)
 }
 
@@ -1400,7 +1404,7 @@ pub struct ActiveCircuitRun {
 }
 
 pub fn list_active_circuit_runs() -> SqlResult<Vec<ActiveCircuitRun>> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     list_active_circuit_runs_inner(&db)
 }
 
@@ -1440,7 +1444,7 @@ pub(crate) fn list_active_circuit_runs_inner(db: &Connection) -> SqlResult<Vec<A
 }
 
 pub fn list_circuit_runs(circuit_id: i64, limit: i64) -> SqlResult<Vec<AutopilotCircuitRun>> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     list_circuit_runs_inner(&db, circuit_id, limit)
 }
 
@@ -1571,7 +1575,7 @@ const OUTSTANDING_ATTENTION_RUNS: &str = "\
 /// while "Dismiss all" acknowledges every outstanding run on the mesh. Counting
 /// the ledger payload would understate the confirmation whenever the cap bites.
 pub fn count_outstanding_circuit_run_attention(mesh_id: i64) -> SqlResult<i64> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     count_outstanding_circuit_run_attention_inner(&db, mesh_id)
 }
 
@@ -1621,7 +1625,7 @@ pub(crate) fn dismiss_all_circuit_run_attention_inner(
 
 /// One run row by id, or `None` when the id is unknown.
 pub fn get_circuit_run(run_id: i64) -> SqlResult<Option<AutopilotCircuitRun>> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     get_circuit_run_inner(&db, run_id)
 }
 
@@ -1659,7 +1663,7 @@ const EXISTING_RUN_ID_CHUNK: usize = 500;
 /// The subset of `ids` that still has a circuit run row. Used by the handoff
 /// folder reconciliation to find folders whose run was deleted.
 pub fn existing_circuit_run_ids(ids: &[i64]) -> SqlResult<HashSet<i64>> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     existing_circuit_run_ids_inner(&db, ids)
 }
 
@@ -1685,7 +1689,7 @@ pub(crate) fn existing_circuit_run_ids_inner(
 }
 
 pub fn list_circuit_run_steps(run_id: i64) -> SqlResult<Vec<AutopilotCircuitRunStep>> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     list_circuit_run_steps_inner(&db, run_id)
 }
 
@@ -2175,7 +2179,7 @@ pub fn clear_circuit_step_agent_node_by_agent_id(run_id: i64, agent_node_id: i64
 /// agent-node count saturated on the implementation agent and parked
 /// the reviewer step in `pending_slot` indefinitely.
 pub fn count_active_circuit_runs(mesh_id: i64) -> SqlResult<i64> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     count_active_circuit_runs_inner(&db, mesh_id)
 }
 

@@ -25,15 +25,28 @@
 #[cfg(test)]
 mod tests {
     use crate::db::{
-        claim_warm_entry_for_mesh_inner, count_available_warm_for_mesh_inner,
-        count_droppable_warm_entries_for_mesh_inner, delete_orphaned_claimed_warm_worktrees_inner,
-        delete_warm_worktrees_for_mesh_inner, insert_warm_worktree_inner, is_warm_pool_path_inner,
+        claim_warm_entry_for_mesh_inner, classify_warm_reconcile_rows,
+        count_available_warm_for_mesh_inner, count_droppable_warm_entries_for_mesh_inner,
+        delete_orphaned_claimed_warm_worktrees_inner, delete_warm_worktrees_for_mesh_inner,
+        insert_warm_worktree_inner, is_warm_pool_path_inner,
         list_oldest_warm_entries_for_mesh_inner, list_warm_paths_for_mesh_droppable_inner,
         list_warm_paths_for_mesh_inner, list_warm_worktrees_to_reconcile_inner,
         list_worktree_enabled_meshes_for_warm_inner, mark_warm_worktree_available_inner,
-        warm_pool_claims_path_inner, WarmWorktreeStatus,
+        warm_pool_claims_path_inner, WarmReconcileEntry, WarmWorktreeStatus,
     };
     use rusqlite::Connection;
+
+    /// The reconcile pass, driven against one connection.
+    ///
+    /// Production splits it: the rows are read under a reader connection and
+    /// the directory check runs after that connection is released (issue
+    /// #1533). Here the two halves are joined again, because a test's
+    /// connection is a local in-memory handle rather than a pooled reader.
+    fn reconcile_entries(conn: &Connection) -> Vec<WarmReconcileEntry> {
+        classify_warm_reconcile_rows(
+            list_warm_worktrees_to_reconcile_inner(conn, STALE_AFTER_MIN).unwrap(),
+        )
+    }
 
     /// Build an in-memory schema that matches v20 (no `warm_worktrees` table)
     /// plus the test fixture's `meshes` rows. The safety-net helper is then
@@ -264,7 +277,7 @@ mod tests {
         )
         .unwrap();
 
-        let entries = list_warm_worktrees_to_reconcile_inner(&conn, STALE_AFTER_MIN).unwrap();
+        let entries = reconcile_entries(&conn);
         let ids: Vec<i64> = entries.iter().map(|e| e.id).collect();
         assert_eq!(
             ids,
@@ -304,7 +317,7 @@ mod tests {
         .unwrap();
         age_row(&conn, filling_id);
 
-        let entries = list_warm_worktrees_to_reconcile_inner(&conn, STALE_AFTER_MIN).unwrap();
+        let entries = reconcile_entries(&conn);
         let ids: Vec<i64> = entries.iter().map(|e| e.id).collect();
         assert_eq!(
             ids,
@@ -338,7 +351,7 @@ mod tests {
         )
         .unwrap();
 
-        let entries = list_warm_worktrees_to_reconcile_inner(&conn, STALE_AFTER_MIN).unwrap();
+        let entries = reconcile_entries(&conn);
         assert!(
             entries.is_empty(),
             "a freshly-inserted `filling` row (a worker filling it right now) must NOT be reconciled"
@@ -365,7 +378,7 @@ mod tests {
         .unwrap();
         age_row(&conn, id);
 
-        let entries = list_warm_worktrees_to_reconcile_inner(&conn, STALE_AFTER_MIN).unwrap();
+        let entries = reconcile_entries(&conn);
         let ids: Vec<i64> = entries.iter().map(|e| e.id).collect();
         assert_eq!(
             ids,
@@ -394,7 +407,7 @@ mod tests {
         .unwrap();
         age_row(&conn, id);
 
-        let entries = list_warm_worktrees_to_reconcile_inner(&conn, STALE_AFTER_MIN).unwrap();
+        let entries = reconcile_entries(&conn);
         assert!(
             !entries.iter().any(|e| e.id == id),
             "a `claimed` row (its dir may back a live node) must never be torn down by reconcile"
@@ -960,8 +973,8 @@ mod tests {
     /// release the global writer mutex during its filesystem teardown so
     /// concurrent DB writes (attention flips, status writes, HTTP auth
     /// token validation) do not queue behind `git worktree remove --force`
-    /// + recursive `remove_dir_all` for many seconds during startup
-    /// reconcile.
+    /// and the recursive `remove_dir_all` that follows it, for many seconds
+    /// during startup reconcile.
     ///
     /// This test pins the **write-side** invariant directly. Pre-fix, the
     /// GC held `write_conn()` for the entire FS phase — every other thread
@@ -1090,6 +1103,7 @@ mod tests {
 
         // Sanity: the probe DELETE really did remove the row.
         let still_present: i64 = crate::db::read_conn()
+            .unwrap()
             .query_row(
                 "SELECT COUNT(*) FROM warm_worktrees WHERE id = ?1",
                 rusqlite::params![probe_row_id],

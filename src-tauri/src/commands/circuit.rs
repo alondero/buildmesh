@@ -11,6 +11,7 @@ use tauri::{command, AppHandle, Emitter};
 
 use crate::circuit::model::{trigger_kind_to_node_kind, validate_circuit_request, CircuitGraph};
 pub use crate::circuit::model::{CircuitBlueprintKind, CircuitTriggerKind};
+use crate::db::DbError;
 use crate::models::{AutopilotCircuit, AutopilotCircuitRun, AutopilotCircuitRunStep};
 
 /// User-requested movement in the pending Circuit Run queue: adjacent
@@ -31,6 +32,10 @@ pub enum CircuitQueueDirection {
 pub struct CircuitRunDetail {
     pub run: AutopilotCircuitRun,
     pub steps: Vec<AutopilotCircuitRunStep>,
+    /// Active review allowance: zero is unlimited, absent means unavailable.
+    #[ts(optional)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_round_limit: Option<i32>,
 }
 
 #[command]
@@ -62,9 +67,13 @@ pub(crate) fn emit_run_updated(app: Option<&AppHandle>, run_id: i64, state: &str
 
 /// Record the outcome and wake the worker. Shared by the command and the mobile
 /// route so both obey the same revision and eligibility checks.
+///
+/// The failure stays typed: the mobile route answers `503` for a transient
+/// pool shortage and `409` for a refused revision, and text cannot tell those
+/// apart (issue #1533). The command above flattens it at the Tauri boundary.
 pub(crate) fn record_circuit_outcome_now(
     request: &crate::db::circuit::evidence::CheckpointRequest,
-) -> Result<(), String> {
+) -> Result<(), DbError> {
     crate::db::circuit::evidence::record_outcome(request)?;
     crate::services::circuit_worker::wake_circuit_worker();
     Ok(())
@@ -157,9 +166,13 @@ pub fn recover_failed_circuit_run(
 }
 
 /// Run Recovery plus the worker wake, shared with the mobile route.
+///
+/// The failure stays typed: the mobile route answers `503` for a transient
+/// pool shortage and `409` for a refused recovery, and text cannot tell those
+/// apart (issue #1533).
 pub(crate) fn recover_failed_circuit_run_now(
     request: &crate::db::circuit::step_recovery::RecoveryRequest,
-) -> Result<(), String> {
+) -> Result<(), DbError> {
     crate::db::circuit::step_recovery::recover_failed_run(request)?;
     crate::services::circuit_worker::wake_circuit_worker();
     Ok(())
@@ -198,6 +211,16 @@ pub struct CircuitAgentOwnership {
 
 #[command]
 pub fn list_circuit_agent_ownerships() -> Result<Vec<CircuitAgentOwnership>, String> {
+    list_circuit_agent_ownerships_now().map_err(|error| error.to_string())
+}
+
+/// The ownership ledger read, keeping the database failure typed.
+///
+/// The command above flattens the failure to text because that is the Tauri
+/// wire type; the mobile route needs to know whether the failure was a
+/// *transient* pool shortage (a `503` it can retry) or a broken query, and
+/// text cannot answer that (issue #1533).
+pub(crate) fn list_circuit_agent_ownerships_now() -> Result<Vec<CircuitAgentOwnership>, DbError> {
     crate::db::list_circuit_agent_ownerships()
         .map(|rows| {
             rows.into_iter()
@@ -215,7 +238,7 @@ pub fn list_circuit_agent_ownerships() -> Result<Vec<CircuitAgentOwnership>, Str
                 )
                 .collect()
         })
-        .map_err(|error| error.to_string())
+        .map_err(DbError::from)
 }
 
 #[command]
@@ -265,6 +288,7 @@ fn map_circuit_rows(
                 .map(|ledger| CircuitRunDetail {
                     run: ledger.run,
                     steps: ledger.steps,
+                    review_round_limit: ledger.review_round_limit,
                 })
                 .collect(),
         })
@@ -498,24 +522,28 @@ fn release_circuit_source(run_id: i64) {
     }
 }
 
-fn cancel_run_and_cleanup_inner(app: Option<&AppHandle>, run_id: i64) -> Result<(), String> {
+fn cancel_run_and_cleanup_inner(app: Option<&AppHandle>, run_id: i64) -> Result<(), DbError> {
     crate::services::circuit_worker::mark_circuit_run_cancelled(run_id);
-    let agent_ids = crate::db::cancel_circuit_run(run_id).map_err(|error| error.to_string())?;
+    let agent_ids = crate::db::cancel_circuit_run(run_id).map_err(DbError::from)?;
     crate::services::circuit_worker::finish_circuit_run_cancellation(run_id);
     release_circuit_source(run_id);
     crate::services::circuit_worker::wake_circuit_worker();
     let cleanup = retire_cancelled_agents(agent_ids);
     let state = crate::db::get_circuit_run(run_id)
-        .map_err(|error| error.to_string())?
+        .map_err(DbError::from)?
         .map(|run| run.state)
         .unwrap_or_else(|| "cancelled".to_string());
     emit_run_updated(app, run_id, &state);
-    cleanup
+    cleanup.map_err(DbError::Rendered)
 }
 
 /// Cancel a run and retire its helper agents. The desktop command and the
 /// mobile route both call this; `app` only decides whether a window is told.
-pub(crate) fn cancel_circuit_run_now(app: Option<&AppHandle>, run_id: i64) -> Result<(), String> {
+///
+/// The failure stays typed: the mobile route answers `503` for a transient
+/// pool shortage (issue #1533) rather than the `500` a flattened string
+/// would produce.
+pub(crate) fn cancel_circuit_run_now(app: Option<&AppHandle>, run_id: i64) -> Result<(), DbError> {
     // Invalidate the worker's current effect batch before waiting for spawn
     // teardown. This closes the race where a slow external effect would
     // otherwise continue after the user pressed Cancel.
@@ -534,14 +562,14 @@ pub(crate) fn cancel_circuit_run_now(app: Option<&AppHandle>, run_id: i64) -> Re
             }
             release_circuit_source(run_id);
             crate::services::circuit_worker::wake_circuit_worker();
-            Err(wait_error)
+            Err(DbError::Rendered(wait_error))
         }
     }
 }
 
 #[command]
 pub fn cancel_circuit_run(app: AppHandle, run_id: i64) -> Result<(), String> {
-    cancel_circuit_run_now(Some(&app), run_id)
+    cancel_circuit_run_now(Some(&app), run_id).map_err(|error| error.to_string())
 }
 
 #[command]
@@ -886,7 +914,19 @@ pub fn list_circuit_runs(
     runs.into_iter()
         .map(|run| {
             let steps = crate::db::list_circuit_run_steps(run.id).map_err(|e| e.to_string())?;
-            Ok(CircuitRunDetail { run, steps })
+            let review_round_limit = {
+                // The reader checkout is fallible (issue #1533): a saturated
+                // pool is a transient shortage, not a broken command, so the
+                // error carries the retryable copy instead of panicking.
+                let db = crate::db::read_conn().map_err(|e| e.to_string())?;
+                crate::db::circuit::review_rounds::current_limit(&db, &run)
+                    .map_err(|e| e.to_string())?
+            };
+            Ok(CircuitRunDetail {
+                run,
+                steps,
+                review_round_limit,
+            })
         })
         .collect()
 }
@@ -950,6 +990,23 @@ pub async fn continue_circuit_review(
     Ok(next_id)
 }
 
+/// Update only this run's review allowance; current work keeps running.
+#[command]
+pub async fn set_circuit_review_round_limit(
+    app: AppHandle,
+    run_id: i64,
+    max_rounds: i32,
+) -> Result<(), String> {
+    let state = crate::commands::run_blocking("set_circuit_review_round_limit", move || {
+        crate::db::circuit::review_rounds::set_review_round_limit(run_id, max_rounds)
+            .map_err(String::from)
+    })
+    .await?;
+    crate::services::circuit_worker::wake_circuit_worker();
+    emit_run_updated(Some(&app), run_id, &state);
+    Ok(())
+}
+
 /// Gracefully pause one active run: the graph stops advancing while the
 /// current steps finish. Idempotent-friendly (pausing a paused run is a
 /// no-op error only if the run isn't active).
@@ -1005,16 +1062,25 @@ pub fn resume_circuit_run(run_id: i64) -> Result<(), String> {
 /// Approve a CollaboratorCheck gate parked in `blocked` on this run.
 #[command]
 pub fn approve_circuit_step(run_id: i64, node_id: String) -> Result<(), String> {
-    let steps = crate::db::list_circuit_run_steps(run_id).map_err(|e| e.to_string())?;
+    approve_circuit_step_now(run_id, node_id).map_err(|error| error.to_string())
+}
+
+/// The approval, keeping the database failure typed.
+///
+/// The command above flattens the failure to text because that is the Tauri
+/// wire type; the mobile route needs to tell a *refused* approval (`409`)
+/// from a transient pool shortage (`503`), and text cannot (issue #1533).
+pub(crate) fn approve_circuit_step_now(run_id: i64, node_id: String) -> Result<(), DbError> {
+    let steps = crate::db::list_circuit_run_steps(run_id).map_err(DbError::from)?;
     let step = steps
         .iter()
         .find(|s| s.node_id == node_id)
-        .ok_or_else(|| format!("run {} has no step {}", run_id, node_id))?;
+        .ok_or_else(|| DbError::Rendered(format!("run {} has no step {}", run_id, node_id)))?;
     if step.status != "blocked" {
-        return Err(format!(
+        return Err(DbError::Rendered(format!(
             "step {} is not waiting for approval (status {})",
             node_id, step.status
-        ));
+        )));
     }
     crate::services::circuit_worker::request_circuit_approval(run_id, node_id);
     Ok(())

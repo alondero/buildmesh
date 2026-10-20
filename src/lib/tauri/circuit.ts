@@ -136,6 +136,9 @@ export const triggerCircuitFromNode = (
 export const pauseCircuitRun = (runId: number) =>
   _invoke<void>('pause_circuit_run', { runId });
 
+export const setCircuitReviewRoundLimit = (runId: number, maxRounds: number) =>
+  _invoke<void>('set_circuit_review_round_limit', { runId, maxRounds });
+
 /** Resume a paused run where it stopped (#1207). */
 export const continueCircuitReview = (runId: number, additionalRounds = 1) =>
   _invoke<number>('continue_circuit_review', { runId, additionalRounds });
