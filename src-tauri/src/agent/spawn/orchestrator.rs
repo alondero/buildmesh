@@ -455,13 +455,20 @@ fn report_spawn_failure(app: &tauri::AppHandle, node_id: i64, is_resume_intent: 
     if is_resume_intent {
         let _ = session_lifecycle::on_resume_failed(&sink, node_id, error);
     } else {
-        let _ = session_lifecycle::on_error(&sink, node_id);
+        // Carry the reason into the lifecycle payload. The persisted snapshot
+        // is what a restarted app reads back and what rides the
+        // `agent-lifecycle` event, and the generic "agent process error"
+        // fallback hides the diagnosis — the user is left with a red node and
+        // no cause (Resume already keeps its reason through
+        // `on_resume_failed`).
+        let _ = session_lifecycle::on_spawn_failed(&sink, node_id, error);
     }
     let _ = app.emit(
         "node-spawn-failed",
         crate::commands::agent::NodeSpawnFailedPayload {
             node_id,
             error: error.to_string(),
+            node_failed: true,
         },
     );
 }

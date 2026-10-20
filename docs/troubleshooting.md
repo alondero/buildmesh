@@ -223,6 +223,40 @@ The original CLI process itself does not survive app close or reboot.
 Do not delete a suspended node until you have reviewed its worktree and copied
 any changes you need.
 
+## A node fails to start and the reason is not obvious
+
+A spawn that fails before the harness starts leaves the node red. The reason
+arrives as a **Spawn** toast (prefixed with `Node <id>: `), and the reason
+itself is stored with the node's lifecycle record, so it survives a restart.
+
+One cause is a repository that Git has been told is *bare*. A repository can be
+flagged `core.bare=true` in its own `.git/config` even though the folder holds a
+full checkout. Git then refuses the commands that need a work tree ("this
+operation must be run in a work tree"), so the spawn fails at worktree
+preparation, before the agent CLI is launched. Buildmesh names the flag and the
+repair:
+
+```
+F:\src\my-project is marked as a bare repository (core.bare=true in its Git config)
+even though it holds a working tree; repair it with
+`git -C "F:\src\my-project" config core.bare false`
+```
+
+1. Run the repair command it gives you, then start the node again.
+2. Check that `git status` works in that folder before you retry — if it still
+   says "this operation must be run in a work tree", the flag is not the only
+   thing wrong.
+
+No production path in Buildmesh writes `core.bare` — only test fixtures do — so
+something outside Buildmesh set it, and the repair is yours to run.
+
+For other failures, read the toast: it carries the same wording the backend
+logged, so `logs\buildmesh.log` under the app-data folder has the full context
+(including the git command that gave up, if the failure was a git timeout). A
+node that was *deferred* rather than failed — the orchestrator left it
+suspended so Resume and Regenerate stay reachable — raises no toast; its state
+in the sidebar tells you it is waiting, not broken.
+
 ## The attention badge is missing or stale
 
 `Ready` means a turn finished and the agent can accept another instruction;

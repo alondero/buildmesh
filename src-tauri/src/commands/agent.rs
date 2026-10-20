@@ -86,8 +86,9 @@ pub struct NodeSpawnCompletedPayload {
 
 /// Payload of the `node-spawn-failed` Tauri event. Emitted by
 /// `start_node_background` when stage-2 fails (e.g. the PTY could not be
-/// opened, the agent CLI rejected its argv). The backend has already
-/// updated the DB to `Error` before emitting, so the listener mirrors it.
+/// opened, the agent CLI rejected its argv). The backend updates the DB to
+/// `Error` before emitting, so the listener mirrors it — unless the attempt
+/// was deferred, which `node_failed` reports.
 ///
 /// Generated to `src/types/generated/NodeSpawnFailedPayload.ts`; the TS half
 /// is imported by `src/stores/agentNodeStore.ts`.
@@ -97,6 +98,15 @@ pub struct NodeSpawnFailedPayload {
     #[ts(as = "i32")]
     pub node_id: i64,
     pub error: String,
+    /// Whether the attempt failed the node, as opposed to being deferred.
+    ///
+    /// A deferred attempt — the orchestrator left a `Suspended` node alone on
+    /// purpose so the user's Resume / Regenerate affordances stay reachable
+    /// — reports `false`: the node is not broken, so a client must not paint
+    /// it red or raise an error toast for it. A node that was already in a
+    /// terminal state keeps that state; the flag says the *attempt* failed,
+    /// not that the row was rewritten.
+    pub node_failed: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -459,14 +469,22 @@ pub(crate) fn dispatch_spawn_outcome(
             // intentional leave-alone for Resume / Regenerate affordances
             // per orchestrator.rs:117-122) is preserved verbatim. The
             // `node-spawn-failed` event fires unconditionally so the UI
-            // can still surface that this attempt was deferred.
-            let _ = session_lifecycle::on_error_if_pending(&sink, node_id);
+            // can still surface that this attempt was deferred, and it
+            // says whether the node was actually marked failed.
+            //
+            // The message names no cause: `SpawnOutcome::Skipped` covers
+            // several (lease contention, a cleanup generation owning the
+            // node, a startup resume the orchestrator declined), and the
+            // variant carries no cause of its own.
+            let reason = "spawn skipped before process launch";
+            let node_failed =
+                session_lifecycle::on_error_if_pending(&sink, node_id, reason).unwrap_or(false);
             let _ = app.emit(
                 "node-spawn-failed",
                 NodeSpawnFailedPayload {
                     node_id,
-                    error: "spawn skipped before process launch (another spawn holds the lease)"
-                        .to_string(),
+                    error: reason.to_string(),
+                    node_failed,
                 },
             );
         }
@@ -486,12 +504,14 @@ pub(crate) fn dispatch_spawn_outcome(
 pub(crate) fn dispatch_spawn_panic(app: &AppHandle, node_id: i64, panic_msg: String) {
     tracing::error!("create_*_node: node {node_id} spawn future panicked: {panic_msg}");
     let sink = session_lifecycle::AppSessionLifecycleSink { app };
-    let _ = session_lifecycle::on_error(&sink, node_id);
+    let reason = format!("spawn panicked: {panic_msg}");
+    let _ = session_lifecycle::on_spawn_failed(&sink, node_id, &reason);
     let _ = app.emit(
         "node-spawn-failed",
         NodeSpawnFailedPayload {
             node_id,
-            error: format!("spawn panicked: {panic_msg}"),
+            error: reason,
+            node_failed: true,
         },
     );
 }
@@ -1937,7 +1957,12 @@ mod tests {
         let (_tmp, node_id) = fresh_pending_node("err-if-pending");
 
         let sink = crate::agent::session_lifecycle::DbOnlySink;
-        let wrote = session_lifecycle::on_error_if_pending(&sink, node_id).expect("helper ok");
+        let wrote = session_lifecycle::on_error_if_pending(
+            &sink,
+            node_id,
+            "spawn skipped before process launch",
+        )
+        .expect("helper ok");
         assert!(wrote, "Pending row must accept the Error write");
 
         let after = crate::db::get_agent_node_by_id(node_id).expect("read after");
@@ -1958,7 +1983,12 @@ mod tests {
             .expect("set suspended");
 
         let sink = crate::agent::session_lifecycle::DbOnlySink;
-        let wrote = session_lifecycle::on_error_if_pending(&sink, node_id).expect("helper ok");
+        let wrote = session_lifecycle::on_error_if_pending(
+            &sink,
+            node_id,
+            "spawn skipped before process launch",
+        )
+        .expect("helper ok");
         assert!(!wrote, "Suspended row must NOT accept the Error write");
 
         let after = crate::db::get_agent_node_by_id(node_id).expect("read after");

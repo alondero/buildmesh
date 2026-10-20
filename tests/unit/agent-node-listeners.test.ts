@@ -6,6 +6,29 @@ import {
 } from '../../src/stores/agentNodeListeners';
 import type { AgentNode } from '../../src/types/generated/AgentNode';
 
+// A spawn failure carries its reason in the event payload, so the listener
+// turns it into a toast. Mock the wrapper the production module imports — the
+// same `vi.hoisted` + named-export pattern the store tests use — so the
+// assertion pins what the user is shown. `toastStackMock` stands in for the
+// live toast stack the listener consults before adding a second toast for a
+// reason that is already on screen.
+const { addToastMock, toastStackMock } = vi.hoisted(() => ({
+  addToastMock: vi.fn(),
+  toastStackMock: [] as { message: string }[],
+}));
+vi.mock('../../src/stores/toastStore', () => ({
+  addToast: addToastMock,
+  dismissToast: vi.fn(),
+  useToastStore: { getState: () => ({ toasts: toastStackMock }) },
+}));
+import { addToast } from '../../src/stores/toastStore';
+
+// The wording the backend's preflight produces for a missing harness binary
+// (`agent/spawn/preflight.rs` `missing_stem_message`). The duplicate-toast
+// guard compares the reason verbatim, so the fixture uses the real text.
+const PROVIDER_ERROR_MESSAGE =
+  "agy can't start: the `agy` command wasn't found. Install the CLI and make sure it's on your PATH, then start the node again.";
+
 /**
  * Unit tests for `attachAgentNodeListeners` (issue #1054).
  *
@@ -60,6 +83,7 @@ function makeSurface(nodes: AgentNode[] = []): SpySurface {
 describe('attachAgentNodeListeners', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    toastStackMock.length = 0;
   });
 
   // Each test below overrides `listen`'s mock implementation to
@@ -638,12 +662,93 @@ describe('attachAgentNodeListeners', () => {
     const surface = makeSurface([{ id: 33, status } as AgentNode]);
     await attachAgentNodeListeners(surface);
 
-    capturedHandler!({ payload: { node_id: 33 } });
+    capturedHandler!({ payload: { node_id: 33, error: 'spawn failed', node_failed: true } });
 
     expect(surface.__calls).toEqual([
       { method: 'findAgentNode', args: [33] },
       ...(['idle', 'spawning', 'error'].includes(status)
         ? [{ method: 'patchAgentNode', args: [33, { status: 'error' }] }] : []),
     ]);
+  });
+
+  it('node-spawn-failed shows the reason the spawn failed', async () => {
+    const mockListen = listen as ReturnType<typeof vi.fn>;
+    let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
+    mockListen.mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
+      if (eventName === 'node-spawn-failed') {
+        capturedHandler = handler;
+      }
+      return Promise.resolve(() => {});
+    });
+
+    const surface = makeSurface([{ id: 5814, status: 'spawning' } as AgentNode]);
+    await attachAgentNodeListeners(surface);
+
+    capturedHandler!({
+      payload: {
+        node_id: 5814,
+        error: 'F:\\src\\pixelpath is marked as a bare repository (core.bare=true in its Git config)',
+        node_failed: true,
+      },
+    });
+
+    // The red badge says the spawn failed; only the reason says why. The
+    // reason exists in the event payload and the backend log, so the toast
+    // is the only place the user can read it.
+    expect(vi.mocked(addToast)).toHaveBeenCalledWith(
+      'Spawn',
+      'Node 5814: F:\\src\\pixelpath is marked as a bare repository (core.bare=true in its Git config)',
+      'error',
+    );
+  });
+
+  it('node-spawn-failed does not re-toast a reason already on the stack', async () => {
+    // A missing harness produces `provider-error` (the reason, labelled with
+    // the harness) *and* `node-spawn-failed` (the state change, same reason).
+    // Two labels mean two toasts for one failure, and the stack holds three.
+    const mockListen = listen as ReturnType<typeof vi.fn>;
+    let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
+    mockListen.mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
+      if (eventName === 'node-spawn-failed') {
+        capturedHandler = handler;
+      }
+      return Promise.resolve(() => {});
+    });
+
+    toastStackMock.push({ message: PROVIDER_ERROR_MESSAGE });
+
+    const surface = makeSurface([{ id: 5814, status: 'spawning' } as AgentNode]);
+    await attachAgentNodeListeners(surface);
+
+    capturedHandler!({
+      payload: { node_id: 5814, error: PROVIDER_ERROR_MESSAGE, node_failed: true },
+    });
+
+    expect(vi.mocked(addToast)).not.toHaveBeenCalled();
+  });
+
+  it('node-spawn-failed stays quiet for a deferred attempt', async () => {
+    // The orchestrator left a `Suspended` node alone on purpose so the
+    // user's Resume / Regenerate affordances stay reachable. The node is not
+    // broken, so an error toast — or a red badge — would report a failure
+    // that did not happen.
+    const mockListen = listen as ReturnType<typeof vi.fn>;
+    let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
+    mockListen.mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
+      if (eventName === 'node-spawn-failed') {
+        capturedHandler = handler;
+      }
+      return Promise.resolve(() => {});
+    });
+
+    const surface = makeSurface([{ id: 5814, status: 'suspended' } as AgentNode]);
+    await attachAgentNodeListeners(surface);
+
+    capturedHandler!({
+      payload: { node_id: 5814, error: 'spawn skipped before process launch', node_failed: false },
+    });
+
+    expect(vi.mocked(addToast)).not.toHaveBeenCalled();
+    expect(surface.__calls).toEqual([]);
   });
 });

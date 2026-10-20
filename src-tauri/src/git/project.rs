@@ -17,9 +17,9 @@ pub fn open(selected: &str) -> Result<Repository, git2::Error> {
 pub fn resolve(selected: &str) -> Result<ProjectRepository, String> {
     let repo =
         open(selected).map_err(|e| format!("No working Git repository for {selected}: {e}"))?;
-    let root = repo.workdir().ok_or_else(|| {
-        format!("{selected} is a bare repository, not a project working directory")
-    })?;
+    let root = repo
+        .workdir()
+        .ok_or_else(|| no_working_directory_reason(selected, &repo))?;
     let root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
     let folder = std::fs::canonicalize(crate::env::to_host_path(selected))
         .map_err(|e| format!("Cannot resolve project folder {selected}: {e}"))?;
@@ -36,6 +36,52 @@ pub fn resolve(selected: &str) -> Result<ProjectRepository, String> {
         relative_folder,
         identity: repository_identity(&repo)?,
     })
+}
+
+/// Why this repository offers no working directory.
+///
+/// A repository whose own config sets `core.bare=true` reports no working
+/// directory even when the folder holds a full checkout: git then refuses
+/// the commands that need a work tree ("fatal: this operation must be run in
+/// a work tree") and the checkout is invisible to git. Telling the user their
+/// project "is a bare repository" sends them hunting for a bare clone they do
+/// not have, so name the mis-set flag and the one-line repair instead.
+fn no_working_directory_reason(selected: &str, repo: &Repository) -> String {
+    if working_tree_flagged_bare(repo) {
+        return format!(
+            "{selected} is marked as a bare repository (core.bare=true in its Git config) \
+             even though it holds a working tree; repair it with \
+             `git -C \"{selected}\" config core.bare false`"
+        );
+    }
+    format!("{selected} is a bare repository, not a project working directory")
+}
+
+/// Whether the repository holds a working tree that its own config hides
+/// behind `core.bare=true`.
+///
+/// The Git directory's *name* is not the answer: a checkout may keep its data
+/// in a separate directory (`--separate-git-dir`), and a bare repository may
+/// live in a folder called `.git`. The index is: a working tree **with tracked
+/// files** leaves a non-empty one behind, a bare repository has none, and the
+/// flag only stops git from *using* the index — it does not delete it. The
+/// flag itself is read from the repository's config rather than assumed, so a
+/// repository that reports no working directory for some other reason keeps
+/// the plain bare-repository wording.
+///
+/// A working tree with an empty index — no tracked files — keeps the plain
+/// wording too: there is no evidence it was ever a checkout and the repair
+/// command would be a guess. It is the same wording it got before this rule
+/// existed.
+fn working_tree_flagged_bare(repo: &Repository) -> bool {
+    let flagged = repo
+        .config()
+        .and_then(|config| config.get_bool("core.bare"))
+        .unwrap_or(false);
+    if !flagged {
+        return false;
+    }
+    repo.index().map(|index| !index.is_empty()).unwrap_or(false)
 }
 
 fn repository_identity(repo: &Repository) -> Result<String, String> {
@@ -236,9 +282,128 @@ mod tests {
         let td = TestDir::new("project-unavailable");
         assert!(resolve(td.path().to_str().unwrap()).is_err());
         Repository::init_bare(td.path()).unwrap();
-        assert!(resolve(td.path().to_str().unwrap())
-            .unwrap_err()
-            .contains("bare"));
+        let reason = resolve(td.path().to_str().unwrap()).unwrap_err();
+        assert!(
+            reason.contains("is a bare repository, not a project working directory"),
+            "a genuinely bare repository keeps the plain wording: {reason}"
+        );
+        assert!(
+            !reason.contains("core.bare=true"),
+            "a genuinely bare repository must not be told to repair a mis-set flag: {reason}"
+        );
+    }
+
+    /// A checkout whose own config sets `core.bare=true` has a working tree
+    /// that git refuses to use, and the user has no bare clone to look for.
+    /// The message must name the mis-set flag and the repair, or the failure
+    /// reads as a mystery ("why is my project bare?").
+    #[test]
+    fn names_the_mis_set_bare_flag_and_its_repair() {
+        let td = TestDir::new("project-flagged-bare");
+        init_repo_with_commit(td.path(), &[("file.txt", "content\n")]);
+        let repo = Repository::open(td.path()).unwrap();
+        repo.config().unwrap().set_bool("core.bare", true).unwrap();
+        drop(repo);
+
+        let reason = resolve(td.path().to_str().unwrap()).unwrap_err();
+        assert!(
+            reason.contains("core.bare=true"),
+            "the message must name the mis-set flag: {reason}"
+        );
+        assert!(
+            reason.contains(&format!(
+                "git -C \"{}\" config core.bare false",
+                td.path().display()
+            )),
+            "the message must carry the repair command: {reason}"
+        );
+        // The repair restores the working tree the folder already had.
+        assert!(resolve(td.path().to_str().unwrap()).is_err());
+        std::process::Command::new("git")
+            .args([
+                "-C",
+                &td.path().to_string_lossy(),
+                "config",
+                "core.bare",
+                "false",
+            ])
+            .status()
+            .expect("git config");
+        assert!(
+            resolve(td.path().to_str().unwrap()).is_ok(),
+            "clearing core.bare must make the checkout resolvable again"
+        );
+    }
+
+    /// A bare repository may live in a folder called `.git`, and a checkout
+    /// may keep its Git data elsewhere (`--separate-git-dir`). The Git
+    /// directory's name is not the discriminator; the index is.
+    #[test]
+    fn a_bare_repository_named_git_is_not_told_it_holds_a_working_tree() {
+        let td = TestDir::new("project-bare-named-git");
+        let bare = td.path().join(".git");
+        Repository::init_bare(&bare).unwrap();
+        let reason = resolve(bare.to_str().unwrap()).unwrap_err();
+        assert!(
+            reason.contains("is a bare repository, not a project working directory"),
+            "a bare repository must keep the plain wording: {reason}"
+        );
+        assert!(
+            !reason.contains("core.bare=true"),
+            "a bare repository must not be told to repair a mis-set flag: {reason}"
+        );
+    }
+
+    /// A checkout whose Git data lives in a separate directory still holds a
+    /// working tree, so the mis-set flag — not the bare-repository wording —
+    /// is what the user must be told.
+    #[test]
+    fn a_separate_git_dir_checkout_is_recognised_as_a_working_tree() {
+        let td = TestDir::new("project-flagged-separate-git-dir");
+        let checkout = td.path().join("checkout");
+        let git_dir = td.path().join("gitdata");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("git");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&[
+            "init",
+            "--separate-git-dir",
+            git_dir.to_str().unwrap(),
+            checkout.to_str().unwrap(),
+        ]);
+        std::fs::write(checkout.join("file.txt"), "content\n").unwrap();
+        run(&["-C", checkout.to_str().unwrap(), "add", "file.txt"]);
+        run(&[
+            "-C",
+            checkout.to_str().unwrap(),
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=test",
+            "commit",
+            "-m",
+            "initial",
+        ]);
+        run(&[
+            "--git-dir",
+            git_dir.to_str().unwrap(),
+            "config",
+            "core.bare",
+            "true",
+        ]);
+
+        let reason = resolve(checkout.to_str().unwrap()).unwrap_err();
+        assert!(
+            reason.contains("core.bare=true"),
+            "a separate-git-dir checkout still holds a working tree: {reason}"
+        );
     }
 
     /// The worktree-capability predicate a new mesh's strategy is decided by

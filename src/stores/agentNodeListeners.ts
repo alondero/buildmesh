@@ -52,6 +52,7 @@ import type { CircuitPrReadyPayload, CircuitRunUpdatedPayload } from '../types/g
 import { invalidateNodeCaches } from '../hooks/invalidateNodeCaches';
 import { getNodeGitPath } from '../lib/paths';
 import { lifecycleNodePatch } from '../lib/status';
+import { addToast, useToastStore } from './toastStore';
 
 /**
  * Typed dispatch seam for the agent-node event listeners. The store
@@ -322,12 +323,41 @@ async function registerAgentNodeListeners(
   // Two-stage spawn failure: backend already updated the node's DB
   // status to 'error' before emitting — we mirror it in the store so
   // the sidebar/title-bar renders the red badge without a refetch.
+  // The reason rides along in the same payload, so it is toasted here:
+  // a red node with no cause is a dead end. A deferred attempt (the
+  // backend left a Suspended node recoverable) is not a failure, and
+  // says so in the payload — no badge, no toast.
   unlistens.push(
     await listen<NodeSpawnFailedPayload>('node-spawn-failed', (event) => {
+      if (!event.payload.node_failed) return;
       const node = surface.findAgentNode(event.payload.node_id);
       if (node && ['idle', 'spawning', 'error'].includes(node.status)) {
         surface.patchAgentNode(event.payload.node_id, { status: 'error' });
       }
+      reportSpawnFailure(event.payload.node_id, event.payload.error);
     }),
   );
+}
+
+/**
+ * One failure, one toast.
+ *
+ * A spawn that fails because the harness binary is missing produces *two*
+ * backend events: `provider-error` (the explanation, labelled with the
+ * harness) and `node-spawn-failed` (the state change, carrying the same
+ * reason). The toast stack's dedup key is provider + message, so a second
+ * label means a second toast for one failure — two of the three slots gone.
+ * The provider-error toast wins (it names the harness), so the spawn toast
+ * is skipped when that exact reason is already on the stack. A spawn toast
+ * reads `Node <id>: <reason>`, so its message differs from the bare reason
+ * it carries and only a provider-error toast can match one. A later failure
+ * with the same reason is suppressed the same way; its reason still reaches
+ * that node's lifecycle record.
+ */
+function reportSpawnFailure(nodeId: number, reason: string): void {
+  const alreadyShown = useToastStore.getState().toasts.some(
+    (toast) => toast.message === reason,
+  );
+  if (alreadyShown) return;
+  addToast('Spawn', `Node ${nodeId}: ${reason}`, 'error');
 }

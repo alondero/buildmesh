@@ -1228,11 +1228,15 @@ pub fn on_idle_with_detail(
     Ok(())
 }
 
-/// A spawn / autopilot run failed — mark `Error`. Used by the
-/// autopilot pipeline's `FinishOutcome::Fail` arm. **Not** for resume
-/// failures — those go through [`on_resume_failed`] so the
-/// `resume-failed` emit is wrapped by the lifecycle entry point, not
-/// left to the caller.
+/// Mark `Error` without a reason — the lifecycle message falls back to the
+/// generic "agent process error".
+///
+/// Prefer [`on_spawn_failed`] for a spawn that failed: it carries the
+/// *reason*, which is the only thing that tells the user what to do. This
+/// entry point is for a caller that genuinely has no reason to give. **Not**
+/// for resume failures — those go through [`on_resume_failed`] so the
+/// `resume-failed` emit is wrapped by the lifecycle entry point, not left to
+/// the caller.
 pub fn on_error(sink: &dyn SessionLifecycleSink, node_id: i64) -> Result<(), String> {
     on_error_with_detail(sink, node_id, &HookSignalDetail::default())
 }
@@ -1256,6 +1260,27 @@ pub fn on_error_with_detail(
     Ok(())
 }
 
+/// A spawn attempt failed — write `Error` and keep the reason.
+///
+/// The reason *is* the diagnosis. A spawn that fails before the process
+/// starts (a harness that is not installed, a repository that supplies no
+/// working tree) leaves the node red with no cause of its own: the generic
+/// "agent process error" fallback says only that something broke. This is the
+/// fresh-spawn counterpart to [`on_resume_failed`], which already carries its
+/// reason, and the persisted snapshot is what a restarted app and the phone
+/// client read back.
+pub fn on_spawn_failed(
+    sink: &dyn SessionLifecycleSink,
+    node_id: i64,
+    reason: &str,
+) -> Result<(), String> {
+    let detail = HookSignalDetail {
+        message: Some(reason.to_string()),
+        ..HookSignalDetail::default()
+    };
+    on_error_with_detail(sink, node_id, &detail)
+}
+
 /// Conditional [`on_error`] variant: only flips a `Pending` row to
 /// `Error`. Used by the detached-spawn wrapper in `commands::agent` for
 /// the `SpawnOutcome::Skipped` arm, where the orchestrator chose to
@@ -1269,7 +1294,11 @@ pub fn on_error_with_detail(
 /// debug-level log is emitted. The caller still emits a
 /// `node-spawn-failed` Tauri event for UI awareness — surfacing that
 /// this attempt was deferred, without changing the recoverable DB row.
-pub fn on_error_if_pending(sink: &dyn SessionLifecycleSink, node_id: i64) -> Result<bool, String> {
+pub fn on_error_if_pending(
+    sink: &dyn SessionLifecycleSink,
+    node_id: i64,
+    reason: &str,
+) -> Result<bool, String> {
     let current = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
     if current.status != SessionStatus::Pending {
         tracing::debug!(
@@ -1279,7 +1308,7 @@ pub fn on_error_if_pending(sink: &dyn SessionLifecycleSink, node_id: i64) -> Res
         );
         return Ok(false);
     }
-    on_error(sink, node_id)?;
+    on_spawn_failed(sink, node_id, reason)?;
     Ok(true)
 }
 
@@ -1917,6 +1946,29 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, LifecycleKind::Error);
         assert_eq!(events[0].status, SessionStatus::Error);
+    }
+
+    /// A failed spawn must say *why*. The generic "agent process error"
+    /// fallback leaves the user with a red node and no cause — the reason
+    /// was in the spawn error and nowhere else.
+    #[test]
+    fn on_spawn_failed_carries_the_reason_into_the_lifecycle_message() {
+        let sink = RecordingSink::new();
+        on_spawn_failed(
+            &sink,
+            5814,
+            "F:\\src\\pixelpath is marked as a bare repository (core.bare=true in its Git config)",
+        )
+        .unwrap();
+        let events = sink.lifecycle_changed();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, LifecycleKind::Error);
+        assert_eq!(events[0].status, SessionStatus::Error);
+        assert_eq!(
+            events[0].message.as_deref(),
+            Some("F:\\src\\pixelpath is marked as a bare repository (core.bare=true in its Git config)"),
+            "the persisted snapshot must carry the reason, not the generic fallback"
+        );
     }
 
     #[test]

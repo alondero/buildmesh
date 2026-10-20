@@ -297,6 +297,26 @@ settings and grouping continue to use the selected path. Sync locks and fetch
 freshness use the canonical common Git directory, so sibling folder Meshes share
 Git coordination while their pool inventories and base refs remain separate.
 
+**A checkout can be flagged bare, and it is not one.** A repository whose own
+config sets `core.bare=true` reports no working directory even though the folder
+holds a full checkout; git then refuses the commands that need a work tree
+("this operation must be run in a work tree"), so `git status` in that folder
+fails and the checkout is invisible to git's working-tree commands.
+`git::project::resolve` tells the two cases apart by the **index** — a working
+tree *with tracked files* leaves a non-empty one behind, a bare repository has
+none, and the flag only stops git from *using* the index, it does not delete
+it — and reads the flag from the repository's config rather than assuming it.
+(The Git directory's *name* is not the answer: a checkout may keep its data in a
+separate directory (`--separate-git-dir`), and a bare repository may live in a
+folder called `.git`.) A working tree with an empty index — no tracked files —
+keeps the plain wording: there is no evidence it was ever a checkout. For the
+mis-flagged checkout the message names the flag and the repair
+(`git -C "<path>" config core.bare false`) instead of calling the user's project
+"a bare repository", which sends them looking for a bare clone they do not have.
+No production path writes `core.bare` — the only writers in the tree are test
+fixtures — so the flag came from outside Buildmesh, and the repair is the user's
+to run.
+
 `AgentNode.worktree_path` remains the exact owned checkout root.
 `project_scope` persists the relative project folder (schema v49); an empty
 string records a root project and NULL retains legacy root-cwd behavior.
@@ -338,6 +358,31 @@ Buildmesh creates a dedicated worktree per agent node **itself**, via `git2` in 
 **Worktree Provisioner** (`git/worktree/provision.rs`) is the four-branch decision that turns a Spawn Context into an on-disk worktree (`Reused` / `Adopted` / `Upgraded` / `Created`). The spawn pipeline (`agent/spawn/`) is four phases coordinated by `spawn_agent_inner` (issue #1427): prepare returns **workspace params** (git/disk) and **launch params** (PTY size, prefill, cascade overrides) as separate values; provision takes only workspace params; launch takes the provisioned workspace *plus* launch params; streams register the process. Do not courier launch knobs through the provision DTO — git worktree provisioning does not care about terminal columns. `spawn_agent_inner` acquires the in-flight claim as a named local before the phase calls (never a discarded `_claim` tuple from prepare — that reopens the #650 race). `spawn_with_intent` is the sole owner of `node-spawn-failed` and session-lifecycle Error writes; phase modules return `Result` so Resume can still call `on_resume_failed`. Prepare reads the mesh/node/warm-pool rows into `WorkspaceToProvision`. Provision builds a `SpawnContext` from those fields, hands it to `provision_for_spawn`, and lets the provisioner own post-spawn bookkeeping (forget-after-spawn, name adoption, status writes) internally — a provision `Err` is returned to the orchestrator, not handled here. Base-ref resolution (`SpawnContext.base_ref`) reaches the cold-path `add_worktree_impl` end-to-end via this seam (pinned by `provision_for_spawn_cold_created_uses_spawn_context_base_ref_not_local_head` for issues #230, #248). `.worktreeinclude` is applied by `apply_worktree_include` (`git/worktree/mod.rs`) on every cold-path `Created` and warm-path `Upgraded` outcome — including **recursive directory copy** as of #248 (previously log-and-skipped; pinned by `apply_worktree_include_copies_directory_recursively`).
 
 **Resume:** worktrees are created only when the directory does not already exist (the `if !host_path.exists()` guard in `agent/spawn/provision.rs`), so resume simply re-spawns inside the existing worktree — no re-creation, and none of the old `-w` "already checked out" failures.
+
+**A failed spawn records why.** The spawn failure paths write the `Error`
+lifecycle transition *with the reason*: the orchestrator's `report_spawn_failure`,
+the deferred attempt (`on_error_if_pending`), a panicked spawn future and a
+circuit's failed initial-prompt delivery all go through
+`session_lifecycle::on_spawn_failed`, which puts the reason in the lifecycle
+message (`every_spawn_failure_path_records_its_reason` checks each of those
+files for the reasonless fallback). The desktop toasts the reason from the
+`node-spawn-failed` event, and the persisted lifecycle snapshot keeps it — so the
+reason survives a restart and rides the `agent-lifecycle` event. The generic
+"agent process error" fallback is for callers that genuinely have no reason to
+give, not the default for a spawn that failed. Resume already carried its reason
+through `on_resume_failed`; the fresh-spawn paths are the ones that used to drop
+it.
+
+**A deferred attempt is not a failure.** The orchestrator returns
+`SpawnOutcome::Skipped` for several reasons (a spawn already in flight, a
+cleanup generation owning the node, a startup resume it declined) and, for a
+`Suspended` node, leaves the row alone so the user's Resume / Regenerate
+affordances stay reachable. `on_error_if_pending` therefore writes `Error` only
+when the row is still `Pending`, and the `node-spawn-failed` payload says
+whether the node was actually marked failed (`node_failed`) — a client must not
+paint a deferred node red or raise an error toast for it. The skip reason names
+no cause, because `SpawnOutcome::Skipped` carries none — the orchestrator's
+skip reasons are indistinguishable at that point.
 
 **Spawn-path subprocess budgets (issue #1229).** Every git CLI call in `git/worktree/` — the three mutators in `mod.rs` and the fetch helpers in `provision.rs` — runs on, or directly feeds, the click-to-terminal path (the provisioner's four branches, the PR-creation command that reuses the same primitives, and the warm-pool refresh), so none of them may use `Command::output()`/`status()`: both wait forever. The two wedges are a full checkout (`git worktree add` runs smudge/clean filters, and git-LFS pulls over the network) and a contended `.git/index.lock`. All of them route through `git::worktree::run_bounded_git`, a seam over `process_util::run_command_with_timeout` that kills the process tree on the deadline, records the wedge via `diagnostics::record_git_subprocess_timeout`, and names the command in its error — so the spawn-failure toast says which command gave up rather than showing a bare git error. Budgets are `GIT_TREE_TIMEOUT` (120s — `worktree add` and `checkout`, which can legitimately write a whole tree), `GIT_LOCAL_TIMEOUT` (30s — `worktree move`, `reset --hard`, the `remote get-url/add/set-url` trio, `rev-parse`), and `git::sync::SPAWN_FETCH_TIMEOUT` for the fork-head fetch. `reset --hard` is deliberately on the cheaper tier despite writing a tree, because a wedged reset leaves a warm-pool entry in `refreshing` with no path back to `available`: a bounded failure the pool retries beats an unbounded one it cannot. Adding a git shell-out under this module means `run_bounded_git`, not `run_command_with_timeout` directly — `spawn_path_git_shellouts_are_all_budgeted` scans both modules' production code so an unbudgeted call site fails the suite, and `run_bounded_git_surfaces_a_hung_command_as_a_named_err` pins the behaviour with a real wedged process.
 

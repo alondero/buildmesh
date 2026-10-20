@@ -371,9 +371,10 @@ pub(super) fn deliver_circuit_initial_prompt(
             node_id,
             error
         );
-        let _ = crate::agent::session_lifecycle::on_error(
+        let _ = crate::agent::session_lifecycle::on_spawn_failed(
             &crate::agent::session_lifecycle::AppSessionLifecycleSink { app },
             node_id,
+            &format!("initial prompt delivery failed: {error}"),
         );
     }
 }

@@ -515,3 +515,41 @@ fn spawn_with_intent_is_sole_node_spawn_failed_emitter() {
         "provision must not stomp resume failures to Error via on_error"
     );
 }
+
+/// The spawn failure paths record **why** they failed.
+///
+/// The reasonless `on_error` fallback says only that something broke, and the
+/// persisted lifecycle snapshot is what a restarted app and the phone client
+/// read — a red node with no cause is a dead end. Each path that can fail a
+/// spawn must therefore pass its reason through `on_spawn_failed`, and the
+/// guard below checks each of those files for the reasonless fallback.
+#[test]
+fn every_spawn_failure_path_records_its_reason() {
+    let orch = include_str!("orchestrator.rs");
+    let commands_agent = include_str!("../../commands/agent.rs");
+    let circuit_spawn = include_str!("../../services/circuit_worker/spawn.rs");
+    // Compare against whitespace-normalised source, so a rustfmt re-wrap
+    // does not change what the guard matches.
+    let flatten = |src: &str| src.split_whitespace().collect::<Vec<_>>().join(" ");
+    for (name, src) in [
+        ("orchestrator.rs", orch),
+        ("commands/agent.rs", commands_agent),
+        ("services/circuit_worker/spawn.rs", circuit_spawn),
+    ] {
+        let flat = flatten(src);
+        assert!(
+            !flat.contains("session_lifecycle::on_error("),
+            "{name} must record why the spawn failed (on_spawn_failed), not the reasonless fallback"
+        );
+        assert!(
+            flat.contains("on_spawn_failed("),
+            "{name} must report a failed spawn through on_spawn_failed so the reason is kept"
+        );
+    }
+    // The orchestrator hands the spawn error itself to `on_spawn_failed` —
+    // not a summary of it.
+    assert!(
+        flatten(orch).contains("on_spawn_failed(&sink, node_id, error)"),
+        "the orchestrator must pass the spawn error through as it is"
+    );
+}

@@ -3,10 +3,22 @@
 /**
  * Payload of the `node-spawn-failed` Tauri event. Emitted by
  * `start_node_background` when stage-2 fails (e.g. the PTY could not be
- * opened, the agent CLI rejected its argv). The backend has already
- * updated the DB to `Error` before emitting, so the listener mirrors it.
+ * opened, the agent CLI rejected its argv). The backend updates the DB to
+ * `Error` before emitting, so the listener mirrors it — unless the attempt
+ * was deferred, which `node_failed` reports.
  *
  * Generated to `src/types/generated/NodeSpawnFailedPayload.ts`; the TS half
  * is imported by `src/stores/agentNodeStore.ts`.
  */
-export type NodeSpawnFailedPayload = { node_id: number, error: string, };
+export type NodeSpawnFailedPayload = { node_id: number, error: string, 
+/**
+ * Whether the attempt failed the node, as opposed to being deferred.
+ *
+ * A deferred attempt — the orchestrator left a `Suspended` node alone on
+ * purpose so the user's Resume / Regenerate affordances stay reachable
+ * — reports `false`: the node is not broken, so a client must not paint
+ * it red or raise an error toast for it. A node that was already in a
+ * terminal state keeps that state; the flag says the *attempt* failed,
+ * not that the row was rewritten.
+ */
+node_failed: boolean, };
