@@ -689,6 +689,14 @@ impl RunView {
         if self.state != RunState::Running || self.has_human_wait(node_id) {
             return NudgeDecision::Ignore;
         }
+        // A wake-up is only claimable with a fence the dispatch side can
+        // match: it re-reads the stamp and the revision and rejects a claim
+        // that does not match (issue #1533). An empty half is not a fence the
+        // dispatch side can ever match, so claiming one would spend the
+        // attempt's nudge budget on a wake that is only ever judged obsolete.
+        if revision.is_empty() || stamp.is_empty() {
+            return NudgeDecision::Ignore;
+        }
         // A wake-up claimed for this attempt is settled by the
         // observation pass, which emits `NudgeUncertain` and stops the
         // turn being classified. It must not be re-decided here: the

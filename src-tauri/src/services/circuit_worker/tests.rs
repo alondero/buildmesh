@@ -4168,6 +4168,10 @@ fn unverified_owned_step_can_deliver_its_one_background_wake() {
             yielded_budget_ms: 30_000,
             active_budget_ms: ACTIVE_WAIT_MS,
             stalled_task_id: Some("bg-finished".into()),
+            fence: Some(TurnFence {
+                stamp: "1:".into(),
+                revision: "report:1".into(),
+            }),
         })
     });
     assert!(events
@@ -4204,6 +4208,72 @@ fn unverified_owned_step_can_deliver_its_one_background_wake() {
             .view
             .nudge_decision(gate, 1, "new-report", "new-turn"),
         crate::circuit::stepper::NudgeDecision::Exhausted
+    );
+}
+
+#[test]
+fn a_busy_reader_pool_leaves_the_turn_fence_unknown() {
+    let fixture = ResultReadFixture::new();
+    let node = db::get_agent_node_by_id(fixture.agent_id).unwrap();
+    // Every reader is checked out, so the lifecycle stamp cannot be read.
+    let readers = crate::db::test_support::saturate_readers();
+    assert!(
+        turn_fence(&node, Some("report:1")).is_none(),
+        "a stamp that cannot be read must leave the fence unknown, not empty"
+    );
+    drop(readers);
+    // The same fence resolves once a reader is free again: the unknown fence
+    // was a shortage, not the end of the turn.
+    let fence = turn_fence(&node, Some("report:1")).expect("the stamp resolves with a free reader");
+    assert_eq!(fence.revision, "report:1");
+    assert!(
+        !fence.stamp.is_empty(),
+        "a resolved fence carries its stamp"
+    );
+}
+
+/// Issue #1533: a wake-up whose fence is unknown is never claimed, so the
+/// attempt keeps its one wake for a later observation pass. Claiming it would
+/// spend the nudge budget on a wake the dispatch side can only reject as
+/// obsolete, and the finished background task would go unannounced until the
+/// wait times out.
+#[test]
+fn an_unknown_fence_leaves_the_background_wake_claimable() {
+    let mut fixture = ResultReadFixture::new();
+    let gate = "implementation_classifier";
+    fixture.view.step_mut(gate).unwrap().status = StepStatus::Unverified;
+    let mut events = Vec::new();
+    observe_waits_with(&fixture.view, &mut events, 1_000, |_, _| {
+        Some(WaitObservation {
+            progress: Some("report:1".into()),
+            observed: true,
+            yielded: true,
+            yielded_budget_ms: 30_000,
+            active_budget_ms: ACTIVE_WAIT_MS,
+            stalled_task_id: Some("bg-finished".into()),
+            fence: None,
+        })
+    });
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, CircuitEvent::NudgeIdleSession { .. })),
+        "a wake-up with an unknown fence must not be claimed"
+    );
+    // Nothing was claimed, so the attempt still has its one wake.
+    assert_eq!(
+        fixture.view.nudge_decision(gate, 1, "report:1", "1:"),
+        crate::circuit::stepper::NudgeDecision::Nudge
+    );
+    // A claim that carries an empty half is refused outright: the dispatch
+    // side re-reads both halves and could never match it.
+    assert_eq!(
+        fixture.view.nudge_decision(gate, 1, "", "1:"),
+        crate::circuit::stepper::NudgeDecision::Ignore
+    );
+    assert_eq!(
+        fixture.view.nudge_decision(gate, 1, "report:1", ""),
+        crate::circuit::stepper::NudgeDecision::Ignore
     );
 }
 
@@ -7019,6 +7089,7 @@ fn yielded_wait_after_a_working_verdict_gets_the_full_yielded_allowance() {
                 yielded_budget_ms: HARNESS_LIFECYCLE_BUDGET_MS,
                 active_budget_ms: ACTIVE_WAIT_MS,
                 stalled_task_id: None,
+                fence: None,
             })
         });
         match wait_event(&events) {
