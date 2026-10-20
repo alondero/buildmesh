@@ -92,6 +92,7 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/git/worktree/worktree_tests.rs': 'git::worktree::tests',
   'src-tauri/src/commands/prune_tests.rs': 'commands::prune::prune_tests',
   'src-tauri/src/http/ws_tests.rs': 'http::ws::tests',
+  'src-tauri/src/http/read_status_tests.rs': 'http::read_status::tests',
   'src-tauri/src/services/agent_node_tests.rs': 'services::agent_node::tests',
   'src-tauri/src/services/agent_node_discovery_tests.rs': 'services::agent_node_discovery::tests',
   'src-tauri/src/services/circuit_worker/dispatch_tests.rs': 'services::circuit_worker::dispatch::tests',
