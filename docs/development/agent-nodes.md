@@ -302,23 +302,33 @@ config sets `core.bare=true` reports no working directory even though the folder
 holds a full checkout; git then refuses the commands that need a work tree
 ("this operation must be run in a work tree"), so `git status` in that folder
 fails and the checkout is invisible to git's working-tree commands.
-`git::project::resolve` tells the two cases apart by the **tracked files on
-disk and their content**: a checkout holds them, a bare repository holds no
-working-tree file at all, and the flag only stops git from *using* the working
-tree, it does not delete it. The flag itself is read from the repository's
-config rather than assumed.
+`git::project::resolve` tells the two cases apart by the **index's own record of
+the working tree**: an index entry that carries stat data — the size and
+timestamps of a file that existed on disk — was staged from a real file, and
+that file is still there. A bare repository's index carries no stat data (`git
+read-tree` writes tree data without touching the filesystem), so it does not pass
+that check whatever its index says and whatever file happens to sit beside it.
+The flag itself is read from the repository's config rather than assumed.
 
-Two cheaper signals are not evidence. The Git directory's *name* is not: a
+Three cheaper signals are not evidence. The Git directory's *name* is not: a
 checkout may keep its data in a separate directory (`--separate-git-dir`), and
 that directory may itself be named `.git`, so the name alone does not stand in for the
 checkout relationship — the `.git` **file** is the only pointer back to the
-checkout, and it is resolved first. The **index** is not evidence either: `git
+checkout, and it is resolved first, with a relative target resolved from the
+directory that holds the link file (the way git resolves it) rather than from
+the process working directory. The **index** is not evidence either: `git
 read-tree` fills a bare repository's index with tree data without writing a
 single file, and git only says an index is *usually* absent from a bare
 repository. A *path* is not evidence either: a bare repository's index can name
-a path that an unrelated file beside it happens to use, so the file's content
-must match the blob the index records (line-ending conversion undone, because
-git may have written the working tree with CRLF while the blob keeps LF).
+a path that an unrelated file beside it happens to use.
+
+The comparison is **stat-based, not content-based**, on purpose. Git may have
+converted line endings or applied a checkout filter when it wrote the working
+tree, so the bytes on disk need not hash to the blob the index records — the
+index records the *working tree's* size, so the stat survives a smudge filter,
+and git itself reports such a file as modified: present, but differing from the blob.
+Presence is what the diagnosis asks about. The scan is bounded and reads no
+file content, so a large tracked file is not loaded into memory.
 
 A checkout whose tracked files are not on disk keeps the plain
 wording: there is no evidence it was ever a checkout. For the

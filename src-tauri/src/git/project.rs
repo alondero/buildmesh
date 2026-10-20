@@ -68,13 +68,14 @@ fn no_working_directory_reason(selected: &str, repo: &Repository) -> String {
 /// writing a single file. Telling such a repository to set `core.bare=false`
 /// would break the one thing it is: a repository with no working tree.
 ///
-/// The evidence that settles it is the tracked files themselves, and their
-/// content. A checkout holds its tracked files on disk with the content the
-/// index records; a bare repository holds no working-tree file, and a file
-/// that merely shares a path with an index entry is not the one the index
-/// describes. The flag is read from the repository's config rather than
-/// assumed, so a repository that reports no working directory for some other
-/// reason keeps the plain bare-repository wording.
+/// The evidence that settles it is the index's own record of the working
+/// tree: an entry that carries stat data was staged from a file that existed
+/// on disk, and that file is still there. A bare repository's index carries
+/// no stat data, so it does not pass that check whatever its index says and
+/// whatever file happens to sit beside it. The flag is read from the
+/// repository's config rather than assumed, so a repository that reports no
+/// working directory for some other reason keeps the plain bare-repository
+/// wording.
 fn working_tree_flagged_bare(repo: &Repository, selected: &str) -> bool {
     let flagged = repo
         .config()
@@ -86,7 +87,7 @@ fn working_tree_flagged_bare(repo: &Repository, selected: &str) -> bool {
     let Some(root) = checkout_root(repo, selected) else {
         return false;
     };
-    tracked_files_match_index(repo, &root)
+    tracked_files_present(repo, &root)
 }
 
 /// The folder that holds the checkout, when the repository's layout names one.
@@ -100,8 +101,8 @@ fn working_tree_flagged_bare(repo: &Repository, selected: &str) -> bool {
 /// The standard layout is the fallback: the Git data lives in a `.git`
 /// directory inside the checkout, so the checkout is the Git directory's
 /// parent. A bare repository reaches that fallback only when no `.git` file
-/// points at it, and it is then separated from a checkout by the content
-/// check in [`tracked_files_match_index`].
+/// points at it, and it is then separated from a checkout by the stat check
+/// in [`tracked_files_present`].
 fn checkout_root(repo: &Repository, selected: &str) -> Option<std::path::PathBuf> {
     let git_dir = repo.path();
     if let Some(root) = gitlink_checkout_root(git_dir, selected) {
@@ -130,6 +131,12 @@ fn gitlink_checkout_root(git_dir: &std::path::Path, selected: &str) -> Option<st
 }
 
 /// Whether a `.git` *file* (a gitlink) names `git_dir` as the repository.
+///
+/// A relative `gitdir:` target is resolved from the directory that holds the
+/// link file, the way git resolves it (`setup.c`: `read_gitfile_gently`) —
+/// `git worktree` writes one when `worktree.useRelativePaths` is set, and
+/// resolving it against the process working directory instead would compare
+/// the wrong path.
 fn gitlink_points_at(link: &std::path::Path, git_dir: &std::path::Path) -> bool {
     let Ok(text) = std::fs::read_to_string(link) else {
         return false;
@@ -137,91 +144,117 @@ fn gitlink_points_at(link: &std::path::Path, git_dir: &std::path::Path) -> bool 
     let Some(target) = text.trim().strip_prefix("gitdir:") else {
         return false;
     };
-    let Ok(target) = std::path::PathBuf::from(target.trim()).canonicalize() else {
+    let target = std::path::Path::new(target.trim());
+    let target = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        match link.parent() {
+            Some(parent) => parent.join(target),
+            None => target.to_path_buf(),
+        }
+    };
+    let Ok(target) = target.canonicalize() else {
         return false;
     };
     target == git_dir
 }
 
-/// Whether the repository's tracked files are on disk under `root` and still
-/// hold what the index records for them.
+/// Whether the repository's tracked files are on disk under `root`.
 ///
-/// The path alone is not evidence. A bare repository's index can name a path
-/// that an unrelated file in the folder beside it happens to use, and telling
-/// that repository to clear `core.bare` would break the one thing it is. The
-/// file's content is the test that survives that collision: a checkout's file
-/// still hashes to the blob the index records.
+/// The index is git's record of the working tree. An entry that carries stat
+/// data — the size and timestamps of a file that existed on disk — was staged
+/// from a real file, and that file is still there. A bare repository's index
+/// carries no stat data (`git read-tree` writes tree data without touching
+/// the filesystem), so a bare repository does not pass this check, whatever its
+/// index says and whatever file happens to sit beside it.
 ///
-/// The scan is bounded — a diagnostic must not read a whole repository — and
-/// a checkout's first few tracked files are enough evidence.
-fn tracked_files_match_index(repo: &Repository, root: &std::path::Path) -> bool {
+/// The comparison is stat-based rather than content-based, on purpose. Git may
+/// have converted line endings or applied a checkout filter when it wrote the
+/// working tree, so the bytes on disk need not hash to the blob the index
+/// records — git itself reports such a file as modified. The index records the
+/// *working tree's* size, not the blob's, so the stat survives a smudge
+/// filter. What this check asks about is presence, not identity.
+///
+/// The scan is bounded: a diagnostic must not walk a whole repository, and it
+/// reads no file content at all, so a large tracked file is not loaded into memory.
+fn tracked_files_present(repo: &Repository, root: &std::path::Path) -> bool {
     /// The index mode of a submodule (gitlink) entry.
     const GITLINK_MODE: u32 = 0o160000;
+    /// The index mode of a sparse-index directory entry.
+    const SPARSE_DIR_MODE: u32 = 0o040000;
+    /// `GIT_INDEX_ENTRY_SKIP_WORKTREE`: the path is excluded from the working
+    /// tree by a sparse checkout, so it is not evidence of one.
+    const SKIP_WORKTREE: u16 = 1 << 14;
     /// How many index entries the check may examine.
-    const MAX_ENTRIES: usize = 64;
+    const MAX_ENTRIES: usize = 4096;
+
     let Ok(index) = repo.index() else {
         return false;
     };
-    index.iter().take(MAX_ENTRIES).any(|entry| {
-        if entry.mode == GITLINK_MODE {
-            return false;
+    let mut examined = 0usize;
+    for entry in index.iter() {
+        if entry.mode == GITLINK_MODE || entry.mode == SPARSE_DIR_MODE {
+            continue;
+        }
+        if entry.flags_extended & SKIP_WORKTREE != 0 {
+            continue;
+        }
+        // No stat data means git did not stage a file for this path.
+        if !entry_has_stat_data(&entry) {
+            continue;
+        }
+        examined += 1;
+        if examined > MAX_ENTRIES {
+            break;
         }
         let name = String::from_utf8_lossy(&entry.path);
         if name.is_empty() {
-            return false;
+            continue;
         }
         let path = root.join(name.as_ref());
         let Ok(meta) = std::fs::metadata(&path) else {
-            return false;
+            continue;
         };
         if !meta.is_file() {
-            return false;
+            continue;
         }
-        let Ok(bytes) = std::fs::read(&path) else {
-            return false;
-        };
-        // Git may have converted line endings when it wrote the working
-        // tree, so the file on disk can differ from the blob by CRLF alone.
-        let normalized = normalize_line_endings(&bytes);
-        // The index records the size it saw. A zero size means the index
-        // carries no stat information for this entry (`git read-tree` writes
-        // none), so the check is skipped rather than trusted.
-        let size = u64::from(entry.file_size);
-        if size != 0 && bytes.len() as u64 != size && normalized.len() as u64 != size {
-            return false;
+        if meta.len() != u64::from(entry.file_size) {
+            continue;
         }
-        content_matches_index(&entry, &bytes, &normalized)
-    })
-}
-
-/// Whether the file's content is the blob the index records for it.
-///
-/// The raw bytes are tried first, then the LF-normalized form, because git
-/// may have converted line endings on checkout (`core.autocrlf`,
-/// `.gitattributes`).
-fn content_matches_index(entry: &git2::IndexEntry, bytes: &[u8], normalized: &[u8]) -> bool {
-    let hash = |data: &[u8]| git2::Oid::hash_object(git2::ObjectType::Blob, data).ok();
-    if hash(bytes) == Some(entry.id) {
+        if !mtime_matches(&meta, &entry.mtime) {
+            continue;
+        }
         return true;
     }
-    normalized != bytes && hash(normalized) == Some(entry.id)
+    false
 }
 
-/// The blob content git stores for a text file: CRLF line endings normalized
-/// to LF.
-fn normalize_line_endings(bytes: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'\r' && bytes.get(index + 1) == Some(&b'\n') {
-            out.push(b'\n');
-            index += 2;
-        } else {
-            out.push(bytes[index]);
-            index += 1;
-        }
+/// Whether the index recorded stat data for this entry — the sign that git
+/// staged it from a file that existed on disk.
+fn entry_has_stat_data(entry: &git2::IndexEntry) -> bool {
+    entry.file_size != 0
+        || entry.mtime.seconds() != 0
+        || entry.ctime.seconds() != 0
+        || entry.ino != 0
+        || entry.dev != 0
+}
+
+/// Whether the file's modification time is the one the index recorded.
+///
+/// The seconds must match. The nanoseconds are compared only when the index
+/// recorded them: a filesystem with a coarse timestamp writes none, and the
+/// index then holds none either.
+fn mtime_matches(meta: &std::fs::Metadata, recorded: &git2::IndexTime) -> bool {
+    let Ok(modified) = meta.modified() else {
+        return false;
+    };
+    let Ok(since_epoch) = modified.duration_since(std::time::UNIX_EPOCH) else {
+        return false;
+    };
+    if since_epoch.as_secs() as i64 != i64::from(recorded.seconds()) {
+        return false;
     }
-    out
+    recorded.nanoseconds() == 0 || since_epoch.subsec_nanos() == recorded.nanoseconds()
 }
 
 fn repository_identity(repo: &Repository) -> Result<String, String> {
@@ -557,23 +590,200 @@ mod tests {
     }
 
     /// Git may write the working tree with CRLF line endings while the blob
-    /// keeps LF, so a checkout still holds the content the index records —
-    /// after the conversion git itself would undo. Comparing the raw bytes
-    /// alone would call that checkout a bare repository.
+    /// keeps LF, so the file on disk differs from the blob in content *and*
+    /// in length. The index records the working tree's size, so the checkout
+    /// is still recognised.
     #[test]
     fn a_checkout_with_converted_line_endings_is_still_a_working_tree() {
         let td = TestDir::new("project-flagged-crlf");
         init_repo_with_commit(td.path(), &[("file.txt", "content\n")]);
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("git");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&[
+            "-C",
+            td.path().to_str().unwrap(),
+            "config",
+            "core.autocrlf",
+            "true",
+        ]);
+        // Dirty the file so git rewrites it through the conversion.
+        std::fs::write(td.path().join("file.txt"), "dirty").unwrap();
+        run(&[
+            "-C",
+            td.path().to_str().unwrap(),
+            "checkout",
+            "-f",
+            "--",
+            "file.txt",
+        ]);
+        assert_eq!(
+            std::fs::read_to_string(td.path().join("file.txt")).unwrap(),
+            "content\r\n",
+            "fixture precondition: git must have converted the working tree"
+        );
+
         let repo = Repository::open(td.path()).unwrap();
         repo.config().unwrap().set_bool("core.bare", true).unwrap();
         drop(repo);
-        // The working tree holds the converted content; the blob holds LF.
-        std::fs::write(td.path().join("file.txt"), "content\r\n").unwrap();
 
         let reason = resolve(td.path().to_str().unwrap()).unwrap_err();
         assert!(
             reason.contains("core.bare=true"),
             "a checkout with converted line endings still holds a working tree: {reason}"
+        );
+    }
+
+    /// A configured checkout filter rewrites the working tree, so the file on
+    /// disk differs from the blob in content and in length. Git itself reports
+    /// such a file as modified — present, but differing from the blob — and presence is
+    /// what the diagnosis asks about.
+    #[test]
+    fn a_checkout_with_a_filtered_file_is_still_a_working_tree() {
+        let td = TestDir::new("project-flagged-filtered");
+        init_repo_with_commit(td.path(), &[("file.txt", "content\n")]);
+        // The attribute file stays untracked, so the fixture has a single tracked file,
+        // tracked file and the evidence can only come from the filtered one.
+        std::fs::write(td.path().join(".gitattributes"), "file.txt filter=demo\n").unwrap();
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("git");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&[
+            "-C",
+            td.path().to_str().unwrap(),
+            "config",
+            "filter.demo.clean",
+            "cat",
+        ]);
+        run(&[
+            "-C",
+            td.path().to_str().unwrap(),
+            "config",
+            "filter.demo.smudge",
+            "sed s/content/transformed/",
+        ]);
+        // Dirty the file so git rewrites it through the filter.
+        std::fs::write(td.path().join("file.txt"), "dirty").unwrap();
+        run(&[
+            "-C",
+            td.path().to_str().unwrap(),
+            "checkout",
+            "-f",
+            "--",
+            "file.txt",
+        ]);
+        assert_eq!(
+            std::fs::read_to_string(td.path().join("file.txt")).unwrap(),
+            "transformed\n",
+            "fixture precondition: git must have applied the smudge filter"
+        );
+
+        let repo = Repository::open(td.path()).unwrap();
+        repo.config().unwrap().set_bool("core.bare", true).unwrap();
+        drop(repo);
+
+        let reason = resolve(td.path().to_str().unwrap()).unwrap_err();
+        assert!(
+            reason.contains("core.bare=true"),
+            "a checkout whose file was rewritten by a filter still holds a working tree: {reason}"
+        );
+    }
+
+    /// A sparse working tree leaves tracked paths out of the working tree
+    /// while the index keeps them, so the evidence can sit past a long run of
+    /// paths that are not there.
+    #[test]
+    fn a_sparse_working_tree_finds_the_paths_that_are_present() {
+        let td = TestDir::new("project-flagged-sparse");
+        let absent: Vec<String> = (0..100).map(|i| format!("absent/{i:03}.txt")).collect();
+        let mut files: Vec<(&str, &str)> = absent
+            .iter()
+            .map(|name| (name.as_str(), "content\n"))
+            .collect();
+        files.push(("present/file.txt", "content\n"));
+        init_repo_with_commit(td.path(), &files);
+        // The absent paths stay in the index but leave the working tree.
+        for name in &absent {
+            std::fs::remove_file(td.path().join(name)).unwrap();
+        }
+
+        let repo = Repository::open(td.path()).unwrap();
+        repo.config().unwrap().set_bool("core.bare", true).unwrap();
+        drop(repo);
+
+        let reason = resolve(td.path().to_str().unwrap()).unwrap_err();
+        assert!(
+            reason.contains("core.bare=true"),
+            "a sparse working tree still holds the paths it kept: {reason}"
+        );
+    }
+
+    /// A `.git` *file* may name its Git directory relatively — git writes one
+    /// when `worktree.useRelativePaths` is set. Resolving that target against
+    /// the process working directory instead of the directory that holds the
+    /// link file compares the wrong path, and the checkout is then described
+    /// as a bare repository.
+    #[test]
+    fn a_relative_gitdir_link_is_resolved_from_the_link_file() {
+        let td = TestDir::new("project-flagged-relative-gitdir");
+        let checkout = td.path().join("checkout");
+        let git_dir = td.path().join("gitdata");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("git");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&[
+            "init",
+            "--separate-git-dir",
+            git_dir.to_str().unwrap(),
+            checkout.to_str().unwrap(),
+        ]);
+        std::fs::write(checkout.join("file.txt"), "content\n").unwrap();
+        run(&["-C", checkout.to_str().unwrap(), "add", "file.txt"]);
+        run(&[
+            "-C",
+            checkout.to_str().unwrap(),
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=test",
+            "commit",
+            "-m",
+            "initial",
+        ]);
+        // The relative form git writes for a linked worktree, pointing at the
+        // Git directory beside the checkout.
+        std::fs::write(checkout.join(".git"), "gitdir: ../gitdata\n").unwrap();
+        run(&[
+            "--git-dir",
+            git_dir.to_str().unwrap(),
+            "config",
+            "core.bare",
+            "true",
+        ]);
+
+        let reason = resolve(checkout.to_str().unwrap()).unwrap_err();
+        assert!(
+            reason.contains("core.bare=true"),
+            "a checkout reached through a relative .git file holds a working tree: {reason}"
         );
     }
 
