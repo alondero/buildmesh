@@ -31,6 +31,10 @@ pub enum CircuitQueueDirection {
 pub struct CircuitRunDetail {
     pub run: AutopilotCircuitRun,
     pub steps: Vec<AutopilotCircuitRunStep>,
+    /// Active review allowance: zero is unlimited, absent means unavailable.
+    #[ts(optional)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_round_limit: Option<i32>,
 }
 
 #[command]
@@ -265,6 +269,7 @@ fn map_circuit_rows(
                 .map(|ledger| CircuitRunDetail {
                     run: ledger.run,
                     steps: ledger.steps,
+                    review_round_limit: ledger.review_round_limit,
                 })
                 .collect(),
         })
@@ -886,7 +891,16 @@ pub fn list_circuit_runs(
     runs.into_iter()
         .map(|run| {
             let steps = crate::db::list_circuit_run_steps(run.id).map_err(|e| e.to_string())?;
-            Ok(CircuitRunDetail { run, steps })
+            let review_round_limit = {
+                let db = crate::db::read_conn();
+                crate::db::circuit::review_rounds::current_limit(&db, &run)
+                    .map_err(|e| e.to_string())?
+            };
+            Ok(CircuitRunDetail {
+                run,
+                steps,
+                review_round_limit,
+            })
         })
         .collect()
 }
@@ -948,6 +962,23 @@ pub async fn continue_circuit_review(
         },
     );
     Ok(next_id)
+}
+
+/// Update only this run's review allowance; current work keeps running.
+#[command]
+pub async fn set_circuit_review_round_limit(
+    app: AppHandle,
+    run_id: i64,
+    max_rounds: i32,
+) -> Result<(), String> {
+    let state = crate::commands::run_blocking("set_circuit_review_round_limit", move || {
+        crate::db::circuit::review_rounds::set_review_round_limit(run_id, max_rounds)
+            .map_err(String::from)
+    })
+    .await?;
+    crate::services::circuit_worker::wake_circuit_worker();
+    emit_run_updated(Some(&app), run_id, &state);
+    Ok(())
 }
 
 /// Gracefully pause one active run: the graph stops advancing while the

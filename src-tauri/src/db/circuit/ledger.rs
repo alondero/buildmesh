@@ -764,6 +764,7 @@ pub(crate) fn list_circuit_trigger_identities_inner(
 pub struct CircuitRunLedger {
     pub run: AutopilotCircuitRun,
     pub steps: Vec<AutopilotCircuitRunStep>,
+    pub review_round_limit: Option<i32>,
 }
 
 /// Ensure the inspectable built-in exists before any review run is created.
@@ -923,11 +924,14 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
         let runs = runs_by_circuit.remove(&circuit.id).unwrap_or_default();
         let ledgers = runs
             .into_iter()
-            .map(|run| CircuitRunLedger {
-                steps: steps_by_run.remove(&run.id).unwrap_or_default(),
-                run,
+            .map(|run| {
+                Ok(CircuitRunLedger {
+                    review_round_limit: super::review_rounds::current_limit(db, &run)?,
+                    steps: steps_by_run.remove(&run.id).unwrap_or_default(),
+                    run,
+                })
             })
-            .collect();
+            .collect::<SqlResult<Vec<_>>>()?;
         out.push((circuit, ledgers));
     }
     Ok(out)

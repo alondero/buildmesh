@@ -258,6 +258,35 @@ beforeEach(() => {
 beforeAll(preloadProbeTabs, 60_000);
 
 describe('CircuitsProbeTab', () => {
+  it('uses the active run allowance when the editable blueprint no longer contains review', async () => {
+    mockBackend({ circuits: [CIRCUIT], runs: [{ ...RUN_RUNNING, review_round_limit: 3 }] });
+    openProbeDestination('circuits');
+    const select = await screen.findByRole('combobox', { name: 'Review rounds' }) as HTMLSelectElement;
+    expect(select.value).toBe('3');
+  });
+  it('edits review rounds directly on a collapsed run card and reflects the refreshed allowance', async () => {
+    const graph = { version: 3, nodes: [
+      { id: 'verdict', type: { type: 'review_verdict', target_node_id: 'reviewer' } },
+      { id: 'retry', type: { type: 'retry_limit', max_retries: 3 } },
+    ], edges: [{ from: 'retry', to: 'verdict', condition: 'always' }, { from: 'verdict', to: 'retry', condition: 'always' }] };
+    const circuits = [{ ...CIRCUIT, graph_json: JSON.stringify(graph) }];
+    const run = { ...RUN_RUNNING, review_round_limit: 3, run: { ...RUN_RUNNING.run, context_json: '{"retry.attempt":"3","retry.max_retries":"3"}' } };
+    mockBackend({ circuits, runs: [run] });
+    const fallback = vi.mocked(invoke).getMockImplementation();
+    let finish!: () => void;
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => cmd === 'set_circuit_review_round_limit'
+      ? new Promise<void>((resolve) => { finish = resolve; }) : fallback!(cmd, args));
+    openProbeDestination('circuits');
+    const select = await screen.findByRole('combobox', { name: 'Review rounds' }) as HTMLSelectElement;
+    expect(screen.getByTestId('run-toggle-12').getAttribute('aria-expanded')).toBe('false');
+    fireEvent.change(select, { target: { value: '0' } });
+    expect(invoke).toHaveBeenCalledWith('set_circuit_review_round_limit', { runId: 12, maxRounds: 0 });
+    expect(select.disabled).toBe(true);
+    mockBackend({ circuits, runs: [{ ...run, review_round_limit: 0, run: { ...run.run, context_json: '{"retry.attempt":"3","retry.max_retries":"unlimited","review.round_limit":"0"}' } }] });
+    await act(async () => finish());
+    await waitFor(() => expect((screen.getByRole('combobox', { name: 'Review rounds' }) as HTMLSelectElement).value).toBe('0'));
+    expect(screen.getByTestId('run-review-rounds-12').textContent).toBe('Round 3 of unlimited');
+  });
   it('exposes the built-in Review Blueprint before it has any runs', async () => {
     mockBackend({ circuits: [{ ...CIRCUIT, is_preset: true, enabled: false }], runs: [] });
     openProbeDestination('circuits');

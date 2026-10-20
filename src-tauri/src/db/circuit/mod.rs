@@ -22,6 +22,7 @@ mod operator_push_tests;
 pub mod overview;
 pub mod queue;
 pub mod recovery;
+pub mod review_rounds;
 pub mod step_recovery;
 
 pub use leases::*;

@@ -5,4 +5,8 @@ import type { AutopilotCircuitRunStep } from "./AutopilotCircuitRunStep";
 /**
  * One run plus its step ledger, for the Probe tab's run list.
  */
-export type CircuitRunDetail = { run: AutopilotCircuitRun, steps: Array<AutopilotCircuitRunStep>, };
+export type CircuitRunDetail = { run: AutopilotCircuitRun, steps: Array<AutopilotCircuitRunStep>, 
+/**
+ * Active review allowance: zero is unlimited, absent means unavailable.
+ */
+review_round_limit?: number, };

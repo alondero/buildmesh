@@ -301,7 +301,13 @@ fn review_progress(
     let context_limit = (context.get("source.review_preset") == Some("1"))
         .then(|| context.get("retry.max_retries")?.parse::<i32>().ok())
         .flatten();
-    let max_rounds = context_limit.or(graph_limit).filter(|limit| *limit > 0);
+    let override_limit = context
+        .get("review.round_limit")
+        .and_then(|value| value.parse::<i32>().ok());
+    let max_rounds = override_limit
+        .or(context_limit)
+        .or(graph_limit)
+        .filter(|limit| *limit > 0);
 
     let recorded_this_pass = context.get(&format!("node.{}.review_verdict_attempt", gate.id))
         == Some(round.to_string().as_str());

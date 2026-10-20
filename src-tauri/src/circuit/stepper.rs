@@ -368,7 +368,8 @@ impl RunView {
         let Some(max_retries) = retry_gate_max(self, gate_id) else {
             return false;
         };
-        retry_target_attempt(self, gate_id) < max_retries
+        (max_retries == 0 && self.context.get("review.round_limit") == Some("0"))
+            || retry_target_attempt(self, gate_id) < max_retries
     }
 
     /// Read-path availability is structural; the write boundary validates delivery.
@@ -3373,7 +3374,7 @@ fn feedback_scheduler_context(run: &RunView) -> CircuitContext {
     if run.context.get("source.review_preset") == Some("1") {
         context.set("source.review_preset", "1");
     }
-    for key in ["retry.max_retries", "retry.attempt"] {
+    for key in ["retry.max_retries", "retry.attempt", "review.round_limit"] {
         if let Some(value) = run
             .context
             .get(key)
@@ -4174,6 +4175,16 @@ fn retry_gate_max(run: &RunView, gate_id: &str) -> Option<i32> {
         Some(CircuitNodeKind::RetryLimit { max_retries }) => *max_retries,
         _ => return None,
     };
+    if review_retry_gate(&run.graph, gate_id) {
+        if let Some(limit) = run
+            .context
+            .get("review.round_limit")
+            .and_then(|v| v.parse::<i32>().ok())
+            .filter(|v| *v >= 0)
+        {
+            return Some(limit);
+        }
+    }
     Some(if run.context.get("source.review_preset") == Some("1") {
         run.context
             .get("retry.max_retries")
@@ -4201,8 +4212,17 @@ fn retry_target_attempt(run: &RunView, gate_id: &str) -> i32 {
 }
 
 fn execute_retry_limit(run: &mut RunView, t: &mut Transition, node_id: &str, max_retries: i32) {
-    run.context
-        .set("retry.max_retries", max_retries.to_string());
+    let unlimited = max_retries == 0
+        && run.context.get("review.round_limit") == Some("0")
+        && review_retry_gate(&run.graph, node_id);
+    run.context.set(
+        "retry.max_retries",
+        if unlimited {
+            "unlimited".into()
+        } else {
+            max_retries.to_string()
+        },
+    );
     let failed_parent = run
         .steps
         .iter()
@@ -4258,7 +4278,7 @@ fn execute_retry_limit(run: &mut RunView, t: &mut Transition, node_id: &str, max
     let target = retry_target.clone().unwrap_or(parent_node_id);
     let attempt = step_attempt(run, &target);
     run.context.set("retry.attempt", attempt.to_string());
-    if attempt < max_retries {
+    if unlimited || attempt < max_retries {
         let next_attempt = attempt + 1;
         run.context.set("retry.attempt", next_attempt.to_string());
         reset_step_for_retry(run, t, &target, next_attempt);
@@ -4278,6 +4298,39 @@ fn execute_retry_limit(run: &mut RunView, t: &mut Transition, node_id: &str, max
             format!("retry budget exhausted after {max_retries} attempts"),
         );
     }
+}
+
+/// Review allowances must never change publication or other retry budgets.
+pub(crate) fn review_retry_gate(graph: &CircuitGraph, gate_id: &str) -> bool {
+    if !matches!(
+        graph.node(gate_id).map(|node| &node.kind),
+        Some(CircuitNodeKind::RetryLimit { .. })
+    ) {
+        return false;
+    }
+    let Some(target) = graph.children(gate_id).into_iter().next() else {
+        return false;
+    };
+    let mut stack = vec![target];
+    let mut visited = std::collections::HashSet::new();
+    let mut loops = false;
+    let mut review = false;
+    while let Some(id) = stack.pop() {
+        if !visited.insert(id.clone()) {
+            continue;
+        }
+        if id == gate_id {
+            loops = true;
+            continue;
+        }
+        review |= graph.is_ancestor(gate_id, &id)
+            && matches!(
+                graph.node(&id).map(|node| &node.kind),
+                Some(CircuitNodeKind::ReviewVerdict { .. })
+            );
+        stack.extend(graph.children(&id));
+    }
+    loops && review
 }
 
 fn reaches_review_verdict(run: &RunView, start: &str) -> bool {
