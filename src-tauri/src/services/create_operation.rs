@@ -540,8 +540,15 @@ fn create_node_blocking(
 }
 
 impl From<rusqlite::Error> for CreateRejection {
+    /// A database failure keeps its type (issue #1533).
+    ///
+    /// `Offload` flattens the error to a string, so the transport could not
+    /// tell a busy reader pool — transient, the client retries — from a
+    /// broken query, and answered `500` for both. `Create(AgentNodeError::Db)`
+    /// carries the typed error through the claim and the replay reads, so the
+    /// route can answer `503` for a busy database and `500` for a broken one.
     fn from(source: rusqlite::Error) -> Self {
-        Self::Offload(source.to_string())
+        Self::Create(AgentNodeError::Db(source))
     }
 }
 

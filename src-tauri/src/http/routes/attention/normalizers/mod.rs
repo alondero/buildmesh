@@ -206,8 +206,8 @@ pub(super) fn resolve_node(
     addressed: Option<crate::models::AgentNode>,
     raw: Option<&Value>,
     generic_mcode: bool,
-    resolve_mcode: impl FnOnce(&str, &str) -> Option<crate::models::AgentNode>,
-) -> Option<crate::models::AgentNode> {
+    resolve_mcode: impl FnOnce(&str, &str) -> Result<Option<crate::models::AgentNode>, rusqlite::Error>,
+) -> Result<Option<crate::models::AgentNode>, rusqlite::Error> {
     let payload = raw.and_then(mcode::parse);
     mcode::resolve_attention_node(addressed, payload.as_ref(), generic_mcode, resolve_mcode)
 }

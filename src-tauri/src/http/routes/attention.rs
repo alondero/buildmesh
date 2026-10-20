@@ -94,7 +94,7 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
                 value.as_ref(),
                 session_id.is_none(),
                 crate::services::mcode_session::hook_target,
-            );
+            )?;
             let provider = node
                 .as_ref()
                 .map(|node| normalizers::provider_for(&node.provider))

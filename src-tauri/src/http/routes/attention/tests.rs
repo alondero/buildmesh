@@ -2548,7 +2548,12 @@ fn mcode_native_attention_routes_legacy_and_shared_callbacks_before_capture() {
     let start = body("SessionStart", id, "f:\\repo\\implementation");
     let start_payload = HookPayload::parse(&start);
     let resolve = |id: &str, cwd: &str| {
-        crate::services::mcode_session::select_hook_target(&nodes, id, cwd, |_| true)
+        Ok(crate::services::mcode_session::select_hook_target(
+            &nodes,
+            id,
+            cwd,
+            |_| true,
+        ))
     };
     let legacy = resolve_attention_node(
         Some(nodes[1].clone()),
@@ -2556,8 +2561,11 @@ fn mcode_native_attention_routes_legacy_and_shared_callbacks_before_capture() {
         false,
         resolve,
     )
-    .unwrap();
-    let shared = resolve_attention_node(None, start_payload.as_ref(), true, resolve).unwrap();
+    .unwrap()
+    .expect("the addressed node resolves");
+    let shared = resolve_attention_node(None, start_payload.as_ref(), true, resolve)
+        .unwrap()
+        .expect("the shared address resolves");
     assert_eq!(
         legacy.id, 4724,
         "last-writer numeric URL cannot select node4725"
@@ -2602,13 +2610,28 @@ fn mcode_native_attention_routes_legacy_and_shared_callbacks_before_capture() {
         false,
         resolve
     )
+    .unwrap()
     .is_none());
-    assert!(resolve_attention_node(None, standalone_payload.as_ref(), true, resolve).is_none());
-    assert!(resolve_attention_node(None, missing_cwd_payload.as_ref(), true, resolve).is_none());
+    assert!(
+        resolve_attention_node(None, standalone_payload.as_ref(), true, resolve)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        resolve_attention_node(None, missing_cwd_payload.as_ref(), true, resolve)
+            .unwrap()
+            .is_none()
+    );
     assert!(
         resolve_attention_node(None, start_payload.as_ref(), true, |id, cwd| {
-            crate::services::mcode_session::select_hook_target(&nodes, id, cwd, |_| false)
+            Ok(crate::services::mcode_session::select_hook_target(
+                &nodes,
+                id,
+                cwd,
+                |_| false,
+            ))
         })
+        .unwrap()
         .is_none()
     );
 }

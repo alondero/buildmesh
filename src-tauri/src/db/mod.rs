@@ -348,7 +348,13 @@ impl ReaderPool {
         let deadline = started + self.checkout_timeout;
         loop {
             if let Some(conn) = available.pop() {
-                let waited = self.now().saturating_duration_since(started);
+                // The lease starts when the reader is *handed out*, not when
+                // the caller started waiting: a contended checkout would
+                // otherwise report the queueing time as holding time, and the
+                // slow-lease warning would name a reader that was never held
+                // for long (issue #1533).
+                let granted = self.now();
+                let waited = granted.saturating_duration_since(started);
                 self.counters.checkouts.fetch_add(1, Ordering::Relaxed);
                 self.counters.in_use.fetch_add(1, Ordering::Relaxed);
                 self.counters
@@ -363,7 +369,7 @@ impl ReaderPool {
                 return Ok(ReadConnection {
                     pool: self,
                     conn: Some(conn),
-                    leased_at: started,
+                    leased_at: granted,
                 });
             }
             let now = self.now();
@@ -433,8 +439,14 @@ pub struct ReaderPoolStats {
 pub struct ReadConnection<'a> {
     pool: &'a ReaderPool,
     conn: Option<Connection>,
-    /// When this reader was checked out, so a lease that outlives
+    /// When this reader was **handed out**, so a lease that outlives
     /// [`SLOW_READER_LEASE`] can be reported when it is returned.
+    ///
+    /// This is the grant time, not the start of the checkout: the time a
+    /// caller spent queueing for a reader is *waiting* time, which
+    /// [`ReaderPoolStats::longest_wait_ms`] already reports. Counting it as
+    /// holding time would make the slow-lease warning name a reader that was
+    /// never actually held for long (issue #1533).
     leased_at: Instant,
 }
 

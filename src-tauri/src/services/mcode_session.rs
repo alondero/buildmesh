@@ -7,11 +7,20 @@ use crate::models::{AgentNode, SessionStatus};
 const SPAWN_REGISTRY_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 const SPAWN_REGISTRY_POLL: std::time::Duration = std::time::Duration::from_millis(25);
 
-pub(crate) fn hook_target(session_id: &str, cwd: &str) -> Option<AgentNode> {
+/// Resolve the node a MiniMax hook callback belongs to.
+///
+/// A read that failed is *unknown*, not "no such node" (issue #1533): the
+/// caller must be able to answer "come back later" instead of telling a
+/// harness its node is gone. The error therefore travels out of this
+/// function, and only a genuinely absent target comes back as `None`.
+pub(crate) fn hook_target(
+    session_id: &str,
+    cwd: &str,
+) -> Result<Option<AgentNode>, rusqlite::Error> {
     retry_hook_target(
         std::time::Instant::now() + SPAWN_REGISTRY_WAIT,
         || {
-            let nodes = crate::db::list_agent_nodes().ok()?;
+            let nodes = crate::db::list_agent_nodes()?;
             let target = select_hook_target(&nodes, session_id, cwd, |node| {
                 matches!(
                     node.status,
@@ -24,13 +33,12 @@ pub(crate) fn hook_target(session_id: &str, cwd: &str) -> Option<AgentNode> {
             });
             if let Some(target) = target {
                 // Check the single selected owner, rather than querying the
-                // generation separately for every candidate row.
-                if crate::db::session_started_at_ms(target.id)
-                    .ok()
-                    .flatten()
-                    .is_some()
-                {
-                    return Some((Some(target), false));
+                // generation separately for every candidate row. A failed
+                // read is unknown, not "this node has no generation": the
+                // stale-generation guard would read that as a stale
+                // callback and drop a live one.
+                if crate::db::session_started_at_ms(target.id)?.is_some() {
+                    return Ok((Some(target), false));
                 }
             }
             // SessionStart can beat registry insertion immediately after child spawn.
@@ -38,7 +46,7 @@ pub(crate) fn hook_target(session_id: &str, cwd: &str) -> Option<AgentNode> {
             let waiting = waiting_for_spawn(&nodes, session_id, cwd, |node| {
                 crate::agent::spawn::is_spawn_in_flight(node.id)
             });
-            Some((None, waiting))
+            Ok((None, waiting))
         },
         std::time::Instant::now,
         std::thread::sleep,
@@ -47,21 +55,21 @@ pub(crate) fn hook_target(session_id: &str, cwd: &str) -> Option<AgentNode> {
 
 fn retry_hook_target<T>(
     deadline: std::time::Instant,
-    mut attempt: impl FnMut() -> Option<(Option<T>, bool)>,
+    mut attempt: impl FnMut() -> Result<(Option<T>, bool), rusqlite::Error>,
     mut now: impl FnMut() -> std::time::Instant,
     mut sleep: impl FnMut(std::time::Duration),
-) -> Option<T> {
+) -> Result<Option<T>, rusqlite::Error> {
     loop {
         if now() >= deadline {
-            return None;
+            return Ok(None);
         }
         let (target, spawn_in_flight) = attempt()?;
         if target.is_some() || !spawn_in_flight {
-            return target;
+            return Ok(target);
         }
         let remaining = deadline.saturating_duration_since(now());
         if remaining.is_zero() {
-            return None;
+            return Ok(None);
         }
         sleep(SPAWN_REGISTRY_POLL.min(remaining));
     }
@@ -238,9 +246,9 @@ mod tests {
             || {
                 calls += 1;
                 if calls == 1 {
-                    Some((None, true))
+                    Ok((None, true))
                 } else {
-                    Some((Some(4724), false))
+                    Ok((Some(4724), false))
                 }
             },
             || start + elapsed.get(),
@@ -248,7 +256,8 @@ mod tests {
                 elapsed.set(elapsed.get() + duration);
                 slept += duration;
             },
-        );
+        )
+        .expect("the attempt does not read the database");
         assert_eq!(target, Some(4724));
         assert_eq!(calls, 2);
         assert_eq!(slept, SPAWN_REGISTRY_POLL);
@@ -259,16 +268,35 @@ mod tests {
             start + SPAWN_REGISTRY_WAIT,
             || {
                 calls += 1;
-                Some((None, true))
+                Ok((None, true))
             },
             || start + elapsed.get(),
             |duration| elapsed.set(elapsed.get() + duration),
-        );
+        )
+        .expect("the attempt does not read the database");
         assert_eq!(result, None);
         assert_eq!(elapsed.get(), SPAWN_REGISTRY_WAIT);
         assert_eq!(
             calls,
             (SPAWN_REGISTRY_WAIT.as_millis() / SPAWN_REGISTRY_POLL.as_millis()) as usize
+        );
+    }
+
+    /// A read that failed is unknown, not "no such node" (issue #1533): the
+    /// error travels out so the route can answer "come back later" instead of
+    /// a 404 that tells the harness its node is gone.
+    #[test]
+    fn mcode_hook_target_reports_a_failed_read_instead_of_no_target() {
+        let start = std::time::Instant::now();
+        let error = retry_hook_target(
+            start + SPAWN_REGISTRY_WAIT,
+            || Err::<(Option<i64>, bool), _>(rusqlite::Error::InvalidQuery),
+            || start,
+            |_| {},
+        );
+        assert!(
+            matches!(error, Err(rusqlite::Error::InvalidQuery)),
+            "the read error must travel out, got: {error:?}"
         );
     }
 }

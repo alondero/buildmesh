@@ -483,12 +483,16 @@ fn run_pass(app: &AppHandle) {
     // N pending runs but only 1 row read is the common case in the
     // deadlock scenario. `entry().or_insert_with()` makes the cache
     // transparent — the first pending run on each mesh reads, every
-    // later one hits the cache. A `None` cache entry (mesh row missing
-    // — likely deleted between run-mint and this pass) is logged once
-    // per missing mesh id; the run stays pending until the orphan-
+    // later one hits the cache. A cache entry that says the mesh row is
+    // missing (likely deleted between run-mint and this pass) is logged
+    // once per missing mesh id; the run stays pending until the orphan-
     // admission sweep clears it.
+    //
+    // The cache holds the *result*, not a flattened `Option`: a read that
+    // failed is unknown, not a missing mesh, and the two must not collapse
+    // (issue #1533).
     use std::collections::HashMap;
-    let mut mesh_cache: HashMap<i64, Option<crate::models::Mesh>> = HashMap::new();
+    let mut mesh_cache: HashMap<i64, Result<crate::models::Mesh, rusqlite::Error>> = HashMap::new();
     retry_failed_cleanup(app);
     // Repair leases for active runs created before the reservation table was
     // introduced. This is idempotent and keeps restarts from losing a claim.
@@ -558,9 +562,9 @@ fn run_pass(app: &AppHandle) {
         if active.run.state == "pending" {
             let mesh = mesh_cache
                 .entry(active.run.mesh_id)
-                .or_insert_with(|| db::get_mesh_by_id(active.run.mesh_id).ok());
+                .or_insert_with(|| db::get_mesh_by_id(active.run.mesh_id));
             match mesh {
-                Some(m) if !may_admit_run(&active, m) => {
+                Ok(m) if !may_admit_run(&active, m) => {
                     record_queue_wait(
                         active.run.id,
                         db::circuit::evidence::QueueWaitReason::MeshCapacity {
@@ -569,7 +573,7 @@ fn run_pass(app: &AppHandle) {
                     );
                     continue;
                 }
-                None => {
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
                     // Orphan reaper: the mesh row is gone (deleted between
                     // mint and this pass). Leaving the row pending wedges
                     // the queue visualisation forever with a run that can
@@ -599,7 +603,20 @@ fn run_pass(app: &AppHandle) {
                     }
                     continue;
                 }
-                Some(_) => {} // admitted by may_admit_run — reserve its lease below
+                Err(error) => {
+                    // A failed read is *unknown*, not "the mesh is gone"
+                    // (issue #1533): a busy reader pool must not terminalise
+                    // a healthy pending run. Defer the run — the next pass
+                    // re-reads the mesh and admits it then.
+                    tracing::warn!(
+                        "circuits: mesh {} lookup failed for run {}, deferring: {}",
+                        active.run.mesh_id,
+                        active.run.id,
+                        error
+                    );
+                    continue;
+                }
+                Ok(_) => {} // admitted by may_admit_run — reserve its lease below
             }
             let required = required_agent_slots(&active);
             if required > 0 {

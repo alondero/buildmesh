@@ -1672,12 +1672,78 @@ fn a_public_read_under_pool_exhaustion_returns_an_error_instead_of_panicking() {
     drop(held);
 }
 
+/// A pool clock the test advances by hand.
+///
+/// The pool reads time from here, so a lease can be made long and a wait can
+/// be measured without the runner sleeping: a wall-clock sleep asserts the
+/// machine's speed, not the code's behaviour (`docs/development/rust-conventions.md`
+/// asks for an injected time budget rather than a stopwatch).
+///
+/// `calls` counts how many times the pool has read the clock. The pool reads
+/// it when a checkout *starts*, so a test can wait until a particular caller
+/// has begun waiting — a state, not a duration.
+struct ManualClock {
+    clock: super::PoolClock,
+    millis: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    calls: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl ManualClock {
+    fn new() -> Self {
+        let base = std::time::Instant::now();
+        let millis = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let clock = {
+            let millis = millis.clone();
+            let calls = calls.clone();
+            move || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                base + std::time::Duration::from_millis(millis.load(Ordering::Relaxed))
+            }
+        };
+        Self {
+            clock: std::sync::Arc::new(clock),
+            millis,
+            calls,
+        }
+    }
+
+    /// Move the pool's clock forward.
+    fn advance_to(&self, millis: u64) {
+        self.millis.store(millis, Ordering::Relaxed);
+    }
+
+    /// How many times the pool has read the clock.
+    fn calls(&self) -> u64 {
+        self.calls.load(Ordering::Relaxed)
+    }
+}
+
+/// Wait for a *state*, not for a duration.
+///
+/// The bound is a safety net: the condition either becomes true (and the
+/// wait ends) or the test fails loudly instead of hanging. The poll sleeps
+/// rather than spinning — a busy spin steals the CPU the wait is competing
+/// for (`docs/development/rust-conventions.md`).
+fn wait_until(mut condition: impl FnMut() -> bool) {
+    for _ in 0..5_000 {
+        if condition() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    panic!("the condition never became true");
+}
+
 /// Issue #1533: the pool's saturation is observable.
 ///
 /// Without these counters a pool exhaustion was a crash with no explanation;
 /// the diagnostics sampler now reports the same numbers, so "every reader was
 /// held" and "the slowest holder kept its reader for a second" are facts in
 /// the log rather than inferences.
+///
+/// The lease length is measured on an injected clock, so the assertion is
+/// about the code's behaviour rather than about how fast the runner is.
 #[test]
 fn reader_pool_stats_report_saturation_and_lease_length() {
     let temp = tempfile::tempdir().unwrap();
@@ -1687,7 +1753,14 @@ fn reader_pool_stats_report_saturation_and_lease_length() {
     writer
         .execute("CREATE TABLE probe (value INTEGER NOT NULL)", [])
         .unwrap();
-    let readers = super::ReaderPool::open(&db_path).unwrap();
+    let manual = ManualClock::new();
+    let readers = super::ReaderPool::open_sized_with_clock(
+        &db_path,
+        super::READER_POOL_SIZE,
+        super::READER_CHECKOUT_TIMEOUT,
+        manual.clock.clone(),
+    )
+    .unwrap();
 
     let idle = readers.stats();
     assert_eq!(idle.in_use, 0);
@@ -1702,15 +1775,87 @@ fn reader_pool_stats_report_saturation_and_lease_length() {
     assert_eq!(busy.checkouts, 1);
 
     // The lease length is measured, so a reader held across slow work shows
-    // up as the reason the pool ran dry.
-    std::thread::sleep(std::time::Duration::from_millis(60));
+    // up as the reason the pool ran dry. The clock moves by hand: the test
+    // asserts the pool's arithmetic, not the runner's speed.
+    manual.advance_to(120);
     drop(held);
     let after = readers.stats();
     assert_eq!(after.in_use, 0, "a returned reader must not stay counted");
-    assert!(
-        after.longest_lease_ms >= 50,
-        "the lease length must be measured, got {}ms",
-        after.longest_lease_ms
+    assert_eq!(
+        after.longest_lease_ms, 120,
+        "the lease length must be measured from the grant"
+    );
+}
+
+/// Issue #1533: the queueing time before a reader is handed out is **wait**
+/// time, not lease time.
+///
+/// The two are different facts. `longest_wait_ms` says how long a caller
+/// queued for a reader; `longest_lease_ms` says how long a reader was held
+/// once it was granted. Counting the queueing time as holding time made the
+/// slow-lease warning name a reader that was never actually held for long —
+/// the diagnostic that exists to explain a dry pool pointed at the wrong
+/// thing.
+#[test]
+fn a_queued_checkout_reports_the_wait_as_a_wait_not_as_a_lease() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("reader-lease.db");
+    let writer = rusqlite::Connection::open(&db_path).unwrap();
+    super::apply_connection_pragmas(&writer, false).unwrap();
+    writer
+        .execute("CREATE TABLE probe (value INTEGER NOT NULL)", [])
+        .unwrap();
+    let manual = ManualClock::new();
+    // One reader: the second caller has to queue for it.
+    let readers = super::ReaderPool::open_sized_with_clock(
+        &db_path,
+        1,
+        super::READER_CHECKOUT_TIMEOUT,
+        manual.clock.clone(),
+    )
+    .unwrap();
+
+    let held = readers.checkout().unwrap();
+    let calls_after_holder = manual.calls();
+
+    std::thread::scope(|scope| {
+        let readers = &readers;
+        let manual = &manual;
+        scope.spawn(move || {
+            let reader = readers
+                .checkout()
+                .expect("the released reader serves the queued caller");
+            // The queued caller holds its reader for 500ms of pool time.
+            manual.advance_to(800);
+            drop(reader);
+        });
+
+        // Wait until the queued caller has *started* its checkout: the pool
+        // reads the clock when a checkout starts, so its wait is measured
+        // from before the clock moves.
+        wait_until(|| manual.calls() > calls_after_holder);
+
+        // The holder releases the reader 300ms (of pool time) after taking it.
+        manual.advance_to(300);
+        drop(held);
+
+        // Keep the queued caller awake. A notification sent before it waits
+        // is lost, and it would otherwise sit out the whole real wait.
+        wait_until(|| {
+            readers.ready.notify_one();
+            readers.stats().checkouts >= 2
+        });
+    });
+
+    let stats = readers.stats();
+    assert_eq!(
+        stats.longest_wait_ms, 300,
+        "the time spent queueing for a reader is reported as a wait"
+    );
+    assert_eq!(
+        stats.longest_lease_ms, 500,
+        "the lease counts holding time only: the queued caller held its reader \
+         for 500ms, not for the 300ms it waited"
     );
 }
 

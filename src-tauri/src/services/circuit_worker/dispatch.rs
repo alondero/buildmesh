@@ -246,6 +246,11 @@ impl EffectHost for FakeHost {
 /// Claim one journalled effect and record the evidence revision on the view.
 /// `Ok(None)` means the row was not `intent` on a running step, so the caller
 /// skips dispatch. The attempt is the step's current attempt.
+///
+/// A busy database also lands on `Ok(None)`: the claim is atomic, so nothing
+/// was claimed and the effect stays dispatchable — the next tick retries it.
+/// Failing the run there would terminalise healthy work over a transient
+/// pool shortage (issue #1533).
 fn claim_journal_effect(
     view: &mut RunView,
     run_id: i64,
@@ -258,10 +263,19 @@ fn claim_journal_effect(
         attempt,
         kind: kind.into(),
     };
-    let Some(revision) =
-        db::circuit::evidence::claim_effect(run_id, &intent).map_err(|error| error.to_string())?
-    else {
-        return Ok(None);
+    let revision = match db::circuit::evidence::claim_effect(run_id, &intent) {
+        Ok(Some(revision)) => revision,
+        Ok(None) => return Ok(None),
+        Err(error) if crate::db::error::is_busy_error(&error) => {
+            tracing::warn!(
+                "circuits: run {} could not claim the effect for {}, deferring: {}",
+                run_id,
+                node_id,
+                error
+            );
+            return Ok(None);
+        }
+        Err(error) => return Err(error.to_string()),
     };
     view.context.set("evidence.revision", revision.to_string());
     Ok(Some(attempt))
@@ -326,12 +340,25 @@ pub(super) fn dispatch_effects(
 ) -> Result<DispatchedEffects, String> {
     let mut outcome_events = Vec::new();
     let effect_batch = begin_circuit_effect_batch(active.run.id);
-    let run_state = db::get_circuit_run(active.run.id)
-        .map_err(|error| error.to_string())?
-        .map(|run| run.state);
     let finish = |outcomes: Vec<CircuitEvent>| DispatchedEffects {
         outcomes,
         batch_cancelled: effect_batch.is_cancelled(),
+    };
+    let run_state = match db::get_circuit_run(active.run.id) {
+        Ok(run) => run.map(|run| run.state),
+        Err(error) => {
+            // A failed read is *unknown*, not "the run is gone" (issue
+            // #1533). Deferring the whole batch leaves every effect
+            // unclaimed, so the next tick dispatches them; failing the run
+            // here would terminalise healthy work over a transient pool
+            // shortage.
+            tracing::warn!(
+                "circuits: run {} state read failed, deferring the batch: {}",
+                active.run.id,
+                error
+            );
+            return Ok(finish(Vec::new()));
+        }
     };
     for effect in effects {
         if effect_batch.is_cancelled() {
@@ -388,24 +415,52 @@ pub(super) fn dispatch_effects(
                         // stepper only emits AgentLost via observation,
                         // and a missing target here means the row is
                         // already gone, so a direct write is honest.
-                        let Some(target_node) = db::get_agent_node_by_id(target)
-                            .ok()
-                            .filter(|node| node.status != SessionStatus::Archived)
-                        else {
-                            let reason = format!(
-                                "target agent {} for step {} was lost before prompt injection",
-                                target, node_id
-                            );
-                            tracing::warn!("circuits: run {}: {}", active.run.id, reason);
-                            return Err(reason);
+                        //
+                        // A read that *failed* is not a missing row: it is
+                        // unknown (issue #1533). Failing the run there would
+                        // terminalise healthy work over a transient pool
+                        // shortage. Skip the effect instead — it stays
+                        // unclaimed, so the next tick dispatches it.
+                        let target_node = match db::get_agent_node_by_id(target) {
+                            Ok(node) if node.status != SessionStatus::Archived => node,
+                            Ok(_) | Err(rusqlite::Error::QueryReturnedNoRows) => {
+                                let reason = format!(
+                                    "target agent {} for step {} was lost before prompt injection",
+                                    target, node_id
+                                );
+                                tracing::warn!("circuits: run {}: {}", active.run.id, reason);
+                                return Err(reason);
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    "circuits: run {}: target agent {} for step {} could not be read, deferring the effect: {}",
+                                    active.run.id,
+                                    target,
+                                    node_id,
+                                    error
+                                );
+                                continue;
+                            }
                         };
-                        if effect_batch.is_cancelled()
-                            || db::get_circuit_run(active.run.id)
-                                .ok()
-                                .flatten()
-                                .is_none_or(|run| run.state != "running")
-                        {
+                        if effect_batch.is_cancelled() {
                             return Ok(finish(outcome_events));
+                        }
+                        // The run must still be running for the write below.
+                        // A read that failed is unknown, not "the run is not
+                        // running" (issue #1533): skip the effect rather than
+                        // inject a prompt into a run that may have been
+                        // cancelled while the database was unavailable.
+                        match db::get_circuit_run(active.run.id) {
+                            Ok(Some(run)) if run.state == "running" => {}
+                            Ok(_) => return Ok(finish(outcome_events)),
+                            Err(error) => {
+                                tracing::warn!(
+                                    "circuits: run {} state read failed before prompt injection, deferring the effect: {}",
+                                    active.run.id,
+                                    error
+                                );
+                                continue;
+                            }
                         }
                         let kind = effect
                             .journal_kind()
