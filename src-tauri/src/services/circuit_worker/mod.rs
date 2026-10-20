@@ -495,10 +495,24 @@ fn run_pass(app: &AppHandle) {
     for active in &runs {
         if RunState::is_admitted_db_str(&active.run.state) {
             let required = required_agent_slots(active);
-            if required > 0
-                && db::circuit_agent_slots_reserved(active.run.id).unwrap_or(0) < required
-            {
-                let _ = db::reserve_circuit_agent_slots(active.run.id, required);
+            if required > 0 {
+                // A failed reservation read is *unknown*, not zero (issue
+                // #1533): repairing against an unknown count would add a
+                // second lease the run may already hold. Skip the repair;
+                // the next pass re-reads it.
+                match db::circuit_agent_slots_reserved(active.run.id) {
+                    Ok(reserved) if reserved < required => {
+                        let _ = db::reserve_circuit_agent_slots(active.run.id, required);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            "circuits: reservation read failed for run {}, skipping the lease repair: {}",
+                            active.run.id,
+                            e
+                        );
+                    }
+                }
             }
         }
     }
@@ -589,7 +603,21 @@ fn run_pass(app: &AppHandle) {
             }
             let required = required_agent_slots(&active);
             if required > 0 {
-                let existing = db::circuit_agent_slots_reserved(active.run.id).unwrap_or(0);
+                // A failed reservation read is *unknown*, not zero (issue
+                // #1533): `existing = 0` would reserve `required` slots a
+                // second time. Skip the reservation for this run; the next
+                // pass re-reads the count.
+                let existing = match db::circuit_agent_slots_reserved(active.run.id) {
+                    Ok(existing) => existing,
+                    Err(e) => {
+                        tracing::warn!(
+                            "circuits: reservation read failed for run {}, skipping the reservation: {}",
+                            active.run.id,
+                            e
+                        );
+                        continue;
+                    }
+                };
                 let additional = required.saturating_sub(existing);
                 if additional > 0
                     && !global_agent_reservation_fits(

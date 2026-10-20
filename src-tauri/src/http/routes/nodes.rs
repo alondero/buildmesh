@@ -94,11 +94,18 @@ impl From<String> for CreateTransportError {
 
 /// The mesh's default Spawn Option, with a missing mesh as the caller's 400
 /// (the runner's `MeshNotFound` answers the same) and a failed read as ours.
+///
+/// A busy reader pool is transient (issue #1533): the answer is `503`, so the
+/// client retries, not `500` — which reads as "this build is broken".
 fn mesh_default_provider(mesh_id: i64) -> Result<String, (&'static str, String)> {
     crate::commands::mesh::get_default_provider_blocking(mesh_id).map_err(|error| match error {
         rusqlite::Error::QueryReturnedNoRows => {
             ("400 Bad Request", format!("Mesh not found: {mesh_id}"))
         }
+        other if crate::db::error::is_busy_error(&other) => (
+            "503 Service Unavailable",
+            format!("Failed to read the mesh default: {other}"),
+        ),
         other => (
             "500 Internal Server Error",
             format!("Failed to read the mesh default: {other}"),
@@ -253,6 +260,12 @@ fn map_create_rejection(rejection: crate::services::create_operation::CreateReje
     use crate::services::create_operation::CreateRejection;
     let status = match &rejection {
         CreateRejection::KeyConflict { .. } => "409 Conflict",
+        // Issue #1533: a busy reader pool is transient — the client retries.
+        CreateRejection::Create(crate::services::agent_node::AgentNodeError::Db(error))
+            if crate::db::error::is_busy_error(error) =>
+        {
+            "503 Service Unavailable"
+        }
         other if other.is_client_error() => "400 Bad Request",
         _ => "500 Internal Server Error",
     };

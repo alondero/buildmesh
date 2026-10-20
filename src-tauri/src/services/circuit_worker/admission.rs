@@ -117,8 +117,25 @@ pub(super) fn observe_capacity(
             }
         }
     };
-    let reserved_for_run = db::circuit_agent_slots_reserved(active.run.id).unwrap_or(0);
-    let owned_by_run = db::count_active_circuit_agent_nodes_for_run(active.run.id).unwrap_or(0);
+    // A failed count is *unknown*, not zero (issue #1533). `owned_by_run = 0`
+    // would make the lease look free and let the run spawn past its
+    // reservation; `reserved_for_run = 0` alone would under-admit. Fail
+    // closed instead: an unknown count admits nothing, and the next tick
+    // re-reads the counters.
+    let (reserved_for_run, owned_by_run) = match (
+        db::circuit_agent_slots_reserved(active.run.id),
+        db::count_active_circuit_agent_nodes_for_run(active.run.id),
+    ) {
+        (Ok(reserved), Ok(owned)) => (reserved, owned),
+        (Err(e), _) | (_, Err(e)) => {
+            tracing::warn!(
+                "circuits: capacity counts for run {} failed, failing closed: {}",
+                active.run.id,
+                e
+            );
+            (0, 0)
+        }
+    };
     observe_capacity_with(CapacityCounts {
         reserved_for_run,
         owned_by_run,

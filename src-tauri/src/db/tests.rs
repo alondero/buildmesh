@@ -11,6 +11,7 @@
 //! Run with: cargo test --package buildmesh --lib db::tests
 
 use std::collections::HashSet;
+use std::sync::atomic::Ordering;
 
 fn suspended_recovery_schema() -> rusqlite::Connection {
     let conn = pending_removal_schema();
@@ -1526,8 +1527,20 @@ fn reader_pool_exhaustion_is_a_typed_busy_error() {
 /// The old loop re-armed the full timeout on every wakeup, so a spurious
 /// condvar notification could stretch a nominal one-second wait across
 /// several seconds — a caller could be parked far longer than the budget it
-/// was promised. The budget here is injected at 200 ms and the waiter is
-/// woken ~200 times meanwhile: the wait must still end at the one deadline.
+/// was promised.
+///
+/// The test drives the pool's **injected clock** rather than a stopwatch: the
+/// notifier advances the clock by one tick per wakeup, and the assertion is
+/// that the wait ended at the deadline — one budget of clock, not one budget
+/// per wakeup. A wall-clock ceiling would fail on a loaded runner even when
+/// the implementation is correct.
+///
+/// The notifier is *paced by the waiter*: a tick is only handed out after the
+/// waiter has read the clock since the previous one. That keeps the clock from
+/// running ahead of the waiter, so the measured wait is the waiter's and not
+/// the scheduler's. Without the pacing, a waiter that the runner had not
+/// scheduled yet would find the clock already past the deadline — a correct
+/// implementation failing on a busy machine.
 #[test]
 fn reader_pool_wait_ends_at_one_deadline_however_often_it_is_woken() {
     let temp = tempfile::tempdir().unwrap();
@@ -1537,40 +1550,90 @@ fn reader_pool_wait_ends_at_one_deadline_however_often_it_is_woken() {
     writer
         .execute("CREATE TABLE probe (value INTEGER NOT NULL)", [])
         .unwrap();
+
+    // The pool's clock: the test advances it, so "time passing" is a fact the
+    // test owns rather than something the runner's scheduling decides. The
+    // clock counts ticks, and `seen` records the last tick the waiter read —
+    // that is the deadline the pool ended the wait on.
     let budget = std::time::Duration::from_millis(300);
-    let readers = super::ReaderPool::open_sized_with_timeout(&db_path, 1, budget).unwrap();
+    let tick = std::time::Duration::from_millis(100);
+    let tick_ms = tick.as_millis() as u64;
+    let base = std::time::Instant::now();
+    let ticks = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let reads = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let seen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let clock = {
+        let ticks = ticks.clone();
+        let reads = reads.clone();
+        let seen = seen.clone();
+        move || {
+            let tick = ticks.load(Ordering::Relaxed);
+            seen.store(tick, Ordering::Relaxed);
+            reads.fetch_add(1, Ordering::Relaxed);
+            base + std::time::Duration::from_millis(tick * tick_ms)
+        }
+    };
+    let readers =
+        super::ReaderPool::open_sized_with_clock(&db_path, 1, budget, std::sync::Arc::new(clock))
+            .unwrap();
     let held = readers.checkout().unwrap();
 
+    // The notifier: a bounded burst of spurious wakeups, each advancing the
+    // clock by one tick. Bounded, so a waiter that re-armed its budget on
+    // every wakeup would still finish the test rather than hang in it.
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     std::thread::scope(|scope| {
-        scope.spawn(|| {
-            // Spurious wakeups: notifications with no reader to hand over.
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1_000);
-            while std::time::Instant::now() < deadline {
+        let readers = &readers;
+        let ticks = ticks.clone();
+        let reads = reads.clone();
+        let notifier_done = done.clone();
+        scope.spawn(move || {
+            for step in 1..=20u64 {
+                if notifier_done.load(Ordering::Relaxed) {
+                    break;
+                }
+                let before = reads.load(Ordering::Relaxed);
+                ticks.store(step, Ordering::Relaxed);
                 readers.ready.notify_one();
-                std::thread::sleep(std::time::Duration::from_millis(5));
+                // Hand out the next tick only once the waiter has read the
+                // clock again: the clock advances with the waiter, never
+                // ahead of it.
+                for _ in 0..100 {
+                    if reads.load(Ordering::Relaxed) > before
+                        || notifier_done.load(Ordering::Relaxed)
+                    {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
             }
         });
 
-        let started = std::time::Instant::now();
         let error = match readers.checkout() {
             Ok(_) => panic!("the pool is exhausted for the whole wait"),
             Err(error) => error,
         };
-        let elapsed = started.elapsed();
-
+        done.store(true, Ordering::Relaxed);
         assert!(
             crate::db::error::is_busy_error(&error),
             "the wait must end as a typed busy error, got: {error}"
         );
-        assert!(
-            elapsed >= budget,
-            "the waiter must actually wait for its budget, waited {elapsed:?}"
-        );
-        assert!(
-            elapsed < std::time::Duration::from_millis(900),
-            "the wait must end at ONE deadline, not one per wakeup: waited {elapsed:?}"
-        );
     });
+
+    // One deadline, not one per wakeup: the waiter reached the deadline and
+    // stopped there, however often the pool was woken. The tick in flight
+    // when the deadline was reached is the only slack allowed.
+    let waited = std::time::Duration::from_millis(seen.load(Ordering::Relaxed) * tick_ms);
+    assert!(
+        waited >= budget,
+        "the waiter must have reached the deadline, the clock reached {waited:?} \
+         for a {budget:?} budget"
+    );
+    assert!(
+        waited <= budget + tick,
+        "the wait must end at ONE deadline, not one per wakeup: the clock reached {waited:?} \
+         for a {budget:?} budget"
+    );
 
     drop(held);
 }

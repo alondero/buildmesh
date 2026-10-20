@@ -132,6 +132,9 @@ mod migration_tests;
 mod tests;
 
 #[cfg(test)]
+mod pool_stress_tests;
+
+#[cfg(test)]
 mod mesh_tests;
 
 #[cfg(test)]
@@ -176,8 +179,8 @@ use rusqlite::{Connection, OpenFlags};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 // Eight handles cover the UI, HTTP, and worker polling fan-out while keeping
 // SQLite's file-descriptor and cache footprint bounded.
@@ -215,6 +218,20 @@ struct ReaderPool {
     /// smaller budget so a wait it does not want to sit through is still
     /// observable.
     checkout_timeout: Duration,
+    /// The pool's clock. Production reads the system clock; a test injects one
+    /// it can advance, so the deadline can be exercised without a stopwatch —
+    /// the same shape the crash watchdog uses for its timestamps. A wall-clock
+    /// assertion here would fail on a loaded runner for a correct
+    /// implementation.
+    clock: PoolClock,
+}
+
+/// The pool's clock: a function the pool reads the current instant from.
+type PoolClock = Arc<dyn Fn() -> Instant + Send + Sync>;
+
+/// The pool's clock, reading the system clock.
+fn system_clock() -> PoolClock {
+    Arc::new(Instant::now)
 }
 
 /// Saturation counters for the reader pool (issue #1533).
@@ -271,6 +288,20 @@ impl ReaderPool {
         size: usize,
         checkout_timeout: Duration,
     ) -> SqlResult<Self> {
+        Self::open_sized_with_clock(db_path, size, checkout_timeout, system_clock())
+    }
+
+    /// Open a pool with an injected budget **and** an injected clock.
+    ///
+    /// The clock is what makes the deadline testable without a stopwatch: the
+    /// test advances it and asserts the wait ended at the deadline, instead of
+    /// measuring how long the runner happened to take.
+    fn open_sized_with_clock(
+        db_path: &Path,
+        size: usize,
+        checkout_timeout: Duration,
+        clock: PoolClock,
+    ) -> SqlResult<Self> {
         let mut flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         if db_path.to_string_lossy().starts_with("file:") {
             flags |= OpenFlags::SQLITE_OPEN_URI;
@@ -288,7 +319,13 @@ impl ReaderPool {
             flags,
             counters: PoolCounters::default(),
             checkout_timeout,
+            clock,
         })
+    }
+
+    /// The pool's current instant.
+    fn now(&self) -> Instant {
+        (self.clock)()
     }
 
     /// Check a reader out of the pool, waiting at most the pool's checkout
@@ -307,11 +344,11 @@ impl ReaderPool {
     /// `panic = "abort"`).
     fn checkout(&self) -> SqlResult<ReadConnection<'_>> {
         let mut available = self.available.lock();
-        let started = std::time::Instant::now();
+        let started = self.now();
         let deadline = started + self.checkout_timeout;
         loop {
             if let Some(conn) = available.pop() {
-                let waited = started.elapsed();
+                let waited = self.now().saturating_duration_since(started);
                 self.counters.checkouts.fetch_add(1, Ordering::Relaxed);
                 self.counters.in_use.fetch_add(1, Ordering::Relaxed);
                 self.counters
@@ -329,23 +366,32 @@ impl ReaderPool {
                     leased_at: started,
                 });
             }
-            let now = std::time::Instant::now();
+            let now = self.now();
             if now >= deadline {
-                return Err(self.give_up(started));
+                return Err(self.checkout_timed_out(started));
             }
             let wait = self.ready.wait_for(&mut available, deadline - now);
             if wait.timed_out() {
-                return Err(self.give_up(started));
+                return Err(self.checkout_timed_out(started));
             }
         }
     }
 
-    /// The deadline expired: count the timeout, say so in the log, and hand
-    /// back the typed busy error.
-    fn give_up(&self, started: std::time::Instant) -> rusqlite::Error {
+    /// The deadline expired: count the timeout, record how long the caller
+    /// actually waited, say so in the log, and hand back the typed busy error.
+    ///
+    /// The wait is recorded here as well as on the success path: a checkout
+    /// that *timed out* is the wait the diagnostics line must show. Leaving it
+    /// out made `wait_ms` stay at zero while every caller was waiting the full
+    /// deadline.
+    fn checkout_timed_out(&self, started: Instant) -> rusqlite::Error {
+        let waited = self.now().saturating_duration_since(started);
         self.counters.timeouts.fetch_add(1, Ordering::Relaxed);
+        self.counters
+            .longest_wait_ms
+            .fetch_max(waited.as_millis() as u64, Ordering::Relaxed);
         tracing::warn!(
-            elapsed_ms = started.elapsed().as_millis(),
+            elapsed_ms = waited.as_millis(),
             in_use = self.counters.in_use.load(Ordering::Relaxed),
             "database reader pool checkout timed out"
         );
@@ -389,7 +435,7 @@ pub struct ReadConnection<'a> {
     conn: Option<Connection>,
     /// When this reader was checked out, so a lease that outlives
     /// [`SLOW_READER_LEASE`] can be reported when it is returned.
-    leased_at: std::time::Instant,
+    leased_at: Instant,
 }
 
 impl Deref for ReadConnection<'_> {
@@ -405,7 +451,7 @@ impl Deref for ReadConnection<'_> {
 impl Drop for ReadConnection<'_> {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
-            let held = self.leased_at.elapsed();
+            let held = self.pool.now().saturating_duration_since(self.leased_at);
             self.pool.counters.in_use.fetch_sub(1, Ordering::Relaxed);
             self.pool
                 .counters

@@ -100,6 +100,22 @@ pub fn db_failure_response(error: &rusqlite::Error) -> Response {
     }
 }
 
+/// The response for a database failure that reached an HTTP route as a
+/// [`crate::db::DbError`].
+///
+/// The same policy as [`db_failure_response`], for the callers that carry the
+/// failure in the database layer's own error type.
+pub fn db_error_response(error: &crate::db::DbError) -> Response {
+    if error.is_busy() {
+        Response::json_error(
+            read_status(&Unavailable::Read(error.to_string())),
+            &format!("Failed to read authoritative state: {error}"),
+        )
+    } else {
+        Response::json_error("500 Internal Server Error", &error.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

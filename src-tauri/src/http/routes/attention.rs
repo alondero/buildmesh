@@ -77,8 +77,15 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
     // below — see the N1 review point about hitting SQLite twice
     // for the same row.
     let (node, provider_owned, hook_generation, raw_payload) =
-        tokio::task::spawn_blocking(move || {
-            let addressed = session_id.and_then(|id| crate::db::get_agent_node_by_id(id).ok());
+        match tokio::task::spawn_blocking(move || -> rusqlite::Result<_> {
+            // A failed lookup is *unknown*, not absent (issue #1533): a busy
+            // reader pool must not make a live node look deleted. The error
+            // travels out of the closure so the route can answer "come back
+            // later" instead of a 404 that tells the harness the node is gone.
+            let addressed = match session_id {
+                Some(id) => Some(crate::db::get_agent_node_by_id(id)?),
+                None => None,
+            };
             let value = serde_json::from_slice::<serde_json::Value>(&hook_body).ok();
             // Old shared manifests may still name the last-spawned node.
             // Their numeric address cannot establish MiniMax ownership either.
@@ -92,14 +99,33 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
                 .as_ref()
                 .map(|node| normalizers::provider_for(&node.provider))
                 .unwrap_or_default();
-            let generation = node
-                .as_ref()
-                .and_then(|node| crate::db::session_started_at_ms(node.id).ok().flatten());
-            (node, provider, generation, value)
+            // The generation is a fact about the node. A failed read is not
+            // "no generation": the stale-generation guard would read that as
+            // a stale callback and drop a live one.
+            let generation = match node.as_ref() {
+                Some(node) => crate::db::session_started_at_ms(node.id)?,
+                None => None,
+            };
+            Ok((node, provider, generation, value))
         })
         .await
-        .ok()
-        .unwrap_or_default();
+        {
+            Ok(Ok(looked_up)) => looked_up,
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    %error,
+                    "attention webhook could not read the session row: the database did not answer"
+                );
+                return Response::empty("503 Service Unavailable");
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "attention webhook could not read the session row: the read task failed"
+                );
+                return Response::empty("503 Service Unavailable");
+            }
+        };
     let stored_cli_session_id: String = node
         .as_ref()
         .and_then(|n| n.cli_session_id.clone())
@@ -234,12 +260,17 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
             // new prompt cannot overtake a Stop that passed its turn fence.
             let state_owner = crate::agent::hook_state::for_node(session_id);
             let mut state = state_owner.lock();
-            if provider_owned == "mcode"
-                && (hook_generation.is_none()
-                    || hook_generation
-                        != crate::db::session_started_at_ms(session_id).ok().flatten())
-            {
-                return Ok(Applied::StaleDropped);
+            if provider_owned == "mcode" {
+                // A failed generation read is *unknown*, not "a different
+                // generation": reading it as a mismatch would drop a live
+                // callback as stale (issue #1533). The error leaves the
+                // closure, so the route answers "come back later" instead of
+                // acknowledging a callback it did not apply.
+                let current_generation = crate::db::session_started_at_ms(session_id)
+                    .map_err(|error| format!("could not read the session generation: {error}"))?;
+                if hook_generation.is_none() || hook_generation != current_generation {
+                    return Ok(Applied::StaleDropped);
+                }
             }
             // Codex self-assigns its thread id. PTY capture remains the
             // earliest source; SessionStart is the structured capture at
@@ -271,13 +302,16 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
             }
             // Re-read after conditional capture. A callback racing another
             // identity write must not publish lifecycle for the losing session.
-            if provider_owned == "mcode"
-                && crate::db::get_agent_node_by_id(session_id)
-                    .ok()
-                    .and_then(|node| node.cli_session_id)
-                    != hook_uuid
-            {
-                return Ok(Applied::StaleDropped);
+            // A failed re-read is *unknown*, not "the identity changed" — the
+            // error leaves the closure rather than dropping a live callback
+            // (issue #1533).
+            if provider_owned == "mcode" {
+                let stored_now = crate::db::get_agent_node_by_id(session_id)
+                    .map_err(|error| format!("could not re-read the session row: {error}"))?
+                    .cli_session_id;
+                if stored_now != hook_uuid {
+                    return Ok(Applied::StaleDropped);
+                }
             }
 
             // Issue #1364 §1 — ordering token: a hook whose provider session

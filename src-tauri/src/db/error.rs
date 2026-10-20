@@ -174,6 +174,20 @@ impl DbError {
             reason: reason.into(),
         }
     }
+
+    /// The persistence layer was busy — the read may be retried.
+    ///
+    /// Issue #1533: a reader-pool checkout that found no free reader at its
+    /// deadline reports SQLite's `SQLITE_BUSY`, so a caller can tell "come
+    /// back in a moment" from "this query is broken" without matching on
+    /// prose. The HTTP boundary turns a busy read into `503 Service
+    /// Unavailable`; a command turns it into a retryable message.
+    pub fn is_busy(&self) -> bool {
+        match self {
+            DbError::Sql(error) => is_busy_error(error),
+            _ => false,
+        }
+    }
 }
 
 /// Carries a message another producer already rendered.

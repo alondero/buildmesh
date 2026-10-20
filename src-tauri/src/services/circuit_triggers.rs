@@ -479,7 +479,22 @@ pub fn run_interval_pass() {
         let Some(interval_seconds) = interval_seconds else {
             continue;
         };
-        let last = db::latest_circuit_run_created_at(circuit.id).ok().flatten();
+        // A failed lookup is *unknown*, not "never fired" (issue #1533):
+        // `interval_should_fire(None, …)` means "this circuit has never run",
+        // so a busy reader pool would mint a new interval run with a fresh
+        // timestamp identity — a second run for a circuit that already has
+        // one. Skip this circuit's decision instead: the next pass retries.
+        let last = match db::latest_circuit_run_created_at(circuit.id) {
+            Ok(last) => last,
+            Err(e) => {
+                tracing::warn!(
+                    "circuits: circuit {} latest-run lookup failed, skipping this interval pass: {}",
+                    circuit.id,
+                    e
+                );
+                continue;
+            }
+        };
         let last_anchor = last.as_deref().and_then(parse_sqlite_datetime);
         if interval_should_fire(last_anchor, interval_seconds, now) {
             let identity = format!("interval:{}", now_millis());

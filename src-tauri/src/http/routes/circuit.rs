@@ -154,7 +154,7 @@ enum ActError {
     /// (issue #1533). Transient, so the client retries rather than treating
     /// the request as broken. The error is kept, not flattened to text, so
     /// the shared status policy can decide between `503` and `500`.
-    Unavailable(rusqlite::Error),
+    Unavailable(crate::db::DbError),
     Failed(String),
 }
 
@@ -162,7 +162,13 @@ enum ActError {
 /// could not answer". Only the second is transient: a busy reader pool earns
 /// a `503`, not the `500` a genuinely broken query gets.
 fn db_failure(error: rusqlite::Error) -> ActError {
-    if crate::db::error::is_busy_error(&error) {
+    action_failure(crate::db::DbError::from(error))
+}
+
+/// The same rule for a failure that already carries the database layer's own
+/// error type.
+fn action_failure(error: crate::db::DbError) -> ActError {
+    if error.is_busy() {
         ActError::Unavailable(error)
     } else {
         ActError::Failed(error.to_string())
@@ -186,7 +192,7 @@ impl ActError {
                 Response::json_error("404 Not Found", &format!("Run {run_id} no longer exists."))
             }
             ActError::Refused(message) => Response::json_error("409 Conflict", message),
-            ActError::Unavailable(error) => crate::http::read_status::db_failure_response(error),
+            ActError::Unavailable(error) => crate::http::read_status::db_error_response(error),
             ActError::Failed(message) => Response::json_error("500 Internal Server Error", message),
         }
     }
@@ -225,37 +231,46 @@ fn require_same_run(path_run: i64, body_run: i64) -> Result<(), Response> {
     ))
 }
 
-fn list_reply(runs: Result<Vec<NodeCircuitRun>, String>) -> Response {
-    match runs.and_then(|runs| serde_json::to_string(&runs).map_err(|error| error.to_string())) {
-        Ok(body) => Response::json("200 OK", body),
-        Err(error) => Response::json_error("500 Internal Server Error", &error),
+fn list_reply(runs: Result<Vec<NodeCircuitRun>, crate::db::DbError>) -> Response {
+    match runs {
+        Ok(runs) => match serde_json::to_string(&runs) {
+            Ok(body) => Response::json("200 OK", body),
+            Err(error) => Response::json_error("500 Internal Server Error", &error.to_string()),
+        },
+        // A busy reader pool is transient (issue #1533): the client retries.
+        Err(error) => crate::http::read_status::db_error_response(&error),
     }
 }
 
 /// `GET /api/circuit-runs` — see [`NodeCircuitRun`].
 pub async fn list(_req: &ParsedRequest) -> Response {
     list_reply(
-        crate::commands::run_blocking("http_list_node_circuit_runs", || {
-            node_run::list_node_circuit_runs().map_err(String::from)
-        })
+        crate::commands::run_blocking_typed::<_, crate::db::DbError, _>(
+            "http_list_node_circuit_runs",
+            node_run::list_node_circuit_runs,
+        )
         .await,
     )
 }
 
 fn ownerships_reply(
-    rows: Result<Vec<circuit_commands::CircuitAgentOwnership>, String>,
+    rows: Result<Vec<circuit_commands::CircuitAgentOwnership>, crate::db::DbError>,
 ) -> Response {
-    match rows.and_then(|rows| serde_json::to_string(&rows).map_err(|error| error.to_string())) {
-        Ok(body) => Response::json("200 OK", body),
-        Err(error) => Response::json_error("500 Internal Server Error", &error),
+    match rows {
+        Ok(rows) => match serde_json::to_string(&rows) {
+            Ok(body) => Response::json("200 OK", body),
+            Err(error) => Response::json_error("500 Internal Server Error", &error.to_string()),
+        },
+        // A busy reader pool is transient (issue #1533): the client retries.
+        Err(error) => crate::http::read_status::db_error_response(&error),
     }
 }
 
 pub async fn ownerships(_req: &ParsedRequest) -> Response {
     ownerships_reply(
-        crate::commands::run_blocking(
+        crate::commands::run_blocking_typed::<_, crate::db::DbError, _>(
             "http_circuit_agent_ownerships",
-            circuit_commands::list_circuit_agent_ownerships,
+            circuit_commands::list_circuit_agent_ownerships_now,
         )
         .await,
     )
@@ -267,7 +282,15 @@ fn approve_request(req: &ParsedRequest) -> Result<ApproveCircuitStepRequest, Res
 
 fn approve_core(run_id: i64, node_id: String) -> Result<(), ActError> {
     ensure_run(run_id)?;
-    circuit_commands::approve_circuit_step(run_id, node_id).map_err(ActError::Refused)
+    // A refusal stays a `409`; a busy database is transient and earns a `503`
+    // (issue #1533). The typed error is what tells them apart.
+    circuit_commands::approve_circuit_step_now(run_id, node_id).map_err(|error| {
+        if error.is_busy() {
+            ActError::Unavailable(error)
+        } else {
+            ActError::Refused(error.to_string())
+        }
+    })
 }
 
 /// `POST /api/circuit-runs/{id}/approve` — approve the parked gate.
@@ -292,7 +315,15 @@ fn outcome_request(req: &ParsedRequest) -> Result<CheckpointRequest, Response> {
 
 fn outcome_core(request: &CheckpointRequest) -> Result<(), ActError> {
     ensure_run(request.run_id)?;
-    circuit_commands::record_circuit_outcome_now(request).map_err(ActError::Refused)
+    // A refusal stays a `409`; a busy database is transient and earns a `503`
+    // (issue #1533).
+    circuit_commands::record_circuit_outcome_now(request).map_err(|error| {
+        if error.is_busy() {
+            ActError::Unavailable(error)
+        } else {
+            ActError::Refused(error.to_string())
+        }
+    })
 }
 
 /// `POST /api/circuit-runs/{id}/outcome` — recheck an Unverified Checkpoint or
@@ -322,7 +353,15 @@ fn recover_request(req: &ParsedRequest) -> Result<RecoveryRequest, Response> {
 
 fn recover_core(request: &RecoveryRequest) -> Result<(), ActError> {
     ensure_run(request.run_id)?;
-    circuit_commands::recover_failed_circuit_run_now(request).map_err(ActError::Refused)
+    // A refusal stays a `409`; a busy database is transient and earns a `503`
+    // (issue #1533).
+    circuit_commands::recover_failed_circuit_run_now(request).map_err(|error| {
+        if error.is_busy() {
+            ActError::Unavailable(error)
+        } else {
+            ActError::Refused(error.to_string())
+        }
+    })
 }
 
 /// `POST /api/circuit-runs/{id}/recover` — Run Recovery on a failed run. The
@@ -345,7 +384,15 @@ pub async fn recover(req: &ParsedRequest) -> Response {
 
 fn cancel_core(run_id: i64) -> Result<(), ActError> {
     ensure_run(run_id)?;
-    circuit_commands::cancel_circuit_run_now(state::app_handle(), run_id).map_err(ActError::Failed)
+    // A cancel failure stays a `500`; a busy database is transient and earns
+    // a `503` (issue #1533).
+    circuit_commands::cancel_circuit_run_now(state::app_handle(), run_id).map_err(|error| {
+        if error.is_busy() {
+            ActError::Unavailable(error)
+        } else {
+            ActError::Failed(error.to_string())
+        }
+    })
 }
 
 /// `POST /api/circuit-runs/{id}/cancel` — cancel the run and retire its helper
@@ -589,7 +636,7 @@ mod tests {
     }
 
     fn listing() -> Response {
-        list_reply(node_run::list_node_circuit_runs().map_err(String::from))
+        list_reply(node_run::list_node_circuit_runs())
     }
 
     #[test]
@@ -597,19 +644,19 @@ mod tests {
         let _db = db::test_support::isolated();
         assert_eq!(
             text(&ownerships_reply(
-                circuit_commands::list_circuit_agent_ownerships()
+                circuit_commands::list_circuit_agent_ownerships_now()
             )),
             "[]"
         );
         let (node, run) = review_run();
-        let response = ownerships_reply(circuit_commands::list_circuit_agent_ownerships());
+        let response = ownerships_reply(circuit_commands::list_circuit_agent_ownerships_now());
         assert_eq!(response.status, "200 OK");
         let body = json(&response);
         assert_eq!(body.as_array().unwrap().len(), 1);
         assert_eq!(body[0]["node_id"], node);
         assert_eq!(body[0]["run_id"], run);
         assert!(body[0]["parent_node_id"].is_null());
-        let failure = ownerships_reply(Err("read failed".into()));
+        let failure = ownerships_reply(Err(crate::db::DbError::Rendered("read failed".into())));
         assert_eq!(failure.status, "500 Internal Server Error");
         assert_eq!(json(&failure)["error"], "read failed");
     }
@@ -644,7 +691,7 @@ mod tests {
 
     #[test]
     fn a_failed_read_is_a_500_with_the_reason() {
-        let response = list_reply(Err("pool exhausted".into()));
+        let response = list_reply(Err(crate::db::DbError::Rendered("pool exhausted".into())));
         assert_eq!(response.status, "500 Internal Server Error");
         assert_eq!(json(&response)["error"], "pool exhausted");
     }
