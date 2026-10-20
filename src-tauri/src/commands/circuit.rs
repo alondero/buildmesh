@@ -915,7 +915,10 @@ pub fn list_circuit_runs(
         .map(|run| {
             let steps = crate::db::list_circuit_run_steps(run.id).map_err(|e| e.to_string())?;
             let review_round_limit = {
-                let db = crate::db::read_conn();
+                // The reader checkout is fallible (issue #1533): a saturated
+                // pool is a transient shortage, not a broken command, so the
+                // error carries the retryable copy instead of panicking.
+                let db = crate::db::read_conn().map_err(|e| e.to_string())?;
                 crate::db::circuit::review_rounds::current_limit(&db, &run)
                     .map_err(|e| e.to_string())?
             };
