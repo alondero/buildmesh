@@ -132,9 +132,6 @@ mod migration_tests;
 mod tests;
 
 #[cfg(test)]
-mod pool_stress_tests;
-
-#[cfg(test)]
 mod mesh_tests;
 
 #[cfg(test)]

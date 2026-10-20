@@ -1018,6 +1018,19 @@ pub enum CircuitEvent {
         attempt: i32,
         error: String,
     },
+    /// The continuation could not be dispatched because the database was
+    /// unavailable.
+    ///
+    /// The prompt was never sent, so the claim is *released* rather than
+    /// settled: the delivery key returns to `pending`, which the observation
+    /// reads as "owed", and its retry re-creates the effect on a later pass
+    /// (issue #1533). A claim left at `claimed` would be settled by the
+    /// observation as *uncertain* — a false verdict about work that was never
+    /// attempted.
+    ContinuationDeferred {
+        node_id: String,
+        attempt: i32,
+    },
     /// An idle session has a finished background task it cannot learn about on
     /// its own (issue #2105). The stepper answers with one bounded wake-up
     /// prompt, fenced to the observed turn, and never repeats it.
@@ -1042,6 +1055,18 @@ pub enum CircuitEvent {
         node_id: String,
         attempt: i32,
         error: String,
+    },
+    /// The wake-up could not be dispatched because the database was
+    /// unavailable.
+    ///
+    /// The wake-up was never sent, so the claim is *released* rather than
+    /// settled, and the wake can be decided again on a later pass: the
+    /// delivery key returns to `pending`, and the wake counter and the turn
+    /// fence are cleared with it — both count wakes that were *sent*
+    /// (issue #1533).
+    NudgeDeferred {
+        node_id: String,
+        attempt: i32,
     },
     /// The agent's turn finished but the result file its prompt asked for is
     /// missing. The stepper answers with a bounded reminder, or fails the step
@@ -1911,6 +1936,22 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 t.context_changed = true;
             }
         }
+        CircuitEvent::ContinuationDeferred { node_id, attempt } => {
+            let key = format!("node.{node_id}.continuation.delivery");
+            if run.state == RunState::Running
+                && run
+                    .step(node_id)
+                    .is_some_and(|s| s.status == StepStatus::Running && s.attempt == *attempt)
+                && run.context.get(&key) == Some("claimed")
+            {
+                // Release the claim: the prompt was never sent, so the
+                // continuation is still owed. `pending` is what the
+                // observation reads as owed, and its retry re-creates the
+                // effect (issue #1533).
+                run.context.set(&key, "pending");
+                t.context_changed = true;
+            }
+        }
         CircuitEvent::NudgeIdleSession {
             node_id,
             attempt,
@@ -1977,6 +2018,27 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 if let CircuitEvent::NudgeUncertain { error, .. } = event {
                     unverify_step(run, &mut t, node_id, format!("Wake-up delivery is unverified: {error}. Inspect the agent; the wake-up will not be replayed."));
                 }
+                t.context_changed = true;
+            }
+        }
+        CircuitEvent::NudgeDeferred { node_id, attempt } => {
+            let key = format!("node.{node_id}.nudge.delivery");
+            if run.state == RunState::Running
+                && run
+                    .step(node_id)
+                    .is_some_and(|s| s.status == StepStatus::Running && s.attempt == *attempt)
+                && run.context.get(&key) == Some("claimed")
+            {
+                // Release the claim: the wake-up was never sent, so it can be
+                // decided again. The wake counter and the turn fence go with
+                // it — both of them count wakes that were *sent*, and this one
+                // was not (issue #1533).
+                run.context.set(&key, "pending");
+                run.context
+                    .remove(&format!("node.{node_id}.nudges.{attempt}"));
+                run.context
+                    .remove(&format!("node.{node_id}.nudge.revision"));
+                run.context.remove(&format!("node.{node_id}.nudge.stamp"));
                 t.context_changed = true;
             }
         }

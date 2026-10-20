@@ -328,6 +328,37 @@ pub(super) fn execute_call_github_effect(
     })])
 }
 
+/// Release the claim the stepper gave an effect, so a later pass can
+/// dispatch it again.
+///
+/// The stepper persists the claim (`continuation.delivery` /
+/// `nudge.delivery`) *before* the effect reaches the dispatcher. A batch that
+/// is abandoned without an outcome leaves that claim at `claimed`, and the
+/// observation ignores a claimed delivery — so the effect would be stranded
+/// instead of retried, and the observation would eventually report it as
+/// uncertain, a false verdict about work that was never attempted (issue
+/// #1533).
+fn defer_effect(view: &RunView, effect: &Effect, outcomes: &mut Vec<CircuitEvent>) {
+    let event = match effect {
+        Effect::ContinueAgentTurn { node_id, .. } => CircuitEvent::ContinuationDeferred {
+            node_id: node_id.clone(),
+            attempt: view
+                .step(node_id)
+                .map(|step| step.attempt)
+                .unwrap_or_default(),
+        },
+        Effect::NudgeIdleAgent { node_id, .. } => CircuitEvent::NudgeDeferred {
+            node_id: node_id.clone(),
+            attempt: view
+                .step(node_id)
+                .map(|step| step.attempt)
+                .unwrap_or_default(),
+        },
+        _ => return,
+    };
+    outcomes.push(event);
+}
+
 /// Run an already-committed effect batch. The cancellation flag is sampled
 /// before the batch permit drops, including on the early returns that stop
 /// the rest of the batch.
@@ -348,16 +379,20 @@ pub(super) fn dispatch_effects(
         Ok(run) => run.map(|run| run.state),
         Err(error) => {
             // A failed read is *unknown*, not "the run is gone" (issue
-            // #1533). Deferring the whole batch leaves every effect
-            // unclaimed, so the next tick dispatches them; failing the run
-            // here would terminalise healthy work over a transient pool
-            // shortage.
+            // #1533). The batch cannot be dispatched — but the stepper has
+            // already claimed the effects it holds, and a claim left at
+            // `claimed` is one the observation never settles: the effect
+            // would be stranded rather than retried. So the claims are
+            // released here, and the next pass dispatches the batch.
             tracing::warn!(
                 "circuits: run {} state read failed, deferring the batch: {}",
                 active.run.id,
                 error
             );
-            return Ok(finish(Vec::new()));
+            for effect in effects {
+                defer_effect(view, effect, &mut outcome_events);
+            }
+            return Ok(finish(outcome_events));
         }
     };
     for effect in effects {
@@ -579,10 +614,58 @@ pub(super) fn dispatch_effects(
                 if view.context.get(&key) != Some("claimed") {
                     continue;
                 }
-                let node = db::get_agent_node_by_id(*target_agent_id)
-                    .map_err(|error| error.to_string())?;
-                let stamp =
-                    db::agent_turn_stamp(*target_agent_id).map_err(|error| error.to_string())?;
+                // A read that failed is unknown, not "the agent is gone"
+                // (issue #1533): the claim is released so the continuation is
+                // dispatched on a later pass, instead of the run failing over
+                // a transient pool shortage.
+                let node = match db::get_agent_node_by_id(*target_agent_id) {
+                    Ok(node) => node,
+                    Err(rusqlite::Error::QueryReturnedNoRows) => {
+                        let reason = format!(
+                            "target agent {} for step {} was lost before prompt injection",
+                            target_agent_id, node_id
+                        );
+                        tracing::warn!("circuits: run {}: {}", active.run.id, reason);
+                        return Err(reason);
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            "circuits: run {}: target agent {} for step {} could not be read, deferring the continuation: {}",
+                            active.run.id,
+                            target_agent_id,
+                            node_id,
+                            error
+                        );
+                        outcome_events.push(CircuitEvent::ContinuationDeferred {
+                            node_id: node_id.clone(),
+                            attempt: view
+                                .step(node_id)
+                                .map(|step| step.attempt)
+                                .unwrap_or_default(),
+                        });
+                        continue;
+                    }
+                };
+                let stamp = match db::agent_turn_stamp(*target_agent_id) {
+                    Ok(stamp) => stamp,
+                    Err(error) => {
+                        tracing::warn!(
+                            "circuits: run {}: turn stamp of agent {} for step {} could not be read, deferring the continuation: {}",
+                            active.run.id,
+                            target_agent_id,
+                            node_id,
+                            error
+                        );
+                        outcome_events.push(CircuitEvent::ContinuationDeferred {
+                            node_id: node_id.clone(),
+                            attempt: view
+                                .step(node_id)
+                                .map(|step| step.attempt)
+                                .unwrap_or_default(),
+                        });
+                        continue;
+                    }
+                };
                 let revision = host.assistant_revision(&node);
                 let valid = continuation_is_current(
                     view,
@@ -603,13 +686,31 @@ pub(super) fn dispatch_effects(
                     });
                     continue;
                 }
-                if effect_batch.is_cancelled()
-                    || db::get_circuit_run(active.run.id)
-                        .ok()
-                        .flatten()
-                        .is_none_or(|run| run.state != "running")
-                {
+                if effect_batch.is_cancelled() {
                     return Ok(finish(outcome_events));
+                }
+                // The run must still be running for the write below. A read
+                // that failed is unknown, not "the run is not running" (issue
+                // #1533): the claim is released so the continuation is
+                // dispatched on a later pass.
+                match db::get_circuit_run(active.run.id) {
+                    Ok(Some(run)) if run.state == "running" => {}
+                    Ok(_) => return Ok(finish(outcome_events)),
+                    Err(error) => {
+                        tracing::warn!(
+                            "circuits: run {} state read failed before continuation injection, deferring the continuation: {}",
+                            active.run.id,
+                            error
+                        );
+                        outcome_events.push(CircuitEvent::ContinuationDeferred {
+                            node_id: node_id.clone(),
+                            attempt: view
+                                .step(node_id)
+                                .map(|step| step.attempt)
+                                .unwrap_or_default(),
+                        });
+                        continue;
+                    }
                 }
                 let expected = view
                     .context
@@ -665,20 +766,103 @@ pub(super) fn dispatch_effects(
                 if view.context.get(&key) != Some("claimed") {
                     continue;
                 }
-                let node = db::get_agent_node_by_id(*target_agent_id)
-                    .map_err(|error| error.to_string())?;
-                // Re-read native completion before the identity/status fences:
-                // an agent may have resumed since observation claimed the wake.
-                let task_id = host.stalled_background_task(&node);
-                let node = db::get_agent_node_by_id(*target_agent_id)
-                    .map_err(|error| error.to_string())?;
-                let stamp =
-                    db::agent_turn_stamp(*target_agent_id).map_err(|error| error.to_string())?;
-                let revision = host.assistant_revision(&node);
                 let attempt = view
                     .step(node_id)
                     .map(|step| step.attempt)
                     .unwrap_or_default();
+                // A read that failed is unknown, not "the agent is gone"
+                // (issue #1533): the claim is released so the wake-up is
+                // decided again on a later pass, instead of the run failing
+                // over a transient pool shortage.
+                let node = match db::get_agent_node_by_id(*target_agent_id) {
+                    Ok(node) => node,
+                    Err(rusqlite::Error::QueryReturnedNoRows) => {
+                        let reason = format!(
+                            "target agent {} for step {} was lost before wake-up injection",
+                            target_agent_id, node_id
+                        );
+                        tracing::warn!("circuits: run {}: {}", active.run.id, reason);
+                        return Err(reason);
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            "circuits: run {}: target agent {} for step {} could not be read, deferring the wake-up: {}",
+                            active.run.id,
+                            target_agent_id,
+                            node_id,
+                            error
+                        );
+                        outcome_events.push(CircuitEvent::NudgeDeferred {
+                            node_id: node_id.clone(),
+                            attempt,
+                        });
+                        continue;
+                    }
+                };
+                // Re-read native completion before the identity/status fences:
+                // an agent may have resumed since observation claimed the wake.
+                let task_id = host.stalled_background_task(&node);
+                let node = match db::get_agent_node_by_id(*target_agent_id) {
+                    Ok(node) => node,
+                    Err(error) => {
+                        tracing::warn!(
+                            "circuits: run {}: target agent {} for step {} could not be re-read, deferring the wake-up: {}",
+                            active.run.id,
+                            target_agent_id,
+                            node_id,
+                            error
+                        );
+                        outcome_events.push(CircuitEvent::NudgeDeferred {
+                            node_id: node_id.clone(),
+                            attempt,
+                        });
+                        continue;
+                    }
+                };
+                let stamp = match db::agent_turn_stamp(*target_agent_id) {
+                    Ok(stamp) => stamp,
+                    Err(error) => {
+                        tracing::warn!(
+                            "circuits: run {}: turn stamp of agent {} for step {} could not be read, deferring the wake-up: {}",
+                            active.run.id,
+                            target_agent_id,
+                            node_id,
+                            error
+                        );
+                        outcome_events.push(CircuitEvent::NudgeDeferred {
+                            node_id: node_id.clone(),
+                            attempt,
+                        });
+                        continue;
+                    }
+                };
+                let revision = host.assistant_revision(&node);
+                // The lifecycle check is a read too, and a failed read is
+                // unknown — not "the agent may be woken". Reading it as "not
+                // allowed" recorded a *terminal* obsolete verdict about a
+                // wake-up that was never attempted (issue #1533).
+                let lifecycle_allows_wake =
+                    match db::agent_node::circuit_lifecycle_blocker(*target_agent_id) {
+                        Ok(None
+                        | Some(
+                            crate::circuit::observation::CircuitObservationBlocker::KnownWorkOutstanding,
+                        )) => true,
+                        Ok(Some(_)) => false,
+                        Err(error) => {
+                            tracing::warn!(
+                                "circuits: run {}: lifecycle of agent {} for step {} could not be read, deferring the wake-up: {}",
+                                active.run.id,
+                                target_agent_id,
+                                node_id,
+                                error
+                            );
+                            outcome_events.push(CircuitEvent::NudgeDeferred {
+                                node_id: node_id.clone(),
+                                attempt,
+                            });
+                            continue;
+                        }
+                    };
                 // The wake-up is only worth sending to the turn that was
                 // observed as stalled. Reuse the continuation fence, bound to
                 // this nudge's own claim keys: a turn that has since moved on
@@ -694,13 +878,7 @@ pub(super) fn dispatch_effects(
                         revision: revision.as_deref(),
                         quiet_ms: host.millis_since_last_output(*target_agent_id),
                         task_id: task_id.as_deref(),
-                        lifecycle_allows_wake: matches!(
-                            db::agent_node::circuit_lifecycle_blocker(*target_agent_id),
-                            Ok(None
-                                | Some(
-                                    crate::circuit::observation::CircuitObservationBlocker::KnownWorkOutstanding
-                                ))
-                        ),
+                        lifecycle_allows_wake,
                     },
                 );
                 if !valid {
@@ -710,13 +888,28 @@ pub(super) fn dispatch_effects(
                     });
                     continue;
                 }
-                if effect_batch.is_cancelled()
-                    || db::get_circuit_run(active.run.id)
-                        .ok()
-                        .flatten()
-                        .is_none_or(|run| run.state != "running")
-                {
+                if effect_batch.is_cancelled() {
                     return Ok(finish(outcome_events));
+                }
+                // The run must still be running for the write below. A read
+                // that failed is unknown, not "the run is not running" (issue
+                // #1533): the claim is released so the wake-up is decided
+                // again on a later pass.
+                match db::get_circuit_run(active.run.id) {
+                    Ok(Some(run)) if run.state == "running" => {}
+                    Ok(_) => return Ok(finish(outcome_events)),
+                    Err(error) => {
+                        tracing::warn!(
+                            "circuits: run {} state read failed before wake-up injection, deferring the wake-up: {}",
+                            active.run.id,
+                            error
+                        );
+                        outcome_events.push(CircuitEvent::NudgeDeferred {
+                            node_id: node_id.clone(),
+                            attempt,
+                        });
+                        continue;
+                    }
                 }
                 let expected = view
                     .context
@@ -1475,6 +1668,74 @@ mod tests {
             SessionStatus::Running
         );
         assert_eq!(effect_rows(open.run_id), 0);
+    }
+
+    /// Issue #1533: a busy reader pool **defers** the batch.
+    ///
+    /// It does not fail the run — a transient shortage is not the run's fault —
+    /// and it does not leave the stepper's claim behind: a claim at `claimed`
+    /// is one the observation ignores, so the effect would be stranded rather
+    /// than retried. The deferred outcome releases the claim, and the batch
+    /// dispatches on the next pass.
+    #[test]
+    fn a_busy_pool_defers_the_batch_and_releases_the_claim() {
+        let graph = one_node("spawn", spawn_kind());
+        let scratch = Scratch::new();
+        let agent = scratch.agent();
+        let mut world = scratch.start(
+            graph,
+            vec![running_step("spawn", Some(agent.id))],
+            &[],
+            claimed_delivery(agent.id, "continuation", None),
+            None,
+        );
+        let host = ready_host();
+
+        // Hold the pool dry: every read now fails with the typed busy error.
+        let held = crate::db::test_support::saturate_readers();
+
+        let deferred = dispatch(
+            &mut world,
+            &host,
+            &[Effect::ContinueAgentTurn {
+                node_id: "spawn".into(),
+                target_agent_id: agent.id,
+                prompt: "go on".into(),
+            }],
+        );
+        assert!(
+            host.prompts.borrow().is_empty(),
+            "a busy pool must not write a prompt"
+        );
+        assert!(
+            matches!(
+                &deferred.outcomes[..],
+                [CircuitEvent::ContinuationDeferred { node_id, attempt: 1 }] if node_id == "spawn"
+            ),
+            "the batch is deferred and the claim released: {:?}",
+            deferred.outcomes
+        );
+
+        // With the pool serving again, the same batch dispatches.
+        drop(held);
+        let pass = dispatch(
+            &mut world,
+            &host,
+            &[Effect::ContinueAgentTurn {
+                node_id: "spawn".into(),
+                target_agent_id: agent.id,
+                prompt: "go on".into(),
+            }],
+        );
+        assert!(
+            matches!(
+                &pass.outcomes[..],
+                [CircuitEvent::ContinuationDelivered { node_id, attempt: 1 }] if node_id == "spawn"
+            ),
+            "the deferred batch dispatches once the pool serves again: {:?}",
+            pass.outcomes
+        );
+        assert_eq!(host.prompts.borrow().len(), 1);
     }
 
     #[test]

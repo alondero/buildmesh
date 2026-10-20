@@ -54,6 +54,11 @@ impl CircuitContext {
         self.vars.get(path).map(|s| s.as_str())
     }
 
+    /// Drop one dotted path.
+    pub fn remove(&mut self, path: &str) {
+        self.vars.remove(path);
+    }
+
     /// Attach lifecycle evidence to this in-memory view. These projections
     /// are rebuilt from the agent lifecycle table and must never be persisted
     /// as part of a circuit run's template context.

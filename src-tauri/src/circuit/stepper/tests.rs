@@ -2651,6 +2651,128 @@ fn circuit_pending_continuation_replays_but_uncertain_delivery_does_not() {
     assert!(advance(&mut run, &retry).effects.is_empty());
 }
 
+/// Issue #1533: a deferred dispatch **releases** the claim, so the effect is
+/// retried instead of being stranded at `claimed`.
+///
+/// A claim left at `claimed` is one the observation never settles: it ignores
+/// a claimed delivery, so the effect would wait forever, and the run's own
+/// recovery would eventually report it as *uncertain* — a false verdict about
+/// work that was never attempted.
+#[test]
+fn a_deferred_continuation_releases_its_claim_so_the_effect_is_retried() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    advance(
+        &mut run,
+        &CircuitEvent::ContinuationObserved {
+            node_id: "classify".into(),
+            attempt: 1,
+            stamp: "100:yield".into(),
+            revision: "r".into(),
+            input_stamp: "1:0".into(),
+        },
+    );
+    let claimed = advance_with_report_evidence(
+        &mut run,
+        &classified("classify", Some(Classification::Continue)),
+    );
+    assert!(claimed
+        .effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::ContinueAgentTurn { .. })));
+    assert_eq!(
+        run.context.get("node.classify.continuation.delivery"),
+        Some("claimed")
+    );
+
+    // The dispatch could not read the database, so it deferred the effect.
+    advance(
+        &mut run,
+        &CircuitEvent::ContinuationDeferred {
+            node_id: "classify".into(),
+            attempt: 1,
+        },
+    );
+    assert_eq!(
+        run.context.get("node.classify.continuation.delivery"),
+        Some("pending"),
+        "a deferred dispatch releases the claim, so the effect is retried"
+    );
+
+    // The observation's retry re-creates the effect.
+    let retry = CircuitEvent::ContinuationRetry {
+        node_id: "classify".into(),
+        attempt: 1,
+    };
+    assert_eq!(advance(&mut run, &retry).effects.len(), 1);
+    assert_eq!(
+        run.context.get("node.classify.continuation.delivery"),
+        Some("claimed")
+    );
+}
+
+/// Issue #1533: a deferred wake-up releases its claim **and** the wake budget
+/// it never spent, so the wake can be decided again.
+///
+/// The counter and the turn fence both bound wakes that were *sent*; a
+/// wake-up that never reached the agent spent neither.
+#[test]
+fn a_deferred_wake_up_releases_its_claim_and_the_wake_budget() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    advance(
+        &mut run,
+        &stalled_session("classify", 1, "report-1", "100:ready"),
+    );
+    assert_eq!(
+        run.context.get("node.classify.nudge.delivery"),
+        Some("claimed")
+    );
+    assert_eq!(run.context.get("node.classify.nudges.1"), Some("1"));
+
+    advance(
+        &mut run,
+        &CircuitEvent::NudgeDeferred {
+            node_id: "classify".into(),
+            attempt: 1,
+        },
+    );
+    assert_eq!(
+        run.context.get("node.classify.nudge.delivery"),
+        Some("pending"),
+        "a deferred dispatch releases the claim, so the wake is decided again"
+    );
+    assert_eq!(
+        run.context.get("node.classify.nudges.1"),
+        None,
+        "a wake-up that was never sent does not spend the attempt's budget"
+    );
+
+    // The same observed turn can be woken again, because the wake was never
+    // sent.
+    let retried = advance(
+        &mut run,
+        &stalled_session("classify", 1, "report-1", "100:ready"),
+    );
+    assert_eq!(retried.effects.len(), 1, "the wake-up is decided again");
+    assert_eq!(
+        run.context.get("node.classify.nudge.delivery"),
+        Some("claimed")
+    );
+}
+
 #[test]
 fn circuit_continuation_is_bounded_deduplicated_and_never_answers_a_blocker() {
     let mut run = gate_run(

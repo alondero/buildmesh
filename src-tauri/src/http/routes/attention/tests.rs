@@ -3450,6 +3450,35 @@ fn cline_hook_name_and_task_id_aliases_parse() {
     assert_eq!(payload.session_id.as_deref(), Some("1789757012702_7of3e"));
 }
 
+/// Issue #1533: a node row that is genuinely gone is **absence** — the route
+/// answers `404`, because the node really is gone.
+///
+/// A read that *failed* is **unknown**: it says nothing about the row, so it
+/// travels out and the route answers `503` ("come back later") instead of
+/// telling the harness its node was deleted.
+#[test]
+fn an_absent_addressed_node_is_absence_and_a_failed_read_is_not() {
+    let _db = crate::db::test_support::isolated();
+
+    // No session id: nothing was addressed.
+    assert!(super::addressed_node(None).unwrap().is_none());
+
+    // A session id whose row is gone: absence.
+    assert!(
+        super::addressed_node(Some(4242)).unwrap().is_none(),
+        "a row that is gone is absence, not an error"
+    );
+
+    // A busy reader pool: unknown.
+    let held = crate::db::test_support::saturate_readers();
+    let error = super::addressed_node(Some(4242)).expect_err("a busy pool is not absence");
+    assert!(
+        crate::db::error::is_busy_error(&error),
+        "the busy answer must stay typed, got: {error}"
+    );
+    drop(held);
+}
+
 fn classify(
     body: &[u8],
     provider: &str,

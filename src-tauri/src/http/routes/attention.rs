@@ -41,6 +41,25 @@ fn verify_attention_token(
     adapter.verify_attention_token(query_string, minted)
 }
 
+/// The node the hook addressed, or absence when its row is genuinely gone.
+///
+/// The two are told apart on purpose (issue #1533). A row that is not there
+/// any more is **absence**: the route answers `404`, because the node really
+/// is gone. A read that *failed* is **unknown** — a busy reader pool says
+/// nothing about the row — and travels out as an error, so the route answers
+/// `503` ("come back later") instead of telling the harness its node was
+/// deleted.
+fn addressed_node(session_id: Option<i64>) -> rusqlite::Result<Option<crate::models::AgentNode>> {
+    let Some(id) = session_id else {
+        return Ok(None);
+    };
+    match crate::db::get_agent_node_by_id(id) {
+        Ok(node) => Ok(Some(node)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 pub async fn handle_post(req: &ParsedRequest) -> Response {
     // Loopback-only: the Claude Code hook always posts from 127.0.0.1/::1. A
     // non-loopback peer is an external spoof attempt — refuse before doing work.
@@ -82,10 +101,7 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
             // reader pool must not make a live node look deleted. The error
             // travels out of the closure so the route can answer "come back
             // later" instead of a 404 that tells the harness the node is gone.
-            let addressed = match session_id {
-                Some(id) => Some(crate::db::get_agent_node_by_id(id)?),
-                None => None,
-            };
+            let addressed = addressed_node(session_id)?;
             let value = serde_json::from_slice::<serde_json::Value>(&hook_body).ok();
             // Old shared manifests may still name the last-spawned node.
             // Their numeric address cannot establish MiniMax ownership either.

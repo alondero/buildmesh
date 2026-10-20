@@ -1950,3 +1950,133 @@ fn reader_pool_shares_named_memory_uri() {
         0
     );
 }
+
+/// Issue #1533: a saturated pool hands every caller the typed busy error.
+///
+/// The mixed-boundary check below proves the same thing end to end; this one
+/// pins the accessor itself, so a boundary that starts swallowing the error
+/// cannot hide a broken pool.
+#[test]
+fn a_saturated_pool_answers_every_concurrent_caller_with_a_busy_error() {
+    let db = crate::db::test_support::isolated();
+    let held = crate::db::test_support::saturate_readers();
+    assert!(
+        !held.is_empty(),
+        "the isolated database must have at least one reader to hold"
+    );
+
+    let busy = std::sync::atomic::AtomicUsize::new(0);
+    let served = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..9 {
+            let handle = db.handle();
+            let busy = &busy;
+            let served = &served;
+            scope.spawn(move || {
+                // A spawned thread does not inherit the test's thread-local
+                // database; it adopts it by handle.
+                let _adopted = crate::db::test_support::adopt(&handle);
+                match super::read_conn() {
+                    Ok(_reader) => {
+                        served.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(error) => {
+                        assert!(
+                            super::error::is_busy_error(&error),
+                            "every caller must get a typed busy error, got: {error}"
+                        );
+                        assert!(
+                            error.to_string().contains(super::READER_POOL_BUSY_MESSAGE),
+                            "the busy answer must carry the retryable copy, got: {error}"
+                        );
+                        busy.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            });
+        }
+    });
+
+    assert_eq!(
+        served.load(Ordering::Relaxed),
+        0,
+        "a saturated pool must not hand out a reader"
+    );
+    assert_eq!(
+        busy.load(Ordering::Relaxed),
+        9,
+        "every concurrent caller must be told the database is busy"
+    );
+
+    drop(held);
+}
+
+/// Issue #1533: the mixed-boundary acceptance — the UI, the HTTP route and
+/// the background worker, concurrently, against one saturated pool.
+///
+/// This is the shape that crashed the application — three kinds of caller,
+/// three kinds of thread, one small pool — and it is the shape the issue's
+/// acceptance asks for. The assertions are per boundary: each one must answer
+/// with *its own* retryable shape, and the application must still serve reads
+/// once the pool drains.
+///
+/// A plain `#[tokio::test]` — the current-thread runtime — is the right one
+/// here: the offload seam captures this thread's isolated database and adopts
+/// it on the blocking pool, and a multi-threaded runtime would run the spawned
+/// tasks on threads that have no such install.
+#[tokio::test]
+async fn the_app_survives_a_saturated_pool_across_its_real_boundaries() {
+    let db = crate::db::test_support::isolated();
+    crate::db::create_mesh(
+        "pool stress",
+        &format!("C:/buildmesh-pool-stress-{}", std::process::id()),
+    )
+    .unwrap();
+    let held = crate::db::test_support::saturate_readers();
+
+    // The UI command: a Tauri command that offloads to the blocking pool.
+    let ui = tokio::spawn(async { crate::commands::mesh::list_meshes().await });
+
+    // The HTTP route: the same offload, plus the status mapping.
+    let http = tokio::spawn(async {
+        let request = crate::http::router::ParsedRequest::test_get("/api/nodes");
+        crate::http::routes::nodes::list(&request).await
+    });
+
+    // The background worker: a real worker pass, on a real worker thread.
+    let worker = {
+        let handle = db.handle();
+        tokio::task::spawn_blocking(move || {
+            // A spawned thread does not inherit the test's thread-local
+            // database; it adopts it by handle.
+            let _adopted = crate::db::test_support::adopt(&handle);
+            crate::services::circuit_triggers::run_interval_pass();
+        })
+    };
+
+    // The UI command answers with the retryable copy, not a panic.
+    let ui = ui.await.expect("the UI command task must not panic");
+    let error = ui.expect_err("a saturated pool cannot serve the UI command");
+    assert!(
+        error.contains(super::READER_POOL_BUSY_MESSAGE),
+        "the UI command must report the retryable busy copy, got: {error}"
+    );
+
+    // The HTTP route answers `503` — transient, so the client retries.
+    let http = http.await.expect("the HTTP route task must not panic");
+    assert_eq!(
+        http.status, "503 Service Unavailable",
+        "a busy database must be retryable at the HTTP boundary"
+    );
+
+    // The worker pass survives a failed read: it skips the pass instead of
+    // panicking, which in a release build would abort the process.
+    worker.await.expect("the worker pass task must not panic");
+
+    // The application is still responsive: with the readers released, the
+    // same command serves the read it could not serve before.
+    drop(held);
+    let meshes = crate::commands::mesh::list_meshes()
+        .await
+        .expect("the pool must serve reads again once the readers are back");
+    assert_eq!(meshes.len(), 1, "the seeded mesh must be visible again");
+}
