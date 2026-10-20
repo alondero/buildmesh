@@ -432,6 +432,38 @@ pub(crate) fn classify_spawn_outcome(
     }
 }
 
+/// Report a spawn failure: the flag the UI needs and the message it shows.
+///
+/// Three outcomes, three different answers — and the error case must not be
+/// collapsed into the deferral case:
+///
+/// - [`session_lifecycle::PendingFailure::Failed`] — the row was `Pending`
+///   and is now `Error`: a real failure, reported as one.
+/// - [`session_lifecycle::PendingFailure::Deferred`] — the row was left
+///   recoverable on purpose: not a failure, so the UI stays quiet.
+/// - `Err` — the status lookup or the lifecycle write itself failed. The
+///   row's state is unknown and the node may still be stuck on `pending`, so
+///   this is reported as a failure: a client that read it as a deferral
+///   would leave the user with a stuck node and no explanation.
+fn spawn_failure_report(
+    outcome: Result<session_lifecycle::PendingFailure, String>,
+    reason: &str,
+) -> (bool, String) {
+    match outcome {
+        Ok(session_lifecycle::PendingFailure::Failed) => (true, reason.to_string()),
+        Ok(session_lifecycle::PendingFailure::Deferred) => (false, reason.to_string()),
+        Err(error) => {
+            tracing::error!("create_*_node: the spawn failure could not be recorded: {error}");
+            (true, unrecorded_failure(reason, &error))
+        }
+    }
+}
+
+/// The message for a failure the lifecycle record could not carry.
+pub(crate) fn unrecorded_failure(reason: &str, error: &str) -> String {
+    format!("{reason} (the failure could not be recorded: {error})")
+}
+
 /// Materialise a [`SpawnDispatchAction`] into session-lifecycle writes +
 /// `node-spawn-completed` / `node-spawn-failed` Tauri events. Mirrors the
 /// synchronous success / failure branches in
@@ -477,13 +509,15 @@ pub(crate) fn dispatch_spawn_outcome(
             // node, a startup resume the orchestrator declined), and the
             // variant carries no cause of its own.
             let reason = "spawn skipped before process launch";
-            let node_failed =
-                session_lifecycle::on_error_if_pending(&sink, node_id, reason).unwrap_or(false);
+            let (node_failed, error) = spawn_failure_report(
+                session_lifecycle::on_error_if_pending(&sink, node_id, reason),
+                reason,
+            );
             let _ = app.emit(
                 "node-spawn-failed",
                 NodeSpawnFailedPayload {
                     node_id,
-                    error: reason.to_string(),
+                    error,
                     node_failed,
                 },
             );
@@ -505,12 +539,23 @@ pub(crate) fn dispatch_spawn_panic(app: &AppHandle, node_id: i64, panic_msg: Str
     tracing::error!("create_*_node: node {node_id} spawn future panicked: {panic_msg}");
     let sink = session_lifecycle::AppSessionLifecycleSink { app };
     let reason = format!("spawn panicked: {panic_msg}");
-    let _ = session_lifecycle::on_spawn_failed(&sink, node_id, &reason);
+    // A lifecycle write that fails leaves the row where it was — `pending` —
+    // so the reason says the failure could not be recorded. The event still
+    // reports a failure: the node did not start either way.
+    let error = match session_lifecycle::on_spawn_failed(&sink, node_id, &reason) {
+        Ok(()) => reason,
+        Err(error) => {
+            tracing::error!(
+                "create_*_node: node {node_id} panic failure could not be recorded: {error}"
+            );
+            unrecorded_failure(&reason, &error)
+        }
+    };
     let _ = app.emit(
         "node-spawn-failed",
         NodeSpawnFailedPayload {
             node_id,
-            error: reason,
+            error,
             node_failed: true,
         },
     );
@@ -1963,7 +2008,11 @@ mod tests {
             "spawn skipped before process launch",
         )
         .expect("helper ok");
-        assert!(wrote, "Pending row must accept the Error write");
+        assert_eq!(
+            wrote,
+            session_lifecycle::PendingFailure::Failed,
+            "Pending row must accept the Error write"
+        );
 
         let after = crate::db::get_agent_node_by_id(node_id).expect("read after");
         assert_eq!(after.status, crate::models::SessionStatus::Error);
@@ -1989,7 +2038,11 @@ mod tests {
             "spawn skipped before process launch",
         )
         .expect("helper ok");
-        assert!(!wrote, "Suspended row must NOT accept the Error write");
+        assert_eq!(
+            wrote,
+            session_lifecycle::PendingFailure::Deferred,
+            "Suspended row must NOT accept the Error write"
+        );
 
         let after = crate::db::get_agent_node_by_id(node_id).expect("read after");
         assert_eq!(
@@ -1997,6 +2050,59 @@ mod tests {
             crate::models::SessionStatus::Suspended,
             "Suspended rows must be preserved verbatim — Resume / Regenerate \
              affordances depend on it"
+        );
+    }
+
+    /// A failed status lookup is an *error*, not a deferral. The row's state
+    /// is unknown and the node may still be stuck on `pending`, so the caller
+    /// has to report a failure rather than fall silent.
+    #[test]
+    fn on_error_if_pending_reports_an_error_for_an_unknown_node() {
+        let _db = ensure_pr_db();
+        let sink = crate::agent::session_lifecycle::DbOnlySink;
+        let outcome = session_lifecycle::on_error_if_pending(
+            &sink,
+            -1,
+            "spawn skipped before process launch",
+        );
+        assert!(
+            outcome.is_err(),
+            "a node whose row is missing must surface as an error, not a deferral"
+        );
+    }
+
+    /// The three outcomes the UI must tell apart: a failure, a deferral, and
+    /// an operation that failed. The error case must not read as a deferral —
+    /// that is what left a stuck node with no explanation.
+    #[test]
+    fn spawn_failure_report_keeps_an_error_apart_from_a_deferral() {
+        let (failed, message) = spawn_failure_report(
+            Ok(session_lifecycle::PendingFailure::Failed),
+            "spawn failed",
+        );
+        assert!(failed, "a recorded Error is a failure");
+        assert_eq!(message, "spawn failed");
+
+        let (deferred, message) = spawn_failure_report(
+            Ok(session_lifecycle::PendingFailure::Deferred),
+            "spawn skipped before process launch",
+        );
+        assert!(!deferred, "a deliberately preserved row is not a failure");
+        assert_eq!(message, "spawn skipped before process launch");
+
+        let (failed, message) =
+            spawn_failure_report(Err("database is locked".to_string()), "spawn failed");
+        assert!(
+            failed,
+            "an unrecorded failure must still be reported as a failure"
+        );
+        assert!(
+            message.contains("database is locked"),
+            "the message must name why the failure could not be recorded: {message}"
+        );
+        assert!(
+            message.starts_with("spawn failed"),
+            "the message must keep the original reason: {message}"
         );
     }
 }

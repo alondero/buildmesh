@@ -371,11 +371,20 @@ pub(super) fn deliver_circuit_initial_prompt(
             node_id,
             error
         );
-        let _ = crate::agent::session_lifecycle::on_spawn_failed(
+        // The circuit records the failure on the node's lifecycle row. A write
+        // that fails leaves the row as it was, so it is logged rather than
+        // dropped — the circuit's own run state carries the failure too.
+        if let Err(write_error) = crate::agent::session_lifecycle::on_spawn_failed(
             &crate::agent::session_lifecycle::AppSessionLifecycleSink { app },
             node_id,
             &format!("initial prompt delivery failed: {error}"),
-        );
+        ) {
+            tracing::error!(
+                "circuits: the prompt-delivery failure could not be recorded for agent {}: {}",
+                node_id,
+                write_error
+            );
+        }
     }
 }
 

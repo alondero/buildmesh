@@ -1281,6 +1281,21 @@ pub fn on_spawn_failed(
     on_error_with_detail(sink, node_id, &detail)
 }
 
+/// What [`on_error_if_pending`] did with the row.
+///
+/// The three answers a caller must keep apart: a row that was `Pending` and
+/// is now `Error` is a failure; a row the orchestrator deliberately left
+/// recoverable is a deferral; and a failed status lookup or lifecycle write
+/// is a third case — the node may still be stuck on `pending`, so it is
+/// reported as a failure rather than quietly swallowed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingFailure {
+    /// The row was `Pending`; the `Error` write landed.
+    Failed,
+    /// The row was not `Pending` and was left recoverable on purpose.
+    Deferred,
+}
+
 /// Conditional [`on_error`] variant: only flips a `Pending` row to
 /// `Error`. Used by the detached-spawn wrapper in `commands::agent` for
 /// the `SpawnOutcome::Skipped` arm, where the orchestrator chose to
@@ -1294,11 +1309,17 @@ pub fn on_spawn_failed(
 /// debug-level log is emitted. The caller still emits a
 /// `node-spawn-failed` Tauri event for UI awareness — surfacing that
 /// this attempt was deferred, without changing the recoverable DB row.
+///
+/// The `Err` arm is a failure of the operation itself — the status lookup
+/// or the lifecycle write — not a deferral. It must not be collapsed into
+/// `Deferred`: the row's state is unknown, the node may still be stuck on
+/// `pending`, and a caller that treats the error as a deferral leaves the
+/// user with a stuck node and no explanation.
 pub fn on_error_if_pending(
     sink: &dyn SessionLifecycleSink,
     node_id: i64,
     reason: &str,
-) -> Result<bool, String> {
+) -> Result<PendingFailure, String> {
     let current = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
     if current.status != SessionStatus::Pending {
         tracing::debug!(
@@ -1306,10 +1327,10 @@ pub fn on_error_if_pending(
              skipping Error write to preserve recoverable state",
             current.status
         );
-        return Ok(false);
+        return Ok(PendingFailure::Deferred);
     }
     on_spawn_failed(sink, node_id, reason)?;
-    Ok(true)
+    Ok(PendingFailure::Failed)
 }
 
 /// An ordinary turn finished and the agent is at its prompt, ready for

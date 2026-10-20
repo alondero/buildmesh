@@ -452,8 +452,17 @@ pub(crate) async fn spawn_with_intent(
 
 fn report_spawn_failure(app: &tauri::AppHandle, node_id: i64, is_resume_intent: bool, error: &str) {
     let sink = session_lifecycle::AppSessionLifecycleSink { app };
+    // A lifecycle write that fails leaves the row where it was, so the reason
+    // the user is shown says the failure could not be recorded — a failure
+    // nobody can see is the failure this change exists to remove.
+    let mut reported = error.to_string();
     if is_resume_intent {
-        let _ = session_lifecycle::on_resume_failed(&sink, node_id, error);
+        if let Err(write_error) = session_lifecycle::on_resume_failed(&sink, node_id, error) {
+            tracing::error!(
+                "create_*_node: node {node_id} resume failure could not be recorded: {write_error}"
+            );
+            reported = crate::commands::agent::unrecorded_failure(error, &write_error);
+        }
     } else {
         // Carry the reason into the lifecycle payload. The persisted snapshot
         // is what a restarted app reads back and what rides the
@@ -461,13 +470,18 @@ fn report_spawn_failure(app: &tauri::AppHandle, node_id: i64, is_resume_intent: 
         // fallback hides the diagnosis — the user is left with a red node and
         // no cause (Resume already keeps its reason through
         // `on_resume_failed`).
-        let _ = session_lifecycle::on_spawn_failed(&sink, node_id, error);
+        if let Err(write_error) = session_lifecycle::on_spawn_failed(&sink, node_id, error) {
+            tracing::error!(
+                "create_*_node: node {node_id} spawn failure could not be recorded: {write_error}"
+            );
+            reported = crate::commands::agent::unrecorded_failure(error, &write_error);
+        }
     }
     let _ = app.emit(
         "node-spawn-failed",
         crate::commands::agent::NodeSpawnFailedPayload {
             node_id,
-            error: error.to_string(),
+            error: reported,
             node_failed: true,
         },
     );

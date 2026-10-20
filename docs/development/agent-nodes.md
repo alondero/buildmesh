@@ -302,14 +302,17 @@ config sets `core.bare=true` reports no working directory even though the folder
 holds a full checkout; git then refuses the commands that need a work tree
 ("this operation must be run in a work tree"), so `git status` in that folder
 fails and the checkout is invisible to git's working-tree commands.
-`git::project::resolve` tells the two cases apart by the **index** — a working
-tree *with tracked files* leaves a non-empty one behind, a bare repository has
-none, and the flag only stops git from *using* the index, it does not delete
-it — and reads the flag from the repository's config rather than assuming it.
-(The Git directory's *name* is not the answer: a checkout may keep its data in a
-separate directory (`--separate-git-dir`), and a bare repository may live in a
-folder called `.git`.) A working tree with an empty index — no tracked files —
-keeps the plain wording: there is no evidence it was ever a checkout. For the
+`git::project::resolve` tells the two cases apart by the **tracked files on
+disk**: a checkout holds them, a bare repository holds no working-tree file at
+all, and the flag only stops git from *using* the working tree, it does not
+delete it. The flag itself is read from the repository's config rather than
+assumed. Two cheaper signals are not evidence: the Git directory's *name* (a
+checkout may keep its data in a separate directory (`--separate-git-dir`), and a
+bare repository may live in a folder called `.git`), and the **index** (`git
+read-tree` fills a bare repository's index with tree data without writing a
+single file, and git only says an index is *usually* absent from a bare
+repository). A checkout whose tracked files are not on disk keeps the plain
+wording: there is no evidence it was ever a checkout. For the
 mis-flagged checkout the message names the flag and the repair
 (`git -C "<path>" config core.bare false`) instead of calling the user's project
 "a bare repository", which sends them looking for a bare clone they do not have.
@@ -383,6 +386,20 @@ whether the node was actually marked failed (`node_failed`) — a client must no
 paint a deferred node red or raise an error toast for it. The skip reason names
 no cause, because `SpawnOutcome::Skipped` carries none — the orchestrator's
 skip reasons are indistinguishable at that point.
+
+**A failure that could not be recorded is still a failure.**
+`on_error_if_pending` has three outcomes, and they must not collapse into each
+other: `PendingFailure::Failed` (the row was `Pending`, the `Error` write
+landed), `PendingFailure::Deferred` (the row was left recoverable on purpose),
+and `Err` (the status lookup or the lifecycle write itself failed). The `Err`
+arm is **not** a deferral — the row's state is unknown, the node may still be
+stuck on `pending`, and a caller that reads it as a deferral leaves the user
+with a stuck node and no explanation. `commands::agent::spawn_failure_report`
+maps it to `node_failed: true` and appends *"(the failure could not be
+recorded: …)"* to the reason, so the toast names both the failure and the
+write that failed. The same holds for the fresh-spawn and panic paths: a
+lifecycle write that fails is named in the reason the user is shown
+(`commands::agent::unrecorded_failure`).
 
 **Spawn-path subprocess budgets (issue #1229).** Every git CLI call in `git/worktree/` — the three mutators in `mod.rs` and the fetch helpers in `provision.rs` — runs on, or directly feeds, the click-to-terminal path (the provisioner's four branches, the PR-creation command that reuses the same primitives, and the warm-pool refresh), so none of them may use `Command::output()`/`status()`: both wait forever. The two wedges are a full checkout (`git worktree add` runs smudge/clean filters, and git-LFS pulls over the network) and a contended `.git/index.lock`. All of them route through `git::worktree::run_bounded_git`, a seam over `process_util::run_command_with_timeout` that kills the process tree on the deadline, records the wedge via `diagnostics::record_git_subprocess_timeout`, and names the command in its error — so the spawn-failure toast says which command gave up rather than showing a bare git error. Budgets are `GIT_TREE_TIMEOUT` (120s — `worktree add` and `checkout`, which can legitimately write a whole tree), `GIT_LOCAL_TIMEOUT` (30s — `worktree move`, `reset --hard`, the `remote get-url/add/set-url` trio, `rev-parse`), and `git::sync::SPAWN_FETCH_TIMEOUT` for the fork-head fetch. `reset --hard` is deliberately on the cheaper tier despite writing a tree, because a wedged reset leaves a warm-pool entry in `refreshing` with no path back to `available`: a bounded failure the pool retries beats an unbounded one it cannot. Adding a git shell-out under this module means `run_bounded_git`, not `run_command_with_timeout` directly — `spawn_path_git_shellouts_are_all_budgeted` scans both modules' production code so an unbudgeted call site fails the suite, and `run_bounded_git_surfaces_a_hung_command_as_a_named_err` pins the behaviour with a real wedged process.
 

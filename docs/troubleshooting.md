@@ -255,7 +255,10 @@ logged, so `logs\buildmesh.log` under the app-data folder has the full context
 (including the git command that gave up, if the failure was a git timeout). A
 node that was *deferred* rather than failed — the orchestrator left it
 suspended so Resume and Regenerate stay reachable — raises no toast; its state
-in the sidebar tells you it is waiting, not broken.
+in the sidebar tells you it is waiting, not broken. A toast that ends with
+"(the failure could not be recorded: …)" means the node failed *and* the
+backend could not write the failure down; the node's row may still read as
+starting, so restart it from the sidebar once the cause is fixed.
 
 ## The attention badge is missing or stale
 

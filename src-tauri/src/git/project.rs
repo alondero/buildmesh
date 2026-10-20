@@ -47,7 +47,7 @@ pub fn resolve(selected: &str) -> Result<ProjectRepository, String> {
 /// project "is a bare repository" sends them hunting for a bare clone they do
 /// not have, so name the mis-set flag and the one-line repair instead.
 fn no_working_directory_reason(selected: &str, repo: &Repository) -> String {
-    if working_tree_flagged_bare(repo) {
+    if working_tree_flagged_bare(repo, selected) {
         return format!(
             "{selected} is marked as a bare repository (core.bare=true in its Git config) \
              even though it holds a working tree; repair it with \
@@ -62,18 +62,19 @@ fn no_working_directory_reason(selected: &str, repo: &Repository) -> String {
 ///
 /// The Git directory's *name* is not the answer: a checkout may keep its data
 /// in a separate directory (`--separate-git-dir`), and a bare repository may
-/// live in a folder called `.git`. The index is: a working tree **with tracked
-/// files** leaves a non-empty one behind, a bare repository has none, and the
-/// flag only stops git from *using* the index — it does not delete it. The
-/// flag itself is read from the repository's config rather than assumed, so a
-/// repository that reports no working directory for some other reason keeps
-/// the plain bare-repository wording.
+/// live in a folder called `.git`. The **index** does not settle it either:
+/// git only says an index is *usually* absent from a bare repository, and
+/// `git read-tree` fills a bare repository's index with tree data without
+/// writing a single file. Telling such a repository to set `core.bare=false`
+/// would break the one thing it is: a repository with no working tree.
 ///
-/// A working tree with an empty index — no tracked files — keeps the plain
-/// wording too: there is no evidence it was ever a checkout and the repair
-/// command would be a guess. It is the same wording it got before this rule
-/// existed.
-fn working_tree_flagged_bare(repo: &Repository) -> bool {
+/// The evidence that settles it is the tracked files themselves. A checkout
+/// holds its tracked files on disk; a bare repository holds no working-tree
+/// files at all, whatever its index says. The flag is read from the
+/// repository's config rather than assumed, so a repository that reports no
+/// working directory for some other reason keeps the plain bare-repository
+/// wording.
+fn working_tree_flagged_bare(repo: &Repository, selected: &str) -> bool {
     let flagged = repo
         .config()
         .and_then(|config| config.get_bool("core.bare"))
@@ -81,7 +82,71 @@ fn working_tree_flagged_bare(repo: &Repository) -> bool {
     if !flagged {
         return false;
     }
-    repo.index().map(|index| !index.is_empty()).unwrap_or(false)
+    let Some(root) = checkout_root(repo, selected) else {
+        return false;
+    };
+    tracked_files_present(repo, &root)
+}
+
+/// The folder that holds the checkout, when the repository's layout names one.
+///
+/// Two layouts put a working tree on disk:
+///
+/// - **Standard** — the Git data lives in a `.git` directory inside the
+///   checkout, so the checkout is the Git directory's parent.
+/// - **Separate Git dir** — the checkout keeps a `.git` *file* naming the
+///   repository elsewhere. The file is the only pointer back to the
+///   checkout, so it is looked up on the selected path and its ancestors.
+///
+/// A bare repository points at no checkout folder: its own directory *is* the
+/// Git directory, and it holds no `.git` entry to follow back to a checkout.
+fn checkout_root(repo: &Repository, selected: &str) -> Option<std::path::PathBuf> {
+    let git_dir = repo.path();
+    if git_dir.file_name() == Some(std::ffi::OsStr::new(".git")) {
+        return git_dir.parent().map(std::path::Path::to_path_buf);
+    }
+    let git_dir = git_dir.canonicalize().ok()?;
+    let mut candidate = std::path::PathBuf::from(crate::env::to_host_path(selected));
+    loop {
+        let link = candidate.join(".git");
+        if link.is_file() && gitlink_points_at(&link, &git_dir) {
+            return Some(candidate);
+        }
+        candidate = candidate.parent()?.to_path_buf();
+    }
+}
+
+/// Whether a `.git` *file* (a gitlink) names `git_dir` as the repository.
+fn gitlink_points_at(link: &std::path::Path, git_dir: &std::path::Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(link) else {
+        return false;
+    };
+    let Some(target) = text.trim().strip_prefix("gitdir:") else {
+        return false;
+    };
+    let Ok(target) = std::path::PathBuf::from(target.trim()).canonicalize() else {
+        return false;
+    };
+    target == git_dir
+}
+
+/// Whether the repository's tracked files are actually on disk under `root`.
+///
+/// A submodule entry (a gitlink) names another repository's commit, not a
+/// file in this working tree, so it is not evidence of anything.
+fn tracked_files_present(repo: &Repository, root: &std::path::Path) -> bool {
+    /// The index mode of a submodule (gitlink) entry.
+    const GITLINK_MODE: u32 = 0o160000;
+    let Ok(index) = repo.index() else {
+        return false;
+    };
+    index.iter().any(|entry| {
+        if entry.mode == GITLINK_MODE {
+            return false;
+        }
+        let name = String::from_utf8_lossy(&entry.path);
+        !name.is_empty() && root.join(name.as_ref()).exists()
+    })
 }
 
 fn repository_identity(repo: &Repository) -> Result<String, String> {
@@ -352,6 +417,68 @@ mod tests {
             !reason.contains("core.bare=true"),
             "a bare repository must not be told to repair a mis-set flag: {reason}"
         );
+    }
+
+    /// A genuine bare repository can carry a populated index: `git read-tree`
+    /// reads tree data into the index without writing a single working-tree
+    /// file, and git only says an index is *usually* absent from a bare
+    /// repository. The index therefore does not prove a working tree, and
+    /// such a repository must not be told to clear a flag that is set
+    /// correctly — that would break the one thing it is.
+    ///
+    /// Both layouts are covered, because they fail for different reasons.
+    /// A bare repository whose Git directory is `<name>.git` has no `.git`
+    /// entry to follow back to a checkout, so no folder holds its tracked
+    /// files. A bare repository *named* `.git` sits inside a folder that
+    /// looks like a checkout root, and only the tracked files themselves —
+    /// absent from a bare repository — tell the two apart.
+    #[test]
+    fn a_bare_repository_with_a_populated_index_is_not_told_it_holds_a_working_tree() {
+        let td = TestDir::new("project-bare-populated-index");
+        init_repo_with_commit(td.path(), &[("file.txt", "content\n")]);
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("git");
+            assert!(status.success(), "git {args:?} failed");
+        };
+
+        for (case, bare) in [
+            ("bare.git", td.path().join("bare.git")),
+            ("named-git", td.path().join("gitdata").join(".git")),
+        ] {
+            if case == "named-git" {
+                std::fs::create_dir_all(td.path().join("gitdata")).unwrap();
+            }
+            run(&[
+                "clone",
+                "--bare",
+                td.path().to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ]);
+            run(&["--git-dir", bare.to_str().unwrap(), "read-tree", "HEAD"]);
+
+            // Fixture precondition: the index really is populated — the case
+            // the index alone does not distinguish from a checkout.
+            let repo = Repository::discover(&bare).unwrap();
+            assert!(
+                !repo.index().unwrap().is_empty(),
+                "fixture precondition ({case}): the bare repository must carry a populated index"
+            );
+
+            let reason = resolve(bare.to_str().unwrap()).unwrap_err();
+            assert!(
+                reason.contains("is a bare repository, not a project working directory"),
+                "a genuine bare repository keeps the plain wording ({case}): {reason}"
+            );
+            assert!(
+                !reason.contains("core.bare=true"),
+                "a genuine bare repository must not be told to repair a mis-set flag ({case}): {reason}"
+            );
+        }
     }
 
     /// A checkout whose Git data lives in a separate directory still holds a
