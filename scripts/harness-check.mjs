@@ -94,6 +94,7 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/http/ws_tests.rs': 'http::ws::tests',
   'src-tauri/src/services/agent_node_tests.rs': 'services::agent_node::tests',
   'src-tauri/src/services/agent_node_discovery_tests.rs': 'services::agent_node_discovery::tests',
+  'src-tauri/src/services/circuit_worker/dispatch_tests.rs': 'services::circuit_worker::dispatch::tests',
   'src-tauri/src/services/circuit_worker/native_hooks_tests.rs': 'services::circuit_worker::native_hooks::tests',
   'src-tauri/src/services/legacy_retirement/retirement_crash_tests.rs': 'services::legacy_retirement::retirement_crash_tests',
   'src-tauri/src/services/transcript_reader/report_snapshot_tests.rs': 'services::transcript_reader::report_snapshot::tests',
