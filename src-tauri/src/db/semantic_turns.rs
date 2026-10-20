@@ -20,7 +20,7 @@ pub fn persist_semantic_turn(node_id: i64, value: Option<&str>) -> SqlResult<()>
 }
 
 pub fn list_semantic_turns() -> SqlResult<Vec<(i64, String)>> {
-    let conn = read_conn();
+    let conn = read_conn()?;
     let mut stmt = conn.prepare("SELECT key,value FROM app_settings WHERE key LIKE ?1")?;
     let rows = stmt.query_map(params![format!("{SEMANTIC_TURN_KEY_PREFIX}%")], |row| {
         let key: String = row.get(0)?;

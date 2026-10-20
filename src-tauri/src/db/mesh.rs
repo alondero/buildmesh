@@ -177,7 +177,7 @@ pub(crate) fn create_mesh_with_base_ref_inner(
 }
 
 pub fn get_mesh_by_id(id: i64) -> SqlResult<Mesh> {
-    let db = read_conn();
+    let db = read_conn()?;
     get_mesh_by_id_inner(&db, id)
 }
 
@@ -217,7 +217,7 @@ pub fn update_mesh_layout(id: i64, layout: &str) -> SqlResult<()> {
 /// editor without a second round-trip — Scratch Pad is a "type whatever
 /// you want" surface and the absence of notes is the common case.
 pub fn get_mesh_scratchpad(id: i64) -> SqlResult<String> {
-    let db = read_conn();
+    let db = read_conn()?;
     get_mesh_scratchpad_inner(&db, id)
 }
 
@@ -370,7 +370,7 @@ pub(crate) fn update_mesh_positions_batch_inner(
 }
 
 pub fn list_meshes() -> SqlResult<Vec<Mesh>> {
-    let db = read_conn();
+    let db = read_conn()?;
     let mut stmt = db.prepare(&format!(
         "SELECT {} FROM meshes ORDER BY position ASC, name ASC",
         mesh_columns()
@@ -381,7 +381,7 @@ pub fn list_meshes() -> SqlResult<Vec<Mesh>> {
 
 /// Look up a mesh by its path.
 pub fn get_mesh_by_path(path: &str) -> SqlResult<Mesh> {
-    let db = read_conn();
+    let db = read_conn()?;
     let mut stmt = db.prepare(&format!(
         "SELECT {} FROM meshes WHERE path = ?1",
         mesh_columns()

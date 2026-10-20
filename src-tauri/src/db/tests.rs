@@ -274,23 +274,23 @@ fn hook_session_capture_only_fills_a_missing_cli_session_id() {
     );
 }
 
-/// Issue #1294 — two Root Nodes in the same mesh root share an OpenCode
-/// `directory`; the SQLite poller would conflate them (it matches on
-/// `directory` + `time_created`), but the OpenCode plugin POSTs each
-/// TUI's `session.created` event to a per-node URL
-/// (`/api/attention/<node_id>`, where `node_id` comes from
-/// `BUILDMESH_SESSION_ID` set per-agent by `spawn_environment`). The DB
-/// write is therefore per-row, not per-directory — the fill-only
-/// `UPDATE … WHERE id = ?2` clause in `set_cli_session_id_if_missing_inner`
-/// pins the right row from the URL path component. A regression that
-/// swapped `id` for a directory-derived id would re-introduce the
-/// two-Root-Node collision; the existing
-/// `set_cli_session_id_if_missing_basic_semantics` test pins the row
-/// semantics, and the route's `path_without_query.strip_prefix(
-/// "/api/attention/")` parse is the only place that derives `node_id`
-/// from the wire. Testing the route end-to-end requires the live HTTP
-/// harness (out of scope for an inner-helper unit test).
-
+// Issue #1294 — two Root Nodes in the same mesh root share an OpenCode
+// `directory`; the SQLite poller would conflate them (it matches on
+// `directory` + `time_created`), but the OpenCode plugin POSTs each
+// TUI's `session.created` event to a per-node URL
+// (`/api/attention/<node_id>`, where `node_id` comes from
+// `BUILDMESH_SESSION_ID` set per-agent by `spawn_environment`). The DB
+// write is therefore per-row, not per-directory — the fill-only
+// `UPDATE … WHERE id = ?2` clause in `set_cli_session_id_if_missing_inner`
+// pins the right row from the URL path component. A regression that
+// swapped `id` for a directory-derived id would re-introduce the
+// two-Root-Node collision; the existing
+// `set_cli_session_id_if_missing_basic_semantics` test pins the row
+// semantics, and the route's `path_without_query.strip_prefix(
+// "/api/attention/")` parse is the only place that derives `node_id`
+// from the wire. Testing the route end-to-end requires the live HTTP
+// harness (out of scope for an inner-helper unit test).
+//
 // File-level `#[cfg(test)]` is applied by the parent module's
 // `#[cfg(test)] mod tests;` declaration — no inner `mod tests {}` wrapper
 // needed (clippy::module_inception otherwise fires because the file is
@@ -1463,6 +1463,192 @@ fn reader_pool_times_out_when_exhausted() {
     assert!(readers.checkout().is_err());
     assert!(started.elapsed() < std::time::Duration::from_secs(2));
     drop(checked_out);
+}
+
+/// Issue #1533: an exhausted pool must report a **typed** busy error, not
+/// panic.
+///
+/// The panic is what killed a macOS laptop's Buildmesh: the accessor used to
+/// `expect` the checkout, and a release build panics with `panic = "abort"`,
+/// so a momentarily busy pool took the whole process with it. The error is
+/// typed (`SQLITE_BUSY`) so a caller can branch on "come back in a moment"
+/// instead of matching on prose.
+#[test]
+fn reader_pool_exhaustion_is_a_typed_busy_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("reader-busy.db");
+    let writer = rusqlite::Connection::open(&db_path).unwrap();
+    super::apply_connection_pragmas(&writer, false).unwrap();
+    writer
+        .execute("CREATE TABLE probe (value INTEGER NOT NULL)", [])
+        .unwrap();
+    let readers = super::ReaderPool::open(&db_path).unwrap();
+    let checked_out: Vec<_> = (0..super::READER_POOL_SIZE)
+        .map(|_| readers.checkout().unwrap())
+        .collect();
+
+    let error = match readers.checkout() {
+        Ok(_) => panic!("an exhausted pool must report an error, not a reader"),
+        Err(error) => error,
+    };
+    assert!(
+        crate::db::error::is_busy_error(&error),
+        "pool exhaustion must be a typed BUSY error, got: {error}"
+    );
+    assert_eq!(
+        error.to_string(),
+        super::READER_POOL_BUSY_MESSAGE,
+        "the user-facing copy must say the database is busy and that a retry may work"
+    );
+
+    // The same condition, one layer up: a caller holding a `DbError` reaches
+    // the same answer through the transparent `Sql` variant.
+    let wrapped = crate::db::DbError::from(error);
+    match &wrapped {
+        crate::db::DbError::Sql(inner) => assert!(
+            crate::db::error::is_busy_error(inner),
+            "a wrapped busy error must still be busy"
+        ),
+        other => panic!("a busy error must stay a busy error, got {other:?}"),
+    }
+
+    // Releasing one reader makes the next checkout succeed — the pool
+    // recovers, which is what makes "busy" a retryable answer.
+    drop(checked_out);
+    assert!(
+        readers.checkout().is_ok(),
+        "a released reader must serve the next waiter"
+    );
+}
+
+/// Issue #1533: the checkout deadline is **absolute**.
+///
+/// The old loop re-armed the full timeout on every wakeup, so a spurious
+/// condvar notification could stretch a nominal one-second wait across
+/// several seconds — a caller could be parked far longer than the budget it
+/// was promised. The budget here is injected at 200 ms and the waiter is
+/// woken ~200 times meanwhile: the wait must still end at the one deadline.
+#[test]
+fn reader_pool_wait_ends_at_one_deadline_however_often_it_is_woken() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("reader-deadline.db");
+    let writer = rusqlite::Connection::open(&db_path).unwrap();
+    super::apply_connection_pragmas(&writer, false).unwrap();
+    writer
+        .execute("CREATE TABLE probe (value INTEGER NOT NULL)", [])
+        .unwrap();
+    let budget = std::time::Duration::from_millis(300);
+    let readers = super::ReaderPool::open_sized_with_timeout(&db_path, 1, budget).unwrap();
+    let held = readers.checkout().unwrap();
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            // Spurious wakeups: notifications with no reader to hand over.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1_000);
+            while std::time::Instant::now() < deadline {
+                readers.ready.notify_one();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+
+        let started = std::time::Instant::now();
+        let error = match readers.checkout() {
+            Ok(_) => panic!("the pool is exhausted for the whole wait"),
+            Err(error) => error,
+        };
+        let elapsed = started.elapsed();
+
+        assert!(
+            crate::db::error::is_busy_error(&error),
+            "the wait must end as a typed busy error, got: {error}"
+        );
+        assert!(
+            elapsed >= budget,
+            "the waiter must actually wait for its budget, waited {elapsed:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(900),
+            "the wait must end at ONE deadline, not one per wakeup: waited {elapsed:?}"
+        );
+    });
+
+    drop(held);
+}
+
+/// Issue #1533: the *public* read path under pool exhaustion returns an
+/// error — it must not panic, and it must not abort the process.
+///
+/// This is the crash this issue exists for: the accessor used to `expect`
+/// the checkout, so a saturated pool panicked on a runtime worker thread
+/// and, in a release build, took the whole application down.
+#[test]
+fn a_public_read_under_pool_exhaustion_returns_an_error_instead_of_panicking() {
+    let _db = crate::db::test_support::isolated();
+    let database = crate::db::test_support::installed_db().expect("the isolated database");
+
+    // Hold every reader the isolated pool has.
+    let mut held = Vec::new();
+    while let Ok(reader) = database.readers.checkout() {
+        held.push(reader);
+    }
+    assert!(
+        !held.is_empty(),
+        "the isolated database must have at least one reader to hold"
+    );
+
+    let error = match crate::db::read_conn() {
+        Ok(_) => panic!("a saturated pool must return an error, never a reader"),
+        Err(error) => error,
+    };
+    assert!(
+        crate::db::error::is_busy_error(&error),
+        "the public accessor must report a typed busy error, got: {error}"
+    );
+    assert_eq!(error.to_string(), crate::db::READER_POOL_BUSY_MESSAGE);
+
+    drop(held);
+}
+
+/// Issue #1533: the pool's saturation is observable.
+///
+/// Without these counters a pool exhaustion was a crash with no explanation;
+/// the diagnostics sampler now reports the same numbers, so "every reader was
+/// held" and "the slowest holder kept its reader for a second" are facts in
+/// the log rather than inferences.
+#[test]
+fn reader_pool_stats_report_saturation_and_lease_length() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("reader-stats.db");
+    let writer = rusqlite::Connection::open(&db_path).unwrap();
+    super::apply_connection_pragmas(&writer, false).unwrap();
+    writer
+        .execute("CREATE TABLE probe (value INTEGER NOT NULL)", [])
+        .unwrap();
+    let readers = super::ReaderPool::open(&db_path).unwrap();
+
+    let idle = readers.stats();
+    assert_eq!(idle.in_use, 0);
+    assert_eq!(idle.available, super::READER_POOL_SIZE as u64);
+    assert_eq!(idle.checkouts, 0);
+    assert_eq!(idle.timeouts, 0);
+
+    let held = readers.checkout().unwrap();
+    let busy = readers.stats();
+    assert_eq!(busy.in_use, 1);
+    assert_eq!(busy.available, super::READER_POOL_SIZE as u64 - 1);
+    assert_eq!(busy.checkouts, 1);
+
+    // The lease length is measured, so a reader held across slow work shows
+    // up as the reason the pool ran dry.
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    drop(held);
+    let after = readers.stats();
+    assert_eq!(after.in_use, 0, "a returned reader must not stay counted");
+    assert!(
+        after.longest_lease_ms >= 50,
+        "the lease length must be measured, got {}ms",
+        after.longest_lease_ms
+    );
 }
 
 #[test]

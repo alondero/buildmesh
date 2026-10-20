@@ -129,7 +129,7 @@ pub(crate) fn mark_warm_worktree_refreshing_inner(conn: &Connection, id: i64) ->
 /// a live spawn. Returns the same `WarmWorktree` projection a claim hands back
 /// (`base_sha` is the field the freshness pass diffs against the new SHA).
 pub fn list_available_warm_for_mesh(mesh_id: i64) -> SqlResult<Vec<WarmWorktree>> {
-    let db = read_conn();
+    let db = read_conn()?;
     list_available_warm_for_mesh_inner(&db, mesh_id)
 }
 
@@ -284,7 +284,7 @@ pub(crate) fn list_warm_paths_for_mesh_inner(
 /// NOT help here because the mesh's `agent_nodes` rows are cascade-deleted
 /// by the same transaction, so no `close` event ever fires for them.
 pub fn list_warm_paths_for_mesh_droppable(mesh_id: i64) -> SqlResult<Vec<String>> {
-    let db = read_conn();
+    let db = read_conn()?;
     list_warm_paths_for_mesh_droppable_inner(&db, mesh_id)
 }
 
@@ -301,8 +301,8 @@ pub(crate) fn list_warm_paths_for_mesh_droppable_inner(
 /// A pool row the startup reconcile must tear down: its `id` (to delete the
 /// SQLite row), its on-disk `path`, and whether that directory is still
 /// `dir_present` (so the caller knows whether a Git worktree teardown is even
-/// needed before dropping the row). See `list_warm_worktrees_to_reconcile_inner`
-/// for which rows qualify.
+/// needed before dropping the row). See
+/// [`classify_warm_reconcile_rows`] for which rows qualify.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WarmReconcileEntry {
     pub id: i64,
@@ -337,14 +337,69 @@ pub struct WarmReconcileEntry {
 pub fn list_warm_worktrees_to_reconcile(
     stale_after_minutes: i64,
 ) -> SqlResult<Vec<WarmReconcileEntry>> {
-    let db = read_conn();
-    list_warm_worktrees_to_reconcile_inner(&db, stale_after_minutes)
+    // The reader is released *before* the directory check. That check is
+    // filesystem work, and after a machine wakes from sleep — or on a network
+    // volume — an `exists()` call can block for a long time. Holding one of
+    // the eight readers across it is how the pool runs dry (issue #1533).
+    let rows = {
+        let db = read_conn()?;
+        list_warm_worktrees_to_reconcile_inner(&db, stale_after_minutes)?
+    };
+    Ok(classify_warm_reconcile_rows(rows))
 }
 
+/// A reconcile row as SQLite reports it, before the directory check.
+///
+/// The directory check is filesystem work, and it must not run behind a
+/// reader connection — see [`list_warm_worktrees_to_reconcile`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WarmReconcileRow {
+    pub id: i64,
+    pub path: String,
+    pub status: String,
+    /// SQLite's own age verdict: the row was created more than the stale
+    /// window ago.
+    pub age_stale: bool,
+}
+
+/// Classify the rows the reconcile pass read: does the row still have a
+/// directory, and does it qualify for teardown?
+///
+/// Pure filesystem work — it must be called with no reader connection held
+/// (issue #1228's rule for I/O behind a database handle).
+pub(crate) fn classify_warm_reconcile_rows(rows: Vec<WarmReconcileRow>) -> Vec<WarmReconcileEntry> {
+    let mut out = Vec::new();
+    for row in rows {
+        let in_flight = row.status == WarmWorktreeStatus::Filling.as_str()
+            || row.status == WarmWorktreeStatus::Refreshing.as_str();
+        let dir_present = std::path::Path::new(&row.path).exists();
+        // In-flight rows are reconciled only when old enough to be a
+        // crash-orphan (never a row a worker is filling right now); a settled
+        // `available` row is reconciled when its directory has vanished.
+        let qualifies = if in_flight {
+            row.age_stale
+        } else {
+            !dir_present
+        };
+        if qualifies {
+            out.push(WarmReconcileEntry {
+                id: row.id,
+                path: row.path,
+                dir_present,
+            });
+        }
+    }
+    out
+}
+
+/// The rows the reconcile pass reads. SQL only.
+///
+/// The directory check is deliberately *not* here: it is filesystem work, and
+/// a cold or network volume can block it for a long time.
 pub(crate) fn list_warm_worktrees_to_reconcile_inner(
     conn: &Connection,
     stale_after_minutes: i64,
-) -> SqlResult<Vec<WarmReconcileEntry>> {
+) -> SqlResult<Vec<WarmReconcileRow>> {
     // SQLite computes the age flag (`created_at` older than the threshold); the
     // disk-existence check can't be pushed into SQL so the final
     // in-flight-vs-available decision is made in Rust. The modifier string is
@@ -357,30 +412,16 @@ pub(crate) fn list_warm_worktrees_to_reconcile_inner(
          WHERE status != 'claimed'",
     )?;
     let rows = stmt.query_map(params![stale_after_minutes], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, i64>(3)? != 0,
-        ))
+        Ok(WarmReconcileRow {
+            id: row.get::<_, i64>(0)?,
+            path: row.get::<_, String>(1)?,
+            status: row.get::<_, String>(2)?,
+            age_stale: row.get::<_, i64>(3)? != 0,
+        })
     })?;
     let mut out = Vec::new();
-    for r in rows {
-        let (id, path, status, age_stale) = r?;
-        let in_flight = status == WarmWorktreeStatus::Filling.as_str()
-            || status == WarmWorktreeStatus::Refreshing.as_str();
-        let dir_present = std::path::Path::new(&path).exists();
-        // In-flight rows are reconciled only when old enough to be a
-        // crash-orphan (never a row a worker is filling right now); a settled
-        // `available` row is reconciled when its directory has vanished.
-        let qualifies = if in_flight { age_stale } else { !dir_present };
-        if qualifies {
-            out.push(WarmReconcileEntry {
-                id,
-                path,
-                dir_present,
-            });
-        }
+    for row in rows {
+        out.push(row?);
     }
     Ok(out)
 }
@@ -688,7 +729,7 @@ fn live_mesh_ids_for(conn: &Connection, live_session_ids: &[i64]) -> Option<Hash
 /// by the worker (hardcoded to 1 for the v21 tracer bullet) so we don't
 /// plumb a config parameter through yet.
 pub fn count_available_warm_for_mesh(mesh_id: i64) -> SqlResult<i64> {
-    let db = read_conn();
+    let db = read_conn()?;
     count_available_warm_for_mesh_inner(&db, mesh_id)
 }
 
@@ -713,7 +754,7 @@ pub(crate) fn count_available_warm_for_mesh_inner(
 /// `git worktree remove --force` a live agent's worktree during the window
 /// between claim and `forget_after_spawn`).
 pub fn count_droppable_warm_entries_for_mesh(mesh_id: i64) -> SqlResult<i64> {
-    let db = read_conn();
+    let db = read_conn()?;
     count_droppable_warm_entries_for_mesh_inner(&db, mesh_id)
 }
 
@@ -750,7 +791,7 @@ pub fn list_oldest_warm_entries_for_mesh(
     mesh_id: i64,
     limit: i64,
 ) -> SqlResult<Vec<(i64, String)>> {
-    let db = read_conn();
+    let db = read_conn()?;
     list_oldest_warm_entries_for_mesh_inner(&db, mesh_id, limit)
 }
 
@@ -778,7 +819,7 @@ pub(crate) fn list_oldest_warm_entries_for_mesh_inner(
 /// full droppable set, not just the oldest-N excess window
 /// `list_oldest_warm_entries_for_mesh` serves.
 pub fn list_all_droppable_warm_entries_for_mesh(mesh_id: i64) -> SqlResult<Vec<(i64, String)>> {
-    let db = read_conn();
+    let db = read_conn()?;
     list_all_droppable_warm_entries_for_mesh_inner(&db, mesh_id)
 }
 
@@ -803,7 +844,7 @@ pub(crate) fn list_all_droppable_warm_entries_for_mesh_inner(
 /// (indexed on `path UNIQUE`) and side-effect free — safe to call from
 /// `collect_prune_info` for every worktree.
 pub fn is_warm_pool_path(path: &str) -> SqlResult<bool> {
-    let db = read_conn();
+    let db = read_conn()?;
     is_warm_pool_path_inner(&db, path)
 }
 
@@ -843,7 +884,7 @@ pub(crate) fn is_warm_pool_path_inner(conn: &Connection, path: &str) -> SqlResul
 /// to call from `services::agent_node::process_pending_removals` for every
 /// pending entry.
 pub fn warm_pool_claims_path(path: &str) -> SqlResult<bool> {
-    let db = read_conn();
+    let db = read_conn()?;
     warm_pool_claims_path_inner(&db, path)
 }
 
@@ -862,7 +903,7 @@ pub(crate) fn warm_pool_claims_path_inner(conn: &Connection, path: &str) -> SqlR
 /// fill-up to the per-mesh target. Mirrors the projection `MeshRow` uses
 /// for the spawn-time read so the two paths can't drift.
 pub fn list_worktree_enabled_meshes_for_warm() -> SqlResult<Vec<WarmPoolMeshRow>> {
-    let db = read_conn();
+    let db = read_conn()?;
     list_worktree_enabled_meshes_for_warm_inner(&db)
 }
 

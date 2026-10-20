@@ -4715,6 +4715,7 @@ fn three_admitted_review_runs_of_one_circuit_all_start_their_first_step() {
 
     let running_steps_on_circuit = || -> i64 {
         db::read_conn()
+            .unwrap()
             .query_row(
                 "SELECT COUNT(*) FROM autopilot_circuit_run_steps s \
                  JOIN autopilot_circuit_runs r ON r.id = s.run_id \

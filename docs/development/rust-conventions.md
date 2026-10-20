@@ -3,7 +3,17 @@
 Status: current
 
 ## Database Pattern
-Use `_inner` helper functions that accept `&Connection` so compound operations keep one connection and writer transactions never re-lock. Public read functions check out `read_conn()` from the eight-connection read-only pool; public mutations lock the dedicated `write_conn()`. SQLite WAL lets those readers run concurrently with the serialized writer. Async request paths use `try_read_conn()` so pool contention has a bounded wait and an error result. See `src-tauri/src/db/mod.rs`.
+Use `_inner` helper functions that accept `&Connection` so compound operations keep one connection and writer transactions never re-lock. Public read functions check out `read_conn()` from the eight-connection read-only pool; public mutations lock the dedicated `write_conn()`. SQLite WAL lets those readers run concurrently with the serialized writer. See `src-tauri/src/db/mod.rs`.
+
+### A reader-pool exhaustion is an error, never a panic (issue #1533)
+
+`db::read_conn()` returns `SqlResult<ReadConnection<'static>>`. There is **no infallible accessor**: the old one `expect`ed the checkout, and a release build panics with `panic = "abort"`, so a momentarily busy pool killed the whole application instead of failing one request. That is how a macOS laptop waking from sleep could take Buildmesh down with it.
+
+- **The wait is bounded by an absolute deadline** (`READER_CHECKOUT_TIMEOUT`, one second). It is not a per-wait timeout: a spurious condvar wakeup must not hand the caller a fresh second, so the deadline is computed once and every wait uses the *remaining* time.
+- **The failure is typed.** The checkout reports SQLite's own `SQLITE_BUSY` code, so a caller branches with `db::error::is_busy_error(&error)` instead of matching on prose. The user-facing copy is `db::READER_POOL_BUSY_MESSAGE`.
+- **The boundaries translate it.** An HTTP read that cannot answer is `503 Service Unavailable` (`http::read_status`), never a `200` with an empty body and never a `401`. A Tauri command surfaces the busy copy, which says a retry may work.
+- **The pool is observable.** `db::reader_pool_stats()` reports readers in use, readers available, checkouts, timeouts, the longest wait and the longest lease; the diagnostics sampler prints them as `db_pool=…` on the `DIAG` line. A reader held for more than a second is logged as a slow lease when it is returned — that holder is the reason the pool ran dry.
+- **Narrow the lease.** A read connection held across filesystem, network or subprocess work starves the pool of one of its eight readers for the whole of that work. Take the connection, do the query, drop it, then do the slow work.
 
 ### Per-test database isolation (issue #2048)
 Production opens exactly one database: `db::init` populates a process-global `OnceCell<Database>` once and later calls are a no-op. Under `cfg(test)` a thread may instead install its **own** database, and `db::get()` prefers it, so `read_conn()` / `write_conn()` / every `db::*` query in that test resolve to that test's rows and `cargo test` runs multi-threaded with no `--test-threads=1`. A test opts in with `let _db = db::test_support::isolated();` as its first statement and holds the guard for the whole body; `isolated()` is depth-counted, so a shared helper may call it again without replacing the caller's rows. This is the same shape `preferences::storage` already uses for its per-thread `APP_DATA_DIR` / `CACHE` (issue #1386), and `db::circuit_tests` already proved the per-test-database approach works (#1691). Variants and their reasons:

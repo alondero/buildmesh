@@ -163,7 +163,7 @@ pub fn bind_create_operation_tx(
 /// so it is gated rather than left as dead code behind `#[allow(dead_code)]`.
 #[cfg(test)]
 pub fn find_create_operation(operation_key: &str) -> SqlResult<Option<CreateOperation>> {
-    let db = read_conn();
+    let db = read_conn()?;
     find_create_operation_inner(&db, operation_key)
 }
 
@@ -218,7 +218,7 @@ pub fn claim_create_operation(
     operation_key: &str,
     request_fingerprint: &str,
 ) -> SqlResult<Option<CreateClaim>> {
-    let db = read_conn();
+    let db = read_conn()?;
     claim_create_operation_inner(&db, operation_key, request_fingerprint)
 }
 

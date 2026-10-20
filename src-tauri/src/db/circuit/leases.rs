@@ -47,7 +47,7 @@ pub(crate) fn reserve_circuit_agent_slots_locked(
 }
 
 pub fn circuit_agent_slots_reserved(run_id: i64) -> SqlResult<i64> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     circuit_agent_slots_reserved_inner(&db, run_id)
 }
 
@@ -63,7 +63,7 @@ pub(crate) fn circuit_agent_slots_reserved_inner(db: &Connection, run_id: i64) -
 }
 
 pub fn count_reserved_circuit_agent_slots_total() -> SqlResult<i64> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     db.query_row(
         "SELECT COALESCE(SUM(l.slots), 0) \
          FROM autopilot_circuit_run_agent_leases l \
@@ -80,7 +80,7 @@ pub fn count_reserved_circuit_agent_slots_total() -> SqlResult<i64> {
 type AgentOwnershipRow = (i64, i64, i64, String, String, Option<i64>);
 
 pub fn list_circuit_agent_ownerships() -> SqlResult<Vec<AgentOwnershipRow>> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     list_circuit_agent_ownerships_inner(&db)
 }
 
@@ -158,7 +158,7 @@ pub(crate) fn list_circuit_agent_ownerships_inner(
 /// circuit agent. The legacy per-mesh node limit is intentionally not part of
 /// this accounting.
 pub fn count_active_circuit_agent_nodes_total() -> SqlResult<i64> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     count_active_circuit_agent_nodes_total_inner(&db)
 }
 
@@ -178,7 +178,7 @@ pub(crate) fn count_active_circuit_agent_nodes_total_inner(db: &Connection) -> S
 }
 
 pub fn count_retained_circuit_agent_nodes_total() -> SqlResult<i64> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     count_retained_circuit_agent_nodes_total_inner(&db)
 }
 
@@ -245,7 +245,8 @@ pub fn list_failed_circuit_agents_for_cleanup() -> SqlResult<Vec<i64>> {
 /// closed by an explicit step after a verified merge, and even then only if it
 /// holds no uncommitted work.
 pub fn agent_is_circuit_helper(node_id: i64) -> SqlResult<bool> {
-    agent_is_circuit_helper_inner(&crate::db::read_conn(), node_id)
+    let conn = crate::db::read_conn()?;
+    agent_is_circuit_helper_inner(&conn, node_id)
 }
 
 pub(crate) fn agent_is_circuit_helper_inner(conn: &Connection, node_id: i64) -> SqlResult<bool> {
@@ -402,7 +403,8 @@ pub(crate) fn release_circuit_agent_spawn_inner(
 }
 
 pub fn circuit_agent_cleanup_claim(node_id: i64) -> SqlResult<Option<String>> {
-    circuit_agent_cleanup_claim_inner(&crate::db::read_conn(), node_id)
+    let conn = crate::db::read_conn()?;
+    circuit_agent_cleanup_claim_inner(&conn, node_id)
 }
 
 /// Generic read seam for spawn callers. The implementation is shared with
@@ -577,7 +579,7 @@ pub(crate) fn failed_circuit_agents_for_cleanup_inner(
 }
 
 pub fn count_active_circuit_agent_nodes_for_run(run_id: i64) -> SqlResult<i64> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     db.query_row(
         "SELECT COUNT(DISTINCT s.agent_node_id) \
          FROM autopilot_circuit_run_steps s \

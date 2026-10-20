@@ -82,6 +82,24 @@ pub fn serialized_or_500<T: serde::Serialize>(status: &'static str, value: &T) -
         .unwrap_or_else(|error| Response::json_error("500 Internal Server Error", &error))
 }
 
+/// The response for a database failure that reached an HTTP route.
+///
+/// A busy reader pool is **transient** (issue #1533): the request could not get
+/// a connection, which says nothing about the data. The answer is therefore
+/// `503`, not the `500` a generic internal failure gets — and never a `401`,
+/// which the mobile client reads as a revoked credential and answers by
+/// bouncing the user to the pairing screen.
+pub fn db_failure_response(error: &rusqlite::Error) -> Response {
+    if crate::db::error::is_busy_error(error) {
+        Response::json_error(
+            read_status(&Unavailable::Read(error.to_string())),
+            &format!("Failed to read authoritative state: {error}"),
+        )
+    } else {
+        Response::json_error("500 Internal Server Error", &error.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +157,36 @@ mod tests {
         let resp = serialized("200 OK", &Vec::<i64>::new()).expect("empty array encodes");
         assert_eq!(resp.status, "200 OK");
         assert_eq!(body(&resp), "[]");
+    }
+
+    /// Issue #1533: a busy reader pool is a *transient* failure, so the HTTP
+    /// answer is `503` — not the `500` a genuinely broken query gets, and
+    /// never a `401`, which the mobile client would answer by revoking the
+    /// user's pairing.
+    #[test]
+    fn a_busy_database_is_503_and_a_broken_query_is_500() {
+        let busy = crate::db::error::busy_error();
+        assert!(
+            crate::db::error::is_busy_error(&busy),
+            "the pool's busy error must be recognisable as busy"
+        );
+        let response = db_failure_response(&busy);
+        assert_eq!(
+            response.status, "503 Service Unavailable",
+            "a busy database is retryable, not a broken build"
+        );
+        assert!(
+            body(&response).contains(crate::db::READER_POOL_BUSY_MESSAGE),
+            "the busy copy must reach the client: {:?}",
+            body(&response)
+        );
+
+        let broken = rusqlite::Error::InvalidQuery;
+        assert_eq!(
+            db_failure_response(&broken).status,
+            "500 Internal Server Error",
+            "a broken query is a fault in this build, not a transient shortage"
+        );
     }
 
     /// The specific false-success this replaces: a body that could not be

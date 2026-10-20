@@ -110,7 +110,7 @@ pub struct NodeCircuitRun {
 
 /// Live and attention-needing runs, one per implementation node.
 pub fn list_node_circuit_runs() -> Result<Vec<NodeCircuitRun>, DbError> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     let tx = db.unchecked_transaction()?;
     let runs = list_node_circuit_runs_inner(&tx)?;
     tx.commit()?;

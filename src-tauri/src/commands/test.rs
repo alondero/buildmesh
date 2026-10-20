@@ -1026,7 +1026,7 @@ mod tests {
     }
 
     fn stored_root_token() -> Option<String> {
-        let conn = crate::db::read_conn();
+        let conn = crate::db::read_conn().unwrap();
         conn.query_row(
             "SELECT value FROM app_settings WHERE key = 'remote_access_token'",
             [],

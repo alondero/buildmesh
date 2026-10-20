@@ -24,6 +24,14 @@ fn sample_fixture() -> Sample {
         bg_sync_failures: 0,
         bg_sync_last_ms: 430,
         git_timeouts: 0,
+        db_pool: Some(crate::db::ReaderPoolStats {
+            in_use: 3,
+            available: 5,
+            checkouts: 412,
+            timeouts: 1,
+            longest_wait_ms: 980,
+            longest_lease_ms: 1_250,
+        }),
     }
 }
 
@@ -67,6 +75,22 @@ fn format_line_renders_expected_fields() {
     );
     assert!(line.contains("bg_sync=att:12/adv:2/fail:0/last_ms:430"));
     assert!(line.contains("git_timeouts=0"));
+    // Issue #1533: the reader pool's saturation is on the line, so a pool
+    // exhaustion that used to kill the app is diagnosable after the fact.
+    assert!(
+        line.contains("db_pool=use:3/avail:5/checkouts:412/timeouts:1/wait_ms:980/lease_ms:1250"),
+        "pool saturation on the DIAG line: {line}"
+    );
+}
+
+/// Before the database is initialised there is no pool to report, and the line
+/// must say so rather than print a pool that looks perfectly idle.
+#[test]
+fn format_line_reports_an_uninitialised_pool_as_off() {
+    let mut s = sample_fixture();
+    s.db_pool = None;
+    let line = format_line(&s);
+    assert!(line.contains("db_pool=off"), "{line}");
 }
 
 /// A zero elapsed must not divide-by-zero into NaN/inf — the rate is 0.

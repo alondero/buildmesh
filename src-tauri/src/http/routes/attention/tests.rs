@@ -523,7 +523,7 @@ fn stale_and_current_native_stops_follow_the_turn_fence() {
     assert!(current_receipt.turn_fenced);
     assert!(!current_receipt.explicit_turn_mismatch);
 
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn().unwrap();
     let status: String = db
         .query_row(
             "SELECT status FROM agent_nodes WHERE id = ?1",

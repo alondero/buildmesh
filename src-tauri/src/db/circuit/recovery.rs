@@ -30,7 +30,7 @@ fn is_review_extension(state: &str, context_json: &str) -> bool {
 }
 
 pub fn existing_review_target(run_id: i64) -> Result<Option<i64>, DbError> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     let run = super::ledger::get_circuit_run_inner(&db, run_id)?
         .ok_or_else(|| DbError::not_found("This run no longer exists."))?;
     if is_review_extension(&run.state, &run.context_json) {
@@ -274,7 +274,7 @@ fn review_source_id(
 }
 
 pub fn review_recovery_source(run_id: i64) -> Result<i64, DbError> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     if let Some(run) = super::ledger::get_circuit_run_inner(&db, run_id)? {
         if is_review_extension(&run.state, &run.context_json) {
             return run.source_agent_node_id.ok_or_else(|| {

@@ -1084,6 +1084,7 @@ mod tests {
 
     fn effect_state(run_id: i64, node_id: &str, kind: &str) -> Option<String> {
         db::read_conn()
+            .unwrap()
             .query_row(
                 "SELECT state FROM circuit_effects WHERE run_id=?1 AND node_id=?2 AND kind=?3",
                 rusqlite::params![run_id, node_id, kind],
@@ -1095,6 +1096,7 @@ mod tests {
 
     fn effect_rows(run_id: i64) -> i64 {
         db::read_conn()
+            .unwrap()
             .query_row(
                 "SELECT COUNT(*) FROM circuit_effects WHERE run_id=?1",
                 [run_id],
@@ -1104,7 +1106,7 @@ mod tests {
     }
 
     fn history_kinds(run_id: i64) -> Vec<String> {
-        let conn = db::read_conn();
+        let conn = db::read_conn().unwrap();
         let mut stmt = conn
             .prepare("SELECT kind FROM circuit_run_history WHERE run_id=?1 ORDER BY id")
             .unwrap();
@@ -1115,7 +1117,7 @@ mod tests {
     }
 
     fn step_agent(run_id: i64, node_id: &str) -> Option<i64> {
-        db::read_conn()
+        db::read_conn().unwrap()
             .query_row(
                 "SELECT agent_node_id FROM autopilot_circuit_run_steps WHERE run_id=?1 AND node_id=?2",
                 rusqlite::params![run_id, node_id],

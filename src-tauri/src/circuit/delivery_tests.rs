@@ -254,7 +254,7 @@ fn grok_opted_in_adapter_recorded_digest_equals_submission_digest_of_written_tex
         .and_then(|s| s.strip_suffix("\x1b[201~"))
         .unwrap();
 
-    let conn = crate::db::read_conn();
+    let conn = crate::db::read_conn().unwrap();
     let detail: String = conn
         .query_row(
             "SELECT detail FROM circuit_run_history WHERE kind='prompt_submitted'",

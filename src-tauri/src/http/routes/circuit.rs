@@ -46,9 +46,9 @@ pub struct StartNodeReviewRequest {
 fn review_options_core(node_id: i64) -> Result<Vec<NodeReviewOption>, ActError> {
     let node = db::get_agent_node_by_id(node_id).map_err(|error| match error {
         rusqlite::Error::QueryReturnedNoRows => ActError::NodeNotFound(node_id),
-        other => ActError::Failed(other.to_string()),
+        other => db_failure(other),
     })?;
-    let circuits = db::list_autopilot_circuits(node.mesh_id).map_err(|e| e.to_string())?;
+    let circuits = db::list_autopilot_circuits(node.mesh_id).map_err(db_failure)?;
     let mut options = vec![NodeReviewOption {
         circuit_id: None,
         name: "Built-in Review Blueprint".into(),
@@ -150,7 +150,23 @@ enum ActError {
     /// The run is not in a state that accepts this action (stale revision,
     /// step already moved on, recovery not offered).
     Refused(String),
+    /// The database could not answer, because it was momentarily busy
+    /// (issue #1533). Transient, so the client retries rather than treating
+    /// the request as broken. The error is kept, not flattened to text, so
+    /// the shared status policy can decide between `503` and `500`.
+    Unavailable(rusqlite::Error),
     Failed(String),
+}
+
+/// A failed database read is either "the row is not there" or "the database
+/// could not answer". Only the second is transient: a busy reader pool earns
+/// a `503`, not the `500` a genuinely broken query gets.
+fn db_failure(error: rusqlite::Error) -> ActError {
+    if crate::db::error::is_busy_error(&error) {
+        ActError::Unavailable(error)
+    } else {
+        ActError::Failed(error.to_string())
+    }
 }
 
 impl From<String> for ActError {
@@ -170,6 +186,7 @@ impl ActError {
                 Response::json_error("404 Not Found", &format!("Run {run_id} no longer exists."))
             }
             ActError::Refused(message) => Response::json_error("409 Conflict", message),
+            ActError::Unavailable(error) => crate::http::read_status::db_failure_response(error),
             ActError::Failed(message) => Response::json_error("500 Internal Server Error", message),
         }
     }
@@ -179,7 +196,7 @@ fn ensure_run(run_id: i64) -> Result<(), ActError> {
     match db::get_circuit_run(run_id) {
         Ok(Some(_)) => Ok(()),
         Ok(None) => Err(ActError::NotFound(run_id)),
-        Err(error) => Err(ActError::Failed(error.to_string())),
+        Err(error) => Err(db_failure(error)),
     }
 }
 
@@ -352,6 +369,29 @@ mod tests {
     use super::*;
     use crate::db::circuit::CircuitStepOp;
     use crate::models::{EnvType, SessionStatus};
+
+    /// Issue #1533: a database that cannot answer right now is transient, so
+    /// the route answers `503` — the client retries — instead of `500`.
+    #[test]
+    fn a_busy_database_answers_503_and_a_broken_query_answers_500() {
+        let busy = db_failure(crate::db::error::busy_error());
+        assert!(
+            matches!(busy, ActError::Unavailable(_)),
+            "a busy database must not be reported as a broken query"
+        );
+        assert_eq!(
+            busy.response().status,
+            "503 Service Unavailable",
+            "the client must be told to come back"
+        );
+
+        let broken = db_failure(rusqlite::Error::InvalidQuery);
+        assert!(
+            matches!(broken, ActError::Failed(_)),
+            "a broken query is a fault in this build"
+        );
+        assert_eq!(broken.response().status, "500 Internal Server Error");
+    }
 
     #[test]
     fn review_choices_include_only_this_meshs_manual_reviews() {

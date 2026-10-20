@@ -26,7 +26,7 @@ pub struct CircuitRunOverview {
 }
 
 pub fn overview(run_id: i64) -> Result<CircuitRunOverview, DbError> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     let tx = db.unchecked_transaction()?;
     let overview = overview_inner(&tx, run_id)?;
     tx.commit()?;

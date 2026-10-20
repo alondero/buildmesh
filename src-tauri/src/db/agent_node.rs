@@ -7,7 +7,7 @@ use rusqlite::{params, Connection};
 
 use crate::models::*;
 
-use super::{read_conn, try_read_conn, write_conn, DbError, SqlResult};
+use super::{read_conn, write_conn, DbError, SqlResult};
 
 /// Preferences are prepared by the caller before acquiring the database writer.
 pub fn migrate_launch_selections(
@@ -691,7 +691,7 @@ fn parse_db_timestamp(s: &str) -> chrono::DateTime<chrono::Utc> {
 /// into a Node Digest. Spine-only — no transcript enrichment in this slice.
 pub fn list_coordinator_node_rows(
 ) -> SqlResult<Vec<(AgentNode, String, chrono::DateTime<chrono::Utc>)>> {
-    let db = read_conn();
+    let db = read_conn()?;
     list_coordinator_node_rows_inner(&db)
 }
 
@@ -814,7 +814,8 @@ pub(crate) fn circuit_lifecycle_blocker_inner(
 pub(crate) fn circuit_lifecycle_blocker(
     id: i64,
 ) -> SqlResult<Option<crate::circuit::observation::CircuitObservationBlocker>> {
-    circuit_lifecycle_blocker_inner(&read_conn(), id)
+    let conn = read_conn()?;
+    circuit_lifecycle_blocker_inner(&conn, id)
 }
 // --- Agent Node operations ---
 
@@ -1380,12 +1381,12 @@ pub(crate) fn toggle_agent_node_pinned_inner(
 }
 
 pub fn get_agent_node_by_id(id: i64) -> SqlResult<AgentNode> {
-    let db = read_conn();
+    let db = read_conn()?;
     get_agent_node_by_id_inner(&db, id)
 }
 
 pub fn list_agent_nodes() -> SqlResult<Vec<AgentNode>> {
-    let db = read_conn();
+    let db = read_conn()?;
     let mut stmt = db.prepare(
         &format!("SELECT {} FROM agent_nodes WHERE status != 'archived' ORDER BY mesh_id ASC, position ASC, created_at ASC", AGENT_NODE_COLUMNS)
     )?;
@@ -1394,7 +1395,7 @@ pub fn list_agent_nodes() -> SqlResult<Vec<AgentNode>> {
 }
 
 pub fn list_agent_nodes_by_mesh(mesh_id: i64) -> SqlResult<Vec<AgentNode>> {
-    let db = read_conn();
+    let db = read_conn()?;
     let mut stmt = db.prepare(&format!(
         "SELECT {} FROM agent_nodes WHERE mesh_id = ?1 ORDER BY position ASC, created_at ASC",
         AGENT_NODE_COLUMNS
@@ -1404,7 +1405,8 @@ pub fn list_agent_nodes_by_mesh(mesh_id: i64) -> SqlResult<Vec<AgentNode>> {
 }
 
 pub fn list_agent_history() -> SqlResult<Vec<AgentNode>> {
-    list_agent_history_inner(&read_conn())
+    let conn = read_conn()?;
+    list_agent_history_inner(&conn)
 }
 
 pub(crate) fn list_agent_history_inner(conn: &Connection) -> SqlResult<Vec<AgentNode>> {
@@ -1773,7 +1775,7 @@ pub(crate) fn clear_cli_session_id_inner(conn: &Connection, id: i64) -> SqlResul
 
 pub fn session_started_at_ms(id: i64) -> SqlResult<Option<i64>> {
     use rusqlite::OptionalExtension;
-    let conn = read_conn();
+    let conn = read_conn()?;
     conn.query_row(
         "SELECT session_started_at FROM agent_nodes WHERE id = ?1",
         params![id],
@@ -1801,7 +1803,7 @@ pub(crate) struct AgentStatusObservation {
 }
 
 pub(crate) fn agent_status_observation(id: i64) -> SqlResult<AgentStatusObservation> {
-    read_conn().query_row("SELECT status,session_started_at,cli_session_id,status_changed_at FROM agent_nodes WHERE id=?1", [id], |row| {
+    read_conn()?.query_row("SELECT status,session_started_at,cli_session_id,status_changed_at FROM agent_nodes WHERE id=?1", [id], |row| {
         let status: String = row.get(0)?;
         let incarnation: Option<i64> = row.get(1)?;
         let session_id: Option<String> = row.get(2)?;
@@ -1818,7 +1820,7 @@ pub(crate) fn agent_status_observation(id: i64) -> SqlResult<AgentStatusObservat
 /// The row's current status revision: its status and `status_changed_at`,
 /// the pair a conditional lifecycle write is fenced on.
 pub(crate) fn agent_status_revision(id: i64) -> SqlResult<(SessionStatus, String)> {
-    read_conn().query_row(
+    read_conn()?.query_row(
         "SELECT status, COALESCE(status_changed_at, '') FROM agent_nodes WHERE id = ?1",
         params![id],
         |row| {
@@ -1829,7 +1831,7 @@ pub(crate) fn agent_status_revision(id: i64) -> SqlResult<(SessionStatus, String
 }
 
 pub(crate) fn agent_turn_stamp(id: i64) -> SqlResult<Option<String>> {
-    read_conn().query_row(
+    read_conn()?.query_row(
         "SELECT session_started_at, status_changed_at FROM agent_nodes WHERE id = ?1",
         params![id],
         |row| {
@@ -2035,7 +2037,7 @@ pub fn mark_running_nodes_suspended() -> SqlResult<usize> {
 }
 
 pub fn list_suspended_nodes() -> SqlResult<Vec<AgentNode>> {
-    let db = read_conn();
+    let db = read_conn()?;
     list_suspended_nodes_inner(&db)
 }
 
@@ -2147,7 +2149,7 @@ pub(crate) fn adopt_continued_cli_session_id_inner(
 /// mirrors `set_cli_session_id_if_missing_inner`'s write guard exactly —
 /// present here means a conditional write would be a no-op there.
 pub fn cli_session_id_present(id: i64) -> SqlResult<bool> {
-    let db = read_conn();
+    let db = read_conn()?;
     cli_session_id_present_inner(&db, id)
 }
 
@@ -2170,11 +2172,11 @@ pub(crate) fn cli_session_id_present_inner(conn: &Connection, id: i64) -> SqlRes
 /// the fence only covers the window inside one process where a delete commits
 /// between the check and the create.
 ///
-/// `try_read_conn` because the only caller is the async socket path: a bounded
+/// Uses `read_conn` because the only caller is the async socket path: a bounded
 /// checkout surfaces pool exhaustion to that caller instead of blocking a
-/// runtime worker (see `try_read_conn`).
+/// runtime worker.
 pub fn agent_node_exists(id: i64) -> SqlResult<bool> {
-    let db = try_read_conn()?;
+    let db = read_conn()?;
     agent_node_exists_inner(&db, id)
 }
 
@@ -2200,7 +2202,7 @@ pub(crate) fn agent_node_exists_inner(conn: &Connection, id: i64) -> SqlResult<b
 /// Ids of circuit-piloted `running` nodes with no captured session identity
 /// whose `status_changed_at` is at least `threshold_ms` old. Pure read.
 pub fn list_zombie_candidates(threshold_ms: i64, now_ms: i64) -> SqlResult<Vec<i64>> {
-    let db = read_conn();
+    let db = read_conn()?;
     list_zombie_candidates_inner(&db, threshold_ms, now_ms)
 }
 
@@ -2409,14 +2411,14 @@ pub fn delete_agent_node_enqueueing_removal(
 }
 
 pub fn list_pending_worktree_removals() -> SqlResult<Vec<PendingWorktreeRemoval>> {
-    let db = read_conn();
+    let db = read_conn()?;
     list_pending_worktree_removals_inner(&db)
 }
 
 /// Read a single queued removal (the blocked-cleanup workflow needs the row
 /// for one path — e.g. after a user-initiated retry).
 pub fn get_pending_worktree_removal(path: &str) -> SqlResult<Option<PendingWorktreeRemoval>> {
-    let db = read_conn();
+    let db = read_conn()?;
     Ok(list_pending_worktree_removals_inner(&db)?
         .into_iter()
         .find(|removal| removal.worktree_path == path))
@@ -2582,7 +2584,7 @@ pub fn set_node_launch_snapshot(
 }
 
 pub fn legacy_launch_nodes() -> SqlResult<Vec<AgentNode>> {
-    let db = read_conn();
+    let db = read_conn()?;
     let mut stmt = db.prepare(&format!("SELECT {AGENT_NODE_COLUMNS} FROM agent_nodes WHERE spawn_configuration IS NULL OR (json_valid(spawn_configuration) AND json_type(spawn_configuration, '$.resolved') IS NULL)"))?;
     let nodes = stmt.query_map([], map_agent_node_row)?.collect();
     nodes
@@ -2592,7 +2594,7 @@ pub fn node_spawn_configuration(
     node_id: i64,
     provider: &str,
 ) -> Result<Option<crate::preferences::spawn_configurations::SpawnConfiguration>, DbError> {
-    let db = super::try_read_conn()?;
+    let db = super::read_conn()?;
     let raw: Option<String> = match db.query_row(
         "SELECT spawn_configuration FROM agent_nodes WHERE id = ?1 AND provider = ?2",
         params![node_id, provider],

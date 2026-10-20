@@ -38,20 +38,53 @@
 //! # Why there is no `PoolExhausted` or `CorruptSchema` variant
 //!
 //! Issue #2448 sketched both. Neither has a producer in the converted files,
-//! and a variant nothing constructs cannot be exercised — a paper tiger. Both
-//! conditions still exist, unchanged, and stay a `rusqlite::Error`:
+//! and a variant nothing constructs cannot be exercised — a paper tiger.
+//! `CorruptSchema` still does not: `db/migrations.rs` repairs and reports
+//! schema drift, and it stays a `rusqlite::Error`.
 //!
-//! * **Pool exhaustion** — `ReaderPool::checkout` in `db/mod.rs` gives up after
-//!   `READER_CHECKOUT_TIMEOUT` and returns `rusqlite::Error::InvalidQuery`.
-//!   `db/mod.rs` is outside this slice (its accessors are `SqlResult`, not
-//!   `String`), and re-labelling the sentinel would change what the user is
-//!   shown today — "Invalid query" — which the freeze forbids. Promote it in
-//!   the slice that converts `mod.rs`, where the timeout can be rendered as the
-//!   timeout it is.
-//! * **Corrupt schema** — `db/migrations.rs` repairs and reports schema drift;
-//!   it is likewise outside this slice and stays on `SqlResult`.
+//! * **Pool exhaustion** — resolved in issue #1533, which is the slice that
+//!   owns the condition. `ReaderPool::checkout` in `db/mod.rs` gives up after
+//!   `READER_CHECKOUT_TIMEOUT` and returns SQLite's own `SQLITE_BUSY` code,
+//!   so the condition is typed rather than prose and the caller can branch on
+//!   it with [`is_busy_error`]. It stays a `rusqlite::Error` because
+//!   `db/mod.rs` and its domain modules report `SqlResult`; a dedicated
+//!   variant would need the `SqlResult`-reporting accessors to change error
+//!   type, which is a different slice from the one that fixed the crash. A
+//!   `DbError` holder reaches the same answer through its transparent `Sql`
+//!   variant.
+//!
+//! The rendering of the *other* frozen messages is untouched: only the
+//! reader-pool timeout changed, because "Invalid query" was never a truthful
+//! description of it and the old copy is what made the failure look like a
+//! bug in the query rather than a busy database.
 
 use rusqlite::Error as SqlError;
+
+/// Whether a raw SQLite error is the reader pool reporting itself busy.
+///
+/// The reader pool's checkout deadline expires as SQLite's `SQLITE_BUSY`
+/// code (issue #1533), so this is a *typed* check rather than a match on
+/// prose: a caller asks "is the database busy?" instead of asking whether an
+/// error message happens to contain a word.
+pub fn is_busy_error(error: &SqlError) -> bool {
+    error
+        .sqlite_error_code()
+        .is_some_and(|code| code == rusqlite::ffi::ErrorCode::DatabaseBusy)
+}
+
+/// The error a reader-pool checkout reports when no reader was free by the
+/// deadline.
+///
+/// SQLite's own `SQLITE_BUSY` code rather than an invented one: "the database
+/// is busy" is exactly what happened, and the code is what lets a caller
+/// branch on the condition ([`is_busy_error`]) instead of matching on prose.
+/// The message is the user-facing copy, and it says a retry may work.
+pub fn busy_error() -> SqlError {
+    SqlError::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+        Some(crate::db::READER_POOL_BUSY_MESSAGE.to_string()),
+    )
+}
 
 /// Why a db-layer operation failed.
 ///

@@ -11,7 +11,8 @@ pub(crate) fn restore_projection_conflicts(
     attempt: i32,
     evidence: &mut crate::circuit::observation::WorkEvidence,
 ) -> SqlResult<bool> {
-    restore_projection_conflicts_inner(&crate::db::read_conn(), run_id, node_id, attempt, evidence)
+    let conn = crate::db::read_conn()?;
+    restore_projection_conflicts_inner(&conn, run_id, node_id, attempt, evidence)
 }
 
 fn restore_projection_conflicts_inner(
@@ -186,7 +187,7 @@ pub struct CircuitStepObservationCoverage {
 }
 
 pub fn history(run_id: i64) -> Result<CircuitEvidenceView, DbError> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     let tx = db.unchecked_transaction()?;
     let (mut view, pending) = evidence_view_unresolved(&tx, run_id)?;
     tx.commit()?;
@@ -444,7 +445,7 @@ pub struct CircuitRunAttention {
 }
 
 pub fn attention(run_id: i64) -> Result<CircuitRunAttention, DbError> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     let tx = db.unchecked_transaction()?;
     let view = attention_inner(&tx, run_id)?;
     tx.commit()?;
@@ -851,7 +852,7 @@ pub(crate) fn receive_native_hook_locked(
 }
 
 pub(crate) fn native_hook_receipts(run_id: i64, after: i64) -> SqlResult<Vec<CircuitHistoryEntry>> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     let mut stmt = db.prepare("SELECT id,node_id,attempt,kind,detail,source,disposition,observed_at FROM circuit_run_history WHERE run_id=?1 AND id>?2 AND kind='native_hook_received' ORDER BY id LIMIT 512")?;
     let rows = stmt.query_map(params![run_id, after], |r| {
         Ok(CircuitHistoryEntry {
@@ -1351,7 +1352,7 @@ pub(crate) enum QueueWaitReason {
 }
 
 pub(crate) fn queue_waits(mesh_id: i64) -> SqlResult<std::collections::HashMap<String, String>> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     queue_waits_inner(&db, mesh_id)
 }
 
@@ -1755,7 +1756,7 @@ pub(super) fn revision_moved(db: &Connection, run_id: i64, expected: i64) -> Sql
 }
 
 pub fn observation_revision(run: &crate::models::AutopilotCircuitRun) -> SqlResult<i64> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     db.query_row(
         "SELECT (SELECT COALESCE(MAX(id),0) FROM circuit_run_history WHERE run_id=r.id)
         FROM autopilot_circuit_runs r WHERE r.id=?1 AND r.context_json=?2 AND r.state=?3",
@@ -2204,7 +2205,7 @@ pub(crate) fn prompt_delivery_acknowledged(
     node_id: &str,
     attempt: i32,
 ) -> SqlResult<bool> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     db.query_row(
         "SELECT EXISTS(SELECT 1 FROM circuit_effects
         WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind='prompt' AND state='acknowledged')",
@@ -2280,7 +2281,7 @@ pub(crate) fn latest_effect_target(
     node_id: &str,
     attempt: i32,
 ) -> SqlResult<Option<String>> {
-    let db = crate::db::read_conn();
+    let db = crate::db::read_conn()?;
     latest_effect_target_inner(&db, run_id, node_id, attempt)
 }
 
