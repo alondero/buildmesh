@@ -185,6 +185,10 @@ function HistoryDetail({ entry }: { entry: CircuitHistoryEntry }) {
         const extension = parseDetail<{ additional_rounds?: number; round_limit?: number; attempt?: number }>(entry.detail);
         return <p className="text-text-secondary break-words">Added {extension?.additional_rounds ?? 1} review round; queued attempt {extension?.attempt ?? 'unknown'} of {extension?.round_limit ?? 'unknown'} on this run. Earlier findings remain in Run History.</p>;
       }
+      case 'review_round_limit': {
+        const change = parseDetail<{ max_rounds: number }>(entry.detail);
+        return <p className="text-text-secondary break-words">Review rounds set to {change?.max_rounds === 0 ? 'unlimited' : change?.max_rounds ?? 'unknown'}. The current round can finish.</p>;
+      }
       case 'operator_attestation': return <div className="space-y-1 text-text-secondary">
         <p className="break-words">{entry.detail}</p>
         <p>Attestation — does not grant permission or review approval.</p>

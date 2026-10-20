@@ -103,6 +103,7 @@ import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { focusAgentNode, reopenAndAdoptAgentNode } from '../../lib/focusAgentNode';
 import { EmptyState } from '../shared/Spinner';
 import { CircuitRunCard } from './CircuitRunCard';
+import { setCircuitReviewRoundLimit } from '../../lib/tauri/circuit';
 
 const CIRCUIT_PROBE_VIEWS = ['activity', 'history', 'queue', 'manage'] as const;
 
@@ -1261,6 +1262,7 @@ setQueueWaits({});
                           busy={busy}
                           onPause={() => runAction(() => pauseCircuitRun(detail.run.id))}
                           onResume={() => runAction(() => resumeCircuitRun(detail.run.id))}
+                          onReviewRoundLimitChange={(limit) => runAction(() => setCircuitReviewRoundLimit(detail.run.id, limit))}
                           onContinueReview={() => runAction(async () => {
                             const meshId = activeMeshIdRef.current;
                             const nextRunId = await continueCircuitReview(detail.run.id);

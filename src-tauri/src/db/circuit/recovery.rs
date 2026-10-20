@@ -370,6 +370,12 @@ pub(crate) fn extend_failed_review_locked(
     let next_attempt = last_attempt
         .checked_add(1)
         .ok_or_else(|| DbError::conflict("Review round limit reached."))?;
+    let context = CircuitContext::from_json(&run.context_json)?;
+    let prior_limit = context
+        .get("review.round_limit")
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|limit| *limit > 0)
+        .unwrap_or(prior_limit);
     let next_limit = prior_limit
         .max(last_attempt)
         .checked_add(additional_rounds)
@@ -431,6 +437,7 @@ pub(crate) fn extend_failed_review_locked(
     });
     context.insert("retry.attempt".into(), next_attempt.to_string());
     context.insert("retry.max_retries".into(), next_limit.to_string());
+    context.remove("review.round_limit");
     context.insert("review.extended".into(), "1".into());
     if run.source_agent_node_id.is_none() {
         context.insert("review.source_was_circuit_owned".into(), "1".into());

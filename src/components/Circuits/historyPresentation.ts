@@ -23,6 +23,7 @@ const KIND_TITLES: Record<string, string> = {
   review_continuation: 'Continued a failed review',
   observation_readiness: 'Session observation',
   review_extension: 'Review rounds added',
+  review_round_limit: 'Review rounds changed',
   run_transition: 'Run state',
   step_transition: 'Step state',
   effect_intent: 'Action intended',

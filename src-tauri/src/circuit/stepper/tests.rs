@@ -246,12 +246,63 @@ fn operator_review_feedback_key_retains_scheduler_inputs() {
     run.context.set("retry.max_retries", "7");
     let retries = feedback_schedule_key(&run, "feedback");
     assert_ne!(initial, retries);
+    run.context.set("review.round_limit", "0");
+    let unlimited = feedback_schedule_key(&run, "feedback");
+    assert_ne!(retries, unlimited);
     run.context.set("node.verdict.review_verdict", "approved");
     run.context.set("node.verdict.review_verdict_attempt", "1");
     let approved = feedback_schedule_key(&run, "feedback");
     assert_ne!(retries, approved);
     run.context.set("node.verdict.review_verdict_attempt", "01");
     assert_ne!(approved, feedback_schedule_key(&run, "feedback"));
+}
+
+#[test]
+fn operator_review_feedback_simulation_honors_live_review_round_limit() {
+    for (authored, limit, allowed) in [(3, 1, false), (1, 9, true), (1, 0, true)] {
+        let mut run = operator_review_fanout_run(0);
+        run.context.set("review.round_limit", limit.to_string());
+        run.graph.nodes.push(CircuitNode {
+            id: "retry".into(),
+            kind: CircuitNodeKind::RetryLimit {
+                max_retries: authored,
+            },
+        });
+        run.graph.nodes.push(CircuitNode {
+            id: "route".into(),
+            kind: CircuitNodeKind::Notify {
+                message: "Changes requested".into(),
+            },
+        });
+        run.graph.edges.extend([
+            CircuitEdge {
+                from: "verdict".into(),
+                to: "route".into(),
+                condition: EdgeCondition::OnOutcome(StepOutcome::Working),
+            },
+            CircuitEdge {
+                from: "route".into(),
+                to: "retry".into(),
+                condition: EdgeCondition::Always,
+            },
+            CircuitEdge {
+                from: "retry".into(),
+                to: "feedback".into(),
+                condition: EdgeCondition::OnOutcome(StepOutcome::Completed),
+            },
+            CircuitEdge {
+                from: "feedback".into(),
+                to: "verdict".into(),
+                condition: EdgeCondition::Always,
+            },
+        ]);
+        assert_eq!(
+            run.check_review_decision("verdict", StepOutcome::Working)
+                .is_ok(),
+            allowed,
+            "authored={authored}, limit={limit}"
+        );
+    }
 }
 
 #[test]
@@ -6654,6 +6705,107 @@ fn issue_review_retry_completed_requeues_the_re_review_with_incremented_attempt(
     assert_eq!(run.step("re_review").unwrap().attempt, 2);
     assert_eq!(run.context.get("retry.attempt"), Some("2"));
     assert_eq!(run.context.get("retry.max_retries"), Some("3"));
+}
+
+#[test]
+fn live_review_round_limit_can_end_current_round_or_allow_ninth_and_unlimited_rounds() {
+    for (limit, attempt, next) in [
+        (1, 4, None),
+        (9, 8, Some(9)),
+        (9, 9, None),
+        (0, 12, Some(13)),
+    ] {
+        let mut run = issue_review_run();
+        issue_review_to_first_verdict(&mut run, 9001);
+        run.context.set("review.round_limit", limit.to_string());
+        run.step_mut("reviewer").unwrap().attempt = attempt;
+        run.step_mut("review_classifier").unwrap().attempt = attempt;
+        let mut re_review = StepView::new("re_review", StepStatus::Completed);
+        re_review.attempt = attempt;
+        re_review.outcome = Some(StepOutcome::Completed);
+        run.steps.push(re_review);
+        request_changes_and_fix(&mut run, "Fix the race");
+        match next {
+            Some(next) => {
+                assert_eq!(run.state, RunState::Running);
+                assert_eq!(run.step("re_review").unwrap().attempt, next);
+                assert_eq!(status_of(&run, "re_review"), StepStatus::Queued);
+            }
+            None => {
+                advance(&mut run, &tick(8));
+                assert_eq!(run.state, RunState::Failed);
+                assert!(run.step("merge").is_none());
+            }
+        }
+    }
+}
+
+#[test]
+fn review_round_limit_never_overrides_publication_retries() {
+    let graph = CircuitGraph::issue_driven_autopilot_review("run");
+    assert!(review_retry_gate(&graph, "review_retry"));
+    assert!(!review_retry_gate(&graph, "wrapup_retry"));
+    let mut run = retry_run(2);
+    run.context.set("review.round_limit", "0");
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(5));
+    run.attach_agent_node("work", 11);
+    advance_with_completion_evidence(&mut run, &agent_finished(11, false));
+    advance(&mut run, &tick(5));
+    advance_with_completion_evidence(&mut run, &agent_finished(11, false));
+    advance(&mut run, &tick(5));
+    assert_eq!(run.state, RunState::Failed);
+}
+
+#[test]
+fn unlimited_review_round_limit_still_routes_approval_to_merge() {
+    let mut run = issue_review_run();
+    issue_review_to_first_verdict(&mut run, 701);
+    run.context.set("review.round_limit", "0");
+    let approved = advance_with_report_evidence(
+        &mut run,
+        &classified_with_output(
+            "review_classifier",
+            Some(Classification::Completed),
+            Some("Approved. No remaining findings."),
+        ),
+    );
+    assert!(approved.effects.iter().any(|effect| matches!(effect,
+        Effect::CloseAgentNode { node_id, .. } if node_id == "close_approved")));
+    advance(&mut run, &tick(8));
+    assert_eq!(status_of(&run, "merge"), StepStatus::Running);
+    assert!(run.step("re_review").is_none());
+}
+
+#[test]
+fn authored_zero_review_budget_exhausts_unless_run_explicitly_selects_unlimited() {
+    for unlimited in [false, true] {
+        let mut run = issue_review_run();
+        issue_review_to_first_verdict(&mut run, 9001);
+        run.graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "review_retry")
+            .unwrap()
+            .kind = CircuitNodeKind::RetryLimit { max_retries: 0 };
+        if unlimited {
+            run.context.set("review.round_limit", "0");
+        }
+        request_changes_and_fix(&mut run, "Fix the race");
+        advance(&mut run, &tick(8));
+        assert_eq!(
+            run.state,
+            if unlimited {
+                RunState::Running
+            } else {
+                RunState::Failed
+            }
+        );
+        assert_eq!(
+            run.context.get("retry.max_retries"),
+            Some(if unlimited { "unlimited" } else { "0" })
+        );
+    }
 }
 
 /// Wrapup-retry exhaustion mirrors review_retry: after 3 failed

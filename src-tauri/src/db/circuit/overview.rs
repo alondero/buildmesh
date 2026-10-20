@@ -23,6 +23,9 @@ pub struct CircuitRunOverview {
     /// The graph this run executes.
     pub graph: CircuitGraph,
     pub attention: CircuitRunAttention,
+    #[ts(optional)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_round_limit: Option<i32>,
 }
 
 pub fn overview(run_id: i64) -> Result<CircuitRunOverview, DbError> {
@@ -42,6 +45,7 @@ pub(crate) fn overview_inner(db: &Connection, run_id: i64) -> Result<CircuitRunO
         |row| row.get(0),
     )?;
     Ok(CircuitRunOverview {
+        review_round_limit: super::review_rounds::current_limit(db, &run)?,
         steps: super::ledger::list_circuit_run_steps_inner(db, run_id)?,
         graph: run_graph(db, run_id)?,
         attention: attention_inner(db, run_id)?,
@@ -90,6 +94,35 @@ mod tests {
             "a pinned run never shows later edits"
         );
         assert!(overview.attention.pushes.is_empty());
+        assert!(serde_json::to_value(&overview)
+            .unwrap()
+            .get("review_round_limit")
+            .is_none());
+        let detail = crate::commands::circuit::CircuitRunDetail {
+            run: overview.run.clone(),
+            steps: overview.steps.clone(),
+            review_round_limit: None,
+        };
+        assert!(serde_json::to_value(&detail)
+            .unwrap()
+            .get("review_round_limit")
+            .is_none());
+        let unlimited = crate::commands::circuit::CircuitRunDetail {
+            review_round_limit: Some(0),
+            ..detail
+        };
+        assert_eq!(
+            serde_json::to_value(&unlimited).unwrap()["review_round_limit"],
+            0
+        );
+        let unlimited = CircuitRunOverview {
+            review_round_limit: Some(0),
+            ..overview
+        };
+        assert_eq!(
+            serde_json::to_value(&unlimited).unwrap()["review_round_limit"],
+            0
+        );
         assert!(overview_inner(&db, 2).is_err());
     }
 }
