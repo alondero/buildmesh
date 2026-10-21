@@ -881,6 +881,15 @@ The selected Settings tab is the tablist's single Tab stop. Up/Down wrap
 through tabs, and Home/End choose the first/last tab. Tab then enters the
 selected panel. Switching tabs preserves unsaved edits.
 
+Some fields — the Worktree directory, the Circuit agent pool size, harness
+defaults and the probe spawn prompts — save as soon as you leave them, either
+by moving to the next control or by switching to another Settings tab. Those
+fields do not save behind your back while you are trying to leave Settings:
+pressing **Escape**, closing with the **×**, or clicking outside the Settings
+panel keeps the edit uncommitted and asks instead. **Keep editing** returns
+to the field you were in with the edit still there; **Discard changes** closes
+Settings without saving it.
+
 Default, classifier, reviewer and naming choices load independently of live
 CLI and WSL probes. Routes awaiting runtime verification explain that state
 and remain unavailable until verified. Failed checks keep a **Retry** action;

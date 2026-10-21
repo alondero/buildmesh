@@ -20,6 +20,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { act, render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ProbeSpawnPromptsSection } from '../../src/components/AppSettings/ProbeSpawnPromptsSection';
+import { Modal } from '../../src/components/shared/Modal';
 import productionExamples from '../../src/types/generated/ProbeSpawnPromptExamples.json';
 
 const DEFAULTS = productionExamples.defaults;
@@ -154,6 +155,33 @@ describe('ProbeSpawnPromptsSection', () => {
     expect(screen.getByTestId('probe-prompt-reset-issue')).not.toBeNull();
     // The untouched side stays on the default.
     expect(screen.getByTestId('probe-prompt-badge-pr').textContent).toBe('Using default');
+  });
+
+  it('does not save the draft on blur while the modal intercepts a dismissal (issue #2458)', async () => {
+    // Escape moves focus to the discard banner's "Keep editing" button,
+    // which blurs the editor. That blur must not save the draft — the user
+    // is trying to abandon it, not persist it.
+    const onSave = vi.fn(async () => true);
+    const user = userEvent.setup();
+    render(
+      <Modal dirty onClose={() => {}} ariaLabel="Settings">
+        <ProbeSpawnPromptsSection
+          stored={{ issue: null, pr: null }}
+          defaults={DEFAULTS}
+          onSave={onSave}
+          onReset={vi.fn(async () => true)}
+        />
+      </Modal>,
+    );
+
+    const input = screen.getByTestId('probe-prompt-input-issue');
+    await user.click(input);
+    fireEvent.change(input, { target: { value: 'Edited {{number}}' } });
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+
+    screen.getByTestId('modal-discard-banner');
+    expect(onSave).not.toHaveBeenCalled();
   });
 
   it('saves the draft on blur and commits the Custom badge on success', async () => {

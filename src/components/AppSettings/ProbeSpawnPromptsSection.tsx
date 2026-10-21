@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { useBlurCommit } from '../../hooks/useBlurCommit';
 import { SettingsSection } from './SettingsRow';
 
 export type ProbePromptKind = 'issue' | 'pr';
@@ -109,6 +110,11 @@ export function ProbeSpawnPromptsSection({
 }: ProbeSpawnPromptsSectionProps) {
   const [drafts, setDrafts] = useState<Partial<Record<ProbePromptKind, PromptDraft>>>({});
   const helpId = useId();
+  // Issue #2458 — these editors save on blur, and the dismissal gestures
+  // (Escape, the header ×, a backdrop click) move focus off them. The
+  // guard keeps an abandoned draft uncommitted so the discard prompt can
+  // still ask about it.
+  const commitOnBlur = useBlurCommit();
   const inputs = useRef<Partial<Record<ProbePromptKind, HTMLTextAreaElement>>>({});
   const focused = useRef<Record<ProbePromptKind, boolean>>({ issue: false, pr: false });
   const insertion = useRef<{ kind: ProbePromptKind; caret: number } | null>(null);
@@ -322,10 +328,12 @@ export function ProbeSpawnPromptsSection({
                 placeholder={defaults === null ? 'Loading default prompt…' : ''}
                 onChange={(e) => updateDraft(kind, e.target.value)}
                 onFocus={() => { focused.current[kind] = true; }}
-                onBlur={(event) => {
-                  if (event.relatedTarget instanceof HTMLElement && event.relatedTarget.dataset.promptInsert === kind) return;
-                  void commit(kind);
-                }}
+                onBlur={commitOnBlur(
+                  () => commit(kind),
+                  (event) =>
+                    !(event.relatedTarget instanceof HTMLElement &&
+                      event.relatedTarget.dataset.promptInsert === kind),
+                )}
                 disabled={inputsDisabled}
                 rows={4}
                 aria-label={`${meta.title} prompt template`}
@@ -344,11 +352,16 @@ export function ProbeSpawnPromptsSection({
                     aria-describedby={`${helpId}-${kind}-${name}-help ${helpId}-${kind}-${name}-example`}
                     onMouseDown={(event) => event.preventDefault()}
                     onClick={() => insertPlaceholder(kind, name)}
-                    onBlur={(event) => {
-                      const next = event.relatedTarget;
-                      if (next === inputs.current[kind] || (next instanceof HTMLElement && next.dataset.promptInsert === kind)) return;
-                      void commit(kind);
-                    }}
+                    onBlur={commitOnBlur(
+                      () => commit(kind),
+                      (event) => {
+                        const next = event.relatedTarget;
+                        return !(
+                          next === inputs.current[kind] ||
+                          (next instanceof HTMLElement && next.dataset.promptInsert === kind)
+                        );
+                      },
+                    )}
                     className={`min-w-0 text-left border border-border-subtle rounded-md px-3 py-2 hover:bg-bg-card-hover focus-visible:outline-none focus-visible:border-accent-cyan disabled:opacity-50 ${name === 'policy' ? 'sm:col-span-2' : ''}`}
                   >
                     <code className="text-sm text-accent-cyan">{`{{${name}}}`}</code>

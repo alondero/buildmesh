@@ -9,11 +9,17 @@
  * briefly caps the pool at 1. It reports a dirty site so the modal's nav rail
  * can mark this pane and the discard banner can intercept a stray close
  * (issue #730).
+ *
+ * The blur commit is guarded against the modal's discard prompt
+ * (issue #2458): Escape, the header × and a backdrop click all move focus
+ * off the field, and an unguarded blur-commit would persist the very draft
+ * the user is trying to abandon.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import * as api from '../../lib/tauri';
 import type { AppPreferences } from '../../types/generated/AppPreferences';
 import { formatError } from '../../lib/errorUtils';
+import { useBlurCommit } from '../../hooks/useBlurCommit';
 import { SettingsRow, SettingsSection } from './SettingsRow';
 import { ResourceLoadStatus } from './ResourceLoadStatus';
 import { useSettingsData } from './SettingsDataContext';
@@ -21,6 +27,11 @@ import { useSettingsData } from './SettingsDataContext';
 export function AutopilotPane() {
   const { resources, prefsLoaded, preferences, loadPreferences, retryResource, setError, siteDirtyChange } =
     useSettingsData();
+
+  // Issue #2458 — the blur commit is skipped while the modal is intercepting
+  // a dismissal, so an abandoned draft stays uncommitted and the discard
+  // prompt can still ask about it.
+  const commitOnBlur = useBlurCommit();
 
   // Circuit agent pool size (app-wide cap on concurrent Circuit agents).
   // The draft is a string so the input can hold a cleared/in-progress
@@ -146,7 +157,7 @@ export function AutopilotPane() {
               setPoolDraft(e.target.value);
               poolDirtyChange(e.target.value.trim() !== poolSavedRef.current);
             }}
-            onBlur={commitPoolSize}
+            onBlur={commitOnBlur(commitPoolSize)}
             onKeyDown={e => {
               if (e.key === 'Enter') commitPoolSize();
             }}
