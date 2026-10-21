@@ -419,6 +419,7 @@ pub(crate) fn upgrade_warm_to_mode(
     branch_name: &str,
     mode: &str,
 ) -> Result<(), String> {
+    super::trust::ensure(project_root, host_path)?;
     if mode == "detached" {
         // No-op: the pool already cut the entry as detached.
     } else {
@@ -907,6 +908,9 @@ pub fn provision_for_spawn(
             host_path: ctx.host_path,
         });
     }
+    if ctx.warm_entry.is_none() {
+        super::trust::ensure(&ctx.node.path, &ctx.host_path)?;
+    }
 
     // ---- Warm path: capture the entry so a failure can clean up both
     //      possible paths before the cold retry (idempotent — whichever
@@ -1037,13 +1041,14 @@ pub fn provision_for_spawn(
                     "provision_for_spawn: manual warm upgrade failed: {warm_err}"
                 ));
             }
-            // Warm path failed. The failure happens in one of three places:
+            // Warm path failed. The failure happens in one of these places:
             //   (a) resolve_base_ref_sha failed — disk untouched.
             //   (b) pre-move branch guard refused (e.g. branch-exists) — disk untouched.
-            //   (c) move_git_worktree failed — disk untouched (atomic at the
-            //       file-system level; git CLI either moves and exits 0 or
-            //       returns non-zero without moving).
-            //   (d) checkout_worktree_to_base failed AFTER the move succeeded —
+            //   (c) old-path trust revocation or the git move failed — pool
+            //       directory intact. Revocation runs before the move so no
+            //       obsolete trusted path can be lost by this fallback.
+            //   (d) destination trust or checkout_worktree_to_base failed
+            //       AFTER the move succeeded —
             //       `host_path` is now populated with a broken worktree that
             //       needs cleanup; `entry.path` (pool) was emptied by the move.
             //
@@ -1070,6 +1075,7 @@ pub fn provision_for_spawn(
             // Cold retry — same SpawnContext with `warm_entry` already cleared.
             // If THIS fails too the spawn surfaces a combined error so the caller
             // can persist a real diagnostic instead of a half-failed warm retry.
+            super::trust::ensure(&ctx.node.path, &ctx.host_path)?;
             if crate::git::project::is_materialized_checkout(&ctx.host_path) {
                 // Race: another thread cut the worktree between our warm failure
                 // and now. Treat as a resume rather than a create.

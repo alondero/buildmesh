@@ -22,6 +22,10 @@
 //!   `copy_dir_all` — pinned by `apply_worktree_include_copies_directory_recursively`.
 
 pub mod provision;
+mod trust;
+
+#[cfg(test)]
+mod ownership_tests;
 
 use std::time::Duration;
 
@@ -411,6 +415,7 @@ fn create_git_worktree_at_root(
     let host_path = std::path::Path::new(worktree_host_path);
 
     if host_path.exists() {
+        trust::ensure(project_root, worktree_host_path)?;
         // Issue #1230: a pre-existing directory is only a valid resume if it
         // is already a linked worktree of `project_root`. The old
         // `return Ok(())` accepted ANY directory — empty husks from
@@ -504,6 +509,7 @@ fn create_git_worktree_at_root(
         ensure_container_excluded(project_root, &container.to_string_lossy());
     }
 
+    trust::ensure(project_root, worktree_host_path)?;
     Ok(())
 }
 
@@ -811,6 +817,8 @@ pub fn move_git_worktree(
     let host_root = to_host_path(project_root);
     let old = to_host_path(old_host_path);
     let new = to_host_path(new_host_path);
+    super::project::resolve(&host_root)?;
+    let old_trust_key = trust::key(&old)?;
 
     // Guard against `git worktree move`'s `mv`-style nesting: when the target
     // directory already exists, git moves the source *inside* it
@@ -821,6 +829,12 @@ pub fn move_git_worktree(
         return Err(format!("git worktree move target already exists: {}", new));
     }
 
+    // Revoke before changing the path. A configuration-write failure must
+    // leave the old checkout in place, never an obsolete trusted path that
+    // the warm fallback can lose track of. User-owned entries are untouched.
+    trust::forget_key(&old_trust_key)
+        .map_err(|error| format!("Cannot revoke Git trust before moving {old}: {error}"))?;
+
     let mut cmd = crate::process_util::git_command();
     cmd.arg("-C")
         .arg(&host_root)
@@ -829,14 +843,22 @@ pub fn move_git_worktree(
         .arg(&old)
         .arg(&new);
 
-    let output = run_bounded_git(cmd, "git worktree move", GIT_LOCAL_TIMEOUT)?;
-    if !output.status.success() {
-        return Err(format!(
-            "git worktree move failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+    let moved = run_bounded_git(cmd, "git worktree move", GIT_LOCAL_TIMEOUT).and_then(|output| {
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "git worktree move failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+        }
+    });
+    if let Err(error) = moved {
+        trust::ensure(&host_root, &old)
+            .map_err(|restore| format!("{error}; cannot restore source Git trust: {restore}"))?;
+        return Err(error);
     }
-    Ok(())
+    trust::ensure(&host_root, &new)
 }
 
 /// Hard-reset a warm pool worktree onto `sha` so it tracks a freshly-fetched
@@ -1153,6 +1175,7 @@ pub const OP_OPEN_ADMIN_ENTRY: &str = "open-worktree-admin-entry";
 pub const OP_RENAME_TO_STAGING: &str = "rename-worktree-to-staging";
 pub const OP_DELETE_STAGING: &str = "delete-staged-worktree";
 pub const OP_PRUNE_ADMIN_ENTRY: &str = "prune-worktree-admin-entry";
+pub const OP_REVOKE_TRUST: &str = "revoke-worktree-git-trust";
 
 /// A removal failure that names the step that failed alongside the underlying
 /// OS error. `detail` is exactly the error text the old `Result<(), String>`
@@ -1210,6 +1233,8 @@ pub fn remove_one_worktree_and_branch_detailed(path: &str) -> Result<(), Worktre
 fn remove_worktree_inner(path: &str, delete_branch: bool) -> Result<(), WorktreeRemovalFailure> {
     let host_path = to_host_path(path);
     let dir = std::path::Path::new(&host_path);
+    let trust_key =
+        trust::key(&host_path).map_err(|e| WorktreeRemovalFailure::new(OP_REVOKE_TRUST, e))?;
 
     // An already-gone working directory is nothing to remove. The node may have
     // been gutted by a previous interrupted close (#239); treat it as success so
@@ -1248,6 +1273,8 @@ fn remove_worktree_inner(path: &str, delete_branch: bool) -> Result<(), Worktree
         // Git half: prune the admin entry if it still points at this path, so
         // the queue entry is only retired once both halves are done.
         prune_orphaned_worktree_entry(&host_path)?;
+        trust::forget_key(&trust_key)
+            .map_err(|e| WorktreeRemovalFailure::new(OP_REVOKE_TRUST, e))?;
         return Ok(());
     }
 
@@ -1279,6 +1306,7 @@ fn remove_worktree_inner(path: &str, delete_branch: bool) -> Result<(), Worktree
     worktree
         .prune(Some(&mut opts))
         .map_err(|e| WorktreeRemovalFailure::new(OP_PRUNE_ADMIN_ENTRY, e))?;
+    trust::forget_key(&trust_key).map_err(|e| WorktreeRemovalFailure::new(OP_REVOKE_TRUST, e))?;
 
     // Best-effort: the worktree (and its work) is already gone, so a branch
     // delete that fails — e.g. the branch was reused by another worktree — must

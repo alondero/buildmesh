@@ -28,8 +28,17 @@ pub fn resolve(selected: &str) -> Result<ProjectRepository, String> {
     if !folder.is_dir() {
         return Err(format!("Project folder {selected} is not a directory"));
     }
-    let repo =
-        open(selected).map_err(|e| format!("No working Git repository for {selected}: {e}"))?;
+    let repo = open(selected).map_err(|e| {
+        if e.code() == git2::ErrorCode::Owner {
+            format!(
+                "Git ownership check rejected project folder {selected}. Review its ownership \
+                 and trust its repository root in your global Git safe.directory configuration, \
+                 then retry. Details: {e}"
+            )
+        } else {
+            format!("No working Git repository for {selected}: {e}")
+        }
+    })?;
     let root = repo
         .workdir()
         .ok_or_else(|| no_working_directory_reason(selected, &repo))?;

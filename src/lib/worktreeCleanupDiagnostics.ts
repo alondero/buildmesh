@@ -21,6 +21,7 @@ const OPERATION_LABELS: Record<string, string> = {
   'rename-worktree-to-staging': 'Moving the folder aside to remove it',
   'delete-staged-worktree': 'Deleting the moved-aside folder',
   'prune-worktree-admin-entry': 'Cleaning up the git worktree entry',
+  'revoke-worktree-git-trust': 'Removing the Git trust exception for the worktree',
 };
 
 const NEVER_ATTEMPTED = 0;

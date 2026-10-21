@@ -17,6 +17,19 @@ Node working directories reach the spawn in three shapes, and cmd.exe cannot use
 
 Cross-runtime linked worktrees retain a host administrative backpointer and a relative forward `.git` link. They are locked against guest pruning because older Git treats foreign absolute backpointers as missing, and does not safely support relative backpointers without newer repository extensions. Buildmesh owns removal and already explicitly prunes locked entries. Prepare this metadata on the blocking pool. Windows process sandboxing cannot contain WSL agents; reject that combination. Shell hooks for a Windows host use Windows curl from WSL to reach host loopback even under NAT; Linux-hosted Windows callbacks explicitly invoke curl in the owning WSL distribution, avoiding collisions with Windows Buildmesh on localhost. Native Linux callbacks retain native curl. Grok uses platform-specific command hooks with curl because its native HTTP-hook SSRF guard rejects the local plain-HTTP callback; those commands still require loopback reachability, including mirrored WSL networking where applicable.
 
+Managed worktree ownership exceptions belong to `git::worktree::trust`. When
+libgit2 rejects a linked checkout with `Owner`, the source repository must first
+pass ordinary repository discovery and ownership validation. The worktree's
+forward link, common directory, registered path and administrative backpointer
+must agree with that source before its canonical exact path is added to global
+`safe.directory`. Cold creation, warm moves, manual upgrades and restart use this
+guard before opening the checkout for launch. Native owned checkouts need no
+exception. Entries added by Buildmesh are tracked in
+`buildmesh.managedWorktreeSafeDirectory`; move and removal revoke those entries,
+while pre-existing user exceptions remain user-owned. Configuration failures
+propagate; ownership validation stays enabled. See
+[ADR 0045](../adr/0045-managed-worktree-git-trust.md).
+
 ## Frameless Window & Bespoke TitleBar
 The window runs with `"decorations": false` (`src-tauri/tauri.conf.json`); `src/components/TitleBar/TitleBar.tsx` is the window chrome (wordmark, ViewModeSwitcher with the Filtered segment, the Filtered view's `GridControls` search bar, the centred "Search or open…" palette field flanked by drag spacers, and the right-hand utility cluster — Usage / Settings / Remote Access pills sharing the `HeaderPillButton` skeleton — plus min/max/close). Traps this recipe has already burned once:
 - **Drag regions are per-target.** Tauri's injected script checks `e.target.hasAttribute('data-tauri-drag-region')` — put the attribute on the bar/spacer/wordmark, but *never* on buttons or their SVGs, or the click is eaten and the button starts a drag instead. Double-click maximize on a drag region is built into the same script (`internal_toggle_maximize`).

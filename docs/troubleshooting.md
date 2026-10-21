@@ -236,6 +236,23 @@ drive does not require moving or cloning the repository. The message includes
 the selected path and the operating system's error to help identify what is
 unavailable.
 
+On Windows, a WSL worktree may instead fail with **not owned by current user**.
+This is Git's ownership check. Verify that you trust the source repository, then
+add its repository root to your Windows user's global Git configuration using
+the exact path shown by Git:
+
+```powershell
+git config --global --add safe.directory "<repository-root>"
+```
+
+Retry the node after trusting the source. Buildmesh adds exact-path exceptions
+only for linked worktrees verified against that source, including a pooled
+worktree's final name after adoption. It tracks and removes the exceptions it
+adds when moving or removing the checkout, and preserves pre-existing user
+exceptions. A refused configuration write or inconsistent worktree links must
+be repaired before retrying. Trusting the source does not authorize unrelated
+repositories merely placed beneath the same folder.
+
 One cause is a repository that Git has been told is *bare*. A repository can be
 flagged `core.bare=true` in its own `.git/config` even though the folder holds a
 full checkout. Git then refuses the commands that need a work tree ("this
