@@ -375,7 +375,7 @@ interface UIState extends GridControls {
   // mount at App scope (App.tsx), gated on these flags. The
   // "createMesh" action name dropped its "canvas" prefix because
   // mesh creation is an application-level concern, not a
-  // canvas-specific one — Sidebar's `+ New mesh` buttons and the
+  // canvas-specific one — the Sidebar's mesh-creation CTA and the
   // canvas empty state's CTA both summon the same modal. (Senior
   // review caught the leaky "canvas" prefix.) The earlier
   // `meshStore.addMesh()` direct-call path is gone; both call

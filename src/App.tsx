@@ -386,7 +386,7 @@ function App() {
       <WorktreeCloseDialog />
       {/* Issue #1536 — the canvas empty state needs to summon this
           modal from outside the Sidebar's render tree. Both call sites
-          (Sidebar's "+ New mesh" buttons + the canvas empty state's
+          (the Sidebar's mesh-creation CTA + the canvas empty state's
           "New mesh" CTA) hit `useUIStore.openCreateMesh`. The
           modal mounts only when explicitly opened — the flag stays
           false on startup so a fresh app boot never flashes the
