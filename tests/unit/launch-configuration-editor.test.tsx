@@ -180,4 +180,97 @@ describe('Launch Configuration editor', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ name: 'Fast review', model: 'MiniMax-M3', effort: null }), undefined, expect.any(Function)));
   });
+
+  // Issue #2423: the raw inputs are progressively disclosed, but the disclosure
+  // does not close over the field that blocks a save.
+  it('collapses optional advanced inputs for a new ordinary setup and explains when they are needed', () => {
+    render(<LaunchConfigurationEditor value={{ id: '', name: 'Fast review', spawn_option_id: targets[0].id, model: null, effort: null, extra_args: null }}
+      targets={targets} onSave={vi.fn()} onCancel={vi.fn()} />);
+    const toggle = screen.getByRole('button', { name: 'Advanced options' });
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    const region = document.getElementById(toggle.getAttribute('aria-controls')!)!;
+    expect(region).not.toBeNull();
+    expect(region.hasAttribute('hidden')).toBe(true);
+    expect(within(region).getByLabelText('Extra arguments')).toBeTruthy();
+    expect(screen.getByText(/Only needed when a provider or harness wants a raw value/)).toBeTruthy();
+    // The common fields stay outside the disclosure.
+    expect(screen.getByLabelText('Name')).toBeTruthy();
+    expect(screen.getByLabelText('Harness')).toBeTruthy();
+    expect(screen.getByLabelText('Provider')).toBeTruthy();
+    expect(screen.getByLabelText('Model')).toBeTruthy();
+  });
+
+  it('opens the disclosure for a configuration that already carries an advanced value', () => {
+    render(<LaunchConfigurationEditor value={{ id: 'launch/verbose', name: 'Verbose', spawn_option_id: targets[0].id, model: null, effort: null, extra_args: '--json' }}
+      targets={targets} onSave={vi.fn()} onCancel={vi.fn()} />);
+    const toggle = screen.getByRole('button', { name: 'Advanced options' });
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    const region = document.getElementById(toggle.getAttribute('aria-controls')!)!;
+    expect(region.hasAttribute('hidden')).toBe(false);
+    expect((within(region).getByLabelText('Extra arguments') as HTMLInputElement).value).toBe('--json');
+  });
+
+  it('keeps a required custom model visible and refuses to hide it behind the disclosure', () => {
+    render(<LaunchConfigurationEditor value={{ id: '', name: 'Custom', spawn_option_id: targets[0].id, model: null, effort: null, extra_args: null }}
+      targets={targets} onSave={vi.fn()} onCancel={vi.fn()} />);
+    const toggle = screen.getByRole('button', { name: 'Advanced options' });
+    fireEvent.change(screen.getByLabelText('Model'), { target: { value: '__custom__' } });
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    const custom = screen.getByLabelText('Custom model') as HTMLInputElement;
+    expect(custom.required).toBe(true);
+    const region = document.getElementById(toggle.getAttribute('aria-controls')!)!;
+    expect(region.hasAttribute('hidden')).toBe(false);
+
+    // Collapsing over a required field is refused and says why.
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByRole('alert').textContent).toContain('custom model is required');
+    expect(region.hasAttribute('hidden')).toBe(false);
+
+    // Choosing a listed model releases the disclosure.
+    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'MiniMax-M3' } });
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('keeps the required endpoint and verification visible outside the disclosure', async () => {
+    const codexRoute = { ...route, harness_id: 'codex', surface: 'openai' as const, base_url: 'https://api.minimax.io/v1' };
+    const codex = { ...targets[0], id: 'codex:minimax', harness_id: 'codex', route: codexRoute, route_attached: false, verification_required: true };
+    const verify = vi.fn().mockResolvedValue({ status: 'verified', model_id: 'MiniMax-M3', runtime: 'native-windows' });
+    render(<LaunchConfigurationEditor value={{ id: '', name: 'Proxy', spawn_option_id: codex.id, model: 'MiniMax-M3', effort: null, extra_args: null }}
+      targets={[codex]} onVerify={verify} onSave={vi.fn()} onCancel={vi.fn()} />);
+    const toggle = screen.getByRole('button', { name: 'Advanced options' });
+    const region = document.getElementById(toggle.getAttribute('aria-controls')!)!;
+    expect(region.hasAttribute('hidden')).toBe(true);
+    expect(region.contains(screen.getByLabelText('Provider endpoint'))).toBe(false);
+    expect(region.contains(screen.getByRole('button', { name: 'Verify provider and model' }))).toBe(false);
+    expect(screen.getByLabelText('Provider endpoint')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Verify provider and model' })).toBeTruthy();
+  });
+
+  it('clears the refusal notice when the provider changes', () => {
+    const other = { ...targets[0], id: 'claude:other', provider_name: 'Other provider' };
+    render(<LaunchConfigurationEditor value={{ id: '', name: 'Switch', spawn_option_id: targets[0].id, model: null, effort: null, extra_args: null }}
+      targets={[targets[0], other]} onSave={vi.fn()} onCancel={vi.fn()} />);
+    const toggle = screen.getByRole('button', { name: 'Advanced options' });
+    fireEvent.change(screen.getByLabelText('Model'), { target: { value: '__custom__' } });
+    fireEvent.click(toggle);
+    expect(screen.getByRole('alert').textContent).toContain('custom model is required');
+
+    // The new provider has no custom model, so the reason for the refusal is
+    // gone with it.
+    fireEvent.change(screen.getByLabelText('Provider'), { target: { value: other.id } });
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('keeps the advanced value in the saved configuration', async () => {
+    const save = vi.fn().mockResolvedValue(undefined);
+    render(<LaunchConfigurationEditor value={{ id: 'launch/verbose', name: 'Verbose', spawn_option_id: targets[0].id, model: null, effort: null, extra_args: '--json' }}
+      targets={targets} onSave={save} onCancel={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Verbose review' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'Verbose review', extra_args: '--json' }), undefined, expect.any(Function),
+    ));
+  });
 });
