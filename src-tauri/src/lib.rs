@@ -6,6 +6,7 @@ mod attention_autoclear;
 mod blocking;
 pub mod circuit;
 mod commands;
+mod companion;
 mod coordinator;
 mod db;
 mod diagnostics;
@@ -153,7 +154,7 @@ pub fn run() {
     }));
 
     tauri::Builder::default()
-        .manage(crate::services::gh_auth_cache::GhAuthCache::new())
+        .manage(crate::companion::CompanionState::default()).manage(crate::services::gh_auth_cache::GhAuthCache::new())
         // Durable last-known Usage Meter readings (ADR-0037). Resolves the app
         // data dir lazily per call, since `manage` runs before `setup()`.
         .manage(crate::services::usage::last_known::UsageLastKnownCache::new())
@@ -240,6 +241,11 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            commands::companion::companion_execute_prompt,
+            commands::companion::companion_get_active_task,
+            commands::companion::companion_cancel_task,
+            commands::companion::companion_respond_confirmation,
+            commands::companion::companion_save_settings,
             // Agent Node (issue #490: renamed from `*_session` to `*_agent_node`).
             commands::agent_node::create_agent_node,
             commands::agent_node::list_agent_nodes,

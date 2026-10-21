@@ -73,6 +73,7 @@ these files when adding a command.
 | `models/` | The shared DTOs. Split by domain (`mesh.rs`, `agent.rs`, `circuit.rs`, `git.rs`); `mod.rs` re-exports every type so `crate::models::…` paths stay stable. Wire types derive `TS` here and are generated, never hand-edited. |
 | `sandbox/` | OS process confinement for agent PTY nodes — `restricted_token.rs`, `appcontainer.rs`, `acl.rs`, `conpty.rs`, and its own `spawn.rs`. |
 | `session_naming/` | Backend-only node auto-naming from agent output (`engine.rs` observes output/turn boundaries, `words.rs`/`slug.rs` build the name, `repository.rs` persists it). PTY-side `session-id` capture does not belong here or in a caller. |
+| `companion/` | Omnibar task lifecycle, bounded CLI inference and fleet tools; reuses `agent/background.rs`, coordinator reads and spawn services. |
 | `coordinator/` | The agent-agnostic control-API read model (`node_digest.rs`, `enrichment.rs`, `drive.rs`) behind `http/routes/coordinator.rs`. |
 | `diagnostics/` | Always-on resource diagnostics — the writer, the watchdog, and startup-failure capture. |
 | `startup/` | Early-boot diagnostics for the failures that stop Buildmesh opening — an unwritable app-data directory, corrupt SQLite, a failed migration — captured before any logger exists. |

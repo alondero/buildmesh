@@ -10,6 +10,7 @@ programs for you.
 - [Install and authenticate a harness](#install-and-authenticate-a-harness)
 - [Your first session](#your-first-session)
 - [Open tools from the title bar](#open-tools-from-the-title-bar)
+- [Coordinate agents with Companion](#coordinate-agents-with-companion)
 - [See which scope you are looking at](#see-which-scope-you-are-looking-at)
 - [Find agents that need attention](#find-agents-that-need-attention)
 - [Configure Autopilot Circuits](#configure-autopilot-circuits)
@@ -180,6 +181,42 @@ workspace without starting its process; **Resume** starts it separately using
 its saved session when available. **Discovered sessions** scans CLI history
 for the explicitly selected repository. The highlighted button is the view you
 are in, and each view has its own **Refresh**.
+
+## Coordinate agents with Companion
+
+Open the Command Omnibar and type `?`, press Tab on an unscoped query, or
+select **Ask Companion**. Try "Which nodes need feedback?" or "Spawn three
+nodes for the top bug issues in buildmesh". Commands and scoped searches
+(`>`, `@`, `/`, `#`) remain available; scoped spawn recipes keep their Tab
+prompt shortcut.
+
+**Settings > General > Companion AI** selects the inference Launch Configuration
+and a per-task spawn limit (default 5, maximum 10). The selection falls back to
+the app default, then Claude. This version supports host-native Claude Code
+with a verified Pro, Max, Team or Enterprise subscription login. The CLI must
+support `--safe-mode`, `--setting-sources`, and `auth status --json`. API provider
+routes, extra CLI arguments, and WSL configurations are rejected. Upgrade the
+CLI or select a supported native configuration if setup fails. Authentication
+stays with the CLI; Companion does not request an API key.
+
+Companion can inspect nodes and transcript tails, read GitHub issues and PRs,
+summarize Circuits, spawn isolated Worktree Nodes, and deliver follow-up prompts.
+New nodes use the Mesh's launch defaults unless the request names a different
+Launch Configuration. Tool progress and partial failures appear in the sheet;
+a delivery marked **unverified** is not proof the target consumed the prompt.
+
+Stopping nodes, deleting their worktrees, and changing reviewer configurations
+require inline confirmation. Deleting a worktree can discard uncommitted files.
+Reviewer configuration changes apply atomically to reviewers whose steps have
+not started; an already-started reviewer requires a fresh review. Enter activates
+the focused confirmation button; Escape rejects the pending action.
+
+Close the Omnibar to continue working while Companion runs. The violet title-bar
+pill reopens progress and offers cancellation. A toast reports completion.
+**Cancel task** stops inference and prevents subsequent actions; an operation
+already provisioning a node finishes before cancellation settles. Completed
+spawns remain visible and are not rolled back. Tasks are single-intent and
+in-memory: closing the app ends the task, and only one task can run at once.
 
 ## See which scope you are looking at
 

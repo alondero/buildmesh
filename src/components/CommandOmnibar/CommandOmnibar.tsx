@@ -29,6 +29,8 @@ import {
   type ReactNode,
 } from 'react';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
+import { CompanionMode } from './CompanionMode';
+import { useCompanionStore } from '../../stores/companionStore';
 import { useUIStore, type OmnibarMode, type ProbeTab } from '../../stores/uiStore';
 import { useAllAgentNodes } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
@@ -89,6 +91,7 @@ export function CommandOmnibar() {
 }
 
 function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => void }) {
+  const companionVisible = useCompanionStore(s => s.visible);
   const inputRef = useRef<HTMLInputElement>(null);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
   const isExecutingRef = useRef(false);
@@ -150,7 +153,11 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
   // hidden for the duration — so skip search until we leave this mode.
   const results = useMemo(() => {
     if (!index || promptTarget) return [];
-    return searchOmnibar(index, query, { limit: RESULT_LIMIT });
+    const matches = searchOmnibar(index, query, { limit: RESULT_LIMIT });
+    if (!query.trim() || isKnownPrefix(query)) return matches;
+    const ask: FuzzyResult = { item: { id: 'companion:ask', category: 'companion', label: `Ask Companion: "${query}"`, fields: [] }, score: 0, fieldMatches: [], bestFieldText: query };
+    const exact = matches.some(result => result.item.fields.some(field => field.text.toLowerCase().includes(query.trim().toLowerCase())));
+    return exact ? [...matches, ask] : [ask, ...matches];
   }, [index, query, promptTarget]);
 
   // Focus: capture the element the user came from, move into the search box,
@@ -164,6 +171,10 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
       if (!isExecutingRef.current) previouslyFocusedRef.current?.focus?.();
     };
   }, []);
+
+  useEffect(() => {
+    if (!companionVisible) inputRef.current?.focus();
+  }, [companionVisible]);
 
   // Refresh the spawn menu on every open (one IPC per open — see
   // `loadSpawnOptions`; no module cache, so providers added in Settings
@@ -186,6 +197,10 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
   // `preventDefault` (it always calls it when invoking a handler), so the
   // inner code is just the dispatch logic.
   useEscapeKey(() => {
+    if (companionVisible && useCompanionStore.getState().task?.confirmation) {
+      void useCompanionStore.getState().respond(false);
+      return;
+    }
     if (promptTarget) {
       setPromptTarget(null);
       setQuery(promptReturnQueryRef.current);
@@ -206,6 +221,11 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
   }, [clampedActive, results.length]);
 
   const executeItem = (item: IndexedItem, initialPrompt?: string) => {
+    if (item.id === 'companion:ask') {
+      useCompanionStore.setState({ visible: true });
+      void useCompanionStore.getState().execute(query);
+      return;
+    }
     const ctx: OmnibarActionContext = {
       meshes,
       spawnOptions,
@@ -252,6 +272,11 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
         e.preventDefault();
         executeItem(promptTarget, query);
       }
+      return;
+    }
+    if (e.key === 'Tab' && !e.shiftKey && !isKnownPrefix(query)) {
+      e.preventDefault();
+      useCompanionStore.setState({ visible: true });
       return;
     }
     // Discovery-screen arrows move a virtual highlight across the tiles
@@ -360,9 +385,16 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
         role="dialog"
         aria-modal="true"
         aria-label="Command Omnibar"
-        className="relative w-full max-w-xl bg-bg-overlay border border-border-default rounded-lg shadow-md animate-scale-in outline-none overflow-hidden"
+        className={`relative w-full max-w-xl bg-bg-overlay border rounded-lg shadow-md animate-scale-in outline-none overflow-hidden ${companionVisible ? 'border-accent-violet ring-1 ring-accent-violet/30' : 'border-border-default'}`}
         onClick={(e) => e.stopPropagation()}
+        onKeyDown={event => {
+          if (companionVisible && event.key === 'Enter' && useCompanionStore.getState().task?.confirmation && event.target === event.currentTarget) {
+            event.preventDefault();
+            void useCompanionStore.getState().respond(true);
+          }
+        }}
       >
+        {companionVisible ? <CompanionMode initialPrompt={query.replace(/^\?/, '')} onBack={() => useCompanionStore.setState({ visible: false })} /> : <>
         <div className="flex items-center gap-2 px-4 py-3 border-b border-border-subtle">
           {promptTarget && (
             <span
@@ -384,6 +416,7 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
             value={query}
             onChange={(e) => {
               setQuery(e.target.value);
+              if (!promptTarget && e.target.value.startsWith('?')) useCompanionStore.setState({ visible: true });
               if (!promptTarget) setActiveIndex(0);
             }}
             onKeyDown={handleKeyDown}
@@ -463,6 +496,7 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
             ))}
           </div>
         )}
+        </>}
       </div>
     </div>
   );
@@ -612,7 +646,7 @@ function ResultRow({
         // Hover is CSS-only — never mutates activeIndex (WAI-ARIA combobox).
         // Transparent idle border keeps row width stable with the active bar.
         active
-          ? 'bg-bg-selection border-l-accent-cyan'
+          ? item.category === 'companion' ? 'bg-bg-selection border-l-accent-violet' : 'bg-bg-selection border-l-accent-cyan'
           : 'border-l-transparent hover:bg-bg-card-hover'
       }`}
     >

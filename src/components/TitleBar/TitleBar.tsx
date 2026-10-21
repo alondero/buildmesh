@@ -10,6 +10,7 @@ import { ScopeIndicator } from './ScopeIndicator';
 import { Wordmark } from './Wordmark';
 import { ZoomControl } from './ZoomControl';
 import { NotificationButton } from './NotificationButton';
+import { CompanionPill } from './CompanionPill';
 import { TitleBarOverflow } from './TitleBarOverflow';
 import { AppSettingsModal } from '../AppSettings/AppSettingsModal';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
@@ -126,6 +127,7 @@ function NavigationControls() {
   // The command field yields to the side clusters at compact widths.
   return (
     <div className="flex min-w-0 items-center justify-center px-2">
+      <CompanionPill />
       <button
         type="button"
         onClick={() => useUIStore.getState().openOmnibar('files')}

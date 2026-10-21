@@ -36,3 +36,5 @@ Use the next numeric filename and include:
 5. Consequences, migration/compatibility notes, and verification evidence.
 6. Links to the current user or developer documentation when the decision is
    user-visible.
+
+- [0045: Companion CLI tool boundary](0045-companion-cli-tool-boundary.md)

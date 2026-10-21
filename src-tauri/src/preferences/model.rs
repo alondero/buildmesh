@@ -353,6 +353,8 @@ impl HarnessConfigValue {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[ts(export, export_to = "AppPreferences.ts")]
 pub struct AppPreferences {
+    #[serde(default)]
+    pub companion: crate::companion::CompanionSettings,
     /// Buildmesh-wide default provider id (e.g. "anthropic", "minimax").
     /// `None` means "no app-wide override — use the hardcoded fallback".
     #[serde(default)]

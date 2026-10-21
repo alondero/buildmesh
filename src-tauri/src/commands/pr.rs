@@ -27,9 +27,8 @@ pub struct GitHubIssue {
     /// `#[serde(default)]` on `html_url`, so a partial response yields `""`
     /// rather than failing to parse.
     pub url: String,
-    /// `"open"` or `"closed"`. Currently always `"open"` because
-    /// `list_issues_only` filters to open issues; kept on the wire so a
-    /// future endpoint widening to both doesn't require a TS-side change.
+    /// `"open"` or `"closed"`. The Issues Probe requests open issues;
+    /// Companion may request either state or both.
     pub state: String,
     /// Label names (flattened from the GitHub API's `[{name, color, ...}]`).
     /// Empty array when the issue has no labels.
@@ -280,6 +279,13 @@ fn empty_feed_completeness() -> GitHubPageCompleteness {
 /// route (`http::routes::issues`) can call it directly; the Tauri command
 /// wraps it in `spawn_blocking` (see [`crate::commands::run_blocking`]).
 pub(crate) fn get_repo_issues_blocking(mesh_id: i64) -> Result<GitHubIssueFeed, String> {
+    get_repo_issues_filtered_blocking(mesh_id, Some(true))
+}
+
+pub(crate) fn get_repo_issues_filtered_blocking(
+    mesh_id: i64,
+    open: Option<bool>,
+) -> Result<GitHubIssueFeed, String> {
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
 
     let Some((owner, repo)) = resolve_owner_repo(&mesh.path)? else {
@@ -290,9 +296,12 @@ pub(crate) fn get_repo_issues_blocking(mesh_id: i64) -> Result<GitHubIssueFeed, 
     };
 
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
-    let page = client
-        .list_issues_only_paged(&owner, &repo)
-        .map_err(|e| e.to_string())?;
+    let page = if open == Some(true) {
+        client.list_issues_only_paged(&owner, &repo)
+    } else {
+        client.list_issues_filtered_paged(&owner, &repo, open)
+    }
+    .map_err(|e| e.to_string())?;
 
     let items = page
         .items

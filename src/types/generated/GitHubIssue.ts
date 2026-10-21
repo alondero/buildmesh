@@ -15,9 +15,8 @@ export type GitHubIssue = { number: number, title: string, body: string,
  */
 url: string, 
 /**
- * `"open"` or `"closed"`. Currently always `"open"` because
- * `list_issues_only` filters to open issues; kept on the wire so a
- * future endpoint widening to both doesn't require a TS-side change.
+ * `"open"` or `"closed"`. The Issues Probe requests open issues;
+ * Companion may request either state or both.
  */
 state: string, 
 /**

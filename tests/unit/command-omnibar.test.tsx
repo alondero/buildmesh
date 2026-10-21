@@ -17,6 +17,7 @@ import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vite
 import { render, renderHook, cleanup, fireEvent, screen, act, waitFor, createEvent } from '@testing-library/react';
 import { CommandOmnibar } from '../../src/components/CommandOmnibar/CommandOmnibar';
 import { executeOmnibarItem, runOmnibarCommand } from '../../src/components/CommandOmnibar/omnibarActions';
+import { useCompanionStore } from '../../src/stores/companionStore';
 import { useUIStore, type OmnibarMode } from '../../src/stores/uiStore';
 import { useAgentNodeStore, useAllAgentNodes } from '../../src/stores/agentNodeStore';
 import { useMeshStore } from '../../src/stores/meshStore';
@@ -153,6 +154,7 @@ function viewModeForRow(rowText: string): string {
 }
 
 beforeEach(() => {
+  useCompanionStore.setState({ visible: false, task: null, starting: false, error: null });
   seedStores();
   loadSpawnOptionsMock.mockResolvedValue([]);
 });
@@ -296,8 +298,8 @@ describe('CommandOmnibar — WAI-ARIA combobox semantics', () => {
     expect(rows.length).toBeGreaterThan(0);
     expect(rows[0].textContent).toMatch(/open settings/i);
     type('zzzznope');
-    expect(options()).toHaveLength(0);
-    expect(screen.getByTestId('command-omnibar-empty')).toBeTruthy();
+    expect(options()).toHaveLength(1);
+    expect(options()[0].textContent).toContain('Ask Companion');
   });
 });
 
@@ -425,14 +427,15 @@ describe('CommandOmnibar — keyboard interaction', () => {
     expect(input.value).toBe('>sync');
   });
 
-  it('Tab on an empty result set does not preventDefault (no silent focus trap)', () => {
+  it('Tab on a natural-language query switches to Companion', () => {
     render(<CommandOmnibar />);
     openOmnibar('files');
     type('zzzznope');
     const input = screen.getByRole('combobox') as HTMLInputElement;
     const event = fireEvent.keyDown(input, { key: 'Tab' });
     // fireEvent returns false when preventDefault was called.
-    expect(event).toBe(true);
+    expect(event).toBe(false);
+    expect(screen.getByRole('textbox', { name: 'Ask Companion' })).toBeTruthy();
   });
 
   it('wraps the overlay in dialog semantics (role=dialog, aria-modal, labelled)', () => {
@@ -452,19 +455,12 @@ describe('CommandOmnibar — keyboard interaction', () => {
     expect(occurrences).toBe(1);
   });
 
-  it('Tab drills into the active result’s domain by applying its prefix filter', () => {
+  it('Tab switches an unscoped command query into Companion mode', () => {
     render(<CommandOmnibar />);
     openOmnibar('files');
     type('settings');
     fireEvent.keyDown(screen.getByRole('combobox'), { key: 'Tab' });
-    const input = screen.getByRole('combobox') as HTMLInputElement;
-    // The first hit for "settings" is the "Open Settings" command — Tab
-    // scopes the (unprefixed) query to the commands domain.
-    expect(input.value.startsWith('>')).toBe(true);
-    expect(input.value).toContain('settings');
-    // The list is now scoped to commands only.
-    const categories = options().map((o) => o.lastElementChild?.textContent);
-    expect(categories.every((c) => c === 'command')).toBe(true);
+    expect((screen.getByRole('textbox', { name: 'Ask Companion' }) as HTMLInputElement).value).toBe('settings');
   });
 
   it('Tab completes the query to the active result once the query is already scoped', () => {

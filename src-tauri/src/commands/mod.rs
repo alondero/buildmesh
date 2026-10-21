@@ -30,6 +30,7 @@ pub mod attention;
 pub mod build_run;
 pub mod circuit;
 pub mod clipboard;
+pub mod companion;
 pub mod coordinator;
 pub mod devices;
 pub mod diagnostics;

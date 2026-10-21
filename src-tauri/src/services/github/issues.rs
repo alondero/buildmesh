@@ -356,7 +356,22 @@ impl GitHubClient {
         owner: &str,
         repo: &str,
     ) -> Result<super::pagination::Page<Issue>, GitHubError> {
-        let query = format!("repo:{owner}/{repo} is:issue state:open");
+        self.list_issues_filtered_paged(owner, repo, Some(true))
+    }
+
+    /// Query open, closed, or all issues while retaining pagination metadata.
+    pub fn list_issues_filtered_paged(
+        &self,
+        owner: &str,
+        repo: &str,
+        open: Option<bool>,
+    ) -> Result<super::pagination::Page<Issue>, GitHubError> {
+        let state = match open {
+            Some(true) => " state:open",
+            Some(false) => " state:closed",
+            None => "",
+        };
+        let query = format!("repo:{owner}/{repo} is:issue{state}");
         self.search_issues(&query, |issue: &Issue| issue.number)
     }
 
