@@ -80,6 +80,7 @@ function requiresTest(predicate) {
 }
 
 export function rustTestLayoutViolations(file, source, addedLines) {
+  file = file.replaceAll('\\', '/');
   if (!file.startsWith('src-tauri/src/') || !file.endsWith('.rs') || /(?:^|\/)tests(?:\/|\.rs$)|_tests\.rs$/.test(file)) return [];
   const { masked, comments } = maskLiterals(source);
   const attributes = /#\s*\[/g;
@@ -107,7 +108,7 @@ export function rustTestLayoutViolations(file, source, addedLines) {
       const cfg = /^cfg\s*\(([\s\S]*)\)$/.exec(attr);
       return cfg ? requiresTest(cfg[1]) : /^(?:\w+::)*test(?:\s*\(|$)/.test(attr);
     })) continue;
-    if (/^mod\s+tests\s*;/.test(masked.slice(cursor))) continue;
+    if (/^(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+(?:r#)?\w+\s*;/.test(masked.slice(cursor))) continue;
     const end = itemEnd(masked, cursor);
     const first = source.slice(0, start).split('\n').length;
     const last = source.slice(0, end).split('\n').length;
@@ -115,7 +116,7 @@ export function rustTestLayoutViolations(file, source, addedLines) {
     const headerEnd = newline === -1 ? source.length : newline;
     if (comments.some(comment => comment.start >= start && comment.start < headerEnd && /^\/\/[^\S\r\n]*allow-test-in-production:[^\S\r\n]*\S/.test(comment.text))) { attributes.lastIndex = end; continue; }
     const changed = [...addedLines].find(line => line >= first && line <= last);
-    if (changed !== undefined) failures.push(`${file}:${changed}: rust-test-layout: move test bodies and test-only fixtures into a sibling *_tests.rs; keep mod tests; in the owner. A shared helper needs // allow-test-in-production: <reason> on its attribute or declaration.`);
+    if (changed !== undefined) failures.push(`${file}:${changed}: rust-test-layout: move test bodies and test-only fixtures into a sibling *_tests.rs; keep the sibling module declaration in the owner. A shared helper needs // allow-test-in-production: <reason> on its attribute or declaration.`);
     // One finding for the owning item, rather than one per nested test.
     attributes.lastIndex = end;
   }

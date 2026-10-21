@@ -63,3 +63,33 @@ test('an array type semicolon does not end a fixture before its changed value', 
   assert.equal(check(source, new Set([3])).length, 1);
   assert.deepEqual(check(source, new Set([5])), []);
 });
+
+test('visible and file-named sibling module declarations are allowed, but inline bodies are rejected', () => {
+  for (const declaration of [
+    'pub(super) mod tests',
+    'pub(crate) mod tests',
+    'pub(in crate::services) mod tests',
+    'pub mod tests',
+    'mod prune_tests',
+    'pub(super) mod command_tests',
+  ]) {
+    const source = `#[cfg(test)]\n#[path = "owner_tests.rs"]\n${declaration}`;
+    assert.deepEqual(check(`${source};\n`), [], declaration);
+    assert.match(check(`${source} { fn fixture() {} }\n`).join('\n'), /rust-test-layout/, declaration);
+  }
+});
+
+test('Windows separators preserve production enforcement and sibling test-file exclusions', () => {
+  const source = '#[cfg(test)]\nstruct FakeHost;\n';
+  const windows = 'src-tauri\\src\\services\\circuit_worker\\dispatch.rs';
+  const unix = windows.replaceAll('\\', '/');
+  const expected = check(source, null, unix);
+  assert.equal(expected.length, 1);
+  assert.deepEqual(check(source, null, windows), expected);
+  for (const file of [
+    'src-tauri\\src\\services\\circuit_worker\\dispatch_tests.rs',
+    'src-tauri\\src\\db\\tests.rs',
+    'src-tauri\\src\\db\\tests\\helpers.rs',
+    'src-tauri\\tests\\integration.rs',
+  ]) assert.deepEqual(check(source, null, file), [], file);
+});
