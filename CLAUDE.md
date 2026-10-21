@@ -22,7 +22,7 @@ repositories, with persistent xterm.js terminals and Windows/WSL support.
 | Scope | Reference |
 |---|---|
 | Windows/worktree dependencies, Cargo targets, test environment | [Worktree setup](docs/agents/development-harness.md#worktree-setup) |
-| Rust, DB connections/tests, generated Rust?TS wire types | [Rust conventions](docs/development/rust-conventions.md); pass one connection through helpers and keep external I/O outside DB locks |
+| Rust, DB connections/tests, generated Rust/TS wire types | [Rust conventions](docs/development/rust-conventions.md); pass one connection through helpers and keep external I/O outside DB locks |
 | Terminal lifecycle or streaming | [Terminals](docs/development/terminals.md); retain singleton terminals across React remounts and dispose only when a node is deleted |
 | Windows/WSL paths | [Windows](docs/development/windows.md); convert through `env::to_host_path` |
 | Agent launch, naming or shell choice | [Agent Nodes](docs/development/agent-nodes.md), [providers](docs/development/providers.md); naming is backend-owned and launch shells are adapter-owned |
