@@ -366,7 +366,7 @@ function classify(gate, code, output, paths) {
   if (gate.id === 'rust-format' && code !== 0) {
     const files = formatDiffPaths(output);
     return { outcome: 'FAIL', reason: files.length
-      ? `rustfmt would rewrite: ${files.join(', ')}. Run \`cargo fmt --all\`, then commit the result alone as \`style(rust): format <files>\`; reformatting inside the behaviour commit buries the change reviewers must read.`
+      ? `rustfmt would rewrite: ${files.join(', ')}. Run \`node scripts/rustfmt-touched.mjs ${files.map(file => `'${file.replaceAll("'", "'\\''")}'`).join(' ')}\` from the repository root, then commit the result alone as \`style(rust): format <files>\`; reformatting inside the behaviour commit buries the change reviewers must read.`
       : 'rustfmt failed without reporting a formatting diff. See the gate log.' };
   }
   if (code !== 0) return { outcome: 'FAIL', reason: 'Command failed. See the gate log; failure attribution is unverified.' };

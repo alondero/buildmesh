@@ -11,6 +11,7 @@ import { acquireSlot, heavyGateEnv, heavyGateLimit, runPlan, slotHolders } from 
 import { RUST_PATH_INCLUDES, fastGates, frontendInScope, lintablePaths, pathIncludeDrift, planChecks, rustModule, rustScope } from '../../scripts/harness-check.mjs';
 import { conptyPrerequisite, gatePassed, isolatedCommand, isolateTests, knownFlakes, readTestReport, reportsRuntimeError, rustFailures, validateFlakeIssues, vitestReport } from '../../scripts/harness-test-failures.mjs';
 import { VERSION as CONPTY_VERSION } from '../../scripts/prepare-conpty.mjs';
+import { decide as formatDecision } from '../../.claude/hooks/guard-rustfmt.mjs';
 
 const script = fileURLToPath(new URL('../../scripts/harness.mjs', import.meta.url));
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -798,10 +799,10 @@ test('the format gate fails on any rustfmt diff and names the files', async t =>
   ].join('\n'));
   assert.equal(diff.outcome, 'FAIL');
   assert.match(diff.reason, /src-tauri\/src\/agent\/background\.rs, src-tauri\/src\/db\/mod\.rs/);
-  // The crate is rustfmt-clean, so `cargo fmt --all` no longer carries the
-  // whole-crate blast radius that used to make it the wrong advice.
-  assert.match(diff.reason, /cargo fmt --all/);
-  assert.doesNotMatch(diff.reason, /rustfmt-touched\.mjs/);
+  const remediation = diff.reason.match(/Run `([^`]+)`/)?.[1];
+  assert.match(remediation, /^node scripts\/rustfmt-touched\.mjs/);
+  assert.match(remediation, /src-tauri\/src\/agent\/background\.rs.*src-tauri\/src\/db\/mod\.rs/);
+  assert.equal(formatDecision(remediation), null, 'the real formatter hook permits the suggested command');
   // The gate checks the final tree, so formatting goes in its own commit after the behaviour change.
   assert.match(diff.reason, /commit the result alone as `style\(rust\)/);
   // A rustfmt failure that reports no diff is never a pass.

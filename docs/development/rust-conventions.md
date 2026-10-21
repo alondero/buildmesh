@@ -135,6 +135,13 @@ The file name is not the module path, and no path walk can derive it: `db/circui
 - **Move the body verbatim, then format.** Unindenting by hand while moving edits the contents of any raw or multi-line string literal in the tests, and nothing notices. Format afterwards with `node scripts/rustfmt-touched.mjs <file>…`, which normalises indentation without touching literals. Finding the block's end needs the same care: a line that merely *starts* with `}` does not prove it closed the module (items may sit at column 0 inside a `mod` body), and a `\` line continuation inside a string literal silently shifts every line index after it.
 - **A production module carries no `#[cfg(test)]` items.** A test-only helper belongs in the test file — `evidence.rs` held `evidence_view_inner` (which wraps `evidence_view_unresolved` in one call, for tests that keep their connection across both halves) in shipped source until #2451. `grep -n '#\[cfg(test)\]' <file>` on a module whose tests have moved should return exactly the `mod tests;` declaration and nothing else; a few small test-gated helpers may predate the split and stay.
 
+`npm run check:agent -- --base <commit>` enforces this placement on added lines,
+including additions inside an existing inline test module. Untouched legacy
+items are exempt. A shared test helper that must stay in the owner needs
+`// allow-test-in-production: <reason>` on its attribute or declaration; the
+exception covers that item. Test files and `mod tests;` declarations are allowed.
+The parser cases and real Git/CLI cases run in `npm run test:agent`.
+
 A source-shape guard that scans "everything above the inline `mod tests`" has to survive the tests leaving. Degrade it to scanning the whole file — `map_or(source, …)` — instead of asserting the marker is still there. `codex.rs::tests::no_codex_read_probe_spawns_without_a_timeout` used to `split_once("#[cfg(test)]\nmod tests {").expect("codex.rs must keep its #[cfg(test)] mod tests block")`, which made the file's own layout a load-bearing fixture: the split became the assertion's premise rather than its subject.
 
 ## Pattern Guards (lint-style unit tests)

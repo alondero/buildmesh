@@ -202,6 +202,9 @@ test('always-loaded documents stay inside their read-cost budget', () => {
   // The primer was 166 KB before issue #2045 split it into owner docs; the
   // budget is what stops it quietly growing back into a manual.
   assert.deepEqual(checkAlwaysLoadedBudgets({ root }), []);
+  for (const path of ['CLAUDE.md', 'docs/agents/engineering.md']) {
+    assert.ok(ALWAYS_LOADED_DOC_BUDGETS[path] <= 4 * 1024, `${path} stays a short entrypoint`);
+  }
   assert.ok(
     ALWAYS_LOADED_DOC_BUDGETS['docs/knowledge-primer.md'] < 32 * 1024,
     'the primer budget must stay far below the size it was split from',

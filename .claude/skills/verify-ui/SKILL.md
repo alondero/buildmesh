@@ -31,7 +31,7 @@ For the native path, `scripts\run-dev.ps1 -Detach -CdpPort 9223 -TestBridge` bui
 Capture the baseline from the **pre-change tree**. Two cases:
 
 - **You haven't changed code yet** (best): build + launch + shoot now, then start implementing.
-- **Changes already made:** create an isolated detached worktree at the recorded pre-change commit with `git worktree add --detach <scratch-path> <base-commit>`; build/capture there. Preserve the active checkout and user edits. Do not commit solely to obtain a screenshot. If a baseline cannot run, report that gap. A new feature with no meaningful before-state may use after-only evidence.
+- **Changes already made:** use [isolated review checks](../../../docs/agents/development-harness.md#isolated-review-checks) at the recorded pre-change commit; run the build and capture in one task-local script so they share the helper's checkout. A manually managed detached worktree is also valid. Preserve the active checkout and user edits. Do not commit solely to obtain a screenshot. If a baseline cannot run, report that gap. A new feature with no meaningful before-state may use after-only evidence.
 
 ### 2. Build + launch the changed tree
 

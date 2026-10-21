@@ -6,6 +6,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { checkContentViolations } from '../.claude/hooks/guard-antipatterns.mjs';
 import { checkLineEndings } from './check-line-endings.mjs';
+import { rustTestLayoutViolations } from './check-rust-test-layout.mjs';
 
 // git's stderr is captured rather than inherited, the way `harness.mjs`,
 // `self-review.mjs` and `check-line-endings.mjs` already capture theirs: the CLI
@@ -63,11 +64,25 @@ function checkDiffFrom(cwd, commit) {
     // `.ps1` is here for the PowerShell condition rule (#1982): a wrong shell
     // check is silent at runtime, so the gate has to see it outside the hooks.
     if (!/\.(?:tsx?|jsx?|rs|ps1)$/i.test(file)) continue;
-    const text = untracked.has(file)
-      ? readFileSync(resolve(cwd, file), 'utf8')
-      : git('diff', '--no-renames', '--no-ext-diff', '--no-textconv', '--unified=0', commit, '--', file)
-        .split('\n').filter(line => line.startsWith('+') && !line.startsWith('+++')).map(line => line.slice(1)).join('\n');
+    const source = readFileSync(resolve(cwd, file), 'utf8');
+    const added = new Set();
+    const lines = [];
+    if (untracked.has(file)) {
+      source.split('\n').forEach((line, index) => { added.add(index + 1); lines.push(line); });
+    } else {
+      let lineNumber = 0;
+      for (const line of git('diff', '--no-renames', '--no-ext-diff', '--no-textconv', '--unified=0', commit, '--', file).split('\n')) {
+        const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+        if (hunk) lineNumber = Number(hunk[1]);
+        else if (line.startsWith('+') && !line.startsWith('+++')) {
+          added.add(lineNumber++);
+          lines.push(line.slice(1));
+        }
+      }
+    }
+    const text = lines.join('\n');
     for (const message of checkContentViolations(file, text)) failures.push(`${file}: ${message}`);
+    failures.push(...rustTestLayoutViolations(file, source, added));
   }
   return failures;
 }
@@ -110,7 +125,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
       process.exitCode = 1;
     } else if (result.skipped) {
       console.log('Line endings passed; the changed-code scan was skipped because its diff base is unavailable.');
-    } else console.log('Agent diff rules and the line-ending policy passed (content heuristics; see docs/agents/engineering.md for limits).');
+    } else console.log('Agent diff rules and the line-ending policy passed (content heuristics; see docs/agents/engineering-reference.md for limits).');
   } catch (error) {
     console.error(`Agent diff check failed: ${error.message}`);
     process.exitCode = 1;

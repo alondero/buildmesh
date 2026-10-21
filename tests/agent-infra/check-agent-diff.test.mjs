@@ -228,3 +228,25 @@ test('configured hooks exist and shared skill entrypoints are readable', () => {
     assert.match(skill, /\ndescription: .+/);
   }
 });
+
+test('Rust layout checks use the full item and added-line locations across committed and local edits', t => {
+  const { cwd, git, put } = repo(t);
+  mkdirSync(join(cwd, 'src-tauri/src'), { recursive: true });
+  put('src-tauri/src/owner.rs', '#[cfg(test)]\nmod tests {\n    #[test] fn legacy() {}\n}\nfn production() {}\n');
+  git('add', '.');
+  git('-c', 'commit.gpgsign=false', 'commit', '-qm', 'legacy tests');
+  const base = git('rev-parse', 'HEAD').trim();
+  put('src-tauri/src/owner.rs', '#[cfg(test)]\nmod tests {\n    #[test] fn legacy() {}\n}\nfn production() { let changed = true; }\n');
+  assert.deepEqual(checkDiff(cwd, base), [], 'unchanged legacy tests stay exempt');
+  put('src-tauri/src/owner.rs', '#[cfg(test)]\nmod tests {\n    #[test] fn legacy() {}\n    fn new_fixture() {}\n}\nfn production() {}\n');
+  git('add', '.');
+  git('-c', 'commit.gpgsign=false', 'commit', '-qm', 'new fixture inside a legacy module');
+  assert.match(checkDiff(cwd, base).join('\n'), /owner\.rs:4:.*rust-test-layout/);
+  put('src-tauri/src/new.rs', '#[cfg(test)]\nstruct FakeHost;\n');
+  const failures = checkDiff(cwd, base);
+  assert.equal(failures.length, 2, failures.join('\n'));
+  assert.match(failures.join('\n'), /new\.rs:1:.*rust-test-layout/);
+  const run = spawnSync(process.execPath, [checker, '--base', base], { cwd, encoding: 'utf8' });
+  assert.equal(run.status, 1, run.stdout);
+  assert.match(run.stderr, /rust-test-layout/);
+});

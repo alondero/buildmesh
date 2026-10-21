@@ -23,6 +23,10 @@ missing evidence and mock/runtime limits explicitly.
 ## Initial pass
 
 Review the whole change against both the spec and documented standards.
+Read the relevant [design and evidence standards](../../../docs/agents/engineering-reference.md#design-for-evidence)
+for the changed boundaries. Use [isolated review checks](../../../docs/agents/development-harness.md#isolated-review-checks)
+when builds or tests would write into the reviewed checkout or shared caches;
+record the helper's pinned revision and account for uncommitted changes separately.
 Report all substantiated findings in one batch, with file/location, severity,
 the violated requirement or invariant, and a concrete failure scenario or
 missing evidence. Separate required corrections from optional suggestions.

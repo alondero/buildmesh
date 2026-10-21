@@ -10,7 +10,7 @@ it does not change their state machine or automatically publish anything.
 Run from the intended worktree with Git, Node/npm, and installed dependencies.
 Rust checks also require Cargo and the Tauri platform dependencies. Browser
 smoke requires `npx playwright install chromium`. Windows worktree setup is
-documented in [CLAUDE.md](../../CLAUDE.md).
+documented in [Worktree setup](#worktree-setup).
 
 Create an ignored `.tmp/task.json`, for example:
 
@@ -113,6 +113,56 @@ Continue the repair loop within the active task; use progress updates for
 intermediate status. `finish` and the Stop hook still reject incomplete or
 stale evidence. CI and release checks remain independent safeguards; mock
 browser checks do not replace required real-runtime acceptance evidence.
+
+## Worktree setup
+
+Use `npm ci` in a fresh checkout, or junction `node_modules` to the main
+checkout's absolute dependency directory (`git worktree list` identifies it).
+Use absolute junction targets: worktree nesting depths vary. Reviews that must
+leave the dependency checkout's caches alone use [isolated review checks](#isolated-review-checks).
+
+Run Vitest with `NODE_ENV=test`; a production React runtime makes render tests
+fail with `React.act is not a function`. The harness sets the environment for
+its test and build gates. Build `dist/mobile/` with `npm run build:mobile` before
+Cargo tests, and rebuild it after mobile source changes.
+
+On Windows, run Rust checks through `scripts/rust-test-shards.mjs` or
+`scripts\check.ps1`. A junction from `src-tauri/target` to the main checkout's
+absolute Cargo target reuses dependencies and satisfies the git gates (ADR 0044).
+Cargo can otherwise report a different worktree's same-name test binary as
+fresh; the runner checks the worktree stamp, rebuilds this repository's packages
+when needed, and copies binaries out before running them. A task-local
+`CARGO_TARGET_DIR` avoids that package rebuild when worktrees verify concurrently.
+
+## Isolated review checks
+
+Run checks against a pinned committed revision without writing build output or
+cache files into the reviewed checkout:
+
+```powershell
+node scripts/review-checkout.mjs --ref <reviewed-sha> -- npm run build
+node scripts/review-checkout.mjs --ref <reviewed-sha> -- node --test tests/agent-infra/check-agent-diff.test.mjs
+```
+
+The helper creates a detached Git worktree under this checkout's ignored
+`.tmp/review-checkouts/`, prints the resolved revision and path, runs the command
+there, and removes its checkout on normal success or failure. Source edits and
+untracked files are not included; review those separately in the original diff.
+For several commands in one checkout, run a task-local Node script as the command.
+A killed helper may leave its printed checkout behind; inspect that path and use
+`git worktree remove --force <printed-path>` to remove only that checkout.
+
+Installed packages are linked individually, with a private `node_modules` root
+and copied bin shims. Vite's `.vite` and `.vite-temp` caches stay in the review
+checkout. Cargo output, npm cache and temporary files also use private paths.
+Package directories themselves are shared: use this mode for build and test
+commands that do not modify installed packages. Dependency inputs must match
+the source checkout. Use `--no-deps` to avoid sharing packages and run a
+script that installs dependencies before checking a different dependency revision.
+
+Git metadata matters: a source extraction without `.git` changed Tailwind's
+source discovery and produced a false bundle-budget finding. Use this helper
+or a real detached worktree, rather than adding a synthetic `.git` directory.
 
 ## Detached dev processes
 
@@ -446,13 +496,13 @@ existing warning backlog remains visible as `warningCount`; any warning in a
 touched file fails. This is not a repository-wide zero-warning certificate.
 Rust formatting is stricter, because the crate is rustfmt-clean (#2022):
 `cargo fmt --all --check` runs over the whole crate and **any** diff fails,
-not only one in a touched file. Fix it with `cargo fmt --all`, then commit the
-result alone as `style(rust): format <files>`; reformatting inside the behaviour
-commit buries the change reviewers must read. Bare `rustfmt <file>` is still
-wrong on a module root (`lib.rs`, `mod.rs`), where it also formats the child
-modules; `node scripts/rustfmt-touched.mjs <file.rs>...` formats the named
-files and restores every other Rust file (tracked, or untracked and not ignored)
-byte for byte. The `guard-rustfmt.mjs` hook is an early warning: it denies a
+not only one in a touched file. From the repository root, run
+`node scripts/rustfmt-touched.mjs <file.rs>...` with the files named in the failure,
+then commit formatting alone as `style(rust): format <files>`. The helper restores
+other tracked and non-ignored Rust files, including child modules that rustfmt
+rewrites. Its named-file scope also matches the formatter hook; bare `rustfmt`
+and writing `cargo fmt` commands are blocked because they can rewrite children
+or the whole crate. The `guard-rustfmt.mjs` hook is an early warning: it denies a
 `rustfmt` or `cargo fmt` command that is not `--check`, but cannot see a
 command built at run time. A rustfmt failure that reports no diff (for example
 a parse error) stays red. Any other existing failure stays red too: reproduce

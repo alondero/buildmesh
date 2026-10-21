@@ -46,9 +46,9 @@ const DOC_HUB_LINKS = [
 // (docs/development/*, docs/adr/*, docs/specs/*) are deliberately unbounded --
 // they are read by section on demand (issue #2045).
 export const ALWAYS_LOADED_DOC_BUDGETS = {
-  'CLAUDE.md': 24 * 1024,
+  'CLAUDE.md': 4 * 1024,
   'CONTEXT.md': 48 * 1024,
-  'docs/agents/engineering.md': 20 * 1024,
+  'docs/agents/engineering.md': 4 * 1024,
   'docs/knowledge-primer.md': 16 * 1024,
 };
 
