@@ -12,6 +12,8 @@ pub mod ai_context_runtime;
 pub mod health;
 pub mod primitives;
 pub mod project;
+#[cfg(test)]
+mod project_path_tests;
 pub(crate) mod status_stats;
 pub mod sync;
 pub mod worktree;

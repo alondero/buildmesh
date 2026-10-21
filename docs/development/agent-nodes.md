@@ -297,6 +297,12 @@ settings and grouping continue to use the selected path. Sync locks and fetch
 freshness use the canonical common Git directory, so sibling folder Meshes share
 Git coordination while their pool inventories and base refs remain separate.
 
+`git::project::resolve` validates the selected folder before Git discovery. A
+missing folder reports `Project folder unavailable` with recovery guidance and
+the OS error; other folder-access failures retain their OS cause. An accessible
+folder whose Git metadata cannot be opened keeps the Git discovery diagnostic.
+No fallback guesses a different repository or rewrites saved paths.
+
 **A checkout can be flagged bare, and it is not one.** A repository whose own
 config sets `core.bare=true` reports no working directory even though the folder
 holds a full checkout; git then refuses the commands that need a work tree

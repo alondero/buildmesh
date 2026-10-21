@@ -15,17 +15,25 @@ pub fn open(selected: &str) -> Result<Repository, git2::Error> {
 }
 
 pub fn resolve(selected: &str) -> Result<ProjectRepository, String> {
+    let folder = std::fs::canonicalize(crate::env::to_host_path(selected)).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            format!(
+                "Project folder unavailable: {selected}. Restore access to the folder \
+                 (check its drive or network mapping), then retry. Details: {e}"
+            )
+        } else {
+            format!("Cannot access project folder {selected}: {e}")
+        }
+    })?;
+    if !folder.is_dir() {
+        return Err(format!("Project folder {selected} is not a directory"));
+    }
     let repo =
         open(selected).map_err(|e| format!("No working Git repository for {selected}: {e}"))?;
     let root = repo
         .workdir()
         .ok_or_else(|| no_working_directory_reason(selected, &repo))?;
     let root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
-    let folder = std::fs::canonicalize(crate::env::to_host_path(selected))
-        .map_err(|e| format!("Cannot resolve project folder {selected}: {e}"))?;
-    if !folder.is_dir() {
-        return Err(format!("Project folder {selected} is not a directory"));
-    }
     let relative = folder
         .strip_prefix(&root)
         .map_err(|_| format!("Project folder {selected} is outside its Git working root"))?;
