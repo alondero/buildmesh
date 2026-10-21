@@ -1266,7 +1266,10 @@ describe('CircuitsProbeTab', () => {
 
       expect((await screen.findByTestId('circuits-status')).textContent).toBe('Loading circuits…');
       await act(async () => { releaseProbe(); });
-      expect(await screen.findByText('1 circuit idle')).toBeTruthy();
+      // Wait for the settled status line before asserting the count: reading
+      // the status while the probe is still loading reported the fallback as a
+      // wrong plural (#2487).
+      await waitFor(() => expect(screen.getByTestId('circuits-status').textContent).toBe('1 circuit idle'));
     });
 
     it('keeps the plural idle count for more than one circuit', async () => {
@@ -1276,7 +1279,10 @@ describe('CircuitsProbeTab', () => {
 
       expect((await screen.findByTestId('circuits-status')).textContent).toBe('Loading circuits…');
       await act(async () => { releaseProbe(); });
-      expect(await screen.findByText('2 circuits idle')).toBeTruthy();
+      // Wait for the settled status line before asserting the count: reading
+      // the status while the probe is still loading reported the fallback as a
+      // wrong plural (#2487).
+      await waitFor(() => expect(screen.getByTestId('circuits-status').textContent).toBe('2 circuits idle'));
     });
 
     it('points the Manage empty state at the Create disclosure, not at Manage', async () => {
