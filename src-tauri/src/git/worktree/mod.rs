@@ -348,10 +348,14 @@ fn has_registered_worktree_path<'a>(
             // `wt.path()` returns git's stored path verbatim — the same form we
             // passed in when we cut the worktree, so direct equality is the
             // safe shape (no canonicalization that could miss symlinks/UNC).
-            // In the normal create flow, the same path spelling is passed to
-            // Git and retained in the admin entry, so compare those paths
-            // directly instead of canonicalizing them.
-            if wt.path() == host_path {
+            // WSL has two equivalent Windows share names. Normalize only
+            // those names, preserving the distribution and guest path case.
+            let aliases = crate::env::wsl_host_path_aliases(wt.path());
+            if wt.path() == host_path
+                || (cfg!(windows)
+                    && !aliases.is_empty()
+                    && aliases == crate::env::wsl_host_path_aliases(host_path))
+            {
                 return true;
             }
         }
@@ -421,7 +425,7 @@ fn create_git_worktree_at_root(
         //   (a) valid linked worktree of project_root → resume (intentional)
         //   (b) empty directory at the target        → rename aside, proceed
         //   (c) non-empty, non-worktree directory    → refuse, user data untouched
-        if is_valid_linked_worktree(project_root, host_path) {
+        if is_valid_linked_worktree(project_root, host_path)? {
             return Ok(());
         }
         match classify_pre_existing_directory(host_path) {
@@ -478,7 +482,7 @@ fn create_git_worktree_at_root(
         base_ref
     );
 
-    let repo = git2::Repository::open(project_root)
+    let repo = super::project::open(project_root)
         .map_err(|e| format!("Failed to open repository at {}: {}", project_root, e))?;
 
     let use_branched = worktree_mode == "branched";
@@ -499,6 +503,8 @@ fn create_git_worktree_at_root(
         Err(err) => return Err(err.message().to_string()),
     }
 
+    super::trust::ensure_linked_worktree(&repo, host_path).map_err(|e| e.to_string())?;
+
     apply_worktree_include(project_root, host_path);
     if let Some(container) = host_path.parent() {
         ensure_container_excluded(project_root, &container.to_string_lossy());
@@ -513,28 +519,36 @@ fn create_git_worktree_at_root(
 /// linked worktree of this parent; a freshly-initialised bare directory opens
 /// as neither. Mirrors git's own notion — a worktree is not just any repo, it's
 /// a repo whose admin entry points back through the parent's worktrees dir.
-fn is_valid_linked_worktree(project_root: &str, host_path: &std::path::Path) -> bool {
+fn is_valid_linked_worktree(
+    project_root: &str,
+    host_path: &std::path::Path,
+) -> Result<bool, String> {
+    let parent_repo = super::project::open(project_root).map_err(|e| e.to_string())?;
+    // Ownership/configuration failures are access failures, not evidence that
+    // this directory is stray data. Repair trust only after proving linkage.
+    if let Err(error) = Repository::open(host_path) {
+        if error.code() == git2::ErrorCode::NotFound {
+            return Ok(false);
+        }
+        if error.code() != git2::ErrorCode::Owner {
+            return Err(error.to_string());
+        }
+        super::trust::ensure_linked_worktree(&parent_repo, host_path).map_err(|e| e.to_string())?;
+    }
     // 1. The candidate path must open as a Repository.
-    let Ok(wt_repo) = Repository::open(host_path) else {
-        return false;
-    };
+    let wt_repo = Repository::open(host_path).map_err(|e| e.to_string())?;
     // Defensive: an openable-but-not-actually-a-repo shouldn't pass. A bare
     // gitdir or a corrupt object store both produce errors here.
     if wt_repo.workdir().is_none() {
-        return false;
+        return Ok(false);
     }
     // 2. The candidate path must be in project_root's linked-worktrees list.
-    let Ok(parent_repo) = Repository::open(project_root) else {
-        return false;
-    };
-    let Ok(names) = parent_repo.worktrees() else {
-        return false;
-    };
-    has_registered_worktree_path(
+    let names = parent_repo.worktrees().map_err(|e| e.to_string())?;
+    Ok(has_registered_worktree_path(
         &parent_repo,
         host_path,
         (0..names.len()).map(|index| names.get(index)),
-    )
+    ))
 }
 
 /// Classification of a directory that exists at a target worktree path but
@@ -821,9 +835,17 @@ pub fn move_git_worktree(
         return Err(format!("git worktree move target already exists: {}", new));
     }
 
+    let repo = super::project::open(&host_root).map_err(|e| e.to_string())?;
+    super::trust::ensure_linked_worktree(&repo, std::path::Path::new(&old))
+        .map_err(|e| e.to_string())?;
+    let old_trust_path = std::fs::canonicalize(&old).map_err(|e| e.to_string())?;
+
     let mut cmd = crate::process_util::git_command();
     cmd.arg("-C")
-        .arg(&host_root)
+        .arg(
+            repo.workdir()
+                .ok_or("Cannot move worktree from a bare repository")?,
+        )
         .arg("worktree")
         .arg("move")
         .arg(&old)
@@ -836,6 +858,13 @@ pub fn move_git_worktree(
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
+    // The source no longer exists after a successful move, including when
+    // destination trust fails and the caller retains it for recovery.
+    if let Err(error) = super::trust::forget_worktree(&old_trust_path) {
+        tracing::warn!(%error, "Could not revoke moved worktree's Buildmesh Git trust");
+    }
+    super::trust::ensure_linked_worktree(&repo, std::path::Path::new(&new))
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1248,10 +1277,15 @@ fn remove_worktree_inner(path: &str, delete_branch: bool) -> Result<(), Worktree
         // Git half: prune the admin entry if it still points at this path, so
         // the queue entry is only retired once both halves are done.
         prune_orphaned_worktree_entry(&host_path)?;
+        if let Err(error) = super::trust::forget_worktree(std::path::Path::new(&host_path)) {
+            tracing::warn!(%error, "Could not revoke absent worktree's Buildmesh Git trust");
+        }
         return Ok(());
     }
 
     let repo = Repository::open(&host_path)
+        .map_err(|e| WorktreeRemovalFailure::new(OP_OPEN_WORKTREE_REPO, e))?;
+    let trust_path = std::fs::canonicalize(&host_path)
         .map_err(|e| WorktreeRemovalFailure::new(OP_OPEN_WORKTREE_REPO, e))?;
     let worktree = git2::Worktree::open_from_repository(&repo)
         .map_err(|e| WorktreeRemovalFailure::new(OP_OPEN_ADMIN_ENTRY, e))?;
@@ -1279,6 +1313,10 @@ fn remove_worktree_inner(path: &str, delete_branch: bool) -> Result<(), Worktree
     worktree
         .prune(Some(&mut opts))
         .map_err(|e| WorktreeRemovalFailure::new(OP_PRUNE_ADMIN_ENTRY, e))?;
+
+    if let Err(error) = super::trust::forget_worktree(&trust_path) {
+        tracing::warn!(%error, "Could not revoke removed worktree's Buildmesh Git trust");
+    }
 
     // Best-effort: the worktree (and its work) is already gone, so a branch
     // delete that fails — e.g. the branch was reused by another worktree — must

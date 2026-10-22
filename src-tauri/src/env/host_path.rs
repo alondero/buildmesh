@@ -1018,6 +1018,30 @@ pub fn canonical_host_path_string(path: &Path) -> String {
     value.replace('\\', "/")
 }
 
+/// Exact Windows spellings of one WSL path. Keep the distribution and guest
+/// path case intact; only the two Windows share names are interchangeable.
+pub(crate) fn wsl_host_path_aliases(path: &Path) -> Vec<String> {
+    let path = canonical_host_path_string(path);
+    let path = path.trim_end_matches('/');
+    let rest = if path
+        .get(..7)
+        .is_some_and(|p| p.eq_ignore_ascii_case("//wsl$/"))
+    {
+        &path[7..]
+    } else if path
+        .get(..16)
+        .is_some_and(|p| p.eq_ignore_ascii_case("//wsl.localhost/"))
+    {
+        &path[16..]
+    } else {
+        return Vec::new();
+    };
+    if rest.is_empty() || rest.starts_with('/') {
+        return Vec::new();
+    }
+    vec![format!("//wsl$/{rest}"), format!("//wsl.localhost/{rest}")]
+}
+
 /// The paths a node "owns" — its mesh root plus the resolved Worktree Node
 /// dir, if any. Single canonical reader of the `use_worktree` +
 /// `worktree_name` rule via `node_worktree_path`; the worktree-manager

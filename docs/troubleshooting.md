@@ -25,6 +25,34 @@ moving a CLI. If it appears in the Spawn Menu but does not start, report the CLI
 name/version, macOS version and the redacted `logs/buildmesh.log` from **Settings
 → Data & Diagnostics → Open data folder**.
 
+## WSL worktree launch fails with an ownership error
+
+On Windows, `repository path ... is not owned by current user` can mean Git
+does not trust a WSL-owned repository. Buildmesh can create exact trust entries
+for its verified linked worktrees once the Mesh root is already trusted.
+
+If the error names the Mesh root, verify that you trust that repository, then
+add its exact host path to Windows Git's global configuration. For example,
+in PowerShell, for a repository you recognize:
+
+```powershell
+git config --global --add safe.directory '//wsl$/Ubuntu/home/user/project'
+```
+
+Retry the node. Buildmesh keeps failed worktrees so retry can reuse their data.
+An ownership error alone does not mean the directory is corrupt or should be
+moved aside.
+
+Derived entries live in `worktree-trust.gitconfig` under the Buildmesh app-data
+profile, included from Windows Git's global configuration. Buildmesh removes
+its entries after successful worktree moves/removal; your own entries stay.
+If the error says trust was recorded but Git still refuses the path, inspect
+global `include.path` and `safe.directory` entries, including later empty reset
+values, and check that the profile's config file is accessible. Removing that
+profile's include revokes its derived grants; a later launch may recreate it
+after verifying the repository and worktree again. See
+[the trust policy](adr/0046-wsl-linked-worktree-trust.md).
+
 ## macOS blocks the app at first launch
 
 The early-access macOS app is signed ad hoc without an Apple Developer ID

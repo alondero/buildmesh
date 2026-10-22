@@ -419,6 +419,9 @@ pub(crate) fn upgrade_warm_to_mode(
     branch_name: &str,
     mode: &str,
 ) -> Result<(), String> {
+    let parent = crate::git::project::open(project_root).map_err(|e| e.to_string())?;
+    super::super::trust::ensure_linked_worktree(&parent, std::path::Path::new(host_path))
+        .map_err(|e| e.to_string())?;
     if mode == "detached" {
         // No-op: the pool already cut the entry as detached.
     } else {
