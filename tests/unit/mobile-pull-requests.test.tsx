@@ -4,6 +4,7 @@ import PullRequestsScreen, { NodePullRequest } from '../../src/mobile/screens/Pu
 import type { GitHubPullRequest } from '../../src/types/generated/GitHubPullRequest';
 import type { GitHubPullRequestFeed } from '../../src/types/generated/GitHubPullRequestFeed';
 import type { PrMergeability } from '../../src/types/generated/PrMergeability';
+import type { Mesh } from '../../src/mobile/api';
 
 const pr: GitHubPullRequest = {
   number: 42, title: 'Fix search', body: '', url: 'https://github.com/o/r/pull/42', state: 'open', draft: false,
@@ -103,7 +104,7 @@ it.each([{}, { mergeable: true }, { mergeable_state: 'clean' }, { mergeable: 'tr
 
 it('discloses incomplete mesh results without offering merge on unrelated PRs', async () => {
   current.completeness = { returned: 1, pages_fetched: 1, complete: false, incomplete_reason: 'safety_cap', reported_total: 1200 };
-  render(<PullRequestsScreen meshId={3} name="Repository" onBack={vi.fn()} onAuthFailed={vi.fn()} />);
+  render(<PullRequestsScreen mesh={{ id: 3, name: 'Repository' } as Mesh} onBack={vi.fn()} onAuthFailed={vi.fn()} />);
   expect(await screen.findByText(/Showing first 1 of 1200/)).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'Squash and merge' })).toBeNull();
 });
