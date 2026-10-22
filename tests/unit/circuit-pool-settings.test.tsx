@@ -109,7 +109,13 @@ describe('Settings — Circuit agent pool size', () => {
     expect(calls['set_app_circuit_agent_pool_size']![0]).toEqual({ size: 0 });
   });
 
-  it('an uncommitted draft makes the modal dirty: Escape intercepts, and the focus shift commits the draft', async () => {
+  it('an uncommitted draft makes the modal dirty: Escape intercepts, and the draft is NOT committed', async () => {
+    // Issue #2458. Escape used to be swallowed by the blur-commit: opening
+    // the discard banner focuses "Keep editing", which blurs the input,
+    // which committed the draft — so `dirty` flipped false, the Modal
+    // auto-dismissed the banner, and the value the user was trying to
+    // abandon was persisted. The banner now stays up and the draft stays
+    // uncommitted.
     const calls = mockBackend(null);
     const onClose = vi.fn();
     const user = userEvent.setup();
@@ -123,24 +129,11 @@ describe('Settings — Circuit agent pool size', () => {
 
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).not.toHaveBeenCalled();
-    // The banner's presence is deliberately NOT probed. Opening it focuses
-    // Cancel, which blurs the input, which commits the draft — so `dirty`
-    // flips false and Modal auto-dismisses the banner (Modal.tsx, "Auto-dismiss
-    // on the dirty→false transition"). It is therefore up for less time than
-    // one React commit, so whether a query could see it came down to whether
-    // `fireEvent` flushed inside `act()`; `@testing-library/react` 16.3.3
-    // stopped wrapping each dispatch in its own, and the probe began missing a
-    // banner that had genuinely opened. `modal.test.tsx` owns banner presence
-    // against a permanently dirty modal, so what is unique here is the commit —
-    // and focusing Cancel is the only thing that moves focus off the input, so a
-    // single commit is what proves the banner opened.
-    await waitFor(() => expect(calls['set_app_circuit_agent_pool_size']).toBeTruthy());
-    // A second commit means the waitFor above was already satisfied before
-    // Escape ran, so a draft committed during `user.type` fails here instead of
-    // passing quietly.
-    expect(calls['set_app_circuit_agent_pool_size']).toHaveLength(1);
-    expect(calls['set_app_circuit_agent_pool_size']![0]).toEqual({ size: 8 });
-    expect(screen.queryByTestId('settings-tab-dirty-autopilot')).toBeNull();
+    // The banner survives: no commit ran behind the banner's back.
+    screen.getByTestId('modal-discard-banner');
+    expect(calls['set_app_circuit_agent_pool_size']).toBeUndefined();
+    // The pane is still dirty, so the nav rail still flags it.
+    screen.getByTestId('settings-tab-dirty-autopilot');
   });
 });
 

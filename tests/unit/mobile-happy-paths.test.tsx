@@ -214,7 +214,7 @@ describe("mobile happy paths (issue #1262)", () => {
   // -----------------------------------------------------------------------
 
   describe("Issue spawn", () => {
-    it("calls onSpawned with the created node when the launch is confirmed", async () => {
+    it("calls onSpawned with the created node when the split button starts the launch", async () => {
       vi.stubGlobal(
         "fetch",
         vi.fn().mockImplementation(async (url: string) => {
@@ -243,12 +243,10 @@ describe("mobile happy paths (issue #1262)", () => {
         />,
       );
 
-      // Expand the issue card to reveal the Spawn button.
+      // Expand the issue card to reveal the Spawn button, then tap its main
+      // half — the mesh default starts straight away, with no confirmation.
       await userEvent.click(await screen.findByTestId("issue-101"));
       await userEvent.click(screen.getByTestId("issue-spawn-101"));
-
-      await waitFor(() => expect(screen.getByRole("button", { name: "Start", exact: true })).toHaveProperty("disabled", false));
-      await userEvent.click(screen.getByRole("button", { name: "Start", exact: true }));
 
       await waitFor(() => {
         // The node plus the identity of the visit that started the launch, so
@@ -288,9 +286,6 @@ describe("mobile happy paths (issue #1262)", () => {
 
       await userEvent.click(await screen.findByTestId("issue-101"));
       await userEvent.click(screen.getByTestId("issue-spawn-101"));
-
-      await waitFor(() => expect(screen.getByRole("button", { name: "Start", exact: true })).toHaveProperty("disabled", false));
-      await userEvent.click(screen.getByRole("button", { name: "Start", exact: true }));
 
       await waitFor(() => {
         expect(screen.getByText("spawn failed")).toBeTruthy();

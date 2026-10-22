@@ -1,9 +1,14 @@
-import { useEffect, useRef, useState } from 'react';
-import { gitBranch, isAuthError, listPulls, prMergeability, squashMerge } from '../api';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { gitBranch, isAuthError, listPulls, prMergeability, spawnFromPull, squashMerge } from '../api';
+import type { Mesh } from '../api';
 import type { GitHubPullRequest } from '../../types/generated/GitHubPullRequest';
 import type { GitHubPullRequestFeed } from '../../types/generated/GitHubPullRequestFeed';
 import { useVisibilityPolling } from '../useVisibilityPolling';
 import { AppBar, Sheet } from '../ui';
+import { SpawnSplitButton } from '../components/SpawnSplitButton';
+import { SpawnMenuSheet } from '../components/SpawnMenuSheet';
+import { useSpawnMenu } from '../useSpawnMenu';
+import { meshDefaultLabel, type LaunchChoice } from '../spawnMenu';
 
 function canMerge(pr: GitHubPullRequest) {
   return pr.state === 'open' && !pr.draft && pr.mergeable === true &&
@@ -20,26 +25,73 @@ function mergeLabel(pr: GitHubPullRequest) {
 }
 
 export function NodePullRequest({ meshId, nodeId, onAuthFailed }: { meshId: number; nodeId: number; onAuthFailed: () => void }) {
-  return <PullRequestList key={`${meshId}:${nodeId}`} meshId={meshId} nodeId={nodeId} onAuthFailed={onAuthFailed} />;
+  // A node's own pull request list is read-only: it has no Spawn Menu, so no
+  // launch is ever in flight on it.
+  return <PullRequestList key={`${meshId}:${nodeId}`} meshId={meshId} nodeId={nodeId} onAuthFailed={onAuthFailed} spawningPr={null} onSpawningPrChange={() => {}} />;
 }
 
-export default function PullRequestsScreen({ meshId, name, onBack, onAuthFailed }: { meshId: number; name: string; onBack: () => void; onAuthFailed: () => void }) {
+export default function PullRequestsScreen({ mesh, onBack, onAuthFailed, backHandlerRef }: { mesh: Mesh; onBack: () => void; onAuthFailed: () => void; backHandlerRef?: { current: (() => boolean) | null } }) {
+  // The Spawn Menu sheet belongs to the screen, not to the list, so the app
+  // bar's back button and the App's back gesture can both dismiss it before
+  // the screen pops (issue #2385).
+  const [menuPr, setMenuPr] = useState<GitHubPullRequest | null>(null);
+  /**
+   * The pull request whose launch is in flight. It lives on the screen
+   * because the sheet's dismissal is the screen's decision: a launch in
+   * flight owns the sheet, so the back gesture is consumed without closing
+   * it — the same rule the issue screen follows.
+   */
+  const [spawningPr, setSpawningPr] = useState<number | null>(null);
+  const dismissMenu = useCallback(() => {
+    if (!menuPr) return false;
+    if (spawningPr === null) setMenuPr(null);
+    return true;
+  }, [menuPr, spawningPr]);
+  useEffect(() => {
+    if (!backHandlerRef) return;
+    backHandlerRef.current = dismissMenu;
+    return () => { backHandlerRef.current = null; };
+  }, [backHandlerRef, dismissMenu]);
   return <div className="screen">
-    <AppBar title="Pull requests" subtitle={name} onBack={onBack} />
-    <main className="mobile-page list-scroll"><PullRequestList key={meshId} meshId={meshId} onAuthFailed={onAuthFailed} /></main>
+    <AppBar title="Pull requests" subtitle={mesh.name} onBack={() => { if (!dismissMenu()) onBack(); }} />
+    <main className="mobile-page list-scroll">
+      <PullRequestList key={mesh.id} meshId={mesh.id} mesh={mesh} onAuthFailed={onAuthFailed} menuPr={menuPr} onMenuPrChange={setMenuPr} spawningPr={spawningPr} onSpawningPrChange={setSpawningPr} />
+    </main>
   </div>;
 }
 
-function PullRequestList({ meshId, nodeId, onAuthFailed }: { meshId: number; nodeId?: number; onAuthFailed: () => void }) {
+function PullRequestList({ meshId, mesh, nodeId, onAuthFailed, menuPr, onMenuPrChange, spawningPr, onSpawningPrChange }: {
+  meshId: number;
+  mesh?: Mesh;
+  nodeId?: number;
+  onAuthFailed: () => void;
+  /** The pull request whose Spawn Menu sheet is open (the mesh-level list only). */
+  menuPr?: GitHubPullRequest | null;
+  /** Opens or closes the Spawn Menu sheet (the mesh-level list only). */
+  onMenuPrChange?: (pr: GitHubPullRequest | null) => void;
+  /** The pull request whose launch is in flight. */
+  spawningPr: number | null;
+  /** Records the launch in flight (the screen owns the dismissal decision). */
+  onSpawningPrChange: (pr: number | null) => void;
+}) {
   const [feed, setFeed] = useState<GitHubPullRequestFeed | null>(null);
   const [branch, setBranch] = useState('');
   const [error, setError] = useState('');
+  const [spawnError, setSpawnError] = useState('');
+  const [spawnNotice, setSpawnNotice] = useState('');
   const [notice, setNotice] = useState('');
   const [confirm, setConfirm] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const active = useRef(false);
   const version = useRef(0);
   const merging = useRef(false);
+  // A launch is guarded by a ref, not by state: `setSpawningPr` is applied on
+  // the next render, so two taps in the same tick would both read
+  // `spawningPr === null` and start two agents for the same pull request.
+  const spawning = useRef(false);
+  // Only the mesh-level list offers the Spawn Menu; a node's own pull request
+  // list is a read-only view of the branch this node already works on.
+  const { choices, providers, error: menuError, retry } = useSpawnMenu(nodeId === undefined);
   useEffect(() => {
     active.current = true;
     version.current++;
@@ -96,12 +148,42 @@ function PullRequestList({ meshId, nodeId, onAuthFailed }: { meshId: number; nod
       if (active.current) setBusy(false);
     }
   }
+  // Start an agent on a pull request (issue #2385). `launch` is the Spawn Menu
+  // row the user picked; no row means the mesh default, which the backend
+  // resolves from its own default chain.
+  async function spawn(pr: GitHubPullRequest, launch?: LaunchChoice | null) {
+    // The ref guard is synchronous, so a second tap in the same tick cannot
+    // start a second agent for the same pull request.
+    if (spawning.current) return;
+    spawning.current = true;
+    onSpawningPrChange(pr.number);
+    setSpawnError('');
+    setSpawnNotice('');
+    try {
+      await spawnFromPull(meshId, pr, launch);
+      onSpawningPrChange(null);
+      onMenuPrChange?.(null);
+      if (!active.current) return;
+      setSpawnNotice(`Started an agent on PR #${pr.number}.`);
+    } catch (e) {
+      onSpawningPrChange(null);
+      if (!active.current) return;
+      if (isAuthError(e)) onAuthFailed();
+      else setSpawnError((e as Error).message);
+    } finally {
+      spawning.current = false;
+    }
+  }
   const prs = feed?.items.filter(pr => nodeId === undefined || (branch && pr.head_ref === branch &&
     pr.head_repo_clone_url === `${pr.url.split('/pull/')[0]}.git`)) ?? [];
+  // The main half of the split button starts the mesh's own default.
+  const defaultLabel = meshDefaultLabel(mesh, providers);
   return <section className="mobile-pulls" aria-label="Pull requests">
     <div className="pulls-heading"><h2>{nodeId === undefined ? 'Open pull requests' : "This node’s pull request"}</h2>
       <button className="chip-btn" disabled={busy} onClick={() => void refresh()}>Refresh PR status</button></div>
     {error && <p role="alert" className="inline-error">{error}</p>}
+    {spawnError && !menuPr && <p role="alert" className="inline-error">{spawnError}</p>}
+    {spawnNotice && <p role="status">{spawnNotice}</p>}
     {notice && <p role="status">{notice}</p>}
     {!feed && !error && !notice && <p>Loading pull requests…</p>}
     {feed && !feed.completeness.complete && <p className="health-note">Showing first {feed.completeness.returned}{feed.completeness.reported_total !== null ? ` of ${feed.completeness.reported_total}` : ''} pull requests. Results are incomplete ({feed.completeness.incomplete_reason}). {nodeId !== undefined && 'This node’s PR may be missing from this list.'}</p>}
@@ -111,11 +193,39 @@ function PullRequestList({ meshId, nodeId, onAuthFailed }: { meshId: number; nod
       <p>{pr.head_ref} · {pr.state} · {mergeLabel(pr)}</p>
       <p>Checks: {({ success: 'passing', failure: 'failing', error: 'error', pending: 'pending', expected: 'expected' } as Record<string, string>)[pr.checks_state ?? ''] ?? 'not reported'}</p>
       <p>Review: {({ approved: 'approved', changes_requested: 'changes requested', review_required: 'required' } as Record<string, string>)[pr.review_decision ?? ''] ?? 'no decision reported'}</p>
+      {nodeId === undefined && <SpawnSplitButton
+        label={defaultLabel}
+        busyLabel="Starting…"
+        testId={`pr-spawn-${pr.number}`}
+        ariaLabel={`Start agent on pull request #${pr.number} with ${defaultLabel}`}
+        busy={spawningPr === pr.number}
+        disabled={spawningPr !== null}
+        menuOpen={menuPr?.number === pr.number}
+        onStart={() => void spawn(pr)}
+        onToggleMenu={() => {
+          setSpawnError('');
+          onMenuPrChange?.(menuPr?.number === pr.number ? null : pr);
+        }}
+      />}
       {nodeId !== undefined && (confirm === pr.number ? <Sheet label="Confirm squash merge" onClose={() => setConfirm(null)}>
         <p>Squash-merge PR #{pr.number} and delete its branch on GitHub?</p>
         <div className="action-grid"><button className="btn-ghost" disabled={busy} onClick={() => setConfirm(null)}>Cancel</button>
           <button className="btn-primary" disabled={busy || !canMerge(pr)} onClick={() => void merge(pr)}>Confirm squash merge</button></div>
       </Sheet> : <button className="btn-primary" disabled={busy || !canMerge(pr)} onClick={() => setConfirm(pr.number)}>{busy ? 'Merging…' : 'Squash and merge'}</button>)}
     </article>)}
+    {menuPr && <SpawnMenuSheet
+      label="Choose a launch configuration"
+      testId="pr-launch-menu"
+      choices={choices}
+      error={menuError}
+      notice={spawnError}
+      onRetry={retry}
+      // A launch in flight owns the sheet: it cannot be dismissed out from
+      // under the request, and its rows are locked so a second launch cannot
+      // start.
+      dismissible={spawningPr === null}
+      onClose={() => onMenuPrChange?.(null)}
+      onChoose={(choice) => void spawn(menuPr, choice)}
+    />}
   </section>;
 }

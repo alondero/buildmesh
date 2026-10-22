@@ -5,11 +5,24 @@ import { PulseDots } from '../../ui';
 
 import { nodeInputContext } from '../../../lib/status';
 import { NodeRow } from './NodeRow';
+import { SpawnSplitButton } from '../SpawnSplitButton';
+import { meshDefaultLabel } from '../../spawnMenu';
 
-export function MeshNodeSection({ mesh, meshNodes, creating, providers, circuitRuns, setPickerMeshId, setMeshActions, onOpenNode, onOpenIssues, onOpenAgentNodes, onOpenPulls }: {
+export function MeshNodeSection({ mesh, meshNodes, creating, providers, circuitRuns, setPickerMeshId, setMeshActions, onOpenNode, onOpenIssues, onOpenAgentNodes, onOpenPulls, onStartAgent, onOpenSpawnMenu, spawnMenuOpen }: {
   mesh: Mesh; meshNodes: AgentNode[]; creating: number | null; providers: Provider[]; circuitRuns: Map<number, NodeCircuitRun>;
   setPickerMeshId: (id: number) => void; setMeshActions: (mesh: Mesh) => void; onOpenNode: (node: AgentNode, prompt?: string) => void;
   onOpenIssues: (mesh: Mesh) => void; onOpenAgentNodes: (mesh: Mesh) => void; onOpenPulls?: (mesh: Mesh) => void;
+  /**
+   * The mesh's split button (issue #2385). The main half opens Capture with
+   * this mesh and the mesh default already chosen; the chevron opens the
+   * Spawn Menu so the user can pick another launch first. `launchId` is the
+   * Spawn Menu row's id, or `null` for the mesh default.
+   */
+  onStartAgent: (mesh: Mesh, launchId: string | null) => void;
+  /** Opens the Spawn Menu for this mesh. */
+  onOpenSpawnMenu: (mesh: Mesh) => void;
+  /** Whether this mesh's Spawn Menu sheet is open. */
+  spawnMenuOpen: boolean;
 }) {
   return (
                   <section key={mesh.id} style={{ marginBottom: 4 }}>
@@ -69,6 +82,15 @@ export function MeshNodeSection({ mesh, meshNodes, creating, providers, circuitR
                     </div>
 
                     <div className="mesh-shortcuts">
+                      <SpawnSplitButton
+                        label="New agent"
+                        compact
+                        testId={`mesh-spawn-${mesh.id}`}
+                        ariaLabel={`Start a new agent in ${mesh.name} with ${meshDefaultLabel(mesh, providers)}`}
+                        menuOpen={spawnMenuOpen}
+                        onStart={() => onStartAgent(mesh, null)}
+                        onToggleMenu={() => onOpenSpawnMenu(mesh)}
+                      />
                       {onOpenPulls && <button className="chip-btn" onClick={() => onOpenPulls(mesh)}>Pull requests</button>}
                       <button
                         className="chip-btn"

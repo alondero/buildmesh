@@ -10,6 +10,11 @@
  * never briefly relocates the warm pool. It reports a dirty site so the
  * modal's nav rail can mark this pane and the discard banner can intercept a
  * stray close (issue #730).
+ *
+ * The blur commit is guarded against the modal's discard prompt
+ * (issue #2458): Escape, the header × and a backdrop click all move focus
+ * off the field, and an unguarded blur-commit would persist the very draft
+ * the user is trying to abandon.
  */
 import { useEffect, useRef, useState } from 'react';
 import * as api from '../../lib/tauri';
@@ -18,6 +23,7 @@ import { formatError } from '../../lib/errorUtils';
 import { currentTheme, setTheme, type ThemeName } from '../../lib/theme';
 import { useExitPromptStore } from '../../stores/exitPromptStore';
 import { optimisticToggle } from '../../lib/optimisticToggle';
+import { useBlurCommit } from '../../hooks/useBlurCommit';
 import { SettingsRow, SettingsSection } from './SettingsRow';
 import { ResourceLoadStatus } from './ResourceLoadStatus';
 import { UpdateAboutSection } from './UpdateAboutSection';
@@ -33,6 +39,11 @@ export function GeneralPane() {
     setError,
     siteDirtyChange,
   } = useSettingsData();
+
+  // Issue #2458 — the blur commit is skipped while the modal is intercepting
+  // a dismissal, so an abandoned draft stays uncommitted and the discard
+  // prompt can still ask about it.
+  const commitOnBlur = useBlurCommit();
 
   // Issue #734: theme toggle. `themeDraft` mirrors currentTheme() so the
   // radio reflects the active value on modal open; flipping it calls
@@ -317,7 +328,7 @@ export function GeneralPane() {
               setWorktreeDirDraft(e.target.value);
               siteDirtyChange('worktree-dir', e.target.value.trim() !== worktreeDirSavedRef.current);
             }}
-            onBlur={commitWorktreeDir}
+            onBlur={commitOnBlur(commitWorktreeDir)}
             onKeyDown={e => {
               if (e.key === 'Enter') commitWorktreeDir();
             }}

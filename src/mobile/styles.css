@@ -198,6 +198,83 @@ button {
   cursor: default;
 }
 
+/* --- Spawn split button (issue #2385) ------------------------------------ */
+/* The desktop's spawn cluster, on the phone: the main half runs the
+   surface's default launch, the chevron half opens the Spawn Menu. */
+.spawn-split {
+  display: inline-flex;
+  align-items: stretch;
+  flex: 1;
+  min-width: 0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+/* Beside equally-weighted controls the pair keeps its natural width. */
+.spawn-split-compact {
+  flex: 0 0 auto;
+}
+.spawn-split-main {
+  flex: 1;
+  min-width: 0;
+  background: var(--accent);
+  border: none;
+  padding: 10px 14px;
+  color: var(--on-accent);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.spawn-split-main:active:not(:disabled) {
+  background: var(--accent-dim);
+}
+.spawn-split-main:disabled {
+  background: var(--surface-3);
+  color: var(--text-faint);
+  cursor: default;
+}
+.spawn-split-toggle {
+  background: var(--surface);
+  border: none;
+  border-left: 1px solid var(--border);
+  padding: 10px 12px;
+  color: var(--text-dim);
+  font-size: 14px;
+  cursor: pointer;
+  min-width: 44px;
+  min-height: 44px;
+}
+.spawn-split-toggle:active:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.spawn-split-toggle:disabled {
+  color: var(--text-faint);
+  cursor: default;
+}
+/* The Spawn Menu rows, rendered as a sheet list. */
+.spawn-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+.spawn-menu-item {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  color: var(--text);
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+.spawn-menu-item:active:not(:disabled) {
+  background: var(--surface-3);
+}
+
 .btn-ghost {
   background: transparent;
   border: 1px solid var(--border-strong);
@@ -777,6 +854,9 @@ button {
   display: flex;
   gap: 8px;
   padding: 4px 12px 10px;
+  /* The mesh's spawn split button joins this row, so the row may wrap
+     rather than overflow a narrow phone (issue #2385). */
+  flex-wrap: wrap;
 }
 .work-filters {
   padding: 0 8px 16px;
