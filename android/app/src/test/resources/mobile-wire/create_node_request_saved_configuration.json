@@ -1,0 +1,9 @@
+{
+  "cols": 80,
+  "configuration_id": "launch/405f11ec",
+  "mesh_id": 3,
+  "operation_key": "op-1",
+  "prompt": "Fix it",
+  "provider": "claude",
+  "rows": 24
+}

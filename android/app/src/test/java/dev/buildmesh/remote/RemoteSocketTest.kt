@@ -3,6 +3,8 @@ package dev.buildmesh.remote
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.*
 // okhttp3 has a `Dispatcher` of its own, so the MockWebServer one is named explicitly.
 import okhttp3.mockwebserver.Dispatcher
@@ -17,7 +19,7 @@ class RemoteSocketTest {
             val received = Channel<String>(Channel.UNLIMITED)
             val statuses = Channel<String>(Channel.UNLIMITED)
             repeat(2) { index ->
-                server.enqueue(MockResponse().setBody("{\"ticket\":\"ticket-$index\"}"))
+                server.enqueue(MockResponse().setBody(JsonObject(MobileWireFixtures.obj("ws_ticket") + ("ticket" to JsonPrimitive("ticket-$index"))).toString()))
                 server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
                     override fun onOpen(webSocket: WebSocket, response: Response) { servers.trySend(webSocket) }
                 }))
@@ -68,7 +70,7 @@ class RemoteSocketTest {
                 val mints = Channel<Int>(Channel.UNLIMITED)
                 server.dispatcher = object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse = when (request.path?.substringBefore('?')) {
-                        "/api/ws-ticket" -> { mints.trySend(1); MockResponse().setBody("{\"ticket\":\"ticket\"}") }
+                        "/api/ws-ticket" -> { mints.trySend(1); MockResponse().setBody(MobileWireFixtures.raw("ws_ticket")) }
                         "/ws/events" -> MockResponse().setResponseCode(status)
                         else -> MockResponse().setResponseCode(404)
                     }

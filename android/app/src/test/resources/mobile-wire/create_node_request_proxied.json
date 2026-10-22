@@ -1,0 +1,7 @@
+{
+  "cols": 80,
+  "mesh_id": 3,
+  "operation_key": "op-1",
+  "provider": "claude:minimax",
+  "rows": 24
+}

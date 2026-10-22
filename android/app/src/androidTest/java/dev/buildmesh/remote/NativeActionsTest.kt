@@ -12,24 +12,57 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import okhttp3.mockwebserver.*
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
 import java.util.concurrent.ConcurrentLinkedQueue
 
+// The desktop's responses are read from the committed mobile-route fixtures
+// (issue #2318), the same files the Rust gate derives from the wire types.
+// A body written by hand here would keep passing when the desktop changed
+// its shape, so the fixtures are the source of truth and only the values
+// that belong to a test's own scenario are overlaid on them.
 class NativeActionsTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
-    private val mesh = Json.parseToJsonElement("""{"id":3,"name":"QA mesh","path":"/repo"}""").obj()
-    private val providers = Json.parseToJsonElement("""[
-        {"id":"terminal","label":"Terminal","resumable":false,"capabilities":{"supports_prefill":false}},
-        {"id":"launch/saved","label":"Saved agent","resumable":true,"capabilities":{"supports_prefill":true},"configuration":{"id":"launch/saved","spawn_option_id":"claude","name":"Saved agent"}},
-        {"id":"claude","label":"Claude Code","resumable":true,"capabilities":{"supports_prefill":true}},
-        {"id":"missing","label":"Unavailable agent","unavailable_reason":"Missing executable","resumable":true,"capabilities":{"supports_prefill":true}}
-    ]""").objects()
-    private val created = """{"id":17,"mesh_id":3,"name":"Created agent","provider":"claude","status":"idle"}"""
+    private val mesh = MobileWireFixtures.array("meshes").first().jsonObject
+    private val providers = MobileWireFixtures.array("providers").map { it.jsonObject }
+    private val created = MobileWireFixtures.raw("agent_node")
     // #2379 answers POST /api/nodes/create with a typed outcome, not a bare node.
-    private val createActive = """{"outcome":"active","node":$created}"""
+    private val createActive = MobileWireFixtures.raw("create_node_outcome_active")
+    /** The canonical issue row, so a renamed field breaks the triage test too. */
+    private val issueRow = MobileWireFixtures.obj("issues_feed").arrayAt("items").first()
+    /** The canonical pull request row, likewise. */
+    private val pullRow = MobileWireFixtures.obj("pulls_feed").arrayAt("items").first()
+    /**
+     * The Spawn Option the archive dialog preselects: the first menu row
+     * that is available, resumable and has no saved configuration of its
+     * own. The plain terminal is not resumable, so it is not offered.
+     */
+    private val archiveProvider = providers
+        .filter { it.flag("resumable") && it.objectAt("configuration") == null && it.text("unavailable_reason").isEmpty() }
+        .first()
+        .text("id")
+
+    // The canonical feed's envelope, with this test's own rows: the triage
+    // screen needs a truncated feed, a blocked issue and a long title.
+    private val triageCompleteness = JsonObject(
+        MobileWireFixtures.obj("issues_feed").objectAt("completeness")!!.mapValues { (key, value) ->
+            when (key) {
+                "returned" -> JsonPrimitive(2)
+                "pages_fetched" -> JsonPrimitive(1)
+                "complete" -> JsonPrimitive(false)
+                "incomplete_reason" -> JsonPrimitive("safety_cap")
+                "reported_total" -> JsonPrimitive(120)
+                else -> value
+            }
+        },
+    )
 
     private fun withDesktop(respond: (RecordedRequest) -> MockResponse, body: (BuildmeshViewModel, ConcurrentLinkedQueue<RecordedRequest>) -> Unit) {
         val app = ApplicationProvider.getApplicationContext<Application>()
@@ -41,8 +74,8 @@ class NativeActionsTest {
             server.dispatcher = object : Dispatcher() {
                 override fun dispatch(request: RecordedRequest): MockResponse {
                     if (request.path == "/api/session") return MockResponse().setResponseCode(204)
-                    if (request.path == "/api/agents/9/git/branch") return MockResponse().setBody("""{"branch":"main"}""")
-                    if (request.path == "/api/meshes/0/pulls?state=open") return MockResponse().setBody("""{"items":[],"completeness":{"returned":0,"pages_fetched":0,"complete":true,"incomplete_reason":null,"reported_total":null}}""")
+                    if (request.path == "/api/agents/9/git/branch") return MockResponse().setBody(MobileWireFixtures.raw("git_branch"))
+                    if (request.path == "/api/meshes/0/pulls?state=open") return MockResponse().setBody(MobileWireFixtures.raw("pulls_feed_empty"))
                     requests.add(request)
                     return respond(request)
                 }
@@ -92,7 +125,13 @@ class NativeActionsTest {
             // #2331: one key per submission, so the retry after a lost response
             // resolves to the same node instead of creating a second one.
             assertEquals(1, keys.distinct().size)
-            val expected = Json.parseToJsonElement("""{"mesh_id":3,"provider":"claude","configuration_id":"launch/saved","rows":24,"cols":80,"operation_key":"${keys[0]}","prompt":"Fix the deadline"}""")
+            // The fixture carries the wire shape; the operation key and the
+            // typed prompt are this test's own.
+            val expected = JsonObject(
+                MobileWireFixtures.obj("create_node_request_saved_configuration") +
+                    ("operation_key" to JsonPrimitive(keys[0])) +
+                    ("prompt" to JsonPrimitive("Fix the deadline"))
+            )
             bodies.forEach { assertEquals(expected, it) }
         }
     }
@@ -120,7 +159,12 @@ class NativeActionsTest {
             compose.waitUntil(10000) { opened == 17L && !vm.state.value.busy }
             val body = Json.parseToJsonElement(requests.single().body.readUtf8()).obj()
             assertEquals("/api/nodes/create", requests.single().path)
-            assertEquals(Json.parseToJsonElement("""{"mesh_id":3,"rows":24,"cols":80,"operation_key":"${body.text("operation_key")}","prompt":"Fix the deadline"}"""), body)
+            val expected = JsonObject(
+                MobileWireFixtures.obj("create_node_request_mesh_default") +
+                    ("operation_key" to JsonPrimitive(body.text("operation_key"))) +
+                    ("prompt" to JsonPrimitive("Fix the deadline"))
+            )
+            assertEquals(expected, body)
         }
     }
 
@@ -142,7 +186,12 @@ class NativeActionsTest {
             compose.waitUntil(10000) { vm.state.value.notice == "Reply delivered" && !vm.state.value.busy }
             compose.onNodeWithText("Send reply").assertDoesNotExist()
             assertEquals("", vm.draft("reply-9"))
-            requests.forEach { assertEquals("""{"seq":"Continue safely\r"}""", it.body.readUtf8()) }
+            requests.forEach {
+                assertEquals(
+                    JsonObject(MobileWireFixtures.obj("node_input_request") + ("seq" to JsonPrimitive("Continue safely\r"))),
+                    Json.parseToJsonElement(it.body.readUtf8()).jsonObject,
+                )
+            }
         }
     }
 
@@ -153,7 +202,7 @@ class NativeActionsTest {
         var opened = 0L
         withDesktop({ request ->
             when (request.path) {
-                "/api/meshes/3/issues" -> MockResponse().setBody("""{"items":[{"number":42,"title":"Fix deadline","body":"Issue details","url":"https://github.com/o/r/issues/42","state":"open","labels":[],"blocked_by":[],"author":"octo"}],"completeness":{"returned":1,"pages_fetched":1,"complete":true,"incomplete_reason":null,"reported_total":null}}""")
+                "/api/meshes/3/issues" -> MockResponse().setBody(MobileWireFixtures.raw("issues_feed"))
                 "/api/meshes/3/issues/42/spawn" -> MockResponse().setBody(created)
                 else -> MockResponse().setResponseCode(404)
             }
@@ -174,14 +223,19 @@ class NativeActionsTest {
             compose.onNodeWithContentDescription("Choose how to start issue #42").performClick()
             compose.onNodeWithText("Terminal").assertDoesNotExist()
             compose.onNodeWithText("Unavailable agent").assertDoesNotExist()
-            compose.onNodeWithText("Claude Code").assertExists()
+            compose.onNodeWithText("MiniMax via Claude Code").assertExists()
             compose.onNodeWithText("Saved configuration").assertExists()
             compose.onNodeWithText("Saved agent").performClick()
             compose.waitUntil(10000) { opened == 17L && !vm.state.value.busy }
             val posts = requests.filter { it.method == "POST" }
             assertEquals(listOf("/api/meshes/3/issues/42/spawn", "/api/meshes/3/issues/42/spawn"), posts.map { it.path })
-            assertEquals(listOf("""{"title":"Fix deadline"}""", """{"title":"Fix deadline","provider":"claude","configuration_id":"launch/saved"}"""),
-                posts.map { it.body.readUtf8() })
+            assertEquals(
+                listOf(
+                    MobileWireFixtures.obj("issue_spawn_request_mesh_default"),
+                    MobileWireFixtures.obj("issue_spawn_request_saved_configuration"),
+                ),
+                posts.map { Json.parseToJsonElement(it.body.readUtf8()).jsonObject },
+            )
         }
     }
 
@@ -191,12 +245,12 @@ class NativeActionsTest {
         var opened = 0L
         withDesktop({ request ->
             when (request.path) {
-                "/api/meshes/3/pulls?state=open" -> MockResponse().setBody("""{"items":[{"number":42,"title":"Fix deadline","body":"","url":"https://github.com/octo/r/pull/42","state":"open","draft":false,"head_ref":"feat/deadline","head_repo_owner":"octo","head_repo_clone_url":"https://github.com/octo/r.git","head_sha":"abc123","author":"octo","mergeable":null,"mergeable_state":"unknown","checks_state":null,"review_decision":null}],"completeness":{"returned":1,"pages_fetched":1,"complete":true,"incomplete_reason":null,"reported_total":null}}""")
+                "/api/meshes/3/pulls?state=open" -> MockResponse().setBody(MobileWireFixtures.raw("pulls_feed"))
                 "/api/meshes/3/pulls/42/spawn" -> MockResponse().setBody(created)
                 // The panel reads the menu from the ViewModel's own snapshot.
-                "/api/meshes" -> MockResponse().setBody("[$mesh]")
+                "/api/meshes" -> MockResponse().setBody(MobileWireFixtures.raw("meshes"))
                 "/api/nodes" -> MockResponse().setBody("[]")
-                "/api/providers" -> MockResponse().setBody(kotlinx.serialization.json.JsonArray(providers).toString())
+                "/api/providers" -> MockResponse().setBody(MobileWireFixtures.raw("providers"))
                 else -> MockResponse().setResponseCode(404)
             }
         }) { vm, requests ->
@@ -208,13 +262,15 @@ class NativeActionsTest {
             compose.onNodeWithText("Squash and merge").assertDoesNotExist()
             compose.onNodeWithContentDescription("Choose how to start PR #42").performClick()
             compose.onNodeWithText("Terminal").assertDoesNotExist()
-            compose.onNodeWithText("Claude Code").performClick()
+            compose.onNodeWithText("MiniMax via Claude Code").performClick()
             compose.waitUntil(10000) { opened == 17L && !vm.state.value.busy }
             // `resume()` also mints an event-socket ticket, which is a POST too.
             val post = requests.single { it.path?.endsWith("/spawn") == true }
             assertEquals("/api/meshes/3/pulls/42/spawn", post.path)
-            assertEquals("""{"title":"Fix deadline","head_ref":"feat/deadline","head_sha":"abc123","head_repo_owner":"octo","head_repo_clone_url":"https://github.com/octo/r.git","provider":"claude"}""",
-                post.body.readUtf8())
+            assertEquals(
+                MobileWireFixtures.obj("pull_spawn_request_proxied"),
+                Json.parseToJsonElement(post.body.readUtf8()).jsonObject,
+            )
         }
     }
 
@@ -245,14 +301,47 @@ class NativeActionsTest {
         var attempts = 0
         withDesktop({ request ->
             when (request.path) {
-                "/api/meshes/3/issues" -> MockResponse().setBody("""{"items":[
-                    {"number":42,"title":"Fix the mobile deadline and preserve a long issue title on a narrow phone screen","body":"Expanded issue details","url":"https://github.com/o/r/issues/42","state":"open","labels":["bug"${if (tagged) ",\"buildmesh:run\"" else ""}],"blocked_by":[43,99],"author":"octo"},
-                    {"number":43,"title":"Prerequisite","body":"","url":"","state":"open","labels":[],"blocked_by":[],"author":""}
-                ],"completeness":{"returned":2,"pages_fetched":1,"complete":false,"incomplete_reason":"safety_cap","reported_total":120}}""")
-                "/api/meshes/3/issue-labels" -> MockResponse().setBody("""{"labels":["bug","buildmesh:run"],"autopilot_triggers":{"buildmesh:run":["Ship fixes"]}}""")
+                "/api/meshes/3/issues" -> MockResponse().setBody(
+                    JsonObject(
+                        MobileWireFixtures.obj("issues_feed") +
+                            ("items" to JsonArray(listOf(
+                                JsonObject(
+                                    issueRow +
+                                        ("number" to JsonPrimitive(42)) +
+                                        ("title" to JsonPrimitive("Fix the mobile deadline and preserve a long issue title on a narrow phone screen")) +
+                                        ("body" to JsonPrimitive("Expanded issue details")) +
+                                        ("url" to JsonPrimitive("https://github.com/o/r/issues/42")) +
+                                        ("labels" to JsonArray(if (tagged) listOf(JsonPrimitive("bug"), JsonPrimitive("buildmesh:run")) else listOf(JsonPrimitive("bug")))) +
+                                        ("blocked_by" to JsonArray(listOf(JsonPrimitive(43), JsonPrimitive(99)))) +
+                                        ("author" to JsonPrimitive("octo"))
+                                ),
+                                JsonObject(
+                                    issueRow +
+                                        ("number" to JsonPrimitive(43)) +
+                                        ("title" to JsonPrimitive("Prerequisite")) +
+                                        ("body" to JsonPrimitive("")) +
+                                        ("url" to JsonPrimitive("")) +
+                                        ("labels" to JsonArray(emptyList())) +
+                                        ("blocked_by" to JsonArray(emptyList())) +
+                                        ("author" to JsonPrimitive(""))
+                                ),
+                            ))) +
+                            ("completeness" to triageCompleteness)
+                    ).toString()
+                )
+                "/api/meshes/3/issue-labels" -> MockResponse().setBody(MobileWireFixtures.raw("issue_labels"))
                 "/api/meshes/3/issues/42/label" -> {
                     if (++attempts == 1) MockResponse().setResponseCode(500).setBody("""{"error":"GitHub permission denied"}""")
-                    else { tagged = Json.parseToJsonElement(request.body.clone().readUtf8()).obj().flag("present"); MockResponse().setResponseCode(204) }
+                    else {
+                        val body = Json.parseToJsonElement(request.body.clone().readUtf8()).jsonObject
+                        // The label the phone writes carries the canonical
+                        // request's key set; the label and the toggle are this
+                        // test's own.
+                        assertEquals(MobileWireFixtures.obj("issue_label_request").keys, body.keys)
+                        assertEquals("buildmesh:run", body.text("label"))
+                        tagged = body.flag("present")
+                        MockResponse().setResponseCode(204)
+                    }
                 }
                 else -> MockResponse().setResponseCode(404)
             }
@@ -277,10 +366,10 @@ class NativeActionsTest {
             compose.onNodeWithText("#42 Fix the mobile", substring = true, useUnmergedTree = true).performClick()
             compose.onNodeWithText("Expanded issue details").assertExists()
             compose.onNodeWithContentDescription("Choose how to start issue #42").performScrollTo().performClick()
-            compose.onNodeWithText("Claude Code").assertExists()
+            compose.onNodeWithText("MiniMax via Claude Code").assertExists()
             issueScreenshot("issues-android-launch")
             androidx.test.espresso.Espresso.pressBack()
-            compose.onNodeWithText("Claude Code").assertDoesNotExist()
+            compose.onNodeWithText("MiniMax via Claude Code").assertDoesNotExist()
             assertFalse(requests.any { it.method == "POST" })
             compose.onNodeWithText("Edit tags for issue #42").performScrollTo().performClick()
             compose.waitUntil(10000) { compose.onAllNodesWithContentDescription("buildmesh:run").fetchSemanticsNodes().isNotEmpty() }
@@ -307,7 +396,7 @@ class NativeActionsTest {
         var opened = 0L
         withDesktop({ request ->
             when (request.path) {
-                "/api/meshes/3/agent-nodes/discover" -> MockResponse().setBody("""[{"session_id":"saved-session","branch":"topic","worktree_name":"tree","first_message":"Archived work"}]""")
+                "/api/meshes/3/agent-nodes/discover" -> MockResponse().setBody(MobileWireFixtures.raw("archived_agent_nodes"))
                 "/api/meshes/3/agent-nodes/import-and-resume" -> MockResponse().setResponseCode(207).setBody("""{"node":{"id":17},"spawn_error":"Executable missing"}""")
                 else -> MockResponse().setResponseCode(404)
             }
@@ -318,14 +407,17 @@ class NativeActionsTest {
             } }
             compose.waitUntil(10000) { compose.onAllNodesWithText("Import and resume").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithText("Import and resume").performClick()
-            compose.onNodeWithText("Launch configuration: Claude Code").assertExists()
+            compose.onNodeWithText("Launch configuration: MiniMax via Claude Code").assertExists()
             compose.onNodeWithText("Start").performClick()
             compose.waitUntil(10000) { vm.state.value.error.contains("Node 17 was imported") && !vm.state.value.busy }
             compose.onNodeWithText("Choose a launch configuration").assertDoesNotExist()
             assertEquals(0L, opened)
             assertTrue(vm.state.value.error.contains("Executable missing"))
             val request = requests.single { it.method == "POST" }
-            assertEquals("""{"cli_session_id":"saved-session","branch":"topic","provider":"claude","worktree_name":"tree"}""", request.body.readUtf8())
+            // The provider is the Spawn Option the archive dialog preselected.
+            val expected = MobileWireFixtures.obj("import_and_resume_request")
+            assertEquals(archiveProvider, expected.text("provider"))
+            assertEquals(expected, Json.parseToJsonElement(request.body.readUtf8()).jsonObject)
         }
     }
 
@@ -333,9 +425,11 @@ class NativeActionsTest {
         var checks = 0
         withDesktop({ request ->
             when (request.path) {
-                "/api/gh/auth" -> MockResponse().setBody(if (++checks == 1) """{"ok":false}""" else """{"ok":true}""")
-                "/api/meshes/3/pr/source?node_id=17" -> MockResponse().setBody("""{"head_branch":"topic","base_branch":"main"}""")
-                "/api/meshes/3/pr" -> MockResponse().setBody("""{"url":"https://example.invalid/pull/17"}""")
+                // The desktop has no GitHub session yet: that is this test's
+                // own scenario, not a wire shape.
+                "/api/gh/auth" -> MockResponse().setBody(if (++checks == 1) """{"ok":false}""" else MobileWireFixtures.raw("gh_auth"))
+                "/api/meshes/3/pr/source?node_id=17" -> MockResponse().setBody(MobileWireFixtures.raw("pr_source"))
+                "/api/meshes/3/pr" -> MockResponse().setBody(MobileWireFixtures.raw("create_pr_result"))
                 else -> MockResponse().setResponseCode(404)
             }
         }) { vm, requests ->
@@ -353,20 +447,52 @@ class NativeActionsTest {
             assertEquals("", vm.draft("pr-body-17"))
             val request = requests.single { it.method == "POST" }
             assertEquals("/api/meshes/3/pr", request.path)
-            assertEquals("""{"title":"Native change","body":"Explains the change","node_id":17,"head_branch":"topic","base_branch":"main"}""", request.body.readUtf8())
+            // The head branch is the one the previewed source reported.
+            val expected = JsonObject(
+                MobileWireFixtures.obj("create_pr_request") +
+                    ("head_branch" to JsonPrimitive(MobileWireFixtures.obj("pr_source").text("head_branch")))
+            )
+            assertEquals(expected, Json.parseToJsonElement(request.body.readUtf8()).jsonObject)
         }
     }
 
-    private fun pullResponse(items: String, complete: Boolean = true) = """{"items":$items,"completeness":{"returned":1,"pages_fetched":1,"complete":$complete,"incomplete_reason":${if (complete) "null" else "\"safety_cap\""},"reported_total":null}}"""
-    private val openPull = """[{"number":42,"title":"Fix search","body":"","url":"https://github.com/o/r/pull/42","state":"open","draft":false,"head_ref":"feature/search",
-        "head_repo_owner":"o","head_repo_clone_url":"https://github.com/o/r.git","head_sha":"abc","author":"o","mergeable":true,"mergeable_state":"clean","checks_state":"success","review_decision":"approved"}]"""
+    /** The canonical pull feed, with this test's own rows and completeness. */
+    private fun pullResponse(items: List<JsonObject>, complete: Boolean = true) = JsonObject(
+        MobileWireFixtures.obj("pulls_feed") +
+            ("items" to JsonArray(items)) +
+            ("completeness" to JsonObject(
+                MobileWireFixtures.obj("pulls_feed").objectAt("completeness")!!.mapValues { (key, value) ->
+                    when (key) {
+                        "complete" -> JsonPrimitive(complete)
+                        "incomplete_reason" -> if (complete) JsonNull else JsonPrimitive("safety_cap")
+                        else -> value
+                    }
+                },
+            ))
+    ).toString()
+
+    /** The open pull request this test merges, with its own row values. */
+    private val openPull = JsonObject(
+        pullRow +
+            ("title" to JsonPrimitive("Fix search")) +
+            ("url" to JsonPrimitive("https://github.com/o/r/pull/42")) +
+            ("head_ref" to JsonPrimitive("feature/search")) +
+            ("head_repo_owner" to JsonPrimitive("o")) +
+            ("head_repo_clone_url" to JsonPrimitive("https://github.com/o/r.git")) +
+            ("head_sha" to JsonPrimitive("abc")) +
+            ("author" to JsonPrimitive("o")) +
+            ("mergeable" to JsonPrimitive(true)) +
+            ("mergeable_state" to JsonPrimitive("clean")) +
+            ("checks_state" to JsonPrimitive("success")) +
+            ("review_decision" to JsonPrimitive("approved"))
+    )
 
     @Test fun aNodePullShowsStatusConfirmsSquashAndRemovesAnAcknowledgedMerge() {
         var merged = false
         withDesktop({ request -> when (request.path) {
-            "/api/agents/17/git/branch" -> MockResponse().setBody("""{"branch":"feature/search"}""")
-            "/api/meshes/3/pulls?state=open" -> MockResponse().setBody(pullResponse(if (merged) "[]" else openPull))
-            "/api/meshes/3/pulls/42/mergeability" -> MockResponse().setBody("""{"mergeable":true,"mergeable_state":"clean"}""")
+            "/api/agents/17/git/branch" -> MockResponse().setBody(JsonObject(MobileWireFixtures.obj("git_branch") + ("branch" to JsonPrimitive("feature/search"))).toString())
+            "/api/meshes/3/pulls?state=open" -> MockResponse().setBody(pullResponse(if (merged) emptyList() else listOf(openPull)))
+            "/api/meshes/3/pulls/42/mergeability" -> MockResponse().setBody(MobileWireFixtures.raw("pr_mergeability"))
             "/api/meshes/3/pulls/42/merge" -> { merged = true; MockResponse().setBody("""{"url":"https://github.com/o/r/pull/42","pr_number":42}""") }
             "/api/nodes", "/api/meshes", "/api/providers" -> MockResponse().setBody("[]")
             else -> MockResponse().setResponseCode(404)
@@ -392,8 +518,9 @@ class NativeActionsTest {
     @Test fun meshPullsDiscloseTruncationAndNodeMergeBecomesDisabledAfterStatusRefresh() {
         var blocked = false
         withDesktop({ request -> when (request.path) {
-            "/api/agents/17/git/branch" -> MockResponse().setBody("""{"branch":"feature/search"}""")
-            "/api/meshes/3/pulls?state=open" -> MockResponse().setBody(pullResponse(if (blocked) openPull.replace("\"clean\"", "\"blocked\"") else openPull, false))
+            "/api/agents/17/git/branch" -> MockResponse().setBody(JsonObject(MobileWireFixtures.obj("git_branch") + ("branch" to JsonPrimitive("feature/search"))).toString())
+            "/api/meshes/3/pulls?state=open" -> MockResponse().setBody(
+                pullResponse(listOf(if (blocked) JsonObject(openPull + ("mergeable_state" to JsonPrimitive("blocked"))) else openPull), false))
             else -> MockResponse().setResponseCode(404)
         } }) { vm, requests ->
             var nodeId by androidx.compose.runtime.mutableStateOf<Long?>(null)

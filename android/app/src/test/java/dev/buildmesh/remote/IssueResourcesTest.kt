@@ -5,13 +5,67 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class IssueResourcesTest {
-    private val feed = issueFeed(Json.parseToJsonElement("""{
-        "items":[
-            {"number":42,"title":"Fix deadline","body":"Details","url":"https://github.com/o/r/issues/42","state":"open","labels":["bug","buildmesh:run"],"author":"octo","blocked_by":[43,99]},
-            {"number":43,"title":"Prerequisite","body":"","url":"","state":"open","labels":[],"author":"","blocked_by":[]}
-        ],
-        "completeness":{"returned":2,"pages_fetched":1,"complete":false,"incomplete_reason":"safety_cap","reported_total":120}
-    }"""))
+    /** The canonical issue row, so a renamed field breaks these tests too. */
+    private val issueRow = MobileWireFixtures.obj("issues_feed").arrayAt("items").first()
+
+    /**
+     * The canonical feed's envelope, with this test's own rows and
+     * completeness: the triage screen needs a tagged, blocked issue and a
+     * truncated feed.
+     */
+    private val feed = issueFeed(
+        JsonObject(
+            MobileWireFixtures.obj("issues_feed") +
+                ("items" to JsonArray(listOf(
+                    issue(
+                        mapOf(
+                            "number" to JsonPrimitive(42),
+                            "title" to JsonPrimitive("Fix deadline"),
+                            "body" to JsonPrimitive("Details"),
+                            "url" to JsonPrimitive("https://github.com/o/r/issues/42"),
+                            "state" to JsonPrimitive("open"),
+                            "labels" to JsonArray(listOf(JsonPrimitive("bug"), JsonPrimitive("buildmesh:run"))),
+                            "author" to JsonPrimitive("octo"),
+                            "blocked_by" to JsonArray(listOf(JsonPrimitive(43), JsonPrimitive(99))),
+                        ),
+                    ),
+                    issue(
+                        mapOf(
+                            "number" to JsonPrimitive(43),
+                            "title" to JsonPrimitive("Prerequisite"),
+                            "body" to JsonPrimitive(""),
+                            "url" to JsonPrimitive(""),
+                            "state" to JsonPrimitive("open"),
+                            "labels" to JsonArray(emptyList()),
+                            "author" to JsonPrimitive(""),
+                            "blocked_by" to JsonArray(emptyList()),
+                        ),
+                    ),
+                ))) +
+                ("completeness" to completeness(
+                    "returned" to JsonPrimitive(2),
+                    "pages_fetched" to JsonPrimitive(1),
+                    "complete" to JsonPrimitive(false),
+                    "incomplete_reason" to JsonPrimitive("safety_cap"),
+                    "reported_total" to JsonPrimitive(120),
+                ))
+        ),
+    )
+
+    /** The canonical issue row with this test's own values. */
+    private fun issue(overrides: Map<String, JsonElement>) = JsonObject(issueRow + overrides)
+
+    /** The canonical feed's completeness block with this test's own values. */
+    private fun completeness(vararg overrides: Pair<String, JsonElement>) =
+        JsonObject(MobileWireFixtures.obj("issues_feed").objectAt("completeness")!! + overrides)
+
+    /** The canonical feed's envelope with this test's own rows and completeness. */
+    private fun feedBody(items: JsonArray, completeness: JsonObject) =
+        JsonObject(
+            MobileWireFixtures.obj("issues_feed") +
+                ("items" to items) +
+                ("completeness" to completeness),
+        )
 
     @Test fun filteringUsesTitleNumberAndTagsWithoutDiscardingMetadata() {
         val issues = feed.arrayAt("items")
@@ -32,10 +86,34 @@ class IssueResourcesTest {
     }
 
     @Test fun completeUnknownTotalAndLegacyFeedsDoNotImplyTheSameCompleteness() {
-        val complete = issueFeed(Json.parseToJsonElement("""{"items":[],"completeness":{"returned":0,"pages_fetched":1,"complete":true,"incomplete_reason":null,"reported_total":null}}"""))
+        val complete = issueFeed(
+            feedBody(
+                JsonArray(emptyList()),
+                completeness(
+                    "returned" to JsonPrimitive(0),
+                    "pages_fetched" to JsonPrimitive(1),
+                    "complete" to JsonPrimitive(true),
+                    "incomplete_reason" to JsonNull,
+                    "reported_total" to JsonNull,
+                ),
+            ),
+        )
         assertNull(issueCompletenessNote(complete))
-        val partial = issueFeed(Json.parseToJsonElement("""{"items":[],"completeness":{"returned":0,"pages_fetched":1,"complete":false,"incomplete_reason":"upstream_incomplete","reported_total":null}}"""))
+        val partial = issueFeed(
+            feedBody(
+                JsonArray(emptyList()),
+                completeness(
+                    "returned" to JsonPrimitive(0),
+                    "pages_fetched" to JsonPrimitive(1),
+                    "complete" to JsonPrimitive(false),
+                    "incomplete_reason" to JsonPrimitive("upstream_incomplete"),
+                    "reported_total" to JsonNull,
+                ),
+            ),
+        )
         assertEquals("Showing the first 0 issues. GitHub reported that its own index was still incomplete — try again.", issueCompletenessNote(partial))
+        // A desktop older than the feed wrapper: a bare array, not the
+        // current wire shape.
         assertEquals("Completeness is unavailable. More issues may exist.", issueCompletenessNote(issueFeed(Json.parseToJsonElement("[]"))))
     }
 }

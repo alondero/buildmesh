@@ -133,11 +133,20 @@ export function Sidebar() {
   // for the open/close state but stores the prefixed value as the
   // single source of truth.
   const [openDropdownFor, setOpenDropdownFor] = useState<string | null>(null);
-  // Both Sidebar `+ New mesh` buttons call the shared
-  // `openCreateMesh` action — the modal itself is mounted at
-  // App.tsx (gated on `uiStore.createMeshOpen`), not here.
-  // The canvas empty state hits the same action.
+  // The Sidebar's mesh-creation CTA calls the shared `openCreateMesh`
+  // action — the modal itself is mounted at App.tsx (gated on
+  // `uiStore.createMeshOpen`), not here. The canvas empty state hits
+  // the same action.
   const openCreateMesh = useUIStore((s) => s.openCreateMesh);
+  // Issue #2468 — the empty workspace renders its own "+ New mesh" CTA
+  // inline, directly under the "No meshes yet" message. The sticky
+  // footer rendered a second mesh-creation button in the same 256px
+  // column, so an empty workspace showed two CTAs in one place (issue
+  // #2468). The footer stands down while the inline CTA is showing, and
+  // returns once the workspace holds a mesh. The Attention view has no
+  // inline CTA of its own, so the footer stays there and both views
+  // keep a mesh-creation CTA.
+  const inlineEmptyCtaVisible = !attentionView && meshes.length === 0;
   // Per-mesh "spawn in flight" set so the mesh row's `+ ▾` cluster shows
   // "Spawning…" and disables while `selectProviderForMesh` runs (an IPC
   // round-trip that includes worktree setup — seconds on a large repo).
@@ -331,9 +340,10 @@ export function Sidebar() {
 
       <div className="w-full bg-bg-surface border-r border-border-subtle flex flex-col h-full overflow-hidden">
         {/* Meshes list — the Mesh Create modal itself is mounted at App.tsx
-            scope (driven by `uiStore.createMeshOpen`); both Sidebar
-            buttons and the canvas empty state's "New mesh" CTA hit the
-            same `openCreateMesh` action. */}
+            scope (driven by `uiStore.createMeshOpen`); the Sidebar's mesh
+            CTA (inline here when the workspace is empty, otherwise the
+            sticky footer) and the canvas empty state's "New mesh" CTA hit
+            the same `openCreateMesh` action. */}
         {/* Issue #2467 — `aria-label` is ignored on a generic unroled
             <div>; the toggle pair needs `role="group"` for the name to reach
             assistive technology. */}
@@ -348,6 +358,9 @@ export function Sidebar() {
                 <p className="text-xs text-text-muted font-sans">
                   No meshes yet. Add a repository to start orchestrating agents.
                 </p>
+                {/* Issue #2468 — this is the Sidebar's only mesh-creation CTA
+                    while the workspace is empty; the sticky footer stands
+                    down so the column never shows two of them. */}
                 <button
                   type="button"
                   onClick={openCreateMesh}
@@ -384,17 +397,24 @@ export function Sidebar() {
           </div>
         </div>
 
-        {/* Add mesh */}
-        <button
-          onClick={openCreateMesh}
-          className="w-full px-3 py-2.5 flex items-center justify-center gap-1.5 text-xs font-sans text-accent-cyan hover:text-accent-blue border-t border-dashed border-border-subtle hover:bg-bg-card/40 transition-colors"
-        >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <line x1="12" y1="5" x2="12" y2="19"/>
-            <line x1="5" y1="12" x2="19" y2="12"/>
-          </svg>
-          New mesh
-        </button>
+        {/* Add mesh — issue #2468. The empty workspace already shows a
+            "+ New mesh" button inline, right under the "No meshes yet"
+            message, so the sticky footer stands down there instead of
+            stacking a second mesh-creation CTA in the same column. The
+            footer returns as soon as the workspace holds a mesh, and
+            stays for the Attention view, which has no inline CTA. */}
+        {!inlineEmptyCtaVisible && (
+          <button
+            onClick={openCreateMesh}
+            className="w-full px-3 py-2.5 flex items-center justify-center gap-1.5 text-xs font-sans text-accent-cyan hover:text-accent-blue border-t border-dashed border-border-subtle hover:bg-bg-card/40 transition-colors"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="12" y1="5" x2="12" y2="19"/>
+              <line x1="5" y1="12" x2="19" y2="12"/>
+            </svg>
+            New mesh
+          </button>
+        )}
       </div>
     </div>
   );

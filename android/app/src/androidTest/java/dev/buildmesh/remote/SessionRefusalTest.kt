@@ -8,7 +8,11 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
@@ -39,7 +43,7 @@ class SessionRefusalTest {
                 override fun dispatch(request: RecordedRequest): MockResponse = when (request.path?.substringBefore('?')) {
                     "/api/session" -> restore
                     "/api/meshes/2/pr" -> session
-                    "/api/nodes" -> MockResponse().setBody("[{\"id\":7,\"name\":\"remote agent\",\"status\":\"running\"}]")
+                    "/api/nodes" -> MockResponse().setBody(JsonArray(MobileWireFixtures.array("nodes").map { it.jsonObject }.map { JsonObject(it + ("id" to JsonPrimitive(7)) + ("name" to JsonPrimitive("remote agent")) + ("status" to JsonPrimitive("running"))) }).toString())
                     // No socket for these cases: the refresh poll is what proves
                     // the pairing still works.
                     "/api/ws-ticket" -> MockResponse().setResponseCode(503)

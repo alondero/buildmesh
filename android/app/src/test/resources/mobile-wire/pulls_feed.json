@@ -1,0 +1,28 @@
+{
+  "completeness": {
+    "complete": true,
+    "incomplete_reason": null,
+    "pages_fetched": 1,
+    "reported_total": null,
+    "returned": 1
+  },
+  "items": [
+    {
+      "author": "octo",
+      "body": "",
+      "checks_state": null,
+      "draft": false,
+      "head_ref": "feat/deadline",
+      "head_repo_clone_url": "https://github.com/octo/r.git",
+      "head_repo_owner": "octo",
+      "head_sha": "abc123",
+      "mergeable": null,
+      "mergeable_state": "unknown",
+      "number": 42,
+      "review_decision": null,
+      "state": "open",
+      "title": "Fix deadline",
+      "url": "https://github.com/octo/r/pull/42"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+[
+  {
+    "branch": "main",
+    "cli_session_id": null,
+    "created_at": "1970-01-01T00:00:00Z",
+    "env": "windows",
+    "head_repo_clone_url": null,
+    "head_repo_owner": null,
+    "id": 17,
+    "is_pinned": false,
+    "mesh_id": 3,
+    "name": "Created agent",
+    "path": "/repo",
+    "position": 0,
+    "project_scope": null,
+    "provider": "claude",
+    "signal_health": null,
+    "source_issue": null,
+    "source_pr": null,
+    "source_pr_pinned_sha": null,
+    "status": "idle",
+    "use_worktree": false,
+    "worktree_name": null,
+    "worktree_path": null
+  }
+]

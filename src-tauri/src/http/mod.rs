@@ -26,6 +26,10 @@ mod fuzz;
 pub mod instances;
 pub mod interface_rank;
 pub mod interface_watcher;
+// Canonical mobile-route wire fixtures (issue #2318). Test-only: it runs
+// under `cargo test --lib http::mobile_wire`, never in the shipped binary.
+#[cfg(test)]
+mod mobile_wire;
 pub mod pairing;
 pub mod rate_limit;
 pub mod read_status;

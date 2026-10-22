@@ -94,23 +94,23 @@ pub async fn merge(req: &ParsedRequest) -> Response {
 /// hands `create_pr_node`. There is no prompt field: the backend renders the
 /// review prompt from the user's template, the same render the desktop uses.
 /// Unknown fields are rejected so a client that tries to send one is told.
-#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
-struct PullSpawnRequest {
-    title: String,
-    head_ref: String,
+pub(crate) struct PullSpawnRequest {
+    pub(crate) title: String,
+    pub(crate) head_ref: String,
     #[serde(default)]
-    head_sha: String,
+    pub(crate) head_sha: String,
     #[serde(default)]
-    head_repo_owner: Option<String>,
+    pub(crate) head_repo_owner: Option<String>,
     #[serde(default)]
-    head_repo_clone_url: Option<String>,
+    pub(crate) head_repo_clone_url: Option<String>,
     /// Spawn Option; absent means the mesh default.
     #[serde(default)]
-    provider: Option<String>,
+    pub(crate) provider: Option<String>,
     /// Saved Launch Configuration under `provider`.
     #[serde(default)]
-    configuration_id: Option<String>,
+    pub(crate) configuration_id: Option<String>,
 }
 
 /// `POST /api/meshes/{id}/pulls/{n}/spawn` — start an agent on the PR's head
@@ -217,20 +217,20 @@ pub async fn pr_source(req: &ParsedRequest) -> Response {
 /// only resolve `mesh.path`, so it published the mesh root's branch: a
 /// `main -> main` PR for a root on `main`, and the wrong branch entirely for
 /// a root sitting on an unrelated feature (issue #2024 rank 4 / #1567).
-#[derive(serde::Deserialize)]
-struct CreatePrRequest {
-    title: String,
-    body: String,
+#[derive(serde::Deserialize, serde::Serialize)]
+pub(crate) struct CreatePrRequest {
+    pub(crate) title: String,
+    pub(crate) body: String,
     /// Node whose worktree is the PR source. Scoped to `{id}`'s mesh.
-    node_id: i64,
+    pub(crate) node_id: i64,
     /// Optional target branch. When absent the mesh's `base_ref` decides it
     /// — the client is never required to assume `main`.
     #[serde(default)]
-    base_branch: Option<String>,
+    pub(crate) base_branch: Option<String>,
     /// Optional assertion that the worktree is still on the branch the
     /// client previewed. Mismatch is an error, not a silent substitution.
     #[serde(default)]
-    head_branch: Option<String>,
+    pub(crate) head_branch: Option<String>,
 }
 
 pub async fn create(req: &ParsedRequest) -> Response {

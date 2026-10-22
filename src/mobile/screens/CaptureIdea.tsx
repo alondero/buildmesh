@@ -59,14 +59,21 @@ function clearDraft(): void {
   }
 }
 
-function storedDestination(field: "meshId" | "providerId"): string {
+/**
+ * The stored destination field, or `null` when it was never chosen.
+ *
+ * `null` and `""` mean different things now: `""` is the mesh default — a
+ * launch that names no provider at all — while `null` means the user has
+ * not picked one, so the first available agent is used (issue #2385).
+ */
+function storedDestination(field: "meshId" | "providerId"): string | null {
   try {
     const destination = JSON.parse(
       localStorage.getItem(DESTINATION_KEY) ?? "{}",
     );
-    return typeof destination?.[field] === "string" ? destination[field] : "";
+    return typeof destination?.[field] === "string" ? destination[field] : null;
   } catch {
-    return "";
+    return null;
   }
 }
 
@@ -76,12 +83,19 @@ export default function CaptureIdea({
   onStarted,
   onAuthFailed,
   onBusyChange,
+  preset,
 }: {
   meshes: Mesh[];
   providers: Provider[];
   onStarted: (node: AgentNode) => void;
   onAuthFailed: () => void;
   onBusyChange?: (busy: boolean) => void;
+  /**
+   * The mesh and launch the surface pre-selected (issue #2385). The mesh
+   * card's split button opens Capture with both already chosen, so the user
+   * writes the idea against the launch they picked rather than re-picking it.
+   */
+  preset?: { meshId: number; launchId?: string | null };
 }) {
   const [text, setText] = useState(() => {
     try {
@@ -90,9 +104,14 @@ export default function CaptureIdea({
       return "";
     }
   });
-  const [meshId, setMeshId] = useState(() => storedDestination("meshId"));
-  const [providerId, setProviderId] = useState(() =>
-    storedDestination("providerId"),
+  const [meshId, setMeshId] = useState(() =>
+    // A preset is the surface's own choice, not the user's stored one, so it
+    // wins from the very first render — the stored destination would
+    // otherwise flash on screen before the preset effect replaced it.
+    preset ? String(preset.meshId) : storedDestination("meshId") ?? "",
+  );
+  const [providerId, setProviderId] = useState<string | null>(() =>
+    preset ? preset.launchId ?? "" : storedDestination("providerId"),
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -111,12 +130,36 @@ export default function CaptureIdea({
       active.current = false;
     };
   }, []);
+  // The mesh card's split button opens Capture with the mesh and the launch
+  // it chose already selected (issue #2385). The primitives are the deps so a
+  // parent that rebuilds the object on every render cannot reset the user's
+  // own picks.
+  const presetMeshId = preset?.meshId;
+  const presetLaunchId = preset?.launchId;
+  /**
+   * Whether the destination on screen came from the preset rather than from
+   * the user. A preset is a one-shot instruction from the mesh card, so while
+   * it is in force the destination must not be written to `localStorage`:
+   * that would overwrite the user's own stored destination with the mesh they
+   * happened to tap, and the stored pair would be lost for good. The flag
+   * clears the moment the user picks a mesh or an agent, because from then
+   * on the pair on screen is theirs to store.
+   */
+  const presetApplied = useRef(Boolean(preset));
+  useEffect(() => {
+    if (presetMeshId === undefined) return;
+    presetApplied.current = true;
+    setMeshId(String(presetMeshId));
+    setProviderId(presetLaunchId ?? "");
+  }, [presetMeshId, presetLaunchId]);
   useEffect(() => {
     try {
-      localStorage.setItem(
-        DESTINATION_KEY,
-        JSON.stringify({ meshId, providerId }),
-      );
+      if (!presetApplied.current) {
+        localStorage.setItem(
+          DESTINATION_KEY,
+          JSON.stringify({ meshId, providerId }),
+        );
+      }
       if (text) localStorage.setItem(DRAFT_KEY, text);
       else localStorage.removeItem(DRAFT_KEY);
       setStored(true);
@@ -131,13 +174,23 @@ export default function CaptureIdea({
       (!p.is_proxied || p.configuration),
   );
   const selectedMesh = meshId || String(meshes[0]?.id ?? "");
-  const selectedProvider = providerId || choices[0]?.id || "";
+  // `null` means the user has not chosen an agent yet, so the first available
+  // one is used; `""` is the mesh default, which names no provider at all and
+  // lets the backend resolve its own default chain (issue #2385).
+  const selectedProvider =
+    providerId === null ? (choices[0]?.id ?? "") : providerId;
+  // A named agent that is no longer on offer — kept visible so the user sees
+  // what happened instead of silently landing on a different agent.
+  const staleProvider =
+    selectedProvider !== "" && !choices.some((p) => p.id === selectedProvider)
+      ? selectedProvider
+      : null;
   const bytes = new TextEncoder().encode(text).length;
   const valid =
     text.trim().length > 0 &&
     bytes <= 16000 &&
     meshes.some((m) => String(m.id) === selectedMesh) &&
-    choices.some((p) => p.id === selectedProvider);
+    (selectedProvider === "" || choices.some((p) => p.id === selectedProvider));
 
   async function start() {
     if (!valid || submitting.current) return;
@@ -147,7 +200,10 @@ export default function CaptureIdea({
     setError(null);
     setCommitted(null);
     try {
-      const provider = choices.find((p) => p.id === selectedProvider)!;
+      // The mesh default names no provider at all: the request then carries
+      // neither `provider` nor `configuration_id`, and the backend resolves
+      // the mesh's own default chain (issue #2385).
+      const provider = choices.find((p) => p.id === selectedProvider);
       // Issue #2331: one operation key per *submission*, reused for every
       // retry of that submission. A retry after a lost response therefore
       // returns the same node instead of creating a second one. The key is
@@ -160,8 +216,13 @@ export default function CaptureIdea({
 
       const outcome = await createNode({
         mesh_id: Number(selectedMesh),
-        provider: provider.configuration?.spawn_option_id ?? provider.id,
-        configuration_id: provider.configuration?.id,
+        ...(provider
+          ? {
+              provider:
+                provider.configuration?.spawn_option_id ?? provider.id,
+              configuration_id: provider.configuration?.id,
+            }
+          : {}),
         prompt: text,
         operation_key: operationKey,
       });
@@ -243,7 +304,12 @@ export default function CaptureIdea({
           id="idea-mesh"
           className="field"
           value={selectedMesh}
-          onChange={(e) => setMeshId(e.target.value)}
+          onChange={(e) => {
+            // The user has now chosen this mesh, so the pair on screen is
+            // theirs and may be stored (issue #2385).
+            presetApplied.current = false;
+            setMeshId(e.target.value);
+          }}
           disabled={busy}
         >
           {!meshes.some((m) => String(m.id) === selectedMesh) && (
@@ -264,16 +330,22 @@ export default function CaptureIdea({
           id="idea-agent"
           className="field"
           value={selectedProvider}
-          onChange={(e) => setProviderId(e.target.value)}
+          onChange={(e) => {
+            // The user has now chosen this agent, so the pair on screen is
+            // theirs and may be stored (issue #2385).
+            presetApplied.current = false;
+            setProviderId(e.target.value);
+          }}
           disabled={busy}
         >
-          {!choices.some((p) => p.id === selectedProvider) && (
-            <option value={selectedProvider} disabled>
+          {staleProvider && (
+            <option value={staleProvider} disabled>
               {choices.length
                 ? "Previous agent unavailable — choose an agent"
                 : "No available agents"}
             </option>
           )}
+          <option value="">Mesh default</option>
           {choices.map((p) => (
             <option key={p.id} value={p.id}>
               {p.configuration?.name ?? p.label}
@@ -282,7 +354,8 @@ export default function CaptureIdea({
         </select>
         {!choices.length && (
           <p className="field-hint">
-            Configure an agent that accepts an initial prompt on your desktop.
+            No agent on this desktop accepts an initial prompt — the mesh
+            default will be used.
           </p>
         )}
         {bytes > 16000 && (

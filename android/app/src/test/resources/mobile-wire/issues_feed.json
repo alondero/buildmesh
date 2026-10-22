@@ -1,0 +1,25 @@
+{
+  "completeness": {
+    "complete": true,
+    "incomplete_reason": null,
+    "pages_fetched": 1,
+    "reported_total": null,
+    "returned": 1
+  },
+  "items": [
+    {
+      "author": "octo",
+      "blocked_by": [
+        43
+      ],
+      "body": "Issue details",
+      "labels": [
+        "bug"
+      ],
+      "number": 42,
+      "state": "open",
+      "title": "Fix deadline",
+      "url": "https://github.com/octo/r/issues/42"
+    }
+  ]
+}

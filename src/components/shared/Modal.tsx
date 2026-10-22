@@ -1,5 +1,6 @@
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useLayoutEffect,
@@ -9,9 +10,11 @@ import {
   type RefObject,
   type Ref,
   type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
+import { ModalDismissalProvider } from './modalDismissal';
 
 // Lets `<ModalCloseButton>` (rendered inside the consumer's children) route
 // its click through the Modal's dirty-aware close instead of closing
@@ -123,6 +126,13 @@ function initialFocusTarget(
  * form — the user can still tweak the field, hit Save, etc. before deciding.
  * Keep editing closes the banner and walks focus back to the element that
  * had focus when the close was attempted (captured in `lastFocusRef`).
+ *
+ * Dismissal-attempt signal (issue #2458): a dismissal gesture moves focus off
+ * the field the user was in, so a host field that saves on blur would persist
+ * the draft the user is trying to abandon — and the dirty signal would clear
+ * before the banner could ask about it. The Modal therefore publishes "a
+ * dismissal is in flight" to its subtree (see `modalDismissal.tsx`); a
+ * blur-to-save field consults it and skips the commit while it holds.
  */
 export function Modal({
   onClose,
@@ -163,13 +173,38 @@ export function Modal({
     dirtyRef.current = dirty;
   }, [dirty]);
 
+  // Issue #2458 — a dismissal attempt in flight. True from the moment the
+  // user starts a dismissal gesture (Escape, the header ×, a backdrop click,
+  // or one of the discard banner's buttons) until that attempt resolves.
+  //
+  // Fields that save on blur ask `isDismissalInFlight()` before committing:
+  // the dismissal gesture is itself a focus move, so the blur fires while
+  // the user is trying to ABANDON the edit, and an unguarded commit would
+  // persist the very draft the discard prompt is asking about — the prompt
+  // then does not appear (the dirty signal cleared first) or is dismissed
+  // again on the next frame.
+  //
+  // A ref, not state: the attempt is latched on `mousedown`, before the
+  // browser moves focus and fires `blur`, and React state is not committed
+  // until after the event handler returns.
+  const dismissalRef = useRef(false);
+  const isDismissalInFlight = useCallback(() => dismissalRef.current, []);
+
   // When `dirty` flips false while the banner is up (e.g. the user typed in
   // an API key, hit Escape, then hit Save — Save succeeds, draft re-syncs
   // to account, parent removes the site from dirtySites), the banner would
   // otherwise keep rendering and clicking Discard would close the modal over
   // content that was just saved. Auto-dismiss on the dirty→false transition.
+  //
+  // The dismissal attempt ends with it: the edit was committed by another
+  // path, so the banner's question is settled and a blur-to-save field may
+  // commit normally again (issue #2458). Without this the latch could
+  // outlive the banner and swallow the next blur-commit in this modal.
   useEffect(() => {
-    if (!dirty) setConfirmingDiscard(false);
+    if (!dirty) {
+      dismissalRef.current = false;
+      setConfirmingDiscard(false);
+    }
   }, [dirty]);
 
   useEffect(() => {
@@ -202,11 +237,17 @@ export function Modal({
       // to the SAFE option; only the explicit Discard button abandons the
       // edits (issue #808). Restore focus to where the user was.
       setConfirmingDiscard(false);
+      // The attempt is over: a blur-to-save field may commit normally again.
+      dismissalRef.current = false;
       requestAnimationFrame(() => lastFocusRef.current?.focus?.());
       return;
     }
     if (dirtyRef.current) {
       lastFocusRef.current = document.activeElement as HTMLElement | null;
+      // Latch the attempt BEFORE the banner moves focus: opening the banner
+      // focuses "Keep editing", which blurs the field the user was editing,
+      // and that blur must not persist the draft (issue #2458).
+      dismissalRef.current = true;
       setConfirmingDiscard(true);
       return;
     }
@@ -269,19 +310,72 @@ export function Modal({
       return;
     }
     if (dirty) {
+      // Latch the attempt before the banner moves focus to "Keep editing":
+      // that focus move blurs the field the user was editing, and the blur
+      // must not persist the draft the prompt is asking about (#2458).
+      dismissalRef.current = true;
       setConfirmingDiscard(true);
       return;
     }
     onClose();
   };
-  const captureFocusBeforeBackdrop = () => {
-    const active = document.activeElement as HTMLElement | null;
-    // body falls out of focus on the next click anyway; capture only real targets.
-    if (active && active !== document.body) lastFocusRef.current = active;
+
+  /**
+   * Dismissal chrome, recognised from the event target.
+   *
+   * `close` — the header ×, marked by `<ModalCloseButton>`.
+   * `banner` — the discard banner's own buttons. They are part of the
+   * attempt too: "Discard" must not let the blur that precedes it persist
+   * the draft, and "Keep editing" must not save it either.
+   * `backdrop` — anything outside the panel, but only when
+   * `closeOnBackdrop` makes the backdrop a dismissal target at all.
+   */
+  const dismissalChrome = (target: EventTarget | null): 'close' | 'banner' | 'backdrop' | null => {
+    if (!(target instanceof Element)) return null;
+    const marker = target.closest('[data-modal-dismiss]');
+    if (marker) {
+      const kind = marker instanceof HTMLElement ? marker.dataset.modalDismiss : undefined;
+      return kind === 'banner' ? 'banner' : 'close';
+    }
+    if (!closeOnBackdrop) return null;
+    if (!panelRef.current) return null;
+    return panelRef.current.contains(target) ? null : 'backdrop';
+  };
+
+  /**
+   * Latch the dismissal attempt on `mousedown` — before the browser moves
+   * focus.
+   *
+   * The focus move is what fires the field's `blur`, and the blur is what a
+   * blur-to-save field would commit on, so the attempt has to be known
+   * *before* that blur, not after the `click` that follows it (#2458).
+   *
+   * Capture phase, so the header × is seen too: it lives inside the panel,
+   * whose `mousedown` stops propagation to keep in-panel clicks from being
+   * read as backdrop clicks.
+   */
+  const handleMouseDownCapture = (event: ReactMouseEvent<HTMLDivElement>) => {
+    const chrome = dismissalChrome(event.target);
+    if (chrome === null) {
+      // An ordinary interaction ends a stale attempt — e.g. the user
+      // pressed the × down, dragged off it and released elsewhere.
+      dismissalRef.current = false;
+      return;
+    }
+    dismissalRef.current = true;
+    if (chrome === 'close' || chrome === 'backdrop') {
+      // Capture the field the user was in before focus leaves it, so
+      // "Keep editing" can walk focus back to it. The banner's own buttons
+      // already hold focus, so they must not clobber that capture.
+      const active = document.activeElement as HTMLElement | null;
+      if (active && active !== document.body) lastFocusRef.current = active;
+    }
   };
 
   const handleCancelDiscard = () => {
     setConfirmingDiscard(false);
+    // The attempt is over — a blur-to-save field may commit normally again.
+    dismissalRef.current = false;
     // Restore focus to the field the user was last in — captured at the
     // moment Escape/backdrop intercepted. Defer one tick so React has
     // finished unmounting the banner before we move focus, otherwise the
@@ -292,6 +386,7 @@ export function Modal({
   };
   const handleConfirmDiscard = () => {
     setConfirmingDiscard(false);
+    dismissalRef.current = false;
     onClose();
   };
 
@@ -303,7 +398,15 @@ export function Modal({
   const requestClose = () => {
     if (confirmingDiscard) return;
     if (dirty) {
-      lastFocusRef.current = document.activeElement as HTMLElement | null;
+      // The pointer gesture already captured the field the user was in
+      // (the `mousedown` on the × precedes this click, and the browser
+      // moves focus between the two) — keep that capture, because
+      // `document.activeElement` is now the × itself. Without a pointer
+      // gesture — keyboard activation — fall back to whatever holds focus.
+      if (!dismissalRef.current) {
+        lastFocusRef.current = document.activeElement as HTMLElement | null;
+      }
+      dismissalRef.current = true;
       setConfirmingDiscard(true);
       return;
     }
@@ -326,7 +429,7 @@ export function Modal({
   return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      onMouseDown={captureFocusBeforeBackdrop}
+      onMouseDownCapture={handleMouseDownCapture}
       onClick={handleBackdropClick}
     >
       <div className="absolute inset-0 bg-bg-base/70 backdrop-blur-sm animate-fade-in" />
@@ -338,9 +441,10 @@ export function Modal({
         aria-label={ariaLabel}
         tabIndex={-1}
         onKeyDown={trapTab}
-        // Stop mousedown propagation too — otherwise captureFocusBeforeBackdrop
-        // fires for every click inside the panel and can clobber lastFocusRef
-        // with the Save button or banner button that the browser just focused.
+        // Stop mousedown propagation too — an in-panel click must not be
+        // read as a backdrop click. The dismissal gesture is recognised in
+        // the CAPTURE phase on the wrapper (above), which runs before this
+        // handler and therefore still sees the header ×.
         onMouseDown={e => e.stopPropagation()}
         className={`relative bg-bg-overlay border border-border-default rounded-lg shadow-md animate-scale-in outline-none w-full ${maxWidth} ${className}`}
         onClick={e => e.stopPropagation()}
@@ -350,6 +454,10 @@ export function Modal({
             role="alertdialog"
             aria-labelledby="modal-discard-title"
             data-testid="modal-discard-banner"
+            // The banner's buttons are part of the dismissal attempt: a
+            // click on "Discard" must not let the blur that precedes it
+            // persist the draft the user is discarding (#2458).
+            data-modal-dismiss="banner"
             className="m-4 mb-0 border border-status-warning/40 bg-status-warning/10 rounded-md px-4 py-3 text-status-warning"
           >
             <p id="modal-discard-title" className="text-base mb-2">
@@ -376,9 +484,11 @@ export function Modal({
             </div>
           </div>
         )}
-        <ModalCloseContext.Provider value={requestClose}>
-          {children}
-        </ModalCloseContext.Provider>
+        <ModalDismissalProvider isInFlight={isDismissalInFlight}>
+          <ModalCloseContext.Provider value={requestClose}>
+            {children}
+          </ModalCloseContext.Provider>
+        </ModalDismissalProvider>
       </div>
     </div>,
     document.body,
@@ -416,6 +526,10 @@ export function ModalCloseButton({
       type="button"
       onClick={requestClose ?? onClose}
       aria-label={label}
+      // Marks the header × as dismissal chrome so the Modal recognises the
+      // dismissal gesture on `mousedown` — before the browser moves focus
+      // and fires the field's `blur` (issue #2458).
+      data-modal-dismiss="close"
       className="shrink-0 flex items-center justify-center w-7 h-7 rounded-md text-text-secondary hover:text-text-primary hover:bg-bg-card-hover transition-colors text-xl leading-none"
     >
       ×

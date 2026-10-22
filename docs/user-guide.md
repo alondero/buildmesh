@@ -804,8 +804,8 @@ current text visible so you can retry editing before leaving the tool.
 
 Use **Settings → Launch Configurations** to name the recipes you launch (the
 list is collapsed; open it with **Show launch configurations**). Choose
-a harness, native authentication or a provider, then a model, supported effort,
-and optional extra arguments. Known providers supply catalogue choices; generic
+a harness, native authentication or a provider, then a model and supported
+effort. Known providers supply catalogue choices; generic
 providers retain manual model entry. The same editor opens from **New configuration**
 in a harness's spawn submenu. Add credentials in **Providers** first: enabled,
 keyed providers can be selected even before a pairing exists. New pairings collect
@@ -816,6 +816,14 @@ While a configuration is saving, the editor shows progress and keeps its fields
 disabled. In the spawn menu, the status changes from **Saving configuration…**
 to **Refreshing availability…** while provider availability is fetched. A failed
 save shows an error and leaves the draft available to retry.
+
+The raw inputs sit behind an **Advanced options** disclosure that starts closed
+for a new configuration and opens on its own when the configuration already
+carries one. It holds the extra arguments passed to the harness command line
+as given, and the **Custom model** field that a **Custom model…** selection
+needs; the disclosure stays open while that required field is in use, so the
+value a save depends on stays on screen. The endpoint, the model choices and
+**Verify provider and model** stay outside it.
 
 Model choices belong to the selected provider and API surface; **Custom model**
 allows a model not yet in the catalogue. Effort choices are restricted to documented
@@ -917,6 +925,15 @@ abandons the edits.
 The selected Settings tab is the tablist's single Tab stop. Up/Down wrap
 through tabs, and Home/End choose the first/last tab. Tab then enters the
 selected panel. Switching tabs preserves unsaved edits.
+
+Some fields — the Worktree directory, the Circuit agent pool size, harness
+defaults and the probe spawn prompts — save as soon as you leave them, either
+by moving to the next control or by switching to another Settings tab. Those
+fields do not save behind your back while you are trying to leave Settings:
+pressing **Escape**, closing with the **×**, or clicking outside the Settings
+panel keeps the edit uncommitted and asks instead. **Keep editing** returns
+to the field you were in with the edit still there; **Discard changes** closes
+Settings without saving it.
 
 Default, classifier, reviewer and naming choices load independently of live
 CLI and WSL probes. Routes awaiting runtime verification explain that state
@@ -1144,6 +1161,15 @@ agent's actual request before answering it. Longer replies belong in the
 terminal. Changes still supports file diffs and pull request creation. The
 request and unsent reply remain available while you inspect changes or the
 terminal. Back returns through the screen you came from.
+
+**Connection → Background notifications** makes the phone tell you when an
+agent needs you while the app is closed. Turn it on once; the phone then keeps
+a connection to the desktop and posts one notification per agent that asks a
+question or requests permission. Tapping the notification opens that agent,
+and the notification clears as soon as the agent is answered — including when
+you answer it on the desktop. The phone shows a persistent "Watching for
+agents" notification for as long as this is on; turning it off stops the
+connection and clears the notifications.
 
 The **Coordinator Read API** is a separate, read-only surface for an external
 coordinator. It is off by default and uses its own capability-scoped token; it

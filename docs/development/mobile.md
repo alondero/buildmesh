@@ -294,7 +294,9 @@ HEAD)" — a false claim about files that demonstrably changed.
 The mobile shell owns screen history and the selected home tab. NodeList owns
 Overview/Work polling and attention events; NodeOverview polls the selected
 node and sends short replies through the acknowledged HTTP input route.
-CaptureIdea retains a browser-local draft until creation succeeds. A create
+CaptureIdea retains a browser-local draft until creation succeeds. Its Agent
+choice lists **Mesh default** first, and a mesh card's split button opens
+Capture with that mesh and the chosen launch already selected. A create
 request without a provider or saved configuration launches the mesh default, the
 same chain the desktop sidebar uses. Its prompt
 crosses the generated CreateNodeRequest boundary into SpawnIntent::Prompt,
@@ -384,13 +386,59 @@ probe's `create_pr_node`, taking `{title, head_ref, head_sha?, head_repo_owner?,
 head_repo_clone_url?, provider?, configuration_id?}`. Both routes build the
 prompt on the desktop from the user's template, so the phone never sends one.
 
-On the web client, **Start agent** opens a launch configuration choice with
-**Mesh default** or an available Spawn Option supporting prefill. Starting
-requires confirmation; cancellation creates no node, and the picker stays open
-while a request is pending. Browser back first dismisses the web picker and is
-consumed while it is starting. The Android client instead uses the desktop's
-split button, including saved configurations, and starts the agent on the
-tap (see [Screens and ownership](android.md#screens-and-ownership)).
+On the web client, the launch is the desktop's **split button** (issue #2385),
+the same shape the Android client and the desktop sidebar use (see
+[Screens and ownership](android.md#screens-and-ownership)). The main half
+starts the mesh default and the chevron opens the Spawn Menu, so the phone
+does not ask for a second confirmation: the split button *is* the
+confirmation. The menu lists the backend's own rows in the backend's own
+order, saved Launch Configurations included, minus the rows that cannot take a
+first prompt. A saved configuration row launches its own `spawn_option_id` with
+the configuration's id beside it; the mesh default sends neither field.
+Browser back dismisses an open Spawn Menu sheet and is consumed while that
+sheet is open. While a launch is in flight the sheet owns the request: it
+cannot be dismissed and its rows are locked, so a second tap cannot start a
+second agent. A launch that fails is reported *inside* the sheet, because the
+sheet stays open so the user can pick again and the screen's own error line
+would sit behind the sheet's backdrop.
+
+## The phone's Spawn Menu
+
+One backend list, and no client re-sorts it (ADR-0016). `GET /api/providers`
+is the Spawn Menu the clients read — the desktop groups it by harness, the
+phone renders it flat. The phone narrows it to the rows that can take a first
+prompt and resolves each row into the pair the spawn routes take
+(`src/mobile/spawnMenu.ts`):
+
+| Menu row | Sent to the route |
+|---|---|
+| Mesh default | nothing — the backend resolves its own default chain |
+| Spawn Option | `provider` |
+| Saved Launch Configuration | `provider` (the row's `spawn_option_id`) and `configuration_id` |
+
+The menu reaches the phone through three surfaces, each a split button
+(`src/mobile/components/SpawnSplitButton.tsx`):
+
+- an **issue** card — the main half starts the agent with the mesh default,
+  the chevron picks a launch;
+- an **open pull request** card — the same pair, on the mesh's pull request
+  list. A node's own pull request list has no split button: it is a read-only
+  view of the branch that node already works on;
+- a **mesh** card — both halves open Capture with that mesh and the chosen
+  launch already selected, because Capture is where the first prompt is
+  written.
+
+Capture offers **Mesh default** as its own choice, and a create request for
+it carries neither `provider` nor `configuration_id`.
+
+Capture's mesh-card preset is the surface's choice, not the user's: it never
+overwrites the stored destination, so the user's own mesh and agent survive a
+visit to Capture. Only an explicit change to either field is stored.
+
+The menu read is secondary: it never reports an authorization failure on its
+own, so a menu read can never sign the user out of a screen they have not
+acted on. The surface's own read — the issue feed, the pull request feed —
+owns the session-expiry signal.
 
 ## Mobile terminal socket lifecycle
 
@@ -436,4 +484,51 @@ ring recovers by replaying the history tail. Pins:
 `a_reconnecting_client_replays_history_then_receives_live_output`,
 `a_slow_subscriber_pins_at_most_the_byte_budget`,
 `repeated_node_lifetimes_reclaim_every_entry`.
+
+## Mobile-route wire fixtures
+
+A mobile route's JSON shape is a contract, but the phone's tests used to mock the
+desktop with bodies written by hand in the shape the *client* assumed. When the
+desktop changed a response, those fixtures kept passing: the issues feed moving
+to `{items, completeness}` (issue #2024) crashed the Issues screen, and the
+mesh-scoped Create PR and saved Launch Configuration launches broke — issue
+#2318 records that the Android tests stayed green throughout. The web client is
+protected because it imports the ts-rs generated types; the phone had no
+equivalent.
+
+The canonical mobile-route fixtures (issue #2318) close that hole. One Rust
+module, `http::mobile_wire`, builds one canonical sample of each mobile-route
+body the phone reads and sends **from the Rust wire type the route actually
+sends** and pins it as a committed JSON fixture under
+`android/app/src/test/resources/mobile-wire/`. The Android JVM tests and the
+instrumentation dispatcher read those fixtures instead of inline strings.
+
+- **The gate is a test.** `committed_mobile_wire_fixtures_match_the_rust_wire_types`
+  compares every committed fixture against a fresh serialisation of the Rust
+  type and fails when they differ, so a wire change that was not regenerated
+  fails `cargo test` instead of passing quietly. Regenerate with
+  `cargo test --lib http::mobile_wire -- --ignored` (run in `src-tauri/`).
+  `the_fixture_directory_holds_only_derived_fixtures` fails when the fixture
+  directory holds a file no Rust type produces, so a fixture left behind by a
+  rename fails the suite too instead of riding along with a passing
+  comparison.
+- **A route body needs a named type.** An anonymous `serde_json::json!` literal
+  carries no type for a fixture to be derived from, so a rename inside it would
+  go unnoticed. `routes::git::GitBranchResponse` and
+  `routes::git::GitHubAuthStatus` exist for that reason: the phone reads
+  both bodies, and an untyped literal would have left them unguarded.
+- **Request bodies are pinned per variant.** A saved Launch Configuration
+  travels as `configuration_id` beside its Spawn Option, a proxied option has
+  no configuration of its own, and the mesh default sends neither — three
+  different bodies on the same route, each with its own fixture.
+- **Scenario data stays a scenario.** The canonical fixture is one sample; a
+  test that needs a truncated feed or a mergeable pull request overlays its own
+  values on the fixture's envelope, so the key set still comes from the Rust
+  type.
+
+Renaming a field in a Rust mobile-route response therefore fails the Rust gate
+and then fails the Android test against the client that has not caught up, with
+no hand-edited Android fixture anywhere. See
+[Android development](android.md#mobile-route-fixtures) for the Android-side
+wiring.
 

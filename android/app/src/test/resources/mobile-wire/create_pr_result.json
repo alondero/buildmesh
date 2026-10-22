@@ -1,0 +1,5 @@
+{
+  "base_branch": "main",
+  "head_branch": "topic",
+  "url": "https://example.invalid/pull/17"
+}

@@ -334,12 +334,9 @@ describe("launch and resume visit authority (issue #2327)", () => {
     async function startIssueSpawn() {
       await act(async () => screen.getByTestId("open-issues").click());
       await userEvent.click(await screen.findByTestId("issue-101"));
+      // The split button's main half starts the launch straight away — the
+      // phone confirms nothing (issue #2385).
       await act(async () => screen.getByTestId("issue-spawn-101").click());
-      const start = await screen.findByRole("button", { name: "Start" });
-      await waitFor(() =>
-        expect((start as HTMLButtonElement).disabled).toBe(false),
-      );
-      await act(async () => start.click());
       await waitFor(() => expect(spawnRequests).toHaveLength(1));
     }
 
@@ -518,20 +515,17 @@ describe("launch and resume visit authority (issue #2327)", () => {
       );
     }
 
-    /// Expands the issue card and confirms a launch, expanding first only when
-    /// the current visit has the card collapsed.
+    /// Expands the issue card and starts a launch, expanding first only when
+    /// the current visit has the card collapsed. The split button's main half
+    /// starts the launch with the mesh default — there is no confirmation
+    /// step on the phone (issue #2385).
     async function confirmLaunch() {
       await screen.findByTestId("issue-101");
       if (screen.queryByTestId("issue-spawn-101") === null) {
         await userEvent.click(screen.getByTestId("issue-101"));
       }
-      await act(async () => screen.getByTestId("issue-spawn-101").click());
-      const start = await screen.findByRole("button", { name: "Start" });
-      await waitFor(() =>
-        expect((start as HTMLButtonElement).disabled).toBe(false),
-      );
       const before = spawnRequests.length;
-      await act(async () => start.click());
+      await act(async () => screen.getByTestId("issue-spawn-101").click());
       await waitFor(() => expect(spawnRequests).toHaveLength(before + 1));
     }
 

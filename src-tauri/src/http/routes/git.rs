@@ -19,6 +19,30 @@ use crate::http::response::Response;
 use crate::http::router::ParsedRequest;
 use crate::read_outcome::ReadOutcome;
 
+/// The branch an agent node's worktree is on.
+///
+/// A typed body rather than an anonymous JSON literal, so the canonical
+/// mobile-route fixture (issue #2318) can be built from the same type the
+/// route sends and a rename is caught by the fixture gate.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "GitBranchResponse.ts")]
+pub struct GitBranchResponse {
+    /// The branch name, exactly as the worktree reports it.
+    pub branch: String,
+}
+
+/// Whether the GitHub CLI is authenticated on the desktop.
+///
+/// A typed body rather than an anonymous JSON literal, so the canonical
+/// mobile-route fixture (issue #2318) can be built from the same type the
+/// route sends and a rename is caught by the fixture gate.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "GitHubAuthStatus.ts")]
+pub struct GitHubAuthStatus {
+    /// `true` when `gh auth status` reports a usable account.
+    pub ok: bool,
+}
+
 /// Resolve the node a per-agent git route is about, or the response to answer
 /// with instead.
 ///
@@ -77,7 +101,7 @@ pub async fn branch(req: &ParsedRequest) -> Response {
         return response;
     }
     match crate::commands::pr::get_current_branch(agent_id).await {
-        Ok(name) => serialized_or_500("200 OK", &serde_json::json!({ "branch": name })),
+        Ok(name) => serialized_or_500("200 OK", &GitBranchResponse { branch: name }),
         Err(e) => Response::json_error("404 Not Found", &e),
     }
 }
@@ -117,7 +141,6 @@ pub async fn gh_auth(_req: &ParsedRequest) -> Response {
     // Await the async wrapper so the blocking auth HTTPS GET runs on the
     // blocking pool, not this route's Tauri async-runtime worker.
     let ok = crate::commands::github::check_gh_auth().await;
-    let body = serde_json::to_string(&serde_json::json!({ "ok": ok }))
-        .unwrap_or_else(|_| "{}".to_string());
+    let body = serde_json::to_string(&GitHubAuthStatus { ok }).unwrap_or_else(|_| "{}".to_string());
     Response::json("200 OK", body)
 }

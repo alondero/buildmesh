@@ -229,6 +229,13 @@ A spawn that fails before the harness starts leaves the node red. The reason
 arrives as a **Spawn** toast (prefixed with `Node <id>: `), and the reason
 itself is stored with the node's lifecycle record, so it survives a restart.
 
+If the reason starts with **Project folder unavailable**, check that the Mesh's
+project folder can be opened in File Explorer or your file manager. Restore any
+disconnected drive or network mapping, then retry the node. A missing mapped
+drive does not require moving or cloning the repository. The message includes
+the selected path and the operating system's error to help identify what is
+unavailable.
+
 One cause is a repository that Git has been told is *bare*. A repository can be
 flagged `core.bare=true` in its own `.git/config` even though the folder holds a
 full checkout. Git then refuses the commands that need a work tree ("this

@@ -1,7 +1,9 @@
 package dev.buildmesh.remote
 
+import android.Manifest
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -18,6 +20,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -31,7 +34,7 @@ import kotlinx.serialization.json.*
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun BuildmeshApp(vm: BuildmeshViewModel, invitation: String = "") {
+fun BuildmeshApp(vm: BuildmeshViewModel, invitation: String = "", requestedNodeId: Long = 0L, onNodeRequestConsumed: () -> Unit = {}) {
     val state by vm.state.collectAsStateWithLifecycle()
     var screen by rememberSaveable { mutableStateOf("home") }
     var tab by rememberSaveable { mutableStateOf("Overview") }
@@ -39,7 +42,26 @@ fun BuildmeshApp(vm: BuildmeshViewModel, invitation: String = "") {
     var nodeId by rememberSaveable { mutableLongStateOf(0) }
     var launch by rememberSaveable { mutableStateOf("") }
     var file by rememberSaveable { mutableStateOf("") }
+    var pendingNodeId by rememberSaveable { mutableLongStateOf(0L) }
     LaunchedEffect(state.paired) { if (!state.paired) screen = "home" }
+    // A notification names the node it is about, so opening it lands on that
+    // node. The request waits for the inventory before it navigates: an empty
+    // node list before the first read means "not loaded yet", not "that node
+    // is gone". The request is consumed so the same tap opens it again later.
+    LaunchedEffect(requestedNodeId) {
+        if (requestedNodeId <= 0L) return@LaunchedEffect
+        pendingNodeId = requestedNodeId
+        onNodeRequestConsumed()
+    }
+    LaunchedEffect(pendingNodeId, state.nodes, state.loaded, state.refreshing) {
+        if (pendingNodeId <= 0L) return@LaunchedEffect
+        val present = state.nodes.any { it.number("id") == pendingNodeId }
+        if (present || (state.loaded && !state.refreshing)) {
+            nodeId = pendingNodeId
+            screen = "node"
+            pendingNodeId = 0L
+        }
+    }
     fun back() { screen = when (screen) { "terminal", "changes", "pr" -> "node"; "diff" -> "changes"; else -> "home" } }
     BackHandler(state.paired && screen != "home") { back() }
     val selected = state.nodes.firstOrNull { it.number("id") == nodeId }
@@ -275,12 +297,55 @@ fun EmptyMessage(message: String) {
 @Composable
 fun ConnectionScreen(origin: String, vm: BuildmeshViewModel, onForgot: () -> Unit) {
     var confirm by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    var watching by remember { mutableStateOf(AgentWatchService.isEnabled(context)) }
+    var refused by remember { mutableStateOf(false) }
+    val askForNotices = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            AgentWatchService.setEnabled(context, true)
+            watching = true
+            refused = false
+        } else {
+            refused = true
+        }
+    }
+    fun watch(enabled: Boolean) {
+        if (!enabled) {
+            AgentWatchService.setEnabled(context, false)
+            watching = false
+            refused = false
+            return
+        }
+        if (!AgentNotifications.allowed(context)) {
+            askForNotices.launch(Manifest.permission.POST_NOTIFICATIONS)
+            return
+        }
+        AgentWatchService.setEnabled(context, true)
+        watching = true
+        refused = false
+    }
     Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("Paired desktop", style = MaterialTheme.typography.titleLarge)
         Text(origin, color = MeshColors.secondary)
         Text("Your device session is encrypted on this phone. To revoke access, remove this device in the desktop's Authorized Devices settings.")
         Button(shape = MaterialTheme.shapes.small, onClick = vm::refresh) { Text("Retry connection") }
         OutlinedButton(shape = MaterialTheme.shapes.small, onClick = { confirm = true }) { Text("Forget this desktop") }
+        HorizontalDivider()
+        Text("Background notifications", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "Keep this phone listening to the desktop while the app is closed, so an agent that asks a question or requests permission reaches you. Turning it off stops the background connection.",
+            color = MeshColors.secondary,
+        )
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(if (watching) "On" else "Off", modifier = Modifier.weight(1f))
+            Switch(checked = watching, onCheckedChange = { watch(it) })
+        }
+        if (refused) {
+            Text(
+                "Buildmesh needs permission to post notifications before it can tell you about an agent.",
+                color = MeshColors.secondary,
+            )
+        }
     }
     if (confirm) AlertDialog(onDismissRequest = { confirm = false }, title = { Text("Forget this desktop?") }, text = { Text("You'll need a fresh invitation to connect again. Revoke this device on the desktop to remove its authorization there too.") },
         confirmButton = { TextButton(onClick = { vm.forget(); onForgot() }) { Text("Forget") } }, dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } })

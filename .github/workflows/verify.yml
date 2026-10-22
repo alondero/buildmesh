@@ -778,8 +778,13 @@ jobs:
             args: "commands:: http::"
           - label: circuit-coordinator
             args: "circuit:: coordinator:: --skip db::circuit:: --skip commands::circuit:: --skip models::circuit:: --skip commands::coordinator:: --skip http::routes::"
+          # `http::routes::git::` is that same nested-path problem once more:
+          # this shard's `git::` filter is a substring of the HTTP git route
+          # module, so the two ts-rs export tests there (issue #2318) would be
+          # claimed by this shard and by `commands-http`, and the coverage gate
+          # would fail. `http::` (commands-http) keeps them.
           - label: git-env-preferences
-            args: "git:: env:: preferences:: --skip commands::git:: --skip commands::preferences:: --skip models::git::"
+            args: "git:: env:: preferences:: --skip commands::git:: --skip commands::preferences:: --skip models::git:: --skip http::routes::git::"
           # Everything whose first path segment no other shard owns, so a new
           # module lands in one place instead of going untested. The
           # `--skip agent::sandbox::` is the same nested-path problem the other

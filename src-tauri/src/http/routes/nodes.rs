@@ -39,7 +39,7 @@ pub async fn list_json() -> Result<Response, Unavailable> {
     serialized("200 OK", &nodes).map_err(Unavailable::Read)
 }
 
-#[derive(serde::Deserialize, ts_rs::TS)]
+#[derive(serde::Deserialize, serde::Serialize, ts_rs::TS)]
 #[ts(export, export_to = "CreateNodeRequest.ts")]
 pub struct CreateNodeRequest {
     #[ts(as = "i32")]
@@ -73,6 +73,16 @@ pub struct CreateNodeRequest {
 /// Longest accepted client operation key. Bounds the ledger row and rejects
 /// an obviously-not-a-uuid body before it reaches the transaction.
 const OPERATION_KEY_MAX_BYTES: usize = 128;
+
+/// Body for `POST /api/nodes/{id}/input`: the keystrokes the phone typed
+/// into an agent's terminal.
+///
+/// Crate-visible so the canonical mobile-route fixture (issue #2318) can be
+/// built from the same type the route parses.
+#[derive(serde::Deserialize, serde::Serialize)]
+pub(crate) struct InputRequest {
+    pub(crate) seq: String,
+}
 
 /// Pre-commit failures raised while preparing a create.
 ///
@@ -353,11 +363,6 @@ pub(crate) const INPUT_BODY_MAX_BYTES: usize = 1024;
 /// re-sent, and `Retry-After` says so.
 pub async fn post_input(req: &ParsedRequest) -> Response {
     let node_id = req.id0();
-
-    #[derive(serde::Deserialize)]
-    struct InputRequest {
-        seq: String,
-    }
 
     let parsed: InputRequest = match serde_json::from_slice(&req.body) {
         Ok(r) => r,

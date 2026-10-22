@@ -61,11 +61,11 @@ fn label_triggers(
     triggers
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
-struct LabelRequest {
-    label: String,
-    present: bool,
+pub(crate) struct LabelRequest {
+    pub(crate) label: String,
+    pub(crate) present: bool,
 }
 
 pub async fn set_label(req: &ParsedRequest) -> Response {
@@ -116,15 +116,15 @@ pub async fn list(req: &ParsedRequest) -> Response {
 // legacy `{title, body, provider}` shape, we want a loud 400 — not a silent
 // body-dropped success — so the user knows to refresh. See memory:
 // buildmesh-serde-default-fragility.
-#[derive(Debug, Clone, PartialEq)]
-struct SpawnRequest {
-    title: String,
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub(crate) struct SpawnRequest {
+    pub(crate) title: String,
     /// Spawn Option; absent means the mesh default.
     #[serde(default)]
-    provider: Option<String>,
+    pub(crate) provider: Option<String>,
     /// Saved Launch Configuration under `provider`.
     #[serde(default)]
-    configuration_id: Option<String>,
+    pub(crate) configuration_id: Option<String>,
 }
 
 /// `POST /api/meshes/{id}/issues/{n}/spawn` — the desktop Issues probe's
