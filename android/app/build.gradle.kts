@@ -73,6 +73,11 @@ android {
     }
     sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/terminal"))
     sourceSets["main"].java.srcDir(layout.buildDirectory.dir("generated/circuitWire"))
+    // The canonical mobile-route fixtures (issue #2318) are committed under
+    // the unit test resources, because the JVM tests read them off the
+    // classpath. The instrumentation dispatcher reads the very same files
+    // from the test APK's assets, so the two suites can never drift apart.
+    sourceSets["androidTest"].assets.srcDir(layout.projectDirectory.dir("src/test/resources"))
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
     lint {
         abortOnError = true

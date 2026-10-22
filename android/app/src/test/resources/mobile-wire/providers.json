@@ -1,0 +1,156 @@
+[
+  {
+    "capabilities": {
+      "attention_capability": {
+        "kind": "none"
+      },
+      "auto_resume_on_startup": false,
+      "available_on": [
+        "windows"
+      ],
+      "background_inference": null,
+      "default_permission_mode": null,
+      "effort_control": {
+        "kind": "none"
+      },
+      "harness_id": "terminal",
+      "is_plain_terminal": true,
+      "permission_modes": [],
+      "produces_readable_transcript": true,
+      "requires_attention_hook": false,
+      "supports_effort_override": false,
+      "supports_extra_args": true,
+      "supports_model_override": true,
+      "supports_passive_turn_watcher": false,
+      "supports_prefill": false,
+      "supports_resume": false
+    },
+    "color": "#5b6472",
+    "group_key": "terminal",
+    "harness_id": "terminal",
+    "icon": "T",
+    "id": "terminal",
+    "is_proxied": false,
+    "label": "Terminal",
+    "provider_id": null,
+    "resumable": false
+  },
+  {
+    "capabilities": {
+      "attention_capability": {
+        "kind": "none"
+      },
+      "auto_resume_on_startup": false,
+      "available_on": [
+        "windows"
+      ],
+      "background_inference": null,
+      "default_permission_mode": null,
+      "effort_control": {
+        "kind": "none"
+      },
+      "harness_id": "claude",
+      "is_plain_terminal": false,
+      "permission_modes": [],
+      "produces_readable_transcript": true,
+      "requires_attention_hook": false,
+      "supports_effort_override": false,
+      "supports_extra_args": true,
+      "supports_model_override": true,
+      "supports_passive_turn_watcher": false,
+      "supports_prefill": true,
+      "supports_resume": true
+    },
+    "color": "#5b6472",
+    "configuration": {
+      "effort": null,
+      "extra_args": null,
+      "harness_id": "claude",
+      "id": "launch/405f11ec",
+      "model": null,
+      "name": "Saved agent",
+      "spawn_option_id": "claude"
+    },
+    "group_key": "claude",
+    "harness_id": "claude",
+    "icon": "S",
+    "id": "launch/405f11ec",
+    "is_proxied": false,
+    "label": "Saved agent",
+    "provider_id": null,
+    "resumable": true
+  },
+  {
+    "capabilities": {
+      "attention_capability": {
+        "kind": "none"
+      },
+      "auto_resume_on_startup": false,
+      "available_on": [
+        "windows"
+      ],
+      "background_inference": null,
+      "default_permission_mode": null,
+      "effort_control": {
+        "kind": "none"
+      },
+      "harness_id": "claude",
+      "is_plain_terminal": false,
+      "permission_modes": [],
+      "produces_readable_transcript": true,
+      "requires_attention_hook": false,
+      "supports_effort_override": false,
+      "supports_extra_args": true,
+      "supports_model_override": true,
+      "supports_passive_turn_watcher": false,
+      "supports_prefill": true,
+      "supports_resume": true
+    },
+    "color": "#5b6472",
+    "group_key": "claude",
+    "harness_id": "claude",
+    "icon": "M",
+    "id": "claude:minimax",
+    "is_proxied": true,
+    "label": "MiniMax via Claude Code",
+    "provider_id": "minimax",
+    "resumable": true
+  },
+  {
+    "capabilities": {
+      "attention_capability": {
+        "kind": "none"
+      },
+      "auto_resume_on_startup": false,
+      "available_on": [
+        "windows"
+      ],
+      "background_inference": null,
+      "default_permission_mode": null,
+      "effort_control": {
+        "kind": "none"
+      },
+      "harness_id": "codex",
+      "is_plain_terminal": false,
+      "permission_modes": [],
+      "produces_readable_transcript": true,
+      "requires_attention_hook": false,
+      "supports_effort_override": false,
+      "supports_extra_args": true,
+      "supports_model_override": true,
+      "supports_passive_turn_watcher": false,
+      "supports_prefill": true,
+      "supports_resume": true
+    },
+    "color": "#5b6472",
+    "group_key": "codex",
+    "harness_id": "codex",
+    "icon": "U",
+    "id": "codex",
+    "is_proxied": false,
+    "label": "Unavailable agent",
+    "provider_id": null,
+    "resumable": true,
+    "unavailable_reason": "Missing executable"
+  }
+]

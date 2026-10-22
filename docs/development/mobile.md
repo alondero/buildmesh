@@ -437,3 +437,50 @@ ring recovers by replaying the history tail. Pins:
 `a_slow_subscriber_pins_at_most_the_byte_budget`,
 `repeated_node_lifetimes_reclaim_every_entry`.
 
+## Mobile-route wire fixtures
+
+A mobile route's JSON shape is a contract, but the phone's tests used to mock the
+desktop with bodies written by hand in the shape the *client* assumed. When the
+desktop changed a response, those fixtures kept passing: the issues feed moving
+to `{items, completeness}` (issue #2024) crashed the Issues screen, and the
+mesh-scoped Create PR and saved Launch Configuration launches broke — issue
+#2318 records that the Android tests stayed green throughout. The web client is
+protected because it imports the ts-rs generated types; the phone had no
+equivalent.
+
+The canonical mobile-route fixtures (issue #2318) close that hole. One Rust
+module, `http::mobile_wire`, builds one canonical sample of each mobile-route
+body the phone reads and sends **from the Rust wire type the route actually
+sends** and pins it as a committed JSON fixture under
+`android/app/src/test/resources/mobile-wire/`. The Android JVM tests and the
+instrumentation dispatcher read those fixtures instead of inline strings.
+
+- **The gate is a test.** `committed_mobile_wire_fixtures_match_the_rust_wire_types`
+  compares every committed fixture against a fresh serialisation of the Rust
+  type and fails when they differ, so a wire change that was not regenerated
+  fails `cargo test` instead of passing quietly. Regenerate with
+  `cargo test --lib http::mobile_wire -- --ignored` (run in `src-tauri/`).
+  `the_fixture_directory_holds_only_derived_fixtures` fails when the fixture
+  directory holds a file no Rust type produces, so a fixture left behind by a
+  rename fails the suite too instead of riding along with a passing
+  comparison.
+- **A route body needs a named type.** An anonymous `serde_json::json!` literal
+  carries no type for a fixture to be derived from, so a rename inside it would
+  go unnoticed. `routes::git::GitBranchResponse` and
+  `routes::git::GitHubAuthStatus` exist for that reason: the phone reads
+  both bodies, and an untyped literal would have left them unguarded.
+- **Request bodies are pinned per variant.** A saved Launch Configuration
+  travels as `configuration_id` beside its Spawn Option, a proxied option has
+  no configuration of its own, and the mesh default sends neither — three
+  different bodies on the same route, each with its own fixture.
+- **Scenario data stays a scenario.** The canonical fixture is one sample; a
+  test that needs a truncated feed or a mergeable pull request overlays its own
+  values on the fixture's envelope, so the key set still comes from the Rust
+  type.
+
+Renaming a field in a Rust mobile-route response therefore fails the Rust gate
+and then fails the Android test against the client that has not caught up, with
+no hand-edited Android fixture anywhere. See
+[Android development](android.md#mobile-route-fixtures) for the Android-side
+wiring.
+

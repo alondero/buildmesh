@@ -62,19 +62,19 @@ pub async fn discover(req: &ParsedRequest) -> Response {
     }
 }
 
-#[derive(serde::Deserialize)]
-struct ImportAndResumeRequest {
-    cli_session_id: String,
-    branch: String,
-    worktree_name: Option<String>,
+#[derive(serde::Deserialize, serde::Serialize)]
+pub(crate) struct ImportAndResumeRequest {
+    pub(crate) cli_session_id: String,
+    pub(crate) branch: String,
+    pub(crate) worktree_name: Option<String>,
     /// The archive entry's originating harness (issue #2332). Required, and
     /// resolved before the session-id gate so that gate can use the harness's
     /// own id shape. See [`LEGACY_CLIENT_NO_PROVENANCE`].
-    provider: Option<String>,
+    pub(crate) provider: Option<String>,
     #[serde(default = "default_rows")]
-    rows: u16,
+    pub(crate) rows: u16,
     #[serde(default = "default_cols")]
-    cols: u16,
+    pub(crate) cols: u16,
 }
 fn default_rows() -> u16 {
     24

@@ -298,11 +298,54 @@ Session lifecycle tests read the encrypted store back in each case: a 403 from a
 data route keeps it, a 401 from a data route and a 401 or 403 from the restore
 clear it, and an unreachable desktop keeps it.
 These assert literal payloads, retained drafts after failures, and acknowledged
-success. They do not create a real GitHub pull request. Their mocked responses
-and the JVM `WireContractTest` fixtures follow the generated Rust wire types in
-`src/types/generated/`. A fixture written in the client's own assumed shape keeps
-passing after the desktop changes: the issues-feed change crashed the Issues
-screen while the old bare-array fixture still passed.
+success. They do not create a real GitHub pull request.
+
+Their mocked responses are the canonical mobile-route fixtures, serialised from
+the Rust wire types the routes send and committed under
+`android/app/src/test/resources/mobile-wire/`. A fixture written in the client's
+own assumed shape keeps passing after the desktop changes: the issues-feed
+change crashed the Issues screen while the old bare-array fixture still passed.
+Reading the derived fixture closes that hole — see
+[Mobile-route fixtures](#mobile-route-fixtures) below.
+
+### Mobile-route fixtures
+
+The Android client reads untyped JSON, so a body written by hand in the client's
+own assumed shape keeps passing after the desktop changes its shape. The
+canonical mobile-route fixtures close that hole (issue #2318).
+
+- **Source of truth:** `src-tauri/src/http/mobile_wire.rs` builds one canonical
+  sample of each mobile-route body the phone reads and sends — the feeds, the
+  Spawn Menu, the node and outcome bodies, the lookups and the launch
+  requests — **from the Rust wire type the route actually sends**, and writes
+  it as `android/app/src/test/resources/mobile-wire/<name>.json`. The merge
+  route's single-`url` request and its response, and the import-and-resume 207
+  body, stay outside the set: they are one-field bodies the phone does not
+  parse. The circuit routes are covered by the Kotlin generator
+  (`scripts/generate-android-circuit-wire.mjs`) instead.
+- **Gate:** `committed_mobile_wire_fixtures_match_the_rust_wire_types` compares
+  each committed fixture against a fresh serialisation of the Rust type and
+  fails when they differ. A wire change that was not regenerated fails
+  `cargo test` rather than passing quietly.
+  `the_fixture_directory_holds_only_derived_fixtures` fails when the directory
+  holds a file no Rust type produces, so a fixture left behind by a rename
+  fails the suite too instead of riding along with a passing comparison.
+- **Consumers:** the JVM tests read the fixtures off the classpath
+  (`src/test/java/dev/buildmesh/remote/MobileWireFixtures.kt`); the
+  instrumentation dispatcher reads the same files from the test APK's assets
+  (`src/androidTest/java/dev/buildmesh/remote/MobileWireFixtures.kt`). Gradle
+  points the `androidTest` assets at `src/test/resources`, so both suites read
+  one committed copy.
+- **Regenerating after an intentional wire change:** run
+  `cargo test --lib http::mobile_wire -- --ignored` in `src-tauri/`.
+- **Adding a route:** give the body a named Rust type — an anonymous
+  `serde_json::json!` literal carries no type for a fixture to be derived
+  from, so a rename inside it would go unnoticed — add the sample to
+  `mobile_wire.rs`, and read the new fixture from the test that needs it.
+
+With the fixture in place, renaming a field in a Rust mobile-route response
+makes the Rust gate fail and then makes the Android test fail against the
+client that has not caught up, with no hand-edited Android fixture anywhere.
 
 For actual desktop acceptance, start the dev profile with Remote Access enabled,
 connect an Android device through adb, and run from the repository root:

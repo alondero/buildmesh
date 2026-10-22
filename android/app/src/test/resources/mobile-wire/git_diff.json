@@ -1,0 +1,31 @@
+{
+  "files": [
+    {
+      "additions": 1,
+      "binary": false,
+      "deletions": 0,
+      "hunks": [
+        {
+          "lines": [
+            {
+              "content": "    let mesh = Mesh::default();",
+              "line_type": "add",
+              "new_num": 11,
+              "old_num": null
+            }
+          ],
+          "lines_highlighted": [],
+          "new_highlighted": "",
+          "new_lines": 3,
+          "new_start": 10,
+          "old_highlighted": "",
+          "old_lines": 2,
+          "old_start": 10
+        }
+      ],
+      "old_path": null,
+      "path": "src/lib.rs",
+      "status": "modified"
+    }
+  ]
+}

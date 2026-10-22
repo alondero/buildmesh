@@ -93,6 +93,7 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/commands/prune_tests.rs': 'commands::prune::prune_tests',
   'src-tauri/src/http/ws_tests.rs': 'http::ws::tests',
   'src-tauri/src/http/read_status_tests.rs': 'http::read_status::tests',
+  'src-tauri/src/http/mobile_wire_tests.rs': 'http::mobile_wire::tests',
   'src-tauri/src/http/routes/circuit_tests.rs': 'http::routes::circuit::tests',
   'src-tauri/src/services/mcode_session_tests.rs': 'services::mcode_session::tests',
   'src-tauri/src/services/agent_node_tests.rs': 'services::agent_node::tests',

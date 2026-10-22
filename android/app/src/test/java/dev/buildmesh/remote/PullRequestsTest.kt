@@ -8,11 +8,53 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class PullRequestsTest {
-    // GitHubPullRequestFeed and PrMergeability from src/types/generated.
-    private val fixture = """{"items":[{"number":42,"title":"Fix search","body":"","url":"https://github.com/o/r/pull/42","state":"open","draft":false,
-        "head_ref":"feature/search","head_repo_owner":"o","head_repo_clone_url":"https://github.com/o/r.git","head_sha":"abc","author":"o",
-        "mergeable":true,"mergeable_state":"clean","checks_state":"success","review_decision":"approved"}],
-        "completeness":{"returned":1,"pages_fetched":1,"complete":false,"incomplete_reason":"safety_cap","reported_total":1200}}"""
+    /** The canonical pull request row, so a renamed field breaks these tests too. */
+    private val pullRow = MobileWireFixtures.obj("pulls_feed").arrayAt("items").first()
+
+    /**
+     * The canonical feed's envelope, with this test's own row and
+     * completeness: this test needs a pull request that is ready to merge and
+     * a feed that was truncated at the page limit.
+     */
+    private val fixture = JsonObject(
+        MobileWireFixtures.obj("pulls_feed") +
+            ("items" to JsonArray(listOf(JsonObject(
+                pullRow +
+                    ("number" to JsonPrimitive(42)) +
+                    ("title" to JsonPrimitive("Fix search")) +
+                    ("url" to JsonPrimitive("https://github.com/o/r/pull/42")) +
+                    ("head_ref" to JsonPrimitive("feature/search")) +
+                    ("head_repo_owner" to JsonPrimitive("o")) +
+                    ("head_repo_clone_url" to JsonPrimitive("https://github.com/o/r.git")) +
+                    ("head_sha" to JsonPrimitive("abc")) +
+                    ("author" to JsonPrimitive("o")) +
+                    ("mergeable" to JsonPrimitive(true)) +
+                    ("mergeable_state" to JsonPrimitive("clean")) +
+                    ("checks_state" to JsonPrimitive("success")) +
+                    ("review_decision" to JsonPrimitive("approved"))
+            )))) +
+            ("completeness" to JsonObject(
+                MobileWireFixtures.obj("pulls_feed").objectAt("completeness")!!.mapValues { (key, value) ->
+                    when (key) {
+                        "returned" -> JsonPrimitive(1)
+                        "pages_fetched" -> JsonPrimitive(1)
+                        "complete" -> JsonPrimitive(false)
+                        "incomplete_reason" -> JsonPrimitive("safety_cap")
+                        "reported_total" -> JsonPrimitive(1200)
+                        else -> value
+                    }
+                },
+            ))
+    ).toString()
+
+    /** The canonical mergeability body with this test's own state. */
+    private fun mergeability(mergeable: JsonElement, state: String) =
+        JsonObject(
+            MobileWireFixtures.obj("pr_mergeability") +
+                ("mergeable" to mergeable) +
+                ("mergeable_state" to JsonPrimitive(state)),
+        ).toString()
+
     private fun feed() = pullFeed(Json.parseToJsonElement(fixture))
 
     @Test fun theGeneratedFeedCarriesChecksReviewsAndTruncation() = runBlocking {
@@ -47,7 +89,7 @@ class PullRequestsTest {
 
     @Test fun aConfirmedSquashRechecksThenSubmitsTheExactUrl() = runBlocking {
         MockWebServer().use { server ->
-            server.enqueue(MockResponse().setBody("""{"mergeable":true,"mergeable_state":"clean"}"""))
+            server.enqueue(MockResponse().setBody(mergeability(JsonPrimitive(true), "clean")))
             server.enqueue(MockResponse().setBody("""{"url":"https://github.com/o/r/pull/42","pr_number":42}"""))
             val api = BuildmeshApi(server.url("/").toString())
             try {
@@ -63,7 +105,7 @@ class PullRequestsTest {
 
     @Test fun aFreshPolicyBlockPreventsTheMergePost() = runBlocking {
         MockWebServer().use { server ->
-            server.enqueue(MockResponse().setBody("""{"mergeable":true,"mergeable_state":"blocked"}"""))
+            server.enqueue(MockResponse().setBody(mergeability(JsonPrimitive(true), "blocked")))
             val api = BuildmeshApi(server.url("/").toString())
             try {
                 val failure = runCatching { api.squashNodePull(3, feed().items.single()) }.exceptionOrNull()
@@ -75,7 +117,7 @@ class PullRequestsTest {
 
     @Test fun aRejectedMergePropagatesItsFailureInsteadOfAcknowledgingSuccess() = runBlocking {
         MockWebServer().use { server ->
-            server.enqueue(MockResponse().setBody("""{"mergeable":true,"mergeable_state":"clean"}"""))
+            server.enqueue(MockResponse().setBody(mergeability(JsonPrimitive(true), "clean")))
             server.enqueue(MockResponse().setResponseCode(500).setBody("""{"error":"Branch protection"}"""))
             val api = BuildmeshApi(server.url("/").toString())
             try {
@@ -91,7 +133,7 @@ class PullRequestsTest {
             assertTrue(runCatching { pullFeed(Json.parseToJsonElement(it)) }.exceptionOrNull() is IllegalStateException)
         }
         assertTrue(runCatching { checkedMergeability(feed().items.single(), Json.parseToJsonElement("{}")) }.exceptionOrNull() is IllegalStateException)
-        val unknown = checkedMergeability(feed().items.single(), Json.parseToJsonElement("""{"mergeable":null,"mergeable_state":"unknown"}"""))
+        val unknown = checkedMergeability(feed().items.single(), Json.parseToJsonElement(mergeability(JsonNull, "unknown")))
         assertFalse(unknown.canMerge)
     }
 }

@@ -1,0 +1,13 @@
+[
+  {
+    "branch": "topic",
+    "cwd": "/repos/buildmesh",
+    "first_message": "Archived work",
+    "node_id": null,
+    "provider": "claude",
+    "resumable": true,
+    "session_id": "saved-session",
+    "timestamp": "2026-01-01T00:00:00Z",
+    "worktree_name": "tree"
+  }
+]

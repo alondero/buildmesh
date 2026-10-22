@@ -1,0 +1,11 @@
+{
+  "autopilot_triggers": {
+    "buildmesh:run": [
+      "Ship fixes"
+    ]
+  },
+  "labels": [
+    "bug",
+    "buildmesh:run"
+  ]
+}

@@ -1,0 +1,26 @@
+[
+  {
+    "base_ref": "main",
+    "build_command": null,
+    "circuit_run_capacity": 0,
+    "color": null,
+    "created_at": "1970-01-01T00:00:00Z",
+    "default_provider": null,
+    "effort": null,
+    "id": 3,
+    "layout": "",
+    "model": null,
+    "name": "QA mesh",
+    "path": "/repo",
+    "position": 0,
+    "pre_spawn_pool_size": 0,
+    "root_build_command": null,
+    "root_run_command": null,
+    "run_command": null,
+    "sandbox": false,
+    "scratchpad": "",
+    "use_worktree": false,
+    "worktree_directory": null,
+    "worktree_mode": null
+  }
+]

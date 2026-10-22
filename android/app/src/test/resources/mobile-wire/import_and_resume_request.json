@@ -1,0 +1,6 @@
+{
+  "branch": "topic",
+  "cli_session_id": "saved-session",
+  "provider": "claude:minimax",
+  "worktree_name": "tree"
+}
