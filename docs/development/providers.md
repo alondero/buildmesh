@@ -616,6 +616,18 @@ viewport edge. The placement follows the panel's content size, because the
 editor owns its own draft state and can add or remove fields — a routed
 provider adds endpoint fields — without changing any of the submenu's props.
 
+The shared editor discloses its advanced inputs instead of laying the fields out
+in one continuous form. The raw values — the extra arguments passed to the
+harness command line, and the custom model reference a `Custom model…`
+selection needs — live behind one `Advanced options` disclosure; the
+endpoint, the model choices and the verification action stay visible outside
+it, because a route that needs them still needs them filled in. The
+disclosure opens by itself when the edited configuration already carries an
+advanced value, and it stays open while the custom model input is required,
+so a required field does not sit behind a closed section. The disclosure is a
+frontend presentation concern: it changes no stored configuration, no
+capability rule and no wire type.
+
 `preferences::spawn_configurations` owns named, capability-validated launch overrides scoped to one Spawn Option. Configurations live in application preferences; the backend menu includes each option's saved choices for mobile, while desktop management reads the same collection through IPC. The shared editor creates and edits configurations from Settings and spawn menus. Launch targets include unattached credentialed providers; saving a new route and recipe uses one preference transaction. Draft verification resolves the selected model without persisting the draft; verification records distinguish endpoint/model/runtime so checking one recipe does not replace another model's proof. Provider model metadata is independent of tier remaps, and allowed efforts intersect provider/model/surface metadata with harness capabilities. New-node creation commits the selected snapshot in `agent_nodes.spawn_configuration` in the same transaction as the node. Explicit per-call overrides win; omitted native fields retain the mesh/application/native cascade, while proxy models default to their route and do not inherit native harness model/effort defaults. `preferences::harness_default_for` is where that exclusion lives — it takes the parsed `SpawnOptionId`, reads the harness half's map entry (native and proxied rows share one key), and strips model/effort for a proxied row — so the frozen-configuration resolver and the live `agent::spawn::launch` seam cannot drift apart. Permission mode stays: it is a harness-CLI flag, not an endpoint fact, so a proxied spawn still inherits it. A resolved proxy model reaches Codex as a single `--model`: `agent::spawn::command::build_spawn_command_prepared` folds the routing descriptor's model into the resolved config before `default_prepare` composes the recipe, so the adapter remains the single owner of the model flag and the orchestrator layer adds only `--profile` and the reasoning `-c` keys. The fold is load-bearing in both directions: the generated `<profile>.config.toml` carries only `model_provider`, so an empty cascade model would leave Codex on an OpenAI model against a foreign endpoint, and a second occurrence is rejected by the CLI as a repeated argument. Resume reads the snapshot, not the editable preference. A provider change cannot reuse another Spawn Option's snapshot.
 
 

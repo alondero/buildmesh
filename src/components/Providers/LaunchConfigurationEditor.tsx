@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import type { SpawnConfiguration } from '../../types/generated/SpawnConfiguration';
 import type { LaunchTarget } from '../../types/generated/LaunchTarget';
 import type { ProviderPairing } from '../../types/generated/ProviderPairing';
@@ -34,7 +34,17 @@ export function LaunchConfigurationEditor({ value, targets, onSave, onCancel, on
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [endpoint, setEndpoint] = useState<string | null>(null);
   const [customModel, setCustomModel] = useState(false);
+  // Issue #2423: the raw inputs sit behind one Advanced options disclosure. It
+  // opens when the configuration already carries an advanced value, and it stays
+  // open while a required custom model is selected, so the disclosure stays
+  // open over the field that blocks a save.
+  const [advancedOpen, setAdvancedOpen] = useState(() => !!value.extra_args?.trim());
+  const [advancedNotice, setAdvancedNotice] = useState(false);
   const [verification, setVerification] = useState<{ inputs: string; message: string } | null>(null);
+  const advancedId = useId();
+  const advancedToggleId = `${advancedId}-toggle`;
+  const advancedHelpId = `${advancedId}-help`;
+  const advancedExpanded = advancedOpen || customModel;
   const dirty = JSON.stringify(draft) !== JSON.stringify(value) || !value.id || endpoint !== null;
   useEffect(() => {
     onDirtyChange?.(dirty);
@@ -65,7 +75,14 @@ export function LaunchConfigurationEditor({ value, targets, onSave, onCancel, on
       : '';
   const selectTarget = (id: string) => {
     setDraft({ ...draft, spawn_option_id: id, harness_id: undefined, provider_route_id: undefined, model: null, effort: null, extra_args: null });
-    setEndpoint(null); setCustomModel(false); setVerification(null);
+    setEndpoint(null); setCustomModel(false); setVerification(null); setAdvancedNotice(false);
+  };
+  // A selected custom model makes its input required, so the disclosure refuses
+  // to close over it and says why instead of hiding a blocking field.
+  const toggleAdvanced = () => {
+    if (advancedExpanded && customModel) { setAdvancedNotice(true); return; }
+    setAdvancedNotice(false);
+    setAdvancedOpen(open => !open);
   };
   return <form className="launch-config-form" aria-label="Launch Configuration" onSubmit={(e) => {
     e.preventDefault();
@@ -96,6 +113,10 @@ export function LaunchConfigurationEditor({ value, targets, onSave, onCancel, on
         <input required={!!target.route && !target.default_model} value={draft.model ?? ''} placeholder={target.default_model ?? 'Default'} onChange={(e) => setDraft({ ...draft, model: e.target.value || null, effort: null })} /> :
         <select value={customModel ? '__custom__' : draft.model ?? ''} onChange={(e) => {
           setCustomModel(e.target.value === '__custom__');
+          // Picking a custom model opens the disclosure: its input is required
+          // and lives inside.
+          if (e.target.value === '__custom__') setAdvancedOpen(true);
+          setAdvancedNotice(false);
           setDraft({ ...draft, model: e.target.value === '__custom__' ? null : e.target.value || null, effort: null });
         }}>
           <option value="">{target.default_model ? `Default (${target.default_model})` : 'Default'}</option>
@@ -104,7 +125,6 @@ export function LaunchConfigurationEditor({ value, targets, onSave, onCancel, on
           <option value="__custom__">Custom model...</option>
         </select>}
       </label>}
-      {customModel && <label>Custom model<input required value={draft.model ?? ''} onChange={(e) => setDraft({ ...draft, model: e.target.value || null, effort: null })} /></label>}
       {efforts.length > 0 && <>
         <label>Effort<select aria-describedby={efforts.includes('max') ? 'launch-config-effort-help' : undefined} value={draft.effort ?? ''} onChange={(e) => setDraft({ ...draft, effort: e.target.value || null })}>
           <option value="">Default</option>{efforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
@@ -112,6 +132,20 @@ export function LaunchConfigurationEditor({ value, targets, onSave, onCancel, on
         <EffortGuidance id="launch-config-effort-help" efforts={efforts} selectedEffort={draft.effort} />
       </>}
       {target?.route && efforts.length === 0 && <p>No configurable effort is documented for this model through this harness.</p>}
+      {(target?.supports_extra_args || customModel) && <section className="launch-config-advanced">
+        <button type="button" id={advancedToggleId} className="launch-config-advanced-toggle"
+          aria-expanded={advancedExpanded} aria-controls={advancedId} onClick={toggleAdvanced}>
+          <span aria-hidden="true" className="launch-config-advanced-chevron">▸</span>
+          Advanced options
+        </button>
+        <p id={advancedHelpId} className="launch-config-advanced-help">Only needed when a provider or harness wants a raw value the fields above do not offer: a custom model reference, and extra arguments passed to the harness command line unchanged.</p>
+        {advancedNotice && <p role="alert" className="launch-config-advanced-notice">A custom model is required, so advanced options stay open until you pick a listed model.</p>}
+        <div id={advancedId} role="group" aria-labelledby={advancedToggleId} aria-describedby={advancedHelpId}
+          hidden={!advancedExpanded} className="launch-config-advanced-fields">
+          {customModel && <label>Custom model<input required value={draft.model ?? ''} onChange={(e) => setDraft({ ...draft, model: e.target.value || null, effort: null })} /></label>}
+          {target?.supports_extra_args && <label>Extra arguments<input value={draft.extra_args ?? ''} onChange={(e) => setDraft({ ...draft, extra_args: e.target.value || null })} /></label>}
+        </div>
+      </section>}
       {target?.verification_required && onVerify && <>
         <p>Verify the selected endpoint and model before launching. Verification sends a small tool-call request using your provider credential.</p>
         <button type="button" disabled={!canSubmit} onClick={() => void runBusyAction(async () => {
@@ -120,7 +154,6 @@ export function LaunchConfigurationEditor({ value, targets, onSave, onCancel, on
           setVerification({ inputs, message: `Verified ${result.model_id} for ${result.runtime}` });
         }, 'verify')}>Verify provider and model</button>
       </>}
-      {target?.supports_extra_args && <label>Extra arguments<input value={draft.extra_args ?? ''} onChange={(e) => setDraft({ ...draft, extra_args: e.target.value || null })} /></label>}
       <div className="launch-config-actions">
         <button type="submit" disabled={!canSubmit || busyAction !== null}>{busyAction === 'save' ? 'Saving…' : 'Save'}</button>
         <button type="button" onClick={onCancel}>Cancel</button>

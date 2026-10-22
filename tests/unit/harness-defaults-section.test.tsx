@@ -23,7 +23,7 @@
  *     harness's controls pre-filled from the stored values.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { AppSettingsModal } from '../../src/components/AppSettings/AppSettingsModal';
@@ -319,6 +319,26 @@ describe('Settings — Agent Harness defaults', () => {
       profileId: 'claude',
       value: { model: 'opus-4-1', effort: null, permission_mode: null },
     });
+  });
+
+  it('does not commit a typed model value while the modal intercepts a dismissal (issue #2458)', async () => {
+    // Escape moves focus to the discard banner's "Keep editing" button,
+    // which blurs the model input. That blur must not commit the draft —
+    // the user is trying to abandon it, not save it.
+    const calls = mockBackend();
+    const onClose = vi.fn();
+    const user = userEvent.setup();
+    render(<AppSettingsModal onClose={onClose} />);
+
+    const input = await screen.findByTestId<HTMLInputElement>('harness-default-model-input-claude');
+    await waitFor(() => expect(input.disabled).toBe(false));
+    await user.type(input, 'opus-4-1');
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+
+    expect(onClose).not.toHaveBeenCalled();
+    screen.getByTestId('modal-discard-banner');
+    expect(calls['set_harness_default']).toBeUndefined();
   });
 
   it('failed save rolls the draft back to the last confirmed value', async () => {
