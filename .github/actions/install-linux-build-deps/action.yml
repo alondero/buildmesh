@@ -191,8 +191,9 @@ runs:
     # reservation and the rest skip the save.
     #
     # One entry is written per distinct resolution, not one per package-set
-    # change: the resolutions diverge when the runner pool mixes image
-    # revisions, and run 39807067624 wrote three entries of ~76 MB each.
+    # change: the resolutions diverge between jobs -- the runner pool mixes
+    # image revisions, or the index moves between them -- and run 39807067624
+    # wrote three entries of ~76 MB each.
     # The superseded ones are the least recently used, so they are the first
     # the repository's 10 GB cache budget evicts. A pull-request merge ref
     # cannot read another pull request's entry, so each Rust-touching pull

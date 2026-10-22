@@ -426,14 +426,15 @@ diagnostic beats a cancelled job — but it does mean a cold or stale cache
 turns a slow pass into a red shard rather than a slow one.
 
 A package-set change makes a new entry for **each distinct resolution** among
-the nine jobs, not one for the change: the resolutions diverge when the runner
-pool mixes image revisions, and run 39807067624 wrote three entries of ~76 MB
-each — about 230 MB for one scope. Each entry holds the whole archive
-directory, so it carries the set it names plus whatever that job downloaded on
-top of the one it restored. The superseded entries are the least recently
-used, so they are the first the 10 GB budget evicts; and a pull-request merge
-ref cannot read another pull request's entry, so each Rust-touching pull
-request leaves its own behind.
+the nine jobs, not one for the change: the resolutions diverge between jobs
+(the runner pool mixes image revisions, or the index moves between them), and
+run 39807067624 wrote three entries of ~76 MB each — about 230 MB for one
+scope. Each entry holds the whole archive directory, so it carries the set it
+names plus whatever that job downloaded on top of the one it restored. The
+superseded entries are the least recently used, so they are the first the
+10 GB budget evicts; and a pull-request merge ref cannot read another pull
+request's entry, so each Rust-touching pull request leaves its own behind.
+
 `tests/agent-infra/apt-package-set-key.test.mjs` (`npm run test:agent`) pins
 the contract on both halves: the script that computes the identity, and the
 composite action's use of it — the key names the digest and the release, the
