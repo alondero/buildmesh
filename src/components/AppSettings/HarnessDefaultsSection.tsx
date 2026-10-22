@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ProviderInfo } from '../../lib/tauri';
 import type { HarnessConfigValue } from '../../types/generated/HarnessConfigValue';
 import type { EffortControlKind } from '../../types/generated/EffortControlKind';
+import { useBlurCommit } from '../../hooks/useBlurCommit';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { SettingsSection } from './SettingsRow';
 
@@ -242,6 +243,11 @@ function HarnessDefaultCard({
   const showModel = caps.supports_model_override;
   const allowed = effortAllowed(caps.effort_control);
   const showEffort = allowed !== null;
+  // Issue #2458 — these controls save on blur, and the dismissal gestures
+  // (Escape, the header ×, a backdrop click) move focus off them. The
+  // guard keeps an abandoned draft uncommitted so the discard prompt can
+  // still ask about it.
+  const commitOnBlur = useBlurCommit();
   // Issue #2151: per-harness permission mode. Two or more modes render a
   // select; a single enforced mode (mcode's Full Access pin) renders as
   // read-only text. A harness with no permission flag renders nothing — a
@@ -274,7 +280,7 @@ function HarnessDefaultCard({
               value={draft.draft.model ?? ''}
               placeholder="model id"
               onChange={(e) => onUpdate({ model: e.target.value || null })}
-              onBlur={() => void onCommit()}
+              onBlur={commitOnBlur(onCommit)}
               disabled={disabled}
               className="w-44 bg-bg-input border border-border-default rounded-md px-3 py-1.5 text-base text-text-primary focus:outline-none focus:border-border-active disabled:opacity-50"
               aria-label={`${provider.label} default model`}
@@ -286,7 +292,7 @@ function HarnessDefaultCard({
               id={`harness-default-effort-${provider.harness_id}`}
               value={draft.draft.effort ?? ''}
               onChange={(e) => onUpdate({ effort: e.target.value || null })}
-              onBlur={() => void onCommit()}
+              onBlur={commitOnBlur(onCommit)}
               disabled={disabled}
               className="w-32 bg-bg-input border border-border-default rounded-md px-3 py-1.5 text-base text-text-primary focus:outline-none focus:border-border-active disabled:opacity-50"
               aria-label={`${provider.label} ${
@@ -335,7 +341,7 @@ function HarnessDefaultCard({
               id={`harness-default-permission-${provider.harness_id}`}
               value={draft.draft.permission_mode ?? ''}
               onChange={(e) => onUpdate({ permission_mode: e.target.value || null })}
-              onBlur={() => void onCommit()}
+              onBlur={commitOnBlur(onCommit)}
               disabled={disabled}
               className="w-full bg-bg-input border border-border-default rounded-md px-3 py-1.5 text-base text-text-primary focus:outline-none focus:border-border-active disabled:opacity-50"
               aria-label={`${provider.label} permission mode`}
