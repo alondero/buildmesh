@@ -17,7 +17,7 @@ pub(crate) struct FreebuffAdapter;
 impl UsageAdapter for FreebuffAdapter {
     fn usage_page(&self) -> Option<UsagePage> {
         Some(UsagePage::new(
-            "https://www.codebuff.com/usage",
+            "https://freebuff.com/?settings=usage",
             "View usage",
         ))
     }
@@ -39,3 +39,6 @@ impl UsageAdapter for FreebuffAdapter {
         crate::services::freebuff_usage::freebuff_usage()
     }
 }
+
+#[cfg(test)]
+mod tests;

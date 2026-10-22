@@ -98,6 +98,8 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/http/mobile_wire_tests.rs': 'http::mobile_wire::tests',
   'src-tauri/src/http/routes/circuit_tests.rs': 'http::routes::circuit::tests',
   'src-tauri/src/services/mcode_session_tests.rs': 'services::mcode_session::tests',
+  'src-tauri/src/services/freebuff_usage_tests.rs': 'services::freebuff_usage::tests',
+  'src-tauri/src/services/freebuff_daily_tests.rs': 'services::freebuff_usage::daily_tests',
   'src-tauri/src/services/agent_node_tests.rs': 'services::agent_node::tests',
   'src-tauri/src/services/agent_node_discovery_tests.rs': 'services::agent_node_discovery::tests',
   'src-tauri/src/services/circuit_worker/dispatch_tests.rs': 'services::circuit_worker::dispatch::tests',
