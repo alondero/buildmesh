@@ -35,7 +35,7 @@ beforeEach(() => {
       { id: 'claude', label: 'Claude Code', capabilities: { supports_prefill: true }, configuration: null },
       { id: 'terminal', label: 'Terminal', capabilities: { supports_prefill: false } },
       { id: 'missing', label: 'Missing', capabilities: { supports_prefill: true }, unavailable_reason: 'Not installed' },
-      { id: 'saved', label: 'Saved recipe', capabilities: { supports_prefill: true }, configuration: { id: 'saved' } },
+      { id: 'saved', label: 'Saved recipe', capabilities: { supports_prefill: true }, configuration: { id: 'saved', name: 'Saved recipe', spawn_option_id: 'claude' } },
     ]);
     throw new Error(`Unexpected request: ${path}`);
   }));
@@ -68,27 +68,52 @@ describe('phone issue triage', () => {
     expect(screen.queryByText(/Blocked by.*99/)).toBeNull();
   });
 
-  it('offers launch choice, filters unsupported entries, and waits for confirmation', async () => {
+  it('starts the mesh default from the split button without a confirmation step', async () => {
     const onSpawned = await openIssue();
     fireEvent.click(screen.getByTestId('issue-spawn-42'));
-    const dialog = await screen.findByRole('dialog', { name: 'Choose a launch configuration' });
-    const choice = await within(dialog).findByLabelText('Launch configuration');
-    expect(within(dialog).queryByText('Terminal')).toBeNull();
-    expect(within(dialog).queryByText('Missing')).toBeNull();
-    expect(within(dialog).queryByText('Saved recipe')).toBeNull();
-    expect(writes).toEqual([]);
-    fireEvent.change(choice, { target: { value: 'claude' } });
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Start' }));
     await waitFor(() => expect(onSpawned).toHaveBeenCalledWith({ id: 9 }, { kind: 'issues', meshId: 1, visitId: 1 }));
-    expect(writes).toEqual([{ path: '/api/meshes/1/issues/42/spawn', body: { title: 'Fix deadline', provider: 'claude' } }]);
+    // The mesh default names neither `provider` nor `configuration_id`: the
+    // backend resolves its own default chain.
+    expect(writes).toEqual([{ path: '/api/meshes/1/issues/42/spawn', body: { title: 'Fix deadline' } }]);
   });
 
-  it('offers mesh default and cancellation without creating a node', async () => {
-    await openIssue();
-    fireEvent.click(screen.getByTestId('issue-spawn-42'));
+  it('offers the prompt-capable menu rows, saved configurations included', async () => {
+    const onSpawned = await openIssue();
+    fireEvent.click(screen.getByTestId('issue-spawn-42-menu'));
+    const dialog = await screen.findByRole('dialog', { name: 'Choose a launch configuration' });
+    await within(dialog).findByText('Claude Code');
+    expect(within(dialog).queryByText('Terminal')).toBeNull();
+    expect(within(dialog).queryByText('Missing')).toBeNull();
+    expect(within(dialog).getByText('Saved recipe')).toBeTruthy();
+    expect(writes).toEqual([]);
+    fireEvent.click(within(dialog).getByText('Saved recipe'));
+    await waitFor(() => expect(onSpawned).toHaveBeenCalledWith({ id: 9 }, { kind: 'issues', meshId: 1, visitId: 1 }));
+    // A saved Launch Configuration launches its own Spawn Option with the
+    // configuration's id beside it.
+    expect(writes).toEqual([{ path: '/api/meshes/1/issues/42/spawn', body: { title: 'Fix deadline', provider: 'claude', configuration_id: 'saved' } }]);
+  });
+
+  it('reports a failed launch inside the open menu sheet', async () => {
+    launch = async () => response({ error: 'spawn failed' }, 500);
+    const onSpawned = await openIssue();
+    fireEvent.click(screen.getByTestId('issue-spawn-42-menu'));
     const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByText('Mesh default')).toBeTruthy();
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await within(dialog).findByText('Claude Code');
+    fireEvent.click(within(dialog).getByText('Claude Code'));
+    // The sheet stays open so the user can pick again, so the failure has to
+    // be reported inside it — behind the backdrop the screen's own error
+    // line would be unreadable.
+    await waitFor(() => expect(within(dialog).getByText('spawn failed')).toBeTruthy());
+    expect(onSpawned).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog')).toBeTruthy();
+  });
+
+  it('closes the launch menu without creating a node', async () => {
+    await openIssue();
+    fireEvent.click(screen.getByTestId('issue-spawn-42-menu'));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('Claude Code')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('issue-launch-menu-backdrop'));
     expect(writes).toEqual([]);
     expect(screen.queryByRole('dialog')).toBeNull();
   });
@@ -125,7 +150,7 @@ describe('phone issue triage', () => {
     await waitFor(() => expect((checkbox as HTMLInputElement).checked).toBe(true));
   });
 
-  it('keeps launch confirmation open during a default spawn and consumes back and backdrop', async () => {
+  it('keeps the launch menu open during a launch and consumes back and backdrop', async () => {
     let resolve!: (response: Response) => void;
     launch = () => new Promise(r => { resolve = r; });
     const backHandlerRef = { current: null as (() => boolean) | null };
@@ -133,17 +158,16 @@ describe('phone issue triage', () => {
     const onBack = vi.fn();
     render(<IssuesScreen mesh={mesh} visitId={1} onBack={onBack} onSpawned={onSpawned} backHandlerRef={backHandlerRef} />);
     fireEvent.click(await screen.findByTestId('issue-42'));
-    fireEvent.click(screen.getByTestId('issue-spawn-42'));
-    const start = within(await screen.findByRole('dialog')).getByRole('button', { name: 'Start' });
-    await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(start);
-    fireEvent.click(start);
+    fireEvent.click(screen.getByTestId('issue-spawn-42-menu'));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByText('Claude Code'));
+    await waitFor(() => expect(writes).toHaveLength(1));
     expect(backHandlerRef.current?.()).toBe(true);
-    fireEvent.click(screen.getByTestId('issue-launch-choice-backdrop'));
+    fireEvent.click(screen.getByTestId('issue-launch-menu-backdrop'));
     fireEvent.click(screen.getByRole('button', { name: 'Back' }));
     expect(screen.getByRole('dialog')).toBeTruthy();
     expect(onBack).not.toHaveBeenCalled();
-    expect(writes).toEqual([{ path: '/api/meshes/1/issues/42/spawn', body: { title: 'Fix deadline' } }]);
+    expect(writes).toEqual([{ path: '/api/meshes/1/issues/42/spawn', body: { title: 'Fix deadline', provider: 'claude' } }]);
     resolve(response({ id: 9 }));
     await waitFor(() => expect(onSpawned).toHaveBeenCalledOnce());
     expect(screen.queryByRole('dialog')).toBeNull();

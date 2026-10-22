@@ -293,7 +293,11 @@ describe("mobile api wire shape (issue #1262)", () => {
     it("POSTs only the issue title hint and the optional provider to /api/meshes/:id/issues/:n/spawn", async () => {
       fetchMock.mockResolvedValue(okJson(node));
 
-      const out = await spawnFromIssue(1, issue, "anthropic");
+      const out = await spawnFromIssue(1, issue, {
+        id: "anthropic",
+        label: "Anthropic",
+        provider: "anthropic",
+      });
 
       expect(out).toEqual(node);
       const [path, init] = fetchMock.mock.calls[0];

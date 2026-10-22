@@ -6,7 +6,7 @@ export default async function ({ page }) {
   const providers = [
     { id: 'claude', label: 'Claude Code', capabilities: { supports_prefill: true }, configuration: null, harness_id: 'claude' },
     { id: 'terminal', label: 'Terminal', capabilities: { supports_prefill: false } },
-    { id: 'saved', label: 'Saved recipe', capabilities: { supports_prefill: true }, configuration: { id: 'saved' } },
+    { id: 'saved', label: 'Saved recipe', capabilities: { supports_prefill: true }, configuration: { id: 'saved', name: 'Saved recipe', spawn_option_id: 'claude' } },
   ];
   const writes = [];
   await page.route('**/api/**', async route => {
@@ -58,10 +58,14 @@ export default async function ({ page }) {
   await page.getByTestId('issues-filter').fill('');
   await page.getByTestId('issue-42').click();
   await expect(page.getByTestId('issue-body-42')).toBeVisible();
-  await page.getByTestId('issue-spawn-42').click();
+  await page.getByTestId('issue-spawn-42-menu').click();
   const dialog = page.getByRole('dialog');
-  await expect(dialog.getByLabel('Launch configuration')).toBeVisible();
-  await expect(dialog.locator('option')).toHaveText(['Mesh default', 'Claude Code']);
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText('Claude Code', { exact: true })).toBeVisible();
+  // A saved Launch Configuration is a menu row of its own (issue #2385).
+  await expect(dialog.getByText('Saved recipe', { exact: true })).toBeVisible();
+  // A row that cannot take the prompt is not offered.
+  await expect(dialog.getByText('Terminal', { exact: true })).toHaveCount(0);
   await fits();
   await page.screenshot({ path: '.tmp/issues-web-launch.png' });
   await page.goBack();

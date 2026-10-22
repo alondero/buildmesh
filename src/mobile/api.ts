@@ -342,6 +342,7 @@ import type { DiffResult } from "../types/generated/DiffResult";
 // cannot drift from the Rust structs the routes serialise.
 import type { PrSource } from "../types/generated/PrSource";
 import type { CreatePrResult } from "../types/generated/CreatePrResult";
+import type { GitHubPullRequest } from "../types/generated/GitHubPullRequest";
 export type { DiffLine, DiffHunk, FileDiff, DiffResult };
 
 export async function gitStatus(agentId: number): Promise<GitStatusEntry[]> {
@@ -516,6 +517,12 @@ export type { ArchivedAgentNode };
 import type { GitHubIssue } from "../types/generated/GitHubIssue";
 export type { GitHubIssue };
 
+// Issue #2385 — the Spawn Menu is one backend list (ADR-0016). `launchFields`
+// turns the picked row into the `provider` / `configuration_id` pair the spawn
+// routes accept; no launch means the mesh default, which sends neither.
+import { launchFields, type LaunchChoice } from "./spawnMenu";
+export type { LaunchChoice };
+
 export async function discoverAgentNodes(
   meshId: number,
 ): Promise<ArchivedAgentNode[]> {
@@ -578,11 +585,16 @@ export async function setIssueLabel(meshId: number, issueNumber: number, label: 
 export async function spawnFromIssue(
   meshId: number,
   issue: GitHubIssue,
-  provider?: string,
+  launch?: LaunchChoice | null,
 ): Promise<AgentNode> {
   // Backend derives the issue URL from the mesh's `origin` remote — we only
   // ship the title hint, not the body (avoids pushing a multi-KB markdown
   // blob through the Windows PowerShell -EncodedCommand argv path).
+  //
+  // `launch` carries the Spawn Menu row the user picked. No launch at all
+  // means the mesh default: the body then names neither `provider` nor
+  // `configuration_id`, and the backend resolves its own default chain
+  // (issue #2385).
   const resp = await apiFetch(
     `/api/meshes/${meshId}/issues/${issue.number}/spawn`,
     {
@@ -590,10 +602,47 @@ export async function spawnFromIssue(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         title: issue.title,
-        provider,
+        ...launchFields(launch),
       }),
     },
   );
+  return resp.json();
+}
+
+/**
+ * Start an agent on an open pull request (issue #2385).
+ *
+ * The launch fields are the same pair the issue spawn sends: a bare Spawn
+ * Option is just `provider`, a saved Launch Configuration is that option's
+ * `spawn_option_id` beside the configuration's own id, and the mesh default
+ * sends neither.
+ *
+ * `head_repo_owner` and `head_repo_clone_url` are only sent when the pull
+ * request actually names a head repository. The backend keys its fork-spawn
+ * decision on whether the owner is `Some`, so sending an empty owner would
+ * turn a same-repository pull request into a fork.
+ */
+export async function spawnFromPull(
+  meshId: number,
+  pull: GitHubPullRequest,
+  launch?: LaunchChoice | null,
+): Promise<AgentNode> {
+  const resp = await apiFetch(`/api/meshes/${meshId}/pulls/${pull.number}/spawn`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: pull.title,
+      head_ref: pull.head_ref,
+      ...(pull.head_sha ? { head_sha: pull.head_sha } : {}),
+      ...(pull.head_repo_owner
+        ? { head_repo_owner: pull.head_repo_owner }
+        : {}),
+      ...(pull.head_repo_clone_url
+        ? { head_repo_clone_url: pull.head_repo_clone_url }
+        : {}),
+      ...launchFields(launch),
+    }),
+  });
   return resp.json();
 }
 

@@ -9,11 +9,13 @@ import { OverviewSummary } from '../components/nodeList/OverviewSummary';
 import { NodeListNotices } from '../components/nodeList/NodeListNotices';
 import { useNodeListSnapshot } from '../components/nodeList/useNodeListSnapshot';
 import type { SentAction, SentMarker } from '../components/nodeList/types';
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentNode, Mesh, createNode, isAuthError, newOperationKey, listProviders, sendNodeKeys } from "../api";
 import { needsYou } from "../circuitRun";
 
 import { AppBar, CenterNote, PulseDots } from "../ui";
+import { SpawnMenuSheet } from "../components/SpawnMenuSheet";
+import { launchChoices } from "../spawnMenu";
 
 import { usePullToRefresh } from "../usePullToRefresh";
 // The hook owns the threshold value internally and exposes
@@ -68,6 +70,22 @@ export default function NodeList({
   const [localView, setLocalView] = useState(view);
   const activeView = onViewChange ? view : localView;
   const changeView = onViewChange ?? setLocalView;
+  /**
+   * The mesh and launch the mesh card's split button pre-selected for the
+   * next Capture (issue #2385). One-shot: leaving Capture drops it, so the
+   * next Capture opens on the user's own stored destination.
+   */
+  const [capturePreset, setCapturePreset] = useState<{ meshId: number; launchId: string | null } | null>(null);
+  /** The mesh whose Spawn Menu sheet is open, if any. */
+  const [spawnMenuMeshId, setSpawnMenuMeshId] = useState<number | null>(null);
+  const goToView = useCallback((next: "overview" | "work" | "capture") => {
+    setCapturePreset(null);
+    changeView(next);
+  }, [changeView]);
+  const openCapture = useCallback((meshId: number, launchId: string | null) => {
+    setCapturePreset({ meshId, launchId });
+    changeView("capture");
+  }, [changeView]);
   const [pickerMeshId, setPickerMeshId] = useState<number | null>(null);
   const [creating, setCreating] = useState<number | null>(null);
   const [meshActions, setMeshActions] = useState<Mesh | null>(null);
@@ -124,6 +142,9 @@ export default function NodeList({
   const { meshes, nodes, circuitRuns, providers, setProviders, staleNotice, setStaleNotice, refresh } = useNodeListSnapshot({
     mountedRef, clearSentMarker, onOffline, onReachable, onAuthFailed,
   });
+  // The Spawn Menu the mesh card's chevron offers (issue #2385) — the same
+  // backend list the issue and pull request surfaces use.
+  const spawnMenuChoices = useMemo(() => launchChoices(providers), [providers]);
 
   // Triage card chips (issue #1377, post-review rewrite). The HTTP
   // `/api/nodes/{id}/input` route returns 200 OK with `{"ok":true}` only
@@ -361,6 +382,7 @@ export default function NodeList({
           <CaptureIdea
             meshes={meshes ?? []}
             providers={providers}
+            preset={capturePreset ?? undefined}
             onStarted={(node) => {
               changeView("work");
               onOpenNode(node);
@@ -421,7 +443,7 @@ export default function NodeList({
               </div>
               {activeView === "overview" && (
                 <>
-                  <OverviewSummary attentionCount={attentionCount} runningCount={runningCount} visibleNodes={visibleNodes} problemNodes={problemNodes} meshes={meshes} providers={providers} circuitRuns={circuitRuns} setFilter={setFilter} changeView={changeView} onOpenNode={onOpenNode} />
+                  <OverviewSummary attentionCount={attentionCount} runningCount={runningCount} visibleNodes={visibleNodes} problemNodes={problemNodes} meshes={meshes} providers={providers} circuitRuns={circuitRuns} setFilter={setFilter} changeView={goToView} onOpenNode={onOpenNode} />
                 </>
               )}
               {activeView === "work" && (
@@ -477,7 +499,7 @@ export default function NodeList({
                 )
                   return null;
                 return (
-                  <MeshNodeSection key={mesh.id} mesh={mesh} meshNodes={meshNodes} creating={creating} providers={providers} circuitRuns={circuitRuns} setPickerMeshId={setPickerMeshId} setMeshActions={setMeshActions} onOpenNode={onOpenNode} onOpenIssues={onOpenIssues} onOpenAgentNodes={onOpenAgentNodes} onOpenPulls={onOpenPulls} />
+                  <MeshNodeSection key={mesh.id} mesh={mesh} meshNodes={meshNodes} creating={creating} providers={providers} circuitRuns={circuitRuns} setPickerMeshId={setPickerMeshId} setMeshActions={setMeshActions} onOpenNode={onOpenNode} onOpenIssues={onOpenIssues} onOpenAgentNodes={onOpenAgentNodes} onOpenPulls={onOpenPulls} onStartAgent={(target, launchId) => openCapture(target.id, launchId)} onOpenSpawnMenu={(target) => setSpawnMenuMeshId(current => current === target.id ? null : target.id)} spawnMenuOpen={spawnMenuMeshId === mesh.id} />
                 );
               })}
             </div>
@@ -496,13 +518,27 @@ export default function NodeList({
             key={key}
             disabled={captureBusy}
             aria-current={activeView === key ? "page" : undefined}
-            onClick={() => changeView(key)}
+            onClick={() => goToView(key)}
           >
             <span aria-hidden="true">{icon}</span>
             {label}
           </button>
         ))}
       </nav>
+      {spawnMenuMeshId !== null && (
+        <SpawnMenuSheet
+          label="Choose a launch configuration"
+          testId="mesh-launch-menu"
+          choices={spawnMenuChoices}
+          error={null}
+          onClose={() => setSpawnMenuMeshId(null)}
+          onChoose={(choice) => {
+            const meshId = spawnMenuMeshId;
+            setSpawnMenuMeshId(null);
+            openCapture(meshId, choice.id);
+          }}
+        />
+      )}
       {pickerMeshId !== null && (
         <ProviderPicker
           providers={providers}

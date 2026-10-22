@@ -13,7 +13,10 @@ import type { LaunchVisit } from "../launchVisit";
 import type { GitHubIssueFeed } from "../../types/generated/GitHubIssueFeed";
 import { FeedCompletenessNote } from "../../components/Probe/FeedCompletenessNote";
 import { IssueTags } from "./IssueTags";
-import { IssueLaunchChoice } from "./IssueLaunchChoice";
+import { SpawnSplitButton } from "../components/SpawnSplitButton";
+import { SpawnMenuSheet } from "../components/SpawnMenuSheet";
+import { useSpawnMenu } from "../useSpawnMenu";
+import { meshDefaultLabel, type LaunchChoice } from "../spawnMenu";
 
 type Props = {
   mesh: Mesh;
@@ -46,34 +49,36 @@ export default function IssuesScreen({
   // Spawning creates a worktree and starts a real agent — first tap expands
   // the issue (body preview, GitHub link), the explicit button commits.
   const [selectedIssue, setSelectedIssue] = useState<number | null>(null);
-  const [launchIssue, setLaunchIssue] = useState<GitHubIssue | null>(null);
+  // The issue whose Spawn Menu sheet is open, if any (issue #2385).
+  const [menuIssue, setMenuIssue] = useState<GitHubIssue | null>(null);
   const lifetime = useRef<AbortSignal | null>(null);
   const pending = useRef(false);
-  const dismissLaunch = () => {
-    if (!launchIssue) return false;
-    if (!pending.current) { setLaunchIssue(null); setError(null); }
+  const { choices, providers, error: menuError, retry } = useSpawnMenu(true);
+  const dismissMenu = () => {
+    if (!menuIssue) return false;
+    if (!pending.current) setMenuIssue(null);
     return true;
   };
   useEffect(() => {
     if (!backHandlerRef) return;
     backHandlerRef.current = () => {
-      if (!launchIssue) return false;
-      if (!pending.current) { setLaunchIssue(null); setError(null); }
+      if (!menuIssue) return false;
+      if (!pending.current) setMenuIssue(null);
       return true;
     };
     return () => { backHandlerRef.current = null; };
-  }, [backHandlerRef, launchIssue]);
+  }, [backHandlerRef, menuIssue]);
 
   useAsyncEffect((signal) => {
     lifetime.current = signal;
     setFeed(null);
     setError(null);
     setSelectedIssue(null);
-    setLaunchIssue(null);
+    setMenuIssue(null);
     setBusyIssue(null);
     setFilter("");
     // `pending` guards one launch per visit, so a visit that has moved on has
-    // to release it: `spawn` early-returns while it is set, and `dismissLaunch`
+    // to release it: `spawn` early-returns while it is set, and `dismissMenu`
     // and the Back gate both refuse while it is set too, so leaving it behind
     // would leave the sheet both undismissable and unlaunchable (issue #2327).
     pending.current = false;
@@ -95,7 +100,11 @@ export default function IssuesScreen({
     // visit's in-flight launch (issue #2327).
   }, [mesh.id, visitId, onAuthFailed]);
 
-  const spawn = async (issue: GitHubIssue, provider?: string) => {
+  // `launch` is the Spawn Menu row the user picked. No row means the mesh
+  // default: the request then names neither `provider` nor
+  // `configuration_id` and the backend resolves its own default chain
+  // (issue #2385).
+  const spawn = async (issue: GitHubIssue, launch?: LaunchChoice | null) => {
     if (pending.current) return;
     pending.current = true;
     const owner = lifetime.current;
@@ -109,10 +118,10 @@ export default function IssuesScreen({
     setBusyIssue(issue.number);
     setError(null);
     try {
-      const node = await spawnFromIssue(mesh.id, issue, provider);
+      const node = await spawnFromIssue(mesh.id, issue, launch);
       if (retired()) return;
       setBusyIssue(null);
-      setLaunchIssue(null);
+      setMenuIssue(null);
       onSpawned(node, ownerVisit);
     } catch (e) {
       if (retired()) return;
@@ -130,10 +139,12 @@ export default function IssuesScreen({
   const query = filter.trim().toLowerCase();
   const filtered = (issues ?? []).filter(i => !query || i.title.toLowerCase().includes(query) || String(i.number).includes(query.replace(/^#/, "")) || i.labels.some(label => label.toLowerCase().includes(query)));
   const openNumbers = new Set(issues?.map(issue => issue.number));
+  // The main half of every split button starts the mesh's own default.
+  const defaultLabel = meshDefaultLabel(mesh, providers);
 
   return (
     <div data-testid="issues-screen" className="screen">
-      <AppBar onBack={() => { if (!dismissLaunch()) onBack(); }} title="GitHub Issues" subtitle={mesh.name} />
+      <AppBar onBack={() => { if (!dismissMenu()) onBack(); }} title="GitHub Issues" subtitle={mesh.name} />
       <div style={{ padding: 12, paddingBottom: 0 }}>
         <input
           placeholder="Filter issues…"
@@ -146,7 +157,7 @@ export default function IssuesScreen({
       </div>
       <div style={{ flex: 1, overflowY: "auto", padding: 12 }}>
         {feed && <FeedCompletenessNote completeness={feed.completeness} label="issues" />}
-        {error && !launchIssue && (
+        {error && !menuIssue && (
           <div style={{ color: "var(--red)", padding: 12, fontSize: 13 }}>
             {error}
           </div>
@@ -263,15 +274,20 @@ export default function IssuesScreen({
                       alignItems: "center",
                     }}
                   >
-                    <button
-                      className="btn-primary"
-                      style={{ flex: 1 }}
+                    <SpawnSplitButton
+                      label={defaultLabel}
+                      busyLabel="Spawning agent…"
+                      testId={`issue-spawn-${issue.number}`}
+                      ariaLabel={`Start agent on this issue with ${defaultLabel}`}
+                      busy={busy}
                       disabled={busyIssue !== null}
-                      data-testid={`issue-spawn-${issue.number}`}
-                      onClick={() => { setError(null); setLaunchIssue(issue); }}
-                    >
-                      {busy ? "Spawning agent…" : "Start agent on this issue"}
-                    </button>
+                      menuOpen={menuIssue?.number === issue.number}
+                      onStart={() => void spawn(issue)}
+                      onToggleMenu={() => {
+                        setError(null);
+                        setMenuIssue(menuIssue?.number === issue.number ? null : issue);
+                      }}
+                    />
                     <a
                       href={issue.url}
                       target="_blank"
@@ -290,7 +306,19 @@ export default function IssuesScreen({
           );
         })}
       </div>
-      {launchIssue && <IssueLaunchChoice busy={busyIssue !== null} error={error} onCancel={() => { setLaunchIssue(null); setError(null); }} onStart={provider => void spawn(launchIssue, provider)} onAuthFailed={onAuthFailed} />}
+      {menuIssue && (
+        <SpawnMenuSheet
+          label="Choose a launch configuration"
+          testId="issue-launch-menu"
+          choices={choices}
+          error={menuError}
+          notice={error}
+          onRetry={retry}
+          dismissible={busyIssue === null}
+          onClose={() => setMenuIssue(null)}
+          onChoose={(choice) => void spawn(menuIssue, choice)}
+        />
+      )}
     </div>
   );
 }

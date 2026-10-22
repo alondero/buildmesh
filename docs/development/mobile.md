@@ -294,7 +294,9 @@ HEAD)" — a false claim about files that demonstrably changed.
 The mobile shell owns screen history and the selected home tab. NodeList owns
 Overview/Work polling and attention events; NodeOverview polls the selected
 node and sends short replies through the acknowledged HTTP input route.
-CaptureIdea retains a browser-local draft until creation succeeds. A create
+CaptureIdea retains a browser-local draft until creation succeeds. Its Agent
+choice lists **Mesh default** first, and a mesh card's split button opens
+Capture with that mesh and the chosen launch already selected. A create
 request without a provider or saved configuration launches the mesh default, the
 same chain the desktop sidebar uses. Its prompt
 crosses the generated CreateNodeRequest boundary into SpawnIntent::Prompt,
@@ -384,13 +386,53 @@ probe's `create_pr_node`, taking `{title, head_ref, head_sha?, head_repo_owner?,
 head_repo_clone_url?, provider?, configuration_id?}`. Both routes build the
 prompt on the desktop from the user's template, so the phone never sends one.
 
-On the web client, **Start agent** opens a launch configuration choice with
-**Mesh default** or an available Spawn Option supporting prefill. Starting
-requires confirmation; cancellation creates no node, and the picker stays open
-while a request is pending. Browser back first dismisses the web picker and is
-consumed while it is starting. The Android client instead uses the desktop's
-split button, including saved configurations, and starts the agent on the
-tap (see [Screens and ownership](android.md#screens-and-ownership)).
+On the web client, the launch is the desktop's **split button** (issue #2385),
+the same shape the Android client and the desktop sidebar use (see
+[Screens and ownership](android.md#screens-and-ownership)). The main half
+starts the mesh default and the chevron opens the Spawn Menu, so the phone
+does not ask for a second confirmation: the split button *is* the
+confirmation. The menu lists the backend's own rows in the backend's own
+order, saved Launch Configurations included, minus the rows that cannot take a
+first prompt. A saved configuration row launches its own `spawn_option_id` with
+the configuration's id beside it; the mesh default sends neither field.
+Browser back dismisses an open Spawn Menu sheet and is consumed while that
+sheet is open. A launch that fails is reported *inside* the sheet, because the
+sheet stays open so the user can pick again and the screen's own error line
+would sit behind the sheet's backdrop.
+
+## The phone's Spawn Menu
+
+One backend list, and no client re-sorts it (ADR-0016). `GET /api/providers`
+is the Spawn Menu the clients read — the desktop groups it by harness, the
+phone renders it flat. The phone narrows it to the rows that can take a first
+prompt and resolves each row into the pair the spawn routes take
+(`src/mobile/spawnMenu.ts`):
+
+| Menu row | Sent to the route |
+|---|---|
+| Mesh default | nothing — the backend resolves its own default chain |
+| Spawn Option | `provider` |
+| Saved Launch Configuration | `provider` (the row's `spawn_option_id`) and `configuration_id` |
+
+The menu reaches the phone through three surfaces, each a split button
+(`src/mobile/components/SpawnSplitButton.tsx`):
+
+- an **issue** card — the main half starts the agent with the mesh default,
+  the chevron picks a launch;
+- an **open pull request** card — the same pair, on the mesh's pull request
+  list. A node's own pull request list has no split button: it is a read-only
+  view of the branch that node already works on;
+- a **mesh** card — both halves open Capture with that mesh and the chosen
+  launch already selected, because Capture is where the first prompt is
+  written.
+
+Capture offers **Mesh default** as its own choice, and a create request for
+it carries neither `provider` nor `configuration_id`.
+
+The menu read is secondary: it never reports an authorization failure on its
+own, so a menu read can never sign the user out of a screen they have not
+acted on. The surface's own read — the issue feed, the pull request feed —
+owns the session-expiry signal.
 
 ## Mobile terminal socket lifecycle
 

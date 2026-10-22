@@ -571,7 +571,7 @@ export default function App() {
         </Suspense>
       )}
       {screen.kind === 'pulls' && <Suspense fallback={<ScreenLoading />}>
-        <PullRequestsScreen meshId={screen.mesh.id} name={screen.mesh.name} onBack={goBack} onAuthFailed={handleAuthFailedForActiveScreen} />
+        <PullRequestsScreen mesh={screen.mesh} onBack={goBack} onAuthFailed={handleAuthFailedForActiveScreen} />
       </Suspense>}
       {prSheet && (
         <Suspense fallback={null}>
