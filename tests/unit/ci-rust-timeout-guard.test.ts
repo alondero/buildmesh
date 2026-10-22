@@ -18,12 +18,37 @@
  * pipes or swallows the command, and the log the guard writes is exactly what
  * the `if: always()` upload collects, so a killed shard leaves evidence behind
  * rather than a warning.
+ *
+ * The job-level backstop is the other half of that contract, and it is where
+ * the Rust shards actually failed. A job cap is a budget for everything the
+ * job does before its guard starts, so the cap has to cover the *real* setup
+ * cost -- the composite action's own `apt-get update` and `apt-get install`
+ * deadlines, plus the checkout, cache restore and toolchain setup around them
+ * -- and then the deadline and kill grace of each step that invokes the
+ * guard. The first version of this test assumed a three-minute setup, a
+ * number no configuration ever promised: the composite action allowed ten
+ * minutes for `apt-get update` and twenty for `apt-get install`, so a
+ * shard's setup could legitimately claim thirty of the fifteen minutes its
+ * whole job had. The test passed and the shards were still cancelled -- run
+ * 39777829786 attempt 2 cancelled `agent` and `git-env-preferences` at "The
+ * job has exceeded the maximum execution time of 15m0s", both of them still
+ * inside `apt-get install`, with the other five shards green -- and the `db`
+ * shard, which survived, had spent 12m20s of its fifteen minutes downloading
+ * packages.
+ *
+ * So the setup budget below is *derived* from the composite action and the
+ * workflow instead of being assumed, and the deadline the workflow declares
+ * for `apt-get install` has to be the deadline the action's shell applies.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync(join(__dirname, '..', '..', '.github', 'workflows', 'verify.yml'), 'utf8');
+const buildDepsAction = readFileSync(
+  join(__dirname, '..', '..', '.github', 'actions', 'install-linux-build-deps', 'action.yml'),
+  'utf8',
+);
 
 const STEP_MARKER = '\n      - ';
 
@@ -107,20 +132,116 @@ function logFile(script: string): string {
   return name;
 }
 
+/** The steps of one job, in order, as their declared name and their own block. */
+function jobSteps(jobId: string): { name: string; body: string }[] {
+  const block = jobBlock(jobId);
+  const found: { name: string; body: string }[] = [];
+  for (let at = block.indexOf(STEP_MARKER); at !== -1; ) {
+    const rest = block.slice(at + STEP_MARKER.length);
+    const nextStep = rest.indexOf(STEP_MARKER);
+    const body = nextStep === -1 ? rest : rest.slice(0, nextStep);
+    found.push({ name: (body.match(/^name: (.*)$/m)?.[1] ?? '').trim(), body });
+    at = block.indexOf(STEP_MARKER, at + STEP_MARKER.length);
+  }
+  return found;
+}
+
+/**
+ * The steps of one job that invoke the guard, as the deadline each runs under
+ * and the kill grace each allows afterwards. A job can hold more than one:
+ * `rust-nonshard` runs the fuzz smoke and then the export/doc/integration
+ * pass, and both have their own deadline, so the job's budget is the sum of
+ * them.
+ */
+function guardedSteps(jobId: string): { minutes: number; graceSeconds: number }[] {
+  const guarded = jobSteps(jobId)
+    .filter((step) => step.body.includes('run-guarded.mjs'))
+    .map((step) => ({
+      minutes: Number(step.body.match(/--minutes (\d+)/)?.[1]),
+      graceSeconds: Number(step.body.match(/--kill-grace-seconds (\d+)/)?.[1]),
+    }));
+  expect(guarded.length, `the \`${jobId}\` job has no guarded step`).toBeGreaterThan(0);
+  for (const step of guarded) {
+    expect(Number.isFinite(step.minutes), `a guarded step in \`${jobId}\` has no --minutes`).toBe(true);
+    expect(Number.isFinite(step.graceSeconds), `a guarded step in \`${jobId}\` has no --kill-grace-seconds`).toBe(true);
+  }
+  return guarded;
+}
+
+/** The default the composite action declares for one of its inputs, in minutes. */
+function actionInputDefault(name: string): number {
+  const key = `\n  ${name}:\n`;
+  const start = buildDepsAction.indexOf(key);
+  expect(start, `the composite action declares no \`${name}\` input`).toBeGreaterThan(-1);
+  // Start after the key line itself: searching from the key would match the
+  // key as the next sibling and yield an empty body.
+  const rest = buildDepsAction.slice(start + key.length);
+  const end = rest.search(/\n {2}[a-z][\w-]*:\n/);
+  const block = end === -1 ? rest : rest.slice(0, end);
+  const value = block.match(/default:\s*'?(\d+)'?/)?.[1];
+  expect(value, `the composite action's \`${name}\` input has no numeric default`).toBeDefined();
+  return Number(value);
+}
+
+/**
+ * The deadline one job gives the composite action for one of its apt
+ * phases, in minutes: the value it passes, or the action's own default when
+ * the job says nothing. Read per phase so a job cannot give one phase a
+ * deadline the budget does not know about.
+ */
+function jobDeadline(
+  jobId: string,
+  name: 'update-timeout-minutes' | 'resolve-timeout-minutes' | 'install-timeout-minutes',
+): number {
+  const step = jobSteps(jobId).find((candidate) => candidate.body.includes('install-linux-build-deps'));
+  expect(step, `the \`${jobId}\` job does not use the composite action`).toBeDefined();
+  const passed = step?.body.match(new RegExp(`^\\s*${name}:\\s*'?(\\d+)'?\\s*$`, 'm'))?.[1];
+  return passed === undefined ? actionInputDefault(name) : Number(passed);
+}
+
+/**
+ * The SIGKILL escalation the apt deadlines can each add, in seconds.
+ *
+ * `timeout --kill-after=30s 5m apt-get …` allows the command five minutes
+ * and then *another* 30 seconds to die after SIGTERM, so the worst case of an
+ * apt phase is its deadline plus that grace. Every phase has to carry its
+ * own: `timeout` without `--kill-after` waits for the child indefinitely, so
+ * a phase that lost its escalation would not only cost the budget 30 seconds
+ * less, it would have no bound at all.
+ */
+function aptKillAfterSeconds(): number {
+  const phases = ['UPDATE_TIMEOUT_MINUTES', 'RESOLVE_TIMEOUT_MINUTES', 'INSTALL_TIMEOUT_MINUTES'];
+  let total = 0;
+  for (const variable of phases) {
+    const invocation = buildDepsAction.match(new RegExp(`timeout[^\\n]*\\$\\{${variable}\\}m[^\\n]*`));
+    expect(invocation, `no apt phase runs under ${variable}`).not.toBeNull();
+    const grace = invocation?.[0].match(/--kill-after=(\d+)s/);
+    expect(grace, `the apt phase under ${variable} has no --kill-after escalation`).not.toBeNull();
+    total += Number(grace?.[1]);
+  }
+  return total;
+}
+
+/**
+ * The runner overhead around the apt phase: checkout, the cache restores, the
+ * Rust toolchain and the artifact download. Measured on run 39777829786
+ * attempt 2, the `remaining` shard spent 34 seconds on all of it
+ * (12:59:29-12:59:35 and 13:00:58-13:01:26), so two minutes is roughly
+ * three and a half times the observed cost.
+ */
+const SETUP_OVERHEAD_SECONDS = 2 * 60;
+
 const shard = runScript('Run the ${{ matrix.shard.label }} tests');
 const nonShard = runScript('Run Rust export, documentation, and integration tests');
 
 // `maxJobMinutes` is what a lost runner costs: the guard cannot fire on a
 // runner that is gone, so the run waits out the job cap before the CI retry
 // can act. Five lost `services` runners in October 2026 each held their run
-// 45-60 minutes under the old 40-minute cap; a healthy shard takes ~2.
+// 45-60 minutes under the old 40-minute cap.
 const guards = [
-  { job: 'rust-tests', script: shard, stepMinutes: 10, maxJobMinutes: 15 },
-  { job: 'rust-nonshard', script: nonShard, stepMinutes: 45, maxJobMinutes: 60 },
+  { job: 'rust-tests', script: shard, stepMinutes: 10, maxJobMinutes: 30 },
+  { job: 'rust-nonshard', script: nonShard, stepMinutes: 45, maxJobMinutes: 75 },
 ];
-
-// Checkout, apt, toolchain and cache restore run before the guard starts.
-const SETUP_ALLOWANCE_SECONDS = 3 * 60;
 
 describe.each(guards)('$job timeout guard', ({ script, stepMinutes }) => {
   it('does not pipe the guarded test command', () => {
@@ -173,21 +294,85 @@ describe.each(guards)('$job bounds', ({ job, script, stepMinutes, maxJobMinutes 
     expect(script).toMatch(new RegExp(`--minutes ${stepMinutes}\\b`));
   });
 
-  it('keeps a job-level backstop above the in-step guard and its kill grace', () => {
+  it('keeps a job-level backstop above the real setup cost and every guarded step', () => {
     // The job cap is the layer that does not depend on the runner's shell
-    // reporting back, so it has to outlive the in-step guard including the
-    // SIGKILL escalation; otherwise the cap cuts a hung test off first and
-    // the guard's annotation and log never happen.
+    // reporting back, so it has to outlive the setup *and* every guarded
+    // step, including the SIGKILL escalation; otherwise the cap cuts a step
+    // off first and the guard's annotation and log never happen.
+    //
+    // The setup cost is the composite action's own deadlines plus the runner
+    // overhead around them -- not an assumed three minutes. Run 39777829786
+    // attempt 2 cancelled two shards at "The job has exceeded the maximum
+    // execution time of 15m0s" while they were still inside `apt-get
+    // install`, because the action allowed thirty minutes of apt work inside
+    // a fifteen-minute job.
     const cap = jobBlock(job).match(/^\s*timeout-minutes: (\d+)$/m);
     expect(cap, `the ${job} job has no timeout-minutes backstop`).not.toBeNull();
-    const grace = Number(shellLines(script).match(/--kill-grace-seconds (\d+)/)?.[1]);
-    expect(Number(cap?.[1]) * 60).toBeGreaterThanOrEqual(
-      SETUP_ALLOWANCE_SECONDS + stepMinutes * 60 + grace,
+    // The setup cost is the composite action's own deadlines plus the runner
+    // overhead around them -- not an assumed three minutes. Run 39777829786
+    // attempt 2 cancelled two shards at "The job has exceeded the maximum
+    // execution time of 15m0s" while they were still inside `apt-get
+    // install`, because the action allowed thirty minutes of apt work inside
+    // a fifteen-minute job.
+    //
+    // Each apt phase can also burn the SIGKILL escalation its `timeout`
+    // allows after the deadline, so those count too: without them the model
+    // said the shard's worst case was exactly the cap, and a job cancelled at
+    // the cap leaves neither a log nor a conclusion (issue #1961).
+    const deadlineMinutes =
+      jobDeadline(job, 'update-timeout-minutes') +
+      jobDeadline(job, 'resolve-timeout-minutes') +
+      jobDeadline(job, 'install-timeout-minutes');
+    const setupSeconds = deadlineMinutes * 60 + SETUP_OVERHEAD_SECONDS + aptKillAfterSeconds();
+    const guardedSeconds = guardedSteps(job).reduce(
+      (total, step) => total + step.minutes * 60 + step.graceSeconds,
+      0,
     );
+    expect(Number(cap?.[1]) * 60).toBeGreaterThanOrEqual(setupSeconds + guardedSeconds);
   });
 
   it('caps what a lost runner costs', () => {
     const cap = jobBlock(job).match(/^\s*timeout-minutes: (\d+)$/m);
     expect(Number(cap?.[1])).toBeLessThanOrEqual(maxJobMinutes);
+  });
+});
+
+describe('the composite action applies the deadlines the workflow declares', () => {
+  it('takes every apt deadline as an input rather than baking it into the shell', () => {
+    // A deadline that is only written in the shell cannot be budgeted for by
+    // the workflow, and the two would drift the moment one of them changed.
+    expect(buildDepsAction).toMatch(/^\s*update-timeout-minutes:\s*$/m);
+    expect(buildDepsAction).toMatch(/^\s*resolve-timeout-minutes:\s*$/m);
+    expect(buildDepsAction).toMatch(/^\s*install-timeout-minutes:\s*$/m);
+  });
+
+  it('applies the declared deadlines instead of a literal minute count', () => {
+    const shell = buildDepsAction;
+    expect(shell).toMatch(/UPDATE_TIMEOUT_MINUTES/);
+    expect(shell).toMatch(/RESOLVE_TIMEOUT_MINUTES/);
+    expect(shell).toMatch(/INSTALL_TIMEOUT_MINUTES/);
+    // No hardcoded `timeout ... Nm apt-get` left behind: the number that the
+    // budget is computed from has to be the number the shell enforces.
+    expect(shell).not.toMatch(/timeout --kill-after=\d+s \d+m apt-get/);
+  });
+
+  it('keeps every apt deadline finite', () => {
+    expect(actionInputDefault('update-timeout-minutes')).toBeGreaterThan(0);
+    expect(actionInputDefault('resolve-timeout-minutes')).toBeGreaterThan(0);
+    expect(actionInputDefault('install-timeout-minutes')).toBeGreaterThan(0);
+  });
+
+  it('bounds the resolve step too, so it cannot be cancelled by the job cap', () => {
+    // The resolution reads the index apt has just fetched and works out the
+    // plan. It is local work, so it cannot stall on the mirror, but it has to
+    // have a deadline for the same reason the other apt phases do: a phase
+    // without one is a phase the job cap cancels without a diagnosis.
+    // The anchor is the shell's own invocation, not the prose above it.
+    const at = buildDepsAction.indexOf('install --print-uris -y');
+    expect(at, 'the action no longer resolves the package set').toBeGreaterThan(-1);
+    const before = buildDepsAction.slice(Math.max(0, at - 400), at);
+    expect(before, 'the resolve step has no deadline of its own').toMatch(
+      /timeout --kill-after=\d+s "\$\{RESOLVE_TIMEOUT_MINUTES\}m"/,
+    );
   });
 });

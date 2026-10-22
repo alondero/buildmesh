@@ -564,6 +564,15 @@ jobs:
       # running the Rust tests, so every job that compiles or runs the Rust
       # suite installs them.
       - uses: ./.github/actions/install-linux-build-deps
+        with:
+          # This is the first Rust job on the runner, so it is the one that
+          # finds the .deb cache empty when the package set has moved on, and
+          # the one that has to download the whole set. On run 39777829786 it
+          # took 15m17s for 77.7 MB, which is why this job's deadline is
+          # wider than the shards'. Its own 90-minute cap is what absorbs
+          # that; the jobs downstream of it restore the entry this one leaves
+          # behind.
+          install-timeout-minutes: 30
 
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -736,16 +745,41 @@ jobs:
   # every process the runner user can kill, including the runner agent, so
   # the guard never runs. `process_util::kill_process_group` calls kill(2)
   # with the whole id instead. At 40 minutes each of the five lost `services`
-  # runners in October 2026 held its run for 45-60 minutes. A healthy shard
-  # takes ~2 minutes including setup, and a cache miss that recompiles the
-  # crate takes about as long as `rust-build` (3-7 minutes), so 15 minutes
-  # still covers the slow honest case. tests/unit/ci-rust-timeout-guard.test.ts
-  # pins the cap and keeps the guard's deadline plus kill grace inside it.
+  # runners in October 2026 held its run for 45-60 minutes.
+  #
+  # Raising the shard cap from 15 to 30 doubles what a lost runner costs the
+  # run before the CI retry can act, and that is the trade: a setup that can
+  # legitimately take sixteen minutes does not fit in fifteen. 30 is still
+  # well under the 40-minute cap whose five lost `services` runners held
+  # their run for 45-60 minutes.
+  #
+  # The cap is the sum of the setup and the guard, and both halves are real
+  # numbers rather than assumptions. The setup is the composite action's own
+  # deadlines -- five minutes for `apt-get update`, two for the resolution
+  # and six for `apt-get install` -- plus the SIGKILL escalation each of those
+  # `timeout` invocations allows after its deadline, plus about two minutes
+  # of checkout, cache restore and toolchain; the guard is ten minutes plus
+  # its one-minute kill grace. That is 27.5 minutes, so the cap is 30.
+  #
+  # It was 15, and that was the arithmetic that failed. The first version of
+  # the budget regression assumed a three-minute setup, a number nothing
+  # promised: the composite action allowed ten minutes for the update and
+  # twenty for the install, so a shard's setup could claim thirty of the
+  # fifteen minutes its whole job had. Run 39777829786 attempt 2 cancelled
+  # `agent` and `git-env-preferences` at "The job has exceeded the maximum
+  # execution time of 15m0s", both of them still inside `apt-get install`,
+  # with the other five shards green -- and the `db` shard, which survived,
+  # had spent 12m20s of its fifteen minutes downloading packages.
+  #
+  # A healthy shard takes ~2 minutes including setup, and the .deb cache is
+  # what keeps it there: the cached set is keyed on the package set itself,
+  # so a hit means the .debs are already on disk. tests/unit/ci-rust-timeout-guard.test.ts
+  # pins the cap and keeps the setup plus the guard inside it.
   rust-tests:
     name: Rust tests (${{ matrix.shard.label }})
     needs: rust-build
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       # These must stay *identical* to `rust-build`'s and `rust-nonshard`'s, and
       # that set is now exactly these four variables. Two separate things depend
@@ -806,6 +840,14 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - uses: ./.github/actions/install-linux-build-deps
+        with:
+          # This job restores the entry `rust-build` left behind, so the .deb
+          # set is already on disk and the install is unpacking rather than
+          # downloading. Six minutes is several times the 60s that took, and it
+          # is deliberately much shorter than the compile job's: a shard that
+          # had to fetch the whole set would not finish inside the job cap
+          # anyway, and a diagnostic beats a cancelled job.
+          install-timeout-minutes: 6
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
@@ -878,7 +920,13 @@ jobs:
     name: Rust export, doc, and integration tests
     needs: [changes, rust-build]
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # The same arithmetic as the shards, over a job that holds two guarded
+    # steps: the fuzz smoke (5 minutes plus its 30-second grace) and the
+    # export/doc/integration pass (45 minutes plus its two-minute grace).
+    # With the setup's 16.5 minutes that is 69, so the cap is 75. It was 60,
+    # which left seven minutes for a setup that could legitimately claim
+    # thirty.
+    timeout-minutes: 75
     env:
       # Same fingerprint inputs as `rust-build`/`rust-tests` so the restored
       # cache is reused for the export, doctest, and integration binaries
@@ -895,6 +943,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - uses: ./.github/actions/install-linux-build-deps
+        with:
+          # Same reasoning as the shards: this job needs `rust-build`, so the
+          # .deb set is already cached and the install only unpacks it.
+          install-timeout-minutes: 6
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable

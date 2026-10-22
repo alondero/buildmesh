@@ -269,7 +269,7 @@ group. The shards are **not** required checks — `Rust tests + TS bindings` is
 the gate, and the non-shard job is the single writer of the generated bindings.
 
 Each Rust test step runs under `scripts/ci/run-guarded.mjs` (10 minutes for a
-shard, 45 for the non-shard pass) beneath a longer job cap (15 and 60
+shard, 45 for the non-shard pass) beneath a longer job cap (30 and 75
 minutes), and writes its log to a file that an `if: always()` upload step
 preserves. The guard streams the command's output into the step log while
 appending it to that file, kills the command's whole process tree at the
@@ -278,6 +278,41 @@ annotation itself, and exits with the
 command's own code — or 124 when the deadline fired. It is unit-tested in
 `tests/agent-infra/run-guarded.test.mjs`, which pins the exit-code contract,
 the tree kill, and the annotation.
+
+The job cap is a budget for the whole job, so it has to cover the setup as
+well as the guard, and the setup is the composite action's own deadlines:
+five minutes for `apt-get update`, two for resolving the package set and six
+for `apt-get install`. Each of those three phases can also burn the 30-second
+SIGKILL escalation its `timeout --kill-after` allows after its deadline, and
+the runner overhead around them — checkout, the cache restores, the Rust
+toolchain — is about two minutes. That is 16.5 minutes of setup, so a shard's
+cap is 30 (16.5 of setup, 11 of guard including its kill grace, and 2.5
+minutes of slack). The non-shard pass's is 75: that job holds two guarded
+steps, the five-minute fuzz smoke and the 45-minute export/doc/integration
+pass, so its worst case is 69 minutes and it has 6 of slack.
+
+The cap was 15 and 60, and the arithmetic behind those was fiction. The first
+version of the budget regression assumed a three-minute setup, a number no
+configuration promised: the composite action allowed ten minutes for the
+update and twenty for the install, so a shard's setup could claim thirty of
+the fifteen minutes its whole job had. The regression passed and the shards
+were still cancelled — run 39777829786 attempt 2 cancelled `agent` and
+`git-env-preferences` at "The job has exceeded the maximum execution time of
+15m0s", both of them still inside `apt-get install`, with the other five
+shards green. `tests/unit/ci-rust-timeout-guard.test.ts` now *derives* the
+setup budget from the composite action and the workflow instead of assuming
+it, and its `keeps a job-level backstop above the real setup cost and every
+guarded step` assertion fails when the cap no longer covers it. The SIGKILL
+escalations count too: without them the model put the shard's worst case at
+exactly the cap, which is the condition in which a job is cancelled with
+neither a log nor a conclusion.
+
+Raising the caps is not free: the cap is what a *lost* runner costs the run
+before the CI retry can act, so a shard now waits out thirty minutes instead
+of fifteen, and the non-shard pass seventy-five instead of sixty. That is the
+price of a setup that can legitimately take sixteen minutes, and thirty is
+still well under the forty-minute cap whose five lost `services` runners
+held their run for 45-60 minutes in October 2026.
 
 The guard exists because of #1961: with a `| tee` pipeline, a descendant that
 leaves the process group still holds the pipe open, so `tee` never sees EOF and
@@ -320,9 +355,14 @@ shard grows past the setup cost again.
 
 GitHub caps a repository's caches at 10 GB in total and evicts the
 least-recently-used entries past that. This repository sat at 9.98 GB before the
-following changes, so **a new cache can silently evict the Cargo target cache
-that turns `rust-build`'s compile into 54 seconds instead of minutes.** Two
-changes keep the budget sustainable:
+following changes, and measured 10.77 GB across 38 entries in October 2026 —
+the cap is already binding, so **a new cache can silently evict the Cargo
+target cache that turns `rust-build`'s compile into 54 seconds instead of
+minutes.** The largest entries are the per-pull-request rust-cache copies
+(~645 MB each, one per merge ref) and the `setup-java` entries (~585 MB each);
+the apt `.deb` entry is ~73 MB, and a pull-request merge ref cannot read
+another pull request's entry, so each Rust-touching pull request leaves one of
+its own behind. Two changes keep the budget sustainable:
 
 - The Linux Rust jobs share one rust-cache entry (`shared-key:
   linux-rust-target`) instead of one per job id. They were saving nine
@@ -333,8 +373,72 @@ changes keep the budget sustainable:
   `Dir::Cache::archives`, which the composite action redirects into the
   workspace, so this uses apt's own supported mechanism: on a hit apt still
   resolves and verifies every package and runs its maintainer scripts, and only
-  the transfer is skipped. A stale or partial entry costs a download, not a
-  broken job.
+  the transfer is skipped.
+
+The apt cache key names the **package set**, not the composite action's own
+file. `apt-get install --print-uris` resolves the install without fetching
+anything and lists the `.deb` it would download; the digest of those filenames
+identifies the set, and `scripts/ci/apt-package-set-key.mjs` computes it. An
+entry under that key holds those files, and the OS release codename is in the
+key too, because a package set from another Ubuntu release is a different set
+rather than a partial hit.
+
+This was not a theoretical concern. The key used to be
+`hashFiles('.github/actions/install-linux-build-deps/action.yml')`, which
+changed only when somebody edited that file and therefore could not tell one
+Ubuntu release from another. The `ubuntu-latest` image moved from 24.04 to
+26.04 in October 2026, and the entry the old image left behind
+(`apt-debs-Linux-0468eee8...`, created 2026-10-12) was still keyed the same
+way. Every job restored it, reported "Cache hit", and then downloaded the
+whole suite again: the restored directory held 133 MB (the entry itself is
+~59 MB compressed), and apt's own "Need to get" and "Fetched" figures matched
+in all nine Linux Rust jobs of run 39777829786 attempt 2 — 77.7 MB in seven
+of them and 76.6 MB in the `db` shard — so none of the restored files was
+reused. The old comment called that harmless — "a stale entry costs a
+download and not a broken job" — but the download *is* the setup cost. The
+`db` shard spent 12m20s of its 15-minute job inside it, and two shards were
+cancelled at the job cap before they ever reached a test.
+
+The fallback restore stays inside the same release
+(`restore-keys: apt-debs-<os>-<codename>-`), so a package version that moved
+between two jobs costs the difference rather than the whole set: apt matches a
+cached `.deb` against the version its index wants and downloads only what is
+missing. The entry is written whenever the exact set is not already stored —
+the restore's exact-key hit is the only case where it is — so a package-set
+change gets an entry of its own rather than leaving the cache frozen on
+whatever set it happens to hold. A write-once rule would be wrong: after an
+Ubuntu security update every job would download the difference and nothing
+would be stored again.
+
+Measured on run 39807067624, the run that carried this change: `rust-build`
+downloaded the set once (60s for the whole step), and the seven shards that
+followed reported `Need to get 0 B` — or 1123 kB where a runner image had a
+slightly different resolution — against the 76.6-77.7 MB each of them had
+fetched before. The two shards that run 39777829786 cancelled at the job cap
+(`agent` and `git-env-preferences`) finished in 2m55s and 1m41s, and the
+required `Rust tests + TS bindings` aggregate went green.
+
+The shards get a six-minute install deadline against the compile job's
+thirty, because they restore the entry `rust-build` left behind and only
+unpack it (60-74s measured). That is a deliberate trade: a shard that had to
+fetch the whole set would not finish inside the job cap anyway, and a
+diagnostic beats a cancelled job — but it does mean a cold or stale cache
+turns a slow pass into a red shard rather than a slow one.
+
+A package-set change makes a new entry for **each distinct resolution** among
+the nine jobs, not one for the change: the resolutions diverge when the runner
+pool mixes image revisions, and run 39807067624 wrote three entries of ~76 MB
+each — about 230 MB for one scope. Each entry holds the whole archive
+directory, so it carries the set it names plus whatever that job downloaded on
+top of the one it restored. The superseded entries are the least recently
+used, so they are the first the 10 GB budget evicts; and a pull-request merge
+ref cannot read another pull request's entry, so each Rust-touching pull
+request leaves its own behind.
+`tests/agent-infra/apt-package-set-key.test.mjs` (`npm run test:agent`) pins
+the contract on both halves: the script that computes the identity, and the
+composite action's use of it — the key names the digest and the release, the
+restore comes after the resolution and before the install, the save comes
+after the install, and the save runs unless the exact set is already stored.
 
 `shared-key` alone does not make one entry. rust-cache also folds a hash of
 every environment variable named `CARGO*`, `CC*`, `CFLAGS*`, `CXX*`, `CMAKE*`, or
