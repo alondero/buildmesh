@@ -1117,6 +1117,15 @@ terminal. Changes still supports file diffs and pull request creation. The
 request and unsent reply remain available while you inspect changes or the
 terminal. Back returns through the screen you came from.
 
+**Connection → Background notifications** makes the phone tell you when an
+agent needs you while the app is closed. Turn it on once; the phone then keeps
+a connection to the desktop and posts one notification per agent that asks a
+question or requests permission. Tapping the notification opens that agent,
+and the notification clears as soon as the agent is answered — including when
+you answer it on the desktop. The phone shows a persistent "Watching for
+agents" notification for as long as this is on; turning it off stops the
+connection and clears the notifications.
+
 The **Coordinator Read API** is a separate, read-only surface for an external
 coordinator. It is off by default and uses its own capability-scoped token; it
 is not the phone pairing credential. Use your own authenticated tunnel for

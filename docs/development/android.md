@@ -170,7 +170,10 @@ its edge-to-edge setup; the resource theme supplies the initial window backgroun
 
 Compose owns Overview/Work, mesh selection and search, node details and replies,
 task capture, issue spawning, archive import/resume, changed files, selectable
-diffs, mesh-branch PR creation and connection settings. Launch selections come
+diffs, mesh-branch PR creation and connection settings. Connection settings also
+owns the background notifications switch, which is off until the user turns it
+on; the watch it starts is described under
+[Background agent notices](#background-agent-notices). Launch selections come
 from the backend menu, including saved configurations and capability filtering.
 Tapping an Overview mesh name selects its ID and switches to Work, clearing the
 search and attention filter. Mesh headers summarize open (non-archived) nodes
@@ -254,21 +257,84 @@ responses into the current desktop prompt. Input controls report disconnection i
 queueing keystrokes. HTTP replies enforce the server's 1024-byte encoded-body
 limit. Enumerated answers are shown as guidance rather than guessed PTY keys.
 
-The ViewModel owns foreground polling and the event socket. The poll reads one
+The ViewModel owns foreground polling and its share of the event feed. The poll reads one
 snapshot (`/api/meshes`, `/api/nodes`, `/api/providers`) every 5s while
 foregrounded, so it hits the desktop's provider-menu route even when nothing
 changed; that route memoizes its derivation per preferences generation rather
 than re-deriving per poll (see
 [providers.md](providers.md#the-spawn-menu-derivation-is-memoized-per-preferences-generation)).
 Refresh requests are coalesced and versioned so polling cannot starve slow
-responses and older responses cannot overwrite a newer event or session. Each
-socket has one reconnect job and one owner. Forgetting or revocation cancels
+responses and older responses do not overwrite a newer event or session
+(`RefreshController.refresh()` publishes only when the request's revision is
+still current). The
+event feed is process-wide, so the socket has one reconnect job and one owner
+however many surfaces are watching it. Forgetting or revocation cancels
 pending actions before their callbacks can clear drafts or navigate.
-Backgrounding cancels sockets/polling; foregrounding immediately reconnects with
+Backgrounding cancels polling; foregrounding immediately reconnects with
 a new target-bound WebSocket ticket. Ticket rate limits allow one bounded retry.
 Mutating HTTP requests and redirects are never automatically replayed.
 HTTP requests explicitly close their connection to match the embedded server's
 one-request transport; terminal WebSockets retain their separate live connection.
+
+## Background agent notices
+
+An agent can stop and wait: it asks a question, or it asks for permission to
+run a command. The desktop records that state on the node (`awaiting_input`)
+and publishes it on `/ws/events`. The phone can be told about it while the app
+is in the background, through a foreground service the user turns on
+themselves.
+
+**The switch.** Connection settings has a "Background notifications" toggle.
+It is off until the user turns it on. Turning it on asks for the notification
+permission on Android 13 and later; if the permission is refused the switch
+stays off and says why. Turning it off stops the service and clears the
+notices it posted.
+
+**What the phone does.** The service (`AgentWatchService`) holds the desktop's
+event feed open. When a node's status becomes `awaiting_input`, the phone
+posts one notice for that node, naming it and saying whether it needs an
+answer or needs permission, and the notice opens that node. The notice is
+cleared as soon as the node's state is resolved — including when the answer is
+given on the desktop, which is the case that matters: the user is not
+required to answer on the phone that was told.
+
+**The watch follows the desktop.** A notice lives as long as the watch does and
+the node still needs a person, so forgetting the desktop stops the watch and
+takes its notices with it — the watch had a desktop to listen to, and now it
+does not. The user's preference survives, so pairing again starts the watch
+again.
+
+**One feed, one socket.** The dashboard and the watch service read the same
+feed (`EventFeed`), which owns one WebSocket and one reconnect timer for the
+whole process. Two sockets would double the desktop's subscriber count, the
+phone's idle traffic and the ticket mint rate.
+
+**The delivery bound.** Under one second from the desktop's lifecycle event to
+the notice on the phone while the socket is connected: the event crosses the
+LAN or VPN on the open socket, and the first notice for a node the phone has
+not seen also reads that node's name from `/api/nodes`. If the socket was
+down, the notice arrives after the reconnect instead — the socket backs off
+1, 2, 4, 8 and 16 seconds, so the bound becomes 16 seconds after the last
+failed attempt.
+
+**The cost.** The watch replaces the foreground dashboard's five-second
+snapshot poll rather than adding to it. Its own idle traffic is one WebSocket
+keepalive ping per 20-second interval (`pingInterval(20, TimeUnit.SECONDS)` in
+`Connection.kt`): about 4,320 pings a day at that interval, each a single
+small control frame, so the day's traffic is protocol overhead rather than
+payload, and the desktop sends no frames of its own while the nodes are idle.
+The phone also shows a persistent "Watching for agents" notification while the
+watch is on, because a foreground service has to say what it is doing. The
+on-device battery figure still needs the physical-device acceptance run; it is
+not claimed here.
+
+**What it is not.** The notice states the desktop's state, not a promise that
+the answer has to be given on this phone. The Circuit "Needs approval" gate is
+a separate person-needed state and is not covered here. A revoked device stops
+the feed rather than reconnecting forever; pairing again is the only way back.
+
+The decision is recorded in
+[ADR 0045](../adr/0045-android-background-agent-notices.md).
 
 ## Verification
 
@@ -281,6 +347,12 @@ pins and hostname verification, invitation validation and Unicode reply limits.
 They are client transport evidence, not proof of the Rust server.
 Controlled coroutine tests also cover slow polling, event invalidation and
 late cleanup after a background/foreground transition.
+The background watch adds two JVM suites: one that reads the feed's event
+vocabulary (which lifecycle kind means a node needs a person, how a node row
+reaches the same conclusion, and that each node owns its own notification id),
+and one that drives the feed against MockWebServer to prove two owners share a
+single socket, that the socket closes with its last owner, and that a revoked
+device stops the feed instead of minting tickets forever.
 
 ```powershell
 android\gradlew.bat -p android connectedDebugAndroidTest

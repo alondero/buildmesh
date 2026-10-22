@@ -22,6 +22,15 @@ data class RemoteState(
     val paired: Boolean = false,
     val busy: Boolean = false,
     val refreshing: Boolean = false,
+    /**
+     * Whether a snapshot has been read at least once.
+     *
+     * `restoring` covers the credential; this covers the inventory. A screen
+     * that needs to know whether a node is missing has to wait for this,
+     * because an empty list before the first read means "not loaded yet", not
+     * "no nodes".
+     */
+    val loaded: Boolean = false,
     val error: String = "",
     val notice: String = "",
     val origin: String = "",
@@ -44,8 +53,23 @@ class BuildmeshViewModel(application: Application) : AndroidViewModel(applicatio
     private var generation = 0
     private var polling: Job? = null
     private var actionJob: Job? = null
-    private var events: RemoteSocket? = null
     private var foreground = false
+
+    /**
+     * The dashboard's share of the desktop's event feed.
+     *
+     * The feed is process-wide, so the background watch service and this
+     * dashboard read the same socket rather than opening a second one.
+     */
+    private val feedListener = object : FeedListener {
+        override fun onOpen() { refresh() }
+        override fun onEvent(event: FeedEvent) {
+            // Invalidate an in-flight snapshot before reading the new authoritative state.
+            refresher.invalidate()
+            refresh()
+        }
+        override fun onUnauthorized() { unauthorized() }
+    }
     private val refresher = RefreshController(viewModelScope,
         read = {
             val client = api ?: throw CancellationException("Disconnected")
@@ -72,7 +96,7 @@ class BuildmeshViewModel(application: Application) : AndroidViewModel(applicatio
                 DashboardSnapshot(meshes.await(), nodes.await(), providers.await(), runs.await(), ownerships.await())
             }
         }, publish = { snapshot ->
-            mutableState.update { it.copy(meshes = snapshot.meshes, nodes = snapshot.nodes, providers = snapshot.providers, circuitRuns = snapshot.runs ?: it.circuitRuns, circuitOwnerships = snapshot.ownerships ?: it.circuitOwnerships, error = "") }
+            mutableState.update { it.copy(meshes = snapshot.meshes, nodes = snapshot.nodes, providers = snapshot.providers, circuitRuns = snapshot.runs ?: it.circuitRuns, circuitOwnerships = snapshot.ownerships ?: it.circuitOwnerships, error = "", loaded = true) }
         }, onError = ::report,
         onBusy = { busy -> mutableState.update { it.copy(refreshing = busy) } },
     )
@@ -86,6 +110,7 @@ class BuildmeshViewModel(application: Application) : AndroidViewModel(applicatio
                     mutableState.update { it.copy(paired = true, origin = saved.origin, draftNamespace = draftNamespace(saved)) }
                     api!!.restore()
                     store.save(api!!.session())
+                    startWatchIfEnabled()
                 } catch (e: Exception) {
                     // `/api/session` is the credential boundary: it answers 401 or
                     // 403 for a credential it will not re-mint, so either one means
@@ -116,8 +141,12 @@ class BuildmeshViewModel(application: Application) : AndroidViewModel(applicatio
                 if (owner != generation) return@launch
                 val session = candidate.session()
                 store.save(session)
+                // The feed's socket is bound to the credential the desktop
+                // accepts, so a fresh pairing has to re-mint it.
+                AppEventFeed.feed.reload()
                 api?.close()
                 api = BuildmeshApi(session.origin, session.root, session.cookie)
+                startWatchIfEnabled()
                 mutableState.value = RemoteState(restoring = false, paired = true, origin = session.origin, draftNamespace = draftNamespace(session))
                 if (foreground) resume()
             } catch (e: CancellationException) { throw e
@@ -132,22 +161,21 @@ class BuildmeshViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun resume() {
         foreground = true
-        val client = api ?: return
+        // Without a paired desktop there is nothing to read and nothing to
+        // listen to, so the feed stays closed.
+        if (api == null) return
         if (state.value.restoring || polling?.isActive == true) return
         refresh()
         polling = viewModelScope.launch { while (isActive) { delay(5000); refresh() } }
-        events = RemoteSocket(client, viewModelScope, "events", onOpen = { refresh() }, onData = {
-            // Invalidate an in-flight snapshot before reading the new authoritative state.
-            refresher.invalidate()
-            refresh()
-        }, onUnauthorized = ::unauthorized).also { it.start() }
+        AppEventFeed.bind(getApplication<Application>())
+        AppEventFeed.feed.attach(feedListener)
     }
 
     fun pause() {
         foreground = false
         polling?.cancel(); polling = null
         refresher.stop()
-        events?.stop(); events = null
+        AppEventFeed.feed.detach(feedListener)
         mutableState.update { it.copy(refreshing = false) }
     }
 
@@ -210,9 +238,28 @@ class BuildmeshViewModel(application: Application) : AndroidViewModel(applicatio
         pause()
         api?.close(); api = null
         store.clear()
+        // Nothing on this phone may keep using the credential that was just
+        // withdrawn, so the feed is rebuilt against an empty store.
+        AppEventFeed.feed.reload()
+        // A watch with no desktop to watch is a phone claiming to listen to
+        // nothing, so it goes away with the desktop. The user's preference
+        // survives: pairing again starts the watch again.
+        AgentWatchService.stop(getApplication<Application>())
         // Keep this VM's private draft scope while disconnected; a newly paired
         // desktop replaces it before any paired screen becomes visible.
         mutableState.value = RemoteState(restoring = false, draftNamespace = state.value.draftNamespace)
+    }
+
+    /**
+     * Start the background watch when the user asked for it.
+     *
+     * The watch follows the credential: a restored or freshly paired desktop
+     * gives it something to listen to, and the service stops itself again when
+     * the desktop goes away.
+     */
+    private fun startWatchIfEnabled() {
+        val app = getApplication<Application>()
+        if (AgentWatchService.isEnabled(app)) AgentWatchService.start(app)
     }
     fun unauthorized() {
         forget()

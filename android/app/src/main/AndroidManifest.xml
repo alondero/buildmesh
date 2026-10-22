@@ -3,6 +3,12 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Background agent notices (issue #2316). POST_NOTIFICATIONS is the
+         runtime gate on Android 13+; the foreground service is what keeps the
+         phone listening for a node that needs a person. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <application
         android:label="Buildmesh"
@@ -24,6 +30,25 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="buildmesh" android:host="pair" />
             </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="buildmesh" android:host="node" />
+            </intent-filter>
         </activity>
+        <!-- Holds the desktop's event feed open while the user has enabled
+             background agent notices (issue #2316). `specialUse` is the honest
+             type here: the service keeps a connection to the user's own
+             desktop open, which is not data transfer to a cloud service, and
+             `dataSync` would be capped at six hours a day on Android 15+. -->
+        <service
+            android:name=".AgentWatchService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps a connection to the paired Buildmesh desktop open so a request from an agent reaches this phone while the app is in the background." />
+        </service>
     </application>
 </manifest>
