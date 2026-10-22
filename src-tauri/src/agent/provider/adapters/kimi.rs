@@ -26,15 +26,16 @@
 //! `.cmd` shim), so `WindowsShell::Direct` is correct everywhere — matching
 //! the AGY and Grok adapter patterns.
 
-use crate::agent::managed_config;
+use crate::agent::attention_hooks::{
+    provision_attention_hooks, HookFormat, HookProvisioningSpec, Ownership, TomlEventRule,
+    TomlHookShape,
+};
 use crate::agent::provider::{
     AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell,
 };
 use crate::env::ResolvedPath;
 use crate::models::EnvType;
 use std::path::Path;
-
-static HOOK_CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn hook_command(windows: bool) -> String {
     if windows {
@@ -46,83 +47,87 @@ fn hook_command(windows: bool) -> String {
     }
 }
 
-/// Kimi Code 0.27.0 reads flat [[hooks]] entries from its global config.
-/// Keep callbacks runtime-bound: this file is shared by all Kimi sessions.
+/// Kimi Code 0.27.0 reads flat `[[hooks]]` entries from its global config.
+/// Declared once as provisioning data: the shared TOML adapter performs the
+/// read/compare/atomic-write sequence, and the callback stays runtime-bound
+/// because this file is shared by all Kimi sessions.
+const KIMI_HOOKS: HookProvisioningSpec<'static> = HookProvisioningSpec {
+    harness: "kimi",
+    file: "config.toml",
+    label: "Kimi config",
+    command: "",
+    event_commands: &[],
+    format: HookFormat::Toml(TomlHookShape {
+        root_key: "hooks",
+        timeout: 10,
+        ownership: Ownership {
+            fields: &["command"],
+            anchors: &["BUILDMESH_SESSION_ID", "BUILDMESH_PORT"],
+            decode_embedded_powershell: true,
+        },
+        events: &[
+            TomlEventRule {
+                name: "SessionStart",
+                matcher: None,
+            },
+            TomlEventRule {
+                name: "Stop",
+                matcher: None,
+            },
+            TomlEventRule {
+                name: "StopFailure",
+                matcher: None,
+            },
+            TomlEventRule {
+                name: "Interrupt",
+                matcher: None,
+            },
+            TomlEventRule {
+                name: "PermissionRequest",
+                matcher: None,
+            },
+            TomlEventRule {
+                name: "PermissionResult",
+                matcher: None,
+            },
+            TomlEventRule {
+                name: "UserPromptSubmit",
+                matcher: None,
+            },
+            TomlEventRule {
+                name: "PreToolUse",
+                matcher: Some("AskUserQuestion|ExitPlanMode"),
+            },
+            TomlEventRule {
+                name: "PostToolUse",
+                matcher: Some("AskUserQuestion|ExitPlanMode"),
+            },
+            TomlEventRule {
+                name: "PostToolUseFailure",
+                matcher: Some("AskUserQuestion|ExitPlanMode"),
+            },
+            // Background AskUserQuestion returns before the answer. Its
+            // terminal task notification, correlated by task id, is the
+            // resolution signal.
+            TomlEventRule {
+                name: "Notification",
+                matcher: Some(r"^task\.(completed|failed|killed|timed_out|lost)$"),
+            },
+        ],
+    }),
+};
+
 fn ensure_hooks(path: &Path, command: &str) -> Result<(), String> {
-    use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table};
-    let _guard = HOOK_CONFIG_LOCK.lock().map_err(|e| e.to_string())?;
-    let original = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(format!("failed to read Kimi config {path:?}: {e}")),
+    let workspace = path
+        .parent()
+        .ok_or_else(|| "Kimi config has no parent directory".to_string())?;
+    let spec = HookProvisioningSpec {
+        command,
+        ..KIMI_HOOKS
     };
-    let mut config = original
-        .parse::<DocumentMut>()
-        .map_err(|e| managed_config::refuse_malformed(path, &e.to_string()))?;
-    if !config.contains_key("hooks")
-        || config["hooks"]
-            .as_array()
-            .is_some_and(|array| array.is_empty())
-    {
-        config["hooks"] = Item::ArrayOfTables(ArrayOfTables::new());
-    } else if !config["hooks"].is_array_of_tables() {
-        let hooks = config["hooks"]
-            .clone()
-            .into_array_of_tables()
-            .map_err(|_| "Kimi hooks must be an array of tables".to_string())?;
-        config["hooks"] = Item::ArrayOfTables(hooks);
-    }
-    let hooks = config["hooks"]
-        .as_array_of_tables_mut()
-        .ok_or_else(|| "Kimi hooks must be an array of tables".to_string())?;
-    hooks.retain(|hook| {
-        !hook
-            .get("command")
-            .and_then(Item::as_str)
-            .is_some_and(|command| {
-                let decoded = command
-                    .find("powershell.exe ")
-                    .and_then(|start| crate::env::decode_powershell_command(&command[start..]));
-                let command = decoded.as_deref().unwrap_or(command);
-                command.contains("BUILDMESH_SESSION_ID") && command.contains("BUILDMESH_PORT")
-            })
-    });
-    for (event, matcher) in [
-        ("SessionStart", None),
-        ("Stop", None),
-        ("StopFailure", None),
-        ("Interrupt", None),
-        ("PermissionRequest", None),
-        ("PermissionResult", None),
-        ("UserPromptSubmit", None),
-        ("PreToolUse", Some("AskUserQuestion|ExitPlanMode")),
-        ("PostToolUse", Some("AskUserQuestion|ExitPlanMode")),
-        ("PostToolUseFailure", Some("AskUserQuestion|ExitPlanMode")),
-        // Background AskUserQuestion returns before the answer. Its terminal
-        // task notification, correlated by task id, is the resolution signal.
-        (
-            "Notification",
-            Some(r"^task\.(completed|failed|killed|timed_out|lost)$"),
-        ),
-    ] {
-        let mut hook = Table::new();
-        hook["event"] = value(event);
-        if let Some(matcher) = matcher {
-            hook["matcher"] = value(matcher);
-        }
-        hook["command"] = value(command);
-        hook["timeout"] = value(10);
-        hooks.push(hook);
-    }
-    let updated = config.to_string();
-    if updated == original {
-        return Ok(());
-    }
-    let parent = path.parent().ok_or("Kimi config has no parent")?;
-    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    managed_config::atomic_write(path, &updated)
-        .map_err(|e| format!("failed to replace Kimi config {path:?}: {e}"))?;
-    Ok(())
+    provision_attention_hooks(&spec, workspace)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 pub struct KimiAdapter;

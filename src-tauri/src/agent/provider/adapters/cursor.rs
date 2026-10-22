@@ -32,10 +32,13 @@
 //! and detects a stale Buildmesh entry by URL substring so re-provisioning
 //! is idempotent (issue #886).
 
+use crate::agent::attention_hooks::{
+    provision_attention_hooks, EventMerge, EventRule, HandlerShape, HookFormat,
+    HookProvisioningSpec, JsonHookShape, Ownership,
+};
 use crate::agent::capabilities::{
     AttentionCapability, AttentionLaunchMode, PermissionModeOption, PERMISSION_MODE_UNATTENDED,
 };
-use crate::agent::managed_config;
 use crate::agent::provider::{
     shell_for, AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta,
 };
@@ -128,67 +131,49 @@ fn hook_command(env_type: EnvType) -> String {
     }
 }
 
-/// True when `handler` looks like the Buildmesh-owned `stop` entry —
-/// its command carries our attention marker and the per-agent env var
-/// names. Used by `ensure_hooks_json` to upsert the Buildmesh entry into
-/// an event's handler array.
-fn is_buildmesh_handler(handler: &serde_json::Value) -> bool {
-    handler
-        .get("command")
-        .and_then(|value| value.as_str())
-        .is_some_and(|command| managed_config::carries_anchors(command, BUILDMESH_HOOK_ANCHORS))
-}
+/// Cursor's documented shape — `{ "version": 1, "hooks": { "stop": […] } }`
+/// — declared once as provisioning data. The shared module performs the
+/// read/compare/upsert/atomic-write sequence; this adapter owns only the
+/// shape, the callback, and the anchors that identify its own handler.
+const CURSOR_HOOKS: HookProvisioningSpec<'static> = HookProvisioningSpec {
+    harness: "cursor",
+    file: "hooks.json",
+    label: "cursor hooks.json",
+    command: "",
+    event_commands: &[],
+    format: HookFormat::Json(JsonHookShape {
+        root_key: Some("hooks"),
+        replace_root: false,
+        required_root: &[("version", "1")],
+        handler: HandlerShape::Command,
+        ownership: Ownership {
+            fields: &["command"],
+            anchors: BUILDMESH_HOOK_ANCHORS,
+            decode_embedded_powershell: false,
+        },
+        events: &[EventRule {
+            name: "stop",
+            optional: false,
+            merge: EventMerge::Flat,
+        }],
+    }),
+};
 
 /// Add or refresh the Buildmesh-owned `stop` handler in
-/// `<project>/.cursor/hooks.json`. The merge walks the documented
-/// Cursor shape — `{ "version": 1, "hooks": { "stop": [...] } }` —
-/// and upserts the Buildmesh entry into the `stop` array, preserving
-/// any sibling handlers (other tools, user-authored automation) the
-/// user has registered. Returns `Ok(())` when the file already carries
-/// the expected handler (no rewrite fires; the issue #886 idempotency
-/// invariant).
-///
-/// A malformed existing file (trailing comma, partial edit, syntax
-/// error) is treated as an explicit `Err` rather than silently clobbered
-/// with `{}` — the shared `managed_config::read_document` refusal: a
-/// missing file is `{}`, but a present-but-unparseable file is the user's
-/// data and must surface to the spawn path as a provision failure so the
-/// agent user can repair it.
+/// `<project>/.cursor/hooks.json`. Sibling handlers (other tools, user-authored
+/// automation) survive; a re-provision over the expected handler does not
+/// rewrite the file (issue #886 idempotency invariant).
 fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
-    let mut document = managed_config::read_document(path).map_err(|error| error.to_string())?;
-    let settings = managed_config::root_object(&mut document, "cursor hooks.json top-level")?;
-    // Cursor's documented shape requires `"version": 1` at the root.
-    // We don't write anything other than `1` — a user with a future
-    // major-version file would surface that here as an explicit
-    // overwrite rather than silently coercing it.
-    match settings.get("version") {
-        // `Map`'s `Index` panics on a missing key, so insert through the map.
-        None => {
-            settings.insert("version".to_string(), serde_json::json!(1));
-        }
-        Some(v) if v == &serde_json::json!(1) => {}
-        Some(other) => {
-            return Err(format!(
-                "cursor hooks.json `version` must be 1; got {other}"
-            ));
-        }
-    }
-    let stop_array = managed_config::array_entry(
-        managed_config::object_entry(settings, "hooks", "cursor hooks.json `hooks`")?,
-        "stop",
-        "cursor hooks.json `hooks.stop`",
-    )?;
-    let new_handler = serde_json::json!({ "command": command });
-    if !managed_config::upsert_entry(stop_array, &is_buildmesh_handler, &new_handler) {
-        return Ok(());
-    }
-    let content = document
-        .to_pretty_json()
-        .map_err(|e| format!("serialize hooks.json failed: {e}"))?;
-    managed_config::atomic_write(path, &content)
-        .map_err(|e| format!("failed to write hooks.json: {e}"))?;
-    tracing::info!("cursor provision_attention_hooks: wrote {:?}", path);
-    Ok(())
+    let workspace = path
+        .parent()
+        .ok_or_else(|| "cursor hooks.json has no parent directory".to_string())?;
+    let spec = HookProvisioningSpec {
+        command,
+        ..CURSOR_HOOKS
+    };
+    provision_attention_hooks(&spec, workspace)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 impl AgentProvider for CursorAdapter {

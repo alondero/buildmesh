@@ -1,4 +1,7 @@
-use crate::agent::managed_config;
+use crate::agent::attention_hooks::{
+    provision_attention_hooks, EventMerge, EventRule, HandlerShape, HookFormat,
+    HookProvisioningSpec, JsonHookShape, Ownership,
+};
 use crate::agent::process::{AgentProcess, AgentProcessParams, PROCESS_REGISTRY};
 use portable_pty::{CommandBuilder, PtyPair};
 use std::io::Write;
@@ -127,11 +130,8 @@ pub fn inject_attention_hook(project_path: &Path) -> Result<(), String> {
     // to tell "turn ended, user needed" from "turn ended, waiting on
     // background tasks"; an empty body degrades to always-mark.
     let curl = crate::env::unix_attention_curl();
-    let hook_command = serde_json::json!({
-        "type": "command",
-        "command": format!("{curl} -sf --connect-timeout 1 --max-time 2 -o /dev/null -X POST -H \"Content-Type: application/json\" --data-binary @- http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID || true"),
-    });
-    ensure_hooks_json(&settings_path, &hook_command)
+    let command = format!("{curl} -sf --connect-timeout 1 --max-time 2 -o /dev/null -X POST -H \"Content-Type: application/json\" --data-binary @- http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID || true");
+    ensure_hooks_json(&settings_path, &command)
 }
 
 /// Anchors that identify a Buildmesh-owned Claude Code handler. The
@@ -144,87 +144,116 @@ pub fn inject_attention_hook(project_path: &Path) -> Result<(), String> {
 const BUILDMESH_HANDLER_ANCHORS: &[&str] =
     &["/api/attention/", "BUILDMESH_PORT", "BUILDMESH_SESSION_ID"];
 
-pub(super) fn is_buildmesh_handler(handler: &serde_json::Value) -> bool {
-    handler
-        .get("command")
-        .and_then(|value| value.as_str())
-        .is_some_and(|command| managed_config::carries_anchors(command, BUILDMESH_HANDLER_ANCHORS))
-}
+/// The ownership rule the spec below installs: a Claude handler is ours when
+/// its `command` carries every canonical anchor.
+pub(super) const CLAUDE_OWNERSHIP: Ownership = Ownership {
+    fields: &["command"],
+    anchors: BUILDMESH_HANDLER_ANCHORS,
+    decode_embedded_powershell: false,
+};
+
+/// Claude Code's `settings.local.json` hook shape, declared once as
+/// provisioning data. The shared module performs the read/compare/upsert/
+/// atomic-write sequence and refuses a malformed user-authored file
+/// (issue #1370 §1); this adapter owns only the event list, the matchers and
+/// the anchors that identify its own handler.
+///
+/// The empty matcher is Claude Code's documented "match-all" form for
+/// `Notification` (a matcher on `idle_prompt` alone misses every permission
+/// prompt).
+const CLAUDE_HOOKS: HookProvisioningSpec<'static> = HookProvisioningSpec {
+    harness: "claude",
+    file: "settings.local.json",
+    label: "settings.local.json",
+    command: "",
+    event_commands: &[],
+    format: HookFormat::Json(JsonHookShape {
+        root_key: Some("hooks"),
+        replace_root: false,
+        required_root: &[],
+        handler: HandlerShape::TypedCommand,
+        ownership: CLAUDE_OWNERSHIP,
+        events: &[
+            EventRule {
+                name: "Notification",
+                optional: false,
+                merge: EventMerge::MatcherGroup { matcher: Some("") },
+            },
+            EventRule {
+                name: "Stop",
+                optional: false,
+                merge: EventMerge::MatcherGroup { matcher: None },
+            },
+            EventRule {
+                name: "Elicitation",
+                optional: false,
+                merge: EventMerge::MatcherGroup { matcher: None },
+            },
+            EventRule {
+                name: "ElicitationResult",
+                optional: false,
+                merge: EventMerge::MatcherGroup { matcher: None },
+            },
+            EventRule {
+                name: "StopFailure",
+                optional: false,
+                merge: EventMerge::MatcherGroup { matcher: None },
+            },
+            EventRule {
+                name: "UserPromptSubmit",
+                optional: false,
+                merge: EventMerge::MatcherGroup { matcher: None },
+            },
+            EventRule {
+                name: "SubagentStart",
+                optional: false,
+                merge: EventMerge::MatcherGroup { matcher: None },
+            },
+            EventRule {
+                name: "SubagentStop",
+                optional: false,
+                merge: EventMerge::MatcherGroup { matcher: None },
+            },
+            EventRule {
+                name: "PreToolUse",
+                optional: false,
+                merge: EventMerge::MatcherGroup {
+                    matcher: Some("^(AskUserQuestion|ExitPlanMode)$"),
+                },
+            },
+            EventRule {
+                name: "PostToolUse",
+                optional: false,
+                merge: EventMerge::MatcherGroup {
+                    matcher: Some("^(AskUserQuestion|ExitPlanMode)$"),
+                },
+            },
+            EventRule {
+                name: "PostToolUseFailure",
+                optional: false,
+                merge: EventMerge::MatcherGroup {
+                    matcher: Some("^(AskUserQuestion|ExitPlanMode)$"),
+                },
+            },
+        ],
+    }),
+};
 
 /// Write the Buildmesh attention hooks into
 /// `{project}/.claude/settings.local.json`, additive-merging any existing
-/// user-authored matcher groups under `Notification` and `Stop`.
-///
-/// The merge refuses to silently overwrite a malformed user-authored file
-/// (trailing comma, partial edit, …) — the shared
-/// `managed_config::read_document` refusal treats parse failure as an
-/// explicit `Err` so the spawn path surfaces a provision error and the
-/// user's data survives intact (issue #1370 §1). A missing file is the
-/// happy path (fresh install); only an existing-but-unparseable file is
-/// the failure case.
-fn ensure_hooks_json(path: &Path, new_handler: &serde_json::Value) -> Result<(), String> {
-    let mut document = managed_config::read_document(path).map_err(|error| error.to_string())?;
-    let hooks_obj = managed_config::object_entry(
-        managed_config::root_object(&mut document, "settings.local.json top-level")?,
-        "hooks",
-        "settings.local.json `hooks`",
-    )?;
-
-    // The empty matcher is Claude Code's documented "match-all" form for
-    // `Notification` (a matcher on `idle_prompt` alone misses every
-    // permission prompt). It is built from the same `String` as the other
-    // matchers so the merge appends the same literal the pre-#1370 tests pin.
-    let matcher_all = String::new();
-
-    let mut changed = false;
-    for (event, matcher) in [
-        ("Notification", Some(matcher_all)),
-        ("Stop", None),
-        ("Elicitation", None),
-        ("ElicitationResult", None),
-        ("StopFailure", None),
-        ("UserPromptSubmit", None),
-        ("SubagentStart", None),
-        ("SubagentStop", None),
-        (
-            "PreToolUse",
-            Some("^(AskUserQuestion|ExitPlanMode)$".to_string()),
-        ),
-        (
-            "PostToolUse",
-            Some("^(AskUserQuestion|ExitPlanMode)$".to_string()),
-        ),
-        (
-            "PostToolUseFailure",
-            Some("^(AskUserQuestion|ExitPlanMode)$".to_string()),
-        ),
-    ] {
-        let matcher = matcher.map(serde_json::Value::String);
-        let fields: Vec<(&str, &serde_json::Value)> =
-            matcher.iter().map(|value| ("matcher", value)).collect();
-        changed |= managed_config::upsert_matcher_group(
-            managed_config::array_entry(
-                hooks_obj,
-                event,
-                &format!("settings.local.json event `{event}`"),
-            )?,
-            &is_buildmesh_handler,
-            new_handler,
-            &fields,
-        );
-    }
-
-    if !changed {
-        return Ok(());
-    }
-
-    let content = document
-        .to_pretty_json()
-        .map_err(|e| format!("serialize failed: {e}"))?;
-    managed_config::atomic_write(path, &content)
-        .map_err(|e| format!("failed to write settings.local.json: {e}"))?;
-    tracing::info!("inject_attention_hook: wrote hook at {:?}", path);
-    Ok(())
+/// user-authored matcher groups. A missing file is the happy path (fresh
+/// install); only an existing-but-unparseable file is the failure case.
+fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
+    let workspace = path
+        .parent()
+        .ok_or_else(|| "settings.local.json has no parent directory".to_string())?;
+    let spec = HookProvisioningSpec {
+        command,
+        ..CLAUDE_HOOKS
+    };
+    provision_attention_hooks(&spec, workspace)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// Check if an agent is already running for this session.

@@ -527,6 +527,16 @@ persist the result without losing the user's content.
 adapter that uses it, plus the merge wherever the document's shape fits one of
 the two shared upserts. How much each adapter shares follows its document.
 
+Above those primitives, `src-tauri/src/agent/attention_hooks.rs` owns the
+attention-hook orchestration once (issue #2525): read, build the expected
+entries, compare, upsert, write atomically and report whether anything changed.
+AGY, Claude Code, Cursor and Grok declare their JSON shape — file, root key,
+event list, matcher rules, handler shape and ownership anchors — as a
+`HookProvisioningSpec`; Kimi declares the TOML shape through the same
+`provision_attention_hooks` entry point, so a caller does not know which format
+its harness writes. The module also owns the idempotency comparison and the
+unreadable-file wording, so a policy fix lands once instead of once per copy.
+
 Claude Code, Cursor, Grok and mcode share all three: their entry is a member of
 an array of handlers or matcher groups, which is what `upsert_entry` and
 `upsert_matcher_group` are for. AGY, Muse and the workspace-trust stores share
