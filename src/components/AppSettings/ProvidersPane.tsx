@@ -19,6 +19,7 @@
  */
 import { useCallback, useRef, useState } from 'react';
 import * as api from '../../lib/tauri';
+import { saveCompanionSettings } from '../../lib/tauri/companion';
 import type { AppPreferences } from '../../types/generated/AppPreferences';
 import { formatError } from '../../lib/errorUtils';
 import { backgroundInferenceOption } from '../../lib/backgroundInference';
@@ -53,6 +54,7 @@ export function ProvidersPane() {
   // trivial content and shouldn't inherit the node's model.
   const [namingProvider, setNamingProvider] = useState<string | null>(null);
   const [namingSaving, setNamingSaving] = useState(false);
+  const [companionSaving, setCompanionSaving] = useState(false);
   // The preferences payload whose picker values are currently rendered.
   const [adoptedPrefs, setAdoptedPrefs] = useState<AppPreferences | null>(null);
 
@@ -111,6 +113,22 @@ export function ProvidersPane() {
   const routingLoaded = resources.routing.status === 'loaded';
   const routingChoices = providersLoaded ? providers : routingProviders;
   const routingReady = providersLoaded || routingLoaded;
+
+  const handleSaveCompanion = async (launchConfiguration: string | null) => {
+    if (!preferences) return;
+    setCompanionSaving(true);
+    setError(null);
+    try {
+      await saveCompanionSettings({
+        launch_configuration: launchConfiguration,
+      });
+      await loadPreferences();
+    } catch (error) {
+      setError(formatError(error));
+    } finally {
+      setCompanionSaving(false);
+    }
+  };
 
   // Persist the default-provider dropdown.
   const handleSave = async (newValue: string) => {
@@ -263,6 +281,18 @@ export function ProvidersPane() {
             disabled={!prefsLoaded || !routingReady || saving}
             onSelect={next => handleSave(next ?? NO_OVERRIDE)}
           />
+        </SettingsRow>
+
+        <SettingsRow label="AI Assistant" htmlFor="companion-launch"
+          summary="Launch Configuration used by Companion in the Command Omnibar."
+          details={<>Uses the same background inference capabilities as auto-naming. Saved model and effort settings apply. Leave unset to use the app default, then Claude Code. Unsupported configurations show why they are unavailable.</>}>
+          <SpawnOptionPicker id="companion-launch" size="md" ariaLabel="AI Assistant" unsetValue={null}
+            providers={routingChoices} value={preferences?.companion?.launch_configuration ?? null}
+            unsetLabel="App default (Claude Code when unset)"
+            disabled={!prefsLoaded || !routingReady || companionSaving}
+            filter={(option) => option.harness_id !== 'terminal'}
+            decorate={backgroundInferenceOption}
+            onSelect={handleSaveCompanion} />
         </SettingsRow>
 
         <SettingsRow label="Circuit classifier provider" htmlFor="circuit-classifier-provider"

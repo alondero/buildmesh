@@ -228,6 +228,15 @@ impl BackgroundLaunch {
     }
 
     pub(crate) fn final_output(&self, stdout: String, result: &Path) -> Result<String, String> {
+        self.final_output_bounded(stdout, result, 4096)
+    }
+
+    pub(crate) fn final_output_bounded(
+        &self,
+        stdout: String,
+        result: &Path,
+        limit: usize,
+    ) -> Result<String, String> {
         use std::io::Read;
         let output = match self.recipe.capability.result_output {
             BackgroundResultOutput::Stdout => stdout,
@@ -235,15 +244,15 @@ impl BackgroundLaunch {
                 let file = std::fs::File::open(result)
                     .map_err(|e| format!("Background final message is unavailable: {e}"))?;
                 let mut output = String::new();
-                file.take(4097)
+                file.take(limit.saturating_add(1) as u64)
                     .read_to_string(&mut output)
                     .map_err(|e| e.to_string())?;
                 output
             }
             format => decode_json_lines(&stdout, format)?,
         };
-        if output.len() > 4096 {
-            return Err("Background final message exceeded 4096 bytes".into());
+        if output.len() > limit {
+            return Err(format!("Background final message exceeded {limit} bytes"));
         }
         if output.trim().is_empty() {
             return Err("Background inference returned no final answer".into());

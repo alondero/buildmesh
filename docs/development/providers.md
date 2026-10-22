@@ -594,6 +594,18 @@ afterwards.
 
 ## Saved Spawn Configurations
 
+Companion's AI Assistant selection lives in Provider defaults and uses the
+same `backgroundInferenceOption` UI decoration and `agent::background::resolve_plan`
+backend validation as auto-naming. The selection is stored in
+`companion.launch_configuration`, falling back to the app default and then
+Claude Code. Its runner honors adapter prompt transport and final-answer
+decoding on every inference step, with a distinct result file per step.
+Assistant replies retain their 256 KiB bound; naming and classification retain
+the shared decoder's 4 KiB default. Companion settings writes apply supplied
+fields atomically, so changing its inference configuration and spawn limit
+from separate settings panes preserves both edits.
+See [ADR 0045](../adr/0045-companion-cli-tool-boundary.md) for fleet tool ownership.
+
 Model-reference syntax belongs to the harness adapter through
 `AgentProvider::validate_model_override`. Configuration and harness-default writes
 invoke it after normalization; interactive command composition and background

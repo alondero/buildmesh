@@ -1,4 +1,4 @@
-//! Native subscription CLI inference, with tools executed only by Buildmesh.
+//! Capability-driven background inference and Buildmesh tool dispatch.
 use super::{tools, CompanionState, CompanionTask};
 use crate::{
     agent::background::{BackgroundLaunch, BackgroundProcessGuard},
@@ -6,7 +6,7 @@ use crate::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use std::{process::Stdio, time::Duration};
+use std::{process::Stdio, sync::Arc, time::Duration};
 use tauri::AppHandle;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
@@ -26,23 +26,9 @@ struct FinalReply {
     response: String,
 }
 
-fn isolate(command: &mut std::process::Command) {
-    for key in crate::agent::provider::CLAUDE_BACKEND_ENV_VARS {
-        command.env_remove(key);
-    }
-    for key in [
-        "CLAUDECODE",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
-        "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
-    ] {
-        command.env_remove(key);
-    }
-    command.env("CLAUDE_CODE_SAFE_MODE", "1");
-}
-
-fn prepare() -> Result<(BackgroundLaunch, tempfile::TempDir, u32), String> {
-    let prefs = crate::preferences::load()?;
+pub(super) fn resolve_launch(
+    prefs: &crate::preferences::AppPreferences,
+) -> Result<BackgroundLaunch, String> {
     let selection = prefs
         .companion
         .launch_configuration
@@ -50,11 +36,13 @@ fn prepare() -> Result<(BackgroundLaunch, tempfile::TempDir, u32), String> {
         .or(prefs.default_provider.as_deref())
         .unwrap_or("claude");
     let plan =
-        crate::preferences::launch_configurations::resolve(&prefs, selection, &Default::default())?;
-    if plan.harness.harness != "anthropic" || plan.route.is_some() {
-        return Err("Companion currently requires a native Claude subscription Launch Configuration; API provider routes are not supported".into());
-    }
-    let launch = crate::agent::background::resolve_plan(plan, &prefs)?;
+        crate::preferences::launch_configurations::resolve(prefs, selection, &Default::default())?;
+    crate::agent::background::resolve_plan(plan, prefs)
+}
+
+fn prepare() -> Result<(BackgroundLaunch, tempfile::TempDir, u32), String> {
+    let prefs = crate::preferences::load()?;
+    let launch = resolve_launch(&prefs)?;
     let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
     Ok((launch, directory, prefs.companion.spawn_limit.clamp(1, 10)))
 }
@@ -113,7 +101,7 @@ async fn inference(
             })?;
         if !status.success() {
             return Err(format!(
-                "Companion CLI exited with {status}; check your subscription login and CLI version"
+                "Companion CLI exited with {status}; check the selected harness login and configuration"
             ));
         }
         String::from_utf8(stdout).map_err(|_| "CLI output was not UTF-8".into())
@@ -126,6 +114,31 @@ async fn inference(
     result
 }
 
+pub(super) async fn infer(
+    launch: Arc<BackgroundLaunch>,
+    directory: Arc<tempfile::TempDir>,
+    index: usize,
+    prompt: String,
+    cancel: &mut watch::Receiver<bool>,
+) -> Result<String, String> {
+    let result = directory.path().join(format!("result-{index}.txt"));
+    let command = {
+        let launch = launch.clone();
+        let directory = directory.clone();
+        let result = result.clone();
+        let prompt = prompt.clone();
+        run_blocking("companion_command", move || {
+            launch.command(directory.path(), &result, &prompt)
+        })
+        .await?
+    };
+    let stdout = inference(command, launch.stdin_prompt(&prompt), cancel).await?;
+    run_blocking("companion_output", move || {
+        launch.final_output_bounded(stdout, &result, 262_144)
+    })
+    .await
+}
+
 pub async fn run(
     app: &AppHandle,
     state: &CompanionState,
@@ -133,60 +146,8 @@ pub async fn run(
     mut cancel: watch::Receiver<bool>,
 ) -> Result<String, String> {
     let (launch, directory, limit) = run_blocking("companion_prepare", prepare).await?;
-    let launch = std::sync::Arc::new(launch);
-    let directory = std::sync::Arc::new(directory);
-    let make_command = |prompt: String| {
-        let launch = launch.clone();
-        let directory = directory.clone();
-        async move {
-            run_blocking("companion_command", move || {
-                let mut command = launch.command(
-                    directory.path(),
-                    &directory.path().join("result.txt"),
-                    &prompt,
-                )?;
-                isolate(&mut command);
-                command.args([
-                    "--safe-mode",
-                    "--setting-sources",
-                    "",
-                    "--strict-mcp-config",
-                    "--mcp-config",
-                    "{\"mcpServers\":{}}",
-                ]);
-                Ok(command)
-            })
-            .await
-        }
-    };
-    let sample = make_command(String::new()).await?;
-    let mut auth = crate::process_util::command_no_window(sample.get_program());
-    auth.current_dir(directory.path());
-    isolate(&mut auth);
-    auth.args([
-        "--safe-mode",
-        "--setting-sources",
-        "",
-        "auth",
-        "status",
-        "--json",
-    ]);
-    let auth = inference(auth, "", &mut cancel).await?;
-    let auth: serde_json::Value =
-        serde_json::from_str(&auth).map_err(|_| "Cannot verify subscription authentication")?;
-    if auth["loggedIn"] != true
-        || auth["authMethod"] != "claude.ai"
-        || auth["apiProvider"] != "firstParty"
-        || !matches!(
-            auth["subscriptionType"].as_str(),
-            Some("pro" | "max" | "team" | "enterprise")
-        )
-    {
-        return Err("Companion requires a verified Claude subscription login; run claude auth login with your subscription account".into());
-    }
-    state.update(app, &task.id, "companion://step", |t| {
-        t.steps.push("Verified subscription login".into())
-    });
+    let launch = Arc::new(launch);
+    let directory = Arc::new(directory);
     let mut history = vec![json!({"role":"user", "content":task.prompt})];
     let mut used = 0;
     for index in 0..24 {
@@ -197,7 +158,14 @@ pub async fn run(
         if prompt.len() > 512_000 {
             return Err("Task context limit reached; narrow the request".into());
         }
-        let raw = inference(make_command(prompt.clone()).await?, &prompt, &mut cancel).await?;
+        let raw = infer(
+            launch.clone(),
+            directory.clone(),
+            index,
+            prompt,
+            &mut cancel,
+        )
+        .await?;
         let reply: Reply = serde_json::from_str(raw.trim())
             .map_err(|_| "Companion returned an invalid tool response; please retry")?;
         match reply {

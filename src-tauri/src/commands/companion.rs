@@ -1,4 +1,4 @@
-use crate::companion::{CompanionSettings, CompanionState, CompanionTask};
+use crate::companion::{CompanionSettingsUpdate, CompanionState, CompanionTask};
 use tauri::{AppHandle, Emitter, State};
 
 #[tauri::command]
@@ -66,12 +66,10 @@ pub fn companion_respond_confirmation(
 }
 
 #[tauri::command]
-pub async fn companion_save_settings(settings: CompanionSettings) -> Result<(), String> {
+pub async fn companion_save_settings(settings: CompanionSettingsUpdate) -> Result<(), String> {
     super::run_blocking("companion_save_settings", move || {
-        if !(1..=10).contains(&settings.spawn_limit) {
-            return Err("Spawn limit must be between 1 and 10".into());
-        }
-        crate::preferences::update(|p| p.companion = settings)?;
+        settings.validate()?;
+        crate::preferences::update(|p| settings.apply(&mut p.companion))?;
         Ok(())
     })
     .await

@@ -190,14 +190,17 @@ nodes for the top bug issues in buildmesh". Commands and scoped searches
 (`>`, `@`, `/`, `#`) remain available; scoped spawn recipes keep their Tab
 prompt shortcut.
 
-**Settings > General > Companion AI** selects the inference Launch Configuration
-and a per-task spawn limit (default 5, maximum 10). The selection falls back to
-the app default, then Claude. This version supports host-native Claude Code
-with a verified Pro, Max, Team or Enterprise subscription login. The CLI must
-support `--safe-mode`, `--setting-sources`, and `auth status --json`. API provider
-routes, extra CLI arguments, and WSL configurations are rejected. Upgrade the
-CLI or select a supported native configuration if setup fails. Authentication
-stays with the CLI; Companion does not request an API key.
+**Settings > Providers > Provider defaults > AI Assistant** selects the
+inference Launch Configuration independently of auto-naming and node spawning.
+The selection falls back to the app default, then Claude Code. It uses the same
+background inference capabilities as auto-naming, including the saved model
+and effort settings. The picker explains why unsupported configurations are
+unavailable: a harness must support background inference on the host, provider
+routes need adapter routing support, and extra CLI arguments are rejected.
+Native configurations use the harness login; explicitly selected API provider
+routes use their configured credentials and billing. Check that login or route
+if inference fails. **Settings > General > Companion AI** sets the per-task
+spawn limit (default 5, maximum 10).
 
 Companion can inspect nodes and transcript tails, read GitHub issues and PRs,
 summarize Circuits, spawn isolated Worktree Nodes, and deliver follow-up prompts.

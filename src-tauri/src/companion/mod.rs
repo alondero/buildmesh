@@ -24,6 +24,48 @@ impl Default for CompanionSettings {
     }
 }
 
+/// Omitted fields retain their saved values; an explicit null clears the launch selection.
+#[derive(Deserialize, TS)]
+#[ts(export, export_to = "CompanionSettingsUpdate.ts")]
+pub struct CompanionSettingsUpdate {
+    #[serde(default, with = "present_launch_configuration")]
+    #[ts(optional, as = "Option<Option<String>>")]
+    pub launch_configuration: Option<Option<String>>,
+    #[ts(optional)]
+    pub spawn_limit: Option<u32>,
+}
+
+mod present_launch_configuration {
+    use serde::Deserialize;
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Option<String>>, D::Error> {
+        Option::<String>::deserialize(deserializer).map(Some)
+    }
+}
+
+impl CompanionSettingsUpdate {
+    pub fn validate(&self) -> Result<(), String> {
+        if self
+            .spawn_limit
+            .is_some_and(|limit| !(1..=10).contains(&limit))
+        {
+            return Err("Spawn limit must be between 1 and 10".into());
+        }
+        Ok(())
+    }
+
+    pub fn apply(self, settings: &mut CompanionSettings) {
+        if let Some(selection) = self.launch_configuration {
+            settings.launch_configuration = selection;
+        }
+        if let Some(limit) = self.spawn_limit {
+            settings.spawn_limit = limit;
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "CompanionTask.ts")]
 pub struct CompanionTask {

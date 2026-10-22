@@ -2,13 +2,22 @@
 
 Status: accepted
 
-The [Companion PRD](../specs/prd-companion-ai.md) needs subscription-backed
-inference while Buildmesh owns tool authorization. Companion uses the shared
-background CLI launcher with a structured JSON stdio loop. Native CLI tools,
-custom settings and MCP servers are disabled, and a separate authentication
-probe must report a first-party subscription login before inference starts.
-The first supported adapter is host-native Claude. Provider routes and extra
-CLI arguments are rejected rather than allowing them to replace this boundary.
+The [Companion PRD](../specs/prd-companion-ai.md) needs harness-backed
+inference while Buildmesh owns fleet tool authorization. Companion uses the
+same background inference capability and launch resolver as node naming.
+The adapter owns the headless recipe, prompt transport, authentication
+environment, native tool policy and final-answer decoding. Host-native
+configurations qualify when their adapter supplies that capability; provider
+routes qualify when it also declares routing support. Extra CLI arguments and
+foreign runtimes are rejected by the shared resolver.
+
+Amended 2026-10-22: the initial implementation restricted inference to a
+verified Claude subscription and appended Claude-only isolation flags. That
+restriction is replaced by the shared adapter contract. Companion makes no
+separate subscription probe and preserves the selected route's credentials.
+This shares naming's adapter tool policies; it does not add an independent
+sandbox around the CLI. Provider defaults owns the inference selection, while
+General retains the per-task spawn limit.
 
 The alternative of granting an unrestricted agent the coordinator HTTP token
 would let it bypass task-specific spawn caps and confirmation gates. Companion

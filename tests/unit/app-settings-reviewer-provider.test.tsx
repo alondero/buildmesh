@@ -34,6 +34,9 @@ vi.mock('../../src/lib/tauri', async (importOriginal) => ({
 
 import { AppSettingsModal } from '../../src/components/AppSettings/AppSettingsModal';
 
+const companionMocks = vi.hoisted(() => ({ save: vi.fn() }));
+vi.mock('../../src/lib/tauri/companion', () => ({ saveCompanionSettings: companionMocks.save }));
+
 function provider(id: string, label: string) {
   return {
     id,
@@ -52,10 +55,15 @@ function provider(id: string, label: string) {
 describe('AppSettingsModal reviewer provider', () => {
   let storedReviewer: string | null;
   let storedNaming: string | null;
+  let storedCompanion: string | null;
 
   beforeEach(() => {
     storedReviewer = 'codex';
     storedNaming = null;
+    storedCompanion = 'codex';
+    companionMocks.save.mockReset().mockImplementation(async (settings) => {
+      storedCompanion = settings.launch_configuration;
+    });
     tauriMocks.setAppNamingProvider.mockReset().mockImplementation((value: string | null) => {
       storedNaming = value;
       return Promise.resolve(undefined);
@@ -66,6 +74,7 @@ describe('AppSettingsModal reviewer provider', () => {
         default_provider: null,
         reviewer_provider: storedReviewer,
         naming_provider: storedNaming,
+        companion: { launch_configuration: storedCompanion, spawn_limit: 3 },
         circuit_agent_pool_size: null,
         worktree_directory: null,
         harness_defaults: {},
@@ -99,6 +108,51 @@ describe('AppSettingsModal reviewer provider', () => {
     await openSettingsPane('Providers');
     return screen.findByRole('button', { name: 'Reviewer provider' });
   }
+
+  it('selects the Assistant backend in Provider defaults without writing its spawn limit', async () => {
+    await renderModal();
+    const trigger = screen.getByRole('button', { name: 'AI Assistant' });
+    await waitFor(() => expect(trigger.textContent).toContain('Codex'));
+    const user = userEvent.setup();
+    await user.click(trigger);
+    expect(screen.queryByRole('menuitem', { name: 'Terminal' })).toBeNull();
+    await user.click(await screen.findByRole('menuitem', { name: 'Anthropic' }));
+    await waitFor(() => expect(companionMocks.save).toHaveBeenCalledWith({ launch_configuration: 'anthropic' }));
+    await waitFor(() => expect(trigger.textContent).toContain('Anthropic'));
+    await user.click(trigger);
+    await user.click(await screen.findByRole('menuitem', { name: 'App default (Claude Code when unset)' }));
+    await waitFor(() => expect(companionMocks.save).toHaveBeenLastCalledWith({ launch_configuration: null }));
+  });
+
+  it('keeps the saved Assistant selection when persistence fails', async () => {
+    companionMocks.save.mockRejectedValueOnce(new Error('Assistant settings write failed'));
+    await renderModal();
+    const trigger = screen.getByRole('button', { name: 'AI Assistant' });
+    await waitFor(() => expect(trigger.textContent).toContain('Codex'));
+    const user = userEvent.setup();
+    await user.click(trigger);
+    await user.click(await screen.findByRole('menuitem', { name: 'Anthropic' }));
+    expect(await screen.findByText('Assistant settings write failed')).toBeTruthy();
+    expect(trigger.textContent).toContain('Codex');
+  });
+
+  it('saves independent field patches when Assistant and limit edits overlap', async () => {
+    let finishLaunchSave!: () => void;
+    companionMocks.save.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      finishLaunchSave = resolve;
+    }));
+    await renderModal();
+    const trigger = screen.getByRole('button', { name: 'AI Assistant' });
+    await waitFor(() => expect(trigger.textContent).toContain('Codex'));
+    const user = userEvent.setup();
+    await user.click(trigger);
+    await user.click(await screen.findByRole('menuitem', { name: 'Anthropic' }));
+    await openSettingsPane('General');
+    await user.selectOptions(screen.getByLabelText('Maximum nodes per task'), '8');
+    await waitFor(() => expect(companionMocks.save).toHaveBeenLastCalledWith({ spawn_limit: 8 }));
+    expect(companionMocks.save).toHaveBeenNthCalledWith(1, { launch_configuration: 'anthropic' });
+    finishLaunchSave();
+  });
 
   it('hydrates the stored provider and filters out the terminal provider', async () => {
     const trigger = await renderModal();
