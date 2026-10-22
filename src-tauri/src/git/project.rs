@@ -11,7 +11,22 @@ pub struct ProjectRepository {
 }
 
 pub fn open(selected: &str) -> Result<Repository, git2::Error> {
-    Repository::discover(crate::env::to_host_path(selected))
+    let host = crate::env::to_host_path(selected);
+    match Repository::discover(&host) {
+        Err(error) if cfg!(windows) && error.code() == git2::ErrorCode::Owner => {
+            // Trying the equivalent share spelling still runs libgit2's normal
+            // ownership checks; this never grants trust to a root or alias.
+            for alias in crate::env::wsl_host_path_aliases(std::path::Path::new(&host)) {
+                if let Ok(repo) = Repository::discover(alias) {
+                    return Ok(repo);
+                }
+            }
+            Err(git2::Error::new(error.code(), error.class(), format!(
+                "{error}. If you trust the source repository, add its exact root path to Windows Git's global safe.directory configuration, then retry"
+            )))
+        }
+        result => result,
+    }
 }
 
 pub fn resolve(selected: &str) -> Result<ProjectRepository, String> {
@@ -34,8 +49,17 @@ pub fn resolve(selected: &str) -> Result<ProjectRepository, String> {
         .workdir()
         .ok_or_else(|| no_working_directory_reason(selected, &repo))?;
     let root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
-    let relative = folder
-        .strip_prefix(&root)
+    let comparable = |path: &std::path::Path| {
+        crate::env::wsl_host_path_aliases(path)
+            .into_iter()
+            .next()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| path.to_path_buf())
+    };
+    let comparable_folder = comparable(&folder);
+    let comparable_root = comparable(&root);
+    let relative = comparable_folder
+        .strip_prefix(&comparable_root)
         .map_err(|_| format!("Project folder {selected} is outside its Git working root"))?;
     let relative_folder = relative.to_string_lossy().replace('\\', "/");
     crate::env::validate_project_scope(&relative_folder)?;

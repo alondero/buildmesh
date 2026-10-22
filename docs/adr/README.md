@@ -25,6 +25,8 @@ successor's status before treating the old text as current.
 | Window chrome | [ADR 0035](0035-native-windows-caption-button-affordances.md), [ADR 0036](0036-macos-traffic-light-affordances.md) |
 | Release and distribution | [ADR 0021](0021-auto-updater-and-github-releases.md) |
 
+- [0046: WSL linked-worktree trust](0046-wsl-linked-worktree-trust.md)
+
 ## Adding an ADR
 
 Use the next numeric filename and include:

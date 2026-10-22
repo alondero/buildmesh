@@ -17,6 +17,28 @@ Node working directories reach the spawn in three shapes, and cmd.exe cannot use
 
 Cross-runtime linked worktrees retain a host administrative backpointer and a relative forward `.git` link. They are locked against guest pruning because older Git treats foreign absolute backpointers as missing, and does not safely support relative backpointers without newer repository extensions. Buildmesh owns removal and already explicitly prunes locked entries. Prepare this metadata on the blocking pool. Windows process sandboxing cannot contain WSL agents; reject that combination. Shell hooks for a Windows host use Windows curl from WSL to reach host loopback even under NAT; Linux-hosted Windows callbacks explicitly invoke curl in the owning WSL distribution, avoiding collisions with Windows Buildmesh on localhost. Native Linux callbacks retain native curl. Grok uses platform-specific command hooks with curl because its native HTTP-hook SSRF guard rejects the local plain-HTTP callback; those commands still require loopback reachability, including mirrored WSL networking where applicable.
 
+## WSL worktree trust
+
+Windows Git requires independent trust for WSL-owned linked worktrees. The
+worktree lifecycle verifies the candidate's registration and Git links against
+an already accessible parent before deriving exact trust for both WSL share
+spellings. `git::trust` owns the profile's `worktree-trust.gitconfig` and its
+global Git include, including bounded config-lock retries and revocation after
+moves/removal. User-managed trust entries are preserved. Root ownership errors
+remain errors; no ownership validation switch is changed. See
+[ADR 0046](../adr/0046-wsl-linked-worktree-trust.md) for the trust boundary and
+[troubleshooting](../troubleshooting.md#wsl-worktree-launch-fails-with-an-ownership-error)
+for recovery.
+
+The ignored Rust test
+`git::trust::tests::live_wsl_root_only_trust_provisions_reuses_moves_and_revokes`
+requires the default WSL distribution with Git plus Windows Git. Run it through
+the Windows Rust runner against this worktree's owned library test binary with
+the exact test filter and `--ignored --nocapture`. It isolates both Git and
+libgit2 configuration in a child process; it does not change the user's Git
+settings. This test covers root-only trust rather than pre-trusting the fixture
+worktree.
+
 ## Frameless Window & Bespoke TitleBar
 The window runs with `"decorations": false` (`src-tauri/tauri.conf.json`); `src/components/TitleBar/TitleBar.tsx` is the window chrome (wordmark, ViewModeSwitcher with the Filtered segment, the Filtered view's `GridControls` search bar, the centred "Search or open…" palette field flanked by drag spacers, and the right-hand utility cluster — Usage / Settings / Remote Access pills sharing the `HeaderPillButton` skeleton — plus min/max/close). Traps this recipe has already burned once:
 - **Drag regions are per-target.** Tauri's injected script checks `e.target.hasAttribute('data-tauri-drag-region')` — put the attribute on the bar/spacer/wordmark, but *never* on buttons or their SVGs, or the click is eaten and the button starts a drag instead. Double-click maximize on a drag region is built into the same script (`internal_toggle_maximize`).

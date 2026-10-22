@@ -16,4 +16,5 @@ pub mod project;
 mod project_path_tests;
 pub(crate) mod status_stats;
 pub mod sync;
+mod trust;
 pub mod worktree;
