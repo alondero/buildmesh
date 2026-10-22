@@ -104,9 +104,14 @@ export default function CaptureIdea({
       return "";
     }
   });
-  const [meshId, setMeshId] = useState(() => storedDestination("meshId") ?? "");
+  const [meshId, setMeshId] = useState(() =>
+    // A preset is the surface's own choice, not the user's stored one, so it
+    // wins from the very first render — the stored destination would
+    // otherwise flash on screen before the preset effect replaced it.
+    preset ? String(preset.meshId) : storedDestination("meshId") ?? "",
+  );
   const [providerId, setProviderId] = useState<string | null>(() =>
-    storedDestination("providerId"),
+    preset ? preset.launchId ?? "" : storedDestination("providerId"),
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -131,17 +136,30 @@ export default function CaptureIdea({
   // own picks.
   const presetMeshId = preset?.meshId;
   const presetLaunchId = preset?.launchId;
+  /**
+   * Whether the destination on screen came from the preset rather than from
+   * the user. A preset is a one-shot instruction from the mesh card, so while
+   * it is in force the destination must not be written to `localStorage`:
+   * that would overwrite the user's own stored destination with the mesh they
+   * happened to tap, and the stored pair would be lost for good. The flag
+   * clears the moment the user picks a mesh or an agent, because from then
+   * on the pair on screen is theirs to store.
+   */
+  const presetApplied = useRef(Boolean(preset));
   useEffect(() => {
     if (presetMeshId === undefined) return;
+    presetApplied.current = true;
     setMeshId(String(presetMeshId));
     setProviderId(presetLaunchId ?? "");
   }, [presetMeshId, presetLaunchId]);
   useEffect(() => {
     try {
-      localStorage.setItem(
-        DESTINATION_KEY,
-        JSON.stringify({ meshId, providerId }),
-      );
+      if (!presetApplied.current) {
+        localStorage.setItem(
+          DESTINATION_KEY,
+          JSON.stringify({ meshId, providerId }),
+        );
+      }
       if (text) localStorage.setItem(DRAFT_KEY, text);
       else localStorage.removeItem(DRAFT_KEY);
       setStored(true);
@@ -286,7 +304,12 @@ export default function CaptureIdea({
           id="idea-mesh"
           className="field"
           value={selectedMesh}
-          onChange={(e) => setMeshId(e.target.value)}
+          onChange={(e) => {
+            // The user has now chosen this mesh, so the pair on screen is
+            // theirs and may be stored (issue #2385).
+            presetApplied.current = false;
+            setMeshId(e.target.value);
+          }}
           disabled={busy}
         >
           {!meshes.some((m) => String(m.id) === selectedMesh) && (
@@ -307,7 +330,12 @@ export default function CaptureIdea({
           id="idea-agent"
           className="field"
           value={selectedProvider}
-          onChange={(e) => setProviderId(e.target.value)}
+          onChange={(e) => {
+            // The user has now chosen this agent, so the pair on screen is
+            // theirs and may be stored (issue #2385).
+            presetApplied.current = false;
+            setProviderId(e.target.value);
+          }}
           disabled={busy}
         >
           {staleProvider && (

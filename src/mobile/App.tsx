@@ -231,6 +231,9 @@ export default function App() {
   const nodeActionBusyRef = useRef(false);
   const handleNodeActionBusy = useCallback((busy: boolean) => { nodeActionBusyRef.current = busy; }, []);
   const issuesBackRef = useRef<(() => boolean) | null>(null);
+  // The pull request screen owns a Spawn Menu sheet, so the back gesture asks
+  // it before it pops the screen (issue #2385).
+  const pullsBackRef = useRef<(() => boolean) | null>(null);
   const handlePrSheetBusy = useCallback((busy: boolean) => {
     prSheetBusyRef.current = busy;
   }, []);
@@ -259,6 +262,10 @@ export default function App() {
         return;
       }
       if (issuesBackRef.current?.()) {
+        window.history.pushState({ bm: true }, "");
+        return;
+      }
+      if (pullsBackRef.current?.()) {
         window.history.pushState({ bm: true }, "");
         return;
       }
@@ -571,7 +578,7 @@ export default function App() {
         </Suspense>
       )}
       {screen.kind === 'pulls' && <Suspense fallback={<ScreenLoading />}>
-        <PullRequestsScreen mesh={screen.mesh} onBack={goBack} onAuthFailed={handleAuthFailedForActiveScreen} />
+        <PullRequestsScreen mesh={screen.mesh} onBack={goBack} onAuthFailed={handleAuthFailedForActiveScreen} backHandlerRef={pullsBackRef} />
       </Suspense>}
       {prSheet && (
         <Suspense fallback={null}>

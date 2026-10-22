@@ -255,8 +255,8 @@ export async function listMeshes(signal?: AbortSignal): Promise<Mesh[]> {
   return (await apiFetch("/api/meshes", { signal })).json();
 }
 
-export async function listProviders(): Promise<Provider[]> {
-  return (await apiFetch("/api/providers")).json();
+export async function listProviders(signal?: AbortSignal): Promise<Provider[]> {
+  return (await apiFetch("/api/providers", { signal })).json();
 }
 
 export const launchConfigurationApi = {

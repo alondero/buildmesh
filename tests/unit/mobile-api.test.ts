@@ -17,6 +17,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   createPr,
   createNode,
+  listProviders,
   newOperationKey,
   importAndResume,
   spawnFromIssue,
@@ -137,6 +138,21 @@ describe("mobile api wire shape (issue #1262)", () => {
       fetchMock.mockResolvedValue(okJson({ url: "x" }));
       await createPr(1, 7, "title", "", "main");
       expect(JSON.parse(fetchMock.mock.calls[0][1].body as string).body).toBe("");
+    });
+  });
+
+  describe("listProviders", () => {
+    it("forwards an abort signal so a surface can cancel the read", async () => {
+      // The Spawn Menu read is secondary: a surface unmounting mid-read must
+      // be able to cancel it rather than resolve into a gone component.
+      fetchMock.mockResolvedValue(okJson([]));
+      const controller = new AbortController();
+
+      await listProviders(controller.signal);
+
+      const [path, init] = fetchMock.mock.calls[0];
+      expect(path).toBe("/api/providers");
+      expect(init.signal).toBe(controller.signal);
     });
   });
 

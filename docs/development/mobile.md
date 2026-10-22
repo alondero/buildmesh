@@ -396,7 +396,9 @@ order, saved Launch Configurations included, minus the rows that cannot take a
 first prompt. A saved configuration row launches its own `spawn_option_id` with
 the configuration's id beside it; the mesh default sends neither field.
 Browser back dismisses an open Spawn Menu sheet and is consumed while that
-sheet is open. A launch that fails is reported *inside* the sheet, because the
+sheet is open. While a launch is in flight the sheet owns the request: it
+cannot be dismissed and its rows are locked, so a second tap cannot start a
+second agent. A launch that fails is reported *inside* the sheet, because the
 sheet stays open so the user can pick again and the screen's own error line
 would sit behind the sheet's backdrop.
 
@@ -428,6 +430,10 @@ The menu reaches the phone through three surfaces, each a split button
 
 Capture offers **Mesh default** as its own choice, and a create request for
 it carries neither `provider` nor `configuration_id`.
+
+Capture's mesh-card preset is the surface's choice, not the user's: it never
+overwrites the stored destination, so the user's own mesh and agent survive a
+visit to Capture. Only an explicit change to either field is stored.
 
 The menu read is secondary: it never reports an authorization failure on its
 own, so a menu read can never sign the user out of a screen they have not

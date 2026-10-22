@@ -40,6 +40,9 @@ export function SpawnMenuSheet({
   /**
    * Whether the sheet can be dismissed right now. A launch is in flight once
    * a row is picked, and the sheet must not be dismissed out from under it.
+   * A sheet that cannot be dismissed is one with a launch in flight, so its
+   * rows are locked too — picking a second row would start a second agent
+   * for the same issue or pull request.
    */
   dismissible?: boolean;
   /** Test id for the sheet. */
@@ -73,6 +76,7 @@ export function SpawnMenuSheet({
               type="button"
               className="spawn-menu-item"
               data-testid={`${testId}-${choice.id}`}
+              disabled={!dismissible}
               onClick={() => onChoose(choice)}
             >
               {choice.label}

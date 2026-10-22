@@ -34,7 +34,7 @@ export function useSpawnMenu(enabled: boolean) {
     (signal) => {
       if (!enabled) return;
       setError(null);
-      void listProviders()
+      void listProviders(signal)
         .then((rows) => {
           if (signal.aborted) return;
           // The menu is a list; anything else is a stale or mismatched

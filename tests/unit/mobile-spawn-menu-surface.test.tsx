@@ -14,13 +14,22 @@
  *     names neither `provider` nor `configuration_id`;
  *   * the pull request card's split button starts a launch with the mesh
  *     default, and the menu sends the picked launch's pair.
+ *
+ * It also pins the side effects the Spawn Menu must not have: a mesh card's
+ * preset may not overwrite the user's stored destination, a launch in flight
+ * owns the sheet, and going back closes the menu before the screen.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { Profiler } from "react";
 import NodeList from "../../src/mobile/screens/NodeList";
 import PullRequestsScreen from "../../src/mobile/screens/PullRequests";
+import CaptureIdea from "../../src/mobile/screens/CaptureIdea";
 import type { AgentNode, Mesh, Provider } from "../../src/mobile/api";
 import type { GitHubPullRequestFeed } from "../../src/types/generated/GitHubPullRequestFeed";
+
+/** The key CaptureIdea stores the chosen destination under. */
+const DESTINATION_KEY = "buildmesh_mobile_idea_destination";
 
 const mesh = {
   id: 1,
@@ -29,6 +38,13 @@ const mesh = {
   created_at: "2026-06-11T00:00:00Z",
   scratchpad: "",
   sandbox: false,
+} as Mesh;
+
+/** A second mesh, so a stored destination can differ from the preset one. */
+const otherMesh = {
+  ...mesh,
+  id: 2,
+  name: "Website",
 } as Mesh;
 
 const node = {
@@ -97,10 +113,13 @@ const response = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status });
 
 let writes: { path: string; body: Record<string, unknown> }[];
+/** Holds a pull request spawn open, so a test can watch the in-flight state. */
+let spawnPending: Promise<void> | null = null;
 
 beforeEach(() => {
   localStorage.clear();
   writes = [];
+  spawnPending = null;
   vi.stubGlobal(
     "WebSocket",
     class {
@@ -118,9 +137,10 @@ beforeEach(() => {
         if (url === "/api/nodes/create") {
           return response({ outcome: "active", node, operation_key: null });
         }
+        if (spawnPending) await spawnPending;
         return response(node);
       }
-      if (url === "/api/meshes") return response([mesh]);
+      if (url === "/api/meshes") return response([mesh, otherMesh]);
       if (url === "/api/nodes") return response([]);
       if (url === "/api/providers") {
         return response([provider, savedConfiguration]);
@@ -207,6 +227,255 @@ describe("the mesh card's spawn menu (issue #2385)", () => {
       mesh_id: 1,
       prompt: "Persist this idea",
     });
+  });
+});
+
+describe("the Spawn Menu's side effects (issue #2385)", () => {
+  /** Renders the mesh list, where the mesh card's split button lives. */
+  function renderNodeList() {
+    return render(
+      <NodeList
+        onOpenNode={vi.fn()}
+        onOpenAgentNodes={vi.fn()}
+        onOpenIssues={vi.fn()}
+        onOffline={vi.fn()}
+        onAuthFailed={vi.fn()}
+      />,
+    );
+  }
+
+  /**
+   * Opens Capture through the mesh card's Spawn Menu, with "Saved review"
+   * picked — the mesh card's own choice of mesh and launch.
+   */
+  async function openCaptureWithPreset() {
+    renderNodeList();
+    fireEvent.click(await screen.findByTestId("mesh-spawn-1-menu"));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(await within(dialog).findByText("Saved review"));
+    await screen.findByLabelText("Work in");
+  }
+
+  it("opens Capture on the preset without a second render", () => {
+    localStorage.setItem(
+      DESTINATION_KEY,
+      JSON.stringify({ meshId: "2", providerId: "claude" }),
+    );
+    const commits: string[] = [];
+
+    render(
+      <Profiler
+        id="capture"
+        onRender={(_id, phase) => {
+          commits.push(phase);
+        }}
+      >
+        <CaptureIdea
+          meshes={[mesh, otherMesh]}
+          providers={[provider, savedConfiguration]}
+          preset={{ meshId: 1, launchId: "launch/saved-review" }}
+          onStarted={vi.fn()}
+          onAuthFailed={vi.fn()}
+        />
+      </Profiler>,
+    );
+
+    // The preset is in the very first render: the stored destination never
+    // flashes on screen, and the preset costs no second render.
+    expect((screen.getByLabelText("Work in") as HTMLSelectElement).value).toBe(
+      "1",
+    );
+    expect((screen.getByLabelText("Agent") as HTMLSelectElement).value).toBe(
+      "launch/saved-review",
+    );
+    expect(commits).toEqual(["mount"]);
+  });
+
+  it("keeps the stored destination when the mesh card preselects a launch", async () => {
+    localStorage.setItem(
+      DESTINATION_KEY,
+      JSON.stringify({ meshId: "2", providerId: "claude" }),
+    );
+
+    await openCaptureWithPreset();
+
+    // Capture opens on the preset the mesh card chose…
+    expect((screen.getByLabelText("Work in") as HTMLSelectElement).value).toBe("1");
+    expect((screen.getByLabelText("Agent") as HTMLSelectElement).value).toBe(
+      "launch/saved-review",
+    );
+    // …but the user's own stored destination is the user's, and survives it.
+    expect(JSON.parse(localStorage.getItem(DESTINATION_KEY) ?? "{}")).toEqual({
+      meshId: "2",
+      providerId: "claude",
+    });
+  });
+
+  it("stores the destination once the user picks their own", async () => {
+    await openCaptureWithPreset();
+
+    fireEvent.change(screen.getByLabelText("Work in"), {
+      target: { value: "2" },
+    });
+
+    await waitFor(() =>
+      expect(
+        JSON.parse(localStorage.getItem(DESTINATION_KEY) ?? "{}"),
+      ).toEqual({
+        meshId: "2",
+        providerId: "launch/saved-review",
+      }),
+    );
+  });
+
+  it("stores the agent the user picks after a preset", async () => {
+    await openCaptureWithPreset();
+
+    fireEvent.change(screen.getByLabelText("Agent"), {
+      target: { value: "claude" },
+    });
+
+    await waitFor(() =>
+      expect(
+        JSON.parse(localStorage.getItem(DESTINATION_KEY) ?? "{}"),
+      ).toEqual({
+        meshId: "1",
+        providerId: "claude",
+      }),
+    );
+  });
+
+  it("starts one agent when the launch is tapped twice", async () => {
+    let release!: () => void;
+    spawnPending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    render(
+      <PullRequestsScreen
+        mesh={mesh}
+        onBack={vi.fn()}
+        onAuthFailed={vi.fn()}
+      />,
+    );
+
+    const start = await screen.findByTestId("pr-spawn-12");
+    // Both taps land in the same tick, so the button is still live for the
+    // second one: only the synchronous guard stops a second agent.
+    act(() => {
+      fireEvent.click(start);
+      fireEvent.click(start);
+    });
+
+    await waitFor(() =>
+      expect(
+        writes.filter((write) =>
+          write.path.endsWith("/api/meshes/1/pulls/12/spawn"),
+        ),
+      ).toHaveLength(1),
+    );
+
+    release();
+    await waitFor(() =>
+      expect(screen.getByText("Started an agent on PR #12.")).toBeTruthy(),
+    );
+  });
+
+  it("locks the menu rows while a launch is in flight", async () => {
+    let release!: () => void;
+    spawnPending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const onBack = vi.fn();
+    const backHandlerRef: { current: (() => boolean) | null } = {
+      current: null,
+    };
+    render(
+      <PullRequestsScreen
+        mesh={mesh}
+        onBack={onBack}
+        onAuthFailed={vi.fn()}
+        backHandlerRef={backHandlerRef}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId("pr-spawn-12-menu"));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(await within(dialog).findByText("Saved review"));
+
+    // The launch owns the sheet: its rows are locked…
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("pr-launch-menu-launch/saved-review"),
+      ).toHaveProperty("disabled", true),
+    );
+    // …the backdrop does not dismiss it…
+    fireEvent.click(screen.getByTestId("pr-launch-menu-backdrop"));
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    // …and back is consumed without closing it, so the screen stays too.
+    fireEvent.click(screen.getByLabelText("Back"));
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(onBack).not.toHaveBeenCalled();
+    await act(async () => {
+      expect(backHandlerRef.current?.()).toBe(true);
+    });
+    expect(screen.getByRole("dialog")).toBeTruthy();
+
+    release();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("dismisses the Spawn Menu before the screen goes back", async () => {
+    const onBack = vi.fn();
+    render(
+      <PullRequestsScreen
+        mesh={mesh}
+        onBack={onBack}
+        onAuthFailed={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId("pr-spawn-12-menu"));
+    await screen.findByRole("dialog");
+
+    fireEvent.click(screen.getByLabelText("Back"));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onBack).not.toHaveBeenCalled();
+
+    // The next back leaves the screen.
+    fireEvent.click(screen.getByLabelText("Back"));
+    expect(onBack).toHaveBeenCalledTimes(1);
+  });
+
+  it("hands the app's back gesture to the open menu", async () => {
+    const onBack = vi.fn();
+    const backHandlerRef: { current: (() => boolean) | null } = {
+      current: null,
+    };
+    render(
+      <PullRequestsScreen
+        mesh={mesh}
+        onBack={onBack}
+        onAuthFailed={vi.fn()}
+        backHandlerRef={backHandlerRef}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId("pr-spawn-12-menu"));
+    await screen.findByRole("dialog");
+
+    let handled = false;
+    await act(async () => {
+      handled = backHandlerRef.current?.() ?? false;
+    });
+    expect(handled).toBe(true);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onBack).not.toHaveBeenCalled();
+
+    // With no menu open the gesture belongs to the screen again.
+    await act(async () => {
+      handled = backHandlerRef.current?.() ?? false;
+    });
+    expect(handled).toBe(false);
   });
 });
 
