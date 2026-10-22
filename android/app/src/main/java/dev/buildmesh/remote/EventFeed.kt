@@ -17,6 +17,26 @@ interface FeedListener {
 }
 
 /**
+ * A feed listener whose callbacks are handed to one owner scope.
+ *
+ * The feed delivers frames on its own worker threads. An owner whose state is
+ * single-threaded has to be given its callbacks on its own thread — the
+ * dashboard's `RefreshController` is documented as a main-thread owner — so
+ * this is the one place that marshalling happens, and it is the one place a
+ * future owner has to remember it.
+ */
+class ScopedFeedListener(
+    private val scope: CoroutineScope,
+    private val opened: () -> Unit,
+    private val frame: (FeedEvent) -> Unit,
+    private val refused: () -> Unit,
+) : FeedListener {
+    override fun onOpen() { scope.launch { opened() } }
+    override fun onEvent(event: FeedEvent) { scope.launch { frame(event) } }
+    override fun onUnauthorized() { scope.launch { refused() } }
+}
+
+/**
  * One owner of the desktop's `/ws/events` feed for the whole process.
  *
  * The dashboard and the background watch service need the same frames, and two
@@ -69,40 +89,42 @@ class EventFeed(
     fun client(): BuildmeshApi? = client
 
     private fun start() {
-        if (socket != null || opening?.isActive == true || revoked) return
-        val owner = synchronized(lock) {
+        synchronized(lock) {
             if (socket != null || opening?.isActive == true || revoked) return
-            ++generation
-        }
-        opening = scope.launch {
-            val saved = try {
-                session()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                null
-            }
-            if (saved == null) return@launch
-            val api = BuildmeshApi(saved.origin, saved.root, saved.cookie)
-            val events = RemoteSocket(
-                api,
-                scope,
-                "events",
-                onOpen = { listeners.forEach { it.onOpen() } },
-                onData = { bytes -> deliver(bytes) },
-                onUnauthorized = { refuse(api) },
-            )
-            // The socket is published under the lock, so a stop that lands
-            // while the session is being read cannot leave a live socket
-            // behind with nothing able to close it.
-            synchronized(lock) {
-                if (owner != generation) {
-                    api.close()
-                    return@launch
+            val owner = ++generation
+            // The launch is published under the lock, so a second attach
+            // cannot slip past the guard between the check and the assignment
+            // and open a socket of its own.
+            opening = scope.launch {
+                val saved = try {
+                    session()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    null
                 }
-                client = api
-                socket = events
-                events.start()
+                if (saved == null) return@launch
+                val api = BuildmeshApi(saved.origin, saved.root, saved.cookie)
+                val events = RemoteSocket(
+                    api,
+                    scope,
+                    "events",
+                    onOpen = { listeners.forEach { it.onOpen() } },
+                    onData = { bytes -> deliver(bytes) },
+                    onUnauthorized = { refuse(api) },
+                )
+                // The socket is published under the lock, so a stop that lands
+                // while the session is being read cannot leave a live socket
+                // behind with nothing able to close it.
+                synchronized(lock) {
+                    if (owner != generation) {
+                        api.close()
+                        return@launch
+                    }
+                    client = api
+                    socket = events
+                    events.start()
+                }
             }
         }
     }

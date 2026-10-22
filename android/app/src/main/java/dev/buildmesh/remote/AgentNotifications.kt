@@ -65,6 +65,10 @@ object AgentNotifications {
      * node that asks twice leaves one notice behind.
      */
     fun post(context: Context, nodeId: Long, title: String, body: String) {
+        // The permission check is written out here rather than delegated to
+        // `allowed()`: lint's permission analysis only recognises a guard in
+        // the method that makes the call, and this module builds with
+        // warnings as errors, so a delegated check fails the gate.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED

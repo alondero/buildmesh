@@ -35,7 +35,10 @@ kind only says *why* the node stopped.
    the watch service attach to the same `EventFeed`, which owns one socket and
    one reconnect timer. Two sockets would double the desktop's subscriber
    count, the phone's idle traffic and the ticket mint rate for no added
-   information.
+   information. The feed delivers frames on its own worker threads, so each
+   owner takes its callbacks on its own thread: the dashboard on its main
+   thread, where its refresher is documented to live, and the watch service
+   on a worker, where it reads the desktop.
 3. **The watch service runs as a `specialUse` foreground service.** Its
    subtype is declared in the manifest. `dataSync` was rejected because
    Android 15 caps that type at six hours per day, and a watch that silently

@@ -301,13 +301,17 @@ required to answer on the phone that was told.
 **The watch follows the desktop.** A notice lives as long as the watch does and
 the node still needs a person, so forgetting the desktop stops the watch and
 takes its notices with it — the watch had a desktop to listen to, and now it
-does not. The user's preference survives, so pairing again starts the watch
-again.
+does not. Its own "Watching for agents" notification goes with it, so the
+phone does not keep claiming to listen to a desktop it is not paired with. The
+user's preference survives, so pairing again starts the watch again.
 
 **One feed, one socket.** The dashboard and the watch service read the same
 feed (`EventFeed`), which owns one WebSocket and one reconnect timer for the
 whole process. Two sockets would double the desktop's subscriber count, the
-phone's idle traffic and the ticket mint rate.
+phone's idle traffic and the ticket mint rate. The feed delivers on its own
+worker threads, so each owner takes its callbacks on its own thread: the
+dashboard on its main thread, where the refresher is documented to live, and
+the watch service on a worker, where it reads the desktop.
 
 **The delivery bound.** Under one second from the desktop's lifecycle event to
 the notice on the phone while the socket is connected: the event crosses the

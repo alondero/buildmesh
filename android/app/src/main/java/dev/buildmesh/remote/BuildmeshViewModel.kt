@@ -59,17 +59,21 @@ class BuildmeshViewModel(application: Application) : AndroidViewModel(applicatio
      * The dashboard's share of the desktop's event feed.
      *
      * The feed is process-wide, so the background watch service and this
-     * dashboard read the same socket rather than opening a second one.
+     * dashboard read the same socket rather than opening a second one. The
+     * feed delivers on its own worker threads, and the refresher is a
+     * main-thread owner, so the listener hands its callbacks to this
+     * ViewModel's scope.
      */
-    private val feedListener = object : FeedListener {
-        override fun onOpen() { refresh() }
-        override fun onEvent(event: FeedEvent) {
+    private val feedListener = ScopedFeedListener(
+        scope = viewModelScope,
+        opened = { refresh() },
+        frame = {
             // Invalidate an in-flight snapshot before reading the new authoritative state.
             refresher.invalidate()
             refresh()
-        }
-        override fun onUnauthorized() { unauthorized() }
-    }
+        },
+        refused = { unauthorized() },
+    )
     private val refresher = RefreshController(viewModelScope,
         read = {
             val client = api ?: throw CancellationException("Disconnected")

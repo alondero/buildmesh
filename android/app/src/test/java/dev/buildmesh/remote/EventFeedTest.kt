@@ -1,7 +1,9 @@
 package dev.buildmesh.remote
 
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.*
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.channels.Channel
 import okhttp3.*
 // okhttp3 has a `Dispatcher` of its own, so the MockWebServer one is named explicitly.
@@ -139,6 +141,40 @@ class EventFeedTest {
                 feed.detach(listener)
                 scope.cancel()
             }
+        }
+    }
+
+    @Test fun aScopedListenerHandsItsCallbacksToTheOwnerScope() {
+        val dispatcher = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "feed-owner") }
+            .asCoroutineDispatcher()
+        val owner = CoroutineScope(dispatcher)
+        try {
+            val seen = Channel<Pair<String, Thread>>(Channel.UNLIMITED)
+            val listener = ScopedFeedListener(
+                scope = owner,
+                opened = { seen.trySend("open" to Thread.currentThread()) },
+                frame = { seen.trySend("event:${it}" to Thread.currentThread()) },
+                refused = { seen.trySend("unauthorized" to Thread.currentThread()) },
+            )
+            // The feed delivers on its own worker threads, so the callbacks
+            // must not run on the caller's thread.
+            val caller = Thread.currentThread()
+            listener.onOpen()
+            listener.onEvent(FeedEvent.Cleared(7))
+            listener.onUnauthorized()
+            val (open, openThread) = runBlocking { withTimeout(5000) { seen.receive() } }
+            val (event, eventThread) = runBlocking { withTimeout(5000) { seen.receive() } }
+            val (unauthorized, unauthorizedThread) = runBlocking { withTimeout(5000) { seen.receive() } }
+            assertTrue("the callback must run on the owner scope: $open", openThread.name.contains("feed-owner"))
+            assertTrue("the callback must run on the owner scope: $event", eventThread.name.contains("feed-owner"))
+            assertTrue("the callback must run on the owner scope: $unauthorized", unauthorizedThread.name.contains("feed-owner"))
+            assertNotSame("the callback must not run on the caller's thread", caller, openThread)
+            assertNotSame("the callback must not run on the caller's thread", caller, eventThread)
+            assertNotSame("the callback must not run on the caller's thread", caller, unauthorizedThread)
+            assertEquals("open", open)
+            assertTrue(event.startsWith("event:Cleared"))
+        } finally {
+            dispatcher.close()
         }
     }
 }

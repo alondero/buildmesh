@@ -78,8 +78,12 @@ class AgentWatchService : Service() {
     override fun onDestroy() {
         stopped = true
         AppEventFeed.feed.detach(listener)
-        // A notice lives exactly as long as the watch does and the node still
-        // needs a person, so a watch that ends takes its notices with it.
+        // The watch's own notification goes with the watch. Without this it
+        // would outlive a service that stopped itself — revoked, disabled, or
+        // unpaired — and sit in the drawer claiming the phone is listening.
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        // A notice lives as long as the watch does and the node still needs a
+        // person, so a watch that ends takes its notices with it.
         for (nodeId in notices.keys) AgentNotifications.cancel(this, nodeId)
         notices.clear()
         scope.cancel()
