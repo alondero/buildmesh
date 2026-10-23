@@ -9,6 +9,5 @@
   "tests/integration/ui-shot-errors.test.ts > ui-shot fatal browser diagnostics fails React key warnings even at console.warn severity": 2539,
   "tests/integration/ui-shot-errors.test.ts > ui-shot fatal browser diagnostics fails React hook-order warnings even at console.warn severity": 2539,
   "tests/integration/ui-shot-server.test.ts > ui-shot Vite server starts the worktree Vite entrypoint and stops the direct child": 2539,
-  "tests/unit/harness-defaults-section.test.tsx > Settings — Agent Harness defaults reset clears via clear_harness_default and collapses the card back to empty": 2539,
-  "tests/integration/tauri-mock-settings.test.ts > renders Settings and prompt defaults in Chromium with the default mock IPC": 2543
+  "tests/unit/harness-defaults-section.test.tsx > Settings — Agent Harness defaults reset clears via clear_harness_default and collapses the card back to empty": 2539
 }
