@@ -1,7 +1,8 @@
 import { spawn } from 'child_process';
 import { connect } from 'net';
 import { createRequire } from 'module';
-import { dirname, resolve } from 'path';
+import { mkdir, mkdtemp, rm } from 'fs/promises';
+import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { DEV_SERVER_STARTUP_MS, DEV_READY_POLL_MS, DEV_LISTEN_PROBE_MS, DEV_SERVER_STOP_MS } from './ui-shot-budgets.mjs';
 
@@ -9,6 +10,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
 const vitePackageJson = require.resolve('vite/package.json');
 const viteEntrypoint = resolve(dirname(vitePackageJson), 'bin', 'vite.js');
+const caches = new WeakMap();
 // The startup budget lives in the budgets module, which
 // `tests/integration/ui-shot.test.ts` also reads, so the wrapper deadline prices
 // the real value rather than a hand-copied literal that would drift when this
@@ -53,21 +55,28 @@ const hasExited = child => child.exitCode !== null || child.signalCode !== null;
  * exit. Vite is launched as a direct Node child, so no shell process tree or
  * Windows-specific taskkill fallback is needed.
  */
-export function stopDevServer(child) {
-  if (!child?.pid || hasExited(child)) return Promise.resolve();
+export async function stopDevServer(child) {
+  if (!child?.pid) return;
 
-  child.kill();
-  return new Promise((resolvePromise) => {
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      resolvePromise();
-    };
-    const timeout = setTimeout(finish, DEV_SERVER_STOP_MS);
-    child.once('close', finish);
-  });
+  if (!hasExited(child)) {
+    child.kill();
+    await new Promise((resolvePromise) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolvePromise();
+      };
+      const timeout = setTimeout(finish, DEV_SERVER_STOP_MS);
+      child.once('close', finish);
+    });
+  }
+  // Never remove a cache while its owner may still be writing it.
+  if (hasExited(child) && caches.has(child)) {
+    await rm(caches.get(child), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    caches.delete(child);
+  }
 }
 
 /**
@@ -96,7 +105,7 @@ function isListening(host, port) {
  * Start this worktree's Vite server and resolve once its URL answers.
  * Returns null when another process already owns the requested URL.
  */
-export async function startDevServer(mockUrl, { timeoutMs = defaultTimeoutMs } = {}) {
+export async function startDevServer(mockUrl, { timeoutMs = defaultTimeoutMs, cacheRoot = resolve(repoRoot, '.tmp/ui-shot-vite') } = {}) {
   // The clock starts before the reuse check, so the phase really is bounded by
   // `timeoutMs`. A probe may only spend what is left of it, otherwise a probe
   // starting just before the deadline runs to its own timeout past it (#2063).
@@ -130,12 +139,16 @@ export async function startDevServer(mockUrl, { timeoutMs = defaultTimeoutMs } =
     viteArgs.push('--host', target.hostname, '--port', target.port);
   }
 
+  await mkdir(cacheRoot, { recursive: true });
+  const cacheDir = await mkdtemp(join(cacheRoot, 'server-'));
   const child = spawn(process.execPath, [viteEntrypoint, ...viteArgs], {
     cwd: repoRoot,
+    env: { ...process.env, BUILDMESH_VITE_CACHE_DIR: cacheDir },
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: false,
     shell: false,
   });
+  caches.set(child, cacheDir);
   let processError;
   let output = '';
   child.stdout?.on('data', (chunk) => { output = rememberOutput(output, chunk); });
