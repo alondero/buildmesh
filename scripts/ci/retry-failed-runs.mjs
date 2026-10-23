@@ -21,6 +21,7 @@
 //
 // `gh run rerun <id> --failed` re-runs only the failed jobs of a run, so a
 // blip in one shard costs that shard, not the whole fan-out.
+// Rerun success follows the exit code; only list responses are parsed as JSON.
 //
 // Usage:
 //   node scripts/ci/retry-failed-runs.mjs [--dry-run]
@@ -69,7 +70,7 @@ export function selectRunsToRetry(runs, { now = Date.now(), windowMs = DEFAULT_W
   return candidates.slice(0, maxRetries);
 }
 
-export function ghJson(args) {
+function ghRaw(args) {
   return new Promise((resolve, reject) => {
     const child = spawn('gh', args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
@@ -84,16 +85,25 @@ export function ghJson(args) {
         reject(new Error(`gh ${args.join(' ')} exited ${code}: ${stderr.trim()}`));
         return;
       }
-      try {
-        resolve(JSON.parse(stdout));
-      } catch (err) {
-        reject(new Error(`gh ${args.join(' ')} returned invalid JSON: ${err.message}`));
-      }
+      resolve(stdout);
     });
   });
 }
 
-export async function main(argv, { gh = ghJson, now = Date.now() } = {}) {
+export async function ghJson(args) {
+  const stdout = await ghRaw(args);
+  try {
+    return JSON.parse(stdout);
+  } catch (err) {
+    throw new Error(`gh ${args.join(' ')} returned invalid JSON: ${err.message}`, { cause: err });
+  }
+}
+
+function ghCommand(args) {
+  return args[0] === 'run' && args[1] === 'rerun' ? ghRaw(args) : ghJson(args);
+}
+
+export async function main(argv, { gh = ghCommand, now = Date.now() } = {}) {
   const dryRun = argv.includes('--dry-run');
   if (argv.some((arg) => arg !== '--dry-run')) {
     process.stderr.write(`${USAGE}\n`);
