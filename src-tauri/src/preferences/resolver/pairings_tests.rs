@@ -1,7 +1,7 @@
 //! Tests for the resolver::pairings submodule — pairing upsert/remove,
 //! proxied-provider ordering, attach-form defaults.
 
-use super::with_temp_dir;
+use crate::preferences::tests::with_temp_dir;
 use crate::preferences::{ApiSurface, AppPreferences, ModelTiers, ProviderPairing};
 
 #[test]
@@ -52,7 +52,7 @@ fn set_proxied_provider_order_round_trips() {
             vec!["minimax".to_string(), "kimi".to_string()],
         )
         .unwrap();
-        let stored = super::super::storage::load()
+        let stored = super::super::super::storage::load()
             .unwrap()
             .proxied_provider_order;
         assert_eq!(stored.len(), 1);
@@ -73,7 +73,7 @@ fn set_proxied_provider_order_normalises_empty_to_drop_entry() {
         )
         .unwrap();
         crate::preferences::set_proxied_provider_order("claude".to_string(), vec![]).unwrap();
-        let stored = super::super::storage::load()
+        let stored = super::super::super::storage::load()
             .unwrap()
             .proxied_provider_order;
         assert!(stored.is_empty());
@@ -88,7 +88,7 @@ fn proxied_order_for_returns_none_when_harness_unset() {
 }
 
 /// Issue #1935 — the one-call attach-picker map is a faithful hoist of the
-/// per-harness resolver, and it is keyed by every harness the Settings pane can
+/// per-harness resolver, and it is keyed by the harnesses the Settings pane can
 /// render: the effective profiles *and* the harness ids that only reach the pane
 /// through a stored pairing.
 #[test]
@@ -145,7 +145,7 @@ fn compatible_providers_by_harness_covers_every_renderable_harness() {
 
         let map = crate::preferences::compatible_providers_by_harness();
 
-        // Every entry is the single-harness computation, unchanged.
+        // Each entry is the single-harness computation, with the same result.
         for (harness_id, accounts) in &map {
             assert_eq!(
                 accounts,
@@ -165,7 +165,7 @@ fn compatible_providers_by_harness_covers_every_renderable_harness() {
         // empty list, not a missing key.
         assert_eq!(map.get("terminal"), Some(&vec![]));
         // The pairing-only harness id is a key even though `harness_profiles()`
-        // never mentioned it.
+        // did not list it.
         assert!(
             map.contains_key("grok"),
             "a harness reachable only through a stored pairing must still have a picker entry",
@@ -180,7 +180,7 @@ fn compatible_providers_by_harness_covers_every_renderable_harness() {
 
 /// Issue #1935 review — a corrupt or empty `spawn_option_id` must not add an
 /// empty key. `""` is not a harness, and an empty list under it would be
-/// indistinguishable from a real "nothing is compatible here" answer.
+/// indistinguishable from a real "no compatible provider here" answer.
 #[test]
 fn compatible_providers_by_harness_skips_empty_harness_ids() {
     with_temp_dir(|_| {

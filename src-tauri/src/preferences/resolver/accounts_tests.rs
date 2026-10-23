@@ -1,9 +1,9 @@
 //! Tests for the resolver::accounts submodule — effective-account resolution,
 //! API key lookups, mutators (upsert/remove), set_account_key_if_absent.
 
-use super::super::model::ProviderAccount;
-use super::super::resolver::effective_pairings;
-use super::with_temp_dir;
+use super::super::super::model::ProviderAccount;
+use super::super::effective_pairings;
+use crate::preferences::tests::with_temp_dir;
 use crate::preferences::{ApiSurface, AppPreferences, ModelTiers, ProviderPairing};
 
 #[test]
@@ -107,7 +107,7 @@ fn effective_pairings_skips_unkeyed_disabled_or_self_auth_accounts() {
 fn minimax_api_key_resolved_prefers_account_then_legacy_field() {
     with_temp_dir(|_| {
         // Legacy field only
-        super::super::storage::update(|p| {
+        super::super::super::storage::update(|p| {
             p.minimax_api_key = Some("legacy".to_string());
         })
         .unwrap();
@@ -116,7 +116,7 @@ fn minimax_api_key_resolved_prefers_account_then_legacy_field() {
             Some("legacy".to_string())
         );
         // Account wins over legacy
-        let mut prefs = super::super::storage::load().unwrap();
+        let mut prefs = super::super::super::storage::load().unwrap();
         prefs.provider_accounts.push(ProviderAccount {
             id: "minimax".to_string(),
             name: "MiniMax".to_string(),
@@ -125,7 +125,7 @@ fn minimax_api_key_resolved_prefers_account_then_legacy_field() {
             claude_compatible: true,
             api_key: Some("account-key".to_string()),
         });
-        super::super::storage::save(prefs).unwrap();
+        super::super::super::storage::save(prefs).unwrap();
         assert_eq!(
             crate::preferences::minimax_api_key_resolved(),
             Some("account-key".to_string())
@@ -136,7 +136,7 @@ fn minimax_api_key_resolved_prefers_account_then_legacy_field() {
 #[test]
 fn provider_accounts_folds_legacy_minimax_key_into_effective_snapshot() {
     with_temp_dir(|_| {
-        super::super::storage::update(|prefs| {
+        super::super::super::storage::update(|prefs| {
             prefs.minimax_api_key = Some("legacy".to_string());
             prefs.provider_accounts.push(ProviderAccount {
                 id: "minimax".to_string(),
@@ -161,7 +161,7 @@ fn provider_accounts_folds_legacy_minimax_key_into_effective_snapshot() {
 /// The `id`s actually stored in `preferences.json` — the list a load must not
 /// grow on its own.
 fn stored_account_ids() -> Vec<String> {
-    let path = super::super::storage::preferences_path().unwrap();
+    let path = super::super::super::storage::preferences_path().unwrap();
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     value["provider_accounts"]
@@ -172,15 +172,15 @@ fn stored_account_ids() -> Vec<String> {
         .collect()
 }
 
-/// Issue #2411: loading preferences must never persist a built-in default
+/// Issue #2411: loading preferences must not persist a built-in default
 /// account into the user's stored `provider_accounts`. The companion migration
 /// used to write back the **merged** list, so folding a PR #1044
-/// `kimi-via-claude` row also stored every code-defined self-auth default as an
-/// account the user had never chosen.
+/// `kimi-via-claude` row also stored the code-defined self-auth defaults as
+/// accounts the user had not chosen.
 #[test]
 fn loading_preferences_never_persists_builtin_defaults_as_stored_accounts() {
     with_temp_dir(|_| {
-        super::super::storage::update(|prefs| {
+        super::super::super::storage::update(|prefs| {
             prefs.provider_accounts = vec![ProviderAccount {
                 id: "kimi-via-claude".to_string(),
                 name: "Kimi (via Claude)".to_string(),
@@ -203,7 +203,7 @@ fn loading_preferences_never_persists_builtin_defaults_as_stored_accounts() {
             .expect("materialized kimi account");
         assert_eq!(kimi.api_key.as_deref(), Some("key-from-companion"));
 
-        // The migration owns exactly one stored row: the kimi row the
+        // The migration owns one stored row: the kimi row the
         // companion's key was folded into. Whatever `default_provider_accounts()`
         // contributes stays code-defined and out of the file.
         assert_eq!(
@@ -217,7 +217,7 @@ fn loading_preferences_never_persists_builtin_defaults_as_stored_accounts() {
 /// Issue #2411: the companion migration must not need a write-back. A legacy
 /// file carrying the companion row is folded into the first-class `kimi` row in
 /// memory by `migrate_prefs_json` on load, so reading it leaves the bytes on
-/// disk exactly as it found them.
+/// disk as it found them.
 #[test]
 fn loading_a_legacy_kimi_companion_file_leaves_it_byte_identical() {
     with_temp_dir(|tmp| {

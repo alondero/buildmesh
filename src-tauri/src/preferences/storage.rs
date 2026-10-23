@@ -411,6 +411,31 @@ fn scrub_plaintext_keys(primary_has_plaintext: bool) {
     }
 }
 
+// Counts `load` calls on this thread so a test can assert that a derivation
+// reads preferences once (issue #2532).
+//
+// Per-thread, like the test cache itself (issue #1386): a parallel test on
+// another worker thread must not change this thread's count.
+#[cfg(test)]
+// allow-test-in-production: the per-thread load counter lets a sibling suite assert that a
+// derivation reads preferences once.
+thread_local! {
+    static LOAD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+// allow-test-in-production: the counter's writer, called from the one read path it counts.
+fn count_load() {
+    LOAD_COUNT.with(|count| count.set(count.get() + 1));
+}
+
+/// The number of [`load`] calls made on this thread.
+#[cfg(test)]
+// allow-test-in-production: the counter's reader, called from a sibling suite's assertion.
+pub(crate) fn load_count() -> usize {
+    LOAD_COUNT.with(|count| count.get())
+}
+
 /// Load preferences, populating the in-process cache on first call.
 ///
 /// Recovers from a poisoned `CACHE` mutex instead of panicking (issue
@@ -435,6 +460,9 @@ fn scrub_plaintext_keys(primary_has_plaintext: bool) {
 /// cache: the write path re-reads the file and refuses, so no ordinary
 /// settings change can turn "unreadable" into "overwritten".
 pub fn load() -> Result<AppPreferences, String> {
+    #[cfg(test)]
+    // allow-test-in-production: the counter's writer, called from the one read path it counts.
+    count_load();
     // Cold-cache populate, mutator, and cache publish all happen under the
     // mutex — the same contract as the pre-issue-#1386 implementation,
     // routed through the `with_cache_mut` cfg-divergent helper. The
