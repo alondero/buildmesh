@@ -51,15 +51,11 @@ describe('ui-shot fatal browser diagnostics', () => {
     expect(result.stderr).toContain('unexpected-console-control');
   });
 
-  it.each([
-    ['key', 'Each child in a list should have a unique "key" prop.'],
-    ['duplicate-key', 'Encountered two children with the same key, duplicate-control.'],
-    ['hook-order', 'React has detected a change in the order of Hooks called by HookControl.'],
-    ['invalid-hook', 'Invalid hook call. Hooks can only be called inside of the body of a function component.'],
-    ['fewer-hooks', 'Rendered fewer hooks than expected. This may be caused by an accidental early return.'],
-    ['more-hooks', 'Rendered more hooks than during the previous render.'],
-  ])('fails React %s warnings even at console.warn severity', async (name, diagnostic) => {
-    const result = await capture(`${mounted}<script>console.warn(${JSON.stringify(diagnostic)})</script>`, name);
+  it('fails React warnings even at console.warn severity', async () => {
+    // String classification is covered without six Chromium boots in the
+    // collector unit tests. Keep one real console.warn -> CLI failure check.
+    const diagnostic = 'Encountered two children with the same key, duplicate-control.';
+    const result = await capture(`${mounted}<script>console.warn(${JSON.stringify(diagnostic)})</script>`, 'duplicate-key');
     expect(result.code, result.stderr).toBe(1);
     expect(result.stderr).toContain('[React warning]');
     expect(result.stderr).toContain(diagnostic);

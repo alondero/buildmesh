@@ -424,6 +424,20 @@ compile smoke, not a packaged Tauri or real-window smoke. Playwright smoke uses
 mock IPC. Visible UI or backend acceptance still requires the relevant real
 dev-profile evidence from [verify-ui](../../.claude/skills/verify-ui/SKILL.md).
 
+Vitest partitions the same unit/integration file patterns into the parallel
+`jsdom` project and the `browser-tools` project. The four process-owning suites
+listed in `vitest.config.ts` run after jsdom drains, one file at a time; this
+also applies to the integration-only CI leg. Browser diagnostic string variants
+are collector unit tests, with one real-browser warning case retaining the CLI
+integration. Exact millisecond search benchmarks do not belong in the shared
+correctness gate; Omnibar matching, ranking and limits remain covered there.
+
+Vite's ordinary optimizer cache lives in this worktree's `.tmp/vite`, outside
+the potentially shared `node_modules`. Each `ui-shot --serve` child instead gets
+a private directory under `.tmp/ui-shot-vite`, passed through
+`BUILDMESH_VITE_CACHE_DIR`. Stopping an exited owned child removes its cache;
+reusing an existing server does not take ownership of its cache or process.
+
 The `ui-shot` mock renders charge their time to named phases in
 `scripts/ui-shot-budgets.mjs`: dev-server startup, browser launch, page setup,
 reading the mock fixtures, navigation, mount, the step script, importing the
