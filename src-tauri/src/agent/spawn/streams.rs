@@ -59,8 +59,8 @@ pub(super) async fn start_streams(
     // before this point — see `git::worktree::provision`.
     //
     // This is where a compensating `set_agent_node_worktree_name` used to
-    // live. #1057 moved the claim into `SpawnContext` via
-    // `warm_claimed.take()` in the provision phase, which silently made
+    // live. #1057 moved the claim into `SpawnContext` via a `take()` on the
+    // claimed entry in the provision phase, which silently made
     // this block's `Some(entry)` guard unmatchable — `None` is a perfectly
     // valid value to pattern-test, so nothing failed to compile and no test
     // covered it. The row kept its stage-1 throwaway slug, and every close

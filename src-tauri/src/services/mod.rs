@@ -11,7 +11,6 @@ pub mod commandcode_session;
 pub mod commandcode_watcher;
 pub mod coordinator_ledger_maintenance;
 pub mod create_operation;
-pub mod fetch_freshness;
 pub mod freebuff_usage;
 pub mod gh_auth_cache;
 pub mod github;
@@ -27,7 +26,6 @@ pub mod pool_worker;
 pub mod provider_verification;
 pub mod session_recovery;
 pub mod state_recovery;
-pub mod sync_lock;
 #[cfg(any(debug_assertions, feature = "dev-tools"))]
 pub(crate) mod test_fixtures;
 pub mod transcript_paths;

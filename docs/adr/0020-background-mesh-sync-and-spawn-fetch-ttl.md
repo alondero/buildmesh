@@ -100,3 +100,21 @@ flip overrides both — once. The Worktrees Probe remains the opt-out.
 - **PRD #608 / issues #609–#653** (warm pool): the pool's "PR-style fetch
   intentionally omitted" note in `services::warm_pool` is now resolved by the
   background sync + `on_fetch_completed` pairing.
+
+## Amendment (2026-10-23): the fetch-recency registry moved into `git/`
+
+Issue #2533 moved the per-Mesh fetch-recency registry this ADR describes from
+`services::fetch_freshness` to `git::fetch_freshness` — it is Git-domain
+coordination, not a service, and leaving it in `services/` would have kept a
+`git/` → `services/` import alive. The module path in the section-2 heading
+above is the historical one; the current home is `git::fetch_freshness`.
+
+**Behaviour.** `SPAWN_FETCH_TTL` is still 5 minutes, the
+spawn-time skip still keys on the last *successful* sync, the background
+worker still runs on the last-*attempt* cadence with `BACKGROUND_SYNC_INTERVAL`
+at 3 minutes, and `warm_pool::on_fetch_completed` still runs when the fetch
+advances the base ref. The per-Mesh fetch/sync lock moved the same way
+(`services::sync_lock` → `git::sync_lock`).
+
+See ADR 0007's amendment and `docs/development/module-map.md` for the one-way
+dependency rule this move serves.

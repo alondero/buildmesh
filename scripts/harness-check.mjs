@@ -92,7 +92,12 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/commands/pr_tests.rs': 'commands::pr::tests',
   'src-tauri/src/db/circuit/evidence_tests.rs': 'db::circuit::evidence::tests',
   'src-tauri/src/git/fetch_origin_tests.rs': 'git::sync::fetch_origin_tests',
+  'src-tauri/src/git/fetch_freshness_tests.rs': 'git::fetch_freshness::tests',
   'src-tauri/src/git/mesh_health_tests.rs': 'git::health::mesh_health_tests',
+  'src-tauri/src/git/sha_tests.rs': 'git::sha::tests',
+  'src-tauri/src/git/sync_lock_tests.rs': 'git::sync_lock::tests',
+  'src-tauri/src/git/worktree/provision_tests.rs': 'git::worktree::provision::tests',
+  'src-tauri/src/git/worktree/warm_tests.rs': 'git::worktree::warm::tests',
   'src-tauri/src/git/worktree/worktree_tests.rs': 'git::worktree::tests',
   'src-tauri/src/commands/prune_tests.rs': 'commands::prune::prune_tests',
   'src-tauri/src/http/ws_tests.rs': 'http::ws::tests',
@@ -107,7 +112,29 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/services/circuit_worker/dispatch_tests.rs': 'services::circuit_worker::dispatch::tests',
   'src-tauri/src/services/circuit_worker/native_hooks_tests.rs': 'services::circuit_worker::native_hooks::tests',
   'src-tauri/src/services/legacy_retirement/retirement_crash_tests.rs': 'services::legacy_retirement::retirement_crash_tests',
+  'src-tauri/src/services/pool_worker_tests.rs': 'services::pool_worker::tests',
   'src-tauri/src/services/transcript_reader/report_snapshot_tests.rs': 'services::transcript_reader::report_snapshot::tests',
+  'src-tauri/src/services/warm_pool_tests.rs': 'services::warm_pool::tests',
+};
+
+// A Rust production file whose tests live in a sibling `<stem>_tests` module
+// that the PARENT declares (`mod y_tests;`) rather than the file itself
+// including (`#[path = "y_tests.rs"] mod tests;`).
+//
+// The path walk maps the production file to its own module, and that module
+// holds no tests — a scoped `cargo test --lib` filter for it selects zero,
+// which the strict zero-test rule reports as a failure that carries no
+// information about the code. These entries point the filter at the module
+// that holds the file's tests. A file that keeps BOTH an inline `mod tests`
+// and a sibling keeps its own module, so its inline tests still run.
+//
+// `RUST_PATH_INCLUDES` covers the `#[path]` half of the same problem; the
+// two tables cover different shapes, because a `#[path]`-included
+// sibling is registered in that table and keeps its owner's filter.
+export const RUST_SIBLING_TESTS = {
+  'src-tauri/src/agent/spawn/prepare.rs': 'agent::spawn::prepare_tests',
+  'src-tauri/src/agent/spawn/provision.rs': 'agent::spawn::provision_tests',
+  'src-tauri/src/db/warm_pool.rs': 'db::warm_pool_tests',
 };
 
 // Every `#[path = "..."]` module in the crate, as repo-relative paths. Entries
@@ -132,6 +159,7 @@ export function pathIncludeDrift(root) {
 // integration tests, or anything outside `src-tauri/src`).
 export function rustModule(path) {
   if (RUST_PATH_INCLUDES[path]) return RUST_PATH_INCLUDES[path];
+  if (RUST_SIBLING_TESTS[path]) return RUST_SIBLING_TESTS[path];
   if (!path.startsWith(RUST_SRC)) return null;
   const rest = path.slice(RUST_SRC.length);
   // The crate root and the binary entry can reach every module.
@@ -144,13 +172,21 @@ export function rustModule(path) {
 // Split changed paths into the Rust modules a `--lib` filter can select, and
 // the ones it cannot: the crate root, a manifest, the build script, or an
 // integration-test binary, which `cargo test --lib` does not run.
-export function rustScope(paths) {
+//
+// A path the diff DELETED is skipped: the file is gone, so the module it
+// named is gone with it and no test can live under it any more. A file that
+// moved is a deletion plus an addition, and the addition carries the filter
+// for the module's new home — without this, each move would ask Cargo for
+// tests under a module that has been deleted, and a filter that matches
+// no test is reported as a failure rather than as the no-op it is.
+export function rustScope(paths, { exists = () => true } = {}) {
   const modules = new Set();
   const unscoped = [];
   for (const path of paths) {
     // `categorisePath` resolves everything under src-tauri/ (and the manifests
     // beside it) to 'rust', so that is the whole Rust surface here.
     if (categorisePath(path) !== 'rust') continue;
+    if (!exists(path)) continue;
     const module = rustModule(path);
     if (module) modules.add(module);
     else unscoped.push(path);
@@ -186,7 +222,7 @@ export function planChecks(paths, { exists = () => true } = {}) {
   if (paths.some(path => path.startsWith(RUST_SRC) && path.endsWith('.rs'))) {
     checks.push({ id: 'check-rust-paths', command: ['node', 'scripts/harness.mjs', 'gate', 'rust-paths'], minutes: 2 });
   }
-  const rust = rustScope(paths);
+  const rust = rustScope(paths, { exists });
   if (rust.whole) {
     checks.push({ id: 'check-rust-tests', command: ['cargo', 'test', '--lib'], cwd: 'src-tauri', rust: true, tests: 'rust', minutes: 30 });
   } else {

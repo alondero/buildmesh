@@ -1970,6 +1970,13 @@ test('a Rust file attached with #[path] selects the module that owns it', () => 
   assert.equal(rustModule('src-tauri/src/commands/prune_tests.rs'), 'commands::prune::prune_tests');
   assert.equal(rustModule('src-tauri/src/services/legacy_retirement/retirement_crash_tests.rs'), 'services::legacy_retirement::retirement_crash_tests');
   assert.equal(rustModule('src-tauri/src/agent/terminal_input.rs'), 'agent::process::terminal_input');
+  // A production file whose tests live in a sibling `<stem>_tests` module the
+  // PARENT declares: a plain path walk maps it to a module that holds no
+  // tests, so the filter would select zero and the strict zero-test rule
+  // would report a failure that carries no information about the code.
+  assert.equal(rustModule('src-tauri/src/db/warm_pool.rs'), 'db::warm_pool_tests');
+  assert.equal(rustModule('src-tauri/src/agent/spawn/provision.rs'), 'agent::spawn::provision_tests');
+  assert.equal(rustModule('src-tauri/src/agent/spawn/prepare.rs'), 'agent::spawn::prepare_tests');
   // A module file maps to its own module; a directory mod.rs to its directory.
   assert.equal(rustModule('src-tauri/src/db/mod.rs'), 'db');
   assert.equal(rustModule('src-tauri/src/env/host_path.rs'), 'env::host_path');

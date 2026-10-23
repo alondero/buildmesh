@@ -99,3 +99,43 @@ If a future cross-language SDK or parallel implementation (libgit2 vs. CLI
 checkout) ever needs to swap implementations, the closures can be lifted into
 a `trait PoolBackend` then. Until then, the trait would be speculative
 generality. Tracked under issue #639 (audit gap 2).
+
+## The claim seam: a consumer-owned interface, not a `PoolBackend`
+
+Issue #2533 broke the `git/` → `services/` dependency cycle by moving the
+pool's side effects behind a narrow interface that the *consumer* declares:
+
+```rust
+// src-tauri/src/git/worktree/warm.rs
+pub trait WarmClaim: Send + Sync { /* entry, needs_refill, mark_forgotten, … */ }
+```
+
+`services::warm_pool` implements it; `git/worktree` consumes it. The
+dependency direction is now one way (`services/` → `git/`), and a third
+warm-worktree producer needs no import of the service layer at all.
+
+This is **not** the `PoolBackend` shape the section above rejected, and the
+distinction is the point:
+
+  * `PoolBackend` would have put the pool's *own operations* (checkout,
+    reset, worktree remove) behind an injected backend so the pool could be
+    re-implemented against a different git library. No current Buildmesh need
+    calls for that: there is one pool and one git implementation, so the trait
+    would have been the speculative generality the section above rejects.
+  * `WarmClaim` exposes **no git operation at all**. It carries the pool's
+    *row lifecycle* (forget a claimed row, announce a count change, schedule
+    the maintenance pass) and the two facts only the pool knows (the entry it
+    holds, whether its inventory is one short) — across a module boundary
+    that would otherwise be a cycle.
+
+The "closures, not traits" rule above still holds where it was written: the
+pool's internal orchestrators (`reconcile_warm_entries`,
+`refresh_warm_entries`, and the fill body `warm_one_with`) still take their
+side effects as `impl Fn(...)` parameters. `WarmClaim` is a cross-module
+seam, not a testability mock.
+
+`git/worktree/warm.rs` also owns the rule "what makes a warm worktree
+usable" (`warm_checkout_plan` — the mode rules, the base-SHA move and the
+`.worktreeinclude` re-application). The pool's fill and the spawn's claim
+used to encode that rule separately; the pool owns the row lifecycle,
+`git/worktree` owns the checkout, and the rule is owned once.

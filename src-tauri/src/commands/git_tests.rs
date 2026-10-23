@@ -565,7 +565,7 @@ mod tests {
         // TTL skips its own fetch. The spawn path's `spawn_can_skip_fetch`
         // gate reads `time_since_success`, so that's the call we check.
         assert!(
-            crate::services::fetch_freshness::time_since_success(local.path().to_str().unwrap())
+            crate::git::fetch_freshness::time_since_success(local.path().to_str().unwrap())
                 < std::time::Duration::from_secs(60),
             "manual Sync that pulled new commits must stamp the freshness \
              registry — without it the user's confidence contract fails on \
@@ -574,7 +574,7 @@ mod tests {
     }
 
     /// Regression test for issue #680 — the manual `git_sync` Tauri
-    /// command must run inside `services::sync_lock::with_mesh_sync_lock`
+    /// command must run inside `crate::git::sync_lock::with_mesh_sync_lock`
     /// so a manual Sync click on a Mesh can't race against concurrent
     /// spawn-time `fetch_origin` calls (or against a second manual Sync)
     /// for the same Mesh. Without the wrap, two `git fetch` shell-outs
@@ -637,7 +637,7 @@ mod tests {
         let holder_path = path_key.clone();
         let entered_holder = Arc::clone(&entered_flag);
         let holder = thread::spawn(move || {
-            crate::services::sync_lock::with_mesh_sync_lock(&holder_path, || {
+            crate::git::sync_lock::with_mesh_sync_lock(&holder_path, || {
                 entered_holder.store(1, Ordering::SeqCst);
                 thread::sleep(Duration::from_millis(500));
             });
