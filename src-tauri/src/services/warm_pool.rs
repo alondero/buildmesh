@@ -73,7 +73,7 @@
 //! priority, removing both DB row + on-disk directory. Idempotent: a no-op
 //! when count ≤ target.
 
-use crate::db::{self, WarmWorktreeStatus};
+use crate::db;
 use crate::session_naming::on_spawn;
 use once_cell::sync::Lazy;
 #[cfg(test)]
@@ -148,17 +148,101 @@ pub fn should_claim_for_spawn(existing_worktree_present: bool) -> bool {
 
 /// What the spawn path needs to adopt a warm entry as a fresh node.
 ///
-/// `path` and `preassigned_name` flow into `agent_nodes.path` and
-/// `agent_nodes.worktree_name` respectively; `id` is the DB row id so the
-/// spawn can `delete_warm_worktree(id)` after a successful claim (the row
-/// outlives its purpose once the directory becomes a node's worktree).
-/// `base_sha` is informational for the spawn-time freshness check.
-#[derive(Debug, Clone)]
-pub struct ClaimedWarmEntry {
-    pub id: i64,
-    pub path: String,
-    pub preassigned_name: String,
-    pub base_sha: Option<String>,
+/// The type lives with the consumer (`git::worktree::warm`) so `git/` can
+/// name it without naming this module — that is the whole point of the
+/// consumer-owned claim seam (issue #2533). This re-export keeps the pool's
+/// own public surface intact for the service layer's callers.
+pub use crate::git::worktree::warm::ClaimedWarmEntry;
+
+/// The pool's implementation of the consumer-owned claim seam (issue #2533).
+///
+/// `git/worktree` reaches the pre-spawn pool through
+/// [`crate::git::worktree::warm::WarmClaim`] — a narrow interface this module
+/// implements — instead of importing the pool directly. The dependency
+/// direction is therefore one way: `services/` → `git/`.
+///
+/// The claim also carries the two facts only the pool knows: the entry it
+/// holds, and whether the pool's inventory is one short because of it.
+pub struct PoolClaim {
+    app: tauri::AppHandle,
+    /// The claimed entry, while the claim is live. `None` when the pool had
+    /// no entry to give (a cold spawn) or when the use-site recheck found the
+    /// directory gone.
+    entry: Option<ClaimedWarmEntry>,
+    /// Whether this spawn took a row out of the pool's inventory. Stays true
+    /// after the use-site recheck drops the row: the inventory is still one
+    /// short, so the post-spawn refill must run.
+    took_entry: bool,
+}
+
+impl PoolClaim {
+    /// Wrap a claimed entry (or the absence of one) in the pool's claim
+    /// handle. A `None` entry means the pool had no entry to give — the spawn
+    /// is cold, and the claim still serves the pool-side operations the
+    /// provisioner needs (the count emit, the post-spawn maintenance).
+    pub fn new(app: tauri::AppHandle, entry: Option<ClaimedWarmEntry>) -> Self {
+        let took_entry = entry.is_some();
+        Self {
+            app,
+            entry,
+            took_entry,
+        }
+    }
+
+    /// The use-site guard for the claim → spawn window (issue #653) — see
+    /// [`recheck_claim`], which owns the rule. A failed recheck leaves the
+    /// claim with no entry, so the spawn falls back to a cold create.
+    pub fn recheck(&mut self) {
+        recheck_claim(&mut self.entry);
+    }
+}
+
+/// The claim's use-site guard for the claim → spawn window (issue #653):
+/// re-check that the claimed directory is still on disk.
+///
+/// When the directory is gone the claim holds no entry any more, so the
+/// spawn must fall back to a cold create. The pool's inventory stays one
+/// short either way, which is why `needs_refill` keeps answering "yes"
+/// after a failed recheck.
+///
+/// This sits beside [`PoolClaim`] rather than inside it because it needs no
+/// app handle: the guard is about the claimed row, and a free function is
+/// what lets a test exercise it without a Tauri app (the crate has no
+/// `tauri::AppHandle` test mock).
+pub fn recheck_claim(entry: &mut Option<ClaimedWarmEntry>) {
+    let Some(claimed) = entry.as_ref() else {
+        return;
+    };
+    if !recheck_after_claim(claimed.id, &claimed.path) {
+        // `recheck_after_claim` already logged the reason (claimed row N's
+        // directory disappeared…), so don't duplicate that WARN here.
+        *entry = None;
+    }
+}
+
+impl crate::git::worktree::warm::WarmClaim for PoolClaim {
+    fn entry(&self) -> Option<&ClaimedWarmEntry> {
+        self.entry.as_ref()
+    }
+
+    fn needs_refill(&self) -> bool {
+        self.took_entry
+    }
+
+    fn mark_forgotten(&self, id: i64) {
+        forget_after_spawn(id);
+    }
+
+    fn emit_pool_changed(&self, mesh_id: i64) {
+        emit_pool_changed(&self.app, mesh_id);
+    }
+
+    fn schedule_maintenance(&self, mesh_id: i64, do_refresh: bool, do_refill: bool) {
+        let app = self.app.clone();
+        std::thread::spawn(move || {
+            post_spawn_maintenance(mesh_id, do_refresh, do_refill, &app);
+        });
+    }
 }
 
 /// Try to claim a warm entry for `mesh_id`. Returns `None` when the pool is
@@ -623,6 +707,81 @@ fn run_rebuild_pass(app: &tauri::AppHandle, all: bool, meshes_wanted: &[i64]) {
 /// behind the pool fill lock (issue #613 AC4), so two adds never target one
 /// repo concurrently. Only the redundant counting was batched.
 fn warm_one_body(app: &tauri::AppHandle, mesh: &db::WarmPoolMeshRow) -> Result<(), String> {
+    let app = app.clone();
+    let mesh_path = mesh.path.clone();
+    let base_ref = mesh.base_ref.clone();
+    let mesh_id = mesh.id;
+    let deps = FillDeps {
+        insert_marker: Box::new(move |path, slug| db::begin_warm_fill(mesh_id, path, slug)),
+        create_worktree: Box::new(move |path, slug| {
+            crate::git::worktree::create_git_worktree(&mesh_path, path, slug, "detached", &base_ref)
+        }),
+        mark_available: Box::new(|row_id, base_sha| {
+            db::mark_warm_worktree_available(row_id, base_sha)
+        }),
+        delete_row: Box::new(db::delete_warm_worktree),
+        head_sha: Box::new(|path| {
+            // The crate's one SHA resolver with an explicit source: the
+            // `LocalHead` source, read from the *worktree* directory (a
+            // linked worktree's own HEAD, not the main repository's). `None`
+            // on any failure — the row stays `available` with
+            // `base_sha = NULL` and the spawn-time freshness check degrades
+            // to "no SHA to compare".
+            crate::git::sha::resolve_sha_at(path, &crate::git::sha::ShaSource::LocalHead)
+                .ok()
+                .map(|oid| oid.to_string())
+        }),
+        emit_changed: Box::new(move || emit_pool_changed(&app, mesh_id)),
+    };
+    warm_one_with(mesh, deps)
+}
+
+/// The fill's side-effecting dependencies, injected so the crash-recovery
+/// path can be exercised without the global DB, a real git repo, or a Tauri
+/// app handle (issue #2533).
+///
+/// The fill is three writes around one piece of disk work: the crash-recovery
+/// marker, the checkout, and the flip to `available`. Injecting them makes
+/// the window between the marker and the flip testable — a test can "kill"
+/// the fill there and assert that the startup reconcile finds the row.
+struct FillDeps {
+    /// Write the crash-recovery marker row. Runs BEFORE the disk work — see
+    /// [`db::begin_warm_fill`].
+    insert_marker: InsertMarker,
+    /// Cut the worktree on disk.
+    create_worktree: CreateWorktree,
+    /// Flip the marker row to `available` and stamp the SHA it landed on.
+    mark_available: MarkAvailable,
+    /// Drop the marker row (the checkout failed).
+    delete_row: DeleteRow,
+    /// Read the SHA the new worktree is checked out at.
+    head_sha: HeadSha,
+    /// Announce the new row to the UI.
+    emit_changed: Box<dyn Fn()>,
+}
+
+/// Write the fill's crash-recovery marker: `(path, slug) -> row id`.
+type InsertMarker = Box<dyn Fn(&str, &str) -> db::SqlResult<i64>>;
+
+/// Cut the worktree on disk: `(path, slug) -> ()`.
+type CreateWorktree = Box<dyn Fn(&str, &str) -> Result<(), String>>;
+
+/// Flip the marker row to `available`: `(row id, base SHA) -> ()`.
+type MarkAvailable = Box<dyn Fn(i64, Option<&str>) -> db::SqlResult<()>>;
+
+/// Drop the marker row: `(row id) -> ()`.
+type DeleteRow = Box<dyn Fn(i64) -> db::SqlResult<()>>;
+
+/// Read the SHA a worktree is checked out at: `(path) -> SHA`.
+type HeadSha = Box<dyn Fn(&str) -> Option<String>>;
+
+/// The fill's body, with its side effects injected (see [`FillDeps`]).
+///
+/// The ordering is the contract: the crash-recovery marker is written first,
+/// the checkout happens second, and the flip to `available` happens third. A
+/// process killed anywhere in that window leaves the `filling` marker behind
+/// for the startup reconcile to find.
+fn warm_one_with(mesh: &db::WarmPoolMeshRow, deps: FillDeps) -> Result<(), String> {
     // Pick a fresh slug. Slug collisions are vanishingly rare (~3.9B combos
     // in the seed pool; #608 follow-up adds the `preassigned_name` UNIQUE
     // guard for the per-mesh case), but if the directory already exists on
@@ -641,42 +800,31 @@ fn warm_one_body(app: &tauri::AppHandle, mesh: &db::WarmPoolMeshRow) -> Result<(
             continue;
         }
 
-        // Insert the row as `filling` BEFORE cutting the worktree so a
-        // crash mid-checkout leaves a recoverable ghost (startup reconcile
-        // deletes rows whose `path` doesn't exist).
-        let row_id = db::insert_warm_worktree(
-            mesh.id,
-            &host_path,
-            &slug,
-            None,
-            WarmWorktreeStatus::Filling,
-        )
-        .map_err(|e| format!("warm_pool insert filling: {}", e))?;
+        // Write the crash-recovery marker BEFORE cutting the worktree: a
+        // crash mid-checkout leaves a recoverable `filling` row for the
+        // startup reconcile to find (issue #2533 — the marker is the fill's
+        // explicit crash-recovery interface, not a convention).
+        let row_id = (deps.insert_marker)(&host_path, &slug)
+            .map_err(|e| format!("warm_pool insert filling: {}", e))?;
 
         // Cut the on-disk worktree. We pin mode = "detached" so a future
         // claim can `git checkout -B <branch>` to upgrade to branched mode
         // (or stay detached if the mesh says so). Detached also avoids
         // touching the mesh's branch refs.
-        match crate::git::worktree::create_git_worktree(
-            &mesh.path,
-            &host_path,
-            &slug,
-            "detached",
-            &mesh.base_ref,
-        ) {
+        match (deps.create_worktree)(&host_path, &slug) {
             Ok(()) => {
                 // Flip to available + stamp the base SHA the worker just
                 // checked out at. We compute it from the new worktree's
                 // HEAD; failures here are non-fatal — the row stays
                 // `available` and the spawn-time freshness check falls
                 // back to "no SHA to compare" semantics.
-                let base_sha = read_warm_head_sha(&host_path).unwrap_or_default();
+                let base_sha = (deps.head_sha)(&host_path).unwrap_or_default();
                 let base_sha_opt = if base_sha.is_empty() {
                     None
                 } else {
                     Some(base_sha.as_str())
                 };
-                if let Err(e) = db::mark_warm_worktree_available(row_id, base_sha_opt) {
+                if let Err(e) = (deps.mark_available)(row_id, base_sha_opt) {
                     tracing::warn!(
                         "warm_pool: failed to flip row {} to available: {}",
                         row_id,
@@ -692,13 +840,13 @@ fn warm_one_body(app: &tauri::AppHandle, mesh: &db::WarmPoolMeshRow) -> Result<(
                 // Surface the new row immediately — a long multi-row fill
                 // gets to show "1/N ready" → "2/N ready" mid-tick instead
                 // of all-at-once at end-of-pass.
-                emit_pool_changed(app, mesh.id);
+                (deps.emit_changed)();
                 return Ok(());
             }
             Err(e) => {
                 // Roll back the filling row so the reconcile doesn't have
                 // to garbage-collect it on the next pass.
-                let _ = db::delete_warm_worktree(row_id);
+                let _ = (deps.delete_row)(row_id);
                 last_err = Some(e);
                 continue;
             }
@@ -706,36 +854,6 @@ fn warm_one_body(app: &tauri::AppHandle, mesh: &db::WarmPoolMeshRow) -> Result<(
     }
 
     Err(last_err.unwrap_or_else(|| "warm_pool: exhausted slug retries".to_string()))
-}
-
-/// Read the SHA the warm worktree is checked out at. Empty string on any
-/// failure (the row stays `available` with `base_sha = NULL` and the
-/// spawn-time freshness check degrades to "no SHA to compare").
-fn read_warm_head_sha(worktree_path: &str) -> Option<String> {
-    let output = read_warm_head_sha_cmd(worktree_path).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if sha.is_empty() {
-        None
-    } else {
-        Some(sha)
-    }
-}
-
-/// Build the `git rev-parse HEAD` command used by `read_warm_head_sha`.
-/// Uses `command_no_window` so the child doesn't flash a console window on
-/// Windows — `warm_one_body` calls this on the post-spawn thread, and an
-/// un-flagged `git.exe` would briefly steal foreground focus from buildmesh's
-/// WebView2, disrupting the user's terminal view (issue #665).
-fn read_warm_head_sha_cmd(worktree_path: &str) -> std::process::Command {
-    let mut cmd = crate::process_util::git_command();
-    cmd.arg("-C")
-        .arg(worktree_path)
-        .arg("rev-parse")
-        .arg("HEAD");
-    cmd
 }
 
 /// Drain any excess, then fill a single mesh up to its `pre_spawn_pool_size`
@@ -1319,13 +1437,18 @@ pub fn drain_excess_warm_entries(
 pub fn refresh_stale_warm_worktrees(mesh: &db::WarmPoolMeshRow) -> Result<usize, String> {
     // Pool disabled for this mesh: `list_worktree_enabled_meshes_for_warm`
     // returns it (it filters only on `use_worktree=1`), but there are no warm
-    // entries to refresh. Bail before the `resolve_base_ref_sha` git2 repo-open
+    // entries to refresh. Bail before the one SHA resolver's git2 repo-open
     // so a "pool off" mesh pays no freshness cost on every advancing fetch
     // (issue #613 review).
     if mesh.pre_spawn_pool_size <= 0 {
         return Ok(0);
     }
-    let new_sha = crate::git::worktree::resolve_base_ref_sha(&mesh.path, &mesh.base_ref)?;
+    let new_sha = crate::git::sha::resolve_sha_at(
+        &mesh.path,
+        &crate::git::sha::ShaSource::BaseRef(mesh.base_ref.clone()),
+    )
+    .map_err(|e| e.to_string())?
+    .to_string();
     let entries = db::list_available_warm_for_mesh(mesh.id)
         .map_err(|e| format!("warm_pool: freshness list for mesh {}: {}", mesh.id, e))?;
     Ok(refresh_warm_entries(
@@ -1366,7 +1489,11 @@ fn refresh_warm_entries(
 ) -> usize {
     let mut refreshed = 0usize;
     for entry in entries {
-        if entry.base_sha.as_deref() == Some(new_sha) {
+        // The freshness rule is owned by the consumer-side seam
+        // (`git::worktree::warm::warm_entry_is_fresh`), so the pool and the
+        // provisioner stay in agreement about what "still usable" means
+        // (issue #2533).
+        if crate::git::worktree::warm::warm_entry_is_fresh(entry.base_sha.as_deref(), new_sha) {
             // Already fresh — nothing to do.
             continue;
         }
@@ -1453,1301 +1580,5 @@ pub fn on_fetch_completed(mesh_id: i64) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::{Arc, Mutex};
-
-    // ---- event name drift guard ----
-    //
-    // The `pool-count-changed` event is the IPC contract with the React
-    // `usePoolChanged` hook. The TS side exports `POOL_COUNT_CHANGED_EVENT`
-    // as a single source of truth — this test pins the Rust half so a
-    // future rename here (e.g. `pool-changed`, `warm-pool-changed`) fails
-    // loudly instead of silently breaking the badge's live updates.
-    // Symmetric test in `tests/unit/usePoolChanged.test.tsx`.
-
-    #[test]
-    fn pool_count_changed_event_name_matches_frontend_constant() {
-        assert_eq!(
-            POOL_COUNT_CHANGED_EVENT, "pool-count-changed",
-            "the event name must match `POOL_COUNT_CHANGED_EVENT` in src/hooks/usePoolChanged.ts — \
-             rename in lockstep on both sides"
-        );
-    }
-
-    // ---- reconcile_warm_entries (the teardown + row-delete orchestration) ----
-    //
-    // These pin the two invariants the issue #610 review flagged as untested:
-    // teardown precedes row-delete, and the row survives a teardown failure so
-    // a future startup can retry rather than orphaning the directory forever.
-
-    fn entry(id: i64, dir_present: bool) -> db::WarmReconcileEntry {
-        db::WarmReconcileEntry {
-            id,
-            path: format!("/repo/m/.claude/worktrees/slug-{}", id),
-            dir_present,
-        }
-    }
-
-    /// A live-directory entry: `remove` must be called BEFORE `delete_row`, and
-    /// the row must be deleted once teardown succeeds. The shared log proves the
-    /// ordering the doc comment promises (teardown-before-delete) — a refactor
-    /// that flipped the two calls would orphan the directory on a delete failure.
-    #[test]
-    fn reconcile_removes_worktree_before_deleting_row() {
-        let log: Mutex<Vec<String>> = Mutex::new(Vec::new());
-        reconcile_warm_entries(
-            vec![entry(7, true)],
-            |path| {
-                log.lock().unwrap().push(format!("remove:{}", path));
-                Ok(())
-            },
-            |id| {
-                log.lock().unwrap().push(format!("delete:{}", id));
-                Ok(())
-            },
-        );
-        let log = log.lock().unwrap();
-        assert_eq!(
-            *log,
-            vec![
-                "remove:/repo/m/.claude/worktrees/slug-7".to_string(),
-                "delete:7".to_string()
-            ],
-            "git teardown must run before the row delete"
-        );
-    }
-
-    /// Teardown failure ⇒ the row is KEPT (delete_row never called) so the next
-    /// startup retries. Deleting it here would orphan the partial worktree
-    /// directory forever — the exact leak the review caught.
-    #[test]
-    fn reconcile_keeps_row_when_teardown_fails() {
-        let deleted: Mutex<Vec<i64>> = Mutex::new(Vec::new());
-        reconcile_warm_entries(
-            vec![entry(9, true)],
-            |_path| Err("worktree locked".to_string()),
-            |id| {
-                deleted.lock().unwrap().push(id);
-                Ok(())
-            },
-        );
-        assert!(
-            deleted.lock().unwrap().is_empty(),
-            "a failed teardown must NOT delete the row (it would orphan the on-disk worktree)"
-        );
-    }
-
-    /// A row whose directory is already gone skips teardown entirely and is
-    /// dropped directly — there is nothing on disk to remove.
-    #[test]
-    fn reconcile_skips_teardown_for_missing_directory() {
-        let removed: Mutex<Vec<String>> = Mutex::new(Vec::new());
-        let deleted: Mutex<Vec<i64>> = Mutex::new(Vec::new());
-        reconcile_warm_entries(
-            vec![entry(3, false)],
-            |path| {
-                removed.lock().unwrap().push(path.to_string());
-                Ok(())
-            },
-            |id| {
-                deleted.lock().unwrap().push(id);
-                Ok(())
-            },
-        );
-        assert!(
-            removed.lock().unwrap().is_empty(),
-            "a ghost row (directory already gone) must not invoke the git teardown"
-        );
-        assert_eq!(
-            *deleted.lock().unwrap(),
-            vec![3],
-            "a ghost row must still have its bookkeeping row dropped"
-        );
-    }
-
-    /// Pin the slug format: a plain `on_spawn` adj-adj-noun slug with NO
-    /// prefix. The manual-spawn fast path adopts this slug as the node's
-    /// display name, so a refactor that re-introduced a `pool-warm-` prefix
-    /// (or otherwise made the slug un-adoptable as a user-facing name) must
-    /// surface as a test failure, not a confusing node name in the UI.
-    #[test]
-    fn fresh_slug_is_a_plain_adoptable_slug() {
-        let slug = fresh_slug();
-        assert!(
-            !slug.starts_with("pool-warm-"),
-            "fresh slug must NOT carry an implementation-detail prefix (issue #609 full name adoption), got `{}`",
-            slug
-        );
-        // Three-word hyphenated slug (matches `on_spawn`'s adj-adj-noun) so it
-        // is a valid node name AND a valid git branch / directory name.
-        assert!(
-            slug.split('-').count() == 3,
-            "slug must be three hyphenated words, got `{}`",
-            slug
-        );
-    }
-
-    /// Warm pools use the same effective container as newly placed nodes.
-    #[test]
-    fn warm_worktree_host_path_uses_default_worktrees_container() {
-        // No per-Mesh override and no app default (preferences uninitialised
-        // in tests reads as `None`) → `.worktrees` container.
-        let mesh = mesh_row(99, 1);
-        let path = warm_worktree_host_path_for_mesh(&mesh, "bold-amber-fox");
-        // Either forward-slash (POSIX host) or backslash (Windows host) is
-        // acceptable as long as the default layout matches node placement.
-        let normalized = path.replace('\\', "/");
-        assert!(
-            normalized.ends_with(".worktrees/bold-amber-fox"),
-            "warm pool path must use the default container, got {normalized}"
-        );
-    }
-
-    // ── Configurable directories (issue #1519) ──────────────────────────────
-
-    #[test]
-    fn warm_host_path_in_dir_joins_effective_dir_and_slug() {
-        let p = warm_worktree_host_path_in_dir("/repo/mesh/custom-wt", "my-node");
-        assert_eq!(p.replace('\\', "/"), "/repo/mesh/custom-wt/my-node");
-        // Slug trimmed so a padded preassigned name never creates a spaced dir.
-        let p = warm_worktree_host_path_in_dir("/repo/mesh/custom-wt/", "  my-node  ");
-        assert_eq!(p.replace('\\', "/"), "/repo/mesh/custom-wt/my-node");
-    }
-
-    #[test]
-    fn merge_rebuild_request_collapses_rapid_saves() {
-        // Issue #1519 review: type → correct → save bursts must not spawn a
-        // thread per keystroke-save. `None` (rebuild all) subsumes mesh ids;
-        // mesh ids accumulate deduplicated.
-        let mut pending = super::RebuildPending::default();
-        super::merge_rebuild_request(&mut pending, Some(1));
-        super::merge_rebuild_request(&mut pending, Some(1));
-        super::merge_rebuild_request(&mut pending, Some(2));
-        assert!(!pending.all);
-        assert_eq!(pending.meshes, vec![1, 2]);
-        super::merge_rebuild_request(&mut pending, None);
-        assert!(pending.all);
-        assert!(pending.meshes.is_empty());
-        // Once `all`, further mesh ids are absorbed silently.
-        super::merge_rebuild_request(&mut pending, Some(3));
-        assert!(pending.all);
-        assert!(pending.meshes.is_empty());
-    }
-
-    #[test]
-    fn warm_path_under_effective_dir_detects_stale_locations() {
-        assert!(warm_path_under_effective_dir(
-            "/repo/mesh/custom/a",
-            "/repo/mesh/custom"
-        ));
-        assert!(!warm_path_under_effective_dir(
-            "/repo/mesh/.claude/worktrees/a",
-            "/repo/mesh/custom"
-        ));
-        // The container itself is not a worktree entry.
-        assert!(!warm_path_under_effective_dir(
-            "/repo/mesh/custom",
-            "/repo/mesh/custom"
-        ));
-        // Sibling prefix (`custom2`) must not match `custom`.
-        assert!(!warm_path_under_effective_dir(
-            "/repo/mesh/custom2/a",
-            "/repo/mesh/custom"
-        ));
-    }
-
-    // ---- should_claim_for_spawn (the activation gate) ----
-    //
-    // The gate keys solely off whether the node's CURRENT worktree directory is
-    // already on disk — `false` ⇒ fresh spawn (claim), `true` ⇒ resume /
-    // re-spawn reusing an existing worktree (don't claim). Issue/PR spawns are
-    // now claim-eligible too (issue #612): the spawn path `git worktree move`s
-    // the pool directory to their `gh{N}-`/`pr{N}-` name rather than excluding
-    // them.
-
-    #[test]
-    fn claims_for_a_fresh_spawn_when_worktree_absent() {
-        assert!(
-            should_claim_for_spawn(false),
-            "a fresh spawn (worktree dir not yet on disk) must be claim-eligible"
-        );
-    }
-
-    #[test]
-    fn does_not_claim_when_worktree_already_present() {
-        // Resume / handover / re-spawn: the node's worktree already exists on
-        // disk. Claiming would re-point it at a different directory and
-        // abandon the agent's work.
-        assert!(
-            !should_claim_for_spawn(true),
-            "a spawn reusing an existing on-disk worktree must NOT be claim-eligible"
-        );
-    }
-
-    // ---- refresh_warm_entries (ref-freshness orchestration, issue #613 AC3) ----
-    //
-    // The three side effects (reset, set_refreshing, set_available) are injected
-    // so the state-flip choreography is testable without git or a DB — the same
-    // DI shape as reconcile_warm_entries above. A shared log records the call
-    // order so the "refreshing-before-reset" invariant is provable.
-
-    fn warm(id: i64, base_sha: Option<&str>) -> db::WarmWorktree {
-        db::WarmWorktree {
-            id,
-            path: format!("/repo/m/.claude/worktrees/slug-{}", id),
-            preassigned_name: format!("slug-{}", id),
-            base_sha: base_sha.map(str::to_string),
-        }
-    }
-
-    /// An entry already parked on the new SHA is left completely untouched — no
-    /// reset, no status churn. This is the common case after a fetch that only
-    /// advanced an unrelated ref, so it must be a true no-op (a needless
-    /// `git reset --hard` would burn disk I/O on every fetch).
-    #[test]
-    fn refresh_skips_an_already_fresh_entry() {
-        let log: Mutex<Vec<String>> = Mutex::new(Vec::new());
-        let n = refresh_warm_entries(
-            "newsha",
-            vec![warm(1, Some("newsha"))],
-            |p, s| {
-                log.lock().unwrap().push(format!("reset:{}:{}", p, s));
-                Ok(())
-            },
-            |id| {
-                log.lock().unwrap().push(format!("refreshing:{}", id));
-                Ok(())
-            },
-            |id, sha| {
-                log.lock()
-                    .unwrap()
-                    .push(format!("available:{}:{:?}", id, sha));
-                Ok(())
-            },
-        );
-        assert_eq!(n, 0, "an already-fresh entry counts as 0 refreshed");
-        assert!(
-            log.lock().unwrap().is_empty(),
-            "a fresh entry must trigger no reset and no status flips"
-        );
-    }
-
-    /// A stale entry is flipped to `refreshing` BEFORE the reset, then back to
-    /// `available` stamped with the NEW sha. The shared log proves the ordering:
-    /// flipping after the reset would let a concurrent claim grab a worktree
-    /// mid-`git reset --hard`.
-    #[test]
-    fn refresh_resets_a_stale_entry_and_stamps_new_sha() {
-        let log: Mutex<Vec<String>> = Mutex::new(Vec::new());
-        let n = refresh_warm_entries(
-            "newsha",
-            vec![warm(7, Some("oldsha"))],
-            |p, s| {
-                log.lock().unwrap().push(format!("reset:{}:{}", p, s));
-                Ok(())
-            },
-            |id| {
-                log.lock().unwrap().push(format!("refreshing:{}", id));
-                Ok(())
-            },
-            |id, sha| {
-                log.lock()
-                    .unwrap()
-                    .push(format!("available:{}:{:?}", id, sha));
-                Ok(())
-            },
-        );
-        assert_eq!(n, 1, "one stale entry refreshed");
-        assert_eq!(
-            *log.lock().unwrap(),
-            vec![
-                "refreshing:7".to_string(),
-                "reset:/repo/m/.claude/worktrees/slug-7:newsha".to_string(),
-                "available:7:Some(\"newsha\")".to_string(),
-            ],
-            "must mark refreshing, then reset, then flip back to available at the new sha"
-        );
-    }
-
-    /// A reset failure restores the entry to `available` at its OLD sha (so it
-    /// stays claimable) and does NOT count it as refreshed. Stranding it at
-    /// `refreshing` would make it permanently unclaimable — the failure mode
-    /// this test guards against.
-    #[test]
-    fn refresh_restores_old_sha_when_reset_fails() {
-        let restored: Mutex<Vec<(i64, Option<String>)>> = Mutex::new(Vec::new());
-        let n = refresh_warm_entries(
-            "newsha",
-            vec![warm(9, Some("oldsha"))],
-            |_p, _s| Err("reset blew up".to_string()),
-            |_id| Ok(()),
-            |id, sha| {
-                restored.lock().unwrap().push((id, sha.map(str::to_string)));
-                Ok(())
-            },
-        );
-        assert_eq!(n, 0, "a failed reset must not count as refreshed");
-        assert_eq!(
-            *restored.lock().unwrap(),
-            vec![(9, Some("oldsha".to_string()))],
-            "a failed reset must restore the entry to available at its OLD sha"
-        );
-    }
-
-    /// A successful reset whose flip-back to `available` fails must NOT be
-    /// counted as refreshed (issue #613 review): the worktree is correct on
-    /// disk but stuck at `refreshing` and so not yet claimable, so counting it
-    /// would over-report the pool's healthy size. The startup reconcile
-    /// recovers the stranded row later.
-    #[test]
-    fn refresh_does_not_count_when_flip_back_fails() {
-        let n = refresh_warm_entries(
-            "newsha",
-            vec![warm(5, Some("oldsha"))],
-            |_p, _s| Ok(()),                                // reset succeeds
-            |_id| Ok(()),                                   // mark refreshing succeeds
-            |_id, _sha| Err(rusqlite::Error::InvalidQuery), // flip-back fails
-        );
-        assert_eq!(
-            n, 0,
-            "a reset whose flip-back to available failed must not count as refreshed (row stranded at refreshing)"
-        );
-    }
-
-    /// An entry with NO recorded base SHA (`base_sha = NULL`, e.g. the
-    /// `read_warm_head_sha` stamp failed at fill time) is treated as stale and
-    /// reset — it can't be proven fresh, so bringing it onto the known-good new
-    /// SHA is the safe choice.
-    #[test]
-    fn refresh_treats_null_base_sha_as_stale() {
-        let reset_calls: Mutex<Vec<String>> = Mutex::new(Vec::new());
-        let n = refresh_warm_entries(
-            "newsha",
-            vec![warm(4, None)],
-            |p, _s| {
-                reset_calls.lock().unwrap().push(p.to_string());
-                Ok(())
-            },
-            |_id| Ok(()),
-            |_id, _sha| Ok(()),
-        );
-        assert_eq!(n, 1, "a NULL-sha entry must be refreshed");
-        assert_eq!(
-            *reset_calls.lock().unwrap(),
-            vec!["/repo/m/.claude/worktrees/slug-4".to_string()],
-            "a NULL-sha entry must be reset onto the new sha"
-        );
-    }
-
-    // ---- recheck_after_claim (use-site guard, issue #653) ----
-    //
-    // The spawn path calls this immediately after `try_claim` to close the
-    // TOCTOU window between the claim's own existence check and the spawn's
-    // use of the path (which involves seconds of `fetch_origin` + git work).
-    // The tests pin all three observable branches: present→true, missing→
-    // false+row-dropped, and missing-row-idempotency (a delete during the
-    // recheck must not panic the spawn).
-
-    fn make_claimed_row(conn: &Connection, path: &str) -> i64 {
-        // `insert_warm_worktree_inner` has a foreign key into `meshes`, so
-        // the helper builds a v20-shape `meshes` table and inserts the parent
-        // row before bringing the warm table forward. Mirrors
-        // `db::warm_pool_tests::v20_schema_with_mesh(true)` — we replicate
-        // it here because the `_inner` helpers we use don't ship their own
-        // schema fixture (and the `db::warm_pool_tests` `v20_schema_with_mesh`
-        // is private to that module).
-        conn.execute_batch(
-            "
-            CREATE TABLE meshes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                path TEXT NOT NULL UNIQUE,
-                layout TEXT NOT NULL DEFAULT 'grid',
-                position INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                build_command TEXT,
-                run_command TEXT,
-                model TEXT,
-                effort TEXT,
-                use_worktree INTEGER NOT NULL DEFAULT 1,
-                worktree_mode TEXT,
-                default_provider TEXT,
-                base_ref TEXT NOT NULL DEFAULT 'origin/main',
-                scratchpad TEXT NOT NULL DEFAULT '',
-                sandbox INTEGER NOT NULL DEFAULT 0
-            );
-            INSERT INTO meshes (name, path) VALUES ('m', '/repo/m');
-            ",
-        )
-        .unwrap();
-        db::migrations::evolve_to(db::migrations::SCHEMA_VERSION, conn).unwrap();
-        db::insert_warm_worktree_inner(
-            conn,
-            1,
-            path,
-            "pool-warm-recheck",
-            Some("aaaa"),
-            db::WarmWorktreeStatus::Claimed,
-        )
-        .unwrap()
-    }
-
-    /// Happy path: the directory exists at recheck time. Returns `true`,
-    /// row is untouched, the spawn proceeds to use the warm entry.
-    #[test]
-    fn recheck_after_claim_returns_true_when_directory_present() {
-        let conn = Connection::open_in_memory().unwrap();
-        // `make_claimed_row` builds meshes + calls `evolve_to`; do not
-        // pre-materialise baseline tables here (#1565) or CREATE TABLE meshes
-        // collides.
-        let tmp = tempfile::TempDir::new().unwrap();
-        let path = tmp.path().to_str().unwrap().to_string();
-        let id = make_claimed_row(&conn, &path);
-
-        assert!(
-            recheck_after_claim_inner(&conn, id, &path),
-            "directory exists → recheck must say true so the spawn proceeds"
-        );
-        let remaining: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM warm_worktrees WHERE id = ?1",
-                rusqlite::params![id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(remaining, 1, "row must survive when dir is present");
-    }
-
-    /// Race outcome: the directory vanished between `try_claim`'s check and
-    /// the spawn's use. Returns `false` AND drops the row so the pool's
-    /// bookkeeping stays consistent — without this, `claimed` rows would
-    /// accumulate pointing at missing directories (the exact symptom in
-    /// issue #653). The caller falls back to cold `create_git_worktree`.
-    #[test]
-    fn recheck_after_claim_returns_false_and_drops_row_when_dir_missing() {
-        let conn = Connection::open_in_memory().unwrap();
-        let tmp = tempfile::TempDir::new().unwrap();
-        let path = tmp.path().to_str().unwrap().to_string();
-        let id = make_claimed_row(&conn, &path);
-        // Now delete the directory — simulate the race outcome.
-        std::fs::remove_dir_all(&path).unwrap();
-
-        assert!(
-            !recheck_after_claim_inner(&conn, id, &path),
-            "missing dir → recheck must say false so the spawn falls back to cold"
-        );
-        let remaining: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM warm_worktrees WHERE id = ?1",
-                rusqlite::params![id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            remaining, 0,
-            "the dropped directory must drop its bookkeeping row — issue #653's stranded-row symptom"
-        );
-    }
-
-    /// Idempotency guard: if some other path (the deleter-side guard,
-    /// startup reconcile, etc.) already dropped the row, the recheck's own
-    /// DELETE on a non-existent id must not panic. `rusqlite::Connection::
-    /// execute` returns `Ok(0)` for a missing row, so this is just a
-    /// regression guard against a future refactor that changed the
-    /// semantics.
-    #[test]
-    fn recheck_after_claim_is_idempotent_on_already_dropped_row() {
-        let conn = Connection::open_in_memory().unwrap();
-        let tmp = tempfile::TempDir::new().unwrap();
-        let path = tmp.path().to_str().unwrap().to_string();
-        let id = make_claimed_row(&conn, &path);
-        std::fs::remove_dir_all(&path).unwrap();
-        // First call drops the row (per the previous test).
-        assert!(!recheck_after_claim_inner(&conn, id, &path));
-        // Second call must not panic on the already-missing row.
-        assert!(
-            !recheck_after_claim_inner(&conn, id, &path),
-            "idempotent recheck on a missing row + missing dir must still return false"
-        );
-    }
-
-    // ---- fill_mesh_to_target_with (orchestration, issues #634 / #1752) ----
-    //
-    // The `count` / `drain` / `warm_one` closures are injected so the test can
-    // drive the drain-then-fill-to-target contract without `tauri::AppHandle`
-    // (which is hard to mock) or real git worktree creation (which is slow +
-    // requires a real repo). The production `fill_mesh_to_target` wraps this
-    // with the real `count_available_warm_for_mesh` +
-    // `drain_excess_warm_entries` + `warm_one_body`.
-    //
-    // The per-mesh early-exits that used to live in a `prewarm_early_exit`
-    // helper (target == 0 ⇒ no work, count >= target ⇒ at target, count
-    // failure ⇒ stop loudly) are now the three branches of this orchestration,
-    // pinned by `fill_mesh_to_target_with_zero_target_runs_only_drain`,
-    // `..._returns_zero_when_at_target`, and
-    // `..._count_failure_aborts_before_warming`.
-
-    fn mesh_row(id: i64, target: i64) -> db::WarmPoolMeshRow {
-        db::WarmPoolMeshRow {
-            id,
-            path: format!("/tmp/buildmesh_fill_test_{}", id),
-            pre_spawn_pool_size: target,
-            base_ref: "origin/main".to_string(),
-            worktree_directory: None,
-        }
-    }
-
-    /// Happy path: drain runs once, then `warm_one` is called once per missing
-    /// entry. The `available < target` bound stops it after exactly `target`
-    /// calls for a mesh starting empty.
-    #[test]
-    fn fill_mesh_to_target_with_warms_exactly_target_times() {
-        let mesh = mesh_row(1, 3);
-        let warm_calls = std::cell::RefCell::new(0);
-        let drain_calls = std::cell::RefCell::new(0);
-
-        let changes = fill_mesh_to_target_with(
-            &mesh,
-            || true,
-            || Ok(0),
-            |_| {
-                *drain_calls.borrow_mut() += 1;
-                Ok(0)
-            },
-            |_m| {
-                *warm_calls.borrow_mut() += 1;
-                Ok(())
-            },
-        );
-
-        assert_eq!(*drain_calls.borrow(), 1, "drain must run exactly once");
-        assert_eq!(
-            *warm_calls.borrow(),
-            3,
-            "one cut per missing entry — a target-3 mesh starting empty needs 3"
-        );
-        assert_eq!(changes, 3, "3 cuts = 3 changes");
-    }
-
-    /// Issue #1752: the count is sampled **once** and a failure aborts the fill
-    /// before cutting anything — a broken count is no basis for warming. The
-    /// drain already ran, so its changes are still reported.
-    #[test]
-    fn fill_mesh_to_target_with_count_failure_aborts_before_warming() {
-        let mesh = mesh_row(2, 5);
-        let count_calls = std::cell::RefCell::new(0);
-        let warm_calls = std::cell::RefCell::new(0);
-
-        let changes = fill_mesh_to_target_with(
-            &mesh,
-            || true,
-            || {
-                *count_calls.borrow_mut() += 1;
-                Err("database is locked".into())
-            },
-            |_| Ok(2), // drain removed 2 excess rows
-            |_m| {
-                *warm_calls.borrow_mut() += 1;
-                Ok(())
-            },
-        );
-
-        assert_eq!(
-            *count_calls.borrow(),
-            1,
-            "the count is sampled exactly once"
-        );
-        assert_eq!(
-            *warm_calls.borrow(),
-            0,
-            "a failed count must not cut a worktree"
-        );
-        assert_eq!(changes, 2, "the drain's changes must still be reported");
-    }
-
-    /// `warm_one_body`'s `Err` (a `git worktree add` failure after slug
-    /// retries) also breaks the loop. Distinct from a count failure (which
-    /// aborts before any warm attempt).
-    #[test]
-    fn fill_mesh_to_target_with_prewarm_err_aborts_loop() {
-        let mesh = mesh_row(3, 5);
-        let responses: std::cell::RefCell<Vec<_>> = std::cell::RefCell::new(vec![
-            Ok(()),
-            Err("git worktree add: locked".into()),
-            Ok(()), // must NOT be reached
-        ]);
-        let warm_calls = std::cell::RefCell::new(0);
-
-        fill_mesh_to_target_with(
-            &mesh,
-            || true,
-            || Ok(0),
-            |_| Ok(0),
-            |_m| {
-                *warm_calls.borrow_mut() += 1;
-                responses.borrow_mut().remove(0)
-            },
-        );
-
-        assert_eq!(
-            *warm_calls.borrow(),
-            2,
-            "loop must stop on a git worktree add failure"
-        );
-    }
-
-    /// `target == 0` ⇒ drain runs once and then the fill returns immediately,
-    /// **without even sampling the count** (issue #1752: a disabled pool has
-    /// nothing to warm, so the query would be pure overhead). This is the
-    /// common case for a worktree-disabled mesh.
-    #[test]
-    fn fill_mesh_to_target_with_zero_target_runs_only_drain() {
-        let mesh = mesh_row(4, 0);
-        let drain_calls = std::cell::RefCell::new(0);
-        let count_calls = std::cell::RefCell::new(0);
-        let warm_calls = std::cell::RefCell::new(0);
-
-        let changes = fill_mesh_to_target_with(
-            &mesh,
-            || true,
-            || {
-                *count_calls.borrow_mut() += 1;
-                Ok(0)
-            },
-            |_| {
-                *drain_calls.borrow_mut() += 1;
-                Ok(0)
-            },
-            |_m| {
-                *warm_calls.borrow_mut() += 1;
-                Ok(())
-            },
-        );
-
-        assert_eq!(*drain_calls.borrow(), 1);
-        assert_eq!(
-            *count_calls.borrow(),
-            0,
-            "a disabled pool must not query the available count"
-        );
-        assert_eq!(
-            *warm_calls.borrow(),
-            0,
-            "a zero-target mesh must NOT warm (drain is the only useful work)"
-        );
-        assert_eq!(changes, 0);
-    }
-
-    /// Issue #1752: a mesh already partway to target only pays for the deficit.
-    /// The once-sampled count seeds `available`, so a target-3 mesh with one
-    /// entry already available cuts exactly two more.
-    #[test]
-    fn fill_mesh_to_target_with_warms_only_the_deficit() {
-        let mesh = mesh_row(10, 3);
-        let warm_calls = std::cell::RefCell::new(0);
-
-        let changes = fill_mesh_to_target_with(
-            &mesh,
-            || true,
-            || Ok(1),
-            |_| Ok(0),
-            |_m| {
-                *warm_calls.borrow_mut() += 1;
-                Ok(())
-            },
-        );
-
-        assert_eq!(
-            *warm_calls.borrow(),
-            2,
-            "only the two missing entries are cut; the sample count seeds the running total"
-        );
-        assert_eq!(changes, 2);
-    }
-
-    /// Drain failure is logged at WARN and the loop PROCEEDS to warm (we
-    /// don't refuse to fill just because the downsize scan errored — the
-    /// pool is presumably already at or below target anyway, and a fill
-    /// is at worst a single extra worktree).
-    #[test]
-    fn fill_mesh_to_target_with_drain_failure_still_attempts_fill() {
-        let mesh = mesh_row(5, 2);
-        let warm_calls = std::cell::RefCell::new(0);
-
-        fill_mesh_to_target_with(
-            &mesh,
-            || true,
-            || Ok(0),
-            |_| Err("drain DB error".into()),
-            |_m| {
-                *warm_calls.borrow_mut() += 1;
-                Ok(())
-            },
-        );
-
-        assert_eq!(
-            *warm_calls.borrow(),
-            2,
-            "a drain failure must NOT abort the fill — it still warms all the way to \
-             target (drain err is logged + swallowed)"
-        );
-    }
-
-    // ---- fill_mesh_to_target_with return value (issue #634 review) ----
-    //
-    // These tests pin the `usize` return contract that the idle worker
-    // uses for its adaptive-tick backoff signal. A return of `0` is the
-    // honest "nothing changed" signal; `> 0` means the pool's available
-    // count changed (drained or warmed). The pre-#634 review caught that
-    // the worker used a static `pre_spawn_pool_size > 0` heuristic
-    // instead — that always returned true for any worktree-enabled mesh,
-    // so the TICK_SLOW backoff never triggered in production.
-
-    /// 3 Warmed cuts + a drain that returned 0 → total changes = 3.
-    #[test]
-    fn fill_mesh_to_target_with_returns_count_of_warmed_entries() {
-        let mesh = mesh_row(6, 3);
-
-        let changes = fill_mesh_to_target_with(&mesh, || true, || Ok(0), |_| Ok(0), |_m| Ok(()));
-        assert_eq!(changes, 3, "3 Warmed responses = 3 changes");
-    }
-
-    /// Drain returns 2 (two excess rows removed) + 1 Warmed = 3 total.
-    /// Pins that drain's count is added to the total — not just the warm
-    /// loop's contributions.
-    #[test]
-    fn fill_mesh_to_target_with_aggregates_drain_and_warm_changes() {
-        let mesh = mesh_row(7, 1);
-        let changes = fill_mesh_to_target_with(
-            &mesh,
-            || true,
-            || Ok(0),
-            |_| Ok(2), // drain removed 2 excess rows
-            |_m| Ok(()),
-        );
-        assert_eq!(changes, 3, "2 drain + 1 warm = 3 changes total");
-    }
-
-    /// Already-at-target mesh returns 0 — the honest "no work was
-    /// needed" signal the idle worker uses to count a no-op pass toward
-    /// its TICK_SLOW backoff. The once-sampled count (2, equal to target)
-    /// means the loop body never runs at all.
-    #[test]
-    fn fill_mesh_to_target_with_returns_zero_when_at_target() {
-        let mesh = mesh_row(8, 2);
-        let warm_calls = std::cell::RefCell::new(0);
-
-        let changes = fill_mesh_to_target_with(
-            &mesh,
-            || true,
-            || Ok(2),
-            |_| Ok(0),
-            |_m| {
-                *warm_calls.borrow_mut() += 1;
-                Ok(())
-            },
-        );
-
-        assert_eq!(changes, 0, "at-target mesh must report 0 changes");
-        assert_eq!(
-            *warm_calls.borrow(),
-            0,
-            "a mesh already at target must not cut anything"
-        );
-    }
-
-    /// Disabled mesh (target = 0) returns 0 because the fill body never
-    /// executes; drain still ran once but reports 0 changes.
-    #[test]
-    fn fill_mesh_to_target_with_returns_zero_when_target_is_zero() {
-        let mesh = mesh_row(9, 0);
-        let changes = fill_mesh_to_target_with(&mesh, || true, || Ok(0), |_| Ok(0), |_m| Ok(()));
-        assert_eq!(changes, 0);
-    }
-
-    // ---- Meshes that are not git working repositories (issue #2348) ----
-    //
-    // A Mesh whose folder cannot be opened as a git working repository can
-    // never back a warm worktree: `create_git_worktree` resolves
-    // `project_root` through `git::project::resolve` first and rejects the same
-    // folders (libgit2 `NotFound (-3)` for a plain folder). Before the gate,
-    // every idle tick cut a doomed worktree and logged a WARN for it (982 such
-    // lines in one day of hub log for one Mesh), and the worker re-attempted
-    // the background fetch on the same doomed premise.
-
-    /// A Mesh row pointing at a real on-disk folder. `mesh_row`'s synthetic
-    /// `/tmp/buildmesh_fill_test_*` path is not openable, which these tests
-    /// need to be exactly the opposite of.
-    fn mesh_row_at(id: i64, target: i64, path: &std::path::Path) -> db::WarmPoolMeshRow {
-        db::WarmPoolMeshRow {
-            id,
-            path: path.to_str().unwrap().to_string(),
-            pre_spawn_pool_size: target,
-            base_ref: "origin/main".to_string(),
-            worktree_directory: None,
-        }
-    }
-
-    /// The gate stops the warm loop — the only step that shells out to git —
-    /// while the drain's bookkeeping still runs and is still reported, so a
-    /// downsize on an unpoolable mesh still converges. Asserting
-    /// `warm_calls == 0` is the regression: before #2348 the loop ran on every
-    /// idle tick and every attempt logged its own WARN.
-    #[test]
-    fn fill_mesh_to_target_with_does_nothing_for_a_non_repository_mesh() {
-        let mesh = mesh_row(2348, 3);
-        let drain_calls = std::cell::RefCell::new(0);
-        let warm_calls = std::cell::RefCell::new(0);
-
-        let changes = fill_mesh_to_target_with(
-            &mesh,
-            || false,
-            || Ok(0),
-            |_| {
-                *drain_calls.borrow_mut() += 1;
-                Ok(3)
-            },
-            |_m| {
-                *warm_calls.borrow_mut() += 1;
-                Ok(())
-            },
-        );
-
-        assert_eq!(
-            *warm_calls.borrow(),
-            0,
-            "a mesh whose folder is not a git working repository must never \
-             reach `git worktree add` (issue #2348)"
-        );
-        assert_eq!(
-            *drain_calls.borrow(),
-            1,
-            "the drain is pure bookkeeping and still runs"
-        );
-        assert_eq!(
-            changes, 3,
-            "the drain's changes are still reported, and no warm is counted"
-        );
-    }
-
-    /// A mesh with nothing to fill never pays for the probe: an at-target (or
-    /// pool-disabled) mesh has no `git worktree add` that could fail, and on
-    /// an unreachable drive that repository open is the expensive call.
-    #[test]
-    fn fill_mesh_to_target_with_skips_the_probe_when_there_is_nothing_to_fill() {
-        let mesh = mesh_row(2349, 2);
-        let probe_calls = std::cell::RefCell::new(0);
-        let warm_calls = std::cell::RefCell::new(0);
-
-        let changes = fill_mesh_to_target_with(
-            &mesh,
-            || {
-                *probe_calls.borrow_mut() += 1;
-                false // would veto every fill if it were consulted
-            },
-            || Ok(2), // already at target
-            |_| Ok(0),
-            |_m| {
-                *warm_calls.borrow_mut() += 1;
-                Ok(())
-            },
-        );
-
-        assert_eq!(
-            *probe_calls.borrow(),
-            0,
-            "an at-target mesh must not pay for the repository probe"
-        );
-        assert_eq!(*warm_calls.borrow(), 0);
-        assert_eq!(changes, 0);
-    }
-
-    /// The probe is the real thing, not a stub: a plain folder reads as
-    /// unusable, a real `git init` repo does not. The repo half is what stops
-    /// the gate from silently disabling every pool in the app.
-    #[test]
-    fn mesh_repo_unusable_is_true_for_a_plain_folder_and_false_for_a_real_repo() {
-        let (_repo_tmp, repo_path) = fresh_git_repo();
-        let plain = tempfile::TempDir::new().expect("tempdir");
-        let repo_mesh = mesh_row_at(9101, 1, std::path::Path::new(&repo_path));
-        let plain_mesh = mesh_row_at(9102, 1, plain.path());
-
-        assert!(
-            !mesh_repo_unusable(&repo_mesh),
-            "a real repository must stay poolable — the gate is not a pool kill switch"
-        );
-
-        // Claim this mesh's report first: the WARN-budget test below owns the
-        // log line for its own paths, and this test is about the probe's truth
-        // value, not about who logs it.
-        claim_non_repo_report(plain_mesh.id, &plain_mesh.path);
-        assert!(
-            mesh_repo_unusable(&plain_mesh),
-            "a folder that is not a git working repository must be reported unusable"
-        );
-    }
-
-    /// The log latch: the FIRST report for a `(mesh, path)` wins, repeats are
-    /// silent, and a re-pointed mesh reports again. Deterministic (no
-    /// subscriber involved), so it pins the "at most one line per app run"
-    /// budget even where the tracing-capture test cannot run.
-    #[test]
-    fn non_repo_report_latch_covers_each_mesh_path_once() {
-        let id = std::process::id() as i64 * 1000 + 9103;
-        let first_path = format!("C:/nonexistent/mesh-{}/a", id);
-        let moved_path = format!("C:/nonexistent/mesh-{}/b", id);
-
-        assert!(
-            claim_non_repo_report(id, &first_path),
-            "the first sighting of a mesh path must be reportable"
-        );
-        assert!(
-            !claim_non_repo_report(id, &first_path),
-            "a repeat sighting must stay silent — this is the #2348 log flood"
-        );
-        assert!(
-            claim_non_repo_report(id, &moved_path),
-            "a mesh re-pointed at another folder is a new condition and must \
-             report its own line"
-        );
-        assert!(
-            claim_non_repo_report(id + 1, &first_path),
-            "the latch is keyed per mesh AND path: a second mesh on the same \
-             unusable folder still has to be reported"
-        );
-    }
-
-    /// The observable half of the flood fix: a second pass over the SAME
-    /// non-repository mesh adds no log line at all. The idle worker runs this
-    /// path every tick, so "the second pass is silent" is exactly the
-    /// regression #2348 reported.
-    ///
-    /// A hand-rolled capturing subscriber scoped via `with_default` (the same
-    /// shape as `agent::provider_menu`'s log-budget test) keeps this
-    /// parallel-safe without a global subscriber or a new dev-dependency.
-    /// The first pass also asserts that exactly one line arrives — `tracing`
-    /// caches per-callsite interest globally, so that assertion is what proves
-    /// the capture is live and makes the silence below non-vacuous.
-    #[test]
-    fn mesh_repo_unusable_stays_silent_on_repeat_passes() {
-        use tracing::field::{Field, Visit};
-        use tracing::span::{Attributes, Id, Record};
-        use tracing::{Event, Metadata};
-
-        struct MessageRecorder {
-            messages: Vec<String>,
-        }
-        impl Visit for MessageRecorder {
-            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-                if field.name() == "message" {
-                    let rendered = format!("{value:?}");
-                    self.messages.push(
-                        rendered
-                            .strip_prefix('"')
-                            .and_then(|inner| inner.strip_suffix('"'))
-                            .unwrap_or(&rendered)
-                            .to_string(),
-                    );
-                }
-            }
-        }
-        type Captured = Arc<Mutex<Vec<String>>>;
-        struct Capture {
-            messages: Captured,
-        }
-        impl tracing::Subscriber for Capture {
-            fn enabled(&self, _: &Metadata<'_>) -> bool {
-                true
-            }
-            fn new_span(&self, _: &Attributes<'_>) -> Id {
-                Id::from_u64(1)
-            }
-            fn record(&self, _: &Id, _: &Record<'_>) {}
-            fn record_follows_from(&self, _: &Id, _: &Id) {}
-            fn event(&self, event: &Event<'_>) {
-                let mut recorder = MessageRecorder {
-                    messages: Vec::new(),
-                };
-                event.record(&mut recorder);
-                self.messages.lock().unwrap().extend(recorder.messages);
-            }
-            fn enter(&self, _: &Id) {}
-            fn exit(&self, _: &Id) {}
-        }
-
-        let plain = tempfile::TempDir::new().expect("tempdir");
-        let mesh = mesh_row_at(std::process::id() as i64 * 1000 + 9104, 1, plain.path());
-        let captured: Captured = Arc::new(Mutex::new(Vec::new()));
-        let run_pass = || {
-            tracing::dispatcher::with_default(
-                &tracing::dispatcher::Dispatch::new(Capture {
-                    messages: captured.clone(),
-                }),
-                || {
-                    tracing::callsite::rebuild_interest_cache();
-                    mesh_repo_unusable(&mesh)
-                },
-            )
-        };
-        let non_repo_lines = || {
-            captured
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|m| m.contains("cannot be opened as a git working repository"))
-                .count()
-        };
-
-        assert!(run_pass(), "precondition: a plain folder is not poolable");
-        assert_eq!(
-            non_repo_lines(),
-            1,
-            "the first report emits exactly one line — also what proves this \
-             capture is live, so the silence asserted below is not vacuous"
-        );
-
-        tracing::callsite::rebuild_interest_cache();
-        captured.lock().unwrap().clear();
-        assert!(
-            run_pass(),
-            "the probe stays true on the second pass — the folder is still not a repo"
-        );
-
-        assert_eq!(
-            non_repo_lines(),
-            0,
-            "a repeat pass over a non-repository mesh must add no log line (issue #2348)"
-        );
-    }
-
-    // ---- End-to-end integration: drain-then-fill on a real temp git repo ----
-    //
-    // (Issue #634 sub-task #5.) The DB-layer drain/refresh logic is covered
-    // exhaustively by `db::warm_pool_tests`; the loop orchestration is
-    // covered by the `fill_mesh_to_target_with` tests above. What neither
-    // of those covers is the **end-to-end drain-then-fill-to-target
-    // contract** against a REAL git repo: real `git init` → real commit →
-    // real `git worktree add` (via `create_git_worktree`) → real
-    // directory on disk → real `git rev-parse HEAD` → real SHA stamped on
-    // the row. These tests lock that contract in place.
-    //
-    // We can't call `fill_mesh_to_target` directly — it needs a
-    // `tauri::AppHandle` for `emit_pool_changed`, and there's no test
-    // mock for that. Instead we drive the exact same `_inner` DB
-    // operations + `create_git_worktree` calls that `fill_mesh_to_target`
-    // uses internally. That's the "real git + real DB" coverage the issue
-    // asks for; the orchestration is unit-tested above.
-    //
-    // DB init routes through `db::test_support::isolated`
-    // — every test in this file (and the rest of the lib test binary)
-    // shares one global DB.
-
-    /// Fresh temp dir with a real git repo: `git init` + an empty initial
-    /// commit on `main`. Returns the temp dir + the repo path.
-    fn fresh_git_repo() -> (tempfile::TempDir, String) {
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let path = tmp.path().to_str().unwrap().to_string();
-
-        let run = |args: &[&str]| {
-            let status = std::process::Command::new("git") // allow-inline-process-spawn: test helper
-                .args(args)
-                .current_dir(&path)
-                .status()
-                .expect("git invocation failed");
-            assert!(status.success(), "git {:?} must succeed", args);
-        };
-
-        run(&["init", "-q"]);
-        run(&["config", "user.email", "test@buildmesh.local"]);
-        run(&["config", "user.name", "Buildmesh Test"]);
-        run(&["config", "commit.gpgsign", "false"]);
-        run(&["checkout", "-q", "-b", "main"]);
-        run(&["commit", "--allow-empty", "-q", "-m", "init"]);
-
-        (tmp, path)
-    }
-
-    /// Insert a worktree-enabled mesh row pointing at `repo_path`.
-    fn insert_mesh(conn: &rusqlite::Connection, repo_path: &str) -> i64 {
-        conn.execute(
-            "INSERT INTO meshes (name, path, use_worktree, pre_spawn_pool_size, base_ref) \
-             VALUES ('m', ?1, 1, 0, 'origin/main')",
-            rusqlite::params![repo_path],
-        )
-        .expect("insert mesh");
-        conn.query_row::<i64, _, _>(
-            "SELECT id FROM meshes WHERE path = ?1",
-            rusqlite::params![repo_path],
-            |row| row.get(0),
-        )
-        .expect("mesh id")
-    }
-
-    /// Cut a real git worktree via the production `create_git_worktree`
-    /// helper, mirroring `warm_one_body`'s body. Returns the on-disk path.
-    fn cut_real_warm_worktree(
-        conn: &rusqlite::Connection,
-        mesh_id: i64,
-        mesh_path: &str,
-    ) -> String {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let slug = format!("wt-{:x}", nanos);
-        // Legacy layout (no custom dir configured in these fixtures).
-        let effective = crate::env::effective_worktree_dir_raw(mesh_path, None, None);
-        let host_path = warm_worktree_host_path_in_dir(&effective, &slug);
-
-        let row_id = db::insert_warm_worktree_inner(
-            conn,
-            mesh_id,
-            &host_path,
-            &slug,
-            None,
-            db::WarmWorktreeStatus::Filling,
-        )
-        .expect("insert filling row");
-
-        crate::git::worktree::create_git_worktree(
-            mesh_path,
-            &host_path,
-            &slug,
-            "detached",
-            "origin/main",
-        )
-        .unwrap_or_else(|e| panic!("create_git_worktree failed for {}: {}", slug, e));
-
-        let sha = read_head_sha(&host_path);
-        let sha_opt: Option<&str> = if sha.is_empty() { None } else { Some(&sha) };
-        conn.execute(
-            "UPDATE warm_worktrees SET status = 'available', base_sha = ?2 WHERE id = ?1",
-            rusqlite::params![row_id, sha_opt],
-        )
-        .expect("flip to available");
-
-        host_path
-    }
-
-    fn read_head_sha(worktree_path: &str) -> String {
-        let output = std::process::Command::new("git") // allow-inline-process-spawn: test helper
-            .args(["-C", worktree_path, "rev-parse", "HEAD"])
-            .output()
-            .expect("git rev-parse");
-        if !output.status.success() {
-            return String::new();
-        }
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    }
-
-    /// Pin the drain-then-fill-to-target contract end-to-end against a real
-    /// temp git repo + real `create_git_worktree` + real DB. Mirrors the
-    /// issue #634 acceptance: drain removes the oldest excess (FIFO order),
-    /// fill cuts real worktrees via the production helper, at-target is a
-    /// no-op.
-    ///
-    /// Uses unique slug suffixes so multiple invocations in the same test
-    /// don't collide on a stale directory.
-    #[test]
-    fn maintenance_drain_then_fill_end_to_end_on_real_repo() {
-        let _db = crate::db::test_support::isolated();
-
-        let (_tmp, repo_path) = fresh_git_repo();
-        let conn = crate::db::write_conn();
-        let mesh_id = insert_mesh(&conn, &repo_path);
-
-        // Cut three warm worktrees in order — the first is the OLDEST.
-        let path_oldest = cut_real_warm_worktree(&conn, mesh_id, &repo_path);
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        let path_middle = cut_real_warm_worktree(&conn, mesh_id, &repo_path);
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        let path_newest = cut_real_warm_worktree(&conn, mesh_id, &repo_path);
-        assert!(std::path::Path::new(&path_oldest).exists());
-        assert!(std::path::Path::new(&path_middle).exists());
-        assert!(std::path::Path::new(&path_newest).exists());
-
-        // Set target = 1 so the drain should drop 2 of 3 (FIFO).
-        conn.execute(
-            "UPDATE meshes SET pre_spawn_pool_size = 1 WHERE id = ?1",
-            rusqlite::params![mesh_id],
-        )
-        .unwrap();
-
-        // Drain phase — mirrors `drain_excess_warm_entries` body.
-        let target: i64 = conn
-            .query_row(
-                "SELECT pre_spawn_pool_size FROM meshes WHERE id = ?1",
-                rusqlite::params![mesh_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let count = db::count_droppable_warm_entries_for_mesh_inner(&conn, mesh_id).unwrap();
-        assert_eq!(count, 3, "precondition: 3 droppable rows");
-        let excess = (count - target).max(0);
-        let candidates =
-            db::list_oldest_warm_entries_for_mesh_inner(&conn, mesh_id, excess).unwrap();
-        assert_eq!(candidates.len(), 2);
-        // FIFO: the OLDEST two are the drop candidates.
-        assert_eq!(candidates[0].1, path_oldest);
-        assert_eq!(candidates[1].1, path_middle);
-        for (id, path) in &candidates {
-            db::delete_warm_worktree_inner(&conn, *id).unwrap();
-            let _ = crate::git::worktree::remove_one_worktree(path);
-        }
-
-        // Postcondition: 1 row left, only newest dir on disk.
-        let remaining = db::count_available_warm_for_mesh_inner(&conn, mesh_id).unwrap();
-        assert_eq!(remaining, 1);
-        assert!(!std::path::Path::new(&path_oldest).exists());
-        assert!(!std::path::Path::new(&path_middle).exists());
-        assert!(std::path::Path::new(&path_newest).exists());
-
-        // Fill phase — bump target to 2 and run the fill loop, which
-        // pins the issue #634 contract: when count < target, we cut
-        // exactly ONE worktree per iteration (mirrors `warm_one_body`).
-        conn.execute(
-            "UPDATE meshes SET pre_spawn_pool_size = 2 WHERE id = ?1",
-            rusqlite::params![mesh_id],
-        )
-        .unwrap();
-        let target: i64 = conn
-            .query_row(
-                "SELECT pre_spawn_pool_size FROM meshes WHERE id = ?1",
-                rusqlite::params![mesh_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-
-        let mut new_paths: Vec<String> = Vec::new();
-        for _ in 0..target {
-            let count = db::count_available_warm_for_mesh_inner(&conn, mesh_id).unwrap();
-            if count >= target {
-                break;
-            }
-            new_paths.push(cut_real_warm_worktree(&conn, mesh_id, &repo_path));
-        }
-
-        let post = db::count_available_warm_for_mesh_inner(&conn, mesh_id).unwrap();
-        assert_eq!(post, 2, "fill must reach target");
-        for p in &new_paths {
-            assert!(std::path::Path::new(p).exists(), "new dir {} must exist", p);
-        }
-
-        // At-target no-op: running the fill loop again must not create
-        // anything new (the `available >= target` early-exit).
-        let mut new_paths_2 = 0;
-        for _ in 0..target {
-            let count = db::count_available_warm_for_mesh_inner(&conn, mesh_id).unwrap();
-            if count >= target {
-                break;
-            }
-            cut_real_warm_worktree(&conn, mesh_id, &repo_path);
-            new_paths_2 += 1;
-        }
-        assert_eq!(new_paths_2, 0, "at-target fill loop must early-exit");
-        let final_count = db::count_available_warm_for_mesh_inner(&conn, mesh_id).unwrap();
-        assert_eq!(final_count, 2, "at-target no-op must leave count unchanged");
-    }
-}
+#[path = "warm_pool_tests.rs"]
+mod tests;

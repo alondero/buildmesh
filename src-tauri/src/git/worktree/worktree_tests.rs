@@ -16,7 +16,7 @@ fn scoped_cold_create_has_bounded_wait_behind_sibling_sync() {
     let (held_tx, held_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
-        crate::services::sync_lock::with_mesh_sync_lock(&root, || {
+        crate::git::sync_lock::with_mesh_sync_lock(&root, || {
             held_tx.send(()).unwrap();
             release_rx.recv().unwrap();
         })
@@ -1192,7 +1192,7 @@ fn sanitize_leaves_healthy_link_files_untouched() {
 }
 
 #[test]
-fn resolve_base_ref_sha_resolves_and_falls_back_to_head() {
+fn resolve_sha_base_ref_resolves_and_falls_back_to_head() {
     let td = TestDir::new("resolve_sha");
     let repo = init_repo_with_commit(td.path(), &[("f.txt", "a\n")]);
     let head = repo
@@ -1205,49 +1205,76 @@ fn resolve_base_ref_sha_resolves_and_falls_back_to_head() {
 
     // A resolvable ref returns its concrete SHA.
     assert_eq!(
-        resolve_base_ref_sha(td.path().to_str().unwrap(), "HEAD").unwrap(),
+        crate::git::sha::resolve_sha_at(
+            td.path().to_str().unwrap(),
+            &crate::git::sha::ShaSource::BaseRef("HEAD".to_string()),
+        )
+        .unwrap()
+        .to_string(),
         head
     );
     // An unresolvable ref degrades to HEAD (offline resilience) rather than
     // erroring — the property the warm-pool adoption path depends on.
     assert_eq!(
-        resolve_base_ref_sha(td.path().to_str().unwrap(), "origin/does-not-exist").unwrap(),
+        crate::git::sha::resolve_sha_at(
+            td.path().to_str().unwrap(),
+            &crate::git::sha::ShaSource::BaseRef("origin/does-not-exist".to_string()),
+        )
+        .unwrap()
+        .to_string(),
         head,
         "an unfetched ref must fall back to HEAD, not hard-fail the checkout"
     );
 }
 
-// ── resolve_base_commit + base_ref (#230) ────────────────────────────────
+// ── the one SHA resolver + base_ref (#230, #2533) ─────────────────────────
 
 #[test]
-fn resolve_base_commit_head_returns_mesh_root_head() {
+fn resolve_sha_head_returns_mesh_root_head() {
     let td = TestDir::new("resolve_head");
     let repo = init_repo_with_commit(td.path(), &[("f.txt", "a\n")]);
     let head = repo.head().unwrap().peel_to_commit().unwrap().id();
-    assert_eq!(resolve_base_commit(&repo, "HEAD").unwrap().id(), head);
-    assert_eq!(resolve_base_commit(&repo, "").unwrap().id(), head);
+    assert_eq!(
+        crate::git::sha::resolve_sha(
+            &repo,
+            &crate::git::sha::ShaSource::BaseRef("HEAD".to_string())
+        )
+        .unwrap(),
+        head
+    );
+    assert_eq!(
+        crate::git::sha::resolve_sha(&repo, &crate::git::sha::ShaSource::BaseRef("".to_string()))
+            .unwrap(),
+        head
+    );
 }
 
 #[test]
-fn resolve_base_commit_resolves_remote_ref() {
+fn resolve_sha_resolves_remote_ref() {
     let td = TestDir::new("resolve_remote");
     let (repo, origin_oid) = repo_with_drifted_head(td.path());
     assert_eq!(
-        resolve_base_commit(&repo, "origin/main").unwrap().id(),
+        crate::git::sha::resolve_sha(
+            &repo,
+            &crate::git::sha::ShaSource::BaseRef("origin/main".to_string())
+        )
+        .unwrap(),
         origin_oid,
         "origin/main must resolve to the remote-tracking commit, not HEAD"
     );
 }
 
 #[test]
-fn resolve_base_commit_falls_back_to_head_when_unresolvable() {
+fn resolve_sha_falls_back_to_head_when_unresolvable() {
     let td = TestDir::new("resolve_fallback");
     let repo = init_repo_with_commit(td.path(), &[("f.txt", "a\n")]);
     let head = repo.head().unwrap().peel_to_commit().unwrap().id();
     assert_eq!(
-        resolve_base_commit(&repo, "origin/does-not-exist")
-            .unwrap()
-            .id(),
+        crate::git::sha::resolve_sha(
+            &repo,
+            &crate::git::sha::ShaSource::BaseRef("origin/does-not-exist".to_string())
+        )
+        .unwrap(),
         head,
         "an unresolvable ref must fall back to HEAD rather than error"
     );

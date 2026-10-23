@@ -54,7 +54,6 @@ import { useProbeResource, type ProbeLoadContext } from '../../lib/probeResource
  */
 
 import { useEffect, useState, useCallback } from 'react';
-import { listen } from '@tauri-apps/api/event';
 import { useMeshStore } from '../../stores/meshStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useUIStore } from '../../stores/uiStore';
@@ -63,7 +62,10 @@ import { useProbeContext } from '../../hooks/useProbeContext';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { usePoolChanged } from '../../hooks/usePoolChanged';
 import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
-import { WORKTREE_DIR_CHANGED_EVENT } from '../../lib/events';
+import {
+  concernsMesh,
+  subscribeWorktreeDirectoryChanges,
+} from '../../lib/streams/worktreeDirectoryStream';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { AiContextSection } from './AiContextSection';
 import { SaveIndicator } from '../shared/SaveIndicator';
@@ -222,22 +224,22 @@ export function ProjectSettingsTab() {
   // open). Skips events for other meshes; `null` (app default moved)
   // refreshes any mesh. The store owns the reads and drops a response that
   // lands after the user has switched meshes.
+  //
+  // `worktree-directory-changed` has exactly one subscriber in the app
+  // (issue #2531) — the owner module
+  // `lib/streams/worktreeDirectoryStream`, which owns the "is this about
+  // MY mesh?" rule.
   useEffect(() => {
     if (activeMeshId === null) return;
     let cancelled = false;
-    let unlisten: (() => void) | null = null;
-    listen<number | null>(WORKTREE_DIR_CHANGED_EVENT, (event) => {
-      const affected = event.payload;
-      if (affected !== null && affected !== undefined && affected !== activeMeshId) return;
+    const release = subscribeWorktreeDirectoryChanges((change) => {
+      if (!concernsMesh(change, activeMeshId)) return;
       if (cancelled) return;
       void refreshWorktreeDirectory();
-    }).then((fn) => {
-      if (cancelled) fn();
-      else unlisten = fn;
     });
     return () => {
       cancelled = true;
-      unlisten?.();
+      release();
     };
   }, [activeMeshId, refreshWorktreeDirectory]);
 

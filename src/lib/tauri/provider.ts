@@ -126,12 +126,16 @@ export function __resetProviderCachesForTests(): void {
  * Cross-surface invalidation event. Emitted by
  * `commands::preferences::{upsert,remove}_provider_account` (and siblings)
  * after a successful save, and re-emitted frontend-side after
- * default-provider writes (`updateMeshColumn` / `setAppDefaultProvider` in
- * the root facade). Owned here in `lib/` so hooks and the facade both
- * import in the same direction — `useProviderListInvalidation` re-exports
- * this symbol so its existing importers keep working.
+ * default-provider writes (`updateMeshColumn` / `setAppDefaultProvider`).
+ *
+ * The constant is declared by the module that OWNS the stream —
+ * `lib/streams/providerListStream` (issue #2531) — so the emitters
+ * (`lib/tauri/mesh.ts`, `lib/tauri/preferences.ts`) and the single
+ * subscriber import the same symbol from the same place. It is
+ * re-exported here for the callers that still import it from this
+ * facet.
  */
-export const PROVIDER_LIST_CHANGED_EVENT = 'provider-list-changed';
+export { PROVIDER_LIST_CHANGED_EVENT } from '../streams/providerListStream';
 
 // ----- Provider catalogue ------------------------------------------------
 

@@ -11,8 +11,7 @@
 //   docs/brand/b3-relay-{icon,mark}.svg -> Android vectors
 //
 // The SVG copies exist because Vite and the mobile SPA each need the mark at a
-// path they can serve; they are verbatim copies plus a generated-file banner,
-// and `tests/unit/brand-wordmark.test.tsx` fails if they drift from the source.
+// path they can serve; regenerate them here rather than editing the copies.
 //
 // Run:
 //   npm run brand:build

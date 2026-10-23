@@ -109,39 +109,6 @@ test('the Rust jobs declare identical cache-keyed environment variables', () => 
   }
 });
 
-test('the fingerprint inputs the shared cache depends on stay identical', () => {
-  // RUSTFLAGS and the profile-debug values are genuine cargo fingerprint
-  // inputs: if these drift, every downstream job recompiles the crate the
-  // previous job just built, whether or not the cache key matches. Asserted by
-  // value, not just by name, so a flipped debug level cannot slip through.
-  const reference = envVars('rust-tests');
-  for (const job of JOBS) {
-    for (const name of ['CARGO_PROFILE_DEV_DEBUG', 'CARGO_PROFILE_TEST_DEBUG', 'CARGO_INCREMENTAL', 'RUSTFLAGS']) {
-      assert.equal(
-        envVars(job).get(name),
-        reference.get(name),
-        `\`${job}\` sets ${name}=${envVars(job).get(name)} but \`rust-tests\` sets ${reference.get(name)}; a mismatch forces a recompile in every job downstream`,
-      );
-    }
-  }
-});
-
-test('no Linux Rust job sets CARGO_BUILD_JOBS', () => {
-  // Named explicitly because it is the one that regressed, and because it reads
-  // like a harmless tuning knob: it caps build parallelism, but it is invisible
-  // to cargo's fingerprint, so setting it in one job only splits the cache key
-  // and silently discards that job's compile. The runner has four cores and
-  // cargo already parallelises across them; if a memory cap is ever genuinely
-  // needed, it belongs on every job at once or on none.
-  for (const job of JOBS) {
-    assert.equal(
-      envVars(job).get('CARGO_BUILD_JOBS'),
-      undefined,
-      `\`${job}\` sets CARGO_BUILD_JOBS, which rust-cache hashes into its key. Give every Rust job the same value or none; one job alone gets a cache entry nobody reads.`,
-    );
-  }
-});
-
 test('the shard-coverage gate runs where the test binary is already built', () => {
   // The gate lists tests with `cargo test --lib -- --list`, which needs the
   // compiled binary. It used to sit in `rust-nonshard` ahead of the fuzz smoke

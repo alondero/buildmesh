@@ -10,6 +10,11 @@ incremental migration. Invocation and error logging keep one chokepoint.
 See [frontend IPC](../development/frontend-ipc.md) for current module ownership
 and enforcement. The original adoption decision below used a single wrapper.
 
+Enforcement now uses ESLint import restrictions, with allowed and denied
+examples in `tests/unit/tauri-ipc-seam.test.ts`. The original source-scanning
+drift ratchet described below has been retired; dynamic transport access and
+facet layout remain review concerns.
+
 Every Tauri `invoke` call goes through one typed wrapper, `src/lib/tauri.ts`, rather than calling `invoke('command_name', …)` raw. The wrapper is hand-written (one thin function per `#[command]`, typed with the generated wire types from ADR-0009), and adoption is enforced by a drift test (`tests/unit/tauri-ipc-seam.test.ts`) with a shrinking allowlist — not by generating the bindings with `tauri-specta`.
 
 ## Context

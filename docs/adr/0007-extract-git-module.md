@@ -140,3 +140,39 @@ error paths (`refuses_to_clobber_existing_branch`,
 `returns_ok_on_bad_base_ref_for_adopted`). No new test fixtures are
 needed: the existing `TestDir` / `init_repo_with_commit` pattern from
 `env::test_helpers` covers every branch.
+
+## Amendment (2026-10-23): one SHA resolver, and `git/` names no service module
+
+Issue #2533 unified the crate's three "resolve a SHA" helpers into one
+implementation with an **explicit source**: `git::sha::resolve_sha` with
+`ShaSource::{OriginRef, LocalHead, BaseRef}`.
+
+The three helpers it replaces (`resolve_base_commit`, `resolve_base_ref_sha`,
+and the warm pool's `read_warm_head_sha`) disagreed about their fallback
+policy — and the disagreement was invisible at the call site, because "which
+helper was called" was the only thing that distinguished them. The base-ref
+path degraded to HEAD when the ref was unresolvable (ADR 0001's
+offline-resilience rule); the remote-ref path did **not**, because a missing
+remote-tracking ref is a real condition the caller must be able to see; the
+warm-head path read a *worktree's* HEAD rather than the mesh's. Now the
+source says which policy applies, and the shell-outs the two helpers used are
+gone (both were pure ref lookups, so libgit2 covers them).
+
+The same change moves two service modules that were really Git-domain
+coordination into `git/`: `services::sync_lock` → `git::sync_lock` (the
+per-Mesh fetch/sync lock) and `services::fetch_freshness` →
+`git::fetch_freshness` (the per-Mesh fetch-recency registry). With those
+moves `git/` names no service module at all, so the dependency between the
+two layers runs one way (`services/` → `git/`). `git::worktree::warm` is the
+new home of the pre-spawn pool's claim seam (`WarmClaim`, implemented by
+`services::warm_pool`) and of the "usable warm worktree" rule that the
+pool's fill and the spawn's claim used to encode separately — see ADR 0019's
+amendment and `docs/development/module-map.md`.
+
+**Behaviour.** The mode rules, the base-SHA move and the
+`.worktreeinclude` re-application keep their previous semantics — pinned by
+`git::worktree::warm::tests` and the `adopt_warm_worktree_*` /
+`upgrade_warm_to_mode_*` suites — and the SHA the warm pool stamps on an
+entry is the SHA the spawn path compares against. The observable difference is
+the *mechanism*: two of the three lookups are pure libgit2 ref lookups, with
+no `git` subprocess.

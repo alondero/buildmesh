@@ -3,8 +3,8 @@ import { listen } from '@tauri-apps/api/event';
 import type { ProviderErrorPayload } from './types/generated/ProviderErrorPayload';
 import type { ResumeFailedPayload } from './types/generated/ResumeFailedPayload';
 import type { WorktreeCleanupFailedPayload } from './types/generated/WorktreeCleanupFailedPayload';
-import type { MeshSyncWarningPayload } from './types/generated/MeshSyncWarningPayload';
 import type { CircuitAgentBlockedPayload } from './types/generated/CircuitAgentBlockedPayload';
+import { subscribeMeshSyncWarnings } from './lib/streams/meshSyncWarningStream';
 import { useGlobalShortcuts } from './hooks/useGlobalShortcuts';
 import { Sidebar } from './components/Sidebar/Sidebar';
 import { TitleBar } from './components/TitleBar/TitleBar';
@@ -267,12 +267,9 @@ function App() {
   // failures). All three share the same toast stack — only the
   // provider label differs — so the user gets a consistent visual
   // treatment for any non-blocking runtime issue.
-  useEffect(() => {
-    const unlisten = listen<MeshSyncWarningPayload>('mesh-sync-warning', (event) => {
-      addToast('Sync', event.payload.message, 'warning');
-    });
-    return () => { unlisten.then((fn) => fn()); };
-  }, []);
+  useEffect(() => subscribeMeshSyncWarnings((warning) => {
+    addToast('Sync', warning.message, 'warning');
+  }), []);
 
   useEffect(() => {
     const unlisten = listen<CircuitNotificationPayload>('circuit-notification', ({ payload }) => {

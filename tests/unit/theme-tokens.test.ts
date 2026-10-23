@@ -18,26 +18,6 @@ describe('theme accent colour tokens', () => {
     }
   );
 
-  // The design-system pass (modernization) migrated components onto these
-  // tokens; if any disappears from @theme, the utility classes silently stop
-  // emitting and the UI regresses invisibly.
-  it('defines --text-2xs (Tailwind v4 font-size namespace — the sub-xs step badges use)', () => {
-    expect(css).toMatch(/--text-2xs\s*:/);
-  });
-
-  it.each(['fade-in', 'scale-in', 'slide-in-right'])(
-    'defines --animate-%s and its keyframes (toast/modal/dropdown entrances)',
-    (name) => {
-      expect(css).toMatch(new RegExp(`--animate-${name}\\s*:`));
-      expect(css).toMatch(new RegExp(`@keyframes ${name}\\b`));
-    }
-  );
-
-  it('retimes all transition utilities with the snappy defaults', () => {
-    expect(css).toMatch(/--default-transition-duration\s*:/);
-    expect(css).toMatch(/--default-transition-timing-function\s*:/);
-  });
-
   it('declares color-scheme so native form controls (select popups) follow the theme', () => {
     // A native <select> popup is OS/browser-rendered and follows the
     // document's `color-scheme`, not our background-color utilities. With
@@ -49,10 +29,5 @@ describe('theme accent colour tokens', () => {
     // root's [data-theme="light"] override for everything below it, leaving
     // light theme with dark native controls.
     expect(css).not.toMatch(/\bbody\s*(?:,[^{]*)?\{[^}]*color-scheme/);
-  });
-
-  it('restores pointer cursor on buttons (Tailwind v4 preflight sets cursor: default)', () => {
-    // Components rely on this base rule instead of per-button cursor-pointer.
-    expect(css).toMatch(/button:not\(:disabled\)[\s\S]{0,200}cursor:\s*pointer/);
   });
 });

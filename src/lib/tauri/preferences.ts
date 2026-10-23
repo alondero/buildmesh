@@ -1,7 +1,7 @@
 import { _invoke } from './_invoke';
 import { emit } from '@tauri-apps/api/event';
 import { clearDefaultProviderPromises } from '../providerCache';
-import { PROVIDER_LIST_CHANGED_EVENT } from './provider';
+import { PROVIDER_LIST_CHANGED_EVENT } from '../streams/providerListStream';
 import type { AppPreferences } from '../../types/generated/AppPreferences';
 import type { CorruptionInfo } from '../../types/generated/CorruptionInfo';
 import type { CorruptionReason } from '../../types/generated/CorruptionReason';

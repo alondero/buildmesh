@@ -1,0 +1,299 @@
+// Sibling test suite for the owning module. The suite lives in its own
+// file so the production module keeps only the declaration below — the
+// repo's rust-test-layout gate requires it.
+
+use super::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+/// Same-key calls serialize: N=10 concurrent callers each sleep 50 ms,
+/// and the wallclock must be ≥ N*50ms (with scheduling slack, well
+/// above 50ms). This is the headline regression test for issue #652 —
+/// without the lock, 10 parallel spawn_blocking threads would each take
+/// ~50ms and finish in ~50ms; with the lock they must serialize.
+///
+/// The concurrency assertion uses the return value of `fetch_add` (the
+/// value *before* our increment) as the "currently inside" count:
+/// if we were alone on entry, the previous value is 0; if another
+/// thread is still inside, the previous value is ≥ 1. (A naive
+/// `fetch_add(1)` followed by `load()` would conflate cumulative
+/// increments with concurrency and false-fail even on a working lock.)
+#[test]
+fn same_key_serializes_concurrent_callers() {
+    const N: usize = 10;
+    const SLEEP_MS: u64 = 50;
+
+    // Counter of threads currently INSIDE the critical section.
+    // +1 on entry, -1 on exit. `fetch_add` returns the previous value,
+    // so a serializing lock means every caller observes a previous
+    // value of 0 (i.e., it was alone when it entered).
+    let in_flight = Arc::new(AtomicUsize::new(0));
+
+    let start = Instant::now();
+    let handles: Vec<_> = (0..N)
+        .map(|_| {
+            let in_flight = Arc::clone(&in_flight);
+            thread::spawn(move || {
+                with_mesh_sync_lock("mesh://serialized", || {
+                    let prev = in_flight.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(
+                        prev, 0,
+                        "per-mesh lock failed: {} thread(s) already inside the critical section",
+                        prev,
+                    );
+                    thread::sleep(Duration::from_millis(SLEEP_MS));
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                });
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().expect("thread panicked");
+    }
+    let elapsed = start.elapsed();
+
+    // All threads exited cleanly — in_flight must be back to 0.
+    assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+
+    // Serialization bound: N sleeps of SLEEP_MS each. Allow a small
+    // scheduling slack (10ms) below the strict N*SLEEP_MS so the test
+    // doesn't false-fail on a fast machine, but anything below ~75%
+    // of N*SLEEP_MS means calls overlapped.
+    let strict = Duration::from_millis(N as u64 * SLEEP_MS);
+    assert!(
+        elapsed + Duration::from_millis(10) >= strict,
+        "elapsed ({:?}) is well below the serialization bound ({:?}); \
+         the per-mesh lock did not serialize",
+        elapsed,
+        strict,
+    );
+}
+
+/// Different keys do NOT serialize: both threads must be inside their
+/// (distinct) critical sections at the same moment, which the
+/// simultaneous-holder count proves. If the per-key lock were secretly
+/// global, only one thread could ever be inside at once and the peak
+/// would stay at 1.
+///
+/// The two closures **rendezvous** rather than relying on two sleeps
+/// overlapping (issue #2049). A sleep only lets the other thread *try*
+/// to run during the window: on a contended host the OS did not schedule
+/// the second thread inside it, so the peak stayed at 1 and the test
+/// failed on correct code. Here each thread announces that it is inside
+/// and then blocks until it has heard the peer do the same, so
+/// simultaneity is established by the test rather than by the
+/// scheduler.
+///
+/// The channels are unbounded, so the announcement does not block, and
+/// `recv_timeout` makes the wait deadlock-free: a global lock parks the
+/// first thread waiting for a peer that is still blocked on the mutex,
+/// so the wait times out and reports the regression instead of hanging
+/// the runner. That still catches the regression this targets (a
+/// per-Mesh map replaced by a single global mutex) — `Ok` is
+/// unreachable when the two critical sections do not overlap.
+#[test]
+fn different_keys_run_in_parallel() {
+    // Generous: the rendezvous ends when the peer arrives, not when the
+    // clock runs out, so this only ever expires on a genuine deadlock.
+    const RENDEZVOUS: Duration = Duration::from_secs(5);
+
+    // One-way announcement in each direction, named by data flow.
+    let (alpha_to_beta_tx, alpha_to_beta_rx) = mpsc::channel::<()>();
+    let (beta_to_alpha_tx, beta_to_alpha_rx) = mpsc::channel::<()>();
+
+    // Threads INSIDE the critical section + the peak count seen
+    // across the whole run. `fetch_add` returns the *previous* value,
+    // so `prev + 1` is the count after the increment; `fetch_max`
+    // records the peak.
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+
+    let i1 = Arc::clone(&in_flight);
+    let p1 = Arc::clone(&peak);
+    let h1 = thread::spawn(move || {
+        with_mesh_sync_lock("mesh://alpha", move || {
+            let new = i1.fetch_add(1, Ordering::SeqCst) + 1;
+            p1.fetch_max(new, Ordering::SeqCst);
+            let _ = alpha_to_beta_tx.send(());
+            let peer_arrived = beta_to_alpha_rx.recv_timeout(RENDEZVOUS);
+            i1.fetch_sub(1, Ordering::SeqCst);
+            assert!(
+                peer_arrived.is_ok(),
+                "mesh://alpha waited {RENDEZVOUS:?} inside its critical \
+                 section without hearing from mesh://beta; the per-Mesh \
+                 lock was unexpectedly serialized (issue #652 / \
+                 different-keys regression)",
+            );
+        })
+    });
+    let i2 = Arc::clone(&in_flight);
+    let p2 = Arc::clone(&peak);
+    let h2 = thread::spawn(move || {
+        with_mesh_sync_lock("mesh://beta", move || {
+            let new = i2.fetch_add(1, Ordering::SeqCst) + 1;
+            p2.fetch_max(new, Ordering::SeqCst);
+            let _ = beta_to_alpha_tx.send(());
+            let peer_arrived = alpha_to_beta_rx.recv_timeout(RENDEZVOUS);
+            i2.fetch_sub(1, Ordering::SeqCst);
+            assert!(
+                peer_arrived.is_ok(),
+                "mesh://beta waited {RENDEZVOUS:?} inside its critical \
+                 section without hearing from mesh://alpha; the per-Mesh \
+                 lock was unexpectedly serialized (issue #652 / \
+                 different-keys regression)",
+            );
+        })
+    });
+    h1.join().expect("alpha thread panicked");
+    h2.join().expect("beta thread panicked");
+
+    // Sanity: counter must be back to 0 after both threads exit.
+    assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+
+    // The peak inside the critical section must reach 2, i.e. at some
+    // moment both threads were inside their (different) per-key locks
+    // simultaneously. A global-lock regression would keep the peak at 1.
+    let observed_peak = peak.load(Ordering::SeqCst);
+    assert_eq!(
+        observed_peak, 2,
+        "peak simultaneous per-key lock holders was {} (expected 2); \
+         the per-Mesh lock was unexpectedly serialized \
+         (issue #652 / different-keys regression)",
+        observed_peak,
+    );
+}
+
+/// A panicking closure leaves the inner mutex `Poisoned`. The next
+/// caller for the same key must still proceed (poison recovery) rather
+/// than fail forever. Mirrors `try_with_fill_lock`'s recovery policy
+/// (module docs).
+#[test]
+fn poisoned_lock_is_recovered_on_next_call() {
+    // Use a dedicated key so this test's poison doesn't bleed into
+    // the other tests' locks.
+    let key = "mesh://poison-test";
+
+    // Spawn a thread that panics inside the closure with this key.
+    // We deliberately do NOT use `assert!(false)` here so the panic
+    // doesn't pollute the test output — `panic!` produces a single
+    // line in the test log.
+    let result = thread::spawn(move || {
+        with_mesh_sync_lock(key, || {
+            panic!("intentional panic inside the per-mesh lock");
+        });
+    })
+    .join();
+    assert!(
+        result.is_err(),
+        "the spawned thread should have panicked to leave the lock poisoned"
+    );
+
+    // Subsequent caller on the same key must run the closure to
+    // completion. If poison recovery is broken, this would either
+    // fail to acquire or propagate the PoisonError into `f()`.
+    let mut ran = false;
+    with_mesh_sync_lock(key, || {
+        ran = true;
+    });
+    assert!(
+        ran,
+        "closure did not run after a poisoned lock — recovery broken"
+    );
+}
+
+/// `with_mesh_sync_lock` returns whatever the closure returns. Cheap
+/// smoke test — the type plumbing is `FnOnce -> R`, and we want to
+/// confirm the generic signature round-trips a non-`()` value.
+#[test]
+fn returns_closure_value() {
+    let result = with_mesh_sync_lock("mesh://return-value", || 42_i32);
+    assert_eq!(result, 42);
+
+    let s = with_mesh_sync_lock("mesh://return-value", || "hello".to_string());
+    assert_eq!(s, "hello");
+}
+
+// ── try_with_mesh_sync_lock_timeout (bounded spawn-path wait) ──────────
+
+/// Uncontended: the closure runs and its value round-trips.
+#[test]
+fn timeout_variant_runs_when_lock_is_free() {
+    let result =
+        try_with_mesh_sync_lock_timeout("mesh://timeout-free", Duration::from_secs(1), || 7_i32);
+    assert_eq!(result, Some(7));
+}
+
+/// The headline regression for the "new nodes take minutes or fail to
+/// start" failure mode: a spawn-path caller must give up (return
+/// `None`, closure NOT run) when another sync holds the mesh lock past
+/// the deadline, instead of queueing behind it indefinitely.
+#[test]
+fn timeout_variant_gives_up_when_holder_outlives_deadline() {
+    const KEY: &str = "mesh://timeout-held";
+    let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+
+    // Holder: takes the lock and keeps it until told to release —
+    // stands in for a wedged manual `git_sync`.
+    let holder = thread::spawn(move || {
+        with_mesh_sync_lock(KEY, || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("holder never acquired the lock");
+
+    let start = Instant::now();
+    let mut ran = false;
+    let result = try_with_mesh_sync_lock_timeout(KEY, Duration::from_millis(300), || ran = true);
+    let elapsed = start.elapsed();
+
+    assert!(result.is_none(), "must give up while the lock is held");
+    assert!(!ran, "the closure must NOT run when the deadline expires");
+    // Bound check: gave up near the deadline (generous slack for CI),
+    // not after some multi-second internal retry.
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "gave up too slowly: {elapsed:?}"
+    );
+
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+
+    // Once released, the same key acquires again.
+    let after = try_with_mesh_sync_lock_timeout(KEY, Duration::from_secs(1), || 1_i32);
+    assert_eq!(after, Some(1), "lock must be reusable after release");
+}
+
+/// A caller that starts while the lock is held but whose deadline
+/// outlives the holder acquires once the holder releases — the bounded
+/// wait is a wait, not a `try_lock`-or-skip.
+#[test]
+fn timeout_variant_acquires_when_holder_releases_in_time() {
+    const KEY: &str = "mesh://timeout-releases";
+    let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+
+    let holder = thread::spawn(move || {
+        with_mesh_sync_lock(KEY, || {
+            started_tx.send(()).unwrap();
+            // Short hold — well inside the waiter's deadline.
+            thread::sleep(Duration::from_millis(200));
+        });
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("holder never acquired the lock");
+
+    let result = try_with_mesh_sync_lock_timeout(KEY, Duration::from_secs(5), || 99_i32);
+    assert_eq!(
+        result,
+        Some(99),
+        "waiter with headroom must acquire after the holder releases"
+    );
+    holder.join().unwrap();
+}

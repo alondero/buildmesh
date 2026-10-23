@@ -92,8 +92,15 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/commands/git_status_counts_tests.rs': 'commands::git_tests::status_counts',
   'src-tauri/src/commands/pr_tests.rs': 'commands::pr::tests',
   'src-tauri/src/db/circuit/evidence_tests.rs': 'db::circuit::evidence::tests',
+  'src-tauri/src/db/circuit/evidence/prompt_delivery_tests.rs': 'db::circuit::evidence::prompt_delivery::tests',
+  'src-tauri/src/services/circuit_prompt_tests.rs': 'services::circuit_prompt::tests',
   'src-tauri/src/git/fetch_origin_tests.rs': 'git::sync::fetch_origin_tests',
+  'src-tauri/src/git/fetch_freshness_tests.rs': 'git::fetch_freshness::tests',
   'src-tauri/src/git/mesh_health_tests.rs': 'git::health::mesh_health_tests',
+  'src-tauri/src/git/sha_tests.rs': 'git::sha::tests',
+  'src-tauri/src/git/sync_lock_tests.rs': 'git::sync_lock::tests',
+  'src-tauri/src/git/worktree/provision_tests.rs': 'git::worktree::provision::tests',
+  'src-tauri/src/git/worktree/warm_tests.rs': 'git::worktree::warm::tests',
   'src-tauri/src/git/worktree/worktree_tests.rs': 'git::worktree::tests',
   'src-tauri/src/commands/prune_tests.rs': 'commands::prune::prune_tests',
   'src-tauri/src/http/ws_tests.rs': 'http::ws::tests',
@@ -114,7 +121,43 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/services/circuit_worker/dispatch_tests.rs': 'services::circuit_worker::dispatch::tests',
   'src-tauri/src/services/circuit_worker/native_hooks_tests.rs': 'services::circuit_worker::native_hooks::tests',
   'src-tauri/src/services/legacy_retirement/retirement_crash_tests.rs': 'services::legacy_retirement::retirement_crash_tests',
+  'src-tauri/src/services/pool_worker_tests.rs': 'services::pool_worker::tests',
   'src-tauri/src/services/transcript_reader/report_snapshot_tests.rs': 'services::transcript_reader::report_snapshot::tests',
+  'src-tauri/src/services/warm_pool_tests.rs': 'services::warm_pool::tests',
+};
+
+// A Rust production file whose tests live in a sibling `<stem>_tests` module
+// that the PARENT declares (`mod y_tests;`) rather than the file itself
+// including (`#[path = "y_tests.rs"] mod tests;`).
+//
+// The path walk maps the production file to its own module, and that module
+// holds no tests — a scoped `cargo test --lib` filter for it selects zero,
+// which the strict zero-test rule reports as a failure that carries no
+// information about the code. These entries point the filter at the module
+// that holds the file's tests. A file that keeps BOTH an inline `mod tests`
+// and a sibling keeps its own module, so its inline tests still run.
+//
+// `RUST_PATH_INCLUDES` covers the `#[path]` half of the same problem; the
+// two tables cover different shapes, because a `#[path]`-included
+// sibling is registered in that table and keeps its owner's filter.
+//
+// The entries below have the shape "the parent declares `mod <stem>_tests;`
+// and the production file is that module's same-stem submodule". A production
+// file that carries test items of its own needs no entry: a filter on its own
+// module already selects them, and redirecting it would skip them.
+export const RUST_SIBLING_TESTS = {
+  'src-tauri/src/agent/spawn/command.rs': 'agent::spawn::command_tests',
+  'src-tauri/src/agent/spawn/orchestrator.rs': 'agent::spawn::orchestrator_tests',
+  'src-tauri/src/agent/spawn/preflight.rs': 'agent::spawn::preflight_tests',
+  'src-tauri/src/agent/spawn/prepare.rs': 'agent::spawn::prepare_tests',
+  'src-tauri/src/agent/spawn/provision.rs': 'agent::spawn::provision_tests',
+  'src-tauri/src/agent/spawn/reader.rs': 'agent::spawn::reader_tests',
+  'src-tauri/src/agent/spawn/streams.rs': 'agent::spawn::streams_tests',
+  'src-tauri/src/db/circuit/operator_push.rs': 'db::circuit::operator_push_tests',
+  'src-tauri/src/db/create_operation.rs': 'db::create_operation_tests',
+  'src-tauri/src/db/mesh.rs': 'db::mesh_tests',
+  'src-tauri/src/db/warm_pool.rs': 'db::warm_pool_tests',
+  'src-tauri/src/services/github/pagination.rs': 'services::github::pagination_tests',
 };
 
 // Every `#[path = "..."]` module in the crate, as repo-relative paths. Entries
@@ -139,6 +182,7 @@ export function pathIncludeDrift(root) {
 // integration tests, or anything outside `src-tauri/src`).
 export function rustModule(path) {
   if (RUST_PATH_INCLUDES[path]) return RUST_PATH_INCLUDES[path];
+  if (RUST_SIBLING_TESTS[path]) return RUST_SIBLING_TESTS[path];
   if (!path.startsWith(RUST_SRC)) return null;
   const rest = path.slice(RUST_SRC.length);
   // The crate root and the binary entry can reach every module.
@@ -152,10 +196,12 @@ export function rustModule(path) {
 // the ones it cannot: the crate root, a manifest, the build script, or an
 // integration-test binary, which `cargo test --lib` does not run.
 //
-// A path that is not on disk (a file the diff deleted or moved) selects
-// no module: its filter would match no test, and the strict zero-test rule
-// would fail the gate on a module that is gone. The new path of a move
-// carries the coverage.
+// A path the diff DELETED is skipped: the file is gone, so the module it
+// named is gone with it and no test can live under it any more. A file that
+// moved is a deletion plus an addition, and the addition carries the filter
+// for the module's new home — without this, each move would ask Cargo for
+// tests under a module that has been deleted, and a filter that matches
+// no test is reported as a failure rather than as the no-op it is.
 export function rustScope(paths, { exists = () => true } = {}) {
   const modules = new Set();
   const unscoped = [];

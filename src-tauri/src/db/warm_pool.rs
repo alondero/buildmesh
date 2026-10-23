@@ -81,6 +81,30 @@ pub(crate) fn insert_warm_worktree_inner(
     Ok(conn.last_insert_rowid())
 }
 
+/// Write the fill's crash-recovery marker.
+///
+/// The pool MUST write this row **before** it cuts the worktree on disk. A
+/// process killed between the two leaves a `filling` row behind, and that row
+/// is the only record that a half-built directory exists — the startup
+/// reconcile finds it through [`list_warm_worktrees_to_reconcile`] and tears
+/// the worktree down. Writing the marker after the checkout would leave a
+/// half-built directory that no row points at, so the reconcile would not
+/// find it.
+///
+/// This is the explicit form of the fill's crash-recovery contract (issue
+/// #2533): the fill's first write is a named operation, and the reconcile
+/// that recovers from a killed fill is a named interface rather than a
+/// convention the two sides have to agree on by inspection.
+pub fn begin_warm_fill(mesh_id: i64, path: &str, preassigned_name: &str) -> SqlResult<i64> {
+    insert_warm_worktree(
+        mesh_id,
+        path,
+        preassigned_name,
+        None,
+        WarmWorktreeStatus::Filling,
+    )
+}
+
 /// Mark a fresh row as `available` once the pool worker finishes cutting the
 /// on-disk worktree. The flip is a single UPDATE — no race window where a
 /// concurrent claim sees a `filling` row that doesn't yet point at a real
@@ -298,10 +322,31 @@ pub(crate) fn list_warm_paths_for_mesh_droppable_inner(
     rows.collect()
 }
 
+/// Why the startup reconcile is tearing a pool row down.
+///
+/// The reason is part of the reconcile's *interface* (issue #2533), not an
+/// internal detail: a caller can tell "a killed fill left this behind" from
+/// "the user deleted the directory" without re-deriving it from the status
+/// column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarmReconcileReason {
+    /// A `filling` row old enough to be a crash orphan: the process died
+    /// between writing the fill's crash-recovery marker
+    /// ([`begin_warm_fill`]) and finishing the checkout. This is the fill's
+    /// crash-recovery path.
+    CrashedFill,
+    /// A `refreshing` row old enough to be a crash orphan: the process died
+    /// between parking the row for a SHA refresh and restoring it.
+    CrashedRefresh,
+    /// An `available` row whose on-disk directory is gone — the user
+    /// hand-deleted it (or a crash removed it after the row was written).
+    MissingDirectory,
+}
+
 /// A pool row the startup reconcile must tear down: its `id` (to delete the
-/// SQLite row), its on-disk `path`, and whether that directory is still
+/// SQLite row), its on-disk `path`, whether that directory is still
 /// `dir_present` (so the caller knows whether a Git worktree teardown is even
-/// needed before dropping the row). See
+/// needed before dropping the row), and *why* it qualifies. See
 /// [`classify_warm_reconcile_rows`] for which rows qualify.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WarmReconcileEntry {
@@ -312,6 +357,8 @@ pub struct WarmReconcileEntry {
     /// directory is already gone (manual delete / crash before checkout), so
     /// there is nothing on disk to remove and the row can be dropped directly.
     pub dir_present: bool,
+    /// Why this row qualifies for teardown.
+    pub reason: WarmReconcileReason,
 }
 
 /// List every pool row the startup reconcile must clean up (issue #610). A row
@@ -382,10 +429,18 @@ pub(crate) fn classify_warm_reconcile_rows(rows: Vec<WarmReconcileRow>) -> Vec<W
             !dir_present
         };
         if qualifies {
+            let reason = if row.status == WarmWorktreeStatus::Filling.as_str() {
+                WarmReconcileReason::CrashedFill
+            } else if row.status == WarmWorktreeStatus::Refreshing.as_str() {
+                WarmReconcileReason::CrashedRefresh
+            } else {
+                WarmReconcileReason::MissingDirectory
+            };
             out.push(WarmReconcileEntry {
                 id: row.id,
                 path: row.path,
                 dir_present,
+                reason,
             });
         }
     }
