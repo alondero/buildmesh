@@ -30,23 +30,25 @@ pub fn default_harness_profiles() -> Vec<HarnessProfile> {
 /// profile with a new `id` is appended. Defaults are always present, so a
 /// built-in like Terminal can never be removed by an empty or partial
 /// `preferences.json`.
+///
+/// An accessor over [`super::snapshot::snapshot_or_default`]: the read and the
+/// load-failure policy happen once, in the snapshot loader (issue #2532).
 pub fn harness_profiles() -> Vec<HarnessProfile> {
+    super::snapshot::snapshot_or_default().harness_profiles
+}
+
+/// The effective harness profile list for an already-loaded preferences value:
+/// the code-defined defaults with the user's stored `harness_profiles` merged
+/// over them by `id`.
+///
+/// Pure — no disk side effects — so the merge is unit-testable without disk.
+pub(super) fn effective_harness_profiles(stored: &[HarnessProfile]) -> Vec<HarnessProfile> {
     let mut profiles = default_harness_profiles();
-    let stored = match load() {
-        Ok(prefs) => prefs.harness_profiles,
-        Err(e) => {
-            tracing::warn!(
-                "preferences::harness_profiles load failed, using defaults: {}",
-                e
-            );
-            Vec::new()
-        }
-    };
     for profile in stored {
         if let Some(existing) = profiles.iter_mut().find(|p| p.id == profile.id) {
-            *existing = profile;
+            *existing = profile.clone();
         } else {
-            profiles.push(profile);
+            profiles.push(profile.clone());
         }
     }
     profiles
@@ -105,22 +107,10 @@ pub fn resolved_harness_profile(profile_id: &str) -> Option<HarnessProfile> {
     }
 }
 
-/// The user's stored spawn-menu harness order — a list of row ids applied by
-/// `agent::provider_menu::order_providers` (issue #573). Empty when never set, in
-/// which case the menu keeps its natural derivation order (Terminal still last).
-/// A load failure is logged and treated as "no stored order".
-pub fn harness_order() -> Vec<String> {
-    match load() {
-        Ok(prefs) => prefs.harness_order,
-        Err(e) => {
-            tracing::warn!(
-                "preferences::harness_order load failed, using natural order: {}",
-                e
-            );
-            Vec::new()
-        }
-    }
-}
+// The user's stored spawn-menu harness order is read from the preferences
+// snapshot (`super::snapshot::PreferencesSnapshot::harness_order`) — the Spawn
+// Menu needs the order *and* the profiles it ranks, so one read serves both
+// (issue #2532). `set_harness_order` below is the writer.
 
 /// Persist the spawn-menu harness order (issue #573). `Terminal` is filtered out
 /// before storing — it's always forced last by the ordering logic, so keeping it

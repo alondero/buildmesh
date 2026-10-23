@@ -20,37 +20,19 @@ pub(super) fn dedupe_keeping_first(ids: impl Iterator<Item = String>) -> Vec<Str
 }
 
 /// The stored **Proxied Provider** pairings in preferences (ADR-0025 / issue
-/// #576). A load failure is logged and treated as "no stored pairings".
+/// #576).
+///
+/// An accessor over [`super::snapshot::snapshot_or_default`]: the read and the
+/// load-failure policy ("no stored pairings") happen once, in the snapshot
+/// loader (issue #2532).
 pub fn provider_pairings() -> Vec<ProviderPairing> {
-    match load() {
-        Ok(prefs) => prefs.provider_pairings,
-        Err(e) => {
-            tracing::warn!(
-                "preferences::provider_pairings load failed, using none: {}",
-                e
-            );
-            Vec::new()
-        }
-    }
+    super::snapshot::snapshot_or_default().pairings
 }
 
-/// The full stored per-harness **Proxied Provider** child orders (issue
-/// #577). One [`ProxiedProviderOrder`] per harness the user has reordered;
-/// a harness without an entry keeps its natural order (the backend's
-/// `order_proxied_children` falls through when the per-harness lookup is
-/// `None`). A load failure is logged and treated as "no stored order".
-pub fn proxied_provider_order() -> Vec<ProxiedProviderOrder> {
-    match load() {
-        Ok(prefs) => prefs.proxied_provider_order,
-        Err(e) => {
-            tracing::warn!(
-                "preferences::proxied_provider_order load failed, using none: {}",
-                e
-            );
-            Vec::new()
-        }
-    }
-}
+// The stored per-harness **Proxied Provider** child order is read from the
+// preferences snapshot (`super::snapshot::PreferencesSnapshot::proxied_provider_order`)
+// — the Spawn Menu needs the order *and* the pairings it ranks, so one read
+// serves both (issue #2532). `set_proxied_provider_order` below is the writer.
 
 /// The stored per-harness child order, if any (issue #577). `None` means
 /// "no stored preference" — the backend's `order_proxied_children` falls
@@ -60,17 +42,20 @@ pub fn proxied_provider_order() -> Vec<ProxiedProviderOrder> {
 /// the harness-config page alike.
 ///
 /// `pub` for the single-harness lookup symmetry with the full-list
-/// [`proxied_provider_order`] getter and the [`set_proxied_provider_order`]
-/// setter — the spawn-menu read path uses [`proxied_provider_order`] (a
-/// single `HashMap` lookup) for performance, but a UI surface that wants
-/// "what's the order under harness X?" can reach for this without parsing
-/// the full vector.
+/// [`super::snapshot::PreferencesSnapshot::proxied_provider_order`] field and
+/// the [`set_proxied_provider_order`] setter — the spawn-menu read path uses
+/// the snapshot's field (a single `HashMap` lookup) for performance, but a UI
+/// surface that wants "what's the order under harness X?" can reach for this
+/// without parsing the full vector.
 ///
 /// No production surface asks the single-harness form yet, so it is compiled
 /// for tests alone (issue #2450).
 #[cfg(test)]
+// allow-test-in-production: a test-only lookup, compiled for the sibling suites alone
+// (issue #2450).
 pub fn proxied_order_for(harness_id: &str) -> Option<Vec<String>> {
-    proxied_provider_order()
+    super::snapshot::snapshot_or_default()
+        .proxied_provider_order
         .into_iter()
         .find(|o| o.harness_id == harness_id)
         .map(|o| o.provider_ids)
