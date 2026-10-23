@@ -3,6 +3,8 @@
 use crate::db::{DbError, SqlResult};
 use rusqlite::{params, Connection, OptionalExtension};
 
+pub(crate) mod prompt_delivery;
+
 const OBSERVATION_FRESHNESS_REJECTION_PREFIX: &str = "Observation freshness fence rejected:";
 
 pub(crate) fn restore_projection_conflicts(
@@ -323,6 +325,10 @@ fn checkpoint_actions(
         }
         _ => vec![],
     };
+    let mut actions = actions;
+    if prompt_delivery::available(db, run_id, &step.node_id, step.attempt)? {
+        actions.insert(0, CheckpointAction::ManualDelivered);
+    }
     Ok(actions)
 }
 
@@ -621,10 +627,65 @@ fn newest_submission_seq(db: &Connection, agent_node_id: i64) -> SqlResult<i64> 
 /// re-deriving it from the turn start (issue #1898 review).
 type SubmissionBinding = (Option<String>, Option<i64>);
 
+/// A wait may start after the prompt's start hook already arrived for its
+/// upstream delivery step. Inherit only the newest submission for this agent,
+/// from a retained ancestor attempt; sibling and retired attempts stay fenced.
+fn upstream_submission_owner(
+    db: &Connection,
+    run_id: i64,
+    node_id: &str,
+    attempt: i32,
+    agent: i64,
+) -> SqlResult<Option<(String, i32)>> {
+    let newest = newest_submission_seq(db, agent)?;
+    let mut query = db.prepare("SELECT h.node_id,h.attempt FROM circuit_run_history h
+        JOIN autopilot_circuit_run_steps s ON s.run_id=h.run_id AND s.node_id=h.node_id AND s.attempt=h.attempt
+        WHERE h.run_id=?1 AND h.kind='prompt_submitted' AND json_extract(h.detail,'$.agent_node_id')=?2
+        AND json_extract(h.detail,'$.submission_seq')=?3 ORDER BY h.id DESC")?;
+    let rows = query.query_map(params![run_id, agent, newest], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)?))
+    })?;
+    let graph =
+        run_graph(db, run_id).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    for row in rows {
+        let (owner, owner_attempt) = row?;
+        // Attempts are local to a step. A cycle cannot authorize a different
+        // attempt of this same step through the ancestor branch.
+        let eligible = if owner == node_id {
+            owner_attempt == attempt
+        } else {
+            graph.is_ancestor(node_id, &owner)
+        };
+        if eligible {
+            return Ok(Some((owner, owner_attempt)));
+        }
+    }
+    Ok(None)
+}
+
 /// The binding a previously recorded, correlated turn start established for
 /// this receipt's turn token. `Stop` carries the token but not the prompt
 /// text, so it can only inherit a binding made when the turn began.
 fn recorded_turn_binding(
+    db: &Connection,
+    run_id: i64,
+    node_id: &str,
+    attempt: i32,
+    receipt: &crate::services::circuit_worker::native_hooks::NativeReceipt,
+) -> SqlResult<Option<SubmissionBinding>> {
+    let local = recorded_turn_binding_at(db, run_id, node_id, attempt, receipt)?;
+    if local.is_some() {
+        return Ok(local);
+    }
+    let Some((owner, owner_attempt)) =
+        upstream_submission_owner(db, run_id, node_id, attempt, receipt.agent_node_id)?
+    else {
+        return Ok(None);
+    };
+    recorded_turn_binding_at(db, run_id, &owner, owner_attempt, receipt)
+}
+
+fn recorded_turn_binding_at(
     db: &Connection,
     run_id: i64,
     node_id: &str,
@@ -698,6 +759,13 @@ fn earn_turn_binding(
     let Some(stamp) = receipt.input_stamp.clone() else {
         return Ok(None);
     };
+    let Some((owner, owner_attempt)) =
+        upstream_submission_owner(db, run_id, node_id, attempt, receipt.agent_node_id)?
+    else {
+        return Ok(None);
+    };
+    let node_id = owner.as_str();
+    let attempt = owner_attempt;
     // Rule 2.
     let submission: Option<PromptSubmission> = db
         .query_row(
@@ -725,18 +793,16 @@ fn earn_turn_binding(
     let claimed: Vec<String> = {
         let mut stmt = db.prepare(
             "SELECT json_extract(detail,'$.hook.turn_id') FROM circuit_run_history
-             WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind='native_hook_received'
-             AND json_extract(detail,'$.agent_node_id')=?4
-             AND json_extract(detail,'$.session_incarnation') IS ?5
+             WHERE run_id=?1 AND kind='native_hook_received'
+             AND json_extract(detail,'$.agent_node_id')=?2
+             AND json_extract(detail,'$.session_incarnation') IS ?3
              AND json_extract(detail,'$.hook.event')='UserPromptSubmit'
              AND json_extract(detail,'$.submission_correlated')=1
-             AND json_extract(detail,'$.submission_seq')=?6",
+             AND json_extract(detail,'$.submission_seq')=?4",
         )?;
         let rows = stmt.query_map(
             params![
                 run_id,
-                node_id,
-                attempt,
                 receipt.agent_node_id,
                 receipt.session_incarnation,
                 submission.submission_seq
@@ -873,6 +939,7 @@ pub(crate) fn native_hook_receipts(run_id: i64, after: i64) -> SqlResult<Vec<Cir
 #[serde(rename_all = "snake_case")]
 #[ts(export, export_to = "CheckpointAction.ts")]
 pub enum CheckpointAction {
+    ManualDelivered,
     Completed,
     NotPerformed,
     Retry,
@@ -895,6 +962,9 @@ pub struct CheckpointRequest {
 }
 
 pub fn record_outcome(request: &CheckpointRequest) -> Result<(), DbError> {
+    if matches!(request.action, CheckpointAction::ManualDelivered) {
+        return crate::services::circuit_prompt::attest(request);
+    }
     let mut db = crate::db::write_conn();
     record_outcome_locked(&mut db, request)
 }
@@ -1233,6 +1303,7 @@ pub(super) fn record_outcome_locked(
                 "The earlier action must be recorded as not performed before a deliberate retry.",
             )),
             CheckpointAction::Recheck
+            | CheckpointAction::ManualDelivered
             | CheckpointAction::ReviewPass
             | CheckpointAction::ReviewFail => unreachable!("handled above"),
         };
@@ -1250,6 +1321,7 @@ pub(super) fn record_outcome_locked(
         CheckpointAction::ReviewPass | CheckpointAction::ReviewFail => {
             unreachable!("handled above")
         }
+        CheckpointAction::ManualDelivered => unreachable!("handled before taking the DB lock"),
     };
     let op = super::CircuitStepOp {
         node_id: request.node_id.clone(),

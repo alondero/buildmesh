@@ -2,19 +2,37 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, expect, it, vi } from 'vitest';
 import { emit } from '@tauri-apps/api/event';
 import { CircuitEvidenceHistory } from '../../src/components/Circuits/CircuitEvidenceHistory';
-import { circuitRunHistory, recordCircuitOutcome } from '../../src/lib/tauri/circuitEvidence';
+import { circuitRunHistory, circuitPromptPayload, recordCircuitOutcome } from '../../src/lib/tauri/circuitEvidence';
 import type { CircuitHistoryEntry } from '../../src/types/generated/CircuitHistoryEntry';
 import type { ObservationCoverage } from '../../src/types/generated/ObservationCoverage';
 import type { CircuitEvidenceView } from '../../src/types/generated/CircuitEvidenceView';
 
 vi.mock('../../src/lib/tauri/circuitEvidence', () => ({
-  circuitRunHistory: vi.fn(), recordCircuitOutcome: vi.fn(),
+  circuitRunHistory: vi.fn(), circuitPromptPayload: vi.fn(), recordCircuitOutcome: vi.fn(),
 }));
 
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(circuitRunHistory).mockReset();
   vi.mocked(recordCircuitOutcome).mockReset();
+});
+
+it('offers exact payload copy and explicit manual confirmation in history details', async () => {
+  vi.mocked(circuitRunHistory).mockResolvedValue({ entries: [entry], coverage: [], checkpoints: [{
+    node_id: 'comment', attempt: 1, actions: ['manual_delivered'], starts_next_review: false, ends_review: false, review_again: false,
+  }] });
+  vi.mocked(circuitPromptPayload).mockResolvedValue('Full prepared payload');
+  vi.mocked(recordCircuitOutcome).mockResolvedValue(undefined);
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+  const { container } = render(<CircuitEvidenceHistory runId={3} updatedAt="one" />);
+  fireEvent.click(container.querySelector('summary')!);
+  fireEvent.click(await screen.findByRole('button', { name: 'Copy payload' }));
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith('Full prepared payload'));
+  fireEvent.click(screen.getByRole('button', { name: 'Sent manually', exact: true }));
+  expect(recordCircuitOutcome).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm: Sent manually' }));
+  await waitFor(() => expect(recordCircuitOutcome).toHaveBeenCalledWith({ run_id: 3, node_id: 'comment', attempt: 1, expected_revision: 7, action: 'manual_delivered', reason: '' }));
 });
 
 const nativeCoverage: ObservationCoverage = { push: 'hooks', pull: 'native_turn_completion', turn_identity: 'native_token',
