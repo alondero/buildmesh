@@ -731,7 +731,7 @@ test('fingerprint ignores local logs but sees tests, lockfile, deletions and unt
 test('a short --base passes binding-drift, and a gate that rewrites the bindings still fails it (#2350)', async t => {
   const fixture = repo(t);
   // The gate is the real CLI in the fixture, so the harness it spawns must be there.
-  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-check.mjs', 'scripts/harness-test-failures.mjs', 'scripts/self-review.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
+  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-check.mjs', 'scripts/harness-test-failures.mjs', 'scripts/self-review.mjs', 'scripts/worktree-deps.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
   fixture.put('src/types/generated/Example.ts', 'export type Example = { id: number };\n');
   const base = fixture.commit();
   const short = base.slice(0, 8);
@@ -1096,7 +1096,7 @@ test('canonical verification rejects a source mutation even when every child che
   const fixture = repo(t);
   // Stand-in executables keep this a process/orchestration regression, without
   // coupling it to a full Tauri or frontend installation.
-  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-check.mjs', 'scripts/harness-test-failures.mjs', 'scripts/self-review.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
+  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-check.mjs', 'scripts/harness-test-failures.mjs', 'scripts/self-review.mjs', 'scripts/worktree-deps.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
   for (const path of ['scripts/check-agent-diff.mjs', 'scripts/check-docs.mjs', 'scripts/check-readme-drift.mjs', 'scripts/check-process-spawn-discipline.mjs']) fixture.put(path, 'process.exit(0);\n');
   fixture.put('.gitignore', '.harness/\n.task.json\nnode_modules/\n');
   fixture.put('node_modules/eslint/package.json', '{"version":"fixture"}');
@@ -1549,7 +1549,7 @@ test('wait never reports a stale or missing result as success', async t => {
 });
 test('verify queues a heavy gate behind held machine-wide slots and runs it once one frees', async t => {
   const fixture = repo(t);
-  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-check.mjs', 'scripts/harness-test-failures.mjs', 'scripts/self-review.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
+  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-check.mjs', 'scripts/harness-test-failures.mjs', 'scripts/self-review.mjs', 'scripts/worktree-deps.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
   for (const path of ['scripts/check-agent-diff.mjs', 'scripts/check-docs.mjs', 'scripts/check-readme-drift.mjs', 'scripts/check-process-spawn-discipline.mjs']) fixture.put(path, 'process.exit(0);\n');
   fixture.put('.gitignore', '.harness/\n.task.json\nnode_modules/\n');
   fixture.put('node_modules/eslint/package.json', '{"version":"fixture"}');

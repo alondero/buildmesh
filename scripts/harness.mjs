@@ -12,8 +12,9 @@ import { acquireSlot, heavyGateEnv, heavyGateLimit, runPlan } from './harness-la
 import { selfReviewReport } from './self-review.mjs';
 import { conptyPrerequisite, failureLines, gatePassed, isolatedCommand, isolateTests, knownFlakes, readTestReport, validateFlakeIssues } from './harness-test-failures.mjs';
 import { fastGates, pathIncludeDrift, planChecks } from './harness-check.mjs';
+import { runWorktreeDeps, WORKTREE_DEPS_USAGE } from './worktree-deps.mjs';
 
-const USAGE = 'harness start --spec <json> | update --spec <json> | status | metrics | check [--base <commit>] | verify [--base <commit>] [--full] | wait [--max-seconds <n>] | finish | evaluate [--case <id>] | checkpoint | record-rollback --ref <commit>';
+const USAGE = 'harness start --spec <json> | update --spec <json> | status | metrics | check [--base <commit>] | verify [--base <commit>] [--full] | wait [--max-seconds <n>] | finish | evaluate [--case <id>] | checkpoint | record-rollback --ref <commit> | ' + WORKTREE_DEPS_USAGE;
 const EXIT = { PASS: 0, FAIL: 1, FLAKY: 1, BLOCKED: 2, TIMEOUT: 124 };
 const statePath = (root, name) => join(root, '.harness', name);
 const git = (root, ...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -257,7 +258,7 @@ async function preflight(root, gate, extraEnv) {
     const probe = spawnSync('git', ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 5000, env: { ...process.env, ...extraEnv } });
     if (probe.error || probe.status !== 0) return 'Git is unavailable on PATH; these tests spawn Git.';
   }
-  if ((gate.command[0] === 'npm' || gate.browser || gate.command.some(arg => arg.startsWith('node_modules/'))) && !existsSync(join(root, 'node_modules/eslint/package.json'))) return 'node_modules is missing; install with npm ci (or the documented worktree junction).';
+  if ((gate.command[0] === 'npm' || gate.browser || gate.command.some(arg => arg.startsWith('node_modules/'))) && !existsSync(join(root, 'node_modules/eslint/package.json'))) return 'node_modules is missing; run `npm run harness -- link-deps` in a secondary worktree, or npm ci.';
   if (gate.rust) {
     const probe = spawnSync('cargo', ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
     if (probe.error || probe.status !== 0) return 'Rust/Cargo is unavailable; install the Tauri platform prerequisites.';
@@ -795,6 +796,7 @@ async function main() {
       return;
     }
     if (args[0] === 'gate') { await internalGate(root, args[1]); return; }
+    if (args[0] === 'link-deps' || args[0] === 'unlink-deps') { console.log(runWorktreeDeps(root, args)); return; }
     const options = parse(args);
     if (options.action === 'status') { console.log(JSON.stringify(status(root), null, 2)); return; }
     if (options.action === 'metrics') { console.log(JSON.stringify(metrics(root), null, 2)); return; }
