@@ -6929,10 +6929,8 @@ fn circuit_spawn_none_timeout_seconds_stays_none() {
 /// re-deriving from the AST. (The circuit watchdog itself reads the
 /// graph node in `observe_waits`; see
 /// `observe_waits_uses_spawn_step_timeout_seconds_for_wait_observed`.)
-/// A future refactor that flattens the carrier without copying the
-/// timeout would drop the wiring silently; the field pin in
-/// `prepare_tests::spawn_options_carries_explicit_slots` catches that
-/// at compile time, this test catches the runtime regression.
+/// This exercises timeout resolution into the carrier; it does not launch a
+/// process or prove the later flattening into `SpawnOptions`.
 #[test]
 fn circuit_spawn_carries_timeout_through_to_resolved_carrier() {
     let kind = spawn_kind(Some("anthropic"), None, None, None, Some(1800));

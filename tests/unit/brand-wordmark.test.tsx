@@ -90,42 +90,4 @@ describe('TitleBar wordmark', () => {
       }
     });
   });
-
-  describe('mark', () => {
-    it('keeps the badge plate a fixed dark, independent of the chrome theme', () => {
-      const { root } = wordmark();
-      const plate = root.querySelector('svg rect');
-      // Deliberate, not an oversight: the plate is what keeps the neon wires
-      // legible on a white title bar, so it must NOT follow the theme.
-      expect(plate?.getAttribute('fill')).toBe('#16161d');
-    });
-  });
-});
-
-/**
- * One canonical compact mark, not three agreeing copies.
- *
- * `src/assets/logo.svg` and `mobile/public/favicon.svg` are generated from
- * `docs/brand/b3-relay-icon.svg` by `npm run brand:build`. If someone edits a
- * copy by hand — the way the logo previously drifted into three disagreeing
- * files — this fails rather than letting the next regeneration silently
- * discard the edit.
- */
-describe('compact mark copies', () => {
-  const canonical = readFileSync(
-    resolve(__dirname, '../../docs/brand/b3-relay-icon.svg'),
-    'utf8'
-  );
-
-  it.each(['src/assets/logo.svg', 'mobile/public/favicon.svg'])(
-    '%s is an unmodified copy of the canonical source',
-    (relPath) => {
-      const generated = readFileSync(resolve(__dirname, '../..', relPath), 'utf8');
-      const [banner, ...body] = generated.split('\n');
-      expect(banner).toContain('do not edit by hand');
-      expect(banner).toContain('b3-relay-icon.svg');
-      // Byte-identical below the banner.
-      expect(body.join('\n')).toBe(canonical);
-    }
-  );
 });

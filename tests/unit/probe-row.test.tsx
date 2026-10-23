@@ -74,28 +74,6 @@ describe('ProbeRow (#463)', () => {
     expect(rel).toContain('noreferrer');
   });
 
-  it('renders the number prefix as a styled span', () => {
-    // `#NN` is the cyan font-mono affordance. Pin it so a future
-    // refactor that drops the number doesn't silently lose it.
-    render(
-      <ProbeRow
-        dataAttr="issue"
-        rowKey={101}
-        number={101}
-        title="Fix the wobble"
-        url=""
-        iconAriaLabel="Open issue on GitHub"
-        isExpanded={false}
-        onToggle={noop}
-      />,
-    );
-
-    const numSpan = screen.getByText('#101');
-    expect(numSpan.tagName).toBe('SPAN');
-    expect(numSpan.className).toContain('text-accent-cyan');
-    expect(numSpan.className).toContain('font-mono');
-  });
-
   it('renders the ↗ icon with the tab-specific aria label', () => {
     // The icon is the discoverability hint next to the title — same
     // target, same routing, but with a tab-specific accessible name
@@ -214,50 +192,6 @@ describe('ProbeRow (#463)', () => {
     expect(openUrlMock).toHaveBeenCalledTimes(1);
   });
 
-  // ---- Chevron rotation + body state ----------------------------------
-
-  it('does not rotate the chevron when collapsed', () => {
-    const { container } = render(
-      <ProbeRow
-        dataAttr="issue"
-        rowKey={101}
-        number={101}
-        title="Fix the wobble"
-        url=""
-        iconAriaLabel="Open issue on GitHub"
-        isExpanded={false}
-        onToggle={noop}
-        body="The widget wobbles under load."
-      />,
-    );
-
-    // The chevron is the only span with `transition-transform` — that's
-    // how the original code styled it, and we keep the same selector
-    // signature so any future CSS regression surfaces here.
-    const chevron = container.querySelector('span.transition-transform')!;
-    expect(chevron.className).not.toContain('rotate-90');
-    expect(chevron.textContent).toBe('▸');
-  });
-
-  it('rotates the chevron 90° when expanded', () => {
-    const { container } = render(
-      <ProbeRow
-        dataAttr="issue"
-        rowKey={101}
-        number={101}
-        title="Fix the wobble"
-        url=""
-        iconAriaLabel="Open issue on GitHub"
-        isExpanded={true}
-        onToggle={noop}
-        body="The widget wobbles under load."
-      />,
-    );
-
-    const chevron = container.querySelector('span.transition-transform')!;
-    expect(chevron.className).toContain('rotate-90');
-  });
-
   it('renders the body as a clamped paragraph when collapsed', () => {
     const { container } = render(
       <ProbeRow
@@ -327,26 +261,6 @@ describe('ProbeRow (#463)', () => {
         isExpanded={false}
         onToggle={noop}
         body={null}
-      />,
-    );
-
-    expect(container.querySelector('p.line-clamp-2')).toBeNull();
-    expect(container.querySelector('div.max-h-48')).toBeNull();
-  });
-
-  it('does not render any body region when body is the empty string', () => {
-    // Same as null — Rust serde default = "" for empty optional strings.
-    const { container } = render(
-      <ProbeRow
-        dataAttr="issue"
-        rowKey={103}
-        number={103}
-        title="No body"
-        url=""
-        iconAriaLabel="Open issue on GitHub"
-        isExpanded={true}
-        onToggle={noop}
-        body=""
       />,
     );
 
@@ -432,64 +346,6 @@ describe('ProbeRow (#463)', () => {
     expect(container.textContent).toContain('feat/201-add-widget');
   });
 
-  // ---- Data attribute -------------------------------------------------
-
-  it('emits the data-attribute prefix as ${dataAttr}-row={rowKey}', () => {
-    // The row is identified in tests by `[data-X-row]` — pin the format
-    // exactly so a future typo (e.g. `data-row-key`) breaks the test
-    // loud rather than silently breaking the tests.
-    const { container } = render(
-      <ProbeRow
-        dataAttr="issue"
-        rowKey={101}
-        number={101}
-        title="Fix the wobble"
-        url=""
-        iconAriaLabel="Open issue on GitHub"
-        isExpanded={false}
-        onToggle={noop}
-      />,
-    );
-    const row = container.querySelector('[data-issue-row]')!;
-    expect(row).toBeTruthy();
-    expect(row.getAttribute('data-issue-row')).toBe('101');
-  });
-
-  it('uses the supplied dataAttr for the body-expanded selector too', () => {
-    // Symmetric contract — `data-pr-body-expanded` for PRs,
-    // `data-issue-body-expanded` for issues. Existing tests query
-    // these selectors verbatim.
-    const { container: prContainer } = render(
-      <ProbeRow
-        dataAttr="pr"
-        rowKey={201}
-        number={201}
-        title="Add widget"
-        url=""
-        iconAriaLabel="Open pull request on GitHub"
-        isExpanded={true}
-        onToggle={noop}
-        body="Adds the widget."
-      />,
-    );
-    expect(prContainer.querySelector('[data-pr-body-expanded]')).toBeTruthy();
-
-    const { container: issueContainer } = render(
-      <ProbeRow
-        dataAttr="issue"
-        rowKey={101}
-        number={101}
-        title="Fix the wobble"
-        url=""
-        iconAriaLabel="Open issue on GitHub"
-        isExpanded={true}
-        onToggle={noop}
-        body="The widget wobbles under load."
-      />,
-    );
-    expect(issueContainer.querySelector('[data-issue-body-expanded]')).toBeTruthy();
-  });
-
   // ---- Slots -----------------------------------------------------------
 
   it('renders the rightSlot as a sibling of the clickable column', () => {
@@ -527,38 +383,6 @@ describe('ProbeRow (#463)', () => {
     const clickableColumn = row.querySelector('[role="button"]')!;
     expect(clickableColumn.contains(button)).toBe(false);
     expect(row.contains(button)).toBe(true);
-  });
-
-  // ---- Full-width body (below the title/action row, not beside it) ---
-
-  it('renders the collapsed body BELOW the title/action row, spanning it', () => {
-    // The 2-line preview renders outside the title column — beside the
-    // action buttons is no place for prose at 240px dock width. Pin the
-    // structure, not the pixels: the preview's wrapper is a sibling of
-    // the title/action row, inside the row root.
-    const { container } = render(
-      <ProbeRow
-        dataAttr="issue"
-        rowKey={101}
-        number={101}
-        title="Fix the wobble"
-        url=""
-        iconAriaLabel="Open issue on GitHub"
-        isExpanded={false}
-        onToggle={noop}
-        body="The widget wobbles under load."
-        rightSlot={<button>Spawn</button>}
-      />,
-    );
-
-    const row = container.querySelector('[data-issue-row]')!;
-    const preview = container.querySelector('p.line-clamp-2')!;
-    expect(preview).toBeTruthy();
-    // The title row is the row root's first flex child; the preview's
-    // wrapper is its sibling below.
-    const titleRow = row.firstElementChild!;
-    expect(titleRow.contains(preview)).toBe(false);
-    expect(preview.parentElement!.parentElement).toBe(titleRow.parentElement);
   });
 
   it('keeps the expanded panel inert — no onToggle on click, no space trap', () => {

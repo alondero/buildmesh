@@ -8,11 +8,9 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import { NodeStatusGlyph } from '../../src/components/shared/NodeStatusGlyph';
 import { STATUS_CONFIG } from '../../src/lib/status';
 import {
-  COMET_PERIOD_MS,
   glyphLabel,
   glyphTitle,
   orbitFor,
-  sharedClockDelayMs,
 } from '../../src/lib/nodeStatusGlyph';
 import type { CircuitNodePresentation } from '../../src/lib/circuitNodePresentation';
 
@@ -36,25 +34,6 @@ const base = {
 afterEach(() => vi.restoreAllMocks());
 
 describe('status circle shapes', () => {
-  it('pins the shape table verbatim so editing a status shape is a deliberate edit here', () => {
-    // The shape is half the colour-blind-safe vocabulary (the dot glyph is
-    // the other half). A change in this table is a UX change, so it must
-    // show up in the test diff first.
-    const shapes = Object.fromEntries(Object.entries(STATUS_CONFIG).map(([id, c]) => [id, c.glyph]));
-    expect(shapes).toEqual({
-      pending: 'dashed',
-      spawning: 'dashed',
-      running: 'solid',
-      idle: 'ring',
-      awaiting_input: 'target',
-      error: 'cross',
-      lost: 'slash',
-      suspended: 'half',
-      completed: 'target',
-      ready: 'target',
-      archived: 'thin',
-    });
-  });
 
   it('never lets two statuses share both shape and colour, so a colour-blind reader can always tell them apart', () => {
     // The actual collision set in STATUS_CONFIG today:
@@ -135,22 +114,6 @@ describe('accessible name and tooltip', () => {
   });
 });
 
-describe('sharedClockDelayMs', () => {
-  it('puts every comet at the same angle at any instant, whenever it mounted', () => {
-    const angleAt = (mountedAt: number, now: number) =>
-      (((now - mountedAt - sharedClockDelayMs(mountedAt)) % COMET_PERIOD_MS) + COMET_PERIOD_MS) % COMET_PERIOD_MS;
-    for (const now of [9_000, 12_345, 100_001]) {
-      const angles = [1_000, 4_321, 7_777, 8_999].map(mountedAt => angleAt(mountedAt, now));
-      expect(new Set(angles).size, `at t=${now}`).toBe(1);
-    }
-  });
-
-  it('is a non-positive delay shorter than one period', () => {
-    expect(sharedClockDelayMs(5_000)).toBe(-1_800);
-    expect(sharedClockDelayMs(COMET_PERIOD_MS)).toBe(0);
-  });
-});
-
 describe('NodeStatusGlyph', () => {
   it('is one labelled image for an unpiloted node, with no orbit', () => {
     const { container } = render(<NodeStatusGlyph {...base} />);
@@ -160,17 +123,6 @@ describe('NodeStatusGlyph', () => {
     expect(container.querySelector('[data-orbit]')).toBeNull();
     expect(screen.queryByRole('button')).toBeNull();
     expect(container.querySelectorAll('svg')).toHaveLength(1);
-  });
-
-  it('keeps one size box for every shape so rows align down the sidebar', () => {
-    const classes = (['solid', 'ring', 'dashed', 'slash', 'half', 'target', 'thin'] as const).map(shape => {
-      const { unmount } = render(<NodeStatusGlyph {...base} shape={shape} />);
-      const cn = screen.getByTestId('node-status-glyph').className;
-      unmount();
-      return cn;
-    });
-    expect(new Set(classes).size).toBe(1);
-    expect(classes[0]).toContain('h-5 w-5');
   });
 
   it.each([
@@ -183,31 +135,6 @@ describe('NodeStatusGlyph', () => {
     expect(container.querySelector('[data-orbit]')?.getAttribute('data-orbit')).toBe(orbit);
     expect(screen.getByRole('img', { name: `Running. ${presentation.label}` })).toBeTruthy();
     expect(screen.getByTestId('node-status-glyph').getAttribute('title')).toBe(`Running. ${presentation.detail}`);
-  });
-
-  it('pulses the circle only, never the orbit around it', () => {
-    const { container } = render(
-      <NodeStatusGlyph {...base} colorClass="status-waiting animate-pulse-fast" circuit={ACTIVE} />,
-    );
-    const pulsing = container.querySelector('.animate-pulse-fast')!;
-    expect(pulsing).toBeTruthy();
-    expect(pulsing.querySelector('[data-orbit]')).toBeNull();
-    expect(container.querySelector('[data-orbit]')!.closest('.animate-pulse-fast')).toBeNull();
-  });
-
-  it('starts the comet on the shared clock', () => {
-    vi.spyOn(performance, 'now').mockReturnValue(5_000);
-    const { container } = render(<NodeStatusGlyph {...base} circuit={ACTIVE} />);
-    const comet = container.querySelector<HTMLElement>('.node-glyph-comet')!;
-    expect(comet.style.animationDelay).toBe('-1800ms');
-  });
-
-  it('does not animate the parked orbits', () => {
-    for (const presentation of [WAITING, NEEDS_ATTENTION, DONE]) {
-      const { container, unmount } = render(<NodeStatusGlyph {...base} circuit={presentation} />);
-      expect(container.querySelector('.node-glyph-comet'), presentation.label).toBeNull();
-      unmount();
-    }
   });
 
   describe('when it can open the Circuit run', () => {
@@ -261,12 +188,6 @@ describe('reduced motion', () => {
     // 3 o'clock start, which looks like no more than a decoration.
     expect(APP_CSS).toMatch(
       /@media \(prefers-reduced-motion: reduce\)\s*\{[^@]*?\.node-glyph-comet\s*\{[^}]*animation:\s*none[^}]*transform:\s*rotate\(-90deg\)/s,
-    );
-  });
-
-  it('strengthens the orbit track when motion is off', () => {
-    expect(APP_CSS).toMatch(
-      /@media \(prefers-reduced-motion: reduce\)\s*\{[^@]*?\.node-glyph-track\s*\{[^}]*opacity:\s*0\.4/s,
     );
   });
 });

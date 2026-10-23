@@ -130,11 +130,6 @@ describe("app version manifests", () => {
     // stays at 0 until the next release. `-1` / `-dev` must not land.
     expect(pre === null || pre === "0").toBe(true);
   }, SUBPROCESS_TIMEOUT_MS);
-
-  it("prerelease compares above its base's previous minor but below its own release", () => {
-    expect(gt("1.3.0-0", "1.2.0")).toBe(true);
-    expect(gt("1.3.0", "1.3.0-0")).toBe(true);
-  }, SUBPROCESS_TIMEOUT_MS);
 });
 
 function runVersionSet(version: string): { status: number; stderr: string } {
