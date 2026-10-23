@@ -162,7 +162,12 @@ pub(crate) fn ready_to_submit(
 
 /// Submit a staged Circuit prefill after its prompt echo and quiet output prove readiness.
 /// The watcher exits after submission, ownership removal, or the bounded timeout.
-pub(crate) fn watch_and_submit_for_circuit(_app: tauri::AppHandle, node_id: i64, prefill: &str) {
+pub(crate) fn watch_and_submit_for_circuit(
+    app: tauri::AppHandle,
+    node_id: i64,
+    prefill: &str,
+    delivery_fence: Option<crate::services::circuit_prompt::InitialDeliveryFence>,
+) {
     // Owned copy for the spawned thread (`'static`); the prefill is a
     // small string (<= a few KB even for verbose loop prompts) but the
     // thread must outlive any stack frame, so a borrow is not enough.
@@ -179,6 +184,11 @@ pub(crate) fn watch_and_submit_for_circuit(_app: tauri::AppHandle, node_id: i64,
         loop {
             std::thread::sleep(POLL_EVERY);
             if Instant::now() >= deadline {
+                crate::services::circuit_prompt::initial_delivery_uncertain(
+                    &app,
+                    delivery_fence.as_ref(),
+                    "Harness startup timed out before submitting the initial prompt",
+                );
                 tracing::warn!(
                     "circuit launch({}): harness never became ready within {:?} — \
                      leaving the prefilled prompt for a human to submit",
@@ -188,6 +198,16 @@ pub(crate) fn watch_and_submit_for_circuit(_app: tauri::AppHandle, node_id: i64,
                 return;
             }
             // Node closed / pipeline aborted while we waited.
+            if let Some(fence) = &delivery_fence {
+                match crate::services::circuit_prompt::initial_pending(fence) {
+                    Ok(false) => return,
+                    Ok(true) => {}
+                    Err(error) => {
+                        tracing::warn!(node_id, %error, "Deferring initial prompt readiness check");
+                        continue;
+                    }
+                }
+            }
             if !evaluator::is_circuit_piloted(node_id) {
                 return;
             }
@@ -209,11 +229,16 @@ pub(crate) fn watch_and_submit_for_circuit(_app: tauri::AppHandle, node_id: i64,
                 Ok(attempt) => {
                     tracing::info!(node_id, attempt, "circuit prefill submitted");
                 }
-                Err(e) => tracing::warn!(
-                    "circuit launch({}): prefilled prompt was never submitted: {}",
-                    node_id,
-                    e
-                ),
+                Err(e) => {
+                    crate::services::circuit_prompt::initial_delivery_uncertain(
+                        &app,
+                        delivery_fence.as_ref(),
+                        &e,
+                    );
+                    tracing::warn!(
+                        "circuit launch({node_id}): prefilled prompt was never submitted: {e}"
+                    );
+                }
             }
             return;
         }

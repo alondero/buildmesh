@@ -128,6 +128,27 @@ placeholder; human approvals are attributed to the operator in the merge handoff
 attestation still cannot supply review approval. Other failures retain their
 backend-selected retry and already-done recovery actions.
 
+Unverified prompt deliveries offer **Copy payload** and **Sent manually** on
+the run card, Circuit Overview and history details. `circuit_prompt_payload`
+accepts a `CircuitPromptRequest` (run, step, attempt, expected revision) and
+returns the retained prepared terminal text, including a task-file pointer
+when staging chose one. It rejects obsolete checkpoints and changed files;
+it does not render the template again. Payload files live alongside the run's
+handoff files; history keeps their digest and submission identity, not text.
+Missing app-data storage preserves automatic delivery but cannot retain this
+manual fallback. Existing checkpoints without a retained payload keep their
+previous recovery actions.
+
+`manual_delivered` acknowledges the prompt journal without allocating another
+submission sequence. Inject steps resume through the normal `PromptDelivered`
+transition; initial and continuation prompts resume observing their agent.
+The already-armed handoff marker and result file remain intact. Downstream
+waits can inherit the newest submission and native turn binding from a retained
+ancestor attempt on the same agent; sibling steps and old attempts cannot supply
+that binding. The action bypasses stale terminal ownership, resolves input waits
+only through the correlated turn start (or preparation time when unavailable),
+and preserves later input requests, work evidence and review requirements.
+
 History shows issue-led outcomes, PR links when retained, and a **Shipped** label
 only when the run recorded GitHub merge confirmation. Review approval alone is
 not shipment. Search covers retained issue and PR fields plus `source.name`; agent reports and internal status values are excluded. Details and technical

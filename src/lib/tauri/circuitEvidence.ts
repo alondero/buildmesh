@@ -5,6 +5,10 @@ import type { CircuitRunAttention } from '../../types/generated/CircuitRunAttent
 import type { CircuitRunOverview } from '../../types/generated/CircuitRunOverview';
 import type { CircuitStepPushRequest } from '../../types/generated/CircuitStepPushRequest';
 import type { RecoveryRequest } from '../../types/generated/RecoveryRequest';
+import type { CircuitPromptRequest } from '../../types/generated/CircuitPromptRequest';
+
+export const circuitPromptPayload = (request: CircuitPromptRequest) =>
+  _invoke<string>('circuit_prompt_payload', { request });
 
 export const circuitRunHistory = (runId: number) =>
   _invoke<CircuitEvidenceView>('circuit_run_history', { runId });
