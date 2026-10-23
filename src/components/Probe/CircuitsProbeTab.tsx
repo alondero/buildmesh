@@ -1,3 +1,5 @@
+import { PROBE_TAB_DEFINITIONS } from '../../lib/probeContext';
+import { useProbeResource, type ProbeLoadContext } from '../../lib/probeResource';
 /**
  * CircuitsProbeTab — the Probe Panel's Autopilot Circuits tab
  * (spec #1205).
@@ -77,7 +79,6 @@ import {
   type CircuitBlueprintKind,
   type CircuitQueueEntry,
   type CircuitTriggerKind,
-  type CircuitWithRuns,
 } from '../../lib/tauri';
 import { recordedLabel } from '../Circuits/runIdentity';
 import { parseRunContext } from '../Circuits/runStepPresentation';
@@ -380,6 +381,18 @@ function SortableQueueRow({
   );
 }
 
+export async function loadCircuits({ meshId }: ProbeLoadContext) {
+  if (meshId === null) return null;
+  const [snapshot, outstanding] = await Promise.all([
+    listCircuitProbe(meshId, 10),
+    countCircuitRunAttention(meshId).catch(err => {
+      console.error('Failed to count circuit attention:', err);
+      return null;
+    }),
+  ]);
+  return { snapshot, outstanding };
+}
+
 export function CircuitsProbeTab() {
   const { activeMeshId } = useProbeContext();
   const openCircuitEditor = useUIStore((s) => s.openCircuitEditor);
@@ -390,17 +403,16 @@ export function CircuitsProbeTab() {
     activeMeshId === null ? undefined : s.meshesById.get(activeMeshId)
   );
   const meshRunCapacity = meshRow?.circuit_run_capacity ?? 0;
-  const [rows, setRows] = useState<CircuitWithRuns[]>([]);
-  const [queueWaits, setQueueWaits] = useState<Record<string, string>>({});
-  const [queue, setQueue] = useState<CircuitQueueEntry[]>([]);
-  /**
-   * The mesh whose snapshot is currently in `rows`/`queue`, or null while a
-   * fetch is in flight. A focus request must not be resolved against the
-   * previous mesh's rows (or the empty initial state) — that would misreport
-   * the target run as out-of-window and consume the request for good.
-   */
-  const [loadedMeshId, setLoadedMeshId] = useState<number | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const resource = useProbeResource(PROBE_TAB_DEFINITIONS.circuits.load, { meshId: activeMeshId }, String(activeMeshId));
+  const rows = useMemo(() => resource.state.data?.snapshot.circuits ?? [], [resource.state.data]);
+  const queue = useMemo(() => resource.state.data?.snapshot.queue ?? [], [resource.state.data]);
+  const queueWaits = resource.state.data?.snapshot.queue_waits ?? {};
+  const snapshotReady = resource.state.attempted;
+  const loadError = resource.state.error;
+  const load = resource.reload;
+  const setQueue = (next: CircuitQueueEntry[]) => resource.mutate(data => data === null ? null : ({
+    ...data, snapshot: { ...data.snapshot, queue: next },
+  }));
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [view, setView] = useState<CircuitProbeView>('activity');
@@ -416,13 +428,12 @@ export function CircuitsProbeTab() {
   // is still in state, and showing it above the incoming mesh's runs would have
   // the user confirm a number that is about neither the list nor the action.
   // `count: null` means the count is not known and the action stays hidden.
-  const [attentionCount, setAttentionCount] = useState<{ meshId: number; count: number | null } | null>(null);
+  const attentionCount = resource.state.data === null ? null : { meshId: activeMeshId, count: resource.state.data.outstanding };
   const [queueSelection, setQueueSelection] = useState<Set<number>>(new Set());
   const [queueVisibleCount, setQueueVisibleCount] = useState(QUEUE_PAGE_SIZE);
   const mountedRef = useRef(false);
   const activeMeshIdRef = useRef(activeMeshId);
   activeMeshIdRef.current = activeMeshId;
-  const loadRequestRef = useRef(0);
   // These snapshots only change when the backend payload or selected view
   // changes. In particular, the duration clock must not rebuild the row model.
   const allRuns = useMemo(() => rows.flatMap(({ runs }) => runs), [rows]);
@@ -462,7 +473,7 @@ export function CircuitsProbeTab() {
   // "Open Manage" is a dead end once the user is on Manage, so the empty
   // state there points at the Create disclosure instead (#2462).
   const emptyCircuitsHint =
-    loadedMeshId !== activeMeshId
+    !snapshotReady
       ? undefined
       : view === 'manage'
         ? 'Expand Create a circuit above to add one to the flow editor.'
@@ -498,7 +509,7 @@ export function CircuitsProbeTab() {
     // `rows`/`queue` are empty, and during a mesh switch they still hold the
     // OUTGOING mesh's data — resolving against either would misreport the run
     // as out-of-window and consume the request before the real data lands.
-    if (activeMeshId === null || loadedMeshId !== activeMeshId) return;
+    if (activeMeshId === null || !snapshotReady) return;
     const runId = pendingCircuitRunFocus;
     const detail = rows.flatMap(({ runs }) => runs).find((d) => d.run.id === runId) ?? null;
     if (detail !== null) {
@@ -523,7 +534,7 @@ export function CircuitsProbeTab() {
       setFocusNotice(`Run #${runId} is outside the loaded window — filtered History to it.`);
     }
     consumeCircuitRunFocus();
-  }, [pendingCircuitRunFocus, activeMeshId, loadedMeshId, rows, queue, consumeCircuitRunFocus]);
+  }, [pendingCircuitRunFocus, activeMeshId, snapshotReady, rows, queue, consumeCircuitRunFocus]);
 
   // Scroll after the commit that rendered the run, then clear the flash.
   useEffect(() => {
@@ -597,88 +608,13 @@ export function CircuitsProbeTab() {
     };
   }, []);
 
-  const load = useCallback(async () => {
-    const requestId = ++loadRequestRef.current;
-    if (!mountedRef.current) return;
-    if (activeMeshId === null) {
-      setRows([]);
-      setQueue([]);
-setQueueWaits({});
-      setAttentionCount(null);
-      setLoadedMeshId(null);
-      return;
-    }
-    try {
-      // Ledger cards and the complete queue hydrate through one IPC payload.
-      // `limit` bounds ordinary terminal history per circuit; attention
-      // (failed / needs-review, up to 50/circuit) and all live runs ride
-      // alongside so Activity stays exact while History stays windowed.
-      //
-      // The unbounded attention count is fetched alongside it rather than after
-      // it. It cannot come from this payload (attention is windowed at 50 per
-      // circuit), and awaiting it sequentially would render the runs one frame
-      // before their count — a toolbar whose runs are listed but whose bulk
-      // action is missing, then appears.
-      //
-      // If the count fails we deliberately show NO bulk action rather than
-      // falling back to the windowed number: a windowed count here is the exact
-      // understatement this command exists to prevent — the user would confirm
-      // "Dismiss 50" and watch more runs than that get acknowledged. The ledger
-      // still renders; only the action that cannot describe itself honestly is
-      // withheld.
-      const [snapshot, outstanding] = await Promise.all([
-        listCircuitProbe(activeMeshId, 10),
-        countCircuitRunAttention(activeMeshId).catch((err) => {
-          console.error('Failed to count circuit attention:', err);
-          return null;
-        }),
-      ]);
-      if (requestId !== loadRequestRef.current) return;
-      setRows(snapshot.circuits);
-      setQueue(snapshot.queue);
-      setQueueWaits(snapshot.queue_waits ?? {});
-      setQueueSelection((prev) => {
-        const live = new Set(snapshot.queue.map((e) => e.run.id));
-        const next = new Set<number>();
-        for (const id of prev) if (live.has(id)) next.add(id);
-        return next;
-      });
-      setAttentionCount({ meshId: activeMeshId, count: outstanding });
-      setLoadError(null);
-      setLoadedMeshId(activeMeshId);
-    } catch (err) {
-      if (requestId !== loadRequestRef.current) return;
-      console.error('Failed to load circuits:', err);
-      setLoadError(formatError(err));
-      // The fetch is over (even though it failed), so a pending focus request
-      // must not wait forever; absence of the run is then a real answer.
-      setLoadedMeshId(activeMeshIdRef.current === activeMeshId ? activeMeshId : null);
-    }
-  }, [activeMeshId]);
-
   useEffect(() => {
-    // Any mesh change invalidates the snapshot identity: `rows` still belongs
-    // to the outgoing mesh until the new fetch lands, and a focus request must
-    // wait for that rather than resolve against stale data.
-    setLoadedMeshId(null);
-    // A confirmation armed against the outgoing mesh must not survive the
-    // switch: its number describes runs the user was looking at, while the
-    // handler would act on the incoming mesh.
     setConfirmDismissAllAttention(false);
-    // Drop the count too. Scoping it to its mesh id stops it rendering over the
-    // wrong mesh, but it does not survive a round trip: if the new mesh's fetch
-    // fails, the count stays in state, and returning to the original mesh makes
-    // its id match again — re-showing a number fetched before that mesh's runs
-    // could have changed, next to a confirmation that would dismiss them.
-    // Invalidating here keeps the control hidden until the current load
-    // supplies a count of its own.
-    setAttentionCount(null);
-    void load();
-    return () => {
-      // Invalidate an in-flight snapshot before a mesh switch or unmount.
-      loadRequestRef.current += 1;
-    };
-  }, [load]);
+    setQueueSelection(new Set());
+  }, [activeMeshId]);
+  useEffect(() => {
+    setQueueSelection(previous => new Set([...previous].filter(id => queue.some(entry => entry.run.id === id))));
+  }, [queue]);
 
   // Live circuit events refresh the snapshot.
   useEffect(() => {
@@ -831,7 +767,7 @@ setQueueWaits({});
     <div className="flex flex-col h-full min-h-0 text-sm" data-testid="circuits-probe-tab">
       <div className="px-3 py-2 border-b border-border-subtle shrink-0">
         <p className="text-xs text-text-secondary mb-2" role="status" data-testid="circuits-status">
-          {loadedMeshId === activeMeshId ? statusText : loadError ? 'Circuits unavailable' : 'Loading circuits…'}
+          {snapshotReady ? statusText : loadError ? 'Circuits unavailable' : 'Loading circuits…'}
         </p>
 
         <div
@@ -1031,7 +967,7 @@ setQueueWaits({});
       />
           </details>
         </section>}
-        {view === 'activity' && loadedMeshId === activeMeshId && <section className="p-3 border-b border-border-subtle" aria-label="Run slots">
+        {view === 'activity' && snapshotReady && <section className="p-3 border-b border-border-subtle" aria-label="Run slots">
           <div className="flex justify-between gap-2 text-xs mb-2">
             <span className="font-semibold text-text-primary">{meshActiveRuns} / {meshRunCapacity || '—'} slots occupied</span>
             <button type="button" className="text-accent-cyan min-h-[24px]" onClick={() => setView('manage')}>Configure</button>
@@ -1117,8 +1053,8 @@ setQueueWaits({});
             )}
           </section>
         )}
-        {view === 'activity' && loadedMeshId === activeMeshId && activityStats.activeCount === 0 && rows.length > 0 && <EmptyState label="Ready for work" hint="No runs are active. Check the queue or trigger a circuit in Manage." />}
-        {view === 'history' && loadedMeshId === activeMeshId && listedRows.length === 0 && rows.length > 0 && (
+        {view === 'activity' && snapshotReady && activityStats.activeCount === 0 && rows.length > 0 && <EmptyState label="Ready for work" hint="No runs are active. Check the queue or trigger a circuit in Manage." />}
+        {view === 'history' && snapshotReady && listedRows.length === 0 && rows.length > 0 && (
           <EmptyState
             label={historyEmptyState.label}
             hint={historyEmptyState.hint}
@@ -1127,7 +1063,7 @@ setQueueWaits({});
         {view !== 'queue' && (rows.length === 0 ? (
           <div className="p-4">
             <EmptyState
-              label={loadedMeshId === activeMeshId ? 'No circuits yet' : loadError ? 'Circuits unavailable' : 'Loading circuits…'}
+              label={snapshotReady ? 'No circuits yet' : loadError ? 'Circuits unavailable' : 'Loading circuits…'}
               hint={emptyCircuitsHint}
             />
           </div>
@@ -1267,7 +1203,7 @@ setQueueWaits({});
                             const meshId = activeMeshIdRef.current;
                             const nextRunId = await continueCircuitReview(detail.run.id);
                             if (mountedRef.current && activeMeshIdRef.current === meshId) {
-                              setLoadedMeshId(null);
+                              resource.invalidate();
                               useUIStore.getState().focusCircuitRun(nextRunId);
                             }
                           })}

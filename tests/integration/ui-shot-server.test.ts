@@ -1,4 +1,7 @@
 import { createServer } from 'node:net';
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { startDevServer, stopDevServer } from '../../scripts/ui-shot-server.mjs';
 
@@ -50,6 +53,46 @@ afterEach(async () => {
 });
 
 describe('ui-shot Vite server', () => {
+  it('isolates optimizer caches for concurrent servers and removes them on stop', async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), 'buildmesh-vite-caches-'));
+    const owned: any[] = [];
+    const dependencies: URL[] = [];
+    try {
+      // Warm the first graph before starting the second. Each must remain
+      // readable after the other server initializes its optimizer.
+      for (let i = 0; i < 2; i++) {
+        const url = `http://127.0.0.1:${await freePort()}`;
+        const child = await startDevServer(url, { cacheRoot });
+        expect(child).not.toBeNull();
+        owned.push(child);
+        children.add(child);
+        const entry = await fetch(`${url}/src/main.tsx`);
+        expect(entry.ok).toBe(true);
+        const imports = [...(await entry.text()).matchAll(/from\s+["']([^"']+\/deps\/[^"']+)["']/g)];
+        expect(imports.length).toBeGreaterThan(0);
+        dependencies.push(...imports.map(match => new URL(match[1], url)));
+      }
+      const directories = await readdir(cacheRoot);
+      expect(directories).toHaveLength(2);
+      const metadata = await Promise.all(directories.map(async directory => {
+        const file = join(cacheRoot, directory, 'deps/_metadata.json');
+        await expect.poll(async () => readFile(file, 'utf8').catch(() => ''), { timeout: 30000 }).not.toBe('');
+        return JSON.parse(await readFile(file, 'utf8'));
+      }));
+      for (const graph of metadata) expect(Object.keys(graph.optimized)).toContain('react');
+      for (const dependency of dependencies) {
+        const response = await fetch(dependency);
+        expect(response.status, `${dependency} must survive the other optimizer's startup`).toBe(200);
+      }
+      await Promise.all(owned.map(child => stopDevServer(child)));
+      expect(await readdir(cacheRoot)).toEqual([]);
+      for (const child of owned) children.delete(child);
+    } finally {
+      for (const child of owned) await stopDevServer(child);
+      await rm(cacheRoot, { recursive: true, force: true });
+    }
+  }, 120000);
+
   it('starts the worktree Vite entrypoint and stops the direct child', async () => {
     const port = await freePort();
     const url = `http://127.0.0.1:${port}`;

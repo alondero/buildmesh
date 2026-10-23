@@ -1026,20 +1026,15 @@ fn manual_worktree_removal_keeps_branch() {
 /// handle inside the tree. An open handle blocks `rmdir` on Windows until the
 /// whole process tree is killed.
 ///
-/// The child is owned by the returned value as a `ScopedChild`, and that value
-/// drops in the order that unpins the tree: the child first, then the worktree
-/// directory, then the parent repo. Issue #2139's audit is the reason — the old
-/// hand-rolled tuple was dropped left-to-right (worktree before the child), so
-/// a failed assertion leaked a directory-pinning process whose natural lifetime
-/// outlasted the test, and the directory teardown silently failed (the exact
-/// stray-sleeper signature from the issue).
+/// A fixture-owned Job Object cleans up descendants even if the production
+/// tree kill under test fails or kills only the shell. Cleanup is bounded and
+/// finishes before Rust drops the worktree and parent repository directories.
 #[cfg(windows)]
 struct PinnedWorktree {
-    /// Declared first, so it drops LAST.
-    _parent: TempDir,
+    locker: std::process::Child,
+    job: Option<crate::process_util::JobHandle>,
     worktree: TempDir,
-    /// Declared last, so it drops FIRST (releasing the pin).
-    locker: crate::env::test_helpers::ScopedChild,
+    _parent: TempDir,
 }
 
 #[cfg(windows)]
@@ -1060,12 +1055,67 @@ impl PinnedWorktree {
 
     /// Reap the (already killed) pinning child, releasing its handle table.
     fn reap_locker(&mut self) {
-        self.locker.reap();
+        self.wait_for_release(std::time::Duration::from_secs(10))
+            .expect("killed process tree must exit and release its output handle");
+    }
+
+    fn wait_for_release(&mut self, timeout: std::time::Duration) -> Result<(), String> {
+        // Reap without a blocking wait, then check the inherited grandchild
+        // handle. A surviving ping cannot satisfy the release condition.
+        use std::os::windows::fs::OpenOptionsExt;
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let exited = self
+                .locker
+                .try_wait()
+                .map_err(|error| error.to_string())?
+                .is_some();
+            let released = match fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(self.path().join("agent.lock"))
+            {
+                Ok(_) => true,
+                // Successful removal has already proved that the pin is gone.
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound && !self.path().exists() =>
+                {
+                    true
+                }
+                Err(_) => false,
+            };
+            if exited && released {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "process tree did not release its pin (shell exited: {exited})"
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for PinnedWorktree {
+    fn drop(&mut self) {
+        // This backstop is independent of the production tree walk being
+        // tested. The job contains ping even after its shell has exited.
+        if let Some(job) = self.job.take() {
+            job.terminate();
+            drop(job);
+        }
+        let _ = self.locker.kill();
+        if let Err(error) = self.wait_for_release(std::time::Duration::from_secs(10)) {
+            eprintln!("pinning fixture cleanup failed: {error}");
+        }
     }
 }
 
 #[cfg(windows)]
 fn worktree_pinned_by_process_tree() -> PinnedWorktree {
+    use std::io::Write;
     let dir = TempDir::new();
     let repo = init_repo(dir.path());
     branch_from_head(&repo, "wt-branch");
@@ -1086,15 +1136,64 @@ fn worktree_pinned_by_process_tree() -> PinnedWorktree {
     let lock_handle = fs::File::create(wt_dir.path().join("agent.lock")).expect("create lock file");
     let mut command = crate::process_util::command_no_window("cmd");
     command
-        .args(["/c", "ping -n 30 127.0.0.1"])
+        .args(["/d", "/q", "/c", "set /p ready= & ping -t 127.0.0.1"])
         .current_dir(wt_dir.path())
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::from(lock_handle));
 
-    PinnedWorktree {
+    let locker = command.spawn().expect("spawn pinning shell");
+    drop(command); // Release the parent's copy of the configured stdout handle.
+    let mut pinned = PinnedWorktree {
         _parent: dir,
         worktree: wt_dir,
-        locker: crate::env::test_helpers::ScopedChild::spawn(command),
+        locker,
+        job: None,
+    };
+    // Hold the shell on stdin until containment is established. Assigning a
+    // job after ping starts would leave a race in the fixture's own cleanup.
+    pinned.job = Some(
+        crate::process_util::JobHandle::contain(pinned.locker_pid())
+            .expect("contain pinning fixture before starting its grandchild"),
+    );
+    writeln!(pinned.locker.stdin.take().unwrap(), "ready").expect("release pinning shell");
+    // The shell's spawn is not the grandchild's readiness. Its first output
+    // proves ping inherited the pin before any test attempts to kill the tree.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while fs::metadata(pinned.path().join("agent.lock"))
+        .unwrap()
+        .len()
+        == 0
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "pinning grandchild never became ready"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
+    pinned
+}
+
+#[cfg(windows)]
+#[test]
+fn pinned_worktree_fixture_cleans_up_an_orphaned_grandchild() {
+    let mut pinned = worktree_pinned_by_process_tree();
+    let path = pinned.path().to_path_buf();
+    let parent = pinned._parent.path().to_path_buf();
+    // Model a broken tree kill: terminate only the shell. The grandchild must
+    // still pin the tree, and the bounded observation must report that failure.
+    pinned.locker.kill().unwrap();
+    assert!(pinned
+        .wait_for_release(std::time::Duration::from_millis(50))
+        .is_err());
+    drop(pinned);
+    assert!(
+        !path.exists(),
+        "fixture must remove its worktree after killing the orphan"
+    );
+    assert!(
+        !parent.exists(),
+        "fixture must remove its parent repository"
+    );
 }
 
 /// Reproduces the Windows close-node failure: while an agent process holds an
@@ -1129,6 +1228,9 @@ fn remove_worktree_succeeds_after_killing_process_tree() {
 
     remove_one_worktree(&pinned.path_str()).expect("prune succeeds once the tree is gone");
     assert!(!pinned.path().exists(), "working directory should be gone");
+    pinned
+        .wait_for_release(std::time::Duration::from_millis(50))
+        .expect("an already removed worktree must count as released during cleanup");
 }
 
 /// Issue #2173, second half: the removal's retry budget was 5 x 100 ms, and

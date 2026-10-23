@@ -12,7 +12,7 @@
  * load, so the palette render pass allocates nothing here.
  */
 import type { ProbeTab } from '../../stores/uiStore';
-import { PROBE_TAB_DEFINITIONS } from '../../lib/probeContext';
+import { PROBE_TAB_DEFINITIONS, PROBE_TAB_ORDER } from '../../lib/probeContext';
 import { PROBE_DESTINATION_COMMANDS } from '../../lib/omnibar/indexers';
 
 export interface ToolDiscoveryTile {
@@ -34,36 +34,6 @@ export function toolTileId(tab: ProbeTab): string {
   return `command-omnibar-tool-${tab}`;
 }
 
-const CODE_TABS = ['files', 'review'] as const;
-// Issue #1460 — Project Settings and Repository get their own group. The two
-// were siblings under "Code", which was the palette's version of the problem
-// the issue describes: configuration and maintenance looked like code
-// browsing. Splitting the group makes the distinction legible on the start
-// screen without adding any permanent navigation (the grid only renders
-// inside the open palette).
-const PROJECT_TABS = ['properties', 'worktrees'] as const;
-const GITHUB_TABS = ['issues', 'pulls'] as const;
-const AUTOMATE_TABS = ['circuits'] as const;
-const REMEMBER_TABS = ['sessions', 'scratchpad'] as const;
-const APP_TABS = ['usage', 'notifications'] as const;
-
-type GroupedTab =
-  | (typeof CODE_TABS)[number]
-  | (typeof PROJECT_TABS)[number]
-  | (typeof GITHUB_TABS)[number]
-  | (typeof AUTOMATE_TABS)[number]
-  | (typeof REMEMBER_TABS)[number]
-  | (typeof APP_TABS)[number];
-
-/** Single type-level exhaustiveness check: adding a `ProbeTab` fails the
- *  build until it is placed in a group, and a mistyped tab fails too. */
-type _AssertDiscoveryExhaustive =
-  Exclude<ProbeTab, GroupedTab> extends never
-    ? Exclude<GroupedTab, ProbeTab> extends never
-      ? unknown
-      : ['unknown tab in discovery groups', Exclude<GroupedTab, ProbeTab>]
-    : ['probe tab missing from discovery groups', Exclude<ProbeTab, GroupedTab>];
-
 function tile(tab: ProbeTab): ToolDiscoveryTile {
   const cmd = PROBE_DESTINATION_COMMANDS[`probe-${tab}`];
   return {
@@ -77,38 +47,20 @@ function tile(tab: ProbeTab): ToolDiscoveryTile {
  *  the per-group scope notes were clutter — the default scope (selected
  *  project) needs no restating, "App-wide" is named by its own heading, and
  *  the Agent Changes focus exception lives in that tile's description. */
-export const TOOL_DISCOVERY_GROUPS: readonly ToolDiscoveryGroup[] & _AssertDiscoveryExhaustive = [
-  {
-    id: 'code',
-    title: 'Code',
-    tiles: CODE_TABS.map(tile),
-  },
-  {
-    id: 'project',
-    title: 'Project',
-    tiles: PROJECT_TABS.map(tile),
-  },
-  {
-    id: 'github',
-    title: 'GitHub',
-    tiles: GITHUB_TABS.map(tile),
-  },
-  {
-    id: 'automate',
-    title: 'Automate',
-    tiles: AUTOMATE_TABS.map(tile),
-  },
-  {
-    id: 'remember',
-    title: 'Remember',
-    tiles: REMEMBER_TABS.map(tile),
-  },
-  {
-    id: 'app',
-    title: 'App-wide',
-    tiles: APP_TABS.map(tile),
-  },
-];
+const DISCOVERY_GROUPS = [
+  { id: 'code', title: 'Code' },
+  { id: 'project', title: 'Project' },
+  { id: 'github', title: 'GitHub' },
+  { id: 'automate', title: 'Automate' },
+  { id: 'remember', title: 'Remember' },
+  { id: 'app', title: 'App-wide' },
+] as const;
+export const TOOL_DISCOVERY_GROUPS: readonly ToolDiscoveryGroup[] = DISCOVERY_GROUPS.map(group => ({
+  ...group,
+  tiles: PROBE_TAB_ORDER.filter(tab => PROBE_TAB_DEFINITIONS[tab].discovery.group === group.id)
+    .sort((a, b) => PROBE_TAB_DEFINITIONS[a].discovery.order - PROBE_TAB_DEFINITIONS[b].discovery.order)
+    .map(tile),
+}));
 
 /** Flat tile order for DOM ids and the virtual active index. */
 export const TOOL_DISCOVERY_TILES: readonly ToolDiscoveryTile[] =
