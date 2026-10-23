@@ -1,2 +1,3 @@
 {
+  "tests/unit/harness-defaults-section.test.tsx > Settings — Agent Harness defaults reset clears via clear_harness_default and collapses the card back to empty": 2539
 }

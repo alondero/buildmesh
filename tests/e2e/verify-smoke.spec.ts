@@ -54,6 +54,7 @@
  */
 import { test, expect, Page } from '@playwright/test';
 import { expandMeshCards } from './utils/state-waits';
+import { openSettingsFromTitleBar } from './utils/title-bar';
 import { buildInitScript } from '../../scripts/ui-mock/tauri-mock.mjs';
 import type { ProviderInfo } from '../../src/types/generated/ProviderInfo';
 
@@ -213,7 +214,7 @@ for (const size of [{ width: 900, height: 600 }, { width: 1280, height: 800 }, {
         await expect(disclosure).toHaveAttribute('aria-expanded', 'false');
         await expect(disclosure).toBeFocused();
 
-        await page.getByRole('button', { name: 'Open settings', exact: true }).click();
+        await openSettingsFromTitleBar(page);
         const dialog = page.getByRole('dialog', { name: 'Settings', exact: true });
         const tabs = dialog.getByRole('tab');
         // Derived from the live tab count rather than pinned to an index: this

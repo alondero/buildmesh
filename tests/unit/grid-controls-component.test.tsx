@@ -248,3 +248,10 @@ describe('GridControls (issue #998)', () => {
     expect(className).toMatch(/\[&::-webkit-search-cancel-button\]:appearance-none/);
   });
 });
+
+it('widens the Search nodes input at the 900px tier so its placeholder is not clipped (#2421)', () => {
+  render(<GridControls />);
+  const input = screen.getByTestId('grid-search-input');
+  expect(input.className).toContain('max-[1099px]:w-32');
+  expect(input.className).not.toContain('max-[1099px]:w-24');
+});

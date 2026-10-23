@@ -23,6 +23,7 @@
 import { test, expect } from '@playwright/test';
 import { buildInitScript, defaultFixtures } from '../../scripts/ui-mock/tauri-mock.mjs';
 import type { ProviderInfo } from '../../src/types/generated/ProviderInfo';
+import { openSettingsFromTitleBar } from './utils/title-bar';
 
 const HARNESS_ID = 'codex';
 
@@ -119,7 +120,7 @@ const fixtures = {
 async function openEditor(page: import('@playwright/test').Page) {
   await page.addInitScript({ content: buildInitScript(fixtures) });
   await page.goto('/');
-  await page.getByRole('button', { name: 'Open settings', exact: true }).click();
+  await openSettingsFromTitleBar(page);
   const dialog = page.getByRole('dialog', { name: 'Settings', exact: true });
   await expect(dialog).toBeVisible();
   await dialog.getByRole('tab', { name: 'Launch Configurations' }).click();

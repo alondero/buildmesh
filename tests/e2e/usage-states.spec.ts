@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { openUsageFromTitleBar } from './utils/title-bar';
 import { buildInitScript, defaultFixtures } from '../../scripts/ui-mock/tauri-mock.mjs';
 
 const USAGE_FIXTURES = {
@@ -68,7 +69,7 @@ test.describe('explicit Usage Meter states', () => {
       }, panelWidth);
 
       await page.goto('/');
-      await page.getByTestId('titlebar-usage').click();
+      await openUsageFromTitleBar(page);
 
       const panel = page.getByTestId('usage-panel-anthropic');
       await expect(panel).toBeVisible();
