@@ -1,5 +1,13 @@
 {
   "tests/unit/omnibar-fuzzy-search.test.ts > performance budget (issue #1410 §3) searches 500+ items in under 5ms per query": 1833,
   "commands::prune::prune_tests::remove_worktree_succeeds_after_killing_process_tree": 2220,
-  "tests/integration/ui-shot.test.ts > ui-shot mock mode keeps the node title and trailing close visible in a 240px pane": 2515
+  "tests/integration/ui-shot.test.ts > ui-shot mock mode keeps the node title and trailing close visible in a 240px pane": 2515,
+  "tests/unit/companion.test.tsx > Companion Omnibar renders final Markdown and an actionable grid link": 2538,
+  "tests/integration/ui-shot-errors.test.ts > ui-shot fatal browser diagnostics fails a mounted page on an unexpected console error": 2538,
+  "tests/integration/ui-shot-errors.test.ts > ui-shot fatal browser diagnostics fails React duplicate-key warnings even at console.warn severity": 2538,
+  "tests/integration/ui-shot-errors.test.ts > ui-shot fatal browser diagnostics fails a mounted page on an uncaught page error": 2539,
+  "tests/integration/ui-shot-errors.test.ts > ui-shot fatal browser diagnostics fails React key warnings even at console.warn severity": 2539,
+  "tests/integration/ui-shot-errors.test.ts > ui-shot fatal browser diagnostics fails React hook-order warnings even at console.warn severity": 2539,
+  "tests/integration/ui-shot-server.test.ts > ui-shot Vite server starts the worktree Vite entrypoint and stops the direct child": 2539,
+  "tests/unit/harness-defaults-section.test.tsx > Settings — Agent Harness defaults reset clears via clear_harness_default and collapses the card back to empty": 2539
 }

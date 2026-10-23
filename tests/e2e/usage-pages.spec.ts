@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { openUsageFromTitleBar } from './utils/title-bar';
 import { buildInitScript, defaultFixtures } from '../../scripts/ui-mock/tauri-mock.mjs';
 
 const usagePage = { url: 'https://claude.ai/settings/usage', label: 'View usage' };
@@ -31,7 +32,7 @@ test('provider usage link fits a 240px dock and opens externally from a cached o
     window.localStorage.setItem('buildmesh.probe-panel-width', '240');
   });
   await page.goto('/');
-  await page.getByTestId('titlebar-usage').click();
+  await openUsageFromTitleBar(page);
   const panel = page.getByTestId('usage-panel-anthropic');
   const link = panel.getByRole('link', { name: /View usage for/ });
   await expect(link).toBeVisible();
