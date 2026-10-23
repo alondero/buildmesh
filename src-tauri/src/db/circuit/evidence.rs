@@ -641,15 +641,22 @@ fn upstream_submission_owner(
     let mut query = db.prepare("SELECT h.node_id,h.attempt FROM circuit_run_history h
         JOIN autopilot_circuit_run_steps s ON s.run_id=h.run_id AND s.node_id=h.node_id AND s.attempt=h.attempt
         WHERE h.run_id=?1 AND h.kind='prompt_submitted' AND json_extract(h.detail,'$.agent_node_id')=?2
-        AND json_extract(h.detail,'$.submission_seq')=?3 AND h.attempt<=?4 ORDER BY h.id DESC")?;
-    let rows = query.query_map(params![run_id, agent, newest, attempt], |r| {
+        AND json_extract(h.detail,'$.submission_seq')=?3 ORDER BY h.id DESC")?;
+    let rows = query.query_map(params![run_id, agent, newest], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)?))
     })?;
     let graph =
         run_graph(db, run_id).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
     for row in rows {
         let (owner, owner_attempt) = row?;
-        if (owner == node_id && owner_attempt == attempt) || graph.is_ancestor(node_id, &owner) {
+        // Attempts are local to a step. A cycle cannot authorize a different
+        // attempt of this same step through the ancestor branch.
+        let eligible = if owner == node_id {
+            owner_attempt == attempt
+        } else {
+            graph.is_ancestor(node_id, &owner)
+        };
+        if eligible {
             return Ok(Some((owner, owner_attempt)));
         }
     }

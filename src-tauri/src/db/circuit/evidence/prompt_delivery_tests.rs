@@ -307,8 +307,9 @@ fn a_manually_delivered_prompt_binds_the_subsequent_native_turn_and_stop() {
 #[test]
 fn manual_injection_keeps_the_turn_bound_across_its_successor_wait() {
     use crate::circuit::stepper::{advance, CircuitEvent, StepStatus};
-    for start_before_confirmation in [true, false] {
-        let (mut db, identity, mut request) = fixture(DeliveryKind::Inject);
+    for (send_attempt, start_before_confirmation) in [(1, true), (1, false), (2, true), (2, false)]
+    {
+        let (mut db, mut identity, mut request) = fixture(DeliveryKind::Inject);
         let mut graph = run_graph(&db, 1).unwrap();
         graph.nodes.push(crate::circuit::model::CircuitNode {
             id: "wait".into(),
@@ -326,6 +327,27 @@ fn manual_injection_keeps_the_turn_bound_across_its_successor_wait() {
             [graph.to_json().unwrap()],
         )
         .unwrap();
+        if send_attempt == 2 {
+            db.execute("UPDATE autopilot_circuit_run_steps SET attempt=2", [])
+                .unwrap();
+            record_prompt_submission_locked(&db, 1, "send", 2, 9, "run the tests").unwrap();
+            identity.submission_seq = 2;
+            append_history(
+                &db,
+                HistoryEvent {
+                    run_id: 1,
+                    node_id: Some("send"),
+                    attempt: Some(2),
+                    kind: "prompt_payload",
+                    detail: &serde_json::to_string(&identity).unwrap(),
+                    source: Some(SOURCE_PROMPT_SUBMISSION),
+                    disposition: Some(DISPOSITION_RECORDED),
+                },
+            )
+            .unwrap();
+            request.attempt = 2;
+            request.expected_revision = revision_inner(&db, 1).unwrap();
+        }
         if start_before_confirmation {
             receive_native_hook_locked(&mut db, &native("UserPromptSubmit", "turn-1", "start"))
                 .unwrap();
@@ -340,7 +362,7 @@ fn manual_injection_keeps_the_turn_bound_across_its_successor_wait() {
             &mut view,
             &CircuitEvent::PromptDelivered {
                 node_id: "send".into(),
-                attempt: 1,
+                attempt: send_attempt,
             },
         );
         assert_eq!(view.step("send").unwrap().status, StepStatus::Completed);
@@ -366,6 +388,13 @@ fn manual_injection_keeps_the_turn_bound_across_its_successor_wait() {
             &ops,
         )
         .unwrap();
+        // The stepper currently propagates the parent's attempt. Exercise the
+        // receipt boundary with independent durable counters as well.
+        db.execute(
+            "UPDATE autopilot_circuit_run_steps SET attempt=1 WHERE node_id='wait'",
+            [],
+        )
+        .unwrap();
         if !start_before_confirmation {
             receive_native_hook_locked(&mut db, &native("UserPromptSubmit", "turn-1", "start"))
                 .unwrap();
@@ -379,7 +408,7 @@ fn manual_injection_keeps_the_turn_bound_across_its_successor_wait() {
             .find(|r| r.source_id == "stop")
             .unwrap();
         assert!(stop.submission_correlated);
-        assert_eq!(stop.submission_seq, Some(1));
+        assert_eq!(stop.submission_seq, Some(identity.submission_seq));
         assert_eq!(stop.input_stamp.as_deref(), Some("manual-input"));
         // A second turn cannot reuse a submission just because its first
         // start was recorded against the downstream observer.
@@ -397,6 +426,82 @@ fn manual_injection_keeps_the_turn_bound_across_its_successor_wait() {
             .unwrap();
         assert!(!other.submission_correlated);
     }
+}
+
+#[test]
+fn ancestor_submission_keeps_attempt_lineage_and_latest_submission_fences() {
+    use crate::circuit::model::{CircuitEdge, CircuitNode};
+    let (db, _, _) = fixture(DeliveryKind::Inject);
+    let mut graph = run_graph(&db, 1).unwrap();
+    for id in ["wait", "sibling"] {
+        graph.nodes.push(CircuitNode {
+            id: id.into(),
+            kind: CircuitNodeKind::AwaitAgentTurn {
+                target_node_id: Some("$source".into()),
+            },
+        });
+    }
+    graph.nodes.push(CircuitNode {
+        id: "limit".into(),
+        kind: CircuitNodeKind::RetryLimit { max_retries: 3 },
+    });
+    graph.nodes.push(CircuitNode {
+        id: "trigger".into(),
+        kind: CircuitNodeKind::Manual,
+    });
+    for (from, to) in [
+        ("trigger", "send"),
+        ("trigger", "sibling"),
+        ("send", "wait"),
+        ("wait", "limit"),
+        ("limit", "send"),
+    ] {
+        graph.edges.push(CircuitEdge {
+            from: from.into(),
+            to: to.into(),
+            condition: Default::default(),
+        });
+    }
+    graph.validate().unwrap();
+    assert!(graph.is_ancestor("send", "send"));
+    db.execute(
+        "UPDATE autopilot_circuits SET graph_json=?1",
+        [graph.to_json().unwrap()],
+    )
+    .unwrap();
+    db.execute("UPDATE autopilot_circuit_run_steps SET attempt=2", [])
+        .unwrap();
+    record_prompt_submission_locked(&db, 1, "send", 2, 9, "run the tests").unwrap();
+    assert_eq!(
+        upstream_submission_owner(&db, 1, "wait", 1, 9).unwrap(),
+        Some(("send".into(), 2))
+    );
+    assert_eq!(
+        upstream_submission_owner(&db, 1, "send", 2, 9).unwrap(),
+        Some(("send".into(), 2))
+    );
+    assert_eq!(
+        upstream_submission_owner(&db, 1, "send", 1, 9).unwrap(),
+        None
+    );
+    assert_eq!(
+        upstream_submission_owner(&db, 1, "sibling", 1, 9).unwrap(),
+        None
+    );
+    db.execute("UPDATE autopilot_circuit_run_steps SET attempt=3", [])
+        .unwrap();
+    assert_eq!(
+        upstream_submission_owner(&db, 1, "wait", 1, 9).unwrap(),
+        None
+    );
+    // Restoring the owner still cannot revive a superseded agent submission.
+    db.execute("UPDATE autopilot_circuit_run_steps SET attempt=2", [])
+        .unwrap();
+    record_prompt_submission_locked(&db, 1, "sibling", 1, 9, "new input").unwrap();
+    assert_eq!(
+        upstream_submission_owner(&db, 1, "wait", 1, 9).unwrap(),
+        None
+    );
 }
 
 #[test]

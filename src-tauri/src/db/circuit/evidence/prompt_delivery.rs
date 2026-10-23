@@ -294,7 +294,8 @@ fn attest_locked(
             "The prepared prompt changed. Refresh before acting.",
         ));
     }
-    let run = super::super::ledger::get_circuit_run_inner(&tx, request.run_id)?.unwrap();
+    let run = super::super::ledger::get_circuit_run_inner(&tx, request.run_id)?
+        .ok_or_else(|| DbError::not_found("Circuit run no longer exists."))?;
     let mut view = recovery_view(&tx, &run)?;
     let node = &request.node_id;
     // Resolve old human waits while retaining the independently fenced native

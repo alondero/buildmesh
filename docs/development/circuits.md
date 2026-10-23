@@ -145,7 +145,9 @@ transition; initial and continuation prompts resume observing their agent.
 The already-armed handoff marker and result file remain intact. Downstream
 waits can inherit the newest submission and native turn binding from a retained
 ancestor attempt on the same agent; sibling steps and old attempts cannot supply
-that binding. The action bypasses stale terminal ownership, resolves input waits
+that binding. Ancestor and observer attempt counters need not match. Binding
+within the same step still requires an exact attempt match, including in bounded
+cycles. The action bypasses stale terminal ownership, resolves input waits
 only through the correlated turn start (or preparation time when unavailable),
 and preserves later input requests, work evidence and review requirements.
 
