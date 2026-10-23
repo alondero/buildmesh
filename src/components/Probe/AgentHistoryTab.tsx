@@ -1,3 +1,6 @@
+import { PROBE_TAB_DEFINITIONS } from '../../lib/probeContext';
+import { useProbeResource } from '../../lib/probeResource';
+import type { AgentNode } from '../../types/generated/AgentNode';
 import { useMemo, useRef, useState } from 'react';
 import { useAllAgentNodes, useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
@@ -6,8 +9,6 @@ import { listAgentHistory, reopenAgentNode } from '../../lib/tauri/history';
 import { formatError } from '../../lib/errorUtils';
 import { formatListTimestamp } from '../../lib/time';
 import { getNodeStatusConfig, STATUS_CONFIG } from '../../lib/status';
-import { useAsyncEffect } from '../../hooks/useAsyncEffect';
-import type { AgentNode } from '../../types/generated/AgentNode';
 import { ArchivedNodesTab } from './ArchivedNodesTab';
 import { ProbeTabBody } from './ProbeTabBody';
 import { LoadingState, RefreshControl } from '../shared/Spinner';
@@ -23,15 +24,22 @@ function absoluteTimestamp(iso: string): string | undefined {
   return Number.isNaN(then.getTime()) ? undefined : then.toLocaleString();
 }
 
+export async function loadHistory() {
+  const nodes = await listAgentHistory();
+  if (!Array.isArray(nodes)) throw new Error('Invalid agent history response');
+  return nodes;
+}
+
 export function AgentHistoryTab() {
   const live = useAllAgentNodes();
   const meshes = useMeshStore(s => s.meshes);
   const adoptNode = useAgentNodeStore(s => s.adoptAgentNode);
   const spawn = useAgentNodeStore(s => s.spawnAgent);
-  const [history, setHistory] = useState<AgentNode[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [reload, setReload] = useState(0);
+  const identity = live.map(n => n.id).join(',');
+  const resource = useProbeResource(PROBE_TAB_DEFINITIONS.sessions.load, { meshId: null }, 'host', { refreshToken: identity });
+  const { loading, error } = resource.state;
+  const history = useMemo(() => resource.state.data ?? [], [resource.state.data]);
+  const setError = resource.reportError;
   const [search, setSearch] = useState('');
   const [scope, setScope] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
@@ -41,16 +49,6 @@ export function AgentHistoryTab() {
   function activate(id: number) {
     if (!focusAgentNode(id)) setError('This agent is no longer in the workspace. Refresh history before opening it.');
   }
-  const identity = live.map(n => n.id).join(',');
-  useAsyncEffect(signal => {
-    setLoading(true); setError(null);
-    void listAgentHistory().then(nodes => {
-      if (signal.aborted) return;
-      if (!Array.isArray(nodes)) throw new Error('Invalid agent history response');
-      setHistory(nodes);
-    }).catch(cause => { if (!signal.aborted) setError(formatError(cause)); })
-      .finally(() => { if (!signal.aborted) setLoading(false); });
-  }, [reload, identity]);
   const nodes = useMemo(() => {
     const merged = new Map(history.map(n => [n.id, n]));
     for (const node of live) merged.set(node.id, node);
@@ -89,7 +87,7 @@ export function AgentHistoryTab() {
         {/* Issue #2461 — Discovered sessions mounts `ArchivedNodesTab`, which
             renders its own `ProbeToolbar` and Refresh control (issue #813).
             A second one here stacked two Refresh buttons ~50px apart. */}
-        {!discovered && <RefreshControl onRefresh={() => setReload(v => v + 1)} isRefreshing={loading} ariaLabel="Refresh agent history" />}
+        {!discovered && <RefreshControl onRefresh={() => void resource.reload()} isRefreshing={loading} ariaLabel="Refresh agent history" />}
       </div>
       {/* Issue #2461 — the "All repositories" option is Lifecycle-only, so in
           Discovered sessions this select was a blank zero-option control above
@@ -108,9 +106,9 @@ export function AgentHistoryTab() {
     </div>
     {error && <div className="shrink-0 min-w-0 border-b border-border-subtle p-3">
       <div role="alert" className="max-h-24 overflow-y-auto overflow-x-hidden break-all text-xs text-status-error">Agent history needs attention: {error}</div>
-      <button type="button" className="mt-2 min-h-[24px] rounded-md border border-border-default px-2 text-xs text-text-primary hover:bg-bg-card-hover" onClick={() => setReload(v => v + 1)}>Retry history</button>
+      <button type="button" className="mt-2 min-h-[24px] rounded-md border border-border-default px-2 text-xs text-text-primary hover:bg-bg-card-hover" onClick={() => void resource.reload()}>Retry history</button>
     </div>}
-    {discovered ? selectedMesh ? <ArchivedNodesTab key={`${selectedMesh.id}:${reload}`} meshId={selectedMesh.id} meshPath={selectedMesh.path} />
+    {discovered ? selectedMesh ? <ArchivedNodesTab key={selectedMesh.id} meshId={selectedMesh.id} meshPath={selectedMesh.path} />
       : <p className="p-3 text-xs text-text-secondary">Add a repository to discover previous sessions.</p>
       : <ProbeTabBody>
         {loading && history.length === 0 && live.length === 0 ? <LoadingState label="Loading agent history…" /> : nodes.length === 0 ? <p className="text-xs text-text-secondary">{error ? 'Agent history unavailable.' : search || scope || statusFilter ? 'No matching agents. Clear search or filters to see more.' : 'No agent history yet.'}</p>

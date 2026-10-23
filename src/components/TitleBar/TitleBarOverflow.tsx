@@ -1,9 +1,10 @@
+import { PROBE_TAB_DEFINITIONS } from '../../lib/probeContext';
 import { useCallback, useRef, useState } from 'react';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 import { useUIStore } from '../../stores/uiStore';
 import { HeaderPillButton } from './HeaderPillButton';
-import { PROBE_TAB_ICONS, UsageIcon } from '../Probe/probeIcons';
+import { UsageIcon } from '../Probe/probeIcons';
 import { MobileIcon, SettingsIcon, ZoomIcon } from './utilityIcons';
 import { TerminalTextSize } from './ZoomControl';
 import { TOOL_DISCOVERY_TILES } from '../CommandOmnibar/toolDiscovery';
@@ -170,7 +171,7 @@ export function TitleBarOverflow({ includeUtilities = false }: { includeUtilitie
             </>
           )}
           {ENTRIES.map((entry) => {
-            const Icon = PROBE_TAB_ICONS[entry.tab];
+            const Icon = PROBE_TAB_DEFINITIONS[entry.tab].icon;
             const isActive = probeOpen && probeTab === entry.tab;
             return (
               <button

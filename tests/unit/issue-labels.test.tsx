@@ -263,4 +263,24 @@ describe('GitHub issue tags', () => {
     expect((await screen.findByRole('alert')).textContent).toContain('Circuit unavailable');
     expect(document.querySelector('[data-circuit-trigger-label]')).toBeNull();
   });
+
+  it('removes eligibility highlights when a previously successful Circuit lookup fails', async () => {
+    issue.labels = ['ready-for-agent'];
+    backend([circuit('ready-for-agent')]);
+    render(<GitIssuesTab />);
+    await waitFor(() => expect(document.querySelector('[data-circuit-trigger-label]')).not.toBeNull());
+    const original = vi.mocked(invoke).getMockImplementation()!;
+    vi.mocked(invoke).mockImplementation((cmd, args, opts) => cmd === 'list_circuits'
+      ? Promise.reject(new Error('Circuit unavailable')) : original(cmd, args, opts));
+    await userEvent.click(screen.getByRole('button', { name: 'Refresh issues' }));
+    expect((await screen.findByRole('alert')).textContent).toContain('Circuit unavailable');
+    expect(document.querySelector('[data-circuit-trigger-label]')).toBeNull();
+    const retry = deferred<AutopilotCircuit[]>();
+    vi.mocked(invoke).mockImplementation((cmd, args, opts) => cmd === 'list_circuits'
+      ? retry.promise : original(cmd, args, opts));
+    await userEvent.click(screen.getByRole('button', { name: 'Refresh issues' }));
+    expect(document.querySelector('[data-circuit-trigger-label]')).toBeNull();
+    await act(async () => retry.resolve([circuit('ready-for-agent')]));
+    expect(document.querySelector('[data-circuit-trigger-label]')).not.toBeNull();
+  });
 });

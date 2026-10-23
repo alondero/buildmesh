@@ -1,12 +1,13 @@
+import { PROBE_TAB_DEFINITIONS } from '../lib/probeContext';
 import { createDualKeyCache } from '../lib/pathInvalidatedCache';
-import { nodeChangedFiles, type GitStatus } from '../lib/tauri';
+import { type GitStatus } from '../lib/tauri';
 import { usePathInvalidatedQuery } from './usePathInvalidatedQuery';
 
 // Agent Changes is keyed by node id, but GIT_CHANGED events arrive with the
 // node's working-directory path. The dual-key cache keeps the list shared
 // across consumers while subscribing to the correct path for invalidation.
 const agentChangedFilesClient = createDualKeyCache<number, GitStatus[]>({
-  fetcher: nodeChangedFiles,
+  fetcher: nodeId => PROBE_TAB_DEFINITIONS.review.load({ meshId: null, nodeId }, new AbortController().signal),
   name: 'agentChangedFiles',
   // A busy agent can emit several file events per second. The list is cheap
   // compared with a rendered diff, but it still only needs to converge once

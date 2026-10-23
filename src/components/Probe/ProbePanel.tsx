@@ -46,7 +46,7 @@
  * `prefers-reduced-motion` via the global media query.
  */
 
-import { Suspense, lazy, useRef } from 'react';
+import { Suspense, useRef } from 'react';
 import { useUIStore, type ProbeTab } from '../../stores/uiStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import {
@@ -62,38 +62,15 @@ import { probeGroupId } from '../../lib/probeGroups';
 import { EmptyState } from '../shared/Spinner';
 import {
   CompassIcon,
-  PROBE_TAB_ICONS,
   SearchIcon,
   type ProbeIcon,
 } from './probeIcons';
 
-// Issue #1568 - lazy-load each tab so the initial bundle doesn't pay for
-// every inspector surface the user may never open. The tabs are 4-71 KB
-// each (RepositoryTab alone is 71 KB); until the inspector is opened
-// (probeOpen===true) the user's app boots without any of them. Even after
-// opening, only the active tab's chunk is fetched — switching tabs brings
-// the next one down on demand. The lazy components are intentionally
-// defined at module scope so they're not recreated on every render.
-// Issue #2409 — `scripts/check-bundle-composition.mjs` gates this split: if a
-// tab is ever imported statically it loses its lazy chunk and the gate fails
-// with the offending import. Add a new tab to its forbidden list too.
-const ProjectFilesTab = lazy(() => import('./ProjectFilesTab').then((m) => ({ default: m.ProjectFilesTab })));
-const AgentChangesTab = lazy(() => import('./AgentChangesTab').then((m) => ({ default: m.AgentChangesTab })));
-const ProjectSettingsTab = lazy(() => import('./ProjectSettingsTab').then((m) => ({ default: m.ProjectSettingsTab })));
-const RepositoryTab = lazy(() => import('./RepositoryTab').then((m) => ({ default: m.RepositoryTab })));
-const CircuitsProbeTab = lazy(() => import('./CircuitsProbeTab').then((m) => ({ default: m.CircuitsProbeTab })));
-const GitIssuesTab = lazy(() => import('./GitIssuesTab').then((m) => ({ default: m.GitIssuesTab })));
-const GitPullRequestsTab = lazy(() => import('./GitPullRequestsTab').then((m) => ({ default: m.GitPullRequestsTab })));
-const AgentHistoryTab = lazy(() => import('./AgentHistoryTab').then((m) => ({ default: m.AgentHistoryTab })));
-const ScratchpadTab = lazy(() => import('./ScratchpadTab').then((m) => ({ default: m.ScratchpadTab })));
-const UsageTab = lazy(() => import('./UsageTab').then((m) => ({ default: m.UsageTab })));
-const NotificationsTab = lazy(() => import('./NotificationsTab').then(m => ({ default: m.NotificationsTab })));
-
+// The registry owns chunk loading and destination dispatch.
 type ProbeTabDef = ProbeTabDefinition & { tab: ProbeTab; icon: ProbeIcon };
 
 export const PROBE_TABS: readonly ProbeTabDef[] = PROBE_TAB_ORDER.map((tab) => ({
   tab,
-  icon: PROBE_TAB_ICONS[tab],
   ...PROBE_TAB_DEFINITIONS[tab],
 }));
 
@@ -380,47 +357,12 @@ function ProbePanelContent() {
   );
 }
 
-/**
- * Switch-renders the active tab's content, falling back to a friendly empty
- * state when the derived context can't support the tab.
- */
+/** Resolve the adapter after applying the shared context guard. */
 function ProbeTabBody({ tab }: { tab: ProbeTab }) {
   const context = useProbeContext();
-  const definition = PROBE_TAB_DEFINITIONS[tab];
-
-  // Host-lens tabs render without a mesh selection. Today that's only
-  // the Usage tab (issue #601) — it shows every detected harness and
-  // keyed provider regardless of which mesh (if any) is focused. Adding
-  // a new host-lens tab means a new branch here.
-  if (definition.lens === 'host') {
-    if (tab === 'usage') return <UsageTab />;
-    if (tab === 'notifications') return <NotificationsTab />;
-    if (tab === 'sessions') return <AgentHistoryTab />;
-    return <ProbeTabPlaceholder tab={tab} />;
-  }
-
+  const { Component } = PROBE_TAB_DEFINITIONS[tab];
   if (!context.hasRequiredContext) return <ProbeContextEmptyState context={context} />;
-
-  // "Agent Changes" lists a specific node's edits — with no focused node
-  // there's nothing to inspect, even though a mesh is selected.
-  // The Agent lens reports a missing node through the same contract as a
-  // missing Mesh; its empty state names the lens and the recovery action.
-
-  // Real content for the tabs whose issues have landed. Routed after the
-  // explicit context guard so each destination gets the same missing-subject
-  // behavior. Mesh-lens Issues, PRs, and Archive do not require an active
-  // node; the Agent Changes destination does. Usage is Host-lens and is
-  // short-circuited above so it renders even with no Mesh selected.
-  if (tab === 'files') return <ProjectFilesTab />;
-  if (tab === 'review') return <AgentChangesTab />;
-  if (tab === 'properties') return <ProjectSettingsTab />;
-  if (tab === 'circuits') return <CircuitsProbeTab />;
-  if (tab === 'worktrees') return <RepositoryTab />;
-  if (tab === 'issues') return <GitIssuesTab />;
-  if (tab === 'pulls') return <GitPullRequestsTab />;
-  if (tab === 'scratchpad') return <ScratchpadTab />;
-
-  return <ProbeTabPlaceholder tab={tab} />;
+  return <Component />;
 }
 
 function ProbeContextEmptyState({ context }: { context: ProbeContext }) {
@@ -446,24 +388,6 @@ function ProbeContextEmptyState({ context }: { context: ProbeContext }) {
       hint="Mesh lens: select a mesh in the sidebar, or focus an agent node, to inspect its files, changes, and settings here."
       fill
       testId="probe-context-empty"
-    />
-  );
-}
-
-/**
- * Scaffold shown for a tab whose real content is still being built in a
- * follow-up issue. Deliberately understated so it reads as "in progress",
- * not "broken".
- */
-function ProbeTabPlaceholder({ tab }: { tab: ProbeTab }) {
-  const def = PROBE_TABS.find((t) => t.tab === tab) ?? PROBE_TABS[0];
-  const Icon = def.icon;
-  return (
-    <EmptyState
-      icon={<Icon className="w-5 h-5" />}
-      label={def.label}
-      hint="This tab's content is coming soon."
-      fill
     />
   );
 }

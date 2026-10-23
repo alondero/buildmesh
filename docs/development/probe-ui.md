@@ -34,6 +34,41 @@ just became selected — by the row itself (`MeshItem`), which owns the
 hand therefore survives later re-renders and only a newly opened Mesh or agent
 expands the row again.
 
+## Probe adapters and scoped reads
+
+For contributors changing a destination: add its icon, ownership metadata and
+`probeTabAdapter` entry to `PROBE_TAB_DEFINITIONS` in
+`src/lib/probeContext.ts`. The entry names the component and its read in one
+dynamic import. Palette command copy and tool-discovery membership also live
+in that entry. Destination IDs and order derive from the record; the panel
+renders its component, and test preloading traverses its `preload` functions.
+The adapter contains no rendering branches, and tab chunks remain lazy.
+
+`src/lib/probeResource.ts` owns non-path read state. `useProbeResource` takes a
+loader, load context and explicit subject key (including server-side filters).
+A refresh token invalidates the same subject without discarding its data.
+A subject change creates an empty resource and disposes the outgoing one.
+Within a subject, only the newest live request can commit data, error or
+completion. Reload retains that subject's last successful data; rejection keeps
+it with an error. Reads whose old data would assert current eligibility use
+`discardOnError`, which keeps that data absent through pending retries.
+Disposal aborts the signal and drops late success/rejection,
+even when IPC cannot cancel the backend operation. Returning to a subject starts
+a fresh owner. `mutate` aborts older reads before applying an acknowledged write.
+Manual busy feedback survives competing background reads until the latest read
+settles. Optional polling waits until each read settles before arming its timer.
+PR mergeability keeps its bounded retry budget and row disclosure rules in the tab.
+
+Existing shared owners remain authoritative: Project Files and Agent Changes
+route their registry reads through path-invalidated caches, settings and notes
+use the Mesh editing session,
+and Notifications reconciles through the notification store. Their registry
+loaders delegate to those owners rather than introducing a second mutation
+policy. The resource governs local read publication, not store-owned drafts or
+cross-surface reconciliation. `tests/unit/probe-resource.test.tsx` exercises the
+adapter contract for every destination in both completion orders, plus mutation,
+error, refresh and disposal behavior.
+
 ## Probe Context Lenses (issue #1456)
 Probe destinations have explicit ownership in `src/lib/probeContext.ts`; the
 complete `PROBE_TAB_DEFINITIONS` record is the source of truth for ownership

@@ -754,6 +754,8 @@ describe('GitIssuesTab (#378)', () => {
     // Loading state — no rows yet, so no flags yet (trivially).
     expect(screen.getByText(/Loading issues/i)).toBeTruthy();
 
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('get_repo_issues', expect.anything()));
+
     // Resolve with an issue that IS blocked by another that's also in the set.
     resolveIssues([
       {

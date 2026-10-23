@@ -114,6 +114,21 @@ describe('AgentHistoryTab (#2461)', () => {
     seedAgentNodes([]);
   });
 
+  it('retains Host history when live agents change and the background reload fails', async () => {
+    mockBackend();
+    render(<AgentHistoryTab />);
+    await screen.findByText('brave-fox');
+    let reject!: (error: Error) => void;
+    vi.mocked(invoke).mockImplementation(cmd => cmd === 'list_agent_history'
+      ? new Promise((_, no) => { reject = no; }) : Promise.resolve([]));
+    act(() => seedAgentNodes([node(2, 'new-live-agent', { status: 'running' })]));
+    expect(screen.getByText('brave-fox')).toBeTruthy();
+    await act(async () => reject(new Error('History offline')));
+    expect((await screen.findByRole('alert')).textContent).toContain('History offline');
+    expect(screen.getByText('brave-fox')).toBeTruthy();
+    expect(screen.getByText('new-live-agent')).toBeTruthy();
+  });
+
   it('gives the selected mode its own background and text colour, in a named group', async () => {
     mockBackend();
     render(<AgentHistoryTab />);
