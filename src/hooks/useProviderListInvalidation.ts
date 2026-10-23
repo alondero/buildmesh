@@ -1,10 +1,13 @@
 import { useEffect } from 'react';
-import { listen } from '@tauri-apps/api/event';
-import { PROVIDER_LIST_CHANGED_EVENT } from '../lib/tauri/provider';
+import {
+  PROVIDER_LIST_CHANGED_EVENT,
+  subscribeProviderListChanges,
+} from '../lib/streams/providerListStream';
 
 // Re-exported so existing importers keep working — the constant itself is
-// owned by `lib/tauri/provider` (one grep-able symbol for the Rust and TS
-// halves; lib-ward import direction, never hooks-ward).
+// owned by `lib/streams/providerListStream` (the module that subscribes to
+// the event), and the emitters in `lib/tauri/mesh.ts` and
+// `lib/tauri/preferences.ts` import the same symbol from there.
 export { PROVIDER_LIST_CHANGED_EVENT };
 
 /**
@@ -18,17 +21,17 @@ export { PROVIDER_LIST_CHANGED_EVENT };
  * (Sidebar spawn menu, Probe tabs that render provider pickers) need an
  * explicit cross-component signal to re-read — this hook provides it.
  *
+ * The event has exactly one subscriber in the app (issue #2531; proved by
+ * `tests/unit/live-event-stream-ownership.test.ts`): the owner module
+ * `lib/streams/providerListStream`, which publishes typed changes to
+ * each consumer. This hook is one of them.
+ *
  * Pass a stable reference (wrap with `useCallback` if your refresh function
  * would otherwise be a new closure on every render) so the listener isn't
  * torn down and re-attached on every parent re-render.
  */
 export function useProviderListInvalidation(refresh: () => void): void {
-  useEffect(() => {
-    const unlisten = listen(PROVIDER_LIST_CHANGED_EVENT, () => {
-      refresh();
-    });
-    return () => {
-      unlisten.then((fn) => fn());
-    };
-  }, [refresh]);
+  useEffect(() => subscribeProviderListChanges(() => {
+    refresh();
+  }), [refresh]);
 }

@@ -21,7 +21,7 @@
 - `tests/e2e/` — Playwright: webServer boots Vite on 1420; `verify-smoke` uses mock IPC, while chromium specs have additional real-runtime requirements. See `docs/agents/engineering.md` before launching.
 - `scripts/ui-shot.mjs` — ad-hoc UI verification + screenshots: Playwright attaches over CDP to the real dev-profile window (`scripts\run-dev.ps1 -CdpPort 9223`); see `.claude/skills/verify-ui/SKILL.md`
 - `docs/adr/` — Architecture Decision Records
-- `docs/learning/` — Enduring technical deep dives, harness capability reviews, and integration contracts (e.g. `harness-capabilities-matrix.md` — the consolidated harness × capability grid, `agy-harness-capabilities.md`, `grok-harness-capabilities.md`, `mcode-harness-capabilities.md`, `opencode-harness-capabilities.md`, `muse-harness-capabilities.md`)
+- `docs/learning/` — Enduring technical deep dives, harness capability reviews, and integration contracts (e.g. `harness-capabilities-matrix.md` — the consolidated harness × capability grid, `muse-harness-capabilities.md`)
 
 ## Where the architecture lives
 
@@ -33,7 +33,7 @@ For backend seams and module ownership, see the
 
 | Area | Owner doc | Owning code |
 |---|---|---|
-| Frontend IPC facets and transport ownership | [frontend-ipc.md](development/frontend-ipc.md) | `src/lib/tauri/`, `src/lib/tauri.ts`, `eslint.config.js` |
+| Frontend IPC facets, transport ownership, live event streams | [frontend-ipc.md](development/frontend-ipc.md) | `src/lib/tauri/`, `src/lib/tauri.ts`, `src/lib/streams/`, `eslint.config.js` |
 | Model providers, usage meters, credentials, spawn recipes | [providers.md](development/providers.md) | `src-tauri/src/preferences/`, `src-tauri/src/services/usage.rs`, `src-tauri/src/services/windows_cred.rs`, `src-tauri/src/agent/provider/` |
 | Terminals, xterm lifecycle, PTY input and output streaming | [terminals.md](development/terminals.md) | `src/components/Terminal/`, `src-tauri/src/pty/` |
 | Agent Node lifecycle, process registry, worktrees | [agent-nodes.md](development/agent-nodes.md) | `src-tauri/src/services/agent_node.rs`, `src-tauri/src/agent/`, `src-tauri/src/git/worktree/` |

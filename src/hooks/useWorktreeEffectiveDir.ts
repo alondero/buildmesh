@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
-import { listen } from '@tauri-apps/api/event';
 import { getWorktreeDirectoryConfig } from '../lib/tauri';
-import { WORKTREE_DIR_CHANGED_EVENT } from '../lib/events';
+import {
+  concernsMesh,
+  subscribeWorktreeDirectoryChanges,
+} from '../lib/streams/worktreeDirectoryStream';
 import { useAsyncEffect } from './useAsyncEffect';
 
 /**
@@ -48,10 +50,8 @@ export function useWorktreeEffectiveDir(meshId: number | null): string | null {
   useEffect(() => {
     if (meshId === null) return;
     let cancelled = false;
-    let unlisten: (() => void) | null = null;
-    listen<number | null>(WORKTREE_DIR_CHANGED_EVENT, (event) => {
-      const affected = event.payload;
-      if (affected !== null && affected !== undefined && affected !== meshId) return;
+    const release = subscribeWorktreeDirectoryChanges((change) => {
+      if (!concernsMesh(change, meshId)) return;
       getWorktreeDirectoryConfig(meshId)
         .then((cfg) => {
           if (!cancelled) setEffective(cfg.effective_directory);
@@ -59,13 +59,10 @@ export function useWorktreeEffectiveDir(meshId: number | null): string | null {
         .catch(() => {
           if (!cancelled) setEffective(null);
         });
-    }).then((fn) => {
-      if (cancelled) fn();
-      else unlisten = fn;
     });
     return () => {
       cancelled = true;
-      unlisten?.();
+      release();
     };
   }, [meshId]);
 

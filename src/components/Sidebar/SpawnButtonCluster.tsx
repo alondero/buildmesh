@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react';
-import { listen } from '@tauri-apps/api/event';
 import { ProviderDropdown } from './ProviderDropdown';
 import { ProviderIcon } from '../Providers/ProviderIcon';
-import { PROVIDER_LIST_CHANGED_EVENT } from '../../lib/tauri/provider';
+import { subscribeProviderListChanges } from '../../lib/streams/providerListStream';
 import { clearDefaultProviderPromises } from '../../lib/providerCache';
 import type { SpawnOption } from '../../lib/groups';
 
@@ -13,14 +12,18 @@ import type { SpawnOption } from '../../lib/groups';
  * shared cache N times per event. Instead there is exactly one
  * subscription: it evicts once, then each mounted cluster re-resolves its
  * own mesh's default (that per-mesh IPC is unavoidable — and cached).
+ *
+ * `provider-list-changed` itself has exactly one subscriber in the app
+ * (issue #2531; proved by `tests/unit/live-event-stream-ownership.test.ts`)
+ * — the owner module `lib/streams/providerListStream`. This fan-out is a
+ * consumer of it.
  */
 const defaultChangedSubscribers = new Set<() => void>();
-let defaultChangedListening = false;
+let releaseDefaultChanged: (() => void) | null = null;
 
 function ensureDefaultChangedListening(): void {
-  if (defaultChangedListening) return;
-  defaultChangedListening = true;
-  void listen(PROVIDER_LIST_CHANGED_EVENT, () => {
+  if (releaseDefaultChanged !== null) return;
+  releaseDefaultChanged = subscribeProviderListChanges(() => {
     clearDefaultProviderPromises();
     for (const refresh of defaultChangedSubscribers) refresh();
   });
@@ -28,7 +31,8 @@ function ensureDefaultChangedListening(): void {
 
 /** Test-only: drop the process-lifetime subscription between cases. */
 export function __resetDefaultChangedListeningForTests(): void {
-  defaultChangedListening = false;
+  releaseDefaultChanged?.();
+  releaseDefaultChanged = null;
   defaultChangedSubscribers.clear();
 }
 

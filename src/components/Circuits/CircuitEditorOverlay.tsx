@@ -14,8 +14,8 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import { listen } from '@tauri-apps/api/event';
 import { formatError } from '../../lib/errorUtils';
+import { subscribeCircuitRunUpdates } from '../../lib/streams/circuitRunStream';
 import {
   getCircuit,
   listCircuitRuns,
@@ -74,14 +74,18 @@ function LoadedCircuitEditor({
 
   // Live runs: the worker emits on every state change; refetch so node
   // overlays pulse/check/alert without leaving the canvas.
+  //
+  // `circuit-run-updated` is owned by `lib/streams/circuitRunStream`
+  // (issue #2531): one backend subscription for the whole app, and this
+  // overlay reads the typed updates instead of matching a raw payload.
   useEffect(() => {
     let disposed = false;
-    const unlisten = listen('circuit-run-updated', () => {
+    const release = subscribeCircuitRunUpdates(() => {
       if (!disposed) void load();
     });
     return () => {
       disposed = true;
-      void unlisten.then((fn) => fn());
+      release();
     };
   }, [load]);
 

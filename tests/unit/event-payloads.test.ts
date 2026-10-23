@@ -28,6 +28,10 @@ import { join, resolve } from 'node:path';
  * regression class by:
  *
  * 1. Walking `src/` for every `listen<T>(<event-name>, ...)` call.
+ *    The event name may be a string literal or a constant the file
+ *    declares itself — the live-stream owners (issue #2531) declare
+ *    their event name next to the subscription so the two are changed
+ *    together.
  * 2. Asserting `T` is NOT an inline literal `{ ... }` — if it is, the
  *    payload would drift from the Rust side on the next refactor.
  * 3. Asserting `T` either:
@@ -64,15 +68,33 @@ interface ListenCall {
   line: number;
 }
 
+/**
+ * String-literal constants declared in the file itself, e.g.
+ * `export const GIT_CHANGED = 'git-changed';`. A listener that names its
+ * event through one of these (`listen<T>(GIT_CHANGED, ...)`) is just as
+ * guardable as one that inlines the literal, and the stream owners
+ * (issue #2531) deliberately declare their event name next to the
+ * subscription so the two are changed together.
+ */
+function localEventNames(source: string): Map<string, string> {
+  const names = new Map<string, string>();
+  const constRe = /(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*=\s*['"]([^'"]+)['"]/g;
+  for (const m of source.matchAll(constRe)) names.set(m[1], m[2]);
+  return names;
+}
+
 function extractListenCalls(files: string[]): ListenCall[] {
   // Matches: listen<T>('event', ...), listen<T>("event", ...),
   //   listen<string | T>('event', ...) — union form used by
   //   BuildRunTerminalRegistry where the backend may send either a raw
   //   string OR a typed payload.
+  //   listen<T>(EVENT_NAME, ...) — the constant form used by the stream
+  //   owners, resolved against the file's own literal constants.
   // Captures the full generic expression up to the closing `>` so unions
-  // are preserved, then the leading string literal as the event name.
+  // are preserved, then the leading string literal (or the constant
+  // identifier) as the event name.
   const re =
-    /\blisten\s*<\s*([\s\S]*?)>\s*\(\s*['"]([a-zA-Z][a-zA-Z0-9_-]*)['"]/g;
+    /\blisten\s*<\s*([\s\S]*?)>\s*\(\s*(?:['"]([a-zA-Z][a-zA-Z0-9_-]*)['"]|([A-Za-z_$][\w$]*))/g;
   const calls: ListenCall[] = [];
 
   for (const file of files) {
@@ -82,10 +104,16 @@ function extractListenCalls(files: string[]): ListenCall[] {
     const cleaned = source
       .replace(/\/\*[\s\S]*?\*\//g, '')
       .replace(/\/\/.*$/gm, '');
+    const constants = localEventNames(cleaned);
 
     for (const m of cleaned.matchAll(re)) {
       const payloadType = m[1].trim();
-      const eventName = m[2];
+      // A quoted literal names the event directly; an identifier only
+      // does when the file declares it as a literal constant. Anything
+      // else (a parameter, a loop variable, a constant imported from
+      // elsewhere) is not an event name this guard can resolve.
+      const eventName = m[2] ?? (m[3] ? constants.get(m[3]) : undefined);
+      if (eventName === undefined) continue;
       const upto = cleaned.slice(0, m.index ?? 0);
       const line = upto.split('\n').length;
       calls.push({ eventName, payloadType, file, line });
