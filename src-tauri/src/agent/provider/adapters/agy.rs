@@ -115,7 +115,6 @@ const AGY_HOOKS: HookProvisioningSpec<'static> = HookProvisioningSpec {
         ownership: Ownership {
             fields: &[],
             anchors: &[],
-            decode_embedded_powershell: false,
         },
         events: &[
             EventRule {
@@ -153,7 +152,7 @@ fn ensure_hooks_json(
     command: &str,
     question: Option<(&str, &str)>,
 ) -> Result<(), String> {
-    let workspace = path
+    let target_dir = path
         .parent()
         .ok_or_else(|| "agy hooks.json has no parent directory".to_string())?;
     let overrides: Vec<(&'static str, &str)> = match question {
@@ -165,7 +164,7 @@ fn ensure_hooks_json(
         event_commands: &overrides,
         ..AGY_HOOKS
     };
-    provision_attention_hooks(&spec, workspace)
+    provision_attention_hooks(&spec, target_dir)
         .map(|_| ())
         .map_err(|error| error.to_string())
 }

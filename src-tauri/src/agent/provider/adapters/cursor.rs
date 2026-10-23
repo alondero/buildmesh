@@ -34,7 +34,7 @@
 
 use crate::agent::attention_hooks::{
     provision_attention_hooks, EventMerge, EventRule, HandlerShape, HookFormat,
-    HookProvisioningSpec, JsonHookShape, Ownership,
+    HookProvisioningSpec, JsonHookShape, Ownership, RequiredRoot,
 };
 use crate::agent::capabilities::{
     AttentionCapability, AttentionLaunchMode, PermissionModeOption, PERMISSION_MODE_UNATTENDED,
@@ -144,12 +144,11 @@ const CURSOR_HOOKS: HookProvisioningSpec<'static> = HookProvisioningSpec {
     format: HookFormat::Json(JsonHookShape {
         root_key: Some("hooks"),
         replace_root: false,
-        required_root: &[("version", "1")],
+        required_root: &[("version", RequiredRoot::Integer(1))],
         handler: HandlerShape::Command,
         ownership: Ownership {
             fields: &["command"],
             anchors: BUILDMESH_HOOK_ANCHORS,
-            decode_embedded_powershell: false,
         },
         events: &[EventRule {
             name: "stop",
@@ -164,14 +163,14 @@ const CURSOR_HOOKS: HookProvisioningSpec<'static> = HookProvisioningSpec {
 /// automation) survive; a re-provision over the expected handler does not
 /// rewrite the file (issue #886 idempotency invariant).
 fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
-    let workspace = path
+    let target_dir = path
         .parent()
         .ok_or_else(|| "cursor hooks.json has no parent directory".to_string())?;
     let spec = HookProvisioningSpec {
         command,
         ..CURSOR_HOOKS
     };
-    provision_attention_hooks(&spec, workspace)
+    provision_attention_hooks(&spec, target_dir)
         .map(|_| ())
         .map_err(|error| error.to_string())
 }

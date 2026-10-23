@@ -534,7 +534,12 @@ AGY, Claude Code, Cursor and Grok declare their JSON shape — file, root key,
 event list, matcher rules, handler shape and ownership anchors — as a
 `HookProvisioningSpec`; Kimi declares the TOML shape through the same
 `provision_attention_hooks` entry point, so a caller does not know which format
-its harness writes. The module also owns the idempotency comparison and the
+its harness writes. The entry point takes the directory holding that file, which
+is the project's config directory for a workspace harness (`.cursor`, `.claude`,
+`.agents`) and the harness's own global config directory for Grok and Kimi, whose
+hook files live outside the project. The module also owns the idempotency
+comparison — including a missing required root entry such as Cursor's
+`"version": 1`, which is persisted even when the events already match — and the
 unreadable-file wording, so a policy fix lands once instead of once per copy.
 
 Claude Code, Cursor, Grok and mcode share all three: their entry is a member of

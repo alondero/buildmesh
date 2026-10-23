@@ -5,7 +5,6 @@ const ANCHORS: &[&str] = &["/api/attention/", "BUILDMESH_PORT"];
 const OWNED_COMMAND: Ownership = Ownership {
     fields: &["command"],
     anchors: ANCHORS,
-    decode_embedded_powershell: false,
 };
 
 fn flat_json_shape() -> JsonHookShape {
@@ -43,7 +42,7 @@ fn read(path: &Path) -> String {
 fn json_flat_handler_is_pinned_byte_for_byte() {
     let temp = tempfile::tempdir().unwrap();
     let format = HookFormat::Json(JsonHookShape {
-        required_root: &[("version", "1")],
+        required_root: &[("version", RequiredRoot::Integer(1))],
         ..flat_json_shape()
     });
 
@@ -219,7 +218,6 @@ fn toml_ownership() -> Ownership {
     Ownership {
         fields: &["command"],
         anchors: &["BUILDMESH_SESSION_ID", "BUILDMESH_PORT"],
-        decode_embedded_powershell: true,
     }
 }
 
@@ -260,6 +258,45 @@ fn toml_hook_array_is_pinned_byte_for_byte() {
         read(&path),
         "# keep my preferences\ndefault_model = 'custom-model'\n\n[[hooks]]\n# user hook\nevent = 'Stop'\ncommand = 'echo user'\ntimeout = 2\n\n[[hooks]]\nevent = \"Stop\"\ncommand = \"callback\"\ntimeout = 10\n\n[[hooks]]\nevent = \"PreToolUse\"\nmatcher = \"AskUserQuestion|ExitPlanMode\"\ncommand = \"callback\"\ntimeout = 10\n"
     );
+}
+
+/// Both formats resolve each event's command the same way: a declared
+/// override wins, otherwise the spec's default callback is written.
+#[test]
+fn toml_events_honour_declared_command_overrides() {
+    let temp = tempfile::tempdir().unwrap();
+    let format = HookFormat::Toml(TomlHookShape {
+        root_key: "hooks",
+        timeout: 10,
+        ownership: toml_ownership(),
+        events: &[
+            TomlEventRule {
+                name: "Stop",
+                matcher: None,
+            },
+            TomlEventRule {
+                name: "PreToolUse",
+                matcher: Some("AskUserQuestion|ExitPlanMode"),
+            },
+        ],
+    });
+    let overrides = [("PreToolUse", "gate")];
+    let spec = HookProvisioningSpec {
+        file: "config.toml",
+        event_commands: &overrides,
+        ..provision_spec(format, "default")
+    };
+
+    let outcome = provision_attention_hooks(&spec, temp.path()).unwrap();
+
+    let written: toml_edit::DocumentMut = read(&outcome.path).parse().unwrap();
+    let commands: Vec<&str> = written["hooks"]
+        .as_array_of_tables()
+        .unwrap()
+        .iter()
+        .map(|hook| hook["command"].as_str().unwrap())
+        .collect();
+    assert_eq!(commands, vec!["default", "gate"]);
 }
 
 /// The malformed-file refusal is produced in one place, names the path,
@@ -354,7 +391,7 @@ fn required_root_values_are_checked_before_any_write() {
     let path = temp.path().join("hooks.json");
     std::fs::write(&path, "{\"version\": 2, \"hooks\": {\"stop\": []}}").unwrap();
     let format = HookFormat::Json(JsonHookShape {
-        required_root: &[("version", "1")],
+        required_root: &[("version", RequiredRoot::Integer(1))],
         ..flat_json_shape()
     });
 
@@ -366,6 +403,38 @@ fn required_root_values_are_checked_before_any_write() {
         "test hooks.json `version` must be 1; got 2"
     );
     assert_eq!(read(&path), "{\"version\": 2, \"hooks\": {\"stop\": []}}");
+}
+
+/// A missing required root entry is a document change of its own: a file whose
+/// hooks already match must still be rewritten so the schema reaches disk.
+#[test]
+fn a_missing_required_root_entry_is_persisted_even_when_hooks_match() {
+    let temp = tempfile::tempdir().unwrap();
+    let format = HookFormat::Json(JsonHookShape {
+        required_root: &[("version", RequiredRoot::Integer(1))],
+        ..flat_json_shape()
+    });
+    let command = "curl $BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID";
+    let spec = provision_spec(format, command);
+    assert!(
+        provision_attention_hooks(&spec, temp.path())
+            .unwrap()
+            .written
+    );
+
+    // Drop only the required entry, leaving the provisioned hooks untouched.
+    let path = temp.path().join("hooks.json");
+    let mut document: serde_json::Value = serde_json::from_str(&read(&path)).unwrap();
+    document.as_object_mut().unwrap().remove("version");
+    std::fs::write(&path, serde_json::to_string(&document).unwrap()).unwrap();
+
+    let repaired = provision_attention_hooks(&spec, temp.path()).unwrap();
+
+    assert!(repaired.written, "the schema repair must reach disk");
+    let on_disk: serde_json::Value = serde_json::from_str(&read(&path)).unwrap();
+    assert_eq!(on_disk["version"], 1);
+    assert_eq!(on_disk["hooks"]["stop"].as_array().unwrap().len(), 1);
+    assert_eq!(on_disk["hooks"]["stop"][0]["command"], command);
 }
 
 /// Ownership survives an encoded WindowsInterop callback, and Kimi's
@@ -388,7 +457,13 @@ fn ownership_survives_encoded_callbacks() {
     let wrapped = Ownership {
         fields: &["command"],
         anchors: &["BUILDMESH_SESSION_ID", "BUILDMESH_PORT"],
-        decode_embedded_powershell: true,
     };
     assert!(wrapped.owns_handler(&serde_json::json!({ "command": embedded })));
+
+    // A wrapper that embeds an unrelated PowerShell payload is still not ours.
+    let unrelated = format!(
+        "if defined OTHER powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
+        crate::env::encode_powershell("echo hello")
+    );
+    assert!(!wrapped.owns_handler(&serde_json::json!({ "command": unrelated })));
 }

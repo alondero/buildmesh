@@ -153,7 +153,6 @@ const BUILDMESH_HANDLER_ANCHORS: &[&str] = &["/api/attention/", "BUILDMESH_PORT"
 const GROK_OWNERSHIP: Ownership = Ownership {
     fields: &["url", "command"],
     anchors: BUILDMESH_HANDLER_ANCHORS,
-    decode_embedded_powershell: false,
 };
 
 /// Grok's hook file, declared once as provisioning data.
@@ -238,14 +237,14 @@ const GROK_HOOKS: HookProvisioningSpec<'static> = HookProvisioningSpec {
 /// rather than wiping user data. A file that does parse is merged, not
 /// replaced. A missing file is the happy path (fresh install).
 fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
-    let workspace = path
+    let target_dir = path
         .parent()
         .ok_or_else(|| "grok hooks.json has no parent directory".to_string())?;
     let spec = HookProvisioningSpec {
         command,
         ..GROK_HOOKS
     };
-    provision_attention_hooks(&spec, workspace)
+    provision_attention_hooks(&spec, target_dir)
         .map(|_| ())
         .map_err(|error| error.to_string())
 }

@@ -149,7 +149,6 @@ const BUILDMESH_HANDLER_ANCHORS: &[&str] =
 pub(super) const CLAUDE_OWNERSHIP: Ownership = Ownership {
     fields: &["command"],
     anchors: BUILDMESH_HANDLER_ANCHORS,
-    decode_embedded_powershell: false,
 };
 
 /// Claude Code's `settings.local.json` hook shape, declared once as
@@ -244,14 +243,14 @@ const CLAUDE_HOOKS: HookProvisioningSpec<'static> = HookProvisioningSpec {
 /// user-authored matcher groups. A missing file is the happy path (fresh
 /// install); only an existing-but-unparseable file is the failure case.
 fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
-    let workspace = path
+    let target_dir = path
         .parent()
         .ok_or_else(|| "settings.local.json has no parent directory".to_string())?;
     let spec = HookProvisioningSpec {
         command,
         ..CLAUDE_HOOKS
     };
-    provision_attention_hooks(&spec, workspace)
+    provision_attention_hooks(&spec, target_dir)
         .map(|_| ())
         .map_err(|error| error.to_string())
 }

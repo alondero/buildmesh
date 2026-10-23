@@ -38,7 +38,8 @@ static TOML_CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub struct HookProvisioningSpec<'a> {
     /// Harness id used in the trace line ("agy", "cursor", …).
     pub harness: &'static str,
-    /// File name inside the workspace directory, e.g. `hooks.json`.
+    /// File name inside the directory passed to
+    /// [`provision_attention_hooks`], e.g. `hooks.json`.
     pub file: &'static str,
     /// The file in the harness's own vocabulary, used in every rejection
     /// ("agy hooks.json"). The shared malformed refusal names the path; this
@@ -73,7 +74,7 @@ pub struct JsonHookShape {
     pub replace_root: bool,
     /// Root entries the file must carry. A missing entry is inserted; a
     /// different value is refused (Cursor's `"version": 1`).
-    pub required_root: &'static [(&'static str, &'static str)],
+    pub required_root: &'static [(&'static str, RequiredRoot)],
     /// The handler object written into every event.
     pub handler: HandlerShape,
     /// Which stored handler counts as Buildmesh's own.
@@ -100,6 +101,25 @@ pub struct TomlHookShape {
 pub struct TomlEventRule {
     pub name: &'static str,
     pub matcher: Option<&'static str>,
+}
+
+/// A root entry the harness's schema requires, e.g. Cursor's `"version": 1`.
+///
+/// Deliberately typed rather than declared as a JSON string: a malformed
+/// declaration is a developer defect, so it is a compile error rather than a
+/// runtime refusal aimed at the user. A harness needing another literal type
+/// adds a variant here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequiredRoot {
+    Integer(i64),
+}
+
+impl RequiredRoot {
+    fn to_json(self) -> serde_json::Value {
+        match self {
+            Self::Integer(value) => serde_json::json!(value),
+        }
+    }
 }
 
 /// One event in a JSON hook document and how Buildmesh's handler merges into
@@ -156,10 +176,6 @@ pub struct Ownership {
     pub fields: &'static [&'static str],
     /// Anchors every Buildmesh callback carries.
     pub anchors: &'static [&'static str],
-    /// Decode a `powershell.exe -EncodedCommand` segment that sits inside a
-    /// wrapper before matching (Kimi wraps its callback in a session guard,
-    /// so the anchors are only visible after decoding).
-    pub decode_embedded_powershell: bool,
 }
 
 impl Ownership {
@@ -173,16 +189,21 @@ impl Ownership {
         })
     }
 
+    /// Anchors match either the command itself (including a bare
+    /// `powershell.exe -EncodedCommand` payload) or an encoded PowerShell
+    /// segment embedded in a wrapper — Kimi guards its callback with
+    /// `if defined BUILDMESH_SESSION_ID …`, so the payload is only visible
+    /// after decoding from wherever the segment starts.
     fn owns_command(&self, command: &str) -> bool {
-        if self.decode_embedded_powershell {
-            let decoded = command
+        managed_config::carries_anchors(command, self.anchors)
+            || command
                 .find("powershell.exe ")
-                .and_then(|start| crate::env::decode_powershell_command(&command[start..]));
-            let candidate = decoded.as_deref().unwrap_or(command);
-            self.anchors.iter().all(|anchor| candidate.contains(anchor))
-        } else {
-            managed_config::carries_anchors(command, self.anchors)
-        }
+                .and_then(|start| crate::env::decode_powershell_command(&command[start..]))
+                .is_some_and(|decoded| self.matches_anchors(&decoded))
+    }
+
+    fn matches_anchors(&self, text: &str) -> bool {
+        self.anchors.iter().all(|anchor| text.contains(anchor))
     }
 }
 
@@ -220,17 +241,39 @@ impl fmt::Display for HookProvisionError {
 
 impl std::error::Error for HookProvisionError {}
 
+/// The command written into one event: a declared override, else the spec's
+/// default callback. Both format adapters resolve commands through this one
+/// rule.
+impl<'a> HookProvisioningSpec<'a> {
+    fn override_command(&self, event: &str) -> Option<&'a str> {
+        self.event_commands
+            .iter()
+            .find(|(name, _)| *name == event)
+            .map(|(_, command)| *command)
+    }
+
+    fn command_for(&self, event: &str) -> &'a str {
+        self.override_command(event).unwrap_or(self.command)
+    }
+}
+
 /// Read, merge and atomically write one harness's attention hooks.
 ///
 /// The sequence is the same for every harness: a missing file is a fresh
 /// install, a malformed file is refused with the one shared wording (the
 /// user's bytes survive), an already-correct file is not rewritten, and a
 /// changed one lands atomically.
+///
+/// `target_dir` is the directory that holds [`spec.file`](HookProvisioningSpec::file),
+/// which is **not** always the project workspace: it is the project-level
+/// config directory for a workspace harness (`.cursor`, `.claude`, `.agents`),
+/// and the harness's own global config directory for one that stores hooks
+/// outside the project (`~/.grok/hooks`, `~/.kimi-code`).
 pub fn provision_attention_hooks(
     spec: &HookProvisioningSpec<'_>,
-    workspace: &Path,
+    target_dir: &Path,
 ) -> Result<HookProvisionOutcome, HookProvisionError> {
-    let path = workspace.join(spec.file);
+    let path = target_dir.join(spec.file);
     let written = match &spec.format {
         HookFormat::Json(shape) => provision_json(spec, shape, &path)?,
         HookFormat::Toml(shape) => provision_toml(spec, shape, &path)?,
@@ -254,9 +297,11 @@ fn provision_json(
     let events = resolve_events(spec, shape);
     let root = managed_config::root_object(&mut document, &format!("{} top-level", spec.label))
         .map_err(HookProvisionError::Refused)?;
-    apply_required_root(spec, shape, root)?;
+    // A missing required root entry is a document change in its own right: it
+    // must be persisted even when the hook events already match.
+    let root_changed = apply_required_root(spec, shape, root)?;
 
-    let changed = match shape.root_key {
+    let events_changed = match shape.root_key {
         Some(key) if shape.replace_root => {
             let expected = expected_events(shape, &events);
             if root.get(key) == Some(&expected) {
@@ -274,6 +319,7 @@ fn provision_json(
         None => merge_events(spec, shape, root, &events)?,
     };
 
+    let changed = root_changed || events_changed;
     if !changed {
         return Ok(false);
     }
@@ -314,35 +360,27 @@ fn resolve_events<'a>(
         .events
         .iter()
         .filter_map(|event| {
-            if let Some((_, command)) = spec
-                .event_commands
-                .iter()
-                .find(|(name, _)| *name == event.name)
-            {
-                return Some((event, *command));
-            }
-            (!event.optional).then_some((event, spec.command))
+            let overridden = spec.override_command(event.name).is_some();
+            (overridden || !event.optional).then(|| (event, spec.command_for(event.name)))
         })
         .collect()
 }
 
 /// Root entries the harness's schema requires (Cursor's `version: 1`). A
 /// missing entry is inserted; any other value is the user's schema mismatch.
+/// Returns whether an entry had to be inserted, so the caller persists it.
 fn apply_required_root(
     spec: &HookProvisioningSpec<'_>,
     shape: &JsonHookShape,
     root: &mut serde_json::Map<String, serde_json::Value>,
-) -> Result<(), HookProvisionError> {
+) -> Result<bool, HookProvisionError> {
+    let mut inserted = false;
     for (key, declared) in shape.required_root {
-        let expected: serde_json::Value = serde_json::from_str(declared).map_err(|error| {
-            HookProvisionError::Refused(format!(
-                "declared {} `{key}` is not valid JSON: {error}",
-                spec.label
-            ))
-        })?;
+        let expected = declared.to_json();
         match root.get(*key) {
             None => {
                 root.insert((*key).to_string(), expected);
+                inserted = true;
             }
             Some(actual) if *actual == expected => {}
             Some(actual) => {
@@ -353,7 +391,7 @@ fn apply_required_root(
             }
         }
     }
-    Ok(())
+    Ok(inserted)
 }
 
 /// The exact object a replace-root namespace must hold.
@@ -499,7 +537,7 @@ fn provision_toml(
         if let Some(matcher) = event.matcher {
             hook["matcher"] = value(matcher);
         }
-        hook["command"] = value(spec.command);
+        hook["command"] = value(spec.command_for(event.name));
         hook["timeout"] = value(shape.timeout);
         hooks.push(hook);
     }

@@ -63,7 +63,6 @@ const KIMI_HOOKS: HookProvisioningSpec<'static> = HookProvisioningSpec {
         ownership: Ownership {
             fields: &["command"],
             anchors: &["BUILDMESH_SESSION_ID", "BUILDMESH_PORT"],
-            decode_embedded_powershell: true,
         },
         events: &[
             TomlEventRule {
@@ -118,14 +117,14 @@ const KIMI_HOOKS: HookProvisioningSpec<'static> = HookProvisioningSpec {
 };
 
 fn ensure_hooks(path: &Path, command: &str) -> Result<(), String> {
-    let workspace = path
+    let target_dir = path
         .parent()
         .ok_or_else(|| "Kimi config has no parent directory".to_string())?;
     let spec = HookProvisioningSpec {
         command,
         ..KIMI_HOOKS
     };
-    provision_attention_hooks(&spec, workspace)
+    provision_attention_hooks(&spec, target_dir)
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
