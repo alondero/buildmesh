@@ -25,7 +25,9 @@ it('renders Settings and prompt defaults in Chromium with the default mock IPC',
     await page.addInitScript(buildInitScript());
     const diagnostics = collectPageErrors(page);
     await page.goto(url, { waitUntil: 'domcontentloaded' });
-    await page.getByRole('button', { name: 'Open settings', exact: true }).click();
+    // At 1440px Settings is folded into the More panel (#2421); open it there.
+    await page.getByRole('button', { name: 'More tools', exact: true }).click();
+    await page.getByTestId('titlebar-overflow-settings').click();
     const dialog = page.getByRole('dialog', { name: 'Settings', exact: true });
     await browserExpect(dialog.getByRole('checkbox', { name: 'Confirm before quitting' })).toBeChecked();
     await dialog.getByRole('tab', { name: 'Launch Configurations', exact: true }).click();

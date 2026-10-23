@@ -12,6 +12,10 @@ import { ZoomControl } from './ZoomControl';
 import { NotificationButton } from './NotificationButton';
 import { CompanionPill } from './CompanionPill';
 import { TitleBarOverflow } from './TitleBarOverflow';
+import { ViewSelector } from './ViewSelector';
+import { MobileIcon, SettingsIcon } from './utilityIcons';
+import { LABELLED_SWITCHER_MIN_WIDTH, UTILITIES_IN_BAR_MIN_WIDTH } from './titleBarTiers';
+import { useMinWidth } from '../../hooks/useMinWidth';
 import { AppSettingsModal } from '../AppSettings/AppSettingsModal';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
 import { useUIStore } from '../../stores/uiStore';
@@ -38,8 +42,8 @@ import { UsageIcon } from '../Probe/probeIcons';
  * entry points, not readouts — their state lives in the surface they open.
  *
  * Issue #1609 reshaped the clusters: the utility pills dropped their
- * borders and joined the switcher's 1300px label ladder (one toolbar, one
- * degradation curve), and the GridControls "Search nodes" bar moved from
+ * borders and joined the switcher's label ladder of the time (since #2421 the
+ * bar mounts different controls per width tier, see `titleBarTiers.ts`), and the GridControls "Search nodes" bar moved from
  * the right cluster into the left, mounted only while the Filtered view is
  * active — it is that view's control, not a global fixture.
  *
@@ -47,6 +51,12 @@ import { UsageIcon } from '../Probe/probeIcons';
  * readouts": it discloses a popover with the terminal text-size slider and
  * a live px readout, both bound to the terminalConfig pub/sub the zoom
  * shortcuts already drive.
+ *
+ * Issue #2421 replaced the shared label ladder (every label dropping to a
+ * glyph below 1440px) with width tiers that mount different controls — see
+ * `titleBarTiers.ts`. Narrow windows get one labelled `ViewSelector` and fold
+ * the four utilities into More; search, Notifications and More stay in the
+ * bar at every width.
  */
 
 // `SHORTCUT_CATALOG` is a static module constant; resolving the
@@ -77,26 +87,6 @@ function Svg({ className, children }: IconProps & { children: React.ReactNode })
     >
       {children}
     </svg>
-  );
-}
-
-/** Lucide `settings`. */
-function SettingsIcon({ className }: IconProps) {
-  return (
-    <Svg className={className}>
-      <circle cx="12" cy="12" r="3" />
-      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-    </Svg>
-  );
-}
-
-/** Lucide `smartphone`. */
-function MobileIcon({ className }: IconProps) {
-  return (
-    <Svg className={className}>
-      <rect x="5" y="2" width="14" height="20" rx="2" ry="2" />
-      <line x1="12" y1="18" x2="12" y2="18" />
-    </Svg>
   );
 }
 
@@ -136,25 +126,37 @@ function NavigationControls() {
         aria-haspopup="dialog"
         aria-expanded={omnibarOpen}
         title="Search or open… (command palette)"
-        // Keep the wide-screen target; max-w-full lets Filtered search
-        // and the native caption controls claim their required space first.
-        className="flex h-10 w-80 min-[1786px]:w-[640px] min-w-0 max-w-full items-center gap-2 rounded-md border border-border-default bg-bg-base px-3 text-sm text-text-muted transition-colors hover:border-accent-cyan/50 hover:text-text-primary"
+        // 260px, growing toward the 640px wide-screen target only out of
+        // width the side tracks do not need: in the centred grid each side
+        // track gets half of what this field leaves, and the widest left
+        // cluster (labelled segments plus a scope label at its 10rem cap)
+        // measured 727px, so 1460px is twice that (#2421). max-w-full lets
+        // Filtered search and the native caption controls claim their
+        // required space first.
+        className="@container flex h-10 w-[clamp(20rem,calc(100vw_-_1460px),640px)] min-w-0 max-w-full items-center gap-2 rounded-md border border-border-default bg-bg-base px-3 text-sm text-text-muted transition-colors hover:border-accent-cyan/50 hover:text-text-primary"
       >
         <SearchIcon className="h-4 w-4 shrink-0" />
         <span className="min-w-0 flex-1 truncate text-left">Search or open…</span>
         {/* `SEARCH_SHORTCUT_LABEL` is resolved once at module scope. The
             conditional still keeps an empty <kbd> chip from appearing if
             the catalog row were ever renamed. The chip is the FIRST thing
-            to disappear when narrowing, on the shared labelled tier
-            (1440px, #2081 review — measured clean in both header grids);
+            to disappear when narrowing, at the labelled-switcher tier
+            (1440px, #2081 review — measured clean in both header grids).
+            Its own `max-[1439px]` class hides it below 1439px (Tailwind's
+            max-[N] is exclusive), and it also yields when the field is narrow;
             user-facing affordances outlast the decorative keyboard hint.
             The chip contributes ~13px of the centre's 143px min-content
             in the labelled tier, which is part of why that tier starts at
             1440. The class string MUST stay a literal so Tailwind v4's
             source scanner picks it up — a template literal would defeat
-            JIT detection and the rule would never compile. */}
+            JIT detection and the rule would never compile. #2421: the
+            field is also a size container. The label, icon and chip need
+            about 208px of content width (icon 16 + gap 8 + label 85 + gap 8
+            + chip 91), so the chip yields below 216px of content width. The
+            earlier 240px threshold compared against the field's outer width
+            and hid the chip at every 1440-1719px window (#2421 review). */}
         {SEARCH_SHORTCUT_LABEL !== '' && (
-          <kbd className="shrink-0 rounded-md border border-border-default bg-bg-card px-1.5 py-0.5 font-mono text-[11px] text-text-muted max-[1439px]:hidden">
+          <kbd className="shrink-0 rounded-md border border-border-default bg-bg-card px-1.5 py-0.5 font-mono text-[11px] text-text-muted max-[1439px]:hidden @max-[216px]:hidden">
             {SEARCH_SHORTCUT_LABEL}
           </kbd>
         )}
@@ -410,6 +412,9 @@ export function TitleBar() {
   // uiStore so Omnibar view commands ("Switch view: Filtered") slide the
   // bar in through the same state the switcher writes.
   const viewMode = useUIStore((s) => s.viewMode);
+  // #2421 — which controls each width tier mounts (see `titleBarTiers`).
+  const labelledSwitcher = useMinWidth(LABELLED_SWITCHER_MIN_WIDTH);
+  const utilitiesInBar = useMinWidth(UTILITIES_IN_BAR_MIN_WIDTH);
   const [isMaximized, setIsMaximized] = useState(false);
   // The snap overlay is positioned onto this button's measured box, so the ref
   // has to reach the real DOM node (ADR-0035).
@@ -486,13 +491,20 @@ export function TitleBar() {
             </div>
           )}
           <Wordmark />
-          <ViewModeSwitcher />
           {/* #2074 — the scope indicator names the effective scope (the one
-              `deriveScope` value) and doubles as the Mesh picker. It sits in
-              this cluster, between the switcher that picks the View Mode and
-              the Filtered search bar that narrows it: same toolbar, same
-              width ladder, one degradation curve. */}
-          <ScopeIndicator />
+              `deriveScope` value) and doubles as the Mesh picker, between the
+              switcher that picks the View Mode and the Filtered search bar
+              that narrows it. #2421 — below the labelled tier both fold into
+              one `ViewSelector` that names the view and scope in text, so a
+              narrow window never shows a row of unlabelled mode glyphs. */}
+          {labelledSwitcher ? (
+            <>
+              <ViewModeSwitcher />
+              <ScopeIndicator />
+            </>
+          ) : (
+            <ViewSelector />
+          )}
           {/* #1609 — the Search Nodes bar IS the Filtered view's control, so
               it mounts beside the switcher only while that mode is active.
               An honest conditional mount: CSS can't interpolate `width: auto`,
@@ -511,26 +523,34 @@ export function TitleBar() {
             (inputs/pills/buttons) keep their clicks; empty space drags. */}
         <div data-tauri-drag-region className="flex items-center justify-end">
           <div className="flex items-center gap-2 pr-1">
+            {/* Notifications stays in the bar at every width: its badge is
+                the urgent signal (#2421). */}
             <NotificationButton />
-            <ZoomControl />
-            <UsageButton />
-            <HeaderPillButton
-              ariaLabel="Open settings"
-              onClick={() => useUIStore.getState().openAppSettings()}
-              title="Settings"
-              label="Settings"
-              icon={<SettingsIcon className="h-4 w-4 shrink-0" />}
-            />
-            <HeaderPillButton
-              ariaLabel="Open mobile remote access"
-              onClick={() => useUIStore.getState().openRemoteAccess()}
-              title="Remote access"
-              label="Mobile"
-              icon={<MobileIcon className="h-4 w-4 shrink-0" />}
-            />
+            {utilitiesInBar && (
+              <>
+                <ZoomControl />
+                <UsageButton />
+                <HeaderPillButton
+                  ariaLabel="Open settings"
+                  onClick={() => useUIStore.getState().openAppSettings()}
+                  title="Settings"
+                  label="Settings"
+                  icon={<SettingsIcon className="h-4 w-4 shrink-0" />}
+                />
+                <HeaderPillButton
+                  ariaLabel="Open mobile remote access"
+                  onClick={() => useUIStore.getState().openRemoteAccess()}
+                  title="Remote access"
+                  label="Mobile"
+                  icon={<MobileIcon className="h-4 w-4 shrink-0" />}
+                />
+              </>
+            )}
             {/* Inspector tools without a dedicated title-bar button share
-                this disclosure and the palette's labels and iconography. */}
-            <TitleBarOverflow />
+                this disclosure and the palette's labels and iconography;
+                below the utilities tier it also carries the four pills
+                above (#2421). */}
+            <TitleBarOverflow includeUtilities={!utilitiesInBar} />
           </div>
 
           {!isMac && (

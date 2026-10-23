@@ -466,47 +466,50 @@ describe('TitleBar (bespoke window chrome)', () => {
 
     it('carries the responsive degradation classes (labels, chip, flex floors)', async () => {
       const { container } = await renderTitleBar();
-      // Pill and switcher labels drop to icon-only below the SAME tier
-      // (1440px) since #1609 and PR #1623 — one toolbar, one ladder.
-      // The threshold moved 1300 → 1400 (a 2px clip on the rightmost
-      // ViewModeSwitcher segment) and now 1400 → 1440 (#2081 review), where
-      // 1440 is the first width MEASURED clean in BOTH header grids: the
-      // labelled layout needs left 726px + centre min-content 143px +
-      // right 538px = 1407px, so 1400–1439 was over budget by 7px and
-      // clipped (the scope indicator's 32px glyph amplified it into a
-      // visible overlap). At 1440 Filtered the centre is 145px against a
-      // 145px min-content. The kbd chip hides FIRST when narrowing at
-      // 1439px — user-facing affordances outlast the decorative keyboard
-      // hint. Class literals are the contract — they MUST stay as literal
-      // strings (not template literals) so Tailwind v4's source scanner
-      // compiles them. The media queries themselves are browser-rendered.
-      const remotePill = screen.getByRole('button', { name: 'Open mobile remote access' });
-      expect(remotePill.querySelector('span')?.className).toContain('max-[1439px]:hidden');
-      const usagePill = screen.getByRole('button', { name: 'Open Usage' });
-      expect(usagePill.querySelector('span')?.className).toContain('max-[1439px]:hidden');
+      // #2421 — pill and switcher labels no longer collapse to bare glyphs.
+      // Narrow tiers MOUNT different controls instead (the compact
+      // ViewSelector, utilities folded into More; pinned per tier in
+      // `title-bar-compact.test.tsx`), so whatever is mounted is labelled.
+      // A hide class here would bring back the row of unlabelled symbols.
+      for (const name of ['Open mobile remote access', 'Open Usage', 'More tools']) {
+        const label = screen.getByRole('button', { name }).querySelector('span');
+        expect(label?.className).not.toContain('hidden');
+      }
       const switcherGroup = screen.getByRole('group', { name: /view mode/i });
-      const switcherLabel = switcherGroup.querySelector('span');
-      expect(switcherLabel?.className).toContain('max-[1439px]:hidden');
+      expect(switcherGroup.querySelector('span')?.className ?? '').not.toContain('hidden');
+      // The kbd chip still hides FIRST when narrowing at 1439px — user-facing
+      // affordances outlast the decorative keyboard hint. Class literals are
+      // the contract — they MUST stay as literal strings (not template
+      // literals) so Tailwind v4's source scanner compiles them.
       const chip = container.querySelector('kbd');
       expect(chip?.className).toContain('max-[1439px]:hidden');
+      // #2421 — and it also yields to the field's OWN width: at 1700px
+      // Filtered with a status filter the field is ~158px, where the chip
+      // left the label as "S." beside a full "Ctrl+Shift+K". The field is a
+      // size container; the label, icon and chip need about 208px of content
+      // width, so below 216px the chip goes and the label keeps the room.
+      expect(screen.getByTestId('titlebar-command-search').className).toContain('@container');
+      expect(chip?.className).toContain('@max-[216px]:hidden');
       // The scope indicator is deliberately NOT on this tier. Its label
-      // collapses LATER (`max-[1699px]:hidden`, pinned in the #2074 block
-      // below): with the shared ladder at 1440px, the Filtered centre cell
+      // collapses LATER (`max-[1700px]:hidden`, pinned in the #2074 block
+      // below): with the switcher's labels at 1440px, the Filtered centre cell
       // still cannot afford the 134.88px a labelled indicator adds between
       // 1440 and 1600px (1600px is the first width measured clear, 1700px
       // the first comfortable one). Asserted here as the inversion, so a
       // future "one ladder for the whole bar" refactor cannot silently rejoin it.
       const scopeLabel = screen.getByTestId('scope-indicator').querySelector('span');
-      expect(scopeLabel?.className).toContain('max-[1699px]:hidden');
+      expect(scopeLabel?.className).toContain('max-[1700px]:hidden');
       expect(scopeLabel?.className).not.toContain('max-[1439px]:hidden');
-      // Responsive palette width (PR #1623 review): the field is
-      // `w-80` (260px at the 13px root) below 1786px viewport, and
-      // bumps to its VS Code-parity `w-[640px]` at >=1786px where
-      // the side clusters can afford it. Pin the breakpoint class so a
-      // future rebase that drops the bump fails the test loudly.
+      // Responsive palette width (PR #1623 review; fluid since #2421): the
+      // field is 260px (20rem at the 13px root) on narrow windows and grows
+      // toward its VS Code-parity 640px only out of the width the centred
+      // grid's side tracks do not need — `100vw - 1460px`, twice the widest
+      // measured left cluster. The old fixed 640px step at 1786px squeezed
+      // that cluster to 573px and truncated the scope label to "All m…"
+      // at 1920px. Pin the literal so a rebase back to a fixed step fails.
       const searchButton = screen.getByTestId('titlebar-command-search');
-      expect(searchButton.className).toContain('w-80');
-      expect(searchButton.className).toContain('min-[1786px]:w-[640px]');
+      expect(searchButton.className).toContain('w-[clamp(20rem,calc(100vw_-_1460px),640px)]');
+      expect(searchButton.className).not.toContain('min-[1786px]:w-[640px]');
       // Flex floor: the palette field's wrapper must never collapse below
       // its yield-first floor.
       const searchWrapper = searchButton.parentElement!;
@@ -663,10 +666,16 @@ describe('TitleBar (bespoke window chrome)', () => {
         });
         await renderTitleBar();
         const trigger = screen.getByTestId('scope-indicator');
-        // Visible text and accessible name are the same string, so the name
-        // survives the label collapse and satisfies WCAG 2.5.3 (Label in Name).
+        // The accessible name is the full label. The visible text is the same
+        // string, except that Pinned and Filtered draw the short form without
+        // their mode word (#2421 round 4): the highlighted segment names the mode.
         expect(trigger.getAttribute('aria-label')).toBe(label);
-        expect(trigger.textContent).toBe(label);
+        const shortLabel = viewMode === 'filtered'
+          ? label.replace(/^Filtered across meshes · (\d+ of \d+) nodes$/, 'all meshes · $1')
+          : viewMode === 'pinned'
+            ? label.replace(/^Pinned across meshes/, 'all meshes')
+            : label;
+        expect(trigger.textContent).toBe(shortLabel);
         // A cross-Mesh mode must never name a Mesh — pinned and filtered
         // legitimately keep a sidebar selection, and that Mesh is NOT the
         // scope the grid is showing.
@@ -704,14 +713,15 @@ describe('TitleBar (bespoke window chrome)', () => {
       // Filtered view — the only mode whose header grid is
       // `auto_minmax(0,1fr)_auto`, so the centre absorbs the overflow down to
       // its own 16px padding floor — a labelled indicator costs the left
-      // track 134.88px. With the shared ladder at 1440px the labelled tier
+      // track 134.88px. With the switcher's labels at 1440px the labelled tier
       // occupies 1440–1599px, where the centre measured 170px at 1600px
       // (first clear) and 270px at 1700px (first comfortable) against a
       // 130–143px min-content. 1600px is the first width measured CLEAR, not
       // a comfortable one, so the label waits for 1700px.
       expect(className).toContain('truncate');
-      expect(className).toContain('max-w-[10rem]');
-      expect(className).toContain('max-[1699px]:hidden');
+      expect(className).toContain('max-w-[16rem]');
+      // 16rem (208px) fits the longest wide label (~194px); 10rem clipped it by ~64px (#2421 round 4).
+      expect(className).toContain('max-[1700px]:hidden');
       expect(className).not.toContain('max-[1439px]:hidden');
       // The accessible name is the label string, so it survives the collapse.
       expect(screen.getByTestId('scope-indicator').getAttribute('aria-label')).toBe('demo-1');
@@ -982,7 +992,6 @@ describe('TitleBar (bespoke window chrome)', () => {
         // had lost their place entirely. It now returns focus exactly like
         // Escape: both dismissals are "not a decision", so both hand the
         // user back where they were.
-        const raf = mockRaf();
         try {
           await renderTitleBar();
           const trigger = screen.getByTestId('scope-indicator');
@@ -990,6 +999,9 @@ describe('TitleBar (bespoke window chrome)', () => {
           expect(screen.queryByRole('dialog', { name: 'Select a Mesh' })).toBeTruthy();
 
           fireEvent.mouseDown(document.body);
+          // Focus is restored one animation frame later, after the browser has
+          // moved focus for the click and React has unmounted the panel (#2421).
+          await new Promise<void>(done => requestAnimationFrame(() => done()));
 
           expect(screen.queryByRole('dialog', { name: 'Select a Mesh' })).toBeNull();
           expect(trigger.getAttribute('aria-expanded')).toBe('false');
@@ -998,7 +1010,7 @@ describe('TitleBar (bespoke window chrome)', () => {
           expect(useUIStore.getState().viewMode).toBe('all');
           expect(useMeshStore.getState().selectedMeshId).toBeNull();
         } finally {
-          raf.mockRestore();
+          // no frame mock: the real frame is what this test is about
         }
       });
 

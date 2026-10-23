@@ -147,7 +147,7 @@ export function GridControls() {
         // announce the field as a search input. The custom button
         // (rendered conditionally below) is the only visible clear
         // affordance.
-        className="bg-bg-card border border-border-default rounded-md px-2.5 py-1.5 text-sm text-text-primary placeholder:text-text-muted w-40 max-[1099px]:w-24 min-w-24 outline-none focus:border-accent-cyan focus:ring-1 focus:ring-accent-cyan/30 transition-colors [&::-webkit-search-cancel-button]:appearance-none"
+        className="bg-bg-card border border-border-default rounded-md px-2.5 py-1.5 text-sm text-text-primary placeholder:text-text-muted w-40 max-[1099px]:w-32 min-w-24 outline-none focus:border-accent-cyan focus:ring-1 focus:ring-accent-cyan/30 transition-colors [&::-webkit-search-cancel-button]:appearance-none"
       />
       {query !== '' && (
         <button
