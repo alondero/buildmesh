@@ -1,3 +1,5 @@
+import { PROBE_TAB_DEFINITIONS } from '../../lib/probeContext';
+import { useProbeResource, type ProbeLoadContext } from '../../lib/probeResource';
 /**
  * GitIssuesTab — the Probe Panel's Git Issues tab body (issue #378).
  *
@@ -87,7 +89,6 @@ import { IssueLabels } from './IssueLabels';
 import { parseGraph } from '../Circuits/circuitGraphModel';
 import { ProbeTabBody } from './ProbeTabBody';
 import { FeedCompletenessNote } from './FeedCompletenessNote';
-import type { GitHubPageCompleteness } from '../../types/generated/GitHubPageCompleteness';
 import { ProbeToolbar } from './ProbeToolbar';
 import { SafeLink } from '../shared/SafeLink';
 import {
@@ -123,6 +124,30 @@ function buildBlockedByTooltip(
   return `Blocked by ${firstLabel} (+ ${rest.length} more)`;
 }
 
+async function loadIssueLabels({ meshId }: ProbeLoadContext) {
+  return meshId === null ? [] : getRepoLabels(meshId);
+}
+
+async function loadIssueTriggers({ meshId }: ProbeLoadContext) {
+  const labels = new Map<string, string[]>();
+  if (meshId === null) return labels;
+  for (const circuit of await listCircuits(meshId)) {
+    if (!circuit.enabled || circuit.mesh_id !== meshId) continue;
+    let nodes;
+    try { nodes = parseGraph(circuit.graph_json).nodes; } catch { continue; }
+    for (const { type: kind } of nodes) {
+      if (kind.type !== 'github_issue_label') continue;
+      const label = kind.label.toLowerCase();
+      labels.set(label, [...new Set([...(labels.get(label) ?? []), circuit.name])]);
+    }
+  }
+  return labels;
+}
+
+export async function loadIssues({ meshId }: ProbeLoadContext) {
+  return meshId === null ? null : getRepoIssues(meshId);
+}
+
 export function GitIssuesTab() {
   const { activeMeshId, activeMeshPath } = useProbeContext();
   const [navigationRequest, setNavigationRequest] = useState<IssueNavigationRequest | null>(null);
@@ -132,40 +157,23 @@ export function GitIssuesTab() {
   // precedence chain server-side.
   const getDefaultProvider = useMeshStore((s) => s.getDefaultProvider);
 
-  const [issues, setIssues] = useState<GitHubIssue[]>([]);
-  // Issue #2024 rank 6 — the read is paginated, so the tab must be able to
-  // say the list is truncated rather than implying it is everything.
-  const [completeness, setCompleteness] =
-    useState<GitHubPageCompleteness | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const resource = useProbeResource(PROBE_TAB_DEFINITIONS.issues.load, { meshId: activeMeshId }, String(activeMeshId));
+  const { loading, error } = resource.state;
+  const issues = useMemo(() => resource.state.data?.items ?? [], [resource.state.data]);
+  const completeness = resource.state.data?.completeness ?? null;
   const [spawning, setSpawning] = useState<number | null>(null);
   // Client-side search over the loaded list. Mirrors the pattern
   // `ArchivedNodesTab` already uses (`useState('')` + memo filter on
   // title/body). No debounce needed — the list is already in memory.
   const [search, setSearch] = useState('');
-  // Bump to force the load effect to re-run on a manual Refresh click
-  // (issue #813 — Git Issues/PRs/Archive previously had no manual
-  // refresh button). Mirrors the pattern `GitPullRequestsTab` already
-  // uses for refetching after a successful merge: bumping the key
-  // aborts the previous effect (useAsyncEffect's signal) and re-fires
-  // the IPC, so a stale in-flight load can't clobber the refreshed
-  // result.
-  const [reloadKey, setReloadKey] = useState(0);
-  const [loadedMeshId, setLoadedMeshId] = useState<number | null>(null);
-  const [triggerLabels, setTriggerLabels] = useState<Map<string, string[]>>(new Map());
-  const [triggerMeshId, setTriggerMeshId] = useState<number | null>(null);
-  const [triggerError, setTriggerError] = useState<string | null>(null);
-  const [repoLabels, setRepoLabels] = useState<{ meshId: number | null; names: string[]; loading: boolean; error: string | null }>({
-    meshId: null, names: [], loading: false, error: null,
+  const triggers = useProbeResource(loadIssueTriggers, { meshId: activeMeshId }, String(activeMeshId), {
+    pollIntervalMs: 5000, discardOnError: true,
   });
-  const [labelsRetry, setLabelsRetry] = useState(0);
-  // A search response started before an acknowledged label write can be stale.
-  const issueWriteRevision = useRef(0);
-  const currentMesh = useRef({ id: activeMeshId });
-  if (currentMesh.current.id !== activeMeshId) currentMesh.current = { id: activeMeshId };
-  const meshOwner = currentMesh.current;
-  const lifetime = useRef<AbortSignal | null>(null);
+  const triggerLabels = triggers.state.data ?? new Map<string, string[]>();
+  const triggerError = triggers.state.error;
+  const labels = useProbeResource(loadIssueLabels, { meshId: activeMeshId }, String(activeMeshId));
+  const repoLabels = { names: labels.state.data ?? [], loading: labels.state.loading, error: labels.state.error };
+  const refresh = () => { void resource.reload(); void triggers.reload(); void labels.reload(); };
   // Only one dropdown open at a time, keyed by issue number — mirrors
   // the SessionBrowserModal pattern so the click-outside handling
   // stays simple.
@@ -185,62 +193,9 @@ export function GitIssuesTab() {
   const expanded = useToggleSet<number>();
   const clearExpanded = expanded.clear;
 
-  useAsyncEffect(signal => { lifetime.current = signal; }, []);
   useEffect(() => clearExpanded(), [activeMeshId, clearExpanded]);
 
   useEffect(() => registerIssueNavigation(setNavigationRequest), []);
-
-  useAsyncEffect(signal => {
-    setTriggerError(null);
-    if (activeMeshId === null) return;
-    let timer: ReturnType<typeof setTimeout>;
-    const loadTriggers = async () => {
-      try {
-        const circuits = await listCircuits(activeMeshId);
-        const labels = new Map<string, string[]>();
-        for (const circuit of circuits) {
-          if (!circuit.enabled || circuit.mesh_id !== activeMeshId) continue;
-          let nodes;
-          try {
-            nodes = parseGraph(circuit.graph_json).nodes;
-          } catch {
-            // One damaged Circuit must not hide labels watched by other Circuits.
-            continue;
-          }
-          for (const { type: kind } of nodes) {
-            if (kind.type !== 'github_issue_label') continue;
-            const label = kind.label.toLowerCase();
-            labels.set(label, [...new Set([...(labels.get(label) ?? []), circuit.name])]);
-          }
-        }
-        if (signal.aborted) return;
-        setTriggerLabels(labels);
-        setTriggerMeshId(activeMeshId);
-        setTriggerError(null);
-      } catch (err) {
-        if (signal.aborted) return;
-        setTriggerLabels(new Map());
-        setTriggerError(formatError(err));
-      } finally {
-        if (!signal.aborted) timer = setTimeout(() => void loadTriggers(), 5000);
-      }
-    };
-    void loadTriggers();
-    return () => clearTimeout(timer);
-  }, [activeMeshId, reloadKey]);
-
-  useAsyncEffect(signal => {
-    if (activeMeshId === null) {
-      setRepoLabels({ meshId: null, names: [], loading: false, error: null });
-      return;
-    }
-    setRepoLabels({ meshId: activeMeshId, names: [], loading: true, error: null });
-    void getRepoLabels(activeMeshId).then(names => {
-      if (!signal.aborted) setRepoLabels({ meshId: activeMeshId, names, loading: false, error: null });
-    }).catch(err => {
-      if (!signal.aborted) setRepoLabels({ meshId: activeMeshId, names: [], loading: false, error: formatError(err) });
-    });
-  }, [activeMeshId, reloadKey, labelsRetry]);
 
   // Cross-reference index for the blocked-by indicator. Built once per
   // render of the loaded open issues list — both as a Set (for fast
@@ -279,38 +234,6 @@ export function GitIssuesTab() {
         issue.labels.some((l) => l.toLowerCase().includes(q)),
     );
   }, [issues, search]);
-
-  useAsyncEffect((signal) => {
-    if (activeMeshId === null) {
-      setIssues([]);
-      setCompleteness(null);
-      setLoadedMeshId(null);
-      setLoading(false);
-      return;
-    }
-    const load = async () => {
-      const writeRevision = issueWriteRevision.current;
-      try {
-        const result = await getRepoIssues(activeMeshId);
-        // The mesh could have changed between opening the modal and the
-        // IPC returning — drop the result in that case rather than
-        // showing issues for a mesh the user no longer has focused.
-        if (signal.aborted || issueWriteRevision.current !== writeRevision) return;
-        setIssues(result.items);
-        setCompleteness(result.completeness);
-        setLoadedMeshId(activeMeshId);
-      } catch (e) {
-        if (signal.aborted) return;
-        console.error('Failed to load issues:', e);
-        setError(formatError(e));
-      } finally {
-        if (!signal.aborted) setLoading(false);
-      }
-    };
-    setLoading(true);
-    setError(null);
-    load();
-  }, [activeMeshId, reloadKey]);
 
   // A jump can originate outside the Probe (currently the Omnibar). Wait for
   // the requested mesh's list to render, then reveal and focus that exact
@@ -443,7 +366,7 @@ export function GitIssuesTab() {
           className="flex-1 min-w-0 bg-bg-input border border-border-default rounded-md px-2 py-1 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-cyan transition-colors"
         />
         <RefreshControl
-          onRefresh={() => setReloadKey((k) => k + 1)}
+          onRefresh={refresh}
           isRefreshing={loading && issues.length > 0}
           ariaLabel="Refresh issues"
         />
@@ -452,7 +375,7 @@ export function GitIssuesTab() {
       <ProbeTabBody padding="p-3">
         {activeMeshId === null ? (
           <EmptyState label="No mesh selected" />
-        ) : (loading && (issues.length === 0 || loadedMeshId !== activeMeshId)) ? (
+        ) : (loading && issues.length === 0) ? (
           // First-load only: refreshes keep the prior list rendered
           // so the user's reading position doesn't reset (mirrors PRs).
           <LoadingState label="Loading issues..." />
@@ -534,23 +457,22 @@ export function GitIssuesTab() {
                     // "+N more" so a heavily-labelled issue doesn't wrap
                     // into a second row of noise.
                     chips.push(<IssueLabels key={`${activeMeshId}-${issue.number}`} meshId={activeMeshId} issue={issue}
-                      triggers={triggerMeshId === activeMeshId ? triggerLabels : new Map()}
-                      repositoryLabels={repoLabels.meshId === activeMeshId ? repoLabels.names : []}
-                      labelsLoading={repoLabels.meshId === activeMeshId && repoLabels.loading}
-                      labelsError={repoLabels.meshId === activeMeshId ? repoLabels.error : null}
-                      onRetryLabels={() => setLabelsRetry(value => value + 1)}
+                      triggers={triggerLabels}
+                      repositoryLabels={repoLabels.names}
+                      labelsLoading={repoLabels.loading}
+                      labelsError={repoLabels.error}
+                      onRetryLabels={() => void labels.reload()}
                       onChange={(label, present) => {
-                        if (currentMesh.current !== meshOwner || lifetime.current?.aborted) return;
-                        issueWriteRevision.current += 1;
-                        setIssues(previous => previous.map(row => row.number === issue.number ? {
+                        if (!resource.isActive()) return;
+                        resource.mutate(previous => previous === null ? null : ({ ...previous, items: previous.items.map(row => row.number === issue.number ? {
                           ...row,
                           labels: present
                             ? [...row.labels.filter(value => value.toLowerCase() !== label.toLowerCase()), label]
                             : row.labels.filter(value => value.toLowerCase() !== label.toLowerCase()),
-                        } : row));
+                        } : row) }));
                       }}
                       onError={error => {
-                        if (currentMesh.current !== meshOwner || lifetime.current?.aborted) return;
+                        if (!resource.isActive()) return;
                         addToast('GitHub tags', `Issue #${issue.number}: ${error}`, 'error');
                       }} />);
                     // Contributor pill — the issue's author, linking to

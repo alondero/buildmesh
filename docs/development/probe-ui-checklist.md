@@ -31,9 +31,6 @@ The panel shell and keyed destination wrapper clip overflow and provide a
 - [ ] **Prefer the shared primitive.** `<ProbeTabBody>` already provides that
       body region with the standard padding. Reach for it unless the tab needs
       a pinned toolbar as a sibling (Circuits, Agent Changes).
-      *(Note: `ProbePanel.tsx` also declares a local `function ProbeTabBody`
-      that is only a tab router — same name, different component. Don't
-      confuse them.)*
 - [ ] **Toolbars sit outside the scroller** as `shrink-0` siblings, so a
       filter or create-row doesn't scroll away from the list it controls.
 - [ ] **`overflow-x` is stated explicitly.** `overflow-y-auto` alone computes

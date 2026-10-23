@@ -1,6 +1,7 @@
+import { PROBE_TAB_DEFINITIONS } from '../lib/probeContext';
 import { createPathKeyedCache } from '../lib/pathInvalidatedCache';
 import { usePathInvalidatedQuery } from './usePathInvalidatedQuery';
-import { getGitStatus, type GitStatus } from '../lib/tauri';
+import { type GitStatus } from '../lib/tauri';
 
 /**
  * Shared client for `getGitStatus(path)`, keyed by repo path. There is exactly
@@ -14,7 +15,7 @@ import { getGitStatus, type GitStatus } from '../lib/tauri';
  * the bus matches, so the single-key factory is the right fit.
  */
 export const gitStatusClient = createPathKeyedCache<GitStatus[]>({
-  fetcher: getGitStatus,
+  fetcher: activePath => PROBE_TAB_DEFINITIONS.files.load({ meshId: null, activePath }, new AbortController().signal),
   name: 'gitStatus',
   // Full `git status` walk shared by three consumers. Bound the
   // GIT_CHANGED-driven refetch rate while an agent streams edits (the

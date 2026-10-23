@@ -1,3 +1,5 @@
+import { PROBE_TAB_DEFINITIONS } from '../../lib/probeContext';
+import { useProbeResource, type ProbeLoadContext } from '../../lib/probeResource';
 /**
  * RepositoryTab — the Probe Panel's Repository destination (issue #1460).
  *
@@ -149,6 +151,10 @@ const isRecommendedBranch = (b: BranchInfo) =>
 
 const isRecommendedWorktree = (w: WorktreeInfo) => !w.is_active && w.is_stale;
 
+export async function loadRepository({ meshId }: ProbeLoadContext) {
+  return meshId === null ? [] : getGitPruneInfo(meshId);
+}
+
 export function RepositoryTab() {
   const { activeMeshId } = useProbeContext();
   // Cleanup selections and confirmations belong to one mesh. Remounting the
@@ -175,9 +181,10 @@ function RepositoryContents() {
   // share a cache.
   const { health, refresh: refreshHealth } = useMeshHealth(activeMeshId, activeMeshPath);
 
-  const [repos, setRepos] = useState<GitRepoPruneInfo[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const resource = useProbeResource(PROBE_TAB_DEFINITIONS.worktrees.load, { meshId: activeMeshId }, String(activeMeshId));
+  const repos = useMemo(() => resource.state.data ?? [], [resource.state.data]);
+  const { loading, error } = resource.state;
+  const setError = resource.reportError;
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -192,30 +199,11 @@ function RepositoryContents() {
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(true);
-  const loadRevisionRef = useRef(0);
-
-  // Single prune-fetch body. Mount, mesh-switch, manual Refresh, and
-  // post-recovery all route through `load`. The function returns the
-  // promise so callers that need to sequence AFTER the refresh (e.g.
-  // `handleDelete` wants the partial-failure error to land on top of
-  // `load`'s own `setError(null)`) can `await load()`. A shared revision
-  // gates mount, manual and post-mutation refreshes,
-  // so a rapid Refresh click while the previous fetch is still pending
-  // can't clobber state with a stale response.
+  const reload = resource.reload;
   const load = useCallback(() => {
-    if (activeMeshId === null || !mountedRef.current) return Promise.resolve();
-    const revision = ++loadRevisionRef.current;
-    const current = () => mountedRef.current && revision === loadRevisionRef.current;
-    setLoading(true);
-    setError(null);
     setSelected(new Set());
-    return getGitPruneInfo(activeMeshId)
-      .then((data) => {
-        if (current()) setRepos(data);
-      })
-      .catch((e) => { if (current()) setError(formatError(e)); })
-      .finally(() => { if (current()) setLoading(false); });
-  }, [activeMeshId]);
+    return reload();
+  }, [reload]);
 
   // Mesh-switch reset (review findings B1 + B2): clear any in-flight
   // pruning set (the repo paths belong to the previous mesh) and wipe
@@ -232,14 +220,10 @@ function RepositoryContents() {
   }, [activeMeshId]);
 
   useEffect(() => {
-    const revisions = loadRevisionRef;
     mountedRef.current = true;
-    void load();
-    return () => {
-      mountedRef.current = false;
-      ++revisions.current;
-    };
-  }, [load]);
+    setSelected(new Set());
+    return () => { mountedRef.current = false; };
+  }, [activeMeshId]);
 
   // Issue #657 — clear any pending prune-success timer on unmount so a
   // late-firing `setSuccessMessage` can't land on an unmounted tree

@@ -92,6 +92,7 @@ describe('ProbePanel', () => {
       activeDiffFile: null,
     });
     vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_provider_meters' || cmd === 'get_provider_accounts') return Promise.resolve([]);
       if (cmd === 'get_git_status') return Promise.resolve(FILES);
       if (cmd === 'list_directory') return Promise.resolve(TREE);
       if (cmd === 'diff_file_against_head') return Promise.resolve(DIFF);

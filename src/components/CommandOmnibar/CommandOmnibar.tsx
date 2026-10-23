@@ -45,7 +45,7 @@ import {
   type IndexedItem,
   type OmnibarIndex,
 } from '../../lib/omnibar';
-import { PROBE_TAB_ICONS } from '../Probe/probeIcons';
+import { PROBE_TAB_DEFINITIONS } from '../../lib/probeContext';
 import {
   TOOL_DISCOVERY_GROUPS,
   TOOL_DISCOVERY_TILES,
@@ -548,7 +548,7 @@ function ToolGroups({
             </span>
             <div className="grid grid-cols-2 gap-1.5">
               {group.tiles.map((tile) => {
-                const Icon = PROBE_TAB_ICONS[tile.tab];
+                const Icon = PROBE_TAB_DEFINITIONS[tile.tab].icon;
                 const isActive = tile.tab === activeTab;
                 return (
                   <button

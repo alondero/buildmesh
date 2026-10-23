@@ -1,3 +1,4 @@
+import { useProbeResource, type ProbeLoadContext } from '../../lib/probeResource';
 /**
  * ArchivedNodesTab — the Probe Panel's Agent History tab body (issue #378;
  * renamed from DiscoveredNodesTab after PR #523; issue #1375 renamed the
@@ -53,7 +54,6 @@
  * walk; we don't reach into `meshesById` directly.
  */
 
-import { formatError } from '../../lib/errorUtils';
 import { useState, useMemo, useCallback } from 'react';
 import {
   discoverAgentNodes,
@@ -114,6 +114,10 @@ function resumeUnavailableReason(session: ArchivedAgentNode): string {
   return `${label} is not installed.`;
 }
 
+export async function loadArchive({ meshId, meshPath }: ProbeLoadContext) {
+  return meshId === null || !meshPath ? [] : discoverAgentNodes(meshId, meshPath);
+}
+
 export function ArchivedNodesTab({ meshId, meshPath }: { meshId?: number; meshPath?: string } = {}) {
   const context = useProbeContext();
   const activeMeshId = meshId ?? context.activeMeshId;
@@ -129,21 +133,13 @@ export function ArchivedNodesTab({ meshId, meshPath }: { meshId?: number; meshPa
   const spawnAgent = useAgentNodeStore((s) => s.spawnAgent);
   const toggleProbe = useUIStore((s) => s.toggleProbe);
 
-  const [sessions, setSessions] = useState<ArchivedAgentNode[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const resource = useProbeResource(loadArchive, { meshId: activeMeshId, meshPath: activeMeshPath }, `${activeMeshId}:${activeMeshPath}`);
+  const { loading, error } = resource.state;
+  const sessions = useMemo(() => resource.state.data ?? [], [resource.state.data]);
   const [search, setSearch] = useState('');
   const [resuming, setResuming] = useState<string | null>(null);
   const [openDropdown, setOpenDropdown] = useState<string | null>(null);
   const [providerList, setProviderList] = useState<ResumableProvider[]>([]);
-  // Bump to force the load effect to re-run on a manual Refresh click
-  // (issue #813 — Archive previously had no manual-refresh affordance).
-  // The mirror of the existing GitIssuesTab / GitPullRequestsTab
-  // `reloadKey` pattern — bumping aborts the previous effect's signal
-  // (useAsyncEffect) and refetches.
-  // Bump to refetch on manual Refresh (issue #813 added the Refresh
-  // affordance to this tab).
-  const [reloadKey, setReloadKey] = useState(0);
   // Fetch providers once at mount. Platform filtering is enforced
   // server-side; the `resumable` flag comes straight from the backend
   // (`ProviderInfo.resumable`, derived from
@@ -181,26 +177,6 @@ export function ArchivedNodesTab({ meshId, meshPath }: { meshId?: number; meshPa
     refreshProviderList();
   }, [refreshProviderList]);
   useProviderListInvalidation(refreshProviderList);
-
-  useAsyncEffect((signal) => {
-    if (activeMeshId === null || activeMeshPath === null) return;
-    const load = async () => {
-      try {
-        const result = await discoverAgentNodes(activeMeshId, activeMeshPath);
-        if (signal.aborted) return;
-        setSessions(result);
-      } catch (e) {
-        if (signal.aborted) return;
-        console.error('Failed to discover sessions:', e);
-        setError(formatError(e));
-      } finally {
-        if (!signal.aborted) setLoading(false);
-      }
-    };
-    setLoading(true);
-    setError(null);
-    load();
-  }, [activeMeshId, activeMeshPath, reloadKey]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -313,7 +289,7 @@ export function ArchivedNodesTab({ meshId, meshPath }: { meshId?: number; meshPa
       <ProbeToolbar
         trailing={
           <RefreshControl
-            onRefresh={() => setReloadKey((k) => k + 1)}
+            onRefresh={() => void resource.reload()}
             isRefreshing={loading && sessions.length > 0}
             ariaLabel="Refresh archived sessions"
           />
