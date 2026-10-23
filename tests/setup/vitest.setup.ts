@@ -393,13 +393,17 @@ beforeEach(async () => {
   // top-level import would cause `platform.ts` to be cached with the
   // real `navigator.platform` value, defeating the test files that
   // mock it to force `isWindows = true` (issue #354 follow-up).
-  const [{ resetPathInvalidatedCacheForTests }, { resetProviderCachesForTests }, { __resetSharedProviderListForTests }, { _resetEscapeKeyStackForTests }, { __resetDefaultChangedListeningForTests }] =
+  const [{ resetPathInvalidatedCacheForTests }, { resetProviderCachesForTests }, { __resetSharedProviderListForTests }, { _resetEscapeKeyStackForTests }, { __resetDefaultChangedListeningForTests }, { __resetCircuitRunStreamForTests }, { __resetProviderListStreamForTests }, { __resetWorktreeDirectoryStreamForTests }, { __resetMeshSyncWarningStreamForTests }] =
     await Promise.all([
       import('../../src/lib/pathInvalidatedCache'),
       import('../../src/lib/providerCache'),
       import('../../src/hooks/useProviderList'),
       import('../../src/hooks/useEscapeKey'),
       import('../../src/components/Sidebar/SpawnButtonCluster'),
+      import('../../src/lib/streams/circuitRunStream'),
+      import('../../src/lib/streams/providerListStream'),
+      import('../../src/lib/streams/worktreeDirectoryStream'),
+      import('../../src/lib/streams/meshSyncWarningStream'),
     ]);
   resetPathInvalidatedCacheForTests();
   resetProviderCachesForTests();
@@ -408,6 +412,15 @@ beforeEach(async () => {
   // cluster holds ONE process-lifetime `provider-list-changed` subscription
   // shared by every mounted row, so reset it alongside the mock bus.
   __resetDefaultChangedListeningForTests();
+  // Issue #2531 — the live event streams each hold ONE backend
+  // subscription for the whole app and fan it out to their consumers.
+  // The subscription outlives the component that caused it (the agent-node
+  // store attaches at boot), so each owner is reset alongside the mock bus
+  // to keep "the stream is fresh between tests" automatic.
+  __resetCircuitRunStreamForTests();
+  __resetProviderListStreamForTests();
+  __resetWorktreeDirectoryStreamForTests();
+  __resetMeshSyncWarningStreamForTests();
   // Issue #649 — the useEscapeKey hook maintains a module-level LIFO
   // stack of Escape handlers so the topmost mounted surface wins. RTL's
   // `cleanup()` already unmounts components between tests, but the reset

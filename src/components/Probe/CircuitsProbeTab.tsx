@@ -60,6 +60,7 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { formatError } from '../../lib/errorUtils';
+import { subscribeCircuitRunUpdates } from '../../lib/streams/circuitRunStream';
 import { queueWaitText } from '../Circuits/CircuitEvidenceHistory';
 import { CircuitRunCapacity } from './CircuitRunCapacity';
 import {
@@ -634,18 +635,22 @@ export function CircuitsProbeTab() {
     // batch cancel (single event) or a worker burst (many events) triggers
     // one snapshot reload, not an N+1 IPC storm.
     //
+    // `circuit-run-updated` is owned by `lib/streams/circuitRunStream`
+    // (issue #2531): the tab reads the typed updates from the owner
+    // instead of matching a raw payload itself.
+    //
     // `circuit-runs-attention-dismissed` rides the same debounce. A bulk
     // acknowledgement changes no run state, so no run-updated event accompanies
     // it and this is the only signal that the count and the acknowledged runs
     // moved. The acting tab reloads through its own runAction, but a second
     // window — or any view that did not perform the action — would otherwise
     // keep showing the old count until something else forced a reload.
-    const unlistenRunUpdated = listen('circuit-run-updated', scheduleLoad);
+    const releaseRunUpdates = subscribeCircuitRunUpdates(scheduleLoad);
     const unlistenAttentionDismissed = listen('circuit-runs-attention-dismissed', scheduleLoad);
     return () => {
       disposed = true;
       if (timer !== null) clearTimeout(timer);
-      void unlistenRunUpdated.then((fn) => fn());
+      releaseRunUpdates();
       void unlistenAttentionDismissed.then((fn) => fn());
     };
   }, [activeMeshId, load]);

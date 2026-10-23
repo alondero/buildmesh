@@ -1,7 +1,7 @@
 import { _invoke } from './_invoke';
 import { emit } from '@tauri-apps/api/event';
 import { deleteDefaultProviderPromise } from '../providerCache';
-import { PROVIDER_LIST_CHANGED_EVENT } from './provider';
+import { PROVIDER_LIST_CHANGED_EVENT } from '../streams/providerListStream';
 import type { Mesh } from '../../types/generated/Mesh';
 import type { AiContextStatus } from '../../types/generated/AiContextStatus';
 import type { MeshRow } from '../../types/generated/MeshRow';

@@ -9,9 +9,10 @@ import { getMeshColor } from '../../lib/meshColors';
 import type { MeshHealth } from '../../lib/tauri';
 import { runMeshSync, useMeshSyncCompletion } from '../../lib/meshSyncFeedback';
 import { useToastStore } from '../../stores/toastStore';
-import { listen } from '@tauri-apps/api/event';
-import { pathMatchesGitEvent } from '../../lib/paths';
-import type { MeshSyncWarningPayload } from '../../types/generated/MeshSyncWarningPayload';
+import {
+  concernsMeshPath,
+  subscribeMeshSyncWarnings,
+} from '../../lib/streams/meshSyncWarningStream';
 import { useGitBranchStatus } from '../../hooks/useGitBranchStatus';
 import { useMeshHealth } from '../../hooks/useMeshHealth';
 import { useMeshGitHubUrl } from '../../hooks/useMeshGitHubUrl';
@@ -326,27 +327,15 @@ function MeshItemView({
   const syncFailed = spawnSyncFailed || syncAttention;
 
   // Light the failure icon only for THIS mesh: the event is app-global and
-  // carries the mesh path that failed, so match through the same
+  // carries the mesh path that failed, so the owner module
+  // (`lib/streams/meshSyncWarningStream`) matches it through the same
   // path-normalisation helper every other mesh-scoped subscriber uses
   // (slash/case/worktree-aware). A successful sync below clears it.
-  useEffect(() => {
-    let unlisten: (() => void) | null = null;
-    let disposed = false;
-    listen<MeshSyncWarningPayload>('mesh-sync-warning', (event) => {
-      if (pathMatchesGitEvent({ path: event.payload.mesh_path }, mesh.path)) {
-        setSpawnSyncFailed(true);
-      }
-    }).then((fn) => {
-      // The mesh (or the whole sidebar) can unmount before the IPC-side
-      // subscription resolves — unsubscribe immediately in that case.
-      if (disposed) fn();
-      else unlisten = fn;
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, [mesh.path]);
+  useEffect(() => subscribeMeshSyncWarnings((warning) => {
+    if (concernsMeshPath(warning, mesh.path)) {
+      setSpawnSyncFailed(true);
+    }
+  }), [mesh.path]);
 
   // A sync can be run from two places this row does not control — the
   // Notifications probe's Retry button and the omnibar's bulk command — and

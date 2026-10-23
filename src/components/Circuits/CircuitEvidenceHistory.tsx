@@ -1,7 +1,7 @@
 import type { CircuitStepObservationCoverage } from '../../types/generated/CircuitStepObservationCoverage';
 import { useEffect, useState } from 'react';
-import { listen } from '@tauri-apps/api/event';
 import { circuitRunHistory, recordCircuitOutcome } from '../../lib/tauri/circuitEvidence';
+import { useCircuitRunUpdates } from '../../lib/streams/circuitRunStream';
 import type { CircuitHistoryEntry } from '../../types/generated/CircuitHistoryEntry';
 import type { CircuitCheckpoint } from '../../types/generated/CircuitCheckpoint';
 import type { CheckpointAction } from '../../types/generated/CheckpointAction';
@@ -226,18 +226,14 @@ export function CircuitEvidenceHistory({ runId, updatedAt, nodeLabel }: {
   const [error, setError] = useState<string | null>(null);
   const [reason, setReason] = useState('');
   const [pending, setPending] = useState(false);
+  // Live transitions of THIS run, but only while the panel is open.
+  // `circuit-run-updated` is owned by `lib/streams/circuitRunStream`
+  // (issue #2531) — the owner filters the event down to the run in
+  // scope, so this panel never matches a raw payload itself.
+  const runUpdates = useCircuitRunUpdates(open ? runId : null);
+  // Manual refresh counter — the panel's own actions re-read the history
+  // after the backend accepted the outcome.
   const [refresh, setRefresh] = useState(0);
-  useEffect(() => {
-    if (!open) return;
-    let current = true;
-    const subscription = listen<unknown>('circuit-run-updated', ({ payload }) => {
-      if (current && typeof payload === 'object' && payload !== null && 'run_id' in payload && payload.run_id === runId) {
-        setRefresh((value) => value + 1);
-      }
-    });
-    void subscription.catch((cause: unknown) => { if (current) setError(String(cause)); });
-    return () => { current = false; void subscription.then((unlisten) => unlisten(), () => {}); };
-  }, [open, runId]);
   useEffect(() => {
     if (!open) return;
     let current = true;
@@ -250,7 +246,7 @@ export function CircuitEvidenceHistory({ runId, updatedAt, nodeLabel }: {
       (cause: unknown) => { if (current) setError(String(cause)); },
     );
     return () => { current = false; };
-  }, [runId, updatedAt, open, refresh]);
+  }, [runId, updatedAt, open, refresh, runUpdates]);
 
   async function record(step: CircuitCheckpoint, action: CheckpointAction) {
     if (rows === null || pending) return;

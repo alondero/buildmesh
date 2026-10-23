@@ -18,7 +18,7 @@
  */
 
 import { useEffect, useState } from 'react';
-import { listen } from '@tauri-apps/api/event';
+import { useCircuitRunUpdates } from '../../lib/streams/circuitRunStream';
 import {
   circuitRunAttention,
   recordCircuitOutcome,
@@ -74,28 +74,15 @@ export function RunNextSteps({ run, steps, roleLabel, busy }: RunNextStepsProps)
   } | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Live transitions of THIS run. `circuit-run-updated` is owned by
+  // `lib/streams/circuitRunStream` (issue #2531) — the owner filters the
+  // event down to the run in scope, so this panel never matches a raw
+  // payload itself.
+  const runUpdates = useCircuitRunUpdates(run.id);
+  // Manual refresh counter — the panel's own actions re-read the run
+  // after the backend accepted the outcome.
   const [refresh, setRefresh] = useState(0);
   const failed = run.state === 'failed';
-
-  useEffect(() => {
-    let current = true;
-    const subscription = listen<unknown>('circuit-run-updated', ({ payload }) => {
-      if (
-        current &&
-        typeof payload === 'object' &&
-        payload !== null &&
-        'run_id' in payload &&
-        payload.run_id === run.id
-      ) {
-        setRefresh((value) => value + 1);
-      }
-    });
-    void subscription.catch(() => {});
-    return () => {
-      current = false;
-      void subscription.then((unlisten) => unlisten(), () => {});
-    };
-  }, [run.id]);
 
   useEffect(() => {
     let current = true;
@@ -110,7 +97,7 @@ export function RunNextSteps({ run, steps, roleLabel, busy }: RunNextStepsProps)
     return () => {
       current = false;
     };
-  }, [run.id, run.updated_at, refresh]);
+  }, [run.id, run.updated_at, refresh, runUpdates]);
 
   const failure = runFailureStep(steps);
   const recovery = attention?.recovery ?? null;
