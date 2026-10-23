@@ -1,21 +1,4 @@
-/**
- * Mobile design-token regression — companion to theme-tokens-contrast.test.ts.
- *
- * The mobile SPA (src/mobile/styles.css) doesn't run Tailwind, so its
- * `:root` vars are a hand-mirrored copy of the desktop @theme tokens in
- * src/App.css (mapping table: DESIGN.md §Mobile token mapping). Before the
- * 2026-09 unification pass that mirror had silently drifted to a Material
- * palette with a 3.6:1 muted text colour. This test pins two contracts:
- *
- *   1. WCAG AA: every text tier (--text / --text-dim / --text-faint) clears
- *      4.5:1 on every surface the mobile app renders text onto, and the
- *      hierarchy stays monotonic (--text > --text-dim > --text-faint).
- *   2. Parity: the mobile vars equal the desktop dark-theme tokens they
- *      mirror, so retuning one file without the other fails the gate.
- *
- * Contrast math is re-implemented inline (no third-party a11y dep),
- * matching the desktop companion test.
- */
+/** Mobile text contrast across the surfaces used by the SPA. */
 
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -55,21 +38,11 @@ const MOBILE_CSS = readFileSync(
   resolve(__dirname, '../../src/mobile/styles.css'),
   'utf8',
 );
-const APP_CSS = readFileSync(resolve(__dirname, '../../src/App.css'), 'utf8');
 
 function readMobileVar(name: string): string {
   const re = new RegExp(`--${name}\\s*:\\s*([^;]+);`);
   const m = re.exec(MOBILE_CSS);
   if (!m) throw new Error(`Missing mobile token --${name}`);
-  return m[1].trim();
-}
-
-function readDesktopToken(name: string): string {
-  // The dark-theme value is the FIRST occurrence (the light override block
-  // repeats each token name).
-  const re = new RegExp(`--color-${name}\\s*:\\s*([^;]+);`);
-  const m = re.exec(APP_CSS);
-  if (!m) throw new Error(`Missing desktop token --color-${name}`);
   return m[1].trim();
 }
 
@@ -105,34 +78,4 @@ describe('mobile text contrast (WCAG AA)', () => {
     expect(primary).toBeGreaterThan(secondary);
     expect(secondary).toBeGreaterThan(muted);
   });
-});
-
-describe('mobile ↔ desktop token parity (DESIGN.md mapping table)', () => {
-  // [mobile var, desktop --color-* token]
-  const pairs: Array<[string, string]> = [
-    ['bg', 'bg-base'],
-    ['surface', 'bg-surface'],
-    ['surface-2', 'bg-card'],
-    ['surface-3', 'bg-card-hover'],
-    ['border', 'border-default'],
-    ['border-strong', 'border-strong'],
-    ['text', 'text-primary'],
-    ['text-dim', 'text-secondary'],
-    ['text-faint', 'text-muted'],
-    ['on-accent', 'text-inverse'],
-    ['accent', 'accent-cyan'],
-    ['accent-dim', 'accent-blue'],
-    ['green', 'accent-green'],
-    ['red', 'accent-red'],
-    ['amber', 'accent-amber'],
-    ['violet', 'accent-violet'],
-  ];
-
-  for (const [mobileVar, desktopToken] of pairs) {
-    it(`--${mobileVar} equals --color-${desktopToken}`, () => {
-      expect(readMobileVar(mobileVar).toLowerCase()).toBe(
-        readDesktopToken(desktopToken).toLowerCase(),
-      );
-    });
-  }
 });

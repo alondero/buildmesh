@@ -25,8 +25,8 @@ if (files.length === 0) {
 }
 
 // Lines whose bare `rounded` is intentionally smallest-radius and survives the sweep.
-// We match a unique enough substring of the className. Keep these in sync with
-// tests/unit/radii-audit.test.ts ALLOWED_BARE_ROUNDED.
+// We match a unique enough substring of the className. The content guard
+// recognizes the allow-bare-rounded marker on preserved lines.
 const KEEP_FRAGMENTS = [
   "px-1 py-px rounded text-2xs", // RepositoryTab Badge (was text-[9px] pre-#733 modernization)
   "px-2 py-1 text-2xs rounded bg-bg-card text-text-muted", // GitPullRequestsTab "can't merge" (was text-[10px])

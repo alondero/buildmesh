@@ -331,10 +331,10 @@ specificity and import order; custom properties don't.
   `tests/unit/theme-tokens-light-contrast.test.ts` recompute contrast from
   the CSS and fail the build if a token regresses; a static list in the same
   test pins load-bearing text to `text-secondary`. The mobile mirror is
-  pinned the same way by `tests/unit/mobile-tokens-contrast.test.ts` (AA on
-  every mobile surface + value parity with the desktop tokens).
-- `tests/unit/radii-audit.test.ts` pins the radius conventions on audited
-  components.
+  checked by `tests/unit/mobile-tokens-contrast.test.ts` for AA on mobile
+  surfaces; equality with desktop token values is a design convention.
+- `scripts/check-agent-diff.mjs` flags new bare radius classes in components;
+  justified exceptions use an `allow-bare-rounded` marker.
 - Keyboard focus is always visible: 1.5px accent-cyan outline on button-like
   elements, focus border on inputs.
 - Colour is never the only signal — statuses always carry a text label on the

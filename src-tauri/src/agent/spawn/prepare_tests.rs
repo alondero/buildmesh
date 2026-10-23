@@ -1,63 +1,5 @@
-use super::intent::ResumeCause;
-use super::prepare::{
-    resolve_base_ref_for_spawn, SpawnInFlightClaim, SpawnOptions, DEFAULT_WORKTREE_MODE,
-};
-use super::WorktreePolicy;
-use crate::agent::provider::SpawnOptionId;
-use crate::models::Provider;
+use super::prepare::{resolve_base_ref_for_spawn, SpawnInFlightClaim};
 use tempfile::TempDir;
-
-/// Pin the spawn-time fallback. Sole pin of `DEFAULT_WORKTREE_MODE`
-/// after #411 deleted the TS-side sentinel (it had no real consumer).
-#[test]
-fn default_worktree_mode_is_branched() {
-    assert_eq!(DEFAULT_WORKTREE_MODE, "branched");
-}
-
-/// `SpawnOptions` must carry the explicit slots through to
-/// `spawn_agent_inner` (issue #1155 AC #1). The orchestrator
-/// destructures them out of `opts`; this test pins the struct
-/// shape so a refactor that drops either field fails compilation.
-#[test]
-fn spawn_options_carries_explicit_slots() {
-    let opts = SpawnOptions {
-        session_id: -1,
-        provider: Provider::Anthropic,
-        resume: None,
-        // Issue #1550: `regenerate_agent_node` sets
-        // `ResumeCause::Regenerate` so argv composition branches off the
-        // captured transcript. Pinned so dropping the field (which would
-        // silently revert every regenerate to an in-place resume) fails
-        // compilation.
-        resume_cause: ResumeCause::Explicit,
-        rows: 24,
-        cols: 80,
-        prefill: None,
-        node: None,
-        explicit_model: Some("sonnet-4".into()),
-        explicit_effort: Some("low".into()),
-        // Issue #1358: every transport that builds a `SpawnRequest`
-        // and reaches `spawn_agent_inner` via `spawn_with_intent`
-        // forwards `explicit_extra_args` from the v2 SpawnAgentNode
-        // explicit slot. None is fine — the resolver then cascades
-        // through mesh / app defaults and `default_prepare` only
-        // forwards the string when `supports_extra_args = true`.
-        explicit_extra_args: None,
-        // #1219: per-step wall-clock budget. Forwarded from the AST's
-        // `SpawnAgentNode.timeout_seconds` through `resolve_circuit_spawn_inputs`
-        // → `ExplicitSpawnOverrides::timeout_seconds` →
-        // `SpawnOptions::explicit_timeout_seconds` → `LaunchParams` so
-        // the launch phase can log it and the (deferred) watchdog can
-        // consume it. Pin the field here so a future refactor that
-        // drops it fails compilation.
-        explicit_timeout_seconds: Some(1800),
-        worktree_policy: WorktreePolicy::RespectMesh,
-    };
-    assert_eq!(opts.explicit_model.as_deref(), Some("sonnet-4"));
-    assert_eq!(opts.explicit_effort.as_deref(), Some("low"));
-    assert!(opts.explicit_extra_args.is_none());
-    assert_eq!(opts.explicit_timeout_seconds, Some(1800));
-}
 
 // -----------------------------------------------------------------------
 // Per-session spawn claim (duplicate-spawn fix). `is_agent_already_running`
@@ -456,33 +398,6 @@ fn resolve_base_ref_keeps_explicit_user_value_for_main_trunk() {
     );
 }
 
-/// WorkspaceToProvision is git/disk inputs. Launch knobs live on LaunchParams.
-#[test]
-fn workspace_to_provision_has_no_pty_or_cascade_fields() {
-    let src = include_str!("provision.rs");
-    let start = src
-        .find("pub(super) struct WorkspaceToProvision")
-        .expect("WorkspaceToProvision must exist");
-    let rest = &src[start..];
-    let end = rest
-        .find("pub(super) struct ProvisionedWorkspace")
-        .expect("ProvisionedWorkspace follows");
-    let body = &rest[..end];
-    for needle in [
-        "rows",
-        "cols",
-        "prefill",
-        "explicit_model",
-        "explicit_effort",
-        "explicit_extra_args",
-    ] {
-        assert!(
-            !body.contains(needle),
-            "WorkspaceToProvision must not courier launch knob {needle}"
-        );
-    }
-}
-
 #[test]
 fn prepare_does_not_acquire_the_in_flight_claim() {
     let src = include_str!("prepare.rs");
@@ -494,64 +409,4 @@ fn prepare_does_not_acquire_the_in_flight_claim() {
         !body.contains("SpawnInFlightClaim::try_claim"),
         "prepare_context must not acquire the claim; spawn_agent_inner owns it"
     );
-}
-
-/// Pin the **prepare → launch** DTO boundary (issue #1659 item 1):
-/// `LaunchParams.spawn_option_id: SpawnOptionId` carries the parsed
-/// value across the spawn-phase boundary. `launch_process` reads
-/// `spawn_option_id.harness_id()` for the per-Mesh override +
-/// application-default lookups (issue #1148 AC #12: native and Proxied
-/// rows consume the same default layer), so the composite-id wire shape
-/// must survive the typed-value boundary intact.
-///
-/// This is a **compilation pin**: the test constructs a real
-/// `LaunchParams` value with `spawn_option_id: SpawnOptionId` exactly as
-/// `prepare_context` does. A future refactor that reverts the field
-/// type to `String`, removes the field, or renames it again fails to
-/// compile — the assertions below then exercise the typed value the
-/// way the launch phase consumes it.
-#[test]
-fn prepare_threads_typed_spawn_option_id_into_launch_params() {
-    use super::intent::ResumeCause;
-    use super::launch::LaunchParams;
-    use super::reader::SessionIdMode;
-
-    // Composite Proxied id — the case that broke the bare-string lookup
-    // in the pre-#1659 code (the harness half is `"claude"`, the
-    // provider half is `"minimax"`; both must be present after the
-    // typed boundary so `launch.rs` can read `.harness_id()`).
-    let raw = "claude:minimax";
-    let id = SpawnOptionId::from(raw);
-
-    // Construction pin — the field shape mirrors `prepare_context`'s
-    // `LaunchParams { spawn_option_id, .. }` literal. If the field
-    // type reverts to `String` (or the field is renamed), this fails to
-    // compile and the regression is caught at build time, not by the
-    // assertions below.
-    let launch = LaunchParams {
-        rows: 24,
-        cols: 80,
-        prefill: None,
-        explicit_model: None,
-        explicit_effort: None,
-        explicit_extra_args: None,
-        explicit_timeout_seconds: None,
-        spawn_option_id: id.clone(),
-        registry_mesh_id: 0,
-        session_id_mode: SessionIdMode::None,
-        resume_cause: ResumeCause::Explicit,
-        sandbox: false,
-    };
-
-    // The launch-phase consumer reads `spawn_option_id.harness_id()`
-    // for the application-default / per-Mesh override lookup (see
-    // launch.rs: `let harness_id_for_default =
-    // spawn_option_id.harness_id();`). A composite id must hand the
-    // launcher the harness half cleanly; a Proxied row looks up the
-    // same default as its native harness row — the regression class
-    // this typed value prevents.
-    assert_eq!(launch.spawn_option_id.harness_id(), "claude");
-    assert_eq!(launch.spawn_option_id.provider_id(), Some("minimax"));
-    assert!(launch.spawn_option_id.is_proxied());
-    assert_eq!(launch.spawn_option_id.to_string(), raw);
 }

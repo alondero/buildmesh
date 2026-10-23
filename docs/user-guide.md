@@ -381,6 +381,17 @@ An action that cannot work is not offered; the box says why instead, for example
 that a closed agent has to be resumed from Archive before a retry. A review
 approval can never be recorded on the reviewer's behalf; use **Review again**.
 
+If a prompt could not be delivered, choose **Copy payload** in the run card,
+the agent's Circuit Overview, or Circuit Run History. Paste it into the target
+agent's terminal and submit it, then choose **Sent manually** and confirm.
+The clipboard receives the exact prepared prompt, which may be a short reference
+to its full task file. This works for feedback injections, initial prompts and
+continuation prompts when a payload was retained. Copy errors stay visible and
+can be retried. The confirmation records delivery and lets the circuit continue
+observing the agent; it does not finish the agent's task or approve a review.
+Resolve any new permission or question in the terminal as usual. If the run
+changes while you act, refresh its actions before confirming again.
+
 Some runs ask for attention only because Buildmesh recorded no outcome, not
 because there is anything left to do — you may have fixed it by hand and moved on.
 **Dismiss all** in the History toolbar clears these in one go, after a

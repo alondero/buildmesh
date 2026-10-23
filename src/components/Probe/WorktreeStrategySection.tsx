@@ -18,8 +18,7 @@
  * drops a write whose project the user has left (issue #2242). Until then the
  * section was handed thirteen props and handlers for exactly that state.
  * All saves fire on change through the session's typed `save`, which uses the
- * `lib/tauri` wrappers — no raw `invoke`, which preserves the `tauri-ipc-seam`
- * ratchet at `tests/unit/tauri-ipc-seam.test.ts`.
+ * `lib/tauri` wrappers; ESLint rejects raw static `invoke` imports.
  *
  * The wrapping `<label>` pattern (option label + nested input) is
  * intentional: it makes `getByLabelText('Use worktree')` resolve the

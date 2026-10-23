@@ -4,6 +4,7 @@ import { emit } from '@tauri-apps/api/event';
 import { RunNextSteps, runNeedsNextSteps } from '../../src/components/Circuits/RunNextStepsPanel';
 import {
   circuitRunAttention,
+  circuitPromptPayload,
   recordCircuitOutcome,
   recoverFailedCircuitRun,
 } from '../../src/lib/tauri/circuitEvidence';
@@ -13,6 +14,7 @@ import type { CircuitRunAttention } from '../../src/types/generated/CircuitRunAt
 
 vi.mock('../../src/lib/tauri/circuitEvidence', () => ({
   circuitRunHistory: vi.fn(),
+  circuitPromptPayload: vi.fn(),
   circuitRunAttention: vi.fn(),
   recordCircuitOutcome: vi.fn(),
   recoverFailedCircuitRun: vi.fn(),
@@ -76,6 +78,64 @@ beforeEach(() => {
   vi.mocked(circuitRunAttention).mockReset();
   vi.mocked(recordCircuitOutcome).mockReset().mockResolvedValue(undefined);
   vi.mocked(recoverFailedCircuitRun).mockReset().mockResolvedValue(undefined);
+  vi.mocked(circuitPromptPayload).mockReset();
+});
+
+describe('manual prompt delivery', () => {
+  function manualPanel() {
+    vi.mocked(circuitRunAttention).mockResolvedValue(recoverable({ recovery: null, checkpoints: [{
+      node_id: 'send', attempt: 2, actions: ['manual_delivered', 'recheck'],
+      starts_next_review: false, ends_review: false, review_again: false,
+    }] }));
+    return renderPanel({ state: 'running' }, [step({ node_id: 'send', attempt: 2, status: 'unverified' })]);
+  }
+
+  it('copies the full prepared payload and confirms manual delivery separately', async () => {
+    const text = 'Full prepared payload\r\nUnicode: café\n' + 'details '.repeat(1000);
+    vi.mocked(circuitPromptPayload).mockResolvedValue(text);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    manualPanel();
+    fireEvent.click(await screen.findByRole('button', { name: 'Copy payload' }));
+    await screen.findByRole('status');
+    expect(writeText).toHaveBeenCalledWith(text);
+    expect(circuitPromptPayload).toHaveBeenCalledWith({ run_id: 7, node_id: 'send', attempt: 2, expected_revision: 41 });
+    expect(recordCircuitOutcome).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Sent manually' }));
+    expect(recordCircuitOutcome).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm: Sent manually' }));
+    await waitFor(() => expect(recordCircuitOutcome).toHaveBeenCalledWith({
+      run_id: 7, node_id: 'send', attempt: 2, expected_revision: 41, action: 'manual_delivered', reason: '',
+    }));
+  });
+
+  it('shows retrieval and clipboard errors and permits retry', async () => {
+    vi.mocked(circuitPromptPayload).mockRejectedValueOnce('The run changed').mockResolvedValue('payload');
+    const writeText = vi.fn().mockRejectedValueOnce(new Error('Clipboard denied')).mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    manualPanel();
+    const copy = await screen.findByRole('button', { name: 'Copy payload' });
+    fireEvent.click(copy);
+    expect((await screen.findByRole('alert')).textContent).toContain('The run changed');
+    expect(writeText).not.toHaveBeenCalled();
+    fireEvent.click(copy);
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Clipboard denied'));
+    fireEvent.click(copy);
+    await screen.findByRole('status');
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('keeps confirmation bound to the revision originally shown when the run refreshes', async () => {
+    const view = manualPanel();
+    fireEvent.click(await screen.findByRole('button', { name: 'Sent manually', exact: true }));
+    vi.mocked(circuitRunAttention).mockResolvedValue(recoverable({ revision: 99, checkpoints: [{
+      node_id: 'send', attempt: 2, actions: ['manual_delivered'], starts_next_review: false, ends_review: false, review_again: false,
+    }] }));
+    view.rerender(<RunNextSteps run={run({ state: 'running', updated_at: 'new' })} steps={[step({ node_id: 'send', attempt: 2, status: 'unverified' })]} roleLabel={roleLabel} busy={false} />);
+    await waitFor(() => expect(circuitRunAttention).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm: Sent manually' }));
+    await waitFor(() => expect(recordCircuitOutcome).toHaveBeenCalledWith(expect.objectContaining({ action: 'manual_delivered', expected_revision: 41 })));
+  });
 });
 
 describe('when the panel is needed', () => {

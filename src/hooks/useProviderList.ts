@@ -1,8 +1,7 @@
 import { useSyncExternalStore } from 'react';
-import { listen } from '@tauri-apps/api/event';
 import { listProviders } from '../lib/tauri';
 import { mapBackendProviders, type SpawnOption } from '../lib/groups';
-import { PROVIDER_LIST_CHANGED_EVENT } from './useProviderListInvalidation';
+import { subscribeProviderListChanges } from '../lib/streams/providerListStream';
 import { formatError } from '../lib/errorUtils';
 
 /**
@@ -73,7 +72,11 @@ function load(): void {
 function ensureListening(): void {
   if (listening) return;
   listening = true;
-  void listen(PROVIDER_LIST_CHANGED_EVENT, () => {
+  // `provider-list-changed` has exactly one subscriber in the app (issue
+  // #2531) — the owner module `lib/streams/providerListStream`. This hook
+  // reads the typed change it publishes instead of holding its own
+  // `listen`.
+  subscribeProviderListChanges(() => {
     inflight = null;
     cached = null;
     load();

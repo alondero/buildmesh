@@ -16,6 +16,12 @@
  *     to exercise dispatch in isolation — the surface is a typed seam
  *     with no transitive store imports.
  *
+ * `circuit-run-updated` is the one exception (issue #2531): it is not a
+ * node-lifecycle event, and six surfaces used to subscribe to it and
+ * each re-implement the "is this about MY run?" filter. It now has its
+ * own owner — `lib/streams/circuitRunStream` — and this module is one of
+ * its consumers.
+ *
  * Why a typed surface, not bare `set/get`
  * ----------------------------------------
  * The listener only needs to *dispatch* — it never reads the store
@@ -48,7 +54,8 @@ import type { NodeActivatedPayload } from '../types/generated/NodeActivatedPaylo
 import type { NodeSpawnCompletedPayload } from '../types/generated/NodeSpawnCompletedPayload';
 import type { NodeSpawnFailedPayload } from '../types/generated/NodeSpawnFailedPayload';
 import type { AgentNode } from '../types/generated/AgentNode';
-import type { CircuitPrReadyPayload, CircuitRunUpdatedPayload } from '../types/generated/CircuitEvents';
+import type { CircuitPrReadyPayload } from '../types/generated/CircuitEvents';
+import { subscribeCircuitRunUpdates } from '../lib/streams/circuitRunStream';
 import { invalidateNodeCaches } from '../hooks/invalidateNodeCaches';
 import { getNodeGitPath } from '../lib/paths';
 import { lifecycleNodePatch } from '../lib/status';
@@ -103,25 +110,6 @@ export interface AgentNodeActionSurface {
 // says this stays as "session" intentionally). Map to the internal
 // `node_id` alias for vocabulary consistency inside the store.
 const SESSION_ID_KEY = 'session_id';
-
-/// Non-terminal run states: ownership is still live, so the satellite re-read
-/// keeps the node glyph's Circuit ring current without a full node refetch.
-const LIVE_CIRCUIT_RUN_STATES = new Set(['pending', 'running', 'paused']);
-
-/// Circuit run states after which the run's remaining agents have been swept.
-/// Deleted agents arrive via `node-deleted`, but a failed-run sweep *archives*
-/// the agents still attached to the run — archive must not dispose their
-/// terminals, and it emits no per-node event — so refetch on these states to
-/// drop the archived cards.
-const TERMINAL_CIRCUIT_RUN_STATES = new Set(['completed', 'failed', 'cancelled']);
-
-/// Every state the runner emits. Anything else is an unknown state the UI
-/// ignores rather than guesses at, so the two sets above stay the single
-/// vocabulary rather than a third inline list.
-const KNOWN_CIRCUIT_RUN_STATES = new Set([
-  ...LIVE_CIRCUIT_RUN_STATES,
-  ...TERMINAL_CIRCUIT_RUN_STATES,
-]);
 
 /**
  * Run every accumulated unlisten handle, isolating individual failures.
@@ -194,21 +182,31 @@ async function registerAgentNodeListeners(
   surface: AgentNodeActionSurface,
   unlistens: Array<() => void>,
 ): Promise<void> {
+  // `circuit-run-updated` is owned by `lib/streams/circuitRunStream` (issue
+  // #2531): one backend subscription for the whole app, and the run-state
+  // vocabulary (known / live / terminal) is derived once by the owner rather
+  // than re-spelled here. This module is one of its consumers.
+  //
+  // The subscription is registered first so the store's all-or-nothing
+  // rollback (issue #1524) still covers it: a failure further down tears this
+  // one down with the rest, and the bus is clean rather than half-wired.
   unlistens.push(
-    await listen<CircuitRunUpdatedPayload>('circuit-run-updated', ({ payload }) => {
-      if (KNOWN_CIRCUIT_RUN_STATES.has(payload.state)) {
-        surface.patchCircuitOwnershipState(payload.run_id, payload.state);
+    subscribeCircuitRunUpdates((update) => {
+      // An event that named no run carries no state to reconcile.
+      if (update.kind !== 'transition') return;
+      if (update.known) {
+        surface.patchCircuitOwnershipState(update.runId, update.state);
       }
       // The patch above only rewrites rows the map already holds, and the event
       // carries just `{ run_id, state }`, so the satellite re-read is what
       // introduces a node to the map (see `refreshCircuitOwnerships`).
-      if (LIVE_CIRCUIT_RUN_STATES.has(payload.state)) {
+      if (update.live) {
         void surface.refreshCircuitOwnerships();
       }
       // A terminal run has swept its remaining agents — a failed-run sweep
       // *archives* them, and archive emits no per-node event — so resync to
       // drop those cards. Deleted agents ride `node-deleted` instead.
-      if (TERMINAL_CIRCUIT_RUN_STATES.has(payload.state)) {
+      if (update.terminal) {
         void surface.fetchAgentNodes();
       }
     }),

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { listen } from '@tauri-apps/api/event';
 import { circuitRunOverview } from '../../lib/tauri/circuitEvidence';
+import { useCircuitRunUpdates } from '../../lib/streams/circuitRunStream';
 import { formatError } from '../../lib/errorUtils';
 import type { CircuitRunOverview } from '../../types/generated/CircuitRunOverview';
 
@@ -33,24 +33,15 @@ export interface RunOverviewState {
 export function useCircuitRunOverview(runId: number | null): RunOverviewState {
   const [overview, setOverview] = useState<CircuitRunOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Manual refresh counter (the card's "reload" affordance).
   const [tick, setTick] = useState(0);
+  // The transitions of THIS run. `circuit-run-updated` is owned by
+  // `lib/streams/circuitRunStream` (issue #2531): the owner filters the
+  // event down to the run in scope, so this hook never matches a raw
+  // payload itself.
+  const runUpdates = useCircuitRunUpdates(runId);
   const sequence = useRef(0);
   const refresh = useCallback(() => setTick((value) => value + 1), []);
-
-  useEffect(() => {
-    if (runId === null) return;
-    let current = true;
-    const subscription = listen<unknown>('circuit-run-updated', ({ payload }) => {
-      if (current && typeof payload === 'object' && payload !== null && 'run_id' in payload && payload.run_id === runId) {
-        setTick((value) => value + 1);
-      }
-    });
-    void subscription.catch(() => {});
-    return () => {
-      current = false;
-      void subscription.then((unlisten) => unlisten(), () => {});
-    };
-  }, [runId]);
 
   // A different run is a different subject: drop the old one at once rather
   // than showing its steps under the new run's tab.
@@ -84,7 +75,7 @@ export function useCircuitRunOverview(runId: number | null): RunOverviewState {
       // Unmount or a newer read: whatever this one returns is stale.
       if (sequence.current === request) sequence.current += 1;
     };
-  }, [runId, tick]);
+  }, [runId, tick, runUpdates]);
 
   return { overview, error, refresh };
 }

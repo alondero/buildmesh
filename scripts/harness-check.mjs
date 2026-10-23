@@ -91,6 +91,8 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/commands/git_status_counts_tests.rs': 'commands::git_tests::status_counts',
   'src-tauri/src/commands/pr_tests.rs': 'commands::pr::tests',
   'src-tauri/src/db/circuit/evidence_tests.rs': 'db::circuit::evidence::tests',
+  'src-tauri/src/db/circuit/evidence/prompt_delivery_tests.rs': 'db::circuit::evidence::prompt_delivery::tests',
+  'src-tauri/src/services/circuit_prompt_tests.rs': 'services::circuit_prompt::tests',
   'src-tauri/src/git/fetch_origin_tests.rs': 'git::sync::fetch_origin_tests',
   'src-tauri/src/git/fetch_freshness_tests.rs': 'git::fetch_freshness::tests',
   'src-tauri/src/git/mesh_health_tests.rs': 'git::health::mesh_health_tests',
