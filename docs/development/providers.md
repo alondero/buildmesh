@@ -43,6 +43,46 @@ OAuth login.
 Never derive remaining allowance from local requests or MSP token/context
 events, and never fold it into a Meta Model API pay-as-you-go wallet.
 
+**Freebuff daily allowance.** The native adapter reads the CLI's
+`$XDG_CONFIG_HOME/manicode/credentials.json` or
+`~/.config/manicode/credentials.json`, accepting the current
+`{"default":{"authToken":"..."}}` shape and the legacy flat login. A present
+`default` entry takes precedence over a top-level token. Sign in through the
+Freebuff CLI if the credential is missing or rejected; browser login alone
+does not create this file.
+
+Verified against the authenticated [Freebuff usage page](https://freebuff.com/?settings=usage)
+on 2026-10-22: `GET https://freebuff.com/api/web/freebuff-session` returns the
+daily meter in `freebucks.daily`. A separate request with the local CLI bearer
+and `Buildmesh-Usage-Probe/1.0` User-Agent returned the same allowance without
+cookies, email, fingerprint, or timezone headers; an anonymous GET returned 401.
+The minimal observed shape is:
+
+```json
+{
+  "status": "none",
+  "freebucks": {
+    "daily": {
+      "limit": 20,
+      "spent": 15,
+      "remaining": 5,
+      "resetAt": "2026-10-22T23:00:00.000Z",
+      "resetTimeZone": "Europe/London"
+    }
+  }
+}
+```
+
+`spent / limit * 100` supplies the Daily percentage (75% in this snapshot).
+Use the server's `resetAt` verbatim rather than inferring midnight or Pacific
+time. `status: "none"` describes the active session and does not hide the daily
+allowance. Missing or invalid daily data reports unavailable instead of a
+healthy empty reading. The response's `freebucks.wallet` contains allowance
+credits, not USD; `rateLimitsByModel` and `/api/web/usage-summary` activity
+statistics do not supply this daily percentage. Neither is projected as a cash
+balance or additional quota. The former Codebuff `/api/usage` route and
+`windows`/`earnedSessions` response assumption have been replaced.
+
 **Observed Session Telemetry is not a Usage Meter.** Muse MSP
 `session/tokenUsage` and `session/contextUsage` notifications are ingested by
 `agent/provider/muse/telemetry.rs`, stored per Agent Node, and surfaced on
@@ -526,6 +566,21 @@ persist the result without losing the user's content.
 `src-tauri/src/agent/managed_config.rs` owns the read and the write for every
 adapter that uses it, plus the merge wherever the document's shape fits one of
 the two shared upserts. How much each adapter shares follows its document.
+
+Above those primitives, `src-tauri/src/agent/attention_hooks.rs` owns the
+attention-hook orchestration once (issue #2525): read, build the expected
+entries, compare, upsert, write atomically and report whether anything changed.
+AGY, Claude Code, Cursor and Grok declare their JSON shape — file, root key,
+event list, matcher rules, handler shape and ownership anchors — as a
+`HookProvisioningSpec`; Kimi declares the TOML shape through the same
+`provision_attention_hooks` entry point, so a caller does not know which format
+its harness writes. The entry point takes the directory holding that file, which
+is the project's config directory for a workspace harness (`.cursor`, `.claude`,
+`.agents`) and the harness's own global config directory for Grok and Kimi, whose
+hook files live outside the project. The module also owns the idempotency
+comparison — including a missing required root entry such as Cursor's
+`"version": 1`, which is persisted even when the events already match — and the
+unreadable-file wording, so a policy fix lands once instead of once per copy.
 
 Claude Code, Cursor, Grok and mcode share all three: their entry is a member of
 an array of handlers or matcher groups, which is what `upsert_entry` and

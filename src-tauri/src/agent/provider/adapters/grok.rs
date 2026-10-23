@@ -54,8 +54,11 @@
 //! `.cmd` shim), so `WindowsShell::Direct` is correct everywhere — matching
 //! the AGY adapter pattern.
 
+use crate::agent::attention_hooks::{
+    provision_attention_hooks, EventMerge, EventRule, HandlerShape, HookFormat,
+    HookProvisioningSpec, JsonHookShape, Ownership,
+};
 use crate::agent::capabilities::{EffortControlKind, GROK_EFFORT_ALLOWED};
-use crate::agent::managed_config;
 use crate::agent::provider::{
     AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell,
 };
@@ -144,113 +147,106 @@ fn grok_home() -> Result<std::path::PathBuf, String> {
 /// identify already-installed configs, so they must not drift.
 const BUILDMESH_HANDLER_ANCHORS: &[&str] = &["/api/attention/", "BUILDMESH_PORT"];
 
-/// Marker predicate: a Grok handler is Buildmesh-owned when its `url` or
-/// `command` carries both canonical anchors. Unrelated user-authored
-/// handlers remain untouched.
-fn is_buildmesh_handler(handler: &serde_json::Value) -> bool {
-    ["url", "command"].iter().any(|field| {
-        handler
-            .get(*field)
-            .and_then(|value| value.as_str())
-            .is_some_and(|value| managed_config::carries_anchors(value, BUILDMESH_HANDLER_ANCHORS))
-    })
-}
+/// A Grok handler is Buildmesh-owned when its `url` or `command` carries
+/// both canonical anchors. Unrelated user-authored handlers remain
+/// untouched.
+const GROK_OWNERSHIP: Ownership = Ownership {
+    fields: &["url", "command"],
+    anchors: BUILDMESH_HANDLER_ANCHORS,
+};
 
-fn merge_question_handler(
-    groups: &mut Vec<serde_json::Value>,
-    handler: &serde_json::Value,
-) -> bool {
-    let original = groups.clone();
-    groups.retain_mut(|group| {
-        let Some(handlers) = group
-            .get_mut("hooks")
-            .and_then(|value| value.as_array_mut())
-        else {
-            return true;
-        };
-        let owned = handlers.iter().any(is_buildmesh_handler);
-        handlers.retain(|handler| !is_buildmesh_handler(handler));
-        !owned || !handlers.is_empty()
-    });
-    groups.push(serde_json::json!({"matcher":"^ask_user_question$", "hooks":[handler]}));
-    *groups != original
-}
-
-/// Write the attention hook file. Idempotent — preserves ALL existing
-/// hooks the user authored (sibling matcher groups, sibling handler
-/// fields, additional events), atomically (named temp file +
-/// `persist`), and only rewrites when the Buildmesh entry actually
-/// changes (so re-running over a fresh write is a no-op on mtime and
-/// bytes — the spawn-path idempotency invariant from issue #886).
-/// Uses a command handler because Grok rejects plain-HTTP URLs in native
-/// HTTP hooks. The runner sends the event envelope on stdin; curl forwards
-/// it unchanged to the loopback endpoint, and callback failures are
-/// best-effort so they never block a prompt or stop event.
-///
-/// If the file exists but will not parse, it is never overwritten: the
-/// shared `managed_config::read_document` refusal surfaces a provision error
-/// to the spawn path rather than wiping user data. A file that does parse is
-/// merged, not replaced — the user's groups and handlers survive. A missing
-/// file is the happy path (fresh install).
+/// Grok's hook file, declared once as provisioning data.
 ///
 /// `Notification` is wired with no matcher field at all (Grok docs
-/// match-all behaviour); the matcher-group array is the array of
-/// matcher groups, each `{"hooks":[handler]}` shaped. `Stop` has no
-/// matcher either — Grok's docs warn "A matcher on `Stop` or
-/// `UserPromptSubmit` is ignored with a warning".
+/// match-all behaviour); the matcher-group array is the array of matcher
+/// groups, each `{"hooks":[handler]}` shaped. `Stop` has no matcher either —
+/// Grok's docs warn "A matcher on `Stop` or `UserPromptSubmit` is ignored
+/// with a warning". Question events use Grok's own replacement merge, which
+/// removes our handler from every group before appending the question group.
+const GROK_HOOKS: HookProvisioningSpec<'static> = HookProvisioningSpec {
+    harness: "grok",
+    file: HOOK_FILE,
+    label: "grok hooks.json",
+    command: "",
+    event_commands: &[],
+    format: HookFormat::Json(JsonHookShape {
+        root_key: Some("hooks"),
+        replace_root: false,
+        required_root: &[],
+        handler: HandlerShape::TypedCommand,
+        ownership: GROK_OWNERSHIP,
+        events: &[
+            EventRule {
+                name: "Notification",
+                optional: false,
+                merge: EventMerge::MatcherGroup { matcher: None },
+            },
+            EventRule {
+                name: "Stop",
+                optional: false,
+                merge: EventMerge::MatcherGroup { matcher: None },
+            },
+            EventRule {
+                name: "StopFailure",
+                optional: false,
+                merge: EventMerge::MatcherGroup { matcher: None },
+            },
+            EventRule {
+                name: "StopCancelled",
+                optional: false,
+                merge: EventMerge::MatcherGroup { matcher: None },
+            },
+            EventRule {
+                name: "UserPromptSubmit",
+                optional: false,
+                merge: EventMerge::MatcherGroup { matcher: None },
+            },
+            EventRule {
+                name: "PreToolUse",
+                optional: false,
+                merge: EventMerge::Question {
+                    matcher: "^ask_user_question$",
+                },
+            },
+            EventRule {
+                name: "PostToolUse",
+                optional: false,
+                merge: EventMerge::Question {
+                    matcher: "^ask_user_question$",
+                },
+            },
+            EventRule {
+                name: "PostToolUseFailure",
+                optional: false,
+                merge: EventMerge::Question {
+                    matcher: "^ask_user_question$",
+                },
+            },
+        ],
+    }),
+};
+
+/// Write the attention hook file. Idempotent — preserves ALL existing hooks
+/// the user authored (sibling matcher groups, sibling handler fields,
+/// additional events), atomically, and only rewrites when the Buildmesh entry
+/// actually changes (so re-running over a fresh write is a no-op on mtime and
+/// bytes — the spawn-path idempotency invariant from issue #886).
+///
+/// If the file exists but will not parse, it is never overwritten: the shared
+/// malformed-document refusal surfaces a provision error to the spawn path
+/// rather than wiping user data. A file that does parse is merged, not
+/// replaced. A missing file is the happy path (fresh install).
 fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
-    let mut document = managed_config::read_document(path).map_err(|error| error.to_string())?;
-
-    let new_handler = serde_json::json!({
-        "type": "command",
-        "command": command,
-    });
-
-    let hooks_obj = managed_config::object_entry(
-        managed_config::root_object(&mut document, "grok hooks.json top-level")?,
-        "hooks",
-        "grok hooks.json `hooks`",
-    )?;
-
-    let mut changed = false;
-    for event in [
-        "Notification",
-        "Stop",
-        "StopFailure",
-        "StopCancelled",
-        "UserPromptSubmit",
-        "PreToolUse",
-        "PostToolUse",
-        "PostToolUseFailure",
-    ] {
-        let groups_array = managed_config::array_entry(
-            hooks_obj,
-            event,
-            &format!("grok hooks.json event `{event}`"),
-        )?;
-        if matches!(event, "PreToolUse" | "PostToolUse" | "PostToolUseFailure") {
-            changed = merge_question_handler(groups_array, &new_handler) || changed;
-        } else {
-            changed = managed_config::upsert_matcher_group(
-                groups_array,
-                &is_buildmesh_handler,
-                &new_handler,
-                &[],
-            ) || changed;
-        }
-    }
-
-    if !changed {
-        return Ok(());
-    }
-
-    let content = document
-        .to_pretty_json()
-        .map_err(|e| format!("serialize hooks.json failed: {e}"))?;
-    managed_config::atomic_write(path, &content)
-        .map_err(|e| format!("failed to write hooks.json: {e}"))?;
-    tracing::info!("grok provision_attention_hooks: wrote {:?}", path);
-    Ok(())
+    let target_dir = path
+        .parent()
+        .ok_or_else(|| "grok hooks.json has no parent directory".to_string())?;
+    let spec = HookProvisioningSpec {
+        command,
+        ..GROK_HOOKS
+    };
+    provision_attention_hooks(&spec, target_dir)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 impl AgentProvider for GrokAdapter {
@@ -487,6 +483,7 @@ impl AgentProvider for GrokAdapter {
 }
 
 #[cfg(test)]
+// allow-test-in-production: this inline adapter test module predates the sibling-test-file rule. Issue #2525 only replaces its local marker helper with the declared GROK_OWNERSHIP predicate; moving the pre-existing suite is out of scope.
 mod tests {
     use super::*;
     use tempfile::TempDir;
@@ -592,29 +589,6 @@ mod tests {
             .to_ascii_lowercase()
             .contains("content-type: application/json"));
         assert_eq!(String::from_utf8(body).unwrap(), payload);
-    }
-
-    #[test]
-    fn question_matcher_migration_preserves_user_handlers_in_mixed_group() {
-        let legacy_owned = serde_json::json!({
-            "type":"http",
-            "url":"http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID"
-        });
-        let owned = serde_json::json!({"type":"command", "command":HOOK_COMMAND_UNIX});
-        let user = serde_json::json!({"type":"command", "command":"user-policy"});
-        let mut groups = vec![serde_json::json!({
-            "matcher":"Bash",
-            "hooks":[legacy_owned, user.clone()]
-        })];
-        assert!(merge_question_handler(&mut groups, &owned));
-        assert_eq!(
-            groups,
-            vec![
-                serde_json::json!({"matcher":"Bash", "hooks":[user]}),
-                serde_json::json!({"matcher":"^ask_user_question$", "hooks":[owned.clone()]})
-            ]
-        );
-        assert!(!merge_question_handler(&mut groups, &owned));
     }
 
     fn provision_grok(project: &Path) {
@@ -1321,29 +1295,29 @@ mod tests {
             "type": "http",
             "url": "http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID",
         });
-        assert!(is_buildmesh_handler(&legacy));
+        assert!(GROK_OWNERSHIP.owns_handler(&legacy));
 
         let buildmesh = serde_json::json!({
             "type": "command",
             "command": HOOK_COMMAND_UNIX,
         });
-        assert!(is_buildmesh_handler(&buildmesh));
+        assert!(GROK_OWNERSHIP.owns_handler(&buildmesh));
 
         let user = serde_json::json!({
             "type": "http",
             "url": "https://hooks.example.com/user-event",
             "timeout": 30,
         });
-        assert!(!is_buildmesh_handler(&user));
+        assert!(!GROK_OWNERSHIP.owns_handler(&user));
 
         let bare = serde_json::json!({"type": "http"});
-        assert!(!is_buildmesh_handler(&bare));
+        assert!(!GROK_OWNERSHIP.owns_handler(&bare));
 
         let command_style = serde_json::json!({
             "type": "command",
             "command": "echo hello",
         });
-        assert!(!is_buildmesh_handler(&command_style));
+        assert!(!GROK_OWNERSHIP.owns_handler(&command_style));
     }
 
     /// Pre-existing user-authored Notification handler survives a
@@ -1457,12 +1431,12 @@ mod tests {
             1,
             "single Buildmesh matcher group expected"
         );
-        assert!(is_buildmesh_handler(&notification[0]["hooks"][0]));
+        assert!(GROK_OWNERSHIP.owns_handler(&notification[0]["hooks"][0]));
         let stop = value["hooks"]["Stop"]
             .as_array()
             .expect("Stop must be present");
         assert_eq!(stop.len(), 1, "single Buildmesh matcher group expected");
-        assert!(is_buildmesh_handler(&stop[0]["hooks"][0]));
+        assert!(GROK_OWNERSHIP.owns_handler(&stop[0]["hooks"][0]));
     }
 
     /// Repeat injects add no duplicate Buildmesh handlers. The
@@ -1665,3 +1639,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "grok_tests.rs"]
+mod provisioning_tests;
