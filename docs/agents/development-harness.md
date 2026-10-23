@@ -116,10 +116,35 @@ browser checks do not replace required real-runtime acceptance evidence.
 
 ## Worktree setup
 
-Use `npm ci` in a fresh checkout, or junction `node_modules` to the main
-checkout's absolute dependency directory (`git worktree list` identifies it).
-Use absolute junction targets: worktree nesting depths vary. Reviews that must
-leave the dependency checkout's caches alone use [isolated review checks](#isolated-review-checks).
+Use `npm ci` in a fresh checkout. In a secondary worktree, link the main
+checkout's installed packages instead:
+
+```powershell
+npm run harness -- link-deps                  # packages from the main checkout
+npm run harness -- link-deps --cargo-target   # also share src-tauri/target (below)
+npm run harness -- link-deps --from <path>    # another checkout instead of the main one
+npm run harness -- unlink-deps                # remove the links link-deps made
+```
+
+`link-deps` finds the main checkout from `git worktree list` and refuses, with
+a message to run `npm ci`, when `package.json` dependency fields or
+`package-lock.json` differ, when the source has no `node_modules`, or when the
+worktree already has a real install. Each package is linked individually under a
+private `node_modules` root; `.bin` shims are copied and bundler caches
+(`.vite`, `.vite-temp`) stay local. Running it again refreshes its own links.
+Do not run `npm install` or `npm ci` over linked packages: they write through
+the links into the main checkout. Run `unlink-deps` first.
+
+`unlink-deps` removes links with non-recursive unlinks, so it does not prompt
+and leaves the main checkout's files in place. It also removes a manual whole-directory
+`node_modules` junction and a linked `src-tauri/target`, and leaves a real install
+alone. In a `node_modules` that `link-deps` created, it removes the links found on
+disk (any symlink or junction there, including ones left by an interrupted
+`link-deps`), so rerunning `unlink-deps` or `link-deps` recovers from an interrupted run.
+Do not remove a junction with `Remove-Item`: PowerShell prompts, which hangs a
+headless runner indefinitely, and `-Recurse` can delete the junction's target.
+Reviews that must leave the dependency checkout's caches alone use
+[isolated review checks](#isolated-review-checks), which share the same linking code.
 
 Run Vitest with `NODE_ENV=test`; a production React runtime makes render tests
 fail with `React.act is not a function`. The harness sets the environment for
@@ -128,7 +153,8 @@ Cargo tests, and rebuild it after mobile source changes.
 
 On Windows, run Rust checks through `scripts/rust-test-shards.mjs` or
 `scripts\check.ps1`. A junction from `src-tauri/target` to the main checkout's
-absolute Cargo target reuses dependencies and satisfies the git gates (ADR 0044).
+absolute Cargo target (`link-deps --cargo-target`) reuses dependencies and
+satisfies the git gates (ADR 0044).
 Cargo can otherwise report a different worktree's same-name test binary as
 fresh; the runner checks the worktree stamp, rebuilds this repository's packages
 when needed, and copies binaries out before running them. A task-local

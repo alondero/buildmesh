@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -82,6 +82,23 @@ test('failed checks and unavailable refs clean up without deleting an unrelated 
   }), /check failed/);
   assert.equal(existsSync(owned), false);
   await assert.rejects(withReviewCheckout(fixture.root, 'missing-ref', async () => assert.fail('must not run')), /missing-ref/);
+  assert.equal(fixture.git('worktree', 'list', '--porcelain').split('\n').filter(line => line.startsWith('worktree ')).length, 1);
+});
+
+test('cleanup survives a dependency link that dangles or was replaced by a real directory', async t => {
+  const fixture = repo(t);
+  fixture.put('node_modules/gone/package.json', '{"name":"gone"}');
+  fixture.put('node_modules/swapped/package.json', '{"name":"swapped"}');
+  let owned;
+  await withReviewCheckout(fixture.root, fixture.head, async ({ path }) => {
+    owned = path;
+    rmSync(join(fixture.root, 'node_modules/gone'), { recursive: true, force: true }); // the link now dangles
+    unlinkSync(join(path, 'node_modules/swapped'));
+    mkdirSync(join(path, 'node_modules/swapped'));
+    writeFileSync(join(path, 'node_modules/swapped/own.txt'), 'installed in the review checkout');
+  });
+  assert.equal(existsSync(owned), false);
+  assert.ok(existsSync(join(fixture.root, 'node_modules/swapped/package.json')));
   assert.equal(fixture.git('worktree', 'list', '--porcelain').split('\n').filter(line => line.startsWith('worktree ')).length, 1);
 });
 
