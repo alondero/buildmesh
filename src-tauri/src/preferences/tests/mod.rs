@@ -12,15 +12,16 @@ use std::path::PathBuf;
 
 // Per-feature test files. Each tests a single concern; the cross-module
 // fixtures live here.
-mod accounts_tests;
-mod catalog_tests;
+//
+// A module whose tests moved next to it keeps them in a sibling `*_tests.rs`
+// (issue #2532): `resolver::accounts`, `resolver::catalog`, `resolver::harness`
+// and `resolver::pairings` own theirs, so a scoped check that selects
+// `preferences::resolver::<module>::` finds the tests that cover it.
 mod compatibility_tests;
 mod confirm_quit_tests;
 mod default_provider_tests;
-mod harness_tests;
 mod migrations_tests;
 mod pairing_compat_tests;
-mod pairings_tests;
 mod recovery_tests;
 mod secrets_tests;
 mod storage_tests;

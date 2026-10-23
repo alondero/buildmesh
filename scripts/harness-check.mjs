@@ -101,6 +101,10 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/http/mobile_wire_tests.rs': 'http::mobile_wire::tests',
   'src-tauri/src/http/routes/circuit_tests.rs': 'http::routes::circuit::tests',
   'src-tauri/src/preferences/launch_catalog_tests.rs': 'preferences::launch_catalog::tests',
+  'src-tauri/src/preferences/resolver/accounts_tests.rs': 'preferences::resolver::accounts::tests',
+  'src-tauri/src/preferences/resolver/catalog_tests.rs': 'preferences::resolver::catalog::tests',
+  'src-tauri/src/preferences/resolver/harness_tests.rs': 'preferences::resolver::harness::tests',
+  'src-tauri/src/preferences/resolver/pairings_tests.rs': 'preferences::resolver::pairings::tests',
   'src-tauri/src/preferences/resolver/snapshot_tests.rs': 'preferences::resolver::snapshot::tests',
   'src-tauri/src/services/mcode_session_tests.rs': 'services::mcode_session::tests',
   'src-tauri/src/services/freebuff_usage_tests.rs': 'services::freebuff_usage::tests',
@@ -147,13 +151,19 @@ export function rustModule(path) {
 // Split changed paths into the Rust modules a `--lib` filter can select, and
 // the ones it cannot: the crate root, a manifest, the build script, or an
 // integration-test binary, which `cargo test --lib` does not run.
-export function rustScope(paths) {
+//
+// A path that is not on disk (a file the diff deleted or moved) selects
+// no module: its filter would match no test, and the strict zero-test rule
+// would fail the gate on a module that is gone. The new path of a move
+// carries the coverage.
+export function rustScope(paths, { exists = () => true } = {}) {
   const modules = new Set();
   const unscoped = [];
   for (const path of paths) {
     // `categorisePath` resolves everything under src-tauri/ (and the manifests
     // beside it) to 'rust', so that is the whole Rust surface here.
     if (categorisePath(path) !== 'rust') continue;
+    if (!exists(path)) continue;
     const module = rustModule(path);
     if (module) modules.add(module);
     else unscoped.push(path);
@@ -189,7 +199,7 @@ export function planChecks(paths, { exists = () => true } = {}) {
   if (paths.some(path => path.startsWith(RUST_SRC) && path.endsWith('.rs'))) {
     checks.push({ id: 'check-rust-paths', command: ['node', 'scripts/harness.mjs', 'gate', 'rust-paths'], minutes: 2 });
   }
-  const rust = rustScope(paths);
+  const rust = rustScope(paths, { exists });
   if (rust.whole) {
     checks.push({ id: 'check-rust-tests', command: ['cargo', 'test', '--lib'], cwd: 'src-tauri', rust: true, tests: 'rust', minutes: 30 });
   } else {

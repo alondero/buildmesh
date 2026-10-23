@@ -573,19 +573,14 @@ fn stamp_effective_permission(
 /// the preferences read happens in `preferences::resolver::snapshot::load_snapshot`
 /// and nowhere else, and it happened before the memo key was taken.
 fn available_providers_with_preferences(
-    snapshot: crate::preferences::PreferencesSnapshot,
+    mut snapshot: crate::preferences::PreferencesSnapshot,
     detection: &crate::agent::detection::DetectionSnapshot,
 ) -> Vec<ProviderInfo> {
-    let crate::preferences::PreferencesSnapshot {
-        accounts,
-        pairings: configured_pairings,
-        harness_profiles,
-        harness_order,
-        proxied_provider_order,
-        pairing_verifications,
-        generation: _,
-        prefs,
-    } = snapshot;
+    // The snapshot owns the stored preferences; the stored collections are views
+    // over them, so there is one copy of each. The two merged lists are taken
+    // by value because the menu composition consumes them.
+    let accounts = std::mem::take(&mut snapshot.accounts);
+    let harness_profiles = std::mem::take(&mut snapshot.harness_profiles);
     // Issue #1937: this derivation dominates the Settings -> Providers load,
     // so each derivation emits one line (lands in `logs\buildmesh.log`
     // on a default install) with the total wall-clock and the Codex probe cost.
@@ -607,7 +602,8 @@ fn available_providers_with_preferences(
     // times a minute over the attention and lifecycle lines it exists to help
     // read.
     let derivation_started = Instant::now();
-    let needs_codex = configured_pairings
+    let needs_codex = snapshot
+        .pairings()
         .iter()
         .any(|pairing| pairing.surface == crate::preferences::ApiSurface::OpenAI);
     let foreign_runtime = if crate::env::is_wsl_host() {
@@ -647,8 +643,9 @@ fn available_providers_with_preferences(
     // attachment. Timed separately so cold Codex discovery is never blamed on
     // composition (or vice versa).
     let compose_started = Instant::now();
-    let pairings = configured_pairings
-        .into_iter()
+    let pairings = snapshot
+        .pairings()
+        .iter()
         .filter(|pairing| {
             accounts
                 .iter()
@@ -659,16 +656,17 @@ fn available_providers_with_preferences(
                         account,
                         crate::models::EnvType::Windows,
                         native_codex.as_ref(),
-                        &pairing_verifications,
+                        snapshot.pairing_verifications(),
                     ) || crate::services::provider_verification::launchable_on_runtime_with(
                         pairing,
                         account,
                         foreign_runtime,
                         wsl_codex.as_ref(),
-                        &pairing_verifications,
+                        snapshot.pairing_verifications(),
                     )
                 })
         })
+        .cloned()
         .collect();
     let profiles = crate::agent::detection::installed_profiles(harness_profiles, detection);
     let distro = if cfg!(windows) {
@@ -682,10 +680,10 @@ fn available_providers_with_preferences(
         pairings,
         Platform::current(),
         distro.as_deref(),
-        &harness_order,
-        &proxied_provider_order,
+        snapshot.harness_order(),
+        snapshot.proxied_provider_order(),
     );
-    let menu = match prefs {
+    let menu = match snapshot.prefs.take() {
         Some(mut prefs) => {
             crate::preferences::launch_configurations::reconcile(&mut prefs);
             let menu = configuration_menu(menu, &prefs, Platform::current());

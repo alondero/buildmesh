@@ -26,27 +26,21 @@ use super::harness::{default_harness_profiles, effective_harness_profiles};
 /// The lists come from the same read, so no derivation observes two
 /// generations at once. `generation` is the number a caller memoises on: it
 /// bumps on each durable preference write, and it only moves forward.
+///
+/// The stored collections are **views** over [`Self::prefs`] rather than
+/// copies of it: one storage, two access paths, so the snapshot and the
+/// preferences behind it read the same value. Only the two merged lists
+/// ([`Self::accounts`] and [`Self::harness_profiles`]) are owned fields,
+/// because they are the code-defined defaults merged with the user's stored
+/// rows and have no counterpart in the stored preferences.
 #[derive(Debug, Clone, Default)]
 pub struct PreferencesSnapshot {
     /// The effective provider accounts — the code-defined defaults with the
     /// user's stored rows merged over them by `id`.
     pub accounts: Vec<ProviderAccount>,
-    /// The stored **Proxied Provider** pairings.
-    pub pairings: Vec<ProviderPairing>,
     /// The effective harness profiles — the code-defined defaults with the
     /// user's stored rows merged over them by `id`.
     pub harness_profiles: Vec<HarnessProfile>,
-    /// The user's stored spawn-menu harness order.
-    pub harness_order: Vec<String>,
-    /// The stored per-harness **Proxied Provider** child order.
-    pub proxied_provider_order: Vec<ProxiedProviderOrder>,
-    /// The stored pairing-verification records.
-    ///
-    /// The derivation consults these when it decides whether a Codex route is
-    /// launchable, so they belong to the snapshot: leaving them to a read of
-    /// their own would be a second preferences read inside one derivation —
-    /// the torn read this module exists to remove.
-    pub pairing_verifications: Vec<PairingVerification>,
     /// The preferences generation this snapshot was read at.
     pub generation: u64,
     /// The preferences value the lists above were resolved from.
@@ -56,6 +50,45 @@ pub struct PreferencesSnapshot {
     /// before the snapshot existed. The lists are still populated with the
     /// code-defined defaults, so the harness rows themselves are unaffected.
     pub prefs: Option<AppPreferences>,
+}
+
+impl PreferencesSnapshot {
+    /// The stored **Proxied Provider** pairings.
+    pub fn pairings(&self) -> &[ProviderPairing] {
+        self.prefs
+            .as_ref()
+            .map(|prefs| prefs.provider_pairings.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// The user's stored spawn-menu harness order.
+    pub fn harness_order(&self) -> &[String] {
+        self.prefs
+            .as_ref()
+            .map(|prefs| prefs.harness_order.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// The stored per-harness **Proxied Provider** child order.
+    pub fn proxied_provider_order(&self) -> &[ProxiedProviderOrder] {
+        self.prefs
+            .as_ref()
+            .map(|prefs| prefs.proxied_provider_order.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// The stored pairing-verification records.
+    ///
+    /// The derivation consults these when it decides whether a Codex route is
+    /// launchable, so they belong to the snapshot: leaving them to a read of
+    /// their own would be a second preferences read inside one derivation —
+    /// the torn read this module exists to remove.
+    pub fn pairing_verifications(&self) -> &[PairingVerification] {
+        self.prefs
+            .as_ref()
+            .map(|prefs| prefs.pairing_verifications.as_slice())
+            .unwrap_or(&[])
+    }
 }
 
 /// Read preferences once and resolve the effective view.
@@ -73,11 +106,7 @@ pub fn load_snapshot() -> Result<PreferencesSnapshot, String> {
     let harness_profiles = effective_harness_profiles(&prefs.harness_profiles);
     Ok(PreferencesSnapshot {
         accounts,
-        pairings: prefs.provider_pairings.clone(),
         harness_profiles,
-        harness_order: prefs.harness_order.clone(),
-        proxied_provider_order: prefs.proxied_provider_order.clone(),
-        pairing_verifications: prefs.pairing_verifications.clone(),
         generation,
         prefs: Some(prefs),
     })
@@ -97,11 +126,7 @@ pub fn snapshot_or_default() -> PreferencesSnapshot {
             tracing::warn!("preferences::snapshot load failed, using defaults: {}", e);
             PreferencesSnapshot {
                 accounts: default_provider_accounts(),
-                pairings: Vec::new(),
                 harness_profiles: default_harness_profiles(),
-                harness_order: Vec::new(),
-                proxied_provider_order: Vec::new(),
-                pairing_verifications: Vec::new(),
                 generation: generation(),
                 prefs: None,
             }

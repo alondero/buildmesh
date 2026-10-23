@@ -205,3 +205,7 @@ pub fn set_account_key_if_absent(prefs: &mut AppPreferences, provider_id: &str, 
     );
     true
 }
+
+#[cfg(test)]
+#[path = "accounts_tests.rs"]
+mod tests;

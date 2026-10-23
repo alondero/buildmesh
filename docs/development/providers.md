@@ -230,11 +230,11 @@ What is **never** fine is two rows in `BUILTIN_PROVIDER_ACCOUNTS` for the same
 credential — that produces two cards, two fetcher paths, and confusing UI.
 
 **Pinned by tests** (regression net):
-- `builtin_provider_accounts_have_no_via_substring_in_id` (`src-tauri/src/preferences/tests/catalog_tests.rs`) — any id with `"via"` is a pairing shorthand and must be expressed as a composite Spawn Option (`claude:kimi`), not as a separate row. A mechanical guard against the specific class of bug PR #1044 introduced.
+- `builtin_provider_accounts_have_no_via_substring_in_id` (`src-tauri/src/preferences/resolver/catalog_tests.rs`) — any id with `"via"` is a pairing shorthand and must be expressed as a composite Spawn Option (`claude:kimi`), not as a separate row. A mechanical guard against the specific class of bug PR #1044 introduced.
 - `kimi_via_claude_id_does_not_exist_in_default_provider_accounts` — the literal dual-id bug.
 - `kimi_is_first_class_claude_compatible_with_moonshot_endpoint` — catalog + `first_class_surfaces` shape (not in defaults).
 - `provider_accounts_migrates_stored_kimi_via_claude_into_first_class_kimi` — one-time migration for users who picked up PR #1044.
-- `loading_preferences_never_persists_builtin_defaults_as_stored_accounts` / `loading_a_legacy_kimi_companion_file_leaves_it_byte_identical` (`src-tauri/src/preferences/tests/accounts_tests.rs`) — a load must not turn code-defined defaults into stored accounts (issue #2411).
+- `loading_preferences_never_persists_builtin_defaults_as_stored_accounts` / `loading_a_legacy_kimi_companion_file_leaves_it_byte_identical` (`src-tauri/src/preferences/resolver/accounts_tests.rs`) — a load must not turn code-defined defaults into stored accounts (issue #2411).
 - `default_provider_accounts_are_self_auth_only` / `effective_pairings_stored_only_no_auto_derive` / `migrate_legacy_account_endpoint_into_claude_pairing` — ADR-0025.
 
 **Don't.** Do not add a `kimi-via-claude`-style companion row when restoring
@@ -725,7 +725,9 @@ crate at `debug`.
 carries the values the derivation consumes — the effective accounts, the stored
 pairings, the effective harness profiles, the harness order, the proxied child
 order and the pairing-verification records — all from one generation, plus the
-`preferences::generation` number a caller memoises on.
+`preferences::generation` number a caller memoises on. The stored collections
+are views over the preferences value that read returned, so each one is stored
+once: the snapshot and the preferences behind it read the same storage.
 
 `agent::provider_menu::available_providers_with_preferences` takes that snapshot
 and a detection snapshot as arguments and reads no preferences itself (it still

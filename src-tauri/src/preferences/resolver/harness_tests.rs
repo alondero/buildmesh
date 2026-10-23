@@ -1,11 +1,11 @@
 //! Tests for the resolver::harness submodule.
 
-use super::super::model::HarnessProfile;
-use super::super::resolver::{
+use super::super::super::model::HarnessProfile;
+use super::super::{
     default_harness_profiles, harness_profiles, is_known_harness_id, merge_detected_profiles,
     resolve_harness_provider,
 };
-use super::with_temp_dir;
+use crate::preferences::tests::with_temp_dir;
 use crate::preferences::AppPreferences;
 
 #[test]
@@ -34,7 +34,7 @@ fn harness_profiles_round_trips_a_stored_user_profile() {
             wsl_distro: None,
             executable: None,
         });
-        super::super::storage::save(prefs).unwrap();
+        super::super::super::storage::save(prefs).unwrap();
         let profiles = harness_profiles();
         assert!(profiles
             .iter()
@@ -54,7 +54,7 @@ fn harness_profiles_user_overrides_default_by_id() {
             wsl_distro: None,
             executable: None,
         });
-        super::super::storage::save(prefs).unwrap();
+        super::super::super::storage::save(prefs).unwrap();
         let profiles = harness_profiles();
         let terminal = profiles.iter().find(|p| p.id == "terminal").unwrap();
         assert_eq!(terminal.name, "Shell");
@@ -73,7 +73,7 @@ fn harness_profiles_new_id_appends() {
             wsl_distro: None,
             executable: None,
         });
-        super::super::storage::save(prefs).unwrap();
+        super::super::super::storage::save(prefs).unwrap();
         let profiles = harness_profiles();
         assert!(profiles.iter().any(|p| p.id == "custom"));
         assert!(profiles.iter().any(|p| p.id == "terminal"));
@@ -100,7 +100,7 @@ fn resolve_harness_provider_uses_profile_harness_field() {
             wsl_distro: None,
             executable: None,
         });
-        super::super::storage::save(prefs).unwrap();
+        super::super::super::storage::save(prefs).unwrap();
         assert!(matches!(
             resolve_harness_provider("deepseek-via-claude"),
             crate::models::Provider::Anthropic
@@ -130,7 +130,9 @@ fn merge_detected_profiles_appends_new_and_reports_count() {
         }])
         .unwrap();
         assert_eq!(added, 1);
-        let stored = super::super::storage::load().unwrap().harness_profiles;
+        let stored = super::super::super::storage::load()
+            .unwrap()
+            .harness_profiles;
         assert!(stored.iter().any(|p| p.id == "claude"));
     });
 }
@@ -173,7 +175,7 @@ fn merge_detected_profiles_never_overwrites_a_user_customized_entry() {
             wsl_distro: None,
             executable: None,
         });
-        super::super::storage::save(prefs).unwrap();
+        super::super::super::storage::save(prefs).unwrap();
         // Detection sees the default name.
         let _ = merge_detected_profiles(vec![HarnessProfile {
             id: "claude".to_string(),
@@ -207,7 +209,7 @@ fn merge_detected_profiles_refreshes_stored_executable() {
             wsl_distro: None,
             executable: None,
         });
-        super::super::storage::save(prefs).unwrap();
+        super::super::super::storage::save(prefs).unwrap();
 
         // The next detection picks up a resolved path.
         let resolved = std::path::PathBuf::from("D:/tools/cline.exe");
@@ -221,7 +223,7 @@ fn merge_detected_profiles_refreshes_stored_executable() {
         }])
         .unwrap();
 
-        let stored = super::super::storage::load().unwrap();
+        let stored = super::super::super::storage::load().unwrap();
         let cline = stored
             .harness_profiles
             .iter()
@@ -250,7 +252,7 @@ fn merge_detected_profiles_preserves_identical_executable() {
             wsl_distro: None,
             executable: Some(resolved.clone()),
         });
-        super::super::storage::save(prefs).unwrap();
+        super::super::super::storage::save(prefs).unwrap();
 
         let _ = merge_detected_profiles(vec![HarnessProfile {
             id: "cline".to_string(),
@@ -262,7 +264,7 @@ fn merge_detected_profiles_preserves_identical_executable() {
         }])
         .unwrap();
 
-        let stored = super::super::storage::load().unwrap();
+        let stored = super::super::super::storage::load().unwrap();
         let cline = stored
             .harness_profiles
             .iter()
@@ -275,11 +277,11 @@ fn merge_detected_profiles_preserves_identical_executable() {
 #[test]
 fn set_harness_order_round_trips() {
     with_temp_dir(|_| {
-        super::super::storage::update(|prefs| {
+        super::super::super::storage::update(|prefs| {
             prefs.harness_order = vec!["claude".to_string(), "codex".to_string()];
         })
         .unwrap();
-        let stored = super::super::storage::load().unwrap().harness_order;
+        let stored = super::super::super::storage::load().unwrap().harness_order;
         assert_eq!(stored, vec!["claude".to_string(), "codex".to_string()]);
     });
 }
@@ -287,7 +289,7 @@ fn set_harness_order_round_trips() {
 #[test]
 fn set_harness_order_preserves_uninstalled_harness_slot() {
     with_temp_dir(|_| {
-        super::super::storage::update(|prefs| {
+        super::super::super::storage::update(|prefs| {
             prefs.harness_order = vec![
                 "claude".to_string(),
                 "codex".to_string(),
@@ -298,7 +300,7 @@ fn set_harness_order_preserves_uninstalled_harness_slot() {
         // "dormant" uninstalled; reorder installed ones.
         crate::preferences::set_harness_order(vec!["codex".to_string(), "claude".to_string()])
             .unwrap();
-        let stored = super::super::storage::load().unwrap().harness_order;
+        let stored = super::super::super::storage::load().unwrap().harness_order;
         // "dormant" still in its slot.
         let dormant_idx = stored.iter().position(|s| s == "dormant").unwrap();
         assert_eq!(dormant_idx, 2);
@@ -314,7 +316,7 @@ fn set_harness_order_drops_duplicate_ids() {
             "claude".to_string(),
         ])
         .unwrap();
-        let stored = super::super::storage::load().unwrap().harness_order;
+        let stored = super::super::super::storage::load().unwrap().harness_order;
         let dedup: Vec<&String> = stored.iter().collect();
         let unique: std::collections::HashSet<&String> = stored.iter().collect();
         assert_eq!(dedup.len(), unique.len());
@@ -330,7 +332,7 @@ fn set_harness_order_filters_out_terminal() {
             "codex".to_string(),
         ])
         .unwrap();
-        let stored = super::super::storage::load().unwrap().harness_order;
+        let stored = super::super::super::storage::load().unwrap().harness_order;
         assert!(!stored.contains(&"terminal".to_string()));
     });
 }
@@ -361,7 +363,7 @@ fn runtime_profile_round_trips_and_resolves_composite_and_canonical_ids() {
             wsl_distro: Some("Ubuntu".into()),
             executable: None,
         });
-        super::super::storage::save(prefs).unwrap();
+        super::super::super::storage::save(prefs).unwrap();
         for id in ["muse-wsl-test", "muse-wsl-test:account"] {
             let profile = crate::preferences::resolved_harness_profile(id).unwrap();
             assert_eq!(profile.runtime, Some(crate::models::EnvType::Wsl));

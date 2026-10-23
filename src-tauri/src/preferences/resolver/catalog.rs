@@ -404,3 +404,7 @@ pub(crate) fn claude_harness_id_from(profiles: &[super::super::model::HarnessPro
 pub(crate) fn claude_harness_id() -> String {
     claude_harness_id_from(&harness_profiles())
 }
+
+#[cfg(test)]
+#[path = "catalog_tests.rs"]
+mod tests;

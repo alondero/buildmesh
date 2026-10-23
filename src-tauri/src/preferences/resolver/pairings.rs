@@ -26,7 +26,7 @@ pub(super) fn dedupe_keeping_first(ids: impl Iterator<Item = String>) -> Vec<Str
 /// load-failure policy ("no stored pairings") happen once, in the snapshot
 /// loader (issue #2532).
 pub fn provider_pairings() -> Vec<ProviderPairing> {
-    super::snapshot::snapshot_or_default().pairings
+    super::snapshot::snapshot_or_default().pairings().to_vec()
 }
 
 // The stored per-harness **Proxied Provider** child order is read from the
@@ -42,9 +42,9 @@ pub fn provider_pairings() -> Vec<ProviderPairing> {
 /// the harness-config page alike.
 ///
 /// `pub` for the single-harness lookup symmetry with the full-list
-/// [`super::snapshot::PreferencesSnapshot::proxied_provider_order`] field and
+/// [`super::snapshot::PreferencesSnapshot::proxied_provider_order`] view and
 /// the [`set_proxied_provider_order`] setter — the spawn-menu read path uses
-/// the snapshot's field (a single `HashMap` lookup) for performance, but a UI
+/// the snapshot's view (a single `HashMap` lookup) for performance, but a UI
 /// surface that wants "what's the order under harness X?" can reach for this
 /// without parsing the full vector.
 ///
@@ -55,10 +55,10 @@ pub fn provider_pairings() -> Vec<ProviderPairing> {
 // (issue #2450).
 pub fn proxied_order_for(harness_id: &str) -> Option<Vec<String>> {
     super::snapshot::snapshot_or_default()
-        .proxied_provider_order
-        .into_iter()
+        .proxied_provider_order()
+        .iter()
         .find(|o| o.harness_id == harness_id)
-        .map(|o| o.provider_ids)
+        .map(|o| o.provider_ids.clone())
 }
 
 /// Persist the **Proxied Provider** child order for a single harness (issue
@@ -376,3 +376,7 @@ pub fn remove_provider_pairing(prefs: &mut AppPreferences, harness_id: &str, pro
         prefs.detached_provider_routes.push(detached);
     }
 }
+
+#[cfg(test)]
+#[path = "pairings_tests.rs"]
+mod tests;

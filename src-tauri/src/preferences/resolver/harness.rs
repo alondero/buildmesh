@@ -313,3 +313,7 @@ pub fn is_known_harness_id(profile_id: &str) -> bool {
     // post-init path.
     harness_profiles().iter().any(|p| p.id == profile_id)
 }
+
+#[cfg(test)]
+#[path = "harness_tests.rs"]
+mod tests;

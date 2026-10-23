@@ -25,8 +25,8 @@ fn the_resolver_accessors_read_through_the_snapshot() {
             "harness_profiles must be the snapshot's profile list"
         );
         assert_eq!(
-            super::super::pairings::provider_pairings(),
-            snapshot.pairings,
+            super::super::pairings::provider_pairings().as_slice(),
+            snapshot.pairings(),
             "provider_pairings must be the snapshot's pairing list"
         );
     });
@@ -50,14 +50,22 @@ fn the_snapshot_reads_preferences_exactly_once() {
 
 /// The snapshot carries the generation it was read at, so a caller can key a
 /// memo on it without sampling the counter separately (and racing the read).
+///
+/// The counter is process-wide while the preferences themselves are
+/// per-test-thread, so a parallel worker's write can move it between two
+/// readings. The check is therefore bounded by the readings around the read:
+/// the snapshot's generation is the one it sampled, and that sample falls
+/// between them.
 #[test]
 fn the_snapshot_carries_the_generation_it_was_read_at() {
     with_temp_dir(|_| {
+        let before = crate::preferences::storage::generation();
         let snapshot = load_snapshot().expect("preferences read");
-        assert_eq!(
-            snapshot.generation,
-            crate::preferences::storage::generation(),
-            "the snapshot must carry the current preferences generation"
+        let after = crate::preferences::storage::generation();
+        assert!(
+            snapshot.generation >= before && snapshot.generation <= after,
+            "the snapshot must carry a generation from its own read: {before} <= {} <= {after}",
+            snapshot.generation
         );
     });
 }
