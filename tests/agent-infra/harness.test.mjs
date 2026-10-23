@@ -1925,6 +1925,21 @@ test('the scoped check maps each changed-file category to its own command', () =
   const rust = commands(['src-tauri/src/db/mod.rs']);
   assert.deepEqual(rust.find(([id]) => id === 'check-rust-1'), ['check-rust-1', 'cargo test --lib db::']);
 
+  // A deleted or moved Rust file has no module left to select: its filter
+  // would match no test, and the strict zero-test rule would fail the gate
+  // on a module that is gone. The new path of a move carries the coverage.
+  const gone = path => path !== 'src-tauri/src/db/gone.rs';
+  assert.deepEqual(
+    rustScope(['src-tauri/src/db/gone.rs'], { exists: gone }),
+    { modules: [], whole: false, unscoped: [] },
+    'a deleted Rust path must select nothing',
+  );
+  assert.deepEqual(
+    rustScope(['src-tauri/src/db/gone.rs', 'src-tauri/src/db/mod.rs'], { exists: gone }),
+    { modules: ['db'], whole: false, unscoped: [] },
+    'a moved file keeps the coverage of its new path',
+  );
+
   // The crate root, a manifest and an integration test cannot narrow, so the
   // whole lib suite runs and the unscoped paths are reported.
   for (const path of ['src-tauri/src/lib.rs', 'src-tauri/src/main.rs', 'src-tauri/Cargo.toml', 'src-tauri/build.rs', 'Cargo.lock', 'src-tauri/tests/command.rs']) {

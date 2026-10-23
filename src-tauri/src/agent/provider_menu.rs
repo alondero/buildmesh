@@ -327,28 +327,49 @@ fn discover_codex_runtimes_concurrently(
 /// serves install metadata older than the probe behind it.
 const DERIVED_MENU_TTL: Duration = Duration::from_secs(45);
 
+/// The Spawn Menu memo key: the preferences generation plus the detection
+/// epoch (issue #2532).
+///
+/// The derivation's preferences and detection inputs are these two — the
+/// preferences it read and the detection observation it filtered the harnesses
+/// against. Keying on the pair is what makes the memo *complete* for them:
+/// an input that can change the rows appears in the key, so a memo hit is not
+/// stale on either count.
+///
+/// Both components only move forward, so the ordering rule below holds for the
+/// pair the way it held for the generation alone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct MenuKey {
+    /// The preferences generation the derivation read at.
+    generation: u64,
+    /// The detection epoch the derivation observed.
+    detection_epoch: u64,
+}
+
 /// Single-slot memo for the Spawn Menu derivation (issue #2349), keyed on the
-/// preferences generation exactly as `agent::launch_routing` keys its routing
-/// cache. The generation only moves **forward**, so a caller that sampled an
-/// older one must neither evict the newer entry nor publish its own: `get`
-/// clears only on a strictly newer generation, and `put` drops a derivation
-/// whose inputs have already moved past it. `now` is a parameter rather than
-/// an internal clock read so the TTL is testable without sleeping.
+/// preferences generation and the detection epoch. The generation is the key
+/// `agent::launch_routing` uses for its routing cache; the epoch is this
+/// memo's addition (issue #2532). The key only moves **forward**, so a caller
+/// that sampled an older one must not evict the newer entry or publish its
+/// own: `get` clears only on a strictly newer key, and `put` drops a
+/// derivation whose inputs have already moved past it. `now` is a parameter
+/// rather than an internal clock read so the TTL is testable without
+/// sleeping.
 #[derive(Default)]
 struct DerivedMenuCache {
-    generation: u64,
+    key: MenuKey,
     derived_at: Option<Instant>,
     menu: Option<Arc<Vec<ProviderInfo>>>,
 }
 
 impl DerivedMenuCache {
-    fn get(&mut self, generation: u64, now: Instant) -> Option<Arc<Vec<ProviderInfo>>> {
-        if generation < self.generation {
-            // A caller holding an older generation must not evict the newer entry.
+    fn get(&mut self, key: MenuKey, now: Instant) -> Option<Arc<Vec<ProviderInfo>>> {
+        if key < self.key {
+            // A caller holding an older key must not evict the newer entry.
             return None;
         }
-        if generation > self.generation {
-            self.generation = generation;
+        if key > self.key {
+            self.key = key;
             self.derived_at = None;
             self.menu = None;
         }
@@ -357,10 +378,10 @@ impl DerivedMenuCache {
         (now.saturating_duration_since(derived_at) < DERIVED_MENU_TTL).then_some(menu)
     }
 
-    fn put(&mut self, generation: u64, now: Instant, menu: Arc<Vec<ProviderInfo>>) {
-        // A stale generation means the slot already moved past this
-        // derivation's inputs — dropping it beats storing dead state.
-        if generation != self.generation {
+    fn put(&mut self, key: MenuKey, now: Instant, menu: Arc<Vec<ProviderInfo>>) {
+        // A stale key means the slot already moved past this derivation's
+        // inputs — dropping it beats storing dead state.
+        if key != self.key {
             return;
         }
         self.derived_at = Some(now);
@@ -409,24 +430,39 @@ fn with_derived_menu<R>(f: impl FnOnce(&mut DerivedMenuCache) -> R) -> R {
 ///
 /// `derive` runs on a miss only, and a hit returns the rows a derivation
 /// would have produced — the same derivation, less the probes.
-fn derived_menu(derive: impl FnOnce() -> Vec<ProviderInfo>) -> Vec<ProviderInfo> {
-    derived_menu_at(crate::preferences::generation(), derive)
+///
+/// The preferences snapshot is read **before** the memo lookup (issue #2532):
+/// its generation is half the memo key, and the derivation consumes the very
+/// same snapshot, so a memo hit serves rows built from the read that was keyed.
+/// The detection snapshot is read the same way — its epoch is the other half of
+/// the key.
+fn derived_menu(
+    snapshot: crate::preferences::PreferencesSnapshot,
+    derive: impl FnOnce(
+        crate::preferences::PreferencesSnapshot,
+        &crate::agent::detection::DetectionSnapshot,
+    ) -> Vec<ProviderInfo>,
+) -> Vec<ProviderInfo> {
+    let detection = crate::agent::detection::detection_snapshot();
+    let key = MenuKey {
+        generation: snapshot.generation,
+        detection_epoch: detection.epoch,
+    };
+    derived_menu_at(key, move || derive(snapshot, &detection))
 }
 
 /// [`derived_menu`] with the cache key supplied, so a unit test can pin a
-/// generation. Sampling the real one is inherently racy under a parallel test
-/// binary: `preferences::generation` is process-wide (one preferences source
-/// per process) while the preferences themselves are per-test-thread, so any
-/// other thread's `save`/`update` moves the key mid-test.
-fn derived_menu_at(
-    generation: u64,
-    derive: impl FnOnce() -> Vec<ProviderInfo>,
-) -> Vec<ProviderInfo> {
-    if let Some(menu) = with_derived_menu(|cache| cache.get(generation, Instant::now())) {
+/// generation and an epoch. Sampling the real ones is inherently racy under a
+/// parallel test binary: `preferences::generation` is process-wide (one
+/// preferences source per process) while the preferences themselves are
+/// per-test-thread, so any other thread's `save`/`update` moves the key
+/// mid-test.
+fn derived_menu_at(key: MenuKey, derive: impl FnOnce() -> Vec<ProviderInfo>) -> Vec<ProviderInfo> {
+    if let Some(menu) = with_derived_menu(|cache| cache.get(key, Instant::now())) {
         return menu.as_ref().clone();
     }
     let menu = Arc::new(derive());
-    with_derived_menu(|cache| cache.put(generation, Instant::now(), Arc::clone(&menu)));
+    with_derived_menu(|cache| cache.put(key, Instant::now(), Arc::clone(&menu)));
     menu.as_ref().clone()
 }
 
@@ -438,7 +474,8 @@ fn derived_menu_at(
 /// `commands::run_blocking` already, so the menu derivation continues to
 /// stay off the async worker pool (issue #634).
 pub(crate) fn available_providers() -> Vec<ProviderInfo> {
-    derived_menu(|| available_providers_with_preferences(crate::preferences::load().ok()))
+    let snapshot = crate::preferences::snapshot_or_default();
+    derived_menu(snapshot, available_providers_with_preferences)
 }
 
 /// Resolve the effective launch permission mode for one menu row (issue
@@ -527,9 +564,23 @@ fn stamp_effective_permission(
         .collect()
 }
 
+/// Compose the Spawn Menu from one preferences snapshot and one detection
+/// snapshot.
+///
+/// Both inputs are passed in, so the function reads no preferences and no
+/// detection state of its own: the rows it produces are a pure function of its
+/// arguments (issue #2532). That is what makes a torn derivation impossible —
+/// the preferences read happens in `preferences::resolver::snapshot::load_snapshot`
+/// and nowhere else, and it happened before the memo key was taken.
 fn available_providers_with_preferences(
-    prefs: Option<crate::preferences::AppPreferences>,
+    mut snapshot: crate::preferences::PreferencesSnapshot,
+    detection: &crate::agent::detection::DetectionSnapshot,
 ) -> Vec<ProviderInfo> {
+    // The snapshot owns the stored preferences; the stored collections are views
+    // over them, so there is one copy of each. The two merged lists are taken
+    // by value because the menu composition consumes them.
+    let accounts = std::mem::take(&mut snapshot.accounts);
+    let harness_profiles = std::mem::take(&mut snapshot.harness_profiles);
     // Issue #1937: this derivation dominates the Settings -> Providers load,
     // so each derivation emits one line (lands in `logs\buildmesh.log`
     // on a default install) with the total wall-clock and the Codex probe cost.
@@ -551,9 +602,8 @@ fn available_providers_with_preferences(
     // times a minute over the attention and lifecycle lines it exists to help
     // read.
     let derivation_started = Instant::now();
-    let accounts = crate::preferences::provider_accounts();
-    let configured_pairings = crate::preferences::provider_pairings();
-    let needs_codex = configured_pairings
+    let needs_codex = snapshot
+        .pairings()
         .iter()
         .any(|pairing| pairing.surface == crate::preferences::ApiSurface::OpenAI);
     let foreign_runtime = if crate::env::is_wsl_host() {
@@ -593,30 +643,32 @@ fn available_providers_with_preferences(
     // attachment. Timed separately so cold Codex discovery is never blamed on
     // composition (or vice versa).
     let compose_started = Instant::now();
-    let pairings = configured_pairings
-        .into_iter()
+    let pairings = snapshot
+        .pairings()
+        .iter()
         .filter(|pairing| {
             accounts
                 .iter()
                 .find(|account| account.id == pairing.provider_id)
                 .is_some_and(|account| {
-                    crate::services::provider_verification::launchable_on_runtime(
+                    crate::services::provider_verification::launchable_on_runtime_with(
                         pairing,
                         account,
                         crate::models::EnvType::Windows,
                         native_codex.as_ref(),
-                    ) || crate::services::provider_verification::launchable_on_runtime(
+                        snapshot.pairing_verifications(),
+                    ) || crate::services::provider_verification::launchable_on_runtime_with(
                         pairing,
                         account,
                         foreign_runtime,
                         wsl_codex.as_ref(),
+                        snapshot.pairing_verifications(),
                     )
                 })
         })
+        .cloned()
         .collect();
-    let profiles = crate::agent::detection::currently_installed_profiles(
-        crate::preferences::harness_profiles(),
-    );
+    let profiles = crate::agent::detection::installed_profiles(harness_profiles, detection);
     let distro = if cfg!(windows) {
         crate::env::get_default_wsl_distro()
     } else {
@@ -628,10 +680,10 @@ fn available_providers_with_preferences(
         pairings,
         Platform::current(),
         distro.as_deref(),
-        &crate::preferences::harness_order(),
-        &crate::preferences::proxied_provider_order(),
+        snapshot.harness_order(),
+        snapshot.proxied_provider_order(),
     );
-    let menu = match prefs {
+    let menu = match snapshot.prefs.take() {
         Some(mut prefs) => {
             crate::preferences::launch_configurations::reconcile(&mut prefs);
             let menu = configuration_menu(menu, &prefs, Platform::current());
@@ -689,11 +741,9 @@ fn configuration_menu(
             id: id.harness_id.clone(),
             name: id.harness_id.clone(),
             harness: wsl_harness.map(str::to_owned).unwrap_or_else(|| {
-                if id.harness_id == "claude" {
-                    "anthropic".into()
-                } else {
-                    id.harness_id.clone()
-                }
+                // The `claude` → `anthropic` mapping comes from the one alias
+                // table (issue #2532) — not a hand-rolled copy of it.
+                crate::agent::harness_catalog::harness_adapter_id(id.harness_id()).to_string()
             }),
             runtime: wsl_harness.map(|_| crate::models::EnvType::Wsl),
             wsl_distro: None,
@@ -824,8 +874,11 @@ pub(super) fn order_providers(
     order: &[String],
 ) -> Vec<ProviderInfo> {
     providers.sort_by(|a, b| {
+        // Which harnesses sort last is a harness fact
+        // (`harness_catalog::HARNESS_MENU_LAST`), not a special case baked
+        // into this comparator (issue #2532).
         let key_a = (
-            a.harness_id == "terminal",
+            crate::agent::harness_catalog::harness_sorts_last(&a.harness_id),
             order
                 .iter()
                 .position(|id| *id == a.harness_id)
@@ -833,7 +886,7 @@ pub(super) fn order_providers(
             a.harness_id.as_str(),
         );
         let key_b = (
-            b.harness_id == "terminal",
+            crate::agent::harness_catalog::harness_sorts_last(&b.harness_id),
             order
                 .iter()
                 .position(|id| *id == b.harness_id)
@@ -941,10 +994,8 @@ fn list_providers_blocking() -> Result<Vec<ProviderInfo>, String> {
     // Load first so an unreadable `preferences.json` still surfaces as the
     // IPC error this command documents; the memo then serves the rows a
     // derivation over that same snapshot would have produced.
-    let prefs = crate::preferences::load()?;
-    Ok(derived_menu(move || {
-        available_providers_with_preferences(Some(prefs))
-    }))
+    let snapshot = crate::preferences::load_snapshot()?;
+    Ok(derived_menu(snapshot, available_providers_with_preferences))
 }
 
 #[cfg(test)]

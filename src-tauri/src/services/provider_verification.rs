@@ -364,16 +364,40 @@ pub fn verify_route_blocking(
     save_result(record)
 }
 
-pub fn matching_verification(
+/// [`matching_verification_in`] over the stored verification records — the
+/// convenience form for a caller that has no snapshot in hand.
+///
+/// The Spawn Menu derivation reads preferences once (issue #2532) and hands
+/// the records it holds to [`matching_verification_in`], so this loading form
+/// has no production caller left; it lives with the test suite that reads it
+/// (issue #2450).
+#[cfg(test)]
+// allow-test-in-production: the loading form of the lookup, kept for the sibling suite
+// that reads it (issue #2450).
+fn matching_verification(
+    pairing: &ProviderPairing,
+    account: &ProviderAccount,
+    install: &codex::CodexInstall,
+) -> Option<PairingVerification> {
+    let verifications = preferences::load().ok()?.pairing_verifications;
+    matching_verification_in(&verifications, pairing, account, install)
+}
+
+/// The verification-record lookup over already-loaded records.
+///
+/// The Spawn Menu derivation reads preferences once (issue #2532), so it hands
+/// the records it already holds to this form rather than letting the lookup
+/// read them again — a second read inside one derivation is the torn read the
+/// snapshot removes.
+pub fn matching_verification_in(
+    verifications: &[PairingVerification],
     pairing: &ProviderPairing,
     account: &ProviderAccount,
     install: &codex::CodexInstall,
 ) -> Option<PairingVerification> {
     let expected = signature_for(pairing, account, install);
-    let record = preferences::load()
-        .ok()?
-        .pairing_verifications
-        .into_iter()
+    let record = verifications
+        .iter()
         .filter(|record| {
             record.harness_id == pairing.harness_id
                 && record.provider_id == pairing.provider_id
@@ -382,7 +406,8 @@ pub fn matching_verification(
         .min_by_key(|record| {
             (record.endpoint != pairing.base_url.as_deref().unwrap_or("")) as u8
                 + (record.model_id != pairing.model_tiers.default.as_deref().unwrap_or("")) as u8
-        })?;
+        })?
+        .clone();
     Some(check_verification(record, pairing, install, &expected))
 }
 
@@ -447,15 +472,19 @@ pub fn verified_codex_pairing(
         ));
     }
     let install = codex::discover_supported_install(env_type)?;
-    verified_codex_pairing_with_install(pairing, account, &install)
+    let verifications = preferences::load()
+        .map(|prefs| prefs.pairing_verifications)
+        .unwrap_or_default();
+    verified_codex_pairing_with_install(pairing, account, &install, &verifications)
 }
 
 fn verified_codex_pairing_with_install(
     pairing: &ProviderPairing,
     account: &ProviderAccount,
     install: &codex::CodexInstall,
+    verifications: &[PairingVerification],
 ) -> Result<VerifiedCodexPairing, String> {
-    verified_with_record(pairing, account, install, None)
+    verified_with_record(pairing, account, install, None, verifications)
 }
 
 pub fn verified_codex_snapshot(
@@ -465,7 +494,10 @@ pub fn verified_codex_snapshot(
     record: Option<&PairingVerification>,
 ) -> Result<VerifiedCodexPairing, String> {
     let install = codex::discover_supported_install(env_type)?;
-    verified_with_record(pairing, account, &install, record)
+    let verifications = preferences::load()
+        .map(|prefs| prefs.pairing_verifications)
+        .unwrap_or_default();
+    verified_with_record(pairing, account, &install, record, &verifications)
 }
 
 fn verified_with_record(
@@ -473,6 +505,7 @@ fn verified_with_record(
     account: &ProviderAccount,
     install: &codex::CodexInstall,
     snapshot: Option<&PairingVerification>,
+    verifications: &[PairingVerification],
 ) -> Result<VerifiedCodexPairing, String> {
     if !account.enabled {
         return Err(format!("provider '{}' is disabled", account.name));
@@ -495,7 +528,7 @@ fn verified_with_record(
                 .unwrap_or_else(|| "incompatible capability contract".into())
         ));
     }
-    let live = matching_verification(pairing, account, install);
+    let live = matching_verification_in(verifications, pairing, account, install);
     let verification = live
         .as_ref()
         .filter(|r| r.status == PairingVerificationStatus::Verified)
@@ -538,8 +571,26 @@ fn verified_with_record(
 pub fn launchable_on_runtime(
     pairing: &ProviderPairing,
     account: &ProviderAccount,
+    env_type: EnvType,
+    codex_install: Option<&codex::CodexInstall>,
+) -> bool {
+    let verifications = preferences::load()
+        .map(|prefs| prefs.pairing_verifications)
+        .unwrap_or_default();
+    launchable_on_runtime_with(pairing, account, env_type, codex_install, &verifications)
+}
+
+/// [`launchable_on_runtime`] over already-loaded verification records.
+///
+/// The Spawn Menu derivation reads preferences once (issue #2532), so it hands
+/// the records the snapshot already holds to this form rather than letting the
+/// lookup read them again.
+pub fn launchable_on_runtime_with(
+    pairing: &ProviderPairing,
+    account: &ProviderAccount,
     _env_type: EnvType,
     codex_install: Option<&codex::CodexInstall>,
+    verifications: &[PairingVerification],
 ) -> bool {
     if pairing.surface == preferences::ApiSurface::Anthropic {
         return account.enabled
@@ -550,7 +601,7 @@ pub fn launchable_on_runtime(
             && preferences::pairing_compatibility(pairing).compatible;
     }
     codex_install.is_some_and(|install| {
-        verified_codex_pairing_with_install(pairing, account, install).is_ok()
+        verified_with_record(pairing, account, install, None, verifications).is_ok()
     })
 }
 
@@ -603,9 +654,13 @@ pub fn current_statuses(env_type: EnvType) -> Vec<PairingVerification> {
                 return Some(record);
             }
             match &install {
-                Ok(install) => {
-                    matching_verification(pairing, account, install).or_else(|| Some(base()))
-                }
+                Ok(install) => matching_verification_in(
+                    &prefs.pairing_verifications,
+                    pairing,
+                    account,
+                    install,
+                )
+                .or_else(|| Some(base())),
                 Err(reason) => {
                     let mut record = base();
                     record.status = PairingVerificationStatus::Failed;

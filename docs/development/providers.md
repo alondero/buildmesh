@@ -230,11 +230,11 @@ What is **never** fine is two rows in `BUILTIN_PROVIDER_ACCOUNTS` for the same
 credential — that produces two cards, two fetcher paths, and confusing UI.
 
 **Pinned by tests** (regression net):
-- `builtin_provider_accounts_have_no_via_substring_in_id` (`src-tauri/src/preferences/tests/catalog_tests.rs`) — any id with `"via"` is a pairing shorthand and must be expressed as a composite Spawn Option (`claude:kimi`), not as a separate row. A mechanical guard against the specific class of bug PR #1044 introduced.
+- `builtin_provider_accounts_have_no_via_substring_in_id` (`src-tauri/src/preferences/resolver/catalog_tests.rs`) — any id with `"via"` is a pairing shorthand and must be expressed as a composite Spawn Option (`claude:kimi`), not as a separate row. A mechanical guard against the specific class of bug PR #1044 introduced.
 - `kimi_via_claude_id_does_not_exist_in_default_provider_accounts` — the literal dual-id bug.
 - `kimi_is_first_class_claude_compatible_with_moonshot_endpoint` — catalog + `first_class_surfaces` shape (not in defaults).
 - `provider_accounts_migrates_stored_kimi_via_claude_into_first_class_kimi` — one-time migration for users who picked up PR #1044.
-- `loading_preferences_never_persists_builtin_defaults_as_stored_accounts` / `loading_a_legacy_kimi_companion_file_leaves_it_byte_identical` (`src-tauri/src/preferences/tests/accounts_tests.rs`) — a load must not turn code-defined defaults into stored accounts (issue #2411).
+- `loading_preferences_never_persists_builtin_defaults_as_stored_accounts` / `loading_a_legacy_kimi_companion_file_leaves_it_byte_identical` (`src-tauri/src/preferences/resolver/accounts_tests.rs`) — a load must not turn code-defined defaults into stored accounts (issue #2411).
 - `default_provider_accounts_are_self_auth_only` / `effective_pairings_stored_only_no_auto_derive` / `migrate_legacy_account_endpoint_into_claude_pairing` — ADR-0025.
 
 **Don't.** Do not add a `kimi-via-claude`-style companion row when restoring
@@ -702,7 +702,7 @@ For scoped project launch directories, use `env::node_working_path`; checkout
 ownership and Git watcher identity use separate helpers. See
 [Agent Node worktree support](agent-nodes.md#worktree-support-git2-based).
 
-## The Spawn Menu derivation is memoized per preferences generation
+## The Spawn Menu derivation reads one preferences snapshot and one alias table
 
 Both production readers of the Spawn Menu — `available_providers` (the mobile
 route `GET /api/providers`) and `list_providers_blocking` (the `list_providers`
@@ -719,15 +719,66 @@ minute, each pass writing a log line. A cached read is what removes that rate; a
 quieter log level alone would not, because the default filter already admits this
 crate at `debug`.
 
-The memo is keyed on `preferences::generation`, which bumps on every durable
-preference write (`save` / `update`), and a change reaches the rest of the app only
-once one of those lands — so a memoized menu is never older than the preferences
-cache every other reader sees. Generation handling matches
-`agent::launch_routing`: it only moves forward, so a derivation that sampled an
-older generation can neither publish nor evict a newer entry. What the generation
-cannot see is a change made outside Buildmesh (a `npm i -g @openai/codex`, or a
-WSL-side install), so the entry also carries a 45s TTL — the same bound
-`codex::CODEX_INSTALL_CACHE_TTL` already accepts for install metadata.
+### One preferences read per derivation
+
+`preferences::resolver::snapshot::PreferencesSnapshot` is the single read. It
+carries the values the derivation consumes — the effective accounts, the stored
+pairings, the effective harness profiles, the harness order, the proxied child
+order and the pairing-verification records — all from one generation, plus the
+`preferences::generation` number a caller memoises on. The stored collections
+are views over the preferences value that read returned, so each one is stored
+once: the snapshot and the preferences behind it read the same storage.
+
+`agent::provider_menu::available_providers_with_preferences` takes that snapshot
+and a detection snapshot as arguments and reads no preferences itself (it still
+probes the Codex CLI and the WSL environment — the two probes this refactor did
+not touch). The rows it produces are a pure function of those two arguments, so
+a **torn derivation is out of reach**: the read happens in
+`preferences::resolver::snapshot::load_snapshot` and nowhere else, and a write
+landing mid-derivation does not reach a derivation that already holds its
+snapshot. The snapshot loader is also the one place that decides what a failed
+preferences read means — each resolver accessor (`provider_accounts`,
+`harness_profiles`, `provider_pairings`) reads through it, so the
+warn-and-fallback rule exists once rather than per accessor.
+
+The rules above are pinned by the tests that came with the change:
+`a_derivation_reads_preferences_exactly_once` and
+`a_derivation_cannot_be_torn_by_a_concurrent_write` in
+`src-tauri/src/agent/provider_menu_tests.rs`, and
+`the_snapshot_reads_preferences_exactly_once` in
+`src-tauri/src/preferences/resolver/snapshot_tests.rs`.
+
+The harness order and the proxied child order have no standalone accessor: they
+are read from the snapshot, because a caller that wants one of them wants the
+profiles and pairings it ranks against too.
+
+### One alias table
+
+The `claude` → `anthropic` mapping is declared once, in
+`agent::harness_catalog::HARNESS_PROFILE_ALIASES`. `harness_profile_alias` and
+`harness_profile_id_for_adapter` resolve it in both directions, so no module
+re-derives it. `agent::harness_catalog::HARNESS_MENU_LAST` sits next to it: a
+harness declares its own Spawn Menu position rather than the comparator
+special-casing one id, which is why Terminal sorts last.
+
+### The memo key is the generation plus the detection epoch
+
+The memo is keyed on the pair (`preferences::generation`, the detection epoch).
+The generation bumps on each durable preference write (`save` / `update`), and a
+change reaches the rest of the app only once one of those lands — so a
+memoized menu is not older than the preferences cache the rest of the app
+reads. Generation handling matches `agent::launch_routing`: it only moves
+forward, so a derivation that sampled an older generation does not publish
+over, or evict, a newer entry.
+
+The second half of the key is `agent::detection::DetectionSnapshot::epoch`. The
+detection observation is the derivation's other input — the installed set it
+filters the harness profiles against — so it belongs in the key: a probe that
+observes a different set bumps the epoch, and the memoized menu is derived again
+straight away. A harness installed while the app runs therefore appears without
+waiting for a timer. The 45s TTL remains as the backstop for the Codex install
+probe — the same bound `codex::CODEX_INSTALL_CACHE_TTL` already accepts for
+install metadata — but the epoch is the mechanism that reacts to a change.
 
 The derivation's single log line is `debug`, not `info`: it carries the same
 wall-clock and Codex-probe attribution fields it always has, for reading next to a

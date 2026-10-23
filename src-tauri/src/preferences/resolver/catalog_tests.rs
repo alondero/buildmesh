@@ -1,7 +1,7 @@
 //! Tests for the resolver::catalog submodule — provider catalog, surface
 //! mapping, first-class provider metadata.
 
-use super::super::resolver::{
+use super::super::{
     default_provider_accounts, first_class_surfaces, is_claude_compatible_id,
     keyed_first_class_catalog,
 };

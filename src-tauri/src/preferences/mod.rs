@@ -65,7 +65,9 @@ pub use storage::{
     restore_backup, reviewer_provider, save, update, worktree_directory,
 };
 #[cfg(test)]
-pub(crate) use storage::{init_for_tests, reset_for_tests};
+// allow-test-in-production: the per-thread preferences scratch dir and the load counter
+// are shared by the sibling suites.
+pub(crate) use storage::{init_for_tests, load_count, reset_for_tests};
 
 // ----- Re-exports: recovery ----------------------------------------------
 
@@ -82,15 +84,15 @@ pub(crate) use resolver::{claude_harness_id_from, minimax_default_tiers};
 pub use resolver::{
     compatible_providers_by_harness, compatible_providers_for_harness, default_harness_profiles,
     effective_provider_pairings, endpoint_model_descriptor, first_class_surfaces,
-    harness_capabilities_for, harness_order, harness_profiles, harness_runtime, harness_surface,
-    keyed_first_class_catalog, merge_detected_profiles, minimax_api_key_resolved,
+    harness_capabilities_for, harness_profiles, harness_runtime, harness_surface,
+    keyed_first_class_catalog, load_snapshot, merge_detected_profiles, minimax_api_key_resolved,
     pairing_compatibility, pairing_for, provider_accounts,
     provider_accounts_with_keys_in_preferences, provider_pairings, provider_surfaces,
-    proxied_provider_order, remove_provider_account, remove_provider_pairing,
-    resolve_default_provider, resolve_harness_provider, resolve_harness_provider_for,
-    resolve_stored_pairing_and_account, resolved_harness_profile, set_account_key_if_absent,
-    set_harness_order, set_proxied_provider_order, surface_for_executor, upsert_provider_account,
-    upsert_provider_pairing,
+    remove_provider_account, remove_provider_pairing, resolve_default_provider,
+    resolve_harness_provider, resolve_harness_provider_for, resolve_stored_pairing_and_account,
+    resolved_harness_profile, set_account_key_if_absent, set_harness_order,
+    set_proxied_provider_order, snapshot_or_default, surface_for_executor, upsert_provider_account,
+    upsert_provider_pairing, PreferencesSnapshot,
 };
 pub use resolver::{CapabilityMaskForResolver, HarnessConfigField, ResolvedCascadeView};
 
