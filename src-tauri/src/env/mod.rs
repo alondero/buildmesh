@@ -251,17 +251,6 @@ pub(crate) mod test_helpers {
         pub(crate) fn id(&self) -> u32 {
             self.0.id()
         }
-
-        /// Reap the child now instead of at the end of the test.
-        ///
-        /// A test that kills the child itself (the "removal succeeds once the
-        /// pinning process is gone" shape) wants the handle released before the
-        /// assertion, and on Windows a terminated-but-unreaped process keeps its
-        /// handle table alive — the directory stays pinned for the length of
-        /// the wait.
-        pub(crate) fn reap(&mut self) {
-            let _ = self.0.wait();
-        }
     }
 
     impl Drop for ScopedChild {

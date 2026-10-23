@@ -76,8 +76,13 @@ describe('Companion Omnibar', () => {
 
   it('renders final Markdown and an actionable grid link', async () => {
     useCompanionStore.setState({ task: task({ status: 'completed', response: '**Done**. [Open Mesh Grid](buildmesh://grid)' }) });
-    render(<CompanionMode initialPrompt="" onBack={() => {}} />);
-    expect((await screen.findByText('Done')).tagName).toBe('STRONG');
+    await act(async () => {
+      render(<CompanionMode initialPrompt="" onBack={() => {}} />);
+      // Wait for the real lazy module, rather than timing its cold transform
+      // against findByText's one-second polling deadline under suite load.
+      await import('../../src/components/CommandOmnibar/CompanionResponse');
+    });
+    expect(screen.getByText('Done').tagName).toBe('STRONG');
     fireEvent.click(screen.getByRole('button', { name: 'Open Mesh Grid' }));
     expect(useUIStore.getState().viewMode).toBe('mesh');
     expect(useUIStore.getState().omnibarOpen).toBe(false);
