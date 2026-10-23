@@ -2,7 +2,7 @@
 //!
 //! Buildmesh owns each Agent Node's git worktree (ADR 0003). This module is the
 //! one home for that ownership — it used to be spread across `env` (create),
-//! `services::agent_node` (close-safety), and `commands::prune` (remove). The
+//! the agent-node service (close-safety), and `commands::prune` (remove). The
 //! *path* of a worktree (the configurable container and WSL/host
 //! conversion) still belongs to `env`; this module takes an already-resolved
 //! host path and makes / inspects / removes the git worktree there.
@@ -13,8 +13,15 @@
 //! realised end-to-end in [`provision::provision_for_spawn`]; the orchestrator
 //! (`agent/spawn.rs`) builds the Spawn Context and matches the outcome. This
 //! module provides the primitives (`create_git_worktree`, `add_worktree_impl`,
-//! `sanitize_git_worktree`, `prune_stale_worktrees`, `resolve_base_commit`,
+//! `sanitize_git_worktree`, `prune_stale_worktrees`,
 //! `apply_worktree_include`) that the Provisioner drives on every spawn.
+//!
+//! The `warm` submodule owns the pre-spawn pool seam and the "usable warm
+//! worktree" rule. It is the reason this module does not name the service
+//! layer: the pool is reached through the consumer-owned [`warm::WarmClaim`]
+//! interface, so the dependency direction is one way (`services/` → `git/`).
+//! See issue #2533.
+//!
 //! Issue #248 deepened the seam:
 //! - `base_ref` (`SpawnContext.base_ref`) reaches the primitive via
 //!   `provision_for_spawn` — pinned by `provision_for_spawn_cold_created_uses_spawn_context_base_ref_not_local_head`.
@@ -22,6 +29,7 @@
 //!   `copy_dir_all` — pinned by `apply_worktree_include_copies_directory_recursively`.
 
 pub mod provision;
+pub mod warm;
 
 use std::time::Duration;
 
@@ -91,46 +99,8 @@ fn run_bounded_git(
 
 // ── Create ──────────────────────────────────────────────────────────────────
 
-/// Resolve the base commit a new worktree should be created from.
-///
-/// `"HEAD"` (or empty) uses the Mesh root's current HEAD — the explicit
-/// "Head" option. Any other ref (e.g. `"origin/main"`) is resolved via
-/// revparse; callers must run `env::fetch_origin` first so remote-tracking refs
-/// are current. If the ref cannot be resolved (offline, missing), this falls
-/// back to HEAD with a warning rather than failing the spawn, consistent with
-/// ADR 0001's offline-fallback intent.
-fn resolve_base_commit<'r>(
-    repo: &'r git2::Repository,
-    base_ref: &str,
-) -> Result<git2::Commit<'r>, String> {
-    let head_commit = || {
-        repo.head()
-            .and_then(|h| h.peel_to_commit())
-            .map_err(|e| format!("Failed to resolve HEAD commit: {}", e))
-    };
-
-    if base_ref.is_empty() || base_ref == "HEAD" {
-        return head_commit();
-    }
-
-    match repo
-        .revparse_single(base_ref)
-        .and_then(|obj| obj.peel_to_commit())
-    {
-        Ok(commit) => Ok(commit),
-        Err(e) => {
-            tracing::warn!(
-                "resolve_base_commit: could not resolve base_ref '{}' ({}); falling back to HEAD",
-                base_ref,
-                e
-            );
-            head_commit()
-        }
-    }
-}
-
 /// Add a worktree to the repo — branched (new branch) or detached — based on
-/// the commit resolved from `base_ref` (see [`resolve_base_commit`]).
+/// the commit resolved from `base_ref` (see [`crate::git::sha::resolve_sha`]).
 ///
 /// This is the one deliberate exception to ADR 0007's "all git access via
 /// libgit2" rule: it shells out to `git worktree add`. libgit2's per-file
@@ -142,7 +112,7 @@ fn resolve_base_commit<'r>(
 /// CLI. See docs/adr/0007 for the amendment.
 ///
 /// We still resolve `base_ref` → a concrete commit via libgit2 (fast, and it
-/// keeps `resolve_base_commit`'s offline-fallback semantics) and hand git the
+/// keeps the one resolver's offline-fallback semantics) and hand git the
 /// 40-char hex SHA. Passing a SHA — never a ref like `@{u}` — also sidesteps
 /// the Windows `Command::args` `{}`-stripping trap (see the curly-brace-arg
 /// memory). `-b <name>` gives branched mode a real branch at the base; detached
@@ -155,10 +125,10 @@ fn add_worktree_impl(
     use_branched: bool,
     base_ref: &str,
 ) -> Result<(), AddWorktreeFailure> {
-    let base_sha = resolve_base_commit(repo, base_ref)
-        .map_err(AddWorktreeFailure::other)?
-        .id()
-        .to_string();
+    let base_sha =
+        super::sha::resolve_sha(repo, &super::sha::ShaSource::BaseRef(base_ref.to_string()))
+            .map_err(|e| AddWorktreeFailure::other(e.to_string()))?
+            .to_string();
     let workdir = repo
         .workdir()
         .ok_or_else(|| AddWorktreeFailure::other("cannot add a worktree to a bare repository"))?;
@@ -391,7 +361,7 @@ fn create_git_worktree_with_timeout(
 ) -> Result<(), String> {
     let project = super::project::resolve(project_root)?;
     let project_root = project.working_root.as_str();
-    crate::services::sync_lock::try_with_mesh_sync_lock_timeout(project_root, timeout, || {
+    crate::git::sync_lock::try_with_mesh_sync_lock_timeout(project_root, timeout, || {
         create_git_worktree_at_root(
             project_root,
             worktree_host_path,
@@ -781,23 +751,6 @@ pub(crate) fn copy_dir_all(src: &std::path::Path, dest: &std::path::Path) -> std
         // symlinks / fifos / sockets: silently skipped (see fn doc).
     }
     Ok(())
-}
-
-/// Resolve `base_ref` to a concrete 40-char commit SHA against the mesh repo,
-/// with the same offline/HEAD fallback [`add_worktree_impl`] gets from
-/// [`resolve_base_commit`]. The warm-pool adoption path (issue #612) hands the
-/// resulting SHA — never a symbolic ref like `origin/main` or `@{u}` — to
-/// `git checkout`, so it inherits both the offline resilience (an unfetched
-/// remote ref degrades to HEAD instead of hard-failing the checkout) and the
-/// Windows `Command::args` brace-strip protection the cold path relies on.
-pub fn resolve_base_ref_sha(project_root: &str, base_ref: &str) -> Result<String, String> {
-    let host_root = to_host_path(project_root);
-    let repo = super::primitives::open_from_host_path(&host_root)
-        .map_err(|e| format!("Failed to open repository at {}: {}", host_root, e))?;
-    // Bind before returning so the borrowed `Commit` temporary is dropped
-    // while `repo` is still alive (the SHA itself is owned).
-    let sha = resolve_base_commit(&repo, base_ref)?.id().to_string();
-    Ok(sha)
 }
 
 /// Move (and rename) an existing worktree to a new directory via

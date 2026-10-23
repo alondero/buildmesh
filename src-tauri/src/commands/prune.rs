@@ -259,7 +259,7 @@ pub async fn prune_remote_tracking(worktree_path: String) -> Result<String, Stri
     .await
 }
 
-/// Run `git fetch --prune` inside `services::sync_lock::with_mesh_sync_lock`
+/// Run `git fetch --prune` inside `crate::git::sync_lock::with_mesh_sync_lock`
 /// so the worktree prune can't race against itself (issue #709 — the
 /// fourth and final per-Mesh git shell-out to land under the lock).
 ///
@@ -267,7 +267,7 @@ pub async fn prune_remote_tracking(worktree_path: String) -> Result<String, Stri
 /// sharing coordination across linked worktrees and sibling Meshes.
 fn locked_prune_remote_tracking(worktree_path: &str) -> Result<String, String> {
     let host_path = to_host_path(worktree_path);
-    crate::services::sync_lock::with_mesh_sync_lock(worktree_path, || {
+    crate::git::sync_lock::with_mesh_sync_lock(worktree_path, || {
         // `run_command_with_timeout` (not a bare `.output()`) — this is a
         // network-facing fetch under the sync lock; a half-open connection
         // would otherwise wedge the blocking-pool thread AND the lock

@@ -1970,6 +1970,28 @@ test('a Rust file attached with #[path] selects the module that owns it', () => 
   assert.equal(rustModule('src-tauri/src/commands/prune_tests.rs'), 'commands::prune::prune_tests');
   assert.equal(rustModule('src-tauri/src/services/legacy_retirement/retirement_crash_tests.rs'), 'services::legacy_retirement::retirement_crash_tests');
   assert.equal(rustModule('src-tauri/src/agent/terminal_input.rs'), 'agent::process::terminal_input');
+  // A production file whose tests live in a sibling `<stem>_tests` module the
+  // PARENT declares: a plain path walk maps it to a module that holds no
+  // tests, so the filter would select zero and the strict zero-test rule
+  // would report a failure that carries no information about the code.
+  assert.equal(rustModule('src-tauri/src/db/warm_pool.rs'), 'db::warm_pool_tests');
+  assert.equal(rustModule('src-tauri/src/agent/spawn/provision.rs'), 'agent::spawn::provision_tests');
+  assert.equal(rustModule('src-tauri/src/agent/spawn/prepare.rs'), 'agent::spawn::prepare_tests');
+  // The siblings of that shape, so an edit to one of these files does not
+  // leave the scoped check with a filter that selects zero tests.
+  assert.equal(rustModule('src-tauri/src/agent/spawn/command.rs'), 'agent::spawn::command_tests');
+  assert.equal(rustModule('src-tauri/src/agent/spawn/orchestrator.rs'), 'agent::spawn::orchestrator_tests');
+  assert.equal(rustModule('src-tauri/src/agent/spawn/preflight.rs'), 'agent::spawn::preflight_tests');
+  assert.equal(rustModule('src-tauri/src/agent/spawn/reader.rs'), 'agent::spawn::reader_tests');
+  assert.equal(rustModule('src-tauri/src/agent/spawn/streams.rs'), 'agent::spawn::streams_tests');
+  assert.equal(rustModule('src-tauri/src/db/circuit/operator_push.rs'), 'db::circuit::operator_push_tests');
+  assert.equal(rustModule('src-tauri/src/db/create_operation.rs'), 'db::create_operation_tests');
+  assert.equal(rustModule('src-tauri/src/db/mesh.rs'), 'db::mesh_tests');
+  assert.equal(rustModule('src-tauri/src/services/github/pagination.rs'), 'services::github::pagination_tests');
+  // A production file that carries test items of its own keeps its own
+  // module: redirecting it to the sibling module would skip those tests.
+  assert.equal(rustModule('src-tauri/src/agent/spawn/launch.rs'), 'agent::spawn::launch');
+  assert.equal(rustModule('src-tauri/src/commands/git.rs'), 'commands::git');
   // A module file maps to its own module; a directory mod.rs to its directory.
   assert.equal(rustModule('src-tauri/src/db/mod.rs'), 'db');
   assert.equal(rustModule('src-tauri/src/env/host_path.rs'), 'env::host_path');

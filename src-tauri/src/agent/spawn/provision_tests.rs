@@ -895,7 +895,7 @@ fn fetch_single_ref_fetches_despite_dirty_parent() {
 // -----------------------------------------------------------------------
 // locked_fetch_pr_head — per-Mesh sync_lock wrap (issue #698)
 //
-// `locked_fetch_pr_head` must run inside `services::sync_lock::with_mesh_
+// `locked_fetch_pr_head` must run inside `crate::git::sync_lock::with_mesh_
 // sync_lock` so two concurrent PR-spawns (or a PR-spawn racing the manual
 // `git_sync` from #680 / the spawn-time `fetch_origin` from #652) can't
 // collide on `.git/FETCH_HEAD` / `.git/refs/remotes/<remote>/<ref>.lock`.
@@ -905,7 +905,7 @@ fn fetch_single_ref_fetches_despite_dirty_parent() {
 // We test the wrap with a wall-clock bound (mirroring the #680
 // `git_sync_serializes_via_per_mesh_sync_lock_gh680` shape in
 // `commands/git_tests.rs`). The `with_mesh_sync_lock` unit tests in
-// `services::sync_lock` prove the primitive itself serialises; this test
+// `crate::git::sync_lock` prove the primitive itself serialises; this test
 // proves THIS specific call site uses the SAME key the spawn path uses,
 // which is the bug class #698 closes.
 //
@@ -932,7 +932,7 @@ fn fetch_single_ref_fetches_despite_dirty_parent() {
 /// the holder is still inside its critical section.
 ///
 /// Why wall-clock (not `fetch_add`): the per-Mesh lock is correctly
-/// implemented (issue #652 + `services::sync_lock` unit tests prove it),
+/// implemented (issue #652 + `crate::git::sync_lock` unit tests prove it),
 /// so it *prevents* simultaneous critical-section entries — `max_concurrent
 /// == 1` even on a working lock. The only signal that `locked_fetch_pr_head`
 /// shares the same key is that it waits for the holder to release the lock.
@@ -959,7 +959,7 @@ fn locked_fetch_pr_head_serializes_via_per_mesh_sync_lock_gh698() {
     let holder_path = path_key.clone();
     let entered_holder = std::sync::Arc::clone(&entered_flag);
     let holder = std::thread::spawn(move || {
-        crate::services::sync_lock::with_mesh_sync_lock(&holder_path, || {
+        crate::git::sync_lock::with_mesh_sync_lock(&holder_path, || {
             entered_holder.store(1, AOrdering::SeqCst);
             std::thread::sleep(Duration::from_millis(500));
         });
@@ -1023,7 +1023,7 @@ fn locked_fetch_pr_head_serializes_fork_branch_via_per_mesh_sync_lock_gh698() {
     let holder_path = path_key.clone();
     let entered_holder = std::sync::Arc::clone(&entered_flag);
     let holder = std::thread::spawn(move || {
-        crate::services::sync_lock::with_mesh_sync_lock(&holder_path, || {
+        crate::git::sync_lock::with_mesh_sync_lock(&holder_path, || {
             entered_holder.store(1, AOrdering::SeqCst);
             std::thread::sleep(Duration::from_millis(500));
         });

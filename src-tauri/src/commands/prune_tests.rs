@@ -1586,7 +1586,7 @@ async fn prune_remote_tracking_returns_err_on_non_repo_path() {
 // ── locked_prune_remote_tracking — per-Mesh sync_lock wrap (issue #709) ──
 //
 // `locked_prune_remote_tracking` must run inside
-// `services::sync_lock::with_mesh_sync_lock` keyed on `&worktree_path`
+// `crate::git::sync_lock::with_mesh_sync_lock` keyed on `&worktree_path`
 // (the worktree's own path), so two concurrent prune-remote-tracking
 // clicks on the same worktree can't collide on `.git/FETCH_HEAD` /
 // `refs/remotes/<remote>/*.lock`. Without the wrap, the losing fetch
@@ -1604,7 +1604,7 @@ async fn prune_remote_tracking_returns_err_on_non_repo_path() {
 // holder; without, it runs concurrently and finishes in tens of ms.
 //
 // Why wall-clock (not `fetch_add`): the per-Mesh lock is correctly
-// implemented (issue #652 + `services::sync_lock` unit tests prove it),
+// implemented (issue #652 + `crate::git::sync_lock` unit tests prove it),
 // so it *prevents* simultaneous critical-section entries — `max_concurrent
 // == 1` even on a working lock. The only signal that this helper shares
 // the same key is that it waits for the holder to release the lock.
@@ -1655,7 +1655,7 @@ async fn locked_prune_remote_tracking_serializes_via_per_mesh_sync_lock_gh709() 
     let holder_path = path_key.clone();
     let entered_holder = std::sync::Arc::clone(&entered_flag);
     let holder = thread::spawn(move || {
-        crate::services::sync_lock::with_mesh_sync_lock(&holder_path, || {
+        crate::git::sync_lock::with_mesh_sync_lock(&holder_path, || {
             entered_holder.store(1, AOrdering::SeqCst);
             thread::sleep(Duration::from_millis(500));
         });
