@@ -131,10 +131,24 @@ export const RUST_PATH_INCLUDES = {
 // `RUST_PATH_INCLUDES` covers the `#[path]` half of the same problem; the
 // two tables cover different shapes, because a `#[path]`-included
 // sibling is registered in that table and keeps its owner's filter.
+//
+// The entries below have the shape "the parent declares `mod <stem>_tests;`
+// and the production file is that module's same-stem submodule". A production
+// file that carries test items of its own needs no entry: a filter on its own
+// module already selects them, and redirecting it would skip them.
 export const RUST_SIBLING_TESTS = {
+  'src-tauri/src/agent/spawn/command.rs': 'agent::spawn::command_tests',
+  'src-tauri/src/agent/spawn/orchestrator.rs': 'agent::spawn::orchestrator_tests',
+  'src-tauri/src/agent/spawn/preflight.rs': 'agent::spawn::preflight_tests',
   'src-tauri/src/agent/spawn/prepare.rs': 'agent::spawn::prepare_tests',
   'src-tauri/src/agent/spawn/provision.rs': 'agent::spawn::provision_tests',
+  'src-tauri/src/agent/spawn/reader.rs': 'agent::spawn::reader_tests',
+  'src-tauri/src/agent/spawn/streams.rs': 'agent::spawn::streams_tests',
+  'src-tauri/src/db/circuit/operator_push.rs': 'db::circuit::operator_push_tests',
+  'src-tauri/src/db/create_operation.rs': 'db::create_operation_tests',
+  'src-tauri/src/db/mesh.rs': 'db::mesh_tests',
   'src-tauri/src/db/warm_pool.rs': 'db::warm_pool_tests',
+  'src-tauri/src/services/github/pagination.rs': 'services::github::pagination_tests',
 };
 
 // Every `#[path = "..."]` module in the crate, as repo-relative paths. Entries
