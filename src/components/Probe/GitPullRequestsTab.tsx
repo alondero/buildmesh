@@ -1,3 +1,5 @@
+import { PROBE_TAB_DEFINITIONS } from '../../lib/probeContext';
+import { useProbeResource, type ProbeLoadContext } from '../../lib/probeResource';
 /**
  * GitPullRequestsTab — the Probe Panel's Pull Requests tab body.
  *
@@ -64,7 +66,7 @@
  */
 
 import { formatError } from '../../lib/errorUtils';
-import { useState, useCallback, useMemo, useRef } from 'react';
+import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import {
   getRepoPulls,
   mergePr,
@@ -90,7 +92,6 @@ import { ProbeRow } from './ProbeRow';
 import { ContributorPill } from './ContributorPill';
 import { ProbeTabBody } from './ProbeTabBody';
 import { FeedCompletenessNote } from './FeedCompletenessNote';
-import type { GitHubPageCompleteness } from '../../types/generated/GitHubPageCompleteness';
 import { ProbeToolbar } from './ProbeToolbar';
 import { SafeLink } from '../shared/SafeLink';
 import {
@@ -283,20 +284,21 @@ function deriveMergeStatus(pr: GitHubPullRequest, pollExhausted: boolean): Merge
   return { kind: 'mergeable' };
 }
 
+export async function loadPulls({ meshId, filter }: ProbeLoadContext) {
+  return meshId === null ? null : getRepoPulls(meshId, filter ?? 'open');
+}
+
 export function GitPullRequestsTab() {
   const { activeMeshId, activeMeshPath } = useProbeContext();
   const openDiff = useUIStore((s) => s.openDiff);
   // `getDefaultProvider` is mesh-scoped — same pattern as `GitIssuesTab`.
   const getDefaultProvider = useMeshStore((s) => s.getDefaultProvider);
 
-  const [prs, setPrs] = useState<GitHubPullRequest[]>([]);
-  // Issue #2024 rank 6 — paginated read; the tab must be able to say the list
-  // is truncated instead of implying it is every PR in the repository.
-  const [completeness, setCompleteness] =
-    useState<GitHubPageCompleteness | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [stateFilter, setStateFilter] = useState<StateFilter>('open');
+  const resource = useProbeResource(PROBE_TAB_DEFINITIONS.pulls.load, { meshId: activeMeshId, filter: stateFilter }, `${activeMeshId}:${stateFilter}`);
+  const { loading, error } = resource.state;
+  const prs = useMemo(() => resource.state.data?.items ?? [], [resource.state.data]);
+  const completeness = resource.state.data?.completeness ?? null;
   // Which PR is awaiting an inline merge confirm, which is mid-merge,
   // and — for the confirming row — which strategy the user armed
   // (defaults to squash, the historical behaviour; the ▾ picker arms a
@@ -326,29 +328,8 @@ export function GitPullRequestsTab() {
   // different row). `useToggleSet` (issue #463) bundles the Set state
   // + toggle closure + clear reset into one hook.
   const expanded = useToggleSet<number>();
-  // Bump to force the load effect to re-run — the previous run's signal
-  // is aborted by useAsyncEffect's cleanup, so any in-flight getRepoPulls
-  // drops its setState instead of clobbering the new run's result. Used
-  // by `handleMerge` to refetch after a successful squash-merge (issue #349).
-  // Bump to refetch on manual Refresh or after merge (issue #349
-  // refetch; #813 surfaced Refresh to the user). `useAsyncEffect`
-  // aborts the previous effect's signal on dep change.
-  const [reloadKey, setReloadKey] = useState(0);
-  // Bounded re-poll budget for `mergeable: null` rows (issue #419, kept
-  // through #1529). `pollAttempts` survives reloadKey bumps (the re-poll's
-  // own refetches must consume budget, not reset it) and resets only when
-  // the scope changes (mesh/filter, tracked below) or the list resolves
-  // with no nulls left. `pollExhausted` flips the null rows from
-  // "Checking…" to the "Unknown" retry state the status derives from.
-  // `softReload` marks reloads that must preserve row state (background
-  // timer ticks and row-level Unknown retries) so the load effect can skip
-  // the row-state clears below — those must never collapse an expanded row
-  // or cancel a pending merge confirm under the user's nose.
-  // `softReload` does the same for a row's own Unknown-retry button. Only
-  // a scope change or an explicit toolbar Refresh / merge refetch clears.
+  // The bounded mergeability budget is a domain policy, independent of read freshness.
   const pollAttempts = useRef(0);
-  const softReload = useRef(false);
-  const prevScope = useRef<{ meshId: number | null; filter: StateFilter } | null>(null);
   const [pollExhausted, setPollExhausted] = useState(false);
   // "View on GitHub" header button — resolves the active mesh's
   // `origin` to a `https://github.com/{owner}/{repo}/pulls` URL.
@@ -372,99 +353,48 @@ export function GitPullRequestsTab() {
     );
   }, [prs, search]);
 
-  // Re-arm the re-poll budget and refetch. The toolbar Refresh is a hard
-  // reload (row state clears in the effect); a row's own Unknown-retry is
-  // soft (the user may be reading another expanded row).
+  const reload = resource.reload;
+  const clearExpanded = expanded.clear;
+  const data = resource.state.data;
+  const clearRows = useCallback(() => {
+    setConfirming(null);
+    setMergeError({});
+    clearExpanded();
+  }, [clearExpanded]);
   const retryListLoad = useCallback(() => {
     pollAttempts.current = 0;
     setPollExhausted(false);
-    setReloadKey((k) => k + 1);
-  }, []);
+    clearRows();
+    void reload();
+  }, [clearRows, reload]);
   const retryUnknownRow = useCallback(() => {
     pollAttempts.current = 0;
     setPollExhausted(false);
-    softReload.current = true;
-    setReloadKey((k) => k + 1);
-  }, []);
-
-  // Fresh scope, fresh budget: tracked inline in the load effect (no extra
-  // effect lifecycle for two synchronous resets).
-  useAsyncEffect((signal) => {
-    if (activeMeshId === null) return;
-    // Scope change (mesh/filter) is a full reset: fresh budget, and the
-    // row state below is cleared (PR numbers don't carry across scopes).
-    // A background poll tick (or explicit refresh/merge refetch) keeps the
-    // running budget and — for poll ticks only — the row state: collapsing
-    // an expanded row or cancelling a pending merge confirm under the
-    // user's nose on a timer tick would be a UX glitch.
-    const scopeChanged =
-      prevScope.current === null ||
-      prevScope.current.meshId !== activeMeshId ||
-      prevScope.current.filter !== stateFilter;
-    prevScope.current = { meshId: activeMeshId, filter: stateFilter };
-    if (scopeChanged) {
+    void reload();
+  }, [reload]);
+  useEffect(() => {
+    pollAttempts.current = 0;
+    setPollExhausted(false);
+    clearRows();
+  }, [activeMeshId, stateFilter, clearRows]);
+  useEffect(() => {
+    if (loading || error || data === null) return;
+    const stillUnknown = stateFilter === 'open' && prs.some(pr => !pr.draft && (pr.mergeable ?? null) === null);
+    if (!stillUnknown) {
       pollAttempts.current = 0;
       setPollExhausted(false);
+      return;
     }
-    const isSoftReload = softReload.current;
-    softReload.current = false;
-    setLoading(true);
-    setError(null);
-    if (!isSoftReload) {
-      setConfirming(null);
-      setMergeError({});
-      // PR numbers don't carry across mesh/filter changes (issue #461).
-      expanded.clear();
+    if (pollAttempts.current >= MAX_POLL_ATTEMPTS) {
+      setPollExhausted(true);
+      return;
     }
-    // One shared re-poll timer per load (issue #419 via #1529: a single
-    // list refetch, not one timer per stuck PR). Owned by this effect run;
-    // cleanup clears it so unmount/mesh/filter/reload never leaks a retry.
-    let pollTimer: ReturnType<typeof setTimeout> | null = null;
-    (async () => {
-      try {
-        const result = await getRepoPulls(activeMeshId, stateFilter);
-        // The mesh / filter could have changed mid-flight — drop a stale result.
-        if (signal.aborted) return;
-        // Issue #2024 rank 6 — the read is paginated; keep the completeness
-        // so the tab can say the list is truncated rather than imply it is
-        // every PR in the repository.
-        setCompleteness(result.completeness);
-        setPrs(result.items);
-        // Closed PRs show no merge control, so unknown mergeability there
-        // needs no resolution. Drafts render "Draft" without consulting it.
-        const stillNull =
-          stateFilter === 'open' &&
-          result.items.some((pr) => !pr.draft && (pr.mergeable ?? null) === null);
-        if (!stillNull) {
-          pollAttempts.current = 0;
-          setPollExhausted(false);
-          return;
-        }
-        if (pollAttempts.current >= MAX_POLL_ATTEMPTS) {
-          setPollExhausted(true);
-          return;
-        }
-        const delay = BASE_POLL_DELAY_MS * (pollAttempts.current + 1);
-        pollTimer = setTimeout(() => {
-          pollTimer = null;
-          if (signal.aborted) return;
-          pollAttempts.current += 1;
-          softReload.current = true;
-          setReloadKey((k) => k + 1);
-        }, delay);
-      } catch (e) {
-        if (signal.aborted) return;
-        console.error('Failed to load pull requests:', e);
-        setError(formatError(e));
-      } finally {
-        if (!signal.aborted) setLoading(false);
-      }
-    })();
-
-    return () => {
-      if (pollTimer !== null) clearTimeout(pollTimer);
-    };
-  }, [activeMeshId, stateFilter, reloadKey]);
+    const timer = setTimeout(() => {
+      pollAttempts.current += 1;
+      void reload();
+    }, BASE_POLL_DELAY_MS * (pollAttempts.current + 1));
+    return () => clearTimeout(timer);
+  }, [loading, error, data, stateFilter, reload, prs]);
 
   // Fetch the provider list once at mount (issue #420, mirrors
   // `GitIssuesTab`). Platform filtering is enforced server-side via
@@ -633,9 +563,10 @@ export function GitPullRequestsTab() {
         }
       }
       // Refetch so the merged PR drops out of the open list. Bumping
-      // reloadKey aborts the in-flight effect (if any) and re-runs it
+      // Refresh through the same owner as polling and manual reloads.
       // — see the useAsyncEffect deps at the top of this component.
-      setReloadKey((k) => k + 1);
+      clearRows();
+      void reload();
     } catch (e) {
       console.error('Failed to merge PR:', e);
       setMergeError((prev) => ({

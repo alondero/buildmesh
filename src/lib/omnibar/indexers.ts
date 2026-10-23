@@ -134,117 +134,15 @@ export interface AppCommand {
   /** Icon hint for the row. */
   icon?: string;
   /** Search aliases beyond the label (e.g. `theme`, `mode`). */
-  keywords?: string[];
+  keywords?: readonly string[];
 }
 
-/**
- * Inspector-destination palette commands (issue #1375). The Record is
- * keyed by the `probe-<tab>` routing id and typed as
- * `Record<\`probe-${ProbeTab}\`, AppCommand>` so adding a value to
- * `PROBE_TAB_ORDER` in `probeContext.ts:155` forces a matching entry
- * here at compile time. The previous `PROBE_TAB_COMMANDS =
- * PROBE_TAB_ORDER` alias was tautological — it never read from the
- * AppCommand array, so a missing entry on this side compiled cleanly
- * (PR #1489 review #1B). The flat `APP_COMMANDS` array below merges
- * non-probe entries with `Object.values` of this map; consumers stay
- * ignorant of the split.
- *
- * Exported (not just spread into `APP_COMMANDS`) so the palette's tool
- * discovery screen can read the same labels instead of re-declaring copy
- * — one catalog, two readers.
- */
-export const PROBE_DESTINATION_COMMANDS: Record<`probe-${ProbeTab}`, AppCommand> = {
-  'probe-files': {
-    id: 'probe-files',
-    label: 'Open Files',
-    subtitle: 'Browse the project explorer',
-    icon: 'files',
-    keywords: ['project', 'explorer', 'file tree'],
-  },
-  'probe-review': {
-    id: 'probe-review',
-    label: 'Open Agent Changes',
-    subtitle: 'Review what the focused agent changed',
-    icon: 'review',
-    keywords: ['changes', 'diff', 'review'],
-  },
-  'probe-usage': {
-    id: 'probe-usage',
-    label: 'Open Usage',
-    subtitle: 'Check provider usage and limits',
-    icon: 'usage',
-    keywords: ['meters', 'limits', 'quota', 'balance'],
-  },
-  'probe-notifications': {
-    id: 'probe-notifications',
-    label: 'Open Notifications',
-    subtitle: 'Review app activity and resolve worktree problems',
-    icon: 'notifications',
-    keywords: ['bell', 'toast', 'history', 'errors', 'cleanup', 'attention'],
-  },
-  'probe-worktrees': {
-    id: 'probe-worktrees',
-    label: 'Open Repository',
-    subtitle: 'Check health, recover, and clean up branches',
-    icon: 'worktrees',
-    keywords: ['repository', 'worktree', 'branch', 'git', 'prune', 'cleanup', 'maintenance'],
-  },
-  'probe-properties': {
-    id: 'probe-properties',
-    label: 'Open Project Settings',
-    subtitle: 'Identity, agent defaults, commands, worktrees',
-    icon: 'properties',
-    keywords: [
-      'project',
-      'properties',
-      'build',
-      'run',
-      'worktree',
-      'base ref',
-      'harness',
-      'sandbox',
-      'pool',
-    ],
-  },
-  'probe-circuits': {
-    // See probe-circuits above — the `Automation:` prefix was a one-off
-    // namespace that did not appear in the inspector header, so the palette
-    // entry was the only surface using two words for the same destination.
-    id: 'probe-circuits',
-    label: 'Open Circuits',
-    subtitle: 'Inspect connected automations',
-    icon: 'circuits',
-    keywords: ['automation', 'flows', 'graphs'],
-  },
-  'probe-issues': {
-    id: 'probe-issues',
-    label: 'Open GitHub Issues',
-    subtitle: 'Find work to pick up',
-    icon: 'issues',
-    keywords: ['github', 'bugs', 'backlog'],
-  },
-  'probe-pulls': {
-    id: 'probe-pulls',
-    label: 'Open GitHub Pull Requests',
-    subtitle: 'See what is ready to merge',
-    icon: 'pulls',
-    keywords: ['github', 'pr', 'merge'],
-  },
-  'probe-sessions': {
-    id: 'probe-sessions',
-    label: 'Open Agent History',
-    subtitle: 'Return to previous agent work',
-    icon: 'sessions',
-    keywords: ['archive', 'resume', 'history', 'completed', 'failed'],
-  },
-  'probe-scratchpad': {
-    id: 'probe-scratchpad',
-    label: 'Open Notes',
-    subtitle: 'Keep notes beside the work',
-    icon: 'scratchpad',
-    keywords: ['scratch pad', 'notes', 'memo'],
-  },
-};
+/** Palette destinations derive their labels and search aliases from the registry. */
+export const PROBE_DESTINATION_COMMANDS = Object.fromEntries<AppCommand>(PROBE_TAB_ORDER.map(tab => [
+  `probe-${tab}`,
+  { id: `probe-${tab}`, icon: tab, ...PROBE_TAB_DEFINITIONS[tab].command },
+])) as Record<`probe-${ProbeTab}`, AppCommand>;
+
 
 /**
  * The task-oriented palette destinations (issue #1375). The palette is the

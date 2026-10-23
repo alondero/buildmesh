@@ -745,15 +745,7 @@ it('keeps isRefreshing up when an older Refresh click is dropped as stale and a 
       expect(btn.getAttribute('aria-busy')).toBe('true');
       expect(screen.queryByText('5.0%')).toBeNull();
 
-      // Now resolve the NEWER call (refresh2 → 90%). The data
-      // commits, but no `handleRefresh` is awaiting this one (it's
-      // the invalidation path) — so `isRefreshing` stays true
-      // until… nothing clears it. Acceptable: a non-user load on
-      // this component doesn't own the spinner. Manual user action
-      // required to dismiss (close tab or click Refresh again).
-      // What we DO assert: data updates to 90% and the spinner is
-      // still up (we have no hook to clear it for the invalidation
-      // path; that's intentional).
+      // A superseding background read now completes the shared busy lifecycle.
       await act(async () => {
         resolveRefresh2([
           { provider: 'anthropic', usageTracked: true, usage: { provider: 'anthropic', loggedIn: true, windows: [{ label: '5-hour', usedPercent: 90, resetsAt: null }], balance: null, meters: [], detail: null, error: null } },
@@ -761,7 +753,7 @@ it('keeps isRefreshing up when an older Refresh click is dropped as stale and a 
         await vi.advanceTimersByTimeAsync(50);
       });
       await screen.findByText('90.0%');
-      expect(btn.getAttribute('aria-busy')).toBe('true');
+      expect(btn.getAttribute('aria-busy')).toBe('false');
     } finally {
       vi.useRealTimers();
     }
