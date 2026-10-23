@@ -340,8 +340,24 @@ pub(super) fn deliver_circuit_initial_prompt(
     prompt: &str,
     delivery: crate::agent::launch::InitialPromptDelivery,
     expected_input: Option<&str>,
+    fence: Option<&crate::services::circuit_prompt::InitialDeliveryFence>,
 ) {
     use crate::agent::launch::InitialPromptDelivery;
+
+    if let Some(fence) = fence {
+        match crate::services::circuit_prompt::initial_pending(fence) {
+            Ok(false) => return,
+            Ok(true) => {}
+            Err(error) => {
+                crate::services::circuit_prompt::initial_delivery_uncertain(
+                    app,
+                    Some(fence),
+                    &format!("Initial prompt readiness could not be checked: {error}"),
+                );
+                return;
+            }
+        }
+    }
 
     let result = match delivery {
         InitialPromptDelivery::Prefill | InitialPromptDelivery::AutoSubmit => Ok(()),
@@ -366,6 +382,9 @@ pub(super) fn deliver_circuit_initial_prompt(
     };
 
     if let Err(error) = result {
+        if crate::services::circuit_prompt::initial_delivery_uncertain(app, fence, &error) {
+            return;
+        }
         tracing::error!(
             "circuits: fallback prompt injection for agent {} failed: {}",
             node_id,
@@ -393,9 +412,10 @@ pub(super) fn schedule_circuit_initial_prompt(
     node_id: i64,
     prompt: &str,
     delivery: crate::agent::launch::InitialPromptDelivery,
+    fence: Option<crate::services::circuit_prompt::InitialDeliveryFence>,
 ) {
     if delivery == crate::agent::launch::InitialPromptDelivery::Prefill {
-        crate::circuit::launch::watch_and_submit_for_circuit(app.clone(), node_id, prompt);
+        crate::circuit::launch::watch_and_submit_for_circuit(app.clone(), node_id, prompt, fence);
     }
 }
 
@@ -467,7 +487,10 @@ pub(super) struct CircuitBackgroundSpawn {
     pub delivery: crate::agent::launch::InitialPromptDelivery,
 }
 
-pub(super) fn spawn_circuit_agent_in_background(app: &AppHandle, spawn: CircuitBackgroundSpawn) {
+pub(super) fn spawn_circuit_agent_in_background(
+    app: &AppHandle,
+    spawn: CircuitBackgroundSpawn,
+) -> Result<(), String> {
     let CircuitBackgroundSpawn {
         run_id,
         node_id,
@@ -478,6 +501,8 @@ pub(super) fn spawn_circuit_agent_in_background(app: &AppHandle, spawn: CircuitB
         delivery,
     } = spawn;
     let app_for_spawn = app.clone();
+    let delivery_fence = crate::services::circuit_prompt::initial_fence(node_id)
+        .map_err(|e| format!("Could not capture initial delivery identity: {e}"))?;
     tauri::async_runtime::spawn(async move {
         // Keep the permit alive until every post-launch cancellation check
         // and compensation path has completed. Merely accepting it as an
@@ -530,7 +555,11 @@ pub(super) fn spawn_circuit_agent_in_background(app: &AppHandle, spawn: CircuitB
                         );
                         let attention_app = app_for_spawn.clone();
                         let _ = tauri::async_runtime::spawn_blocking(move || {
-                            crate::commands::attention::mark_attention(node_id, &attention_app);
+                            crate::services::circuit_prompt::initial_delivery_uncertain(
+                                &attention_app,
+                                delivery_fence.as_ref(),
+                                &error,
+                            );
                         })
                         .await;
                         return;
@@ -539,7 +568,13 @@ pub(super) fn spawn_circuit_agent_in_background(app: &AppHandle, spawn: CircuitB
             } else {
                 None
             };
-        schedule_circuit_initial_prompt(&app_for_spawn, node_id, &prompt, delivery);
+        schedule_circuit_initial_prompt(
+            &app_for_spawn,
+            node_id,
+            &prompt,
+            delivery,
+            delivery_fence.clone(),
+        );
         if !run_accepts_effects_async(run_id).await {
             abort_circuit_spawn_async(run_id, node_id).await;
             return;
@@ -552,11 +587,13 @@ pub(super) fn spawn_circuit_agent_in_background(app: &AppHandle, spawn: CircuitB
                     &prompt,
                     delivery,
                     expected_input.as_deref(),
+                    delivery_fence.as_ref(),
                 );
             }
         })
         .await;
     });
+    Ok(())
 }
 
 /// Retire a circuit spawn that lost a cancellation/delete race. The row may
@@ -804,6 +841,14 @@ pub(super) fn spawn_step_agent(
                 existing_agent_id,
                 handoff_turn.as_ref(),
             );
+            retain_initial_prompt(
+                run_id,
+                view,
+                node_id,
+                existing_agent_id,
+                &resolved_prompt,
+                handoff_turn.as_ref(),
+            )?;
             crate::circuit::delivery::write_prompt_to_pty(existing_agent_id, &resolved_prompt, app)
                 .map_err(|e| format!("PTY write failed on retry: {}", e))?;
             attach_spawned_agent(
@@ -884,6 +929,14 @@ pub(super) fn spawn_step_agent(
                 crate::commands::agent::NodeCreatedPayload { id: new_node.id },
             );
             crate::circuit::handoff::set_agent_turn(run_id, new_node.id, handoff_turn.as_ref());
+            retain_initial_prompt(
+                run_id,
+                view,
+                node_id,
+                new_node.id,
+                &resolved_prompt,
+                handoff_turn.as_ref(),
+            )?;
             spawn_circuit_agent_in_background(
                 app,
                 CircuitBackgroundSpawn {
@@ -895,7 +948,7 @@ pub(super) fn spawn_step_agent(
                     prompt: resolved_prompt,
                     delivery: prompt_delivery,
                 },
-            );
+            )?;
             return Ok(());
         }
     }
@@ -970,6 +1023,14 @@ pub(super) fn spawn_step_agent(
     // Issue #1358: per-step model / effort / extra_args ride the explicit
     // layer through to `spawn_with_intent`, where capability masking occurs.
     crate::circuit::handoff::set_agent_turn(run_id, node.id, handoff_turn.as_ref());
+    retain_initial_prompt(
+        run_id,
+        view,
+        node_id,
+        node.id,
+        &resolved_prompt,
+        handoff_turn.as_ref(),
+    )?;
     spawn_circuit_agent_in_background(
         app,
         CircuitBackgroundSpawn {
@@ -981,8 +1042,33 @@ pub(super) fn spawn_step_agent(
             prompt: resolved_prompt,
             delivery: prompt_delivery,
         },
-    );
+    )?;
 
+    Ok(())
+}
+
+fn retain_initial_prompt(
+    run_id: i64,
+    view: &mut RunView,
+    node_id: &str,
+    agent: i64,
+    text: &str,
+    turn: Option<&crate::circuit::handoff::HandoffTurn>,
+) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Ok(());
+    }
+    let prepared = crate::circuit::delivery::PreparedPrompt::prepare(agent, text)?;
+    let revision = crate::services::circuit_prompt::retain(
+        run_id,
+        node_id,
+        view.step(node_id).map_or(1, |s| s.attempt),
+        &prepared,
+        crate::services::circuit_prompt::DeliveryKind::Initial,
+        turn,
+    )
+    .map_err(|e| e.to_string())?;
+    view.context.set("evidence.revision", revision.to_string());
     Ok(())
 }
 

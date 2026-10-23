@@ -357,6 +357,15 @@ pub(crate) fn expected_result(run_id: i64, agent_node_id: i64) -> Option<PathBuf
 
 /// `expected_result` under an explicit root.
 pub(crate) fn expected_result_in(root: &Path, run_id: i64, agent_node_id: i64) -> Option<PathBuf> {
+    let turn = agent_turn_in(root, run_id, agent_node_id)?;
+    Some(paths_in(root, run_id, &turn.node_id, turn.attempt).result)
+}
+
+pub(crate) fn agent_turn(run_id: i64, agent_node_id: i64) -> Option<HandoffTurn> {
+    crate::preferences::app_data_dir().and_then(|root| agent_turn_in(&root, run_id, agent_node_id))
+}
+
+fn agent_turn_in(root: &Path, run_id: i64, agent_node_id: i64) -> Option<HandoffTurn> {
     let marker = agent_turn_marker_in(root, run_id, agent_node_id);
     let text = match std::fs::read_to_string(&marker) {
         Ok(text) => text,
@@ -370,7 +379,7 @@ pub(crate) fn expected_result_in(root: &Path, run_id: i64, agent_node_id: i64) -
         }
     };
     match parse_turn_marker(&text) {
-        Some(turn) => Some(paths_in(root, run_id, &turn.node_id, turn.attempt).result),
+        Some(turn) => Some(turn),
         None => {
             tracing::warn!(
                 "circuits: run {run_id}: malformed handoff for agent {agent_node_id} at {}; expecting no result file",
