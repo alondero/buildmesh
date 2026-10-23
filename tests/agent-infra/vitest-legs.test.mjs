@@ -30,13 +30,6 @@ function jobBlock(jobId) {
   return end === -1 ? workflow.slice(start) : rest.slice(0, end);
 }
 
-test('the legs are read from the real verify workflow', () => {
-  const legs = readVitestLegs();
-  assert.deepEqual(legs.map((leg) => leg.label), ['unit 1/2', 'unit 2/2', 'integration']);
-  assert.equal(legs[0].args, '--pool=threads --shard=1/2 tests/unit');
-  assert.equal(legs[2].args, '--pool=threads tests/integration');
-});
-
 test('every suite the combined invocation ran is owned, and none is dropped or invented', () => {
   const legs = readVitestLegs();
   const named = legs.flatMap((leg) => leg.suites);

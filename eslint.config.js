@@ -313,9 +313,8 @@ export default [
       //
       // This rule replaced a test that read `src/App.tsx` and regexed it for
       // the anti-pattern spelling (issue #2240): one file's source text is a
-      // weaker gate than a lint rule over every file, and the behavioural
-      // cases in `tests/unit/app-zustand-subscription.test.tsx` already pin
-      // the re-render contract the fix depends on.
+      // weaker gate than a lint rule over every file. Real consumer render
+      // isolation is covered by `tests/unit/sidebar-render-count.test.tsx`.
       'no-restricted-syntax': [
         'error',
         {
