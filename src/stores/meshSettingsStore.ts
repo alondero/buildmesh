@@ -727,3 +727,7 @@ export const useMeshSettingsStore = create<MeshSettingsState>((set, get) => {
     },
   };
 });
+/** Whether the editing session has hydrated this subject. */
+export function meshSettingsReady(state: MeshSettingsState, meshId: number | null): boolean {
+  return state.loadedMeshId === meshId;
+}
