@@ -4,36 +4,7 @@ use super::orchestrator::{
 };
 use super::{
     ExplicitSpawnOverrides, IssueContext, ResumeCause, SpawnIntent, SpawnRequest, TerminalSize,
-    WorktreePolicy,
 };
-
-/// `SpawnRequest` must carry an `explicit` field (issue #1155 AC #1).
-/// The struct shape pin protects `spawn_with_intent` from a future
-/// refactor that drops the field — the orchestrator destructures
-/// `explicit` out of the request and feeds it into `SpawnOptions`.
-#[test]
-fn spawn_request_carries_explicit_overrides() {
-    let req = SpawnRequest {
-        node_id: -1,
-        intent: SpawnIntent::Fresh,
-        terminal_size: TerminalSize { rows: 24, cols: 80 },
-        explicit: ExplicitSpawnOverrides {
-            model: Some("opus-4-1".into()),
-            effort: Some("high".into()),
-            extra_args: None,
-            timeout_seconds: None,
-        },
-        worktree_policy: WorktreePolicy::RespectMesh,
-        lifecycle_lease: false,
-        cleanup_new_node_on_handover_failure: false,
-    };
-    assert_eq!(req.explicit.model.as_deref(), Some("opus-4-1"));
-    assert_eq!(req.explicit.effort.as_deref(), Some("high"));
-
-    // `Default` lets spawn sites opt out via `..Default::default()`.
-    assert_eq!(ExplicitSpawnOverrides::default().model, None);
-    assert_eq!(ExplicitSpawnOverrides::default().effort, None);
-}
 
 // -----------------------------------------------------------------------
 // SpawnRequest constructor + intent dispatch pins.

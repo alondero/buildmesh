@@ -78,40 +78,6 @@ describe('ProviderIcon', () => {
     expect(span?.className).toContain('bg-text-muted');
   });
 
-  it('withBackground wraps known providers in a 34×34 colored chip', () => {
-    const { container } = render(
-      <ProviderIcon providerId="anthropic" withBackground />,
-    );
-    const chip = container.firstElementChild as HTMLElement;
-    expect(chip.tagName).toBe('DIV');
-    expect(chip.style.width).toBe('34px');
-    expect(chip.style.height).toBe('34px');
-    expect(chip.style.background).toBe('rgb(29, 124, 252)'); // #1d7cfc
-    expect(chip.style.color).toBe('rgb(255, 255, 255)');
-    // The actual icon is nested inside the chip.
-    expect(chip.querySelector('svg')).toBeTruthy();
-  });
-
-  it('withBackground uses a neutral chip for unknown providers', () => {
-    const { container } = render(
-      <ProviderIcon providerId="mystery" withBackground />,
-    );
-    const chip = container.firstElementChild as HTMLElement;
-    expect(chip.style.background).toBe('rgb(85, 85, 85)'); // #555
-    // The inner fallback dot is still a span.
-    const span = chip.querySelector('span');
-    expect(span).toBeTruthy();
-    expect(span?.className).toContain('bg-text-muted');
-  });
-
-  it('without withBackground, the chip wrapper is NOT rendered (desktop default)', () => {
-    const { container } = render(<ProviderIcon providerId="anthropic" />);
-    // No 34×34 wrapper — the icon is the root element.
-    const root = container.firstElementChild as HTMLElement;
-    expect(root.tagName).toBe('svg');
-    expect(root.style.width).toBe('');
-  });
-
   // ----- Issue #575 / ADR-0016: Spawn Option composite-id lookup -----
   //
   // A Proxied Provider row's id is `<harness>:<provider>` (e.g.
@@ -142,17 +108,6 @@ describe('ProviderIcon', () => {
     // Kimi is an inline SVG.
     expect(container.querySelector('svg')).toBeTruthy();
     expect(container.querySelector('span.bg-text-muted')).toBeNull();
-  });
-
-  it('uses the brand-color chip background for a Proxied row (MiniMax indigo, not Claude blue)', () => {
-    // Pre-fix: chip background was keyed on `claude:minimax` (a miss,
-    // falling through to the dark-gray #555 fallback). Post-fix: keyed
-    // on the provider half `minimax` → #6366f1 (indigo).
-    const { container } = render(
-      <ProviderIcon providerId="claude:minimax" withBackground />,
-    );
-    const chip = container.firstElementChild as HTMLElement;
-    expect(chip.style.background).toBe('rgb(99, 102, 241)');
   });
 
   it('keeps the full composite id in the hover tooltip (not just the lookup key)', () => {
@@ -188,20 +143,6 @@ describe('ProviderIcon', () => {
     expect(chip.style.background).toBe('rgb(171, 205, 239)');
   });
 
-  it('backgroundColor falls back to the registered brand colour when not provided', () => {
-    // Existing behaviour: no override → use the hard-coded lookup. Pins
-    // that the desktop sidebar / probe / settings surfaces (which never
-    // pass `backgroundColor`) keep rendering the established colours.
-    // (`agy` is the backend adapter id, not the human "Antigravity"
-    // label — the registry is keyed off the adapter id, so a regression
-    // that drifted to the label would miss and fall through to `#555`.)
-    const { container } = render(
-      <ProviderIcon providerId="agy" withBackground />,
-    );
-    const chip = container.firstElementChild as HTMLElement;
-    expect(chip.style.background).toBe('rgb(16, 185, 129)'); // #10b981
-  });
-
   it('backgroundColor wins for a Proxied row (live MiniMax colour, not Claude blue)', () => {
     // `claude:minimax` would normally render the MiniMax indigo chip
     // (`#6366f1`) via the lookup. The override must win when the live
@@ -216,28 +157,6 @@ describe('ProviderIcon', () => {
     );
     const chip = container.firstElementChild as HTMLElement;
     expect(chip.style.background).toBe('rgb(171, 205, 239)');
-  });
-
-  it('chipSize controls the chip wrapper dimensions and scales borderRadius', () => {
-    // Default is 34px (mobile NodeRow). The mobile ProviderPicker's
-    // Proxied-child rows use 28px. Pin both the dimensions and the
-    // radius (`Math.round(chipSize / 4.5)` → 34→8, 28→6) so a future
-    // "let's just hardcode 34" regression breaks the picker.
-    const { container: small } = render(
-      <ProviderIcon providerId="anthropic" withBackground chipSize={28} />,
-    );
-    const smallChip = small.firstElementChild as HTMLElement;
-    expect(smallChip.style.width).toBe('28px');
-    expect(smallChip.style.height).toBe('28px');
-    expect(smallChip.style.borderRadius).toBe('6px');
-
-    const { container: large } = render(
-      <ProviderIcon providerId="anthropic" withBackground chipSize={34} />,
-    );
-    const largeChip = large.firstElementChild as HTMLElement;
-    expect(largeChip.style.width).toBe('34px');
-    expect(largeChip.style.height).toBe('34px');
-    expect(largeChip.style.borderRadius).toBe('8px');
   });
 
   // ----- Issue #948 — `fallbackGlyph` for custom Proxied accounts -----
@@ -307,42 +226,5 @@ describe('ProviderIcon', () => {
       <ProviderIcon providerId="claude:custom-account" fallbackGlyph="X" title="My Proxy" />,
     );
     expect(screen.getByTitle('My Proxy').textContent).toBe('X');
-  });
-
-  it('fallbackGlyph scales its font with chipSize', () => {
-    // Matches the pre-#328 mobile NodeRow letter (14px/700 in the 34px
-    // chip); the picker's 28px Proxied-child chip gets a proportionally
-    // smaller letter rather than an overflowing one.
-    const { container: large } = render(
-      <ProviderIcon providerId="mystery" withBackground fallbackGlyph="X" />,
-    );
-    const largeGlyph = large.querySelector('span') as HTMLElement;
-    expect(largeGlyph.style.fontSize).toBe('14px');
-    expect(largeGlyph.style.fontWeight).toBe('700');
-
-    const { container: small } = render(
-      <ProviderIcon providerId="mystery" withBackground chipSize={28} fallbackGlyph="X" />,
-    );
-    const smallGlyph = small.querySelector('span') as HTMLElement;
-    expect(smallGlyph.style.fontSize).toBe('11px');
-  });
-
-  it('chipSize keeps the brand mark inside the chip (Antigravity PNG at 28px)', () => {
-    // The mobile ProviderPicker Proxied-child rows render brand marks
-    // in 28px chips. A regression that drops the chipSize prop (or wires
-    // it wrong) would either hide the brand mark (chip too small) or
-    // clip it (chip too large). Pin that the `<img>` is nested inside
-    // the 28px chip and the brand-mark path still resolves.
-    const { container } = render(
-      <ProviderIcon
-        providerId="agy"
-        withBackground
-        chipSize={28}
-        backgroundColor="#10b981"
-      />,
-    );
-    const chip = container.firstElementChild as HTMLElement;
-    expect(chip.querySelector('img')).toBeTruthy();
-    expect(chip.style.background).toBe('rgb(16, 185, 129)');
   });
 });

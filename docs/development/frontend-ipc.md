@@ -89,9 +89,10 @@ component.
 
 ## Verification
 
-`tests/unit/tauri-ipc-seam.test.ts` checks static, re-exported and dynamic
-transport access and exercises allowed and denied imports through ESLint.
-`eslint.config.js` owns the legacy consumer list and import restrictions.
+`eslint.config.js` owns the legacy consumer list and restrictions on static
+imports and re-exports. `tests/unit/tauri-ipc-seam.test.ts` exercises allowed
+and denied imports through ESLint. Dynamic imports and `require()` are left
+to review; there is no separate source scan of transport access or facet layout.
 `tests/unit/live-event-stream-ownership.test.ts` walks `src/` and asserts
 that every live event reaches the event bus from exactly one file — the
 structural guard that keeps "one owner per stream" true.

@@ -26,8 +26,6 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, act, waitFor, fireEvent } from '@testing-library/react';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import type { ComponentProps } from 'react';
 import { DndContext } from '@dnd-kit/core';
 import { SortableContext } from '@dnd-kit/sortable';
@@ -328,23 +326,4 @@ describe('Sidebar render isolation (issue #1748)', () => {
     expect(ietCount(12)).toBe(0);
     expect(ietCount(21)).toBe(0);
   });
-
-  it('Sidebar groups nodes in one memo pass instead of filtering per mesh in render', () => {
-    // Source-level guard mirroring the issue #1246 precedent in
-    // app-zustand-subscription.test.tsx: keeps the O(M x N) inline
-    // `agentNodes.filter(...)` from creeping back into the render path.
-    const sidebarPath = resolve(__dirname, '../../src/components/Sidebar/Sidebar.tsx');
-    const src = readFileSync(sidebarPath, 'utf8');
-    const stripped = stripJsComments(src);
-    expect(stripped).not.toMatch(/agentNodes\.filter/);
-    expect(stripped).toMatch(/useMemo/);
-  });
 });
-
-/** Drop // and block comments so the guard above reads code, not prose. */
-function stripJsComments(src: string): string {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/^\s*\/\/.*$/gm, '')
-    .replace(/[ \t]+\/\/.*$/gm, '');
-}

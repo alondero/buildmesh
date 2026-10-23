@@ -15,8 +15,7 @@ use crate::agent::provider::SpawnOptionId;
 use crate::models::{AgentNode, Provider};
 use crate::{db, env};
 
-/// Default `worktree_mode` when the mesh config leaves it unset. Pinned by
-/// `default_worktree_mode_is_branched` in `prepare_tests.rs`.
+/// Default `worktree_mode` when the mesh config leaves it unset.
 ///
 /// This was previously paired with a TS sentinel at `src/lib/worktreeMode.ts`,
 /// deleted in #411 once the TS side lost its only consumer (a self-referential

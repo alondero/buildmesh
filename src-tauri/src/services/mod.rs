@@ -3,6 +3,7 @@
 pub mod agent_node;
 pub mod agent_node_discovery;
 pub mod agy_session;
+pub(crate) mod circuit_prompt;
 pub mod circuit_triggers;
 pub mod circuit_worker;
 pub mod cline_session;

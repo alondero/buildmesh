@@ -2,8 +2,7 @@
 //!
 //! Typed wrappers around the Settings > Data & Diagnostics commands. Every
 //! call routes through the `_invoke` chokepoint (ADR-0010) — never raw
-//! `@tauri-apps/api/core`, which `tests/unit/tauri-ipc-seam.test.ts` pins as
-//! a single allowed site.
+//! `@tauri-apps/api/core`; ESLint restricts static transport imports.
 //!
 //! ## Two export/restore entry points each
 //!

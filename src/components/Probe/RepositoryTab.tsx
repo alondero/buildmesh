@@ -32,9 +32,7 @@ import { useProbeResource, type ProbeLoadContext } from '../../lib/probeResource
  *
  * The IPC seam (ADR-0010) is observed: every `invoke` goes through
  * `src/lib/tauri.ts` (`getGitPruneInfo`, `deleteBranches`, `deleteWorktrees`,
- * `pruneRemoteTracking`). The drift test at
- * `tests/unit/tauri-ipc-seam.test.ts` fails on a new component that
- * imports raw `invoke`, so this stays in the ratchet.
+ * `pruneRemoteTracking`). ESLint rejects raw static `invoke` imports.
  *
  * Reactivity: the prune info is fetched on mount and after every delete /
  * free / restore (the recovery hook invalidates both health + prune on

@@ -12,11 +12,13 @@ import { ledgerTimestampMs } from './circuitGraphModel';
 import { historyTitle, splitHistory, stepReference } from './historyPresentation';
 import { LAST_ROUND_GUIDANCE, LAST_ROUND_MANUAL_RECOVERY, checkpointActionNeedsEvidence } from './runNextSteps';
 import { formatWallClock } from './runIdentity';
+import { CopyPromptPayload } from './CopyPromptPayload';
 
 function historyActionLabel(action: CheckpointAction, startsNextReview: boolean, endsReview: boolean): string {
   if (action === 'completed' && startsNextReview) return 'Start the next review';
   if (action === 'completed' && endsReview) return 'Record the last round';
   return {
+    manual_delivered: 'Sent manually',
     completed: 'Record completed',
     not_performed: 'Record not performed',
     retry: 'Retry as new attempt',
@@ -222,6 +224,7 @@ export function CircuitEvidenceHistory({ runId, updatedAt, nodeLabel }: {
   const [showTechnical, setShowTechnical] = useState(false);
   const [rows, setRows] = useState<CircuitHistoryEntry[] | null>(null);
   const [checkpoints, setCheckpoints] = useState<CircuitCheckpoint[]>([]);
+  const [manual, setManual] = useState<{ step: CircuitCheckpoint; revision: number } | null>(null);
   const [coverage, setCoverage] = useState<CircuitStepObservationCoverage[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [reason, setReason] = useState('');
@@ -248,13 +251,13 @@ export function CircuitEvidenceHistory({ runId, updatedAt, nodeLabel }: {
     return () => { current = false; };
   }, [runId, updatedAt, open, refresh, runUpdates]);
 
-  async function record(step: CircuitCheckpoint, action: CheckpointAction) {
+  async function record(step: CircuitCheckpoint, action: CheckpointAction, revision = rows?.[rows.length - 1]?.id ?? 0) {
     if (rows === null || pending) return;
     setPending(true);
     setError(null);
     try {
       await recordCircuitOutcome({ run_id: runId, node_id: step.node_id, attempt: step.attempt,
-        expected_revision: rows[rows.length - 1]?.id ?? 0, action, reason });
+        expected_revision: revision, action, reason });
       setReason('');
       setRefresh((value) => value + 1);
     } catch (cause) { setError(String(cause)); }
@@ -275,7 +278,7 @@ export function CircuitEvidenceHistory({ runId, updatedAt, nodeLabel }: {
         {checkpoints.some((step) => step.starts_next_review) && <p>Start the next review records that this step finished and sends the work back to the reviewer. It does not approve the work.</p>}
         {checkpoints.some((step) => step.ends_review && !step.starts_next_review && step.review_again) && <p>{LAST_ROUND_GUIDANCE}</p>}
         {checkpoints.some((step) => step.ends_review && !step.starts_next_review && !step.review_again) && <p>{LAST_ROUND_MANUAL_RECOVERY}</p>}
-        <p>For a staged prompt, submit it in the agent terminal first. Record completed only after confirming it was accepted.</p>
+        <p>For a staged prompt, copy the payload, paste and submit it in the agent terminal, then choose Sent manually.</p>
 <p>Completion does not grant review approval. Explicit review decisions are recorded as human verdicts.</p>
         <label htmlFor="evidence-reason" className="block">Reason and supporting evidence</label>
         <p className="text-text-muted">Optional, and recorded in the run history when given — except for a review verdict, which needs evidence. The backend stores an unattributed action in its own words rather than refusing it.</p>
@@ -283,10 +286,20 @@ export function CircuitEvidenceHistory({ runId, updatedAt, nodeLabel }: {
           className="block w-full min-w-0 rounded-sm border border-border-subtle bg-bg-card p-1" />
         {checkpoints.map((step) => <fieldset key={step.node_id} disabled={pending || rows === null} className="flex flex-wrap gap-2">
           <legend>{step.node_id}</legend>
-          {step.actions.map((action) => <button key={action} type="button" disabled={pending || (checkpointActionNeedsEvidence(action) && reason.trim() === '')} className="text-accent-cyan disabled:opacity-50" onClick={() => void record(step, action)}>
+          {step.actions.includes('manual_delivered') && <CopyPromptPayload
+            key={`${step.node_id}:${step.attempt}:${rows?.[rows.length - 1]?.id ?? 0}`}
+            request={{ run_id: runId, node_id: step.node_id, attempt: step.attempt, expected_revision: rows?.[rows.length - 1]?.id ?? 0 }}
+            disabled={pending || rows === null}
+          />}
+          {step.actions.map((action) => <button key={action} type="button" disabled={pending || (checkpointActionNeedsEvidence(action) && reason.trim() === '')} className="min-h-6 text-accent-cyan disabled:opacity-50" onClick={() => action === 'manual_delivered' ? setManual({ step, revision: rows?.[rows.length - 1]?.id ?? 0 }) : void record(step, action)}>
             {historyActionLabel(action, step.starts_next_review, step.ends_review)}
           </button>)}
         </fieldset>)}
+        {manual !== null && <div>
+          <p>Confirm you pasted the payload into the agent terminal and submitted it.</p>
+          <button type="button" disabled={pending} className="min-h-6 text-accent-cyan disabled:opacity-50"
+            onClick={() => { void record(manual.step, 'manual_delivered', manual.revision); setManual(null); }}>Confirm: Sent manually</button>
+        </div>}
       </div>}
       {coverage.length > 0 && <details>
         <summary className="cursor-pointer">Current harness observation capabilities</summary>
