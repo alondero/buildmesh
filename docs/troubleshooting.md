@@ -364,6 +364,63 @@ file when it holds nothing else) by hand. If the error persists,
 use [What to include in a report](#what-to-include-in-a-report) and include the
 Codex version, node status, and relevant redacted log lines.
 
+## Grok Code reports a plugin hook “failed, ignored”
+
+A Grok Code plugin hook that runs a Python script reports a failure on tool
+calls with an error like:
+
+```
+(plugin/hookify/hooks) failed, ignored: exit code 1: Program 'python3.exe' failed to run:
+The specified executable is not a valid application for this OS platform
+```
+
+The hook is a separate program from the Grok CLI, so it fails on its own. The
+message means the `python3.exe` that Grok found on your `PATH` is not a Windows
+program — commonly a leftover POSIX shell script (`#!/bin/sh` …) left in a
+Python install directory, which Windows reports as an invalid application.
+Grok reports the failure and ignores it, so the session continues without the
+rules that hook enforces.
+
+- Find what `python3` resolves to. In PowerShell run `where.exe python3` and
+  check each hit; the first one is what Grok uses.
+- Confirm the file is a real program. A Windows executable starts with the
+  bytes `4D 5A`; a shell script starts with `#!`. A one-line check:
+  `Get-Content -Encoding Byte -TotalCount 2 'C:\path\to\python3.exe'`.
+- Replace the offending file with a working Python executable, or remove it so
+  a valid `python3` further down your `PATH` is used. Keep the original until
+  you have confirmed the replacement works.
+- Restart the Grok Code node. Hooks are run per tool call, so a new node is
+  enough to confirm the change; no Buildmesh repair is needed.
+
+### Why the same failure comes back
+
+Windows has no `python3` of its own. The Microsoft Store's Python Install
+Manager publishes `python3.exe` in `%LOCALAPPDATA%\Microsoft\WindowsApps` as an
+App Execution Alias — a zero-byte reparse point that points at the Store
+package. When that package is missing or half-installed, the alias can fail to
+resolve to a runnable program, and Windows then reports it as an invalid
+application.
+
+A common local workaround is to drop a `#!/bin/sh` script named `python3.exe`
+into the Python install directory so the name resolves under Git Bash. That
+satisfies a POSIX shell and breaks native Windows callers, which is why the
+error can appear in one tool and not another.
+
+To keep it fixed:
+
+- Prefer a real executable over a shell script. A copy of the install's
+  `python.exe` named `python3.exe` satisfies both.
+- Check that the Python install directory comes **before**
+  `%LOCALAPPDATA%\Microsoft\WindowsApps` on your `PATH`. The Store alias sits
+  in `WindowsApps`, and Windows resolves the first match on `PATH`.
+- If a shell profile prepends the Python directory, keep the prepend correct
+  and idempotent. A malformed line can silently drop the prepend and leave the
+  Store alias in front, which reinstates the failure on the next shell start.
+
+This is a local environment problem, not a Buildmesh setting. If the report
+mentions a plugin hook rather than Buildmesh's own attention hook, include the
+harness version and the plugin name in your report.
+
 ## Codex refuses to start over a proxied provider
 
 A node opened from a proxied provider (a Codex route) fails immediately with a
