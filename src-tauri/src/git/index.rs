@@ -14,6 +14,10 @@ use std::path::{Path, PathBuf};
 
 use crate::env::to_host_path;
 
+#[cfg(test)]
+#[path = "index_tests.rs"]
+mod tests;
+
 /// Stage one file (by repo-relative path) into the index.
 ///
 /// Handles the change kinds the diff surfaces can show:

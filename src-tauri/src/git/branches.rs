@@ -14,6 +14,10 @@ use crate::models::{BranchInfo, GitRepoPruneInfo, WorktreeInfo};
 
 use super::primitives;
 
+#[cfg(test)]
+#[path = "branches_tests.rs"]
+mod tests;
+
 /// Delete local branches by name from the repo at `repo_path`.
 ///
 /// Active branches are rejected up-front with a single combined error so the

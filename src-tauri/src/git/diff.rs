@@ -15,6 +15,10 @@ use git2::{Diff, DiffFindOptions, Repository, Tree};
 
 use super::state::{Baseline, GitQueryError};
 
+#[cfg(test)]
+#[path = "diff_tests.rs"]
+mod tests;
+
 /// One changed file in a diff, with the baseline side of its content.
 ///
 /// The *new* side of the file is not carried here: it lives in the working

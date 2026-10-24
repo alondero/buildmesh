@@ -13,6 +13,10 @@ use std::path::Path;
 
 use git2::{ObjectType, Repository, TreeBuilder};
 
+#[cfg(test)]
+#[path = "tree_tests.rs"]
+mod tests;
+
 /// What a portability commit added.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PortabilityCommit {

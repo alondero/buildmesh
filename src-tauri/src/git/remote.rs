@@ -7,6 +7,10 @@
 
 use git2::Repository;
 
+#[cfg(test)]
+#[path = "remote_tests.rs"]
+mod tests;
+
 /// The repository's identity: which branch it is on, where `origin` points,
 /// and what other remotes it has.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -61,8 +65,11 @@ fn current_branch_of(repo: &Repository) -> String {
                     }
                 }
             } else {
+                // A detached HEAD has no branch name, so the short commit SHA
+                // stands in for it — the same helper the branch-status read
+                // uses, so the two views of that fact agree.
                 head.target()
-                    .map(|oid| oid.to_string()[..8].to_string())
+                    .map(|oid| super::primitives::short_sha(repo, oid))
                     .unwrap_or_default()
             }
         }

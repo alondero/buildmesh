@@ -26,7 +26,7 @@ use super::status_stats;
 
 #[cfg(test)]
 #[path = "state_tests.rs"]
-mod state_tests;
+mod tests;
 
 /// Which baseline a read is relative to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -413,6 +413,11 @@ fn status_entries(repo: &Repository) -> Result<Vec<FileStatus>, GitQueryError> {
 ///
 /// The order matters and is shared with the summary count, so the summary can
 /// never report a different set than the rows it summarises (#2193).
+///
+/// The order and the fallback are unchanged from the pre-#2526 walk, because
+/// the UI renders these labels. The fallback is not dead code: a file that
+/// changed *kind* (a regular file replaced by a symlink, say) carries a
+/// type-change flag, which none of the named branches match.
 fn classify_status(flag: Status) -> &'static str {
     if flag.is_index_new() || flag.is_wt_new() {
         "added"
