@@ -117,8 +117,9 @@ pub(crate) trait TranscriptReader: Send + Sync {
     /// A finished background task this harness recorded but cannot deliver to an
     /// idle session on its own (issue #2105).
     ///
-    /// `lines` is this session's own transcript, `spawn_path` the CLI's cwd
-    /// (which decides which data dir holds its runtime state), and `now_ms` the
+    /// `lines` is this session's own transcript and `transcript` its canonical
+    /// file path, already resolved through the node's runtime environment.
+    /// Readers locate external task state from that path. `now_ms` is the
     /// caller's clock, so a harness that judges quiescence can be driven
     /// deterministically from a test.
     ///
@@ -130,7 +131,7 @@ pub(crate) trait TranscriptReader: Send + Sync {
     fn stalled_background_task(
         &self,
         _lines: &str,
-        _spawn_path: &str,
+        _transcript: &Path,
         _now_ms: i64,
     ) -> Option<String> {
         None
@@ -196,3 +197,6 @@ pub(crate) fn registered() -> &'static [&'static dyn TranscriptAdapter] {
 pub(crate) fn default_adapter() -> &'static dyn TranscriptAdapter {
     &CLAUDE_CODE_ADAPTER
 }
+
+#[cfg(test)]
+mod adapter_tests;

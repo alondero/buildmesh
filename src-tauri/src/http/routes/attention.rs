@@ -182,8 +182,8 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
         return Response::empty("404 Not Found");
     }
 
-    // Normalize only after the HTTP gates. Transcript reconciliation is file I/O,
-    // so it runs on the blocking pool, with no database connection held.
+    // Normalize only after the HTTP gates. Transcript and external runtime-store
+    // I/O runs on the blocking pool, with no Buildmesh database connection held.
     let normalize_provider = provider_owned.clone();
     let normalize_session = normalizers::reconciliation_session_id(
         raw_payload.as_ref(),
@@ -203,7 +203,8 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
         tokio::task::spawn_blocking(move || {
             let normalized = normalizers::normalize(raw_payload.as_ref(), &normalize_provider,
                 |path| if normalize_provider == "mcode" {
-                    crate::services::transcript_reader::adapters::mcode::count_pending_background_tasks(&normalize_session, &normalize_path)
+                    crate::services::transcript_reader::adapters::mcode::count_pending_background_tasks_for_spawn(
+                        &normalize_session, &normalize_path, crate::env::minimax_data_dir())
                 } else {
                     crate::services::transcript_reader::adapters::claude_code::count_pending_background_tasks(path)
                 });

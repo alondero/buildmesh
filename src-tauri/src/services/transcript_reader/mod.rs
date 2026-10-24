@@ -159,13 +159,12 @@ pub(crate) fn stalled_background_task(
     now_ms: i64,
 ) -> Option<String> {
     let (path, _) = resolve(format, session_id, node_path).ok()?;
-    stalled_background_task_at(format, &path, node_path, now_ms)
+    stalled_background_task_at(format, &path, now_ms)
 }
 
 fn stalled_background_task_at(
     format: TranscriptFormat,
     path: &Path,
-    node_path: &str,
     now_ms: i64,
 ) -> Option<String> {
     let reader = reader(format);
@@ -174,9 +173,9 @@ fn stalled_background_task_at(
         // Older unfinished work can veto a positive tail result. Require the
         // complete history before asking the harness to authorize a wake.
         let whole = std::fs::read_to_string(path).ok()?;
-        return reader.stalled_background_task(&whole, node_path, now_ms);
+        return reader.stalled_background_task(&whole, path, now_ms);
     }
-    reader.stalled_background_task(&lines, node_path, now_ms)
+    reader.stalled_background_task(&lines, path, now_ms)
 }
 
 fn result(parsed: Result<Parsed, UnavailableReason>, digest: bool) -> TranscriptTail {
@@ -329,43 +328,6 @@ mod tests {
     }
 
     #[test]
-    fn minimax_wake_reads_work_before_tail_window() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("messages.jsonl");
-        let node_path = dir.path().to_str().unwrap();
-        let padding = serde_json::json!({"message":{"role":"custom","content":[
-            {"type":"text","text":"x".repeat(WAKEUP_TAIL_BYTES as usize + 1024)}]}});
-        let recent = concat!(
-            "{\"message\":{\"role\":\"toolResult\",\"timestamp\":200,\"details\":{\"status\":\"auto_promoted\",\"task_id\":\"bg_review_recent\"},\"content\":[]}}\n",
-            "{\"message\":{\"role\":\"toolResult\",\"timestamp\":300,\"details\":{\"status\":\"succeeded\",\"task_id\":\"bg_review_recent\"},\"content\":[]}}\n"
-        );
-        for (pending, settled) in [
-            (
-                serde_json::json!({"message":{"role":"toolResult","timestamp":50,
-                    "details":{"status":"started","task_id":"bg_review_older"},"content":[]}}),
-                serde_json::json!({"message":{"role":"toolResult","timestamp":100,
-                    "details":{"status":"succeeded","task_id":"bg_review_older"},"content":[]}}),
-            ),
-            (
-                serde_json::json!({"message":{"role":"assistant","timestamp":50,
-                    "content":[{"type":"toolCall","id":"foreground","name":"bash","arguments":{}}]}}),
-                serde_json::json!({"message":{"role":"toolResult","timestamp":100,
-                    "toolCallId":"foreground","content":[]}}),
-            ),
-        ] {
-            std::fs::write(&path, format!("{pending}\n{padding}\n{recent}")).unwrap();
-            assert_eq!(
-                stalled_background_task_at(TranscriptFormat::Mcode, &path, node_path, 400),
-                None
-            );
-            std::fs::write(&path, format!("{pending}\n{settled}\n{padding}\n{recent}")).unwrap();
-            assert_eq!(
-                stalled_background_task_at(TranscriptFormat::Mcode, &path, node_path, 400),
-                Some("bg_review_recent".into())
-            );
-        }
-    }
-    #[test]
     fn transcript_format_for_harness_routes_each_format() {
         assert_eq!(
             TranscriptFormat::for_harness("codex"),
@@ -469,3 +431,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod background_task_tests;
