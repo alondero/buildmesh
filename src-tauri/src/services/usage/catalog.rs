@@ -12,7 +12,7 @@ use super::adapter::{api_key_for, UsageAdapter};
 use super::adapters::{
     AgyAdapter, AnthropicAdapter, CodexAdapter, CommandcodeAdapter, CursorAdapter, DeepseekAdapter,
     FreebuffAdapter, GrokAdapter, KimiAdapter, MinimaxAdapter, MuseCodeAdapter, OpenaiAdapter,
-    OpencodeAdapter, OpenrouterAdapter,
+    OpencodeAdapter, OpenrouterAdapter, PerchAdapter,
 };
 use super::cache::{FlightTicket, LeaderGuard};
 use super::outcome::UsageOutcome;
@@ -34,8 +34,9 @@ static OPENAI_ADAPTER: OpenaiAdapter = OpenaiAdapter;
 static DEEPSEEK_ADAPTER: DeepseekAdapter = DeepseekAdapter;
 static FREEBUFF_ADAPTER: FreebuffAdapter = FreebuffAdapter;
 static MUSE_CODE_ADAPTER: MuseCodeAdapter = MuseCodeAdapter;
+static PERCH_ADAPTER: PerchAdapter = PerchAdapter;
 
-static USAGE_METERS: [&'static dyn UsageAdapter; 14] = [
+static USAGE_METERS: [&'static dyn UsageAdapter; 15] = [
     &ANTHROPIC_ADAPTER,
     &CODEX_ADAPTER,
     &CURSOR_ADAPTER,
@@ -58,6 +59,9 @@ static USAGE_METERS: [&'static dyn UsageAdapter; 14] = [
     // Muse Code subscription quota is counted locally against Meta's published
     // static tier table. Detection-gated on the `muse` harness.
     &MUSE_CODE_ADAPTER,
+    // Perch reads the CLI session and the account endpoint. Detection-gated
+    // on the `perch` harness.
+    &PERCH_ADAPTER,
 ];
 
 /// Seam entry point: `catalog.dispatch(id).fetch(accounts)` proves the seam
@@ -252,6 +256,7 @@ fn outcome_from_cached(usage: &ProviderUsage) -> UsageOutcome {
     }
 }
 #[cfg(test)]
+// allow-test-in-production: this dispatch pin predates the sibling-test-file rule. Perch is one more registered meter; moving the suite is out of scope.
 mod tests {
     use super::*;
     use crate::preferences::BillingMode;
@@ -559,6 +564,7 @@ mod tests {
             ("deepseek", None),
             ("freebuff", Some("freebuff")),
             ("muse-code", Some("muse")),
+            ("perch", Some("perch")),
         ];
         for (id, harness) in cases {
             let adapter = dispatch(id).unwrap_or_else(|| panic!("missing adapter: {id}"));
@@ -636,6 +642,7 @@ mod tests {
             "deepseek",
             "freebuff",
             "muse-code",
+            "perch",
         ] {
             let adapter = dispatch(id).unwrap_or_else(|| panic!("missing adapter: {id}"));
             assert_eq!(adapter.id(), id, "dispatch({id}) returned wrong adapter");

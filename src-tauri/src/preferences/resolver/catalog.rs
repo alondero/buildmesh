@@ -125,6 +125,13 @@ pub(crate) const BUILTIN_PROVIDER_ACCOUNTS: &[BuiltInProviderAccount] = &[
         name: "Meta Muse Code",
         self_auth: true,
     },
+    // Perch owns `~/.perch/cli-auth-session.json` (or the macOS keychain).
+    // The same id names the native Agent Harness.
+    BuiltInProviderAccount {
+        id: "perch",
+        name: "Perch",
+        self_auth: true,
+    },
 ];
 
 // One row per credential/billing identity. Pairings live in the Spawn Menu

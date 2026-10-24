@@ -103,6 +103,27 @@ statistics do not supply this daily percentage. Neither is projected as a cash
 balance or additional quota. The former Codebuff `/api/usage` route and
 `windows`/`earnedSessions` response assumption have been replaced.
 
+**Perch subscription usage.** Perch owns its sign-in. The session file is
+`~/.perch/cli-auth-session.json`, or `$PERCH_CLI_AUTH_DIR/cli-auth-session.json`.
+On macOS the session lives in the login keychain (service `app.perchai.cli-auth`,
+account `default`) unless `PERCH_CLI_AUTH_DIR` is set. The refresh lock and the
+invalid-grant marker stay in that directory either way. Buildmesh refreshes an
+expired access token and writes the rotated refresh token back. A failed refresh
+does not delete the session. Sign in with `perch login`. The meter reads
+`GET {appUrl}/api/perchai/account`. One PT is $0.001. Starter is one Monthly row
+(20,000 PT unless an entitlement says otherwise). Pro does not invent a monthly
+Roost percentage: the detail says "Roost fair use", then rolling 5-hour and 7-day
+windows when the payload enables them and the cap is positive, then Manual monthly
+(75,000 PT unless an entitlement overrides it) and the manual rolling windows. A
+reset time is copied from `nextFreedAt` only when that string parses. An admin,
+internal, or internal-plan account is one Monthly meter with no individual limit
+and the PT already used. Bring-your-own-key (`billingLane` exactly `byo`) is
+managed externally. Confirmed against perchai-cli 2.4.116 source, plus a 401 from
+an expired session, not a captured live account snapshot. The usage link is the
+[Pro plan guide](https://www.perchai.app/docs/plans/pro) (Starter is
+[documented separately](https://www.perchai.app/docs/plans/starter)), labelled
+**Usage guide**, not a settings deep link.
+
 **Observed Session Telemetry is not a Usage Meter.** Muse MSP
 `session/tokenUsage` and `session/contextUsage` notifications are ingested by
 `agent/provider/muse/telemetry.rs`, stored per Agent Node, and surfaced on
