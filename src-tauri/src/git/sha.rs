@@ -103,7 +103,7 @@ impl std::error::Error for ShaResolveError {}
 ///
 /// This is the single implementation behind the crate's SHA lookups;
 /// [`resolve_sha_at`] is the path-opening wrapper around it.
-pub fn resolve_sha(repo: &Repository, source: &ShaSource) -> Result<Oid, ShaResolveError> {
+pub(crate) fn resolve_sha(repo: &Repository, source: &ShaSource) -> Result<Oid, ShaResolveError> {
     match source {
         ShaSource::OriginRef(name) => {
             // No fallback here: a missing remote-tracking ref means
@@ -149,12 +149,11 @@ pub fn resolve_sha(repo: &Repository, source: &ShaSource) -> Result<Oid, ShaReso
 /// [`to_host_path`] first, so callers may pass the DB-stored form.
 pub fn resolve_sha_at(path: &str, source: &ShaSource) -> Result<Oid, ShaResolveError> {
     let host_path = to_host_path(path);
-    let repo = super::primitives::open_from_host_path(&host_path).map_err(|error| {
-        ShaResolveError::Repository {
+    let repo =
+        super::primitives::open_at(&host_path).map_err(|error| ShaResolveError::Repository {
             path: host_path.clone(),
             error,
-        }
-    })?;
+        })?;
     resolve_sha(&repo, source)
 }
 

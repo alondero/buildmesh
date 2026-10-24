@@ -1,9 +1,12 @@
 //! Diff computation using difference-rs with syntect syntax highlighting for Buildmesh
+//!
+//! The git2 side of the diff lives in [`crate::git::diff`] and
+//! [`crate::git::state`]: this module asks for a baseline and gets plain
+//! data back, then turns it into hunks and highlights (issue #2526).
 
 use crate::commands::git::{GitStatus, GitSummary};
 use crate::db;
 use crate::env::to_host_path;
-use crate::git::primitives;
 use crate::models::{DiffHunk, DiffLine, DiffResult, FileDiff};
 use difference_rs::{Changeset, Difference};
 use once_cell::sync::Lazy;
@@ -384,33 +387,12 @@ fn diff_file_against_head_blocking(
     session_path: String,
     file_path: String,
 ) -> Result<DiffResult, String> {
-    let repo =
-        crate::git::primitives::open_from_host_path(&session_path).map_err(|e| e.to_string())?;
-    let root = repo
-        .workdir()
-        .ok_or_else(|| "Git repository has no working directory".to_string())?;
+    let head =
+        crate::git::diff::head_file_at(&session_path, &file_path).map_err(|e| e.to_string())?;
 
-    let head = repo.head().ok();
-    let head_content = if let Some(reference) = &head {
-        reference.peel_to_commit().ok().and_then(|commit| {
-            commit.tree().ok().and_then(|tree| {
-                tree.get_path(std::path::Path::new(&file_path))
-                    .ok()
-                    .and_then(|entry| {
-                        entry.to_object(&repo).ok().and_then(|obj| {
-                            obj.as_blob()
-                                .map(|b| String::from_utf8_lossy(b.content()).to_string())
-                        })
-                    })
-            })
-        })
-    } else {
-        None
-    };
+    let current_content = fs::read_to_string(head.root.join(&file_path)).unwrap_or_default();
 
-    let current_content = fs::read_to_string(root.join(&file_path)).unwrap_or_default();
-
-    let old_content = head_content.as_deref().unwrap_or("");
+    let old_content = head.content.as_deref().unwrap_or("");
     let lines = compute_file_diff(old_content, &current_content);
     let groups = group_into_hunks(&lines, CONTEXT_LINES);
     let hunks = groups.iter().map(|g| build_hunk(g, &file_path)).collect();
@@ -422,61 +404,6 @@ fn diff_file_against_head_blocking(
             ..Default::default()
         }],
     })
-}
-
-/// Map a libgit2 delta status onto the frontend status vocabulary
-/// (`GitStatus.status`), so the changed-files list and tree badges share one
-/// set of labels.
-fn delta_status_str(status: git2::Delta) -> &'static str {
-    use git2::Delta;
-    match status {
-        Delta::Added => "added",
-        Delta::Deleted => "deleted",
-        Delta::Renamed | Delta::Copied => "renamed",
-        Delta::Untracked => "untracked",
-        // Typechange (e.g. file → symlink) and anything unforeseen read as a
-        // modification — the safe, least-surprising default.
-        _ => "modified",
-    }
-}
-
-/// Read a path's blob out of a tree as a String (empty if absent). NUL bytes
-/// survive (valid UTF-8), so binary detection downstream still works.
-fn tree_blob_string(repo: &git2::Repository, tree: Option<&git2::Tree>, path: &str) -> String {
-    tree.and_then(|t| t.get_path(std::path::Path::new(path)).ok())
-        .and_then(|e| e.to_object(repo).ok())
-        .and_then(|o| {
-            o.as_blob()
-                .map(|b| String::from_utf8_lossy(b.content()).to_string())
-        })
-        .unwrap_or_default()
-}
-
-/// Resolve the baseline tree to diff a worktree against: the merge-base of the
-/// worktree `HEAD` and `base_ref`. Fallback chain (see ADR 0005): merge-base →
-/// the `base_ref` commit (unrelated histories) → `HEAD` (no resolvable base) →
-/// `None`, i.e. the empty tree (a repo with no commits, where everything in the
-/// working dir reads as an addition).
-fn resolve_base_tree<'r>(repo: &'r git2::Repository, base_ref: &str) -> Option<git2::Tree<'r>> {
-    let head_commit = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
-    let base_commit = repo
-        .revparse_single(base_ref)
-        .ok()
-        .and_then(|o| o.peel_to_commit().ok());
-
-    match (head_commit, base_commit) {
-        (Some(head), Some(base)) => {
-            if let Ok(mb) = repo.merge_base(head.id(), base.id()) {
-                if let Some(tree) = repo.find_commit(mb).ok().and_then(|c| c.tree().ok()) {
-                    return Some(tree);
-                }
-            }
-            base.tree().ok()
-        }
-        (Some(head), None) => head.tree().ok(),
-        (None, Some(base)) => base.tree().ok(),
-        (None, None) => None,
-    }
 }
 
 /// Single place the diff walk consults its cancellation token, so the
@@ -557,51 +484,28 @@ fn diff_against_base(
     only: Option<&str>,
     cancel: Option<&AtomicBool>,
 ) -> Result<DiffResult, String> {
-    let host = to_host_path(repo_path);
-    let repo = crate::git::primitives::open_from_host_path(&host).map_err(|e| e.to_string())?;
-    let base_tree = resolve_base_tree(&repo, base_ref);
-
-    let mut opts = git2::DiffOptions::new();
-    // Keep these options in lockstep with `changed_files_against_base` so the
-    // file-list and the per-file diff never disagree on what counts as a
-    // change (the whole point of the ADR-0005 seam). `show_untracked_content`
-    // makes an untracked file's empty/zero-byte content visible to the diff
-    // walker — without it, an empty untracked file would be invisible to
-    // `diff_against_base` (no tree entry to diff against) yet present in the
-    // list (whose statuses walk handles empty content). Pinning this in
-    // `changed_files_zero_byte_untracked_agrees_with_diff` keeps both readers
-    // in sync if the option set ever changes.
-    opts.include_untracked(true)
-        .recurse_untracked_dirs(true)
-        .show_untracked_content(true);
+    // Reject path traversal at the core so every caller inherits it — the
+    // desktop IPC path and the mobile /diff route both land here. The HTTP
+    // route keeps its own check to answer with a 400 before we ever open
+    // the repo.
     if let Some(p) = only {
-        // Reject path traversal at the core so every caller inherits it — the
-        // desktop IPC path and the mobile /diff route both land here. The HTTP
-        // route keeps its own check to answer with a 400 before we ever open
-        // the repo.
         if p.split(['/', '\\'])
             .any(|seg| seg == ".." || seg.is_empty())
         {
             return Err("invalid path".to_string());
         }
-        opts.pathspec(p);
     }
-
-    let mut diff = repo
-        .diff_tree_to_workdir_with_index(base_tree.as_ref(), Some(&mut opts))
-        .map_err(|e| e.to_string())?;
-
-    // Collapse a delete+add of the same content into a single "renamed" entry.
-    let mut find = git2::DiffFindOptions::new();
-    find.renames(true);
-    let _ = diff.find_similar(Some(&mut find));
-
-    let root = repo
-        .workdir()
-        .ok_or_else(|| "Git repository has no working directory".to_string())?;
+    let host = to_host_path(repo_path);
+    let plan = crate::git::diff::diff_plan(
+        &host,
+        &crate::git::state::Baseline::BaseRef(base_ref.to_string()),
+        only,
+    )
+    .map_err(|e| e.to_string())?;
+    let root = plan.root;
     let mut files = Vec::new();
 
-    for delta in diff.deltas() {
+    for entry in plan.entries {
         // Poll cancellation at the file boundary — cheap load on every
         // delta, and the walk is delta-bounded so we can't park here
         // long. Pairs with the per-hunk poll below for files whose
@@ -609,45 +513,21 @@ fn diff_against_base(
         if cancel_requested(cancel) {
             return Err(DIFF_CANCELLED.to_string());
         }
-        let Some(path) = delta.new_file().path().or_else(|| delta.old_file().path()) else {
-            continue;
-        };
-        let rel = path.to_string_lossy().to_string();
-        let status = delta_status_str(delta.status());
-
-        let old_rel = delta
-            .old_file()
-            .path()
-            .map(|p| p.to_string_lossy().to_string());
-        let old_path = if status == "renamed" {
-            old_rel.clone()
-        } else {
-            None
-        };
-
-        // Old side comes from the base tree (under the pre-rename path); a brand
-        // new file has no old side.
-        let old_content = if matches!(status, "added" | "untracked") {
-            String::new()
-        } else {
-            tree_blob_string(
-                &repo,
-                base_tree.as_ref(),
-                old_rel.as_deref().unwrap_or(&rel),
-            )
-        };
+        let rel = entry.path;
+        let status = entry.status;
+        let old_path = entry.old_path;
+        let old_content = entry.old_content;
 
         // New side is the current bytes on disk (absent for deletions).
         let raw = std::fs::read(root.join(&rel)).ok();
-        let is_binary = delta.new_file().is_binary()
-            || delta.old_file().is_binary()
+        let is_binary = entry.binary
             || raw.as_ref().map(|b| b.contains(&0)).unwrap_or(false)
             || old_content.as_bytes().contains(&0);
 
         if is_binary {
             files.push(FileDiff {
                 path: rel,
-                status: status.to_string(),
+                status,
                 old_path,
                 binary: true,
                 ..Default::default()
@@ -695,69 +575,31 @@ fn diff_against_base(
 }
 
 /// List every file an Agent Node changed since it branched — committed *and*
-/// uncommitted (ADR 0005) — as lightweight status entries. Shares
-/// [`resolve_base_tree`] with [`diff_against_base`], so the file-list and the
-/// per-file diff can never disagree on what "changed" means (the mobile Changes
-/// view stitches both into one view). Skips the hunk building and syntect
-/// highlighting the full diff pays for — a status entry needs only path,
-/// classification, and line counts.
-fn changed_files_against_base(
-    repo: &git2::Repository,
-    base_ref: &str,
-) -> Result<Vec<GitStatus>, String> {
-    let base_tree = resolve_base_tree(repo, base_ref);
-
-    let mut opts = git2::DiffOptions::new();
-    // `show_untracked_content` so a brand-new file's lines are counted as
-    // additions rather than emitting an empty patch (matches line_stats_by_path).
-    opts.include_untracked(true)
-        .recurse_untracked_dirs(true)
-        .show_untracked_content(true);
-
-    let mut diff = repo
-        .diff_tree_to_workdir_with_index(base_tree.as_ref(), Some(&mut opts))
-        .map_err(|e| e.to_string())?;
-
-    // Collapse a delete+add of identical content into one "renamed" entry — the
-    // same find_similar pass diff_against_base runs, so the list and the
-    // per-file diff classify a rename identically.
-    let mut find = git2::DiffFindOptions::new();
-    find.renames(true);
-    let _ = diff.find_similar(Some(&mut find));
-
-    let mut files = Vec::new();
-    for idx in 0..diff.deltas().len() {
-        let Some(delta) = diff.get_delta(idx) else {
-            continue;
-        };
-        let Some(path) = delta.new_file().path().or_else(|| delta.old_file().path()) else {
-            continue;
-        };
-        let rel = path.to_string_lossy().to_string();
-        let status = delta_status_str(delta.status()).to_string();
-
-        // Binary files / patch errors yield no line stats — report (0, 0).
-        let (additions, deletions) = match git2::Patch::from_diff(&diff, idx) {
-            Ok(Some(patch)) => patch
-                .line_stats()
-                .map(|(_context, add, del)| (add, del))
-                .unwrap_or((0, 0)),
-            _ => (0, 0),
-        };
-
-        files.push(GitStatus {
+/// uncommitted (ADR 0005) — as lightweight status entries.
+///
+/// The read is [`crate::git::state::changed_files_at`], the same one the
+/// Changed Files Section uses, and both views count lines through the shared
+/// implementation, so their line counts agree. Their labels stay each view's
+/// own vocabulary — the mobile Changes view stitches both into one view. It
+/// skips the hunk building and syntect highlighting the full diff pays for —
+/// a status entry needs only path, classification, and line counts.
+fn changed_files_against_base(repo_path: &str, base_ref: &str) -> Result<Vec<GitStatus>, String> {
+    let files = crate::git::state::changed_files_at(
+        repo_path,
+        crate::git::state::Baseline::BaseRef(base_ref.to_string()),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(files
+        .into_iter()
+        .map(|file| GitStatus {
             project_path: None,
-            path: rel,
-            status,
-            additions,
-            deletions,
-        });
-    }
-
-    files.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(files)
+            path: file.path,
+            status: file.status,
+            additions: file.additions,
+            deletions: file.deletions,
+        })
+        .collect())
 }
-
 /// Fold a since-branch file-list into the header summary the mobile Changes
 /// view shows. `total` is every changed file; `added` counts new/untracked,
 /// `deleted` counts removals, and everything else (modified, renamed) reads as
@@ -875,9 +717,7 @@ pub async fn node_changed_files(node_id: i64) -> Result<Vec<GitStatus>, String> 
 pub(crate) fn node_changed_files_blocking(node_id: i64) -> Result<Vec<GitStatus>, String> {
     let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
     let base_ref = node_base_ref(&node);
-    let repo = primitives::open_from_host_path(&crate::env::node_git_path(&node).host_path)
-        .map_err(|e| e.to_string())?;
-    changed_files_against_base(&repo, &base_ref)
+    changed_files_against_base(&crate::env::node_git_path(&node).host_path, &base_ref)
 }
 
 /// The `{total, added, modified, deleted}` header for the mobile Changes view,
@@ -899,6 +739,9 @@ pub(crate) fn node_changed_summary_blocking(node_id: i64) -> Result<GitSummary, 
 }
 
 #[cfg(test)]
+// allow-test-in-production: this inline suite predates the sibling-test-file rule. Issue #2526
+// only re-points its calls at the new git/ seam; moving the pre-existing suite is out
+// of scope.
 mod tests {
     #[test]
     fn scoped_project_diffs_remain_repository_relative() {
@@ -949,7 +792,8 @@ mod tests {
             "precondition: the worktree is clean after committing foo.rs"
         );
 
-        let files = changed_files_against_base(&repo, "origin/main").unwrap();
+        let files =
+            changed_files_against_base(dir.path().to_str().unwrap(), "origin/main").unwrap();
         assert!(
             files
                 .iter()
@@ -971,7 +815,8 @@ mod tests {
         // Edit base.txt on disk without committing.
         std::fs::write(dir.path().join("base.txt"), "base\nedited\n").unwrap();
 
-        let files = changed_files_against_base(&repo, "origin/main").unwrap();
+        let files =
+            changed_files_against_base(dir.path().to_str().unwrap(), "origin/main").unwrap();
         assert!(
             files
                 .iter()
@@ -982,10 +827,10 @@ mod tests {
     }
 
     /// The list and the per-file diff must agree on what "changed" means — the
-    /// whole point of the `resolve_base_tree` seam. A zero-byte untracked file
-    /// was a real disagreement point: it would be invisible to a diff that
-    /// doesn't set `show_untracked_content`, yet visible to the status walk.
-    /// Both readers now set the option; this test pins the agreement so a
+    /// whole point of the `git::diff::resolve_base_tree` seam. A zero-byte
+    /// untracked file was a real disagreement point: it would be invisible to a
+    /// diff that doesn't set `show_untracked_content`, yet visible to the status
+    /// walk. Both readers now set the option; this test pins the agreement so a
     /// future opts change can't silently re-introduce the mismatch.
     #[test]
     fn changed_files_and_diff_agree_on_zero_byte_untracked() {
@@ -999,7 +844,7 @@ mod tests {
         std::fs::write(dir.path().join("empty.rs"), b"").unwrap();
 
         let list_paths: std::collections::HashSet<String> =
-            changed_files_against_base(&repo, "origin/main")
+            changed_files_against_base(dir.path().to_str().unwrap(), "origin/main")
                 .unwrap()
                 .into_iter()
                 .map(|f| f.path)

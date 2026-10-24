@@ -1,7 +1,166 @@
 //! Exact counts for simple, unfiltered deltas without retaining patch lines.
 //! Other deltas stay with libgit2, including its attributes and size policy.
-use git2::{AttrCheckFlags, Delta, DiffDelta, FileMode, Repository};
+use git2::{AttrCheckFlags, Delta, DiffDelta, DiffOptions, FileMode, Repository};
+use std::collections::HashMap;
 use std::io::Read;
+
+/// Test-only counters for the line-stat fast path (issue #2526).
+///
+/// The counters used to live in `commands/git.rs`, next to the walk that
+/// incremented them. The walk moved into `git::state` when the raw
+/// `Repository` handle left the command layer, so the counters moved with it
+/// — a counter in the command layer could no longer observe the walk it was
+/// measuring. `walk` counts status walks, `diff` counts line-stat diffs and
+/// `patch` counts the fallbacks to libgit2's own patch implementation.
+#[cfg(test)]
+// allow-test-in-production: the counters are shared by the sibling suites that assert how
+// much work a read did, and by the walks they measure; the module is the counter,
+// not a test body.
+pub(crate) mod status_metrics {
+    use std::cell::Cell;
+    thread_local! {
+        static COUNTS: Cell<[usize; 3]> = const { Cell::new([0; 3]) };
+    }
+    fn increment(index: usize) {
+        COUNTS.with(|counts| {
+            let mut value = counts.get();
+            value[index] += 1;
+            counts.set(value);
+        });
+    }
+    pub fn walk() {
+        increment(0);
+    }
+    pub fn diff() {
+        increment(1);
+    }
+    pub fn patch() {
+        increment(2);
+    }
+    pub fn take() -> [usize; 3] {
+        COUNTS.with(|counts| counts.replace([0; 3]))
+    }
+}
+
+/// The line counts for one delta: `(additions, deletions)`.
+///
+/// This is the **single** implementation behind every changed-file view in
+/// Buildmesh (issue #2526). The Changed Files Section and the Node Change Set
+/// used to compute the same fact with two implementations, so the two views
+/// could disagree about a file's line counts.
+///
+/// The fast path is [`simple_counts`] — exact counts for a simple, unfiltered
+/// delta without retaining the patch lines. Everything else falls back to
+/// libgit2's own patch implementation, which also decides binary detection and
+/// honours the repository's attributes.
+pub(crate) fn delta_counts(repo: &Repository, diff: &git2::Diff<'_>, idx: usize) -> (usize, usize) {
+    let Some(delta) = diff.get_delta(idx) else {
+        return (0, 0);
+    };
+    if let Some(counts) = simple_counts(repo, &delta) {
+        return counts;
+    }
+    #[cfg(test)]
+    // allow-test-in-production: the counter's writer, called from the one patch fallback it counts.
+    status_metrics::patch();
+    // Binary files / errors yield no patch — leave them at (0, 0).
+    match git2::Patch::from_diff(diff, idx) {
+        Ok(Some(patch)) => patch
+            .line_stats()
+            .map(|(_context, additions, deletions)| (additions, deletions))
+            .unwrap_or((0, 0)),
+        _ => (0, 0),
+    }
+}
+
+/// One delta of a diff, with the facts every changed-file view needs.
+///
+/// The walk that produces these is the **single** place a changed file's
+/// line counts are computed (issue #2526). The Changed Files Section and the
+/// Node Change Set read the same walk, so they cannot disagree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeltaView {
+    /// The change kind: `added`, `deleted`, `renamed`, `untracked` or
+    /// `modified`.
+    pub status: &'static str,
+    /// The repository-relative path of the file.
+    pub path: String,
+    /// The previous path, for a rename.
+    pub old_path: Option<String>,
+    /// Lines added.
+    pub additions: usize,
+    /// Lines deleted.
+    pub deletions: usize,
+}
+
+/// Walk every delta of a diff once, with its line counts.
+pub(crate) fn walk_deltas(repo: &Repository, diff: &git2::Diff<'_>) -> Vec<DeltaView> {
+    #[cfg(test)]
+    // allow-test-in-production: the counter's writer, called from the one delta walk it counts.
+    status_metrics::diff();
+    let mut views = Vec::new();
+    for idx in 0..diff.deltas().len() {
+        let Some(delta) = diff.get_delta(idx) else {
+            continue;
+        };
+        let Some(path) = delta.new_file().path().or_else(|| delta.old_file().path()) else {
+            continue;
+        };
+        let rel = path.to_string_lossy().into_owned();
+        let status = super::diff::delta_status_str(delta.status());
+        let old_path = if status == "renamed" {
+            delta
+                .old_file()
+                .path()
+                .map(|old| old.to_string_lossy().into_owned())
+        } else {
+            None
+        };
+        let (additions, deletions) = delta_counts(repo, diff, idx);
+        views.push(DeltaView {
+            status,
+            path: rel,
+            old_path,
+            additions,
+            deletions,
+        });
+    }
+    views
+}
+
+/// The line counts of a walked diff, keyed by **both** the old and the new
+/// path of each delta.
+///
+/// Keying on both sides is what lets a deleted file (whose delta carries the
+/// path on its old side) and an added file (new side) both be found by a
+/// lookup on the path the caller knows.
+pub(crate) fn line_stats_map(deltas: &[DeltaView]) -> HashMap<String, (usize, usize)> {
+    let mut stats: HashMap<String, (usize, usize)> = HashMap::new();
+    for delta in deltas {
+        let counts = (delta.additions, delta.deletions);
+        for path in [Some(delta.path.as_str()), delta.old_path.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            stats.insert(path.to_string(), counts);
+        }
+    }
+    stats
+}
+
+/// The diff options every changed-file view shares.
+///
+/// `show_untracked_content` is what makes a brand-new file's lines countable
+/// as additions instead of an empty patch, and it is the reason the
+/// Changed Files Section and the Node Change Set agree about an untracked
+/// file. Keep this in lockstep with the status walk's own options.
+pub(crate) fn diff_options() -> DiffOptions {
+    let mut opts = DiffOptions::new();
+    opts.include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .show_untracked_content(true);
+    opts
+}
 
 /// None means the caller must use libgit2's patch implementation.
 pub(crate) fn simple_counts(repo: &Repository, delta: &DiffDelta<'_>) -> Option<(usize, usize)> {

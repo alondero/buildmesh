@@ -871,6 +871,31 @@ fn convert_link_path_for_env(path: &str, env_type: EnvType) -> String {
     }
 }
 
+/// Whether the worktree named `worktree_name` is registered in the
+/// repository at `host_path`.
+///
+/// The registration lives in git metadata, not on disk — a directory that
+/// looks like a worktree but was never registered is a broken worktree, and
+/// the build runner must not treat it as usable.
+pub fn worktree_registered_at(host_path: &str, worktree_name: &str) -> Result<bool, String> {
+    let repo = git2::Repository::open(host_path)
+        .or_else(|_| git2::Repository::discover(host_path))
+        .map_err(|e| format!("Failed to open repository: {}", e))?;
+
+    let worktrees = repo
+        .worktrees()
+        .map_err(|e| format!("Failed to list worktrees: {}", e))?;
+
+    for index in 0..worktrees.len() {
+        if let Ok(Some(name)) = worktrees.get(index) {
+            if name == worktree_name {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// Sanitize a worktree's git link files to the correct path format for the
 /// target environment (Windows vs WSL). Repairs BOTH sides of the link:
 ///

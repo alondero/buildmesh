@@ -83,43 +83,18 @@ pub(crate) fn observe_wrapup_git_state(node: &crate::models::AgentNode) -> Wrapu
     // fine but libgit2 reports as NotFound (the 2026-07-17 gh252 incident —
     // the agent had to run `git worktree repair` itself). Sanitize both link
     // sides and retry once, so a format-only mismatch never reaches the
-    // repo_error path and never costs a correction attempt.
-    let opened = git2::Repository::open(&host_path).or_else(|first_err| {
-        tracing::info!(
-            "circuit verification({}): open failed ({}); sanitizing worktree links and retrying",
-            node.id,
-            first_err
-        );
-        if let Err(e) = crate::git::worktree::sanitize_git_worktree(&host_path, resolved.env_type) {
-            tracing::warn!("circuit verification({}): sanitize failed: {}", node.id, e);
-        }
-        git2::Repository::open(&host_path)
-    });
+    // repo_error path and never costs a correction attempt. The retry lives
+    // in `git::state` so the command layer holds no repository handle.
+    let observed = crate::git::state::wrapup_state_at(&host_path, resolved.env_type);
 
-    let (dirty, branch, pushed, repo_error) = match opened {
-        Ok(repo) => {
-            let dirty = crate::git::primitives::is_dirty(&repo).unwrap_or(true);
-            let branch = crate::git::primitives::head_branch_name(&repo);
-            let pushed = branch
-                .as_deref()
-                .and_then(|b| {
-                    let local = repo.find_branch(b, git2::BranchType::Local).ok()?;
-                    let upstream = local.upstream().ok()?;
-                    let local_oid = local.get().target()?;
-                    let up_oid = upstream.get().target()?;
-                    let (ahead, _behind) =
-                        crate::git::primitives::ahead_behind(&repo, local_oid, up_oid).ok()?;
-                    Some(ahead == 0)
-                })
-                .unwrap_or(false);
-            (dirty, branch, pushed, None)
-        }
-        Err(e) => {
+    let (dirty, branch, pushed, repo_error) = match observed.repo_error {
+        None => (observed.dirty, observed.branch, observed.pushed, None),
+        Some(error) => {
             tracing::warn!(
                 "circuit verification({}): could not open repo at {}: {}",
                 node.id,
                 host_path,
-                e
+                error
             );
             // Name the exact path the harness inspects — without it the agent
             // has no way to know where the check is looking and starts
@@ -127,12 +102,11 @@ pub(crate) fn observe_wrapup_git_state(node: &crate::models::AgentNode) -> Wrapu
             let repo_error = format!(
                 "the verification could not open the node's worktree at {} as a git repository ({}) — \
                  repair or recreate the worktree at that exact path and do your wrap-up (commit, push, PR) from it",
-                host_path, e
+                host_path, error
             );
             (true, None, false, Some(repo_error))
         }
     };
-
     WrapupState {
         dirty,
         pushed,
