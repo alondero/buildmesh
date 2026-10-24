@@ -50,9 +50,10 @@ import {
 } from '../../src/lib/tauri';
 
 // The async queries in this file poll up to the suite's async-query
-// budget, which `tests/setup/vitest.setup.ts` owns for the whole suite:
-// the first render of this tab can miss a shorter window under the full
-// suite load, which is how issue #1520's restored CI found it.
+// budget, which `tests/setup/vitest.setup.ts` owns for the whole suite.
+// Under the full suite load the first render of this tab can outlast the
+// 1s window RTL polls by default, which is how issue #1520's restored CI
+// found it.
 
 const MESH: Mesh = {
   id: 42,

@@ -161,9 +161,10 @@ function mockBackend(opts: {
           circuit_agent_pool_size: null,
           harness_defaults: defaults,
         };
-        if (!opts.preferencesDelayMs) return Promise.resolve(preferences);
+        const delayMs = opts.preferencesDelayMs ?? 0;
+        if (delayMs === 0) return Promise.resolve(preferences);
         return new Promise((resolve) => {
-          setTimeout(() => resolve(preferences), opts.preferencesDelayMs);
+          setTimeout(() => resolve(preferences), delayMs);
         });
       }
       case 'get_coordinator_status':
