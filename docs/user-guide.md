@@ -323,12 +323,15 @@ issue-driven review flow run the same loop:
    to the implementation agent, which commits and pushes fixes. The same reviewer,
    still open, is then asked to review again, up to the round limit.
 3. On approval the reviewer is closed and the implementation agent is asked to
-squash and merge the pull request. It marks a draft ready, brings an
-   out-of-date branch up to date with the base branch first, and waits for
-   required checks before merging. It stops and reports instead of merging only
-   if a check genuinely fails on the code or the merge stays blocked for any
-   other reason. The circuit then finishes and hands the agent
-   back to you. The agent stays open, so read its report to confirm the merge.
+   squash and merge the pull request. It marks a draft ready, rebases its
+   branch onto the base branch the pull request targets, resolves the merge
+   conflicts that rebase produces in favour of the reviewed work, pushes the
+   rebased branch, and waits for required checks before merging. It stops and
+   reports instead of merging only if a check genuinely fails on the code, a
+   conflict cannot be resolved without changing what the reviewer approved, or
+   the merge stays blocked for any other reason. The circuit then finishes and
+   hands the agent back to you. The agent stays open, so read its report to
+   confirm the merge.
 
 Legacy Autopilot controls are removed. Existing nodes, worktrees and history are
 retained, and the previous global agent cap and custom wrap-up template are carried

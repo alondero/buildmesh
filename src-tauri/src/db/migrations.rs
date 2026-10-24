@@ -345,7 +345,7 @@ pub(crate) const ISSUE_REVIEW_VERDICT_UPGRADE_FLAG: &str = "issue_review_verdict
 pub(crate) const REVIEW_CONTRACT_PROMPT_UPGRADE_FLAG: &str = "review_contract_prompt_upgrade_v1";
 const REVIEW_CONTRACT_PROMPT_UPGRADE_COMPLETE: &str = "complete";
 const REVIEW_CONTRACT_PROMPT_UPGRADE_DEFERRED: &str = "deferred";
-const LEGACY_REVIEW_GRAPH_PREDICATE: &str = "c.graph_json LIKE '%Review the work of agent {{source.agent_id}}%' OR c.graph_json LIKE '%An independent reviewer requested changes to your work.%' OR c.graph_json LIKE '%review PR {{pr.number}} as%' OR c.graph_json LIKE '%Follow the feedback comments on PR #{{pr.number}}%' OR c.graph_json LIKE '%Do not make further changes. If a required check fails%'";
+const LEGACY_REVIEW_GRAPH_PREDICATE: &str = "c.graph_json LIKE '%Review the work of agent {{source.agent_id}}%' OR c.graph_json LIKE '%An independent reviewer requested changes to your work.%' OR c.graph_json LIKE '%review PR {{pr.number}} as%' OR c.graph_json LIKE '%Follow the feedback comments on PR #{{pr.number}}%' OR c.graph_json LIKE '%Do not make further changes. If a required check fails%' OR c.graph_json LIKE '%prefer update-branch over rebasing%'";
 type ReviewContractCandidate = (Option<i64>, Option<String>, Option<i64>, bool);
 
 // ---------------------------------------------------------------------------

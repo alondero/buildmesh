@@ -23,11 +23,39 @@ pub(crate) const RE_REVIEW_DELIVERY: &str = "The author has addressed your previ
 /// an empty argument lets `gh` resolve the pull request for the current branch.
 ///
 /// A branch that fell behind its base while it was reviewed is the usual reason
-/// a merge is refused, so the agent first brings it up to date (GitHub's own
-/// update when it can, a local rebase when it cannot) and only then waits for
-/// the checks that restarts. The final `gh pr view` gives the agent, and the
-/// reader of its report, a merge result that can be checked.
+/// a merge is refused, and `gh pr update-branch` cannot fix a branch that
+/// conflicts with its base. The approved branch is therefore rebased onto the
+/// base branch the pull request targets, and the hand-off authorises both the
+/// rebase and the conflict resolution it needs: only the implementation agent
+/// knows the reviewed change set, so it resolves the conflicts in favour of
+/// the approved work. An agent told merely to "report" a conflict resolution
+/// reads that as unauthorised and stops, so the authorisation is explicit and
+/// the boundary is explicit too — a conflict that cannot be resolved without
+/// changing what the reviewer approved is reported instead of merged.
+///
+/// The checks that follow the push are waited out on the pushed commit's own
+/// workflow run, and the closing `gh pr view` gives the agent, and the reader
+/// of its report, a merge result that can be checked.
 pub(crate) fn merge_approved_pr(subject: &str, pr_argument: &str) -> String {
+    format!(
+        "The independent reviewer approved {subject}. Squash and merge it now: if it is still a draft, mark it ready for review (`gh pr ready{pr_argument}`). \
+        First bring your branch up to date with the base branch this pull request targets (usually `main`): read that branch with `gh pr view{pr_argument} --json baseRefName`, fetch it (`git fetch origin <base-branch>`), and rebase onto it (`git rebase origin/<base-branch>`). \
+        You are authorised to rebase the branch, to resolve the merge conflicts that the rebase produces, and to push the rebased branch (`git push --force-with-lease`). \
+        Resolve every conflict in favour of the approved work: keep the reviewed changes intact, take the base branch's version only where the two changes genuinely cannot be combined, and do not drop, weaken, or start new work. \
+        If a conflict cannot be resolved without changing what the reviewer approved, stop and report why instead of merging. \
+        Then wait for the required checks on the pushed commit: resolve the workflow run for that commit (`gh run list --commit <sha> --json databaseId`) and poll that run's jobs (`gh run view <run-id> --json status,conclusion,jobs`) until every job completes — do not use `gh pr checks --watch`, which aggregates superseded runs and can report stale pending entries. \
+        Then squash-merge it (`gh pr merge{pr_argument} --squash`) and confirm the result (`gh pr view{pr_argument} --json state,mergedAt`). \
+        If a required check genuinely fails on the code, or the merge stays blocked for any other reason, stop and report why instead of merging. \
+        Report the merge result, including every conflict you resolved. The Circuit has finished and will not send further prompts to this session."
+    )
+}
+
+/// The merge hand-off shipped before the rebase hand-off. It updated an
+/// out-of-date branch with `gh pr update-branch` and mentioned conflict
+/// resolution only as something to report, so an agent that hit a conflict
+/// stopped instead of resolving it. Startup upgrades replace only this exact
+/// stock text.
+pub(crate) fn branch_sync_merge_prompt(subject: &str, pr_argument: &str) -> String {
     format!(
         "The independent reviewer approved {subject}. Squash and merge it now: if it is still a draft, mark it ready for review (`gh pr ready{pr_argument}`). \
         Then check whether the PR branch is behind the base branch (`gh pr view{pr_argument} --json mergeStateStatus,mergeable`). \
@@ -40,12 +68,15 @@ pub(crate) fn merge_approved_pr(subject: &str, pr_argument: &str) -> String {
     )
 }
 
-/// The hand-off text shipped before the branch-update and merge-check steps.
-/// Startup upgrades replace only this exact stock text.
-pub(crate) fn legacy_merge_approved_pr(subject: &str, pr_argument: &str) -> String {
-    format!(
-        "The independent reviewer approved {subject}. Squash and merge it now: if it is still a draft, mark it ready for review (`gh pr ready{pr_argument}`); wait for its required checks to pass (`gh pr checks{pr_argument} --watch`); then squash-merge it (`gh pr merge{pr_argument} --squash`). Do not make further changes. If a required check fails or the merge is blocked, stop and report why instead of merging. Report the merge result. The Circuit has finished and will not send further prompts to this session."
-    )
+/// Every stock merge hand-off a stored graph may still carry, oldest first.
+///
+/// A stored graph matches one of these exactly, so an upgrade can replace it;
+/// a user-edited prompt matches none of them and is left intact.
+pub(crate) fn legacy_merge_prompts(subject: &str, pr_argument: &str) -> Vec<String> {
+    vec![
+        legacy_merge_prompt(subject, pr_argument),
+        branch_sync_merge_prompt(subject, pr_argument),
+    ]
 }
 
 /// The pre-branch-sync merge hand-off, kept verbatim so the stock-text
@@ -85,27 +116,47 @@ pub(crate) const LEGACY_PR_REVIEW_PROMPT: &str = "review PR {{pr.number}} as a g
 pub(crate) const LEGACY_PR_REVIEW_WITH_VERDICT: &str = "review PR {{pr.number}} as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture. Add the review comments to the PR as a comment. The pull request URL is {{pr.url}}. State the reviewed commit and an explicit final verdict: approve only if there are no remaining actionable findings; otherwise request changes or explain what blocks review. Review completion alone is not approval. Re-check previous findings against the current code. Separate blocking correctness, specification and verification findings from optional style suggestions; do not turn optional preferences or unrelated redesigns into blockers.";
 
 #[cfg(test)]
+// allow-test-in-production: this inline suite predates the sibling-test-file rule; this change only
+// updates the merge hand-off assertions it owns. Moving the pre-existing suite is out of scope.
 mod tests {
     use super::*;
 
     #[test]
-    fn merge_prompt_authorizes_branch_sync_instead_of_stopping_when_outdated() {
+    fn merge_prompt_authorizes_rebase_and_conflict_resolution() {
         let prompt = merge_approved_pr("PR #1 (http://example/pr/1)", " 1");
         assert!(
-            prompt.contains("behind"),
-            "merge prompt must name the behind-base case, was: {prompt:?}"
+            prompt.contains("git rebase origin/<base-branch>"),
+            "merge prompt must name the rebase onto the base branch, was: {prompt:?}"
         );
         assert!(
-            prompt.contains("update-branch"),
-            "merge prompt must authorize bringing the branch up to date, was: {prompt:?}"
+            prompt.contains("baseRefName"),
+            "merge prompt must tell the agent how to find the base branch, was: {prompt:?}"
         );
         assert!(
-            prompt.contains("mergeStateStatus"),
-            "merge prompt must gate the sync on the machine-readable merge state, was: {prompt:?}"
+            prompt.contains(
+                "authorised to rebase the branch, to resolve the merge conflicts that the rebase produces"
+            ),
+            "merge prompt must authorise conflict resolution, was: {prompt:?}"
         );
         assert!(
-            prompt.contains("prefer update-branch over rebasing"),
-            "merge prompt must steer away from history rewrites that dismiss approval, was: {prompt:?}"
+            prompt.contains("--force-with-lease"),
+            "merge prompt must authorise pushing the rebased branch, was: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("Resolve every conflict in favour of the approved work"),
+            "merge prompt must resolve conflicts towards the approved work, was: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("cannot be resolved without changing what the reviewer approved"),
+            "merge prompt must keep the stop condition for unresolvable conflicts, was: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("gh pr merge 1 --squash"),
+            "merge prompt must still squash-merge the PR, was: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("gh pr view 1 --json state,mergedAt"),
+            "merge prompt must confirm the merge it reported, was: {prompt:?}"
         );
         assert!(
             prompt.contains("gh run list --commit"),
@@ -116,12 +167,35 @@ mod tests {
             "merge prompt must keep the stop condition for real check failures, was: {prompt:?}"
         );
         assert!(
-            prompt.contains("report any merge-conflict resolution"),
-            "merge prompt must require reporting manual conflict resolution, was: {prompt:?}"
+            !prompt.contains("gh pr update-branch"),
+            "update-branch cannot resolve a conflicting branch, was: {prompt:?}"
         );
         assert!(
             !prompt.contains("Do not make further changes"),
-            "blanket no-changes ban stops agents from updating an outdated branch, was: {prompt:?}"
+            "blanket no-changes ban stops agents from rebasing, was: {prompt:?}"
+        );
+    }
+
+    #[test]
+    fn the_branch_sync_hand_off_is_kept_as_a_legacy_stock_text() {
+        let subject = "your pull request for this work";
+        let legacy = legacy_merge_prompts(subject, "");
+        assert!(
+            legacy.contains(&branch_sync_merge_prompt(subject, "")),
+            "the branch-update hand-off must stay upgradeable, was: {legacy:?}"
+        );
+        assert!(
+            legacy.contains(&legacy_merge_prompt(subject, "")),
+            "the first hand-off must stay upgradeable, was: {legacy:?}"
+        );
+        assert!(
+            !legacy.contains(&merge_approved_pr(subject, "")),
+            "the current hand-off must not be an upgrade target"
+        );
+        assert_eq!(
+            legacy.len(),
+            2,
+            "exactly two hand-offs precede the rebase one"
         );
     }
 
