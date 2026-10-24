@@ -568,7 +568,7 @@ mod tests {
     fn merge_verification_upgrade_pins_runs_and_rewrites_only_stock_server_owned_graphs() {
         use crate::circuit::model::{CircuitGraph, CircuitNode, CircuitNodeKind};
         use crate::circuit::test_support::publication_flow_issue_review;
-        use crate::review_contract::{legacy_merge_approved_pr, merge_approved_pr};
+        use crate::review_contract::{branch_sync_merge_prompt, merge_approved_pr};
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
         conn.execute(
@@ -582,7 +582,7 @@ mod tests {
         preset_graph.replace_stock_text(
             "merge",
             &merge_approved_pr("your pull request for this work", ""),
-            &legacy_merge_approved_pr("your pull request for this work", ""),
+            &branch_sync_merge_prompt("your pull request for this work", ""),
         );
         let preset = preset_graph.to_json().unwrap();
         let issue = publication_flow_issue_review().to_json().unwrap();
@@ -631,12 +631,12 @@ mod tests {
             .unwrap()
         };
 
-        // The preset keeps its topology and gets the branch-update hand-off.
+        // The preset keeps its topology and gets the rebase hand-off.
         let upgraded_preset = CircuitGraph::from_json(&read(1)).unwrap();
         assert!(upgraded_preset.has_review_topology_of(&CircuitGraph::agent_review(None, None, 3)));
         assert!(matches!(
             upgraded_preset.node("merge").map(|n| &n.kind),
-            Some(CircuitNodeKind::InjectPty { prompt, .. }) if prompt.contains("gh pr update-branch")
+            Some(CircuitNodeKind::InjectPty { prompt, .. }) if prompt.contains("git rebase origin/<base-branch>")
         ));
         // The stock issue circuit now verifies the merge before closing the implementer.
         let upgraded_issue = CircuitGraph::from_json(&read(2)).unwrap();
@@ -645,7 +645,7 @@ mod tests {
         ));
         assert!(upgraded_issue.node("merge_verify").is_some());
         // A user-owned copy whose merge prompt still matches the legacy stock
-        // text gains the branch-update hand-off too (its prompt is a literal
+        // text gains the rebase hand-off too (its prompt is a literal
         // match, so the upgrade is safe), but its topology is preserved.
         let upgraded_copy = CircuitGraph::from_json(&read(3)).unwrap();
         assert_ne!(
@@ -656,16 +656,16 @@ mod tests {
         assert!(upgraded_copy.has_review_topology_of(&CircuitGraph::agent_review(None, None, 3)));
         assert!(matches!(
             upgraded_copy.node("merge").map(|n| &n.kind),
-            Some(CircuitNodeKind::InjectPty { prompt, .. }) if prompt.contains("gh pr update-branch")
+            Some(CircuitNodeKind::InjectPty { prompt, .. }) if prompt.contains("git rebase origin/<base-branch>")
         ));
         // A customized topology is not rewritten; only its still-stock merge
-        // prompt gains the branch-update step.
+        // prompt gains the rebase step.
         let upgraded_custom = CircuitGraph::from_json(&read(4)).unwrap();
         assert!(upgraded_custom.node("merge_verify").is_none());
         assert!(upgraded_custom.node("announce").is_some());
         assert!(matches!(
             upgraded_custom.node("merge").map(|n| &n.kind),
-            Some(CircuitNodeKind::InjectPty { prompt, .. }) if prompt.contains("gh pr update-branch")
+            Some(CircuitNodeKind::InjectPty { prompt, .. }) if prompt.contains("git rebase origin/<base-branch>")
         ));
 
         let snapshot: String = conn
@@ -877,7 +877,7 @@ mod tests {
                 if let crate::circuit::model::CircuitNodeKind::InjectPty { prompt, .. } =
                     &mut node.kind
                 {
-                    *prompt = crate::review_contract::legacy_merge_prompt(
+                    *prompt = crate::review_contract::branch_sync_merge_prompt(
                         "PR #{{pr.number}} ({{pr.url}})",
                         " {{pr.number}}",
                     );
@@ -909,7 +909,7 @@ mod tests {
                 if let crate::circuit::model::CircuitNodeKind::InjectPty { prompt, .. } =
                     &mut node.kind
                 {
-                    *prompt = crate::review_contract::legacy_merge_prompt(
+                    *prompt = crate::review_contract::branch_sync_merge_prompt(
                         "your pull request for this work",
                         "",
                     );
@@ -959,7 +959,8 @@ mod tests {
             matches!(
                 copy_graph.node("merge").map(|node| &node.kind),
                 Some(crate::circuit::model::CircuitNodeKind::InjectPty { prompt, .. })
-                    if prompt.contains("gh pr update-branch")
+                    if prompt.contains("git rebase origin/<base-branch>")
+                        && prompt.contains("authorised to rebase the branch")
                         && !prompt.contains("Do not make further changes")
             ),
             "non-preset review copy merge text must upgrade via the local-review path"

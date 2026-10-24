@@ -340,8 +340,8 @@ impl CircuitGraph {
     fn upgrade_legacy_agent_review_prompts(&mut self) -> bool {
         let old_review = crate::review_contract::LEGACY_LOCAL_REVIEW_PROMPT;
         let old_feedback = crate::review_contract::LEGACY_FEEDBACK_PROMPT;
-        let old_merge =
-            crate::review_contract::legacy_merge_prompt("your pull request for this work", "");
+        let old_merges =
+            crate::review_contract::legacy_merge_prompts("your pull request for this work", "");
         let mut changed = false;
         for node in &mut self.nodes {
             match &mut node.kind {
@@ -359,7 +359,7 @@ impl CircuitGraph {
                     changed = true;
                 }
                 CircuitNodeKind::InjectPty { prompt, .. }
-                    if node.id == "merge" && prompt == &old_merge =>
+                    if node.id == "merge" && old_merges.iter().any(|text| prompt == text) =>
                 {
                     *prompt = crate::review_contract::merge_approved_pr(
                         "your pull request for this work",
@@ -381,7 +381,7 @@ impl CircuitGraph {
         // was split from REVIEW_POLICY. A user-authored extension of either
         // prompt is not stock and must remain intact.
         let old_feedback = "Follow the feedback comments on PR #{{pr.number}} ({{pr.url}}). Reviewer report: {{node.reviewer.output}}. Address every valid comment, run the relevant tests, and update the PR. Do not ignore architectural or clean-code concerns; report what you changed.";
-        let old_merge = crate::review_contract::legacy_merge_prompt(
+        let old_merges = crate::review_contract::legacy_merge_prompts(
             "PR #{{pr.number}} ({{pr.url}})",
             " {{pr.number}}",
         );
@@ -404,7 +404,7 @@ impl CircuitGraph {
                     changed = true;
                 }
                 CircuitNodeKind::InjectPty { prompt, .. }
-                    if node.id == "merge" && prompt == &old_merge =>
+                    if node.id == "merge" && old_merges.iter().any(|text| prompt == text) =>
                 {
                     *prompt = Self::pr_merge_prompt();
                     changed = true;
@@ -536,8 +536,10 @@ impl CircuitGraph {
         true
     }
 
-    /// Replace the stock merge hand-off text with the one that updates an
-    /// out-of-date branch first. A customized merge prompt is never rewritten.
+    /// Replace the stock merge hand-off text with the one that rebases onto
+    /// the base branch and resolves the conflicts that rebase produces. Every
+    /// hand-off shipped before it is replaced; a customized merge prompt is
+    /// never rewritten.
     fn upgrade_merge_prompt(&mut self) -> bool {
         let (subject, argument) = if self.is_issue_driven_autopilot_review() {
             ("PR #{{pr.number}} ({{pr.url}})", " {{pr.number}}")
@@ -545,11 +547,10 @@ impl CircuitGraph {
             ("your pull request for this work", "")
         };
         let before = self.clone();
-        self.replace_stock_text(
-            "merge",
-            &crate::review_contract::legacy_merge_approved_pr(subject, argument),
-            &crate::review_contract::merge_approved_pr(subject, argument),
-        );
+        let current = crate::review_contract::merge_approved_pr(subject, argument);
+        for stock in crate::review_contract::legacy_merge_prompts(subject, argument) {
+            self.replace_stock_text("merge", &stock, &current);
+        }
         *self != before
     }
 
@@ -658,6 +659,8 @@ impl CircuitGraph {
 }
 
 #[cfg(test)]
+// allow-test-in-production: this inline suite predates the sibling-test-file rule; this change only
+// updates the merge hand-off assertions it owns. Moving the pre-existing suite is out of scope.
 mod tests {
     use super::*;
 
@@ -907,7 +910,9 @@ mod tests {
         assert!(issue.upgrade_merge_prompt());
         assert!(matches!(
             issue.node("merge").map(|n| &n.kind),
-            Some(CircuitNodeKind::InjectPty { prompt, .. }) if prompt.contains("gh pr update-branch {{pr.number}}")
+            Some(CircuitNodeKind::InjectPty { prompt, .. })
+                if prompt.contains("git rebase origin/<base-branch>")
+                    && prompt.contains("authorised to rebase the branch")
         ));
         assert!(!issue.upgrade_merge_prompt(), "idempotent");
 
@@ -918,7 +923,7 @@ mod tests {
         local.replace_stock_text(
             "merge",
             &crate::review_contract::merge_approved_pr("your pull request for this work", ""),
-            &crate::review_contract::legacy_merge_approved_pr(
+            &crate::review_contract::branch_sync_merge_prompt(
                 "your pull request for this work",
                 "",
             ),
@@ -926,13 +931,15 @@ mod tests {
         assert!(local.upgrade_merge_prompt());
         assert!(matches!(
             local.node("merge").map(|n| &n.kind),
-            Some(CircuitNodeKind::InjectPty { prompt, .. }) if prompt.contains("gh pr update-branch")
+            Some(CircuitNodeKind::InjectPty { prompt, .. })
+                if prompt.contains("git rebase origin/<base-branch>")
+                    && prompt.contains("authorised to rebase the branch")
         ));
 
         let mut custom = crate::circuit::test_support::publication_flow_issue_review();
         custom.replace_stock_text(
             "merge",
-            &crate::review_contract::legacy_merge_approved_pr(
+            &crate::review_contract::legacy_merge_prompt(
                 "PR #{{pr.number}} ({{pr.url}})",
                 " {{pr.number}}",
             ),
@@ -1138,7 +1145,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_merge_prompts_upgrade_to_branch_sync_text_and_custom_merge_is_preserved() {
+    fn legacy_merge_prompts_upgrade_to_the_rebase_text_and_custom_merge_is_preserved() {
         for (mut graph, upgrade) in [
             (
                 CircuitGraph::issue_driven_autopilot_review("buildmesh:run"),
@@ -1146,40 +1153,41 @@ mod tests {
             ),
             (CircuitGraph::agent_review(None, None, 3), "local"),
         ] {
-            let node = graph
-                .nodes
-                .iter_mut()
-                .find(|node| node.id == "merge")
-                .expect("merge exists");
-            if let CircuitNodeKind::InjectPty { prompt, .. } = &mut node.kind {
-                *prompt = if upgrade == "issue" {
-                    crate::review_contract::legacy_merge_prompt(
-                        "PR #{{pr.number}} ({{pr.url}})",
-                        " {{pr.number}}",
-                    )
-                } else {
-                    crate::review_contract::legacy_merge_prompt(
-                        "your pull request for this work",
-                        "",
-                    )
-                };
-            }
-            let changed = if upgrade == "issue" {
-                graph.upgrade_legacy_issue_review_contract()
+            let (subject, argument) = if upgrade == "issue" {
+                ("PR #{{pr.number}} ({{pr.url}})", " {{pr.number}}")
             } else {
-                graph.upgrade_legacy_agent_review_prompts()
+                ("your pull request for this work", "")
             };
-            assert!(changed, "{upgrade} legacy merge text must upgrade");
-            assert!(
-                matches!(
-                    graph.node("merge").map(|node| &node.kind),
-                    Some(CircuitNodeKind::InjectPty { prompt, .. })
-                        if prompt.contains("gh pr update-branch")
-                            && prompt.contains("gh pr merge")
-                            && !prompt.contains("Do not make further changes")
-                ),
-                "{upgrade} merge node carries the branch-sync text"
-            );
+            // Every hand-off shipped before the rebase one must upgrade: an
+            // install that stored the branch-update text still needs the
+            // conflict resolution the agent would otherwise refuse to do.
+            for legacy in crate::review_contract::legacy_merge_prompts(subject, argument) {
+                let node = graph
+                    .nodes
+                    .iter_mut()
+                    .find(|node| node.id == "merge")
+                    .expect("merge exists");
+                if let CircuitNodeKind::InjectPty { prompt, .. } = &mut node.kind {
+                    *prompt = legacy.clone();
+                }
+                let changed = if upgrade == "issue" {
+                    graph.upgrade_legacy_issue_review_contract()
+                } else {
+                    graph.upgrade_legacy_agent_review_prompts()
+                };
+                assert!(changed, "{upgrade} legacy merge text must upgrade");
+                assert!(
+                    matches!(
+                        graph.node("merge").map(|node| &node.kind),
+                        Some(CircuitNodeKind::InjectPty { prompt, .. })
+                            if prompt.contains("git rebase origin/<base-branch>")
+                                && prompt.contains("authorised to rebase the branch")
+                                && prompt.contains("gh pr merge")
+                                && !prompt.contains("Do not make further changes")
+                    ),
+                    "{upgrade} merge node carries the rebase text"
+                );
+            }
         }
 
         let mut custom = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");

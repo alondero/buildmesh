@@ -145,6 +145,8 @@ function mockBackend(opts: {
   defaults?: Record<string, { model: string | null; effort: string | null; permission_mode?: string | null }>;
   providers?: ProviderInfo[];
   failOnSave?: boolean;
+  /** Delay each `get_app_preferences` reply by this many milliseconds. */
+  preferencesDelayMs?: number;
 } = {}) {
   const defaults = opts.defaults ?? {};
   const providers = opts.providers ?? [CLAUDE_ROW, CODEX_ROW, AGY_ROW, OPENCODE_ROW, TERMINAL_ROW];
@@ -152,13 +154,19 @@ function mockBackend(opts: {
   vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
     calls[cmd] = [...(calls[cmd] ?? []), args];
     switch (cmd) {
-      case 'get_app_preferences':
-        return Promise.resolve({
+      case 'get_app_preferences': {
+        const preferences = {
           default_provider: null,
           minimax_api_key: null,
           circuit_agent_pool_size: null,
           harness_defaults: defaults,
+        };
+        const delayMs = opts.preferencesDelayMs ?? 0;
+        if (delayMs === 0) return Promise.resolve(preferences);
+        return new Promise((resolve) => {
+          setTimeout(() => resolve(preferences), delayMs);
         });
+      }
       case 'get_coordinator_status':
         return Promise.resolve({ enabled: false, has_token: false });
       case 'get_network_status':
@@ -375,12 +383,34 @@ describe('Settings — Agent Harness defaults', () => {
 
     // The card collapses back to empty after the clear: the Reset
     // button disappears (no stored default left) and the model input
-    // clears. The local map update is optimistic (the parent's
-    // `handleClearHarnessDefault` deletes the key before the IPC
-    // resolves), so the assertion fires immediately after the click.
+    // clears. The parent's `handleClearHarnessDefault` awaits the IPC
+    // and then re-reads the preferences through the loader (issue
+    // #1534), so the collapse lands after that round trip rather than
+    // in the click's own tick — hence the wait.
     await waitFor(() =>
       expect(screen.queryByTestId('harness-default-reset-claude')).toBeNull(),
     );
+  });
+
+  it('renders the reset card when the preferences round trip outlasts a second', async () => {
+    // The reset card is the last thing to render in this file: the button
+    // appears only after `list_providers` lands, `get_app_preferences`
+    // delivers the stored default and the section's re-key effect has
+    // flushed. Inside `npm run verify` that chain shares the machine with a
+    // concurrent Rust compile, and it measured 305-889ms there — close
+    // enough to RTL's 1s polling deadline that a busier run failed a test
+    // that passes in isolation (issue #2539). The delay here stands in for
+    // that contention: it fails if the suite's async-query budget is cut
+    // back to RTL's 1s default, because the query is then reported missing
+    // while the card is still on its way.
+    mockBackend({
+      defaults: { claude: { model: 'opus-4-1', effort: 'high' } },
+      providers: [CLAUDE_ROW],
+      preferencesDelayMs: 1200,
+    });
+    render(<AppSettingsModal onClose={() => {}} />);
+
+    expect(await screen.findByTestId('harness-default-reset-claude')).toBeTruthy();
   });
 
   it('omits harnesses with nothing to configure, so Terminal gets no card', async () => {
