@@ -7,10 +7,17 @@
 //! providers.
 //!
 //! What lives here:
-//! - The 7-variant [`UsageOutcome`] enum (`Reading`, `NoCredential`, `Rejected`,
-//!   `RateLimited`, `Unavailable`, `Degraded`, `ManagedExternally`).
-//! - The [`AuthPolicy`] classifier that the shared fetch driver uses to map
-//!   provider-side 401/403 responses to the right outcome variant.
+//! - The [`UsageOutcome`] enum (`Reading`, `Enriched`, `NoCredential`,
+//!   `Rejected`, `RateLimited`, `Unavailable`, `Degraded`,
+//!   `ManagedExternally`).
+//! - The [`UsageReading`] payload a successful read produces: windowed quota,
+//!   an optional prepaid balance, meters and a detail line. A
+//!   balance-style reading is representable *alongside* windowed quota, not
+//!   instead of it.
+//! - The [`UsageEnrichmentPatch`] a best-effort second read contributes to
+//!   the reading it augments.
+//! - The [`ResponsePolicy`] the shared fetch driver uses to word a failed
+//!   response.
 //! - The [`UsageOutcome::into_usage`] projection — the only site that mints a
 //!   [`super::types::ProviderUsage`] from an outcome.
 //! - The [`UsageOutcome::keep`] predicate that [`crate::commands::usage::assemble_meters`]
@@ -49,12 +56,31 @@ pub(crate) enum UsageOutcome {
         meters: Vec<UsageMeter>,
         detail: Option<String>,
     },
+    /// A reading produced by a primary read plus a second, best-effort read
+    /// (issue #2528 step 1).
+    ///
+    /// The second read is *enrichment*: it does not fail the reading.
+    /// Whatever it contributed is already merged into `reading`, so this
+    /// variant projects like the bare reading it wraps — the panel renders
+    /// the same bytes either way, which the projection test in
+    /// `outcome_tests.rs` pins.
+    ///
+    /// The variant exists so the outcome records that a second read was
+    /// attempted.
+    /// Without it the enrichment would be an invisible side effect of the
+    /// fetch rather than a modelled part of its result, and a provider that
+    /// needed one would have to bolt an extra HTTP call onto its own.
+    Enriched {
+        /// The primary read's outcome, already carrying the enrichment's
+        /// contribution.
+        reading: Box<UsageOutcome>,
+    },
     /// No credential on disk / not logged in / mechanism is not a subscription
     /// (e.g. an API-key provider with no key, or Muse Code without an OAuth
     /// login). Maps to `logged_in: false` so the gate drops the row.
     NoCredential { hint: String },
     /// Credential present but the provider rejected it (HTTP 401/403 with the
-    /// adapter's [`AuthPolicy::Rejected`] classification). Renders the
+    /// adapter's [`ResponsePolicy`] rejection copy). Renders the
     /// "Invalid API key" re-entry affordance when the account has a key
     /// configured; otherwise the gate drops the row.
     Rejected { hint: String },
@@ -73,24 +99,115 @@ pub(crate) enum UsageOutcome {
     ManagedExternally { platform: String },
 }
 
-/// How an adapter wants a provider-side auth rejection classified.
+/// The payload a successful usage read produces.
 ///
-/// The shared [`super::adapter::fetch_usage`] driver takes this as an explicit
-/// input so the 401/403 arm is intentional rather than accidentally omitted —
-/// MiniMax's pre-#1745 omission (`fetch_usage` had no 401/403 arm) is the
-/// motivating example.
+/// This is the shape the shared driver's parse step returns, and it is a
+/// struct rather than a bare tuple for one reason: a balance-style reading
+/// (Kimi's wallet, Grok's prepaid balance) must be representable
+/// *alongside* windowed quota (Codex, Anthropic), not instead of it. The
+/// pre-#2528 driver returned `(windows, detail)` and forced a balance-only
+/// provider to hand-roll its own HTTP ladder; a provider that
+/// reports both a monthly meter and a prepaid balance now fits the same
+/// shape.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct UsageReading {
+    /// The provider's quota windows, in the order the panel renders them.
+    pub windows: Vec<UsageWindow>,
+    /// The provider's prepaid / cash balance, when it reports one.
+    pub balance: Option<BillingBalance>,
+    /// The provider's metered amounts.
+    pub meters: Vec<UsageMeter>,
+    /// A free-text detail line (plan name, extra credits, …).
+    pub detail: Option<String>,
+}
+
+impl UsageReading {
+    /// Project the reading onto the [`UsageOutcome::Reading`] variant.
+    ///
+    /// The reading has a single projection site, so an adapter has one way
+    /// to encode the same payload.
+    pub(crate) fn into_outcome(self) -> UsageOutcome {
+        UsageOutcome::Reading {
+            windows: self.windows,
+            balance: self.balance,
+            meters: self.meters,
+            detail: self.detail,
+        }
+    }
+}
+
+/// What a best-effort enrichment read contributed to the reading it
+/// augments.
 ///
-/// Default ordering ([`AuthPolicy::Rejected`] first via `#[default]`) matches
-/// the convention for keyed providers (ADR-0026 §2): 401/403 means the
-/// credential is gone/bad. The default is intentionally not used by adapters
-/// (every call site passes `AuthPolicy` explicitly), but the `Default` impl
-/// keeps the `clippy::derivable_impls` lint quiet and is harmless.
+/// The patch is merged into the reading by the shared driver before the
+/// outcome is built, so the reading and the patch stay in step — the
+/// outcome carries no second copy of the reading that could fall out of
+/// sync.
+///
+/// A successful enrichment *replaces* the primary read's balance and detail
+/// line and *appends* its windows to the primary read's windows. The
+/// replacement is deliberate: a provider that reports a monthly meter and a
+/// prepaid balance shows the meter, not the balance — so the enrichment
+/// that produced the meter also suppresses the balance.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct UsageEnrichmentPatch {
+    /// Windows the enrichment added, appended after the primary read's
+    /// windows in this order.
+    pub windows: Vec<UsageWindow>,
+    /// The balance the reading carries after the enrichment. `None` means
+    /// the reading carries no balance.
+    pub balance: Option<BillingBalance>,
+    /// The detail line the reading carries after the enrichment.
+    pub detail: Option<String>,
+}
+
+/// How the shared fetch driver words a failed response.
+///
+/// The driver owns the request → status → parse flow; what differs between
+/// providers is how a failure is *worded*. Encoding those differences in
+/// one policy value keeps the ladder itself shared instead of hand-rolled
+/// per adapter — the gap issue #2528 step 1 exists to close.
+///
+/// The [`Default`] value reproduces the driver's original wording,
+/// so an adapter that does not need custom copy keeps the shared text.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AuthPolicy {
-    /// 401/403 means the credential is gone/bad (default for keyed providers
-    /// that return `logged_out` on 401/403 today).
+pub(crate) struct ResponsePolicy {
+    /// The remediation copy a 401/403 response maps to. `None` uses the
+    /// default `"API error {status}: {body}"`.
+    pub rejected_hint: Option<&'static str>,
+    /// The copy a body-read failure maps to. `None` treats an unreadable
+    /// body as empty and carries on with it.
+    pub body_read_error: Option<&'static str>,
+    /// How a non-2xx response body is rendered into the error reason.
+    pub error_body: ErrorBody,
+}
+
+/// How a non-2xx response body is rendered into the error reason.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ErrorBody {
+    /// Use the response body verbatim.
     #[default]
-    Rejected,
+    Raw,
+    /// Use the trimmed body, or `fallback` when the body is blank.
+    TrimmedOr(&'static str),
+}
+
+impl ErrorBody {
+    /// Render `body` into the detail half of an `"API error {code}: {detail}"`
+    /// reason.
+    pub(crate) fn render(self, body: &str) -> &str {
+        match self {
+            Self::Raw => body,
+            Self::TrimmedOr(fallback) => {
+                let trimmed = body.trim();
+                if trimmed.is_empty() {
+                    fallback
+                } else {
+                    trimmed
+                }
+            }
+        }
+    }
 }
 
 // Migration shim removed (issue #1758): `From<ProviderUsage> for
@@ -151,12 +268,16 @@ impl UsageOutcome {
             Self::Rejected { hint } => logged_out(provider, hint),
             Self::RateLimited { reason } => unavailable(provider, reason),
             Self::Unavailable { reason } => unavailable(provider, reason),
+            // An enriched reading projects like the bare reading it wraps:
+            // the enrichment is internal bookkeeping and does not change what
+            // the panel renders.
+            Self::Enriched { reading } => reading.into_usage(provider),
         }
     }
 
     /// Pure keep/drop predicate for [`crate::commands::usage::assemble_meters`].
     /// Centralising the decision in the outcome taxonomy means one table test
-    /// covers all 7 variants; the gate in `assemble_meters` becomes a thin
+    /// covers all 8 variants; the gate in `assemble_meters` becomes a thin
     /// switch over this predicate.
     ///
     /// Contract:
@@ -174,6 +295,9 @@ impl UsageOutcome {
         match self {
             Self::NoCredential { .. } => false,
             Self::Rejected { .. } => configured_keys.contains(provider_id),
+            // An enriched reading is kept like the bare reading it
+            // wraps.
+            Self::Enriched { reading } => reading.keep(configured_keys, provider_id),
             Self::Reading { .. }
             | Self::RateLimited { .. }
             | Self::Unavailable { .. }
@@ -181,341 +305,50 @@ impl UsageOutcome {
             | Self::ManagedExternally { .. } => true,
         }
     }
+
+    /// True when the outcome carries a real reading of the provider's usage.
+    ///
+    /// [`Self::Enriched`] wraps a reading, so it counts: the last-known store
+    /// records what the provider actually reported, and an enriched reading
+    /// reports as much as the bare reading it wraps.
+    pub(crate) fn is_reading(&self) -> bool {
+        match self {
+            Self::Reading { .. } => true,
+            Self::Enriched { reading } => reading.is_reading(),
+            Self::NoCredential { .. }
+            | Self::Rejected { .. }
+            | Self::RateLimited { .. }
+            | Self::Unavailable { .. }
+            | Self::Degraded { .. }
+            | Self::ManagedExternally { .. } => false,
+        }
+    }
+
+    /// True when the outcome is a transient failure — a rate limit or an
+    /// unavailable response — for which a remembered reading is preferred
+    /// over the live error.
+    ///
+    /// [`crate::commands::usage::assemble_meters`] reads this instead of
+    /// listing the failure variants itself, so the taxonomy owns the
+    /// classification. The match below has no wildcard arm, so a new
+    /// variant fails to compile until the predicate covers it.
+    ///
+    /// [`Self::Enriched`] looks through the wrapper: an enriched reading is
+    /// not transient, and a provider that wraps a failure in an enriched
+    /// reading is classified by the outcome it wraps.
+    pub(crate) fn is_transient(&self) -> bool {
+        match self {
+            Self::RateLimited { .. } | Self::Unavailable { .. } => true,
+            Self::Enriched { reading } => reading.is_transient(),
+            Self::Reading { .. }
+            | Self::NoCredential { .. }
+            | Self::Rejected { .. }
+            | Self::Degraded { .. }
+            | Self::ManagedExternally { .. } => false,
+        }
+    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::services::usage::types::UsageAmount;
-
-    /// Pin the projection table. One test per variant with the exact wire
-    /// triple the panel renders against. If a future change adds a variant
-    /// without extending this test, the gate's behaviour for that variant
-    /// is undefined — fail here, not in production.
-    #[test]
-    fn into_usage_table_per_variant() {
-        let amount = UsageAmount {
-            used: 25.0,
-            limit: Some(100.0),
-            remaining: Some(75.0),
-            unit: "USD".to_string(),
-            used_percent: Some(25.0),
-            resets_at: Some("2026-10-01T00:00:00Z".to_string()),
-        };
-        let cases = vec![
-            (
-                "reading windows pass through",
-                UsageOutcome::Reading {
-                    windows: vec![UsageWindow {
-                        label: "5-hour".into(),
-                        used_percent: Some(41.0),
-                        resets_at: None,
-                    }],
-                    balance: None,
-                    meters: vec![],
-                    detail: None,
-                },
-                ProviderUsage {
-                    provider: "minimax".into(),
-                    logged_in: true,
-                    windows: vec![UsageWindow {
-                        label: "5-hour".into(),
-                        used_percent: Some(41.0),
-                        resets_at: None,
-                    }],
-                    balance: None,
-                    meters: vec![],
-                    detail: None,
-                    error: None,
-                },
-            ),
-            (
-                "reading balance + meters + detail pass through",
-                UsageOutcome::Reading {
-                    windows: vec![],
-                    balance: Some(BillingBalance {
-                        remaining: 12.34,
-                        monthly_spend: Some(1.5),
-                        currency: "USD".into(),
-                    }),
-                    meters: vec![UsageMeter::Metered {
-                        amount: amount.clone(),
-                    }],
-                    detail: Some("tier name".into()),
-                },
-                ProviderUsage {
-                    provider: "cursor".into(),
-                    logged_in: true,
-                    windows: vec![],
-                    balance: Some(BillingBalance {
-                        remaining: 12.34,
-                        monthly_spend: Some(1.5),
-                        currency: "USD".into(),
-                    }),
-                    meters: vec![UsageMeter::Metered {
-                        amount: amount.clone(),
-                    }],
-                    detail: Some("tier name".into()),
-                    error: None,
-                },
-            ),
-            (
-                "no credential -> logged_out envelope (no meter sentinel)",
-                UsageOutcome::NoCredential {
-                    hint: "Muse login missing. Run muse login again.".into(),
-                },
-                ProviderUsage {
-                    provider: "muse-code".into(),
-                    logged_in: false,
-                    windows: vec![],
-                    balance: None,
-                    meters: vec![],
-                    detail: None,
-                    error: Some("Muse login missing. Run muse login again.".into()),
-                },
-            ),
-            (
-                "rejected -> logged_out envelope",
-                UsageOutcome::Rejected {
-                    hint: "Invalid API key".into(),
-                },
-                ProviderUsage {
-                    provider: "kimi".into(),
-                    logged_in: false,
-                    windows: vec![],
-                    balance: None,
-                    meters: vec![],
-                    detail: None,
-                    error: Some("Invalid API key".into()),
-                },
-            ),
-            (
-                "rate limited -> unavailable envelope with rate message",
-                UsageOutcome::RateLimited {
-                    reason: "Rate limited — usage data temporarily unavailable".into(),
-                },
-                ProviderUsage {
-                    provider: "anthropic".into(),
-                    logged_in: true,
-                    windows: vec![],
-                    balance: None,
-                    meters: vec![],
-                    detail: None,
-                    error: Some("Rate limited — usage data temporarily unavailable".into()),
-                },
-            ),
-            (
-                "unavailable -> unavailable envelope with reason",
-                UsageOutcome::Unavailable {
-                    reason: "API error 500: upstream down".into(),
-                },
-                ProviderUsage {
-                    provider: "codex".into(),
-                    logged_in: true,
-                    windows: vec![],
-                    balance: None,
-                    meters: vec![],
-                    detail: None,
-                    error: Some("API error 500: upstream down".into()),
-                },
-            ),
-            (
-                "degraded -> logged_in with detail (ADR-0026 sk-proj- contract)",
-                UsageOutcome::Degraded {
-                    detail: "Monthly spend tracking requires an Organization Admin API Key (sk-admin-...)".into(),
-                },
-                ProviderUsage {
-                    provider: "openai".into(),
-                    logged_in: true,
-                    windows: vec![],
-                    balance: None,
-                    meters: vec![],
-                    detail: Some(
-                        "Monthly spend tracking requires an Organization Admin API Key (sk-admin-...)"
-                            .into(),
-                    ),
-                    error: None,
-                },
-            ),
-            (
-                "managed externally -> managed_externally meter",
-                UsageOutcome::ManagedExternally {
-                    platform: "AWS Bedrock".into(),
-                },
-                ProviderUsage {
-                    provider: "anthropic".into(),
-                    logged_in: true,
-                    windows: vec![],
-                    balance: None,
-                    meters: vec![UsageMeter::ManagedExternally {
-                        platform: "AWS Bedrock".into(),
-                    }],
-                    detail: None,
-                    error: None,
-                },
-            ),
-        ];
-
-        for (name, outcome, expected) in cases {
-            let usage = outcome.into_usage(&expected.provider);
-            assert_eq!(
-                (
-                    usage.provider.as_str(),
-                    usage.logged_in,
-                    usage.error.as_deref(),
-                    usage.detail.as_deref(),
-                    usage.meters.len(),
-                    usage.windows.len(),
-                    usage.balance.is_some(),
-                ),
-                (
-                    expected.provider.as_str(),
-                    expected.logged_in,
-                    expected.error.as_deref(),
-                    expected.detail.as_deref(),
-                    expected.meters.len(),
-                    expected.windows.len(),
-                    expected.balance.is_some(),
-                ),
-                "{name}: projection mismatch"
-            );
-        }
-    }
-
-    /// The projection must never emit both `error` and a `UsageMeter::Unavailable`.
-    /// That's the dead-branch class Muse Code's pre-#1745 envelope exposed
-    /// (the panel's error branch precedes the meters branch in render order).
-    /// Pin every variant against this invariant.
-    #[test]
-    fn projection_never_emits_error_and_unavailable_meter_together() {
-        // Touch every variant of UsageOutcome — Reading is included because
-        // a future adapter bug could construct one with both fields.
-        let amount = UsageAmount {
-            used: 0.0,
-            limit: None,
-            remaining: None,
-            unit: "USD".into(),
-            used_percent: None,
-            resets_at: None,
-        };
-        let outcomes = vec![
-            UsageOutcome::Reading {
-                windows: vec![],
-                balance: None,
-                meters: vec![UsageMeter::Unavailable],
-                detail: None,
-            },
-            UsageOutcome::NoCredential { hint: "x".into() },
-            UsageOutcome::Rejected { hint: "x".into() },
-            UsageOutcome::RateLimited { reason: "x".into() },
-            UsageOutcome::Unavailable { reason: "x".into() },
-            UsageOutcome::Degraded { detail: "x".into() },
-            UsageOutcome::ManagedExternally {
-                platform: "AWS Bedrock".into(),
-            },
-        ];
-        for outcome in outcomes {
-            let usage = outcome.into_usage("p");
-            let has_unavailable_meter = usage
-                .meters
-                .iter()
-                .any(|m| matches!(m, UsageMeter::Unavailable));
-            let has_error = usage.error.is_some();
-            assert!(
-                !(has_error && has_unavailable_meter),
-                "projection must never emit both error and UsageMeter::Unavailable; got: {usage:?}"
-            );
-            // Silence the unused warning on `amount` — it documents the
-            // shape of a future Reading case but the Reading case here is
-            // intentionally a degraded one without the amount field.
-            let _ = amount;
-        }
-    }
-
-    /// `keep` table: one row per variant × configured/unconfigured. The
-    /// gate in `assemble_meters` reads this directly after the seam change.
-    #[test]
-    fn keep_predicate_table() {
-        let configured: HashSet<String> =
-            ["kimi", "openai"].iter().map(|s| s.to_string()).collect();
-        let unconfigured: HashSet<String> = HashSet::new();
-
-        let cases = vec![
-            // (variant, configured_set, id, expected_keep, name)
-            (
-                UsageOutcome::Reading {
-                    windows: vec![],
-                    balance: None,
-                    meters: vec![],
-                    detail: None,
-                },
-                &configured,
-                "kimi",
-                true,
-                "Reading kept regardless of configured_keys",
-            ),
-            (
-                UsageOutcome::NoCredential { hint: "x".into() },
-                &configured,
-                "kimi",
-                false,
-                "NoCredential always dropped (even when configured)",
-            ),
-            (
-                UsageOutcome::NoCredential { hint: "x".into() },
-                &unconfigured,
-                "kimi",
-                false,
-                "NoCredential always dropped (unconfigured)",
-            ),
-            (
-                UsageOutcome::Rejected { hint: "x".into() },
-                &configured,
-                "kimi",
-                true,
-                "Rejected kept when configured (Invalid API key affordance)",
-            ),
-            (
-                UsageOutcome::Rejected { hint: "x".into() },
-                &unconfigured,
-                "kimi",
-                false,
-                "Rejected dropped when unconfigured",
-            ),
-            (
-                UsageOutcome::RateLimited { reason: "x".into() },
-                &configured,
-                "kimi",
-                true,
-                "RateLimited kept regardless",
-            ),
-            (
-                UsageOutcome::Unavailable { reason: "x".into() },
-                &unconfigured,
-                "kimi",
-                true,
-                "Unavailable kept regardless",
-            ),
-            (
-                UsageOutcome::Degraded { detail: "x".into() },
-                &configured,
-                "kimi",
-                true,
-                "Degraded kept regardless",
-            ),
-            (
-                UsageOutcome::ManagedExternally {
-                    platform: "AWS Bedrock".into(),
-                },
-                &configured,
-                "kimi",
-                true,
-                "ManagedExternally kept regardless",
-            ),
-        ];
-
-        for (outcome, configured_set, id, expected_keep, name) in cases {
-            assert_eq!(outcome.keep(configured_set, id), expected_keep, "{name}");
-        }
-    }
-}
+#[path = "outcome_tests.rs"]
+mod tests;

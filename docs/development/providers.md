@@ -43,6 +43,26 @@ OAuth login.
 Never derive remaining allowance from local requests or MSP token/context
 events, and never fold it into a Meta Model API pay-as-you-go wallet.
 
+**Where a new provider's usage endpoint goes.** The seam is
+`UsageAdapter` (`services/usage/adapter.rs`), and a new provider's file under
+`services/usage/adapters/` owns that provider's whole fetch: the credential
+read, the HTTP request, the response parse, and the wording that provider
+uses for a failure. (`freebuff` is the one adapter whose fetch lives
+elsewhere, in `services/freebuff_usage.rs`.) The shared `fetch_usage` driver
+in the same module owns the request → status → parse flow for the adapters
+that use it — the list is in `adapters/mod.rs`; the adapter supplies the
+request builder, the parse step and a `ResponsePolicy` (in
+`services/usage/outcome.rs`) for the wording. `agy` uses the driver for its
+model-API fallback only; its quota-summary read carries its own status
+handling, as do the adapters outside that list. A provider that needs a
+second, best-effort read — Command Code's subscription lookup supplies the
+monthly meter the credits endpoint does not carry — uses the driver's
+enrichment (`services/usage/adapter.rs`), so a failed second read leaves the
+first read's reading standing. A new provider therefore gets a new file
+under `services/usage/adapters/`, registered in `adapters/mod.rs` and
+dispatched from `catalog.rs`. `services/usage.rs` is orchestration only: it
+holds no provider HTTP code, token read, or response parse (issue #2528).
+
 **Freebuff daily allowance.** The native adapter reads the CLI's
 `$XDG_CONFIG_HOME/manicode/credentials.json` or
 `~/.config/manicode/credentials.json`, accepting the current
@@ -146,7 +166,7 @@ with the Antigravity CLI User-Agent, and the API gates the response on the CLI
 version that User-Agent advertises. Below cli `1.2.0` it still answers
 `HTTP 200` but strips the "Gemini Models" (weekly + 5-hour) group, so both
 Gemini meters silently disappear — an old pin is a blank meter, not an error.
-`AGY_USER_AGENT` (`services/usage.rs`) pins the current published CLI version
+`AGY_USER_AGENT` (`services/usage/adapters/agy.rs`) pins the current published CLI version
 (`agy --version`), verified live 2026-10-16 at `1.4.0`: `1.1.5` returned only
 "Claude and GPT models", `1.2.0` added "Gemini Models", and `1.4.0` also returned
 the "Gemini 4 Argon" group.

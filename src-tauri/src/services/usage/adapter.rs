@@ -6,8 +6,7 @@
 //!
 //! ```text
 //! usage module (types + outcome + cache only, deep: small interface, shared taxonomy)
-//!              │ seam: UsageAdapter { id(), fetch(accounts) -> UsageOutcome,
-//!              │                       auth_policy() -> AuthPolicy }
+//!              │ seam: UsageAdapter { id(), fetch(accounts) -> UsageOutcome }
 //!    ┌─────────┼──────────┬──────────────┬─── …nth adapter
 //! anthropic  minimax   opencode   freebuff
 //! adapter    adapter   adapter    adapter
@@ -23,7 +22,7 @@
 //!   `Degraded` / `ManagedExternally` / `Reading` taxonomy is owned by
 //!   `super::outcome`, not by per-adapter envelope choices.
 //! - The shared [`fetch_usage`] driver classifies HTTP 401/403 according to
-//!   the adapter's [`super::outcome::AuthPolicy`] default, eliminating the
+//!   the adapter's [`super::outcome::ResponsePolicy`], eliminating the
 //!   per-adapter hand-rolled status ladder that drifted (MiniMax missing
 //!   the arm, Muse Code conflating no-credential with unavailable, Agy
 //!   mapping client-build errors to logged-out).
@@ -43,8 +42,8 @@
 //! [`super::outcome::UsageOutcome::into_usage`] projection (invoked by the
 //! catalog) is the sole mint site of the wire shape.
 
-use super::outcome::{AuthPolicy, UsageOutcome};
-use super::types::{UsageError, UsagePage, UsageWindow};
+use super::outcome::{ResponsePolicy, UsageEnrichmentPatch, UsageOutcome, UsageReading};
+use super::types::{UsageError, UsagePage};
 use crate::preferences::ProviderAccount;
 use crate::services::http_client::blocking_client_builder;
 use reqwest::blocking::{Client, RequestBuilder};
@@ -261,7 +260,9 @@ impl ClientOverrideGuard {
 
 /// Drives the shared request → status-check → parse flow. Callers reach this
 /// only once a credential is confirmed present, so any failure here is reported
-/// as logged-in-but-unavailable. `parse` maps a 2xx body to `(windows, detail)`.
+/// as logged-in-but-unavailable. `parse` maps a 2xx body to a
+/// [`UsageReading`] — windowed quota, an optional prepaid balance, meters and
+/// a detail line.
 ///
 /// Moved here from the `usage.rs` god-module so adapters import the driver
 /// from the seam, never from the fetcher module. Existing `parse_*` +
@@ -273,199 +274,156 @@ impl ClientOverrideGuard {
 /// mapped to `unavailable()` (red transport error), which is why MiniMax's
 /// revoked-key case rendered red text while its keyed siblings rendered
 /// "Invalid API key". The arm now classifies via the adapter's
-/// [`AuthPolicy`] so each provider gets the right variant.
+/// [`ResponsePolicy`] so each provider gets the right variant.
+///
+/// **Issue #2528 step 1**: the parse step widened from `(windows, detail)`
+/// to a [`UsageReading`], so a balance-style reading rides the shared driver
+/// instead of forcing a hand-rolled ladder, and the driver's failure wording
+/// moved into an explicit [`ResponsePolicy`] so per-provider remediation copy
+/// is a parameter rather than a forked implementation.
 ///
 /// The provider name is set by the catalog projection (see
 /// [`UsageOutcome::into_usage`]); this driver is intentionally
 /// provider-agnostic so adapters can't accidentally leak provider-id
 /// strings into the error variants.
 pub(crate) fn fetch_usage<F1, F2>(
-    auth_policy: AuthPolicy,
+    policy: ResponsePolicy,
     build_request: F1,
     parse: F2,
 ) -> UsageOutcome
 where
     F1: FnOnce(&Client) -> RequestBuilder,
-    F2: FnOnce(&str) -> Result<(Vec<UsageWindow>, Option<String>), UsageError>,
+    F2: FnOnce(&str) -> Result<UsageReading, UsageError>,
 {
     let client = match shared_client() {
         Ok(c) => c,
         Err(e) => return UsageOutcome::Unavailable { reason: e },
     };
+    match fetch_reading(&client, policy, build_request, parse) {
+        Ok(reading) => reading.into_outcome(),
+        Err(outcome) => outcome,
+    }
+}
 
+/// Drives the shared request → status-check → parse flow plus one
+/// best-effort enrichment read.
+///
+/// The enrichment is a second, independent read that *adds* to the primary
+/// one (Command Code's subscription lookup supplies the monthly meter the
+/// credits endpoint does not carry). It is best-effort: a failed enrichment
+/// leaves the primary read's reading as it was, which
+/// `outcome::UsageOutcome::Enriched` and the projection test beside it pin.
+///
+/// The returned outcome is [`UsageOutcome::Enriched`], whose wire projection
+/// is the primary reading with the enrichment's contribution merged in —
+/// see [`UsageEnrichmentPatch`] for the merge rules.
+pub(crate) fn fetch_usage_with_enrichment<F1, F2, F3>(
+    policy: ResponsePolicy,
+    build_request: F1,
+    parse: F2,
+    enrich: F3,
+) -> UsageOutcome
+where
+    F1: FnOnce(&Client) -> RequestBuilder,
+    F2: FnOnce(&str) -> Result<UsageReading, UsageError>,
+    F3: FnOnce(&Client) -> Result<Option<UsageEnrichmentPatch>, UsageError>,
+{
+    let client = match shared_client() {
+        Ok(c) => c,
+        Err(e) => return UsageOutcome::Unavailable { reason: e },
+    };
+    let mut reading = match fetch_reading(&client, policy, build_request, parse) {
+        Ok(reading) => reading,
+        Err(outcome) => return outcome,
+    };
+    if let Ok(Some(patch)) = enrich(&client) {
+        // A successful enrichment appends its windows and replaces the
+        // reading's balance and detail line — see [`UsageEnrichmentPatch`].
+        reading.windows.extend(patch.windows);
+        reading.balance = patch.balance;
+        reading.detail = patch.detail;
+    }
+    // Otherwise the enrichment added no contribution, or it failed. Either
+    // way the primary read's reading stands as it was. The provider's own closure
+    // reports *why* its enrichment failed; the driver only records that the
+    // second read was attempted.
+    UsageOutcome::Enriched {
+        reading: Box::new(reading.into_outcome()),
+    }
+}
+
+/// The shared status ladder: one request, one status check, one parse.
+///
+/// Returns the parsed reading on success, or the outcome the failure maps to.
+/// Split out of [`fetch_usage`] so the enriched driver runs the same
+/// ladder before adding its second read.
+fn fetch_reading<F1, F2>(
+    client: &Client,
+    policy: ResponsePolicy,
+    build_request: F1,
+    parse: F2,
+) -> Result<UsageReading, UsageOutcome>
+where
+    F1: FnOnce(&Client) -> RequestBuilder,
+    F2: FnOnce(&str) -> Result<UsageReading, UsageError>,
+{
     // Production request → response → parse. `shared_client` (above) may
     // be a test override installed by [`with_client_override`], letting
     // the timeout test drive the production path with a 1s client.
-    let request = build_request(&client);
-    match request.send() {
-        Ok(r) if matches!(r.status().as_u16(), 401 | 403) => {
-            let status = r.status().as_u16();
-            let body = r.text().unwrap_or_default();
-            let hint = format!("API error {status}: {body}");
-            match auth_policy {
-                AuthPolicy::Rejected => UsageOutcome::Rejected { hint },
-            }
+    let request = build_request(client);
+    let response = match request.send() {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(UsageOutcome::Unavailable {
+                reason: format!("Request failed: {}", e),
+            })
         }
-        Ok(r) if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
-            UsageOutcome::RateLimited {
-                reason: "Rate limited — usage data temporarily unavailable".to_string(),
-            }
-        }
-        Ok(r) if !r.status().is_success() => UsageOutcome::Unavailable {
+    };
+
+    let status = response.status();
+    if matches!(status.as_u16(), 401 | 403) {
+        let body = response.text().unwrap_or_default();
+        let hint = match policy.rejected_hint {
+            Some(hint) => hint.to_string(),
+            None => format!("API error {}: {}", status.as_u16(), body),
+        };
+        return Err(UsageOutcome::Rejected { hint });
+    }
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Err(UsageOutcome::RateLimited {
+            reason: "Rate limited — usage data temporarily unavailable".to_string(),
+        });
+    }
+    if !status.is_success() {
+        let body = response.text().unwrap_or_default();
+        return Err(UsageOutcome::Unavailable {
             reason: format!(
                 "API error {}: {}",
-                r.status().as_u16(),
-                r.text().unwrap_or_default()
+                status.as_u16(),
+                policy.error_body.render(&body)
             ),
-        },
-        Ok(r) => match parse(&r.text().unwrap_or_default()) {
-            Ok((windows, detail)) => UsageOutcome::Reading {
-                windows,
-                balance: None,
-                meters: Vec::new(),
-                detail,
-            },
-            Err(e) => UsageOutcome::Unavailable {
-                reason: format!("Failed to parse response: {}", e),
-            },
-        },
-        Err(e) => UsageOutcome::Unavailable {
-            reason: format!("Request failed: {}", e),
-        },
+        });
     }
+
+    let body = match response.text() {
+        Ok(body) => body,
+        Err(error) => match policy.body_read_error {
+            Some(copy) => {
+                return Err(UsageOutcome::Unavailable {
+                    reason: format!("{copy}: {error}"),
+                })
+            }
+            // The driver's original behaviour: an unreadable body reads as an
+            // empty body, so the parse step is the one that reports the
+            // failure.
+            None => String::new(),
+        },
+    };
+    parse(&body).map_err(|error| UsageOutcome::Unavailable {
+        reason: format!("Failed to parse response: {}", error),
+    })
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::preferences::BillingMode;
-
-    fn account(id: &str, api_key: Option<&str>) -> ProviderAccount {
-        ProviderAccount {
-            id: id.to_string(),
-            name: id.to_string(),
-            enabled: true,
-            billing_mode: BillingMode::PayAsYouGo,
-            claude_compatible: true,
-            api_key: api_key.map(str::to_string),
-        }
-    }
-
-    #[test]
-    fn api_key_rejects_missing_and_empty_keys() {
-        assert_eq!(api_key_for(&[], "keyed-test"), None);
-        assert_eq!(
-            api_key_for(&[account("keyed-test", None)], "keyed-test"),
-            None
-        );
-        assert_eq!(
-            api_key_for(&[account("keyed-test", Some(""))], "keyed-test"),
-            None
-        );
-        assert_eq!(
-            api_key_for(&[account("keyed-test", Some("k"))], "keyed-test"),
-            Some("k")
-        );
-        // Wrong provider id never leaks a key across providers.
-        assert_eq!(
-            api_key_for(&[account("other", Some("k"))], "keyed-test"),
-            None
-        );
-    }
-
-    #[test]
-    fn shared_client_applies_a_configured_request_timeout() {
-        // Verify the configured timeout on the actual production fetch
-        // path: install a 1s client via `with_client_override` (the
-        // shared_client seam), drive the production `fetch_usage`
-        // against an idle loopback listener, and assert the timeout
-        // envelope AND a narrow band tied to the configured value
-        // (0.8s..1.8s). The previous draft reproduced the
-        // request/status/parse algorithm in `fetch_usage_with`; this
-        // test exercises the production code itself.
-        //
-        // Tying the upper bound to the configured value with a small
-        // tolerance catches the regression class where the timeout
-        // is reduced (say) to 5s without anybody noticing because the
-        // test still passes.
-        //
-        // Issue #1745: `fetch_usage` now returns `UsageOutcome`; the
-        // timeout path is `UsageOutcome::Unavailable { reason: "Request failed: ..." }`.
-        const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
-        let client = blocking_client_builder()
-            .timeout(TIMEOUT)
-            .build()
-            .expect("test client build");
-        let (port, _server) = spawn_idle_loopback();
-        let start = std::time::Instant::now();
-        let outcome = with_client_override(client, || {
-            fetch_usage(
-                AuthPolicy::Rejected,
-                |c| c.get(format!("http://127.0.0.1:{port}/usage")),
-                |body| Ok((vec![], Some(body.to_string()))),
-            )
-        });
-        let elapsed = start.elapsed();
-        let reason = match &outcome {
-            UsageOutcome::Unavailable { reason } => reason.as_str(),
-            other => panic!("expected Unavailable outcome, got: {other:?}"),
-        };
-        assert!(
-            reason.starts_with("Request failed:"),
-            "expected reqwest timeout envelope, got reason: {reason:?}"
-        );
-        // IdleServer Drop joins the worker thread on every exit path
-        // (success or panic); the assertion below proves the timeout
-        // fired AFTER the connection was accepted, not because the
-        // listener was closed prematurely.
-        assert!(
-            elapsed >= std::time::Duration::from_millis(800),
-            "1s timeout must wait for the configured value; elapsed {elapsed:?}"
-        );
-        assert!(
-            elapsed < TIMEOUT + std::time::Duration::from_millis(800),
-            "configured timeout is {TIMEOUT:?}; elapsed {elapsed:?} should be within 800ms"
-        );
-    }
-
-    /// Spawns a TCP listener on `127.0.0.1:0` and a worker thread that
-    /// accepts one connection then idles until the returned [`IdleServer`]
-    /// guard's `Drop` runs. The guard deterministically stops the worker
-    /// thread and joins it so a panic in the test body still cleans up.
-    fn spawn_idle_loopback() -> (u16, IdleServer) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-        let port = listener.local_addr().unwrap().port();
-        listener.set_nonblocking(false).expect("blocking accept");
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let stop_for_thread = std::sync::Arc::clone(&stop);
-        let listener_thread = std::thread::spawn(move || {
-            if let Ok((stream, _)) = listener.accept() {
-                while !stop_for_thread.load(std::sync::atomic::Ordering::Acquire) {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                drop(stream);
-            }
-        });
-        let server = IdleServer {
-            stop,
-            handle: Some(listener_thread),
-        };
-        (port, server)
-    }
-
-    /// RAII guard: flips `stop` and joins the worker thread on Drop, so a
-    /// panic in the test body still cleans up the listener.
-    struct IdleServer {
-        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-        handle: Option<std::thread::JoinHandle<()>>,
-    }
-
-    impl Drop for IdleServer {
-        fn drop(&mut self) {
-            self.stop.store(true, std::sync::atomic::Ordering::Release);
-            if let Some(handle) = self.handle.take() {
-                let _ = handle.join();
-            }
-        }
-    }
-}
+#[path = "adapter_tests.rs"]
+mod tests;

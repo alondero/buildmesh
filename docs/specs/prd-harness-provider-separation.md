@@ -54,7 +54,7 @@ Specifically:
 - **Integration Tests**:
   - Mock API responses for usage stats to verify correct parsing of both `UsageWindow` and `BillingBalance` shapes.
 - **Prior Art**:
-  - Refer to existing tests in `src-tauri/src/preferences.rs` and `src-tauri/src/services/usage.rs`.
+  - Refer to existing tests in `src-tauri/src/preferences.rs` and `src-tauri/src/services/usage/`.
 
 ## Out of Scope
 
