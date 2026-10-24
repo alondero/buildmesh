@@ -127,6 +127,19 @@ remaining retention/coverage work.
 
 Process-global `static OnceCell<Mutex<_>>` caches with test-only `#[cfg(test)]` forks (or per-test `GH_AUTH_CACHE_TEST_LOCK`) are flaky — `cargo test -- --test-threads=8` still racy via snapshot-delta tricks and they hide production synchronization bugs (see #1482 preferences, #1483 gh-auth). Prefer an injectable struct (`services::gh_auth_cache::GhAuthCache` — single `Arc<Inner>` with `slot: Mutex<(Instant,bool)>` + `misses: AtomicU64` + injectable `now`/`auth` closures, `Mutex` held across `auth_fn` to coalesce concurrent misses to one HTTPS call). Wire one instance via `tauri::Builder::manage(GhAuthCache::new())` and take `tauri::State<GhAuthCache>` in the `#[command] async fn`; the `*_blocking` core takes `&GhAuthCache` and calls `cache.check()` directly (runs on `spawn_blocking`, so blocking there is the intended coalescing). Tests use `GhAuthCache::for_test_with_auth()` per `#[test]` (isolated counter, stubbed network, controllable `now` via `for_test_with_clock_and_auth` or `expire_for_test()`). See `src-tauri/src/services/gh_auth_cache.rs` and `src-tauri/src/lib.rs:manage`.
 
+## The mobile event broadcast is process-global — identify an event by its content
+`http::events` owns one `tokio::sync::broadcast` channel per process
+(`src-tauri/src/http/events.rs`), shared by its subscribers: the `/ws/events` WebSocket
+endpoint and the tests that subscribe. A test that emits its own event and asserts on
+the *next* event received therefore races its siblings — issue #2561 saw
+`http::events::tests::lifecycle_changed_delivers_through_broadcast` fail with
+`wrong variant` in the full Rust suite while an isolated rerun passed. Identify the event
+by its own content instead — the node id and kind this test published under — and
+correlate it with a helper that skips what it does not recognise. The payload assertions
+stay: an unrelated event is skipped rather than accepted in place of the intended one,
+and a missing event still fails the test. The same rule holds for any `broadcast` channel
+a test reads.
+
 ## Rust unit tests live in sibling `*_tests.rs` files
 A module's unit tests are a sibling `*_tests.rs` beside it, attached with `#[cfg(test)] #[path = "…_tests.rs"] mod tests;` instead of an inline `#[cfg(test)] mod tests { … }` (#2451 moved the fourteen largest inline blocks — `db/circuit/evidence.rs` alone carried ~4,800 test lines). **The module keeps the name `tests`, and that is load-bearing**, because a test's identity is its full path `<owner>::tests::<name>`: the `rust-tests` shard matrix in `.github/workflows/verify.yml` selects by *substring match* on that path, `scripts/harness-corpus.json` pins whole test names as gate commands (`agent::spawn_environment::tests::format_powershell_command`), and `scripts/known-flakes.json` keys flakes by full name. Some `#[path]` modules do take their name from the file instead (`commands::prune::prune_tests`), which is fine — but a *rename* moves every test path at once, so the shard filters, the corpus commands and the flake keys have to move with it or the CI filter silently runs zero tests.
 
