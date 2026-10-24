@@ -45,11 +45,36 @@ ordering, health, recovery and harness capability limits.
 ### False-Yield Suppression (issue #878)
 
 MiniMax Code Stop reconciliation reads the node's canonical `messages.jsonl`
-and native `background-tasks` store, resolved through its own session ID and
+and native task stores, resolved through its own session ID and
 spawn environment. It does not apply Claude's task scanner to MiniMax's
 temporary compatible hook transcript. Explicit and timeout-promoted launches
-remain pending until a native terminal tool receipt or terminal summary settles
-them. Missing or partial canonical history remains unavailable evidence. An
+remain pending until native terminal evidence settles them. MiniMax 0.6.13's
+`v2/sqlite/runtime-state.sqlite` retains task status in
+`local_runtime_background_tasks`; the reader opens it read-only and matches
+both the launched task ID and the canonical manifest's session ID. A terminal
+status with an end time at or after native task creation settles failed,
+cancelled and `lost` tasks too. `lost` is MiniMax's terminal startup-recovery
+state when its runtime restarted before a task completed; it proves termination,
+not successful work. The same terminal-status predicate reads native tool
+receipts and database rows. Their last `task_output` can still say `running`, and unlike successful
+commands they need not produce `background-tasks/<id>/summary.txt` or a later
+terminal transcript receipt. A running or unknown native row remains pending;
+missing SQLite storage retains the legacy receipt/summary behavior. An
+unreadable native store, or an existing database missing the task table, is
+unavailable evidence rather than a legacy fallback. Stop then degrades to an
+attention mark. The idle-stall detector uses the same session-bound registry
+reconciliation: an earlier failed or lost task cannot suppress a wake for
+another task that finished after the last assistant activity. Its canonical
+transcript path identifies the runtime store through the same resolver Stop
+uses, without reading another home. If an existing registry is busy, corrupt or
+missing its task table, wake detection returns no candidate even when a
+`summary.txt` exists. This conservatively preserves a possible newer native
+running-state veto. This is an intentional exception to the callback rule below:
+the periodic wake probe emits no attention mark itself. A permanently unreadable
+registry can suppress the nudge indefinitely without operator repair or a fresh
+Stop callback. A fresh Stop still marks unavailable evidence, even when summaries
+exist; a later probe resumes nudges once the registry is readable.
+Missing or partial canonical history remains unavailable evidence. An
 unanswered foreground tool call also leaves Stop completion evidence unavailable;
 its matching native result must arrive before Stop can report Ready. The
 native lookup runs even when the compatible transcript path is missing or empty.
@@ -57,7 +82,7 @@ If the first Stop precedes identity capture, it uses the validated callback
 session of the already resolved workspace owner; application still requires the
 existing generation and conditional identity fences.
 
-Claude Code ends its turn when it launches background work (`run_in_background` Bash, timeout-backgrounded commands) and re-invokes itself when the `<task-notification>` arrives — so a Stop (or 60s-idle Notification) is *not* always "the user is needed". The route reads `transcript_path` from the hook payload and asks `transcript_reader::count_pending_background_tasks` for launched-but-unnotified task IDs; finish = a `<task-id>` notification with a **terminal** status — `running`-status notifications don't count. A launch needs both halves of one exchange: a `tool_result` promising "You will be notified when it completes" **and** the `tool_use` it answers, named as a launch-capable tool (`Bash` — the only tool Claude Code launches background work from), with the receipt opening the result text. Wording alone is not evidence, since a tool result carries text too: an agent reading this repository's own source sees both launch phrasings quoted back in a `Read` result, and no notification can settle the task that wording alone would have registered. A receipt with no launch-capable call behind it owns no task. Pending work → the Node Turn is published via `node_turn::publish_hook` with `background_running` (naming/autopilot still fire; no attention mark). Permission-prompt Notifications always mark, even mid-background-wait. Any unknown (empty/garbage body, unreadable transcript) degrades to marking — never to silence.
+Claude Code ends its turn when it launches background work (`run_in_background` Bash, timeout-backgrounded commands) and re-invokes itself when the `<task-notification>` arrives — so a Stop (or 60s-idle Notification) is *not* always "the user is needed". The route reads `transcript_path` from the hook payload and asks `transcript_reader::count_pending_background_tasks` for launched-but-unnotified task IDs; finish = a `<task-id>` notification with a **terminal** status — `running`-status notifications don't count. A launch needs both halves of one exchange: a `tool_result` promising "You will be notified when it completes" **and** the `tool_use` it answers, named as a launch-capable tool (`Bash` — the only tool Claude Code launches background work from), with the receipt opening the result text. Wording alone is not evidence, since a tool result carries text too: an agent reading this repository's own source sees both launch phrasings quoted back in a `Read` result, and no notification can settle the task that wording alone would have registered. A receipt with no launch-capable call behind it owns no task. Pending work → the Node Turn is published via `node_turn::publish_hook` with `background_running` (naming/autopilot still fire; no attention mark). Permission-prompt Notifications always mark, even mid-background-wait. For Stop and Notification attention callbacks, unknown evidence (empty/garbage body, unreadable transcript) degrades to marking. The periodic MiniMax wake probe has the conservative silence exception described above.
 
 Claude Code can stop a background command through `TaskStop` without queuing a terminal task notification. The transcript scan also accepts a successful `TaskStop` result bound to the matching tool call and task ID. A failed stop, a request without its result, or unrelated tool output keeps that task pending. Stop and idle Notification callbacks use this same scan.
 

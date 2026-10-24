@@ -812,8 +812,8 @@ pub(super) fn turn_fence(
 /// The finished background task a yielded session has not read, when its
 /// harness's own runtime state says so.
 ///
-/// Pure file I/O against the session's transcript and the harness's task store —
-/// never a database read, so it cannot hold a connection across disk. Any
+/// Reads the transcript and external runtime state, including MiniMax's bounded,
+/// read-only SQLite lookup. No Buildmesh DB connection spans that I/O. Any
 /// failure (unknown harness, missing transcript, unparsable record, no task
 /// store) yields `None`: an unreadable session is not evidence of a stall.
 pub(super) fn stalled_background_task(node: &crate::models::AgentNode) -> Option<String> {
