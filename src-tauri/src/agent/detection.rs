@@ -163,6 +163,14 @@ const DETECTABLE: &[Detectable] = &[
         // state live in `~/.config/manicode/`. Either signal counts as installed.
         config_dirs: &[".config/manicode"],
     },
+    Detectable {
+        id: "perch",
+        name: "Perch",
+        harness: "perch",
+        binaries: &["perch"],
+        // perchai-cli keeps auth, threads, and settings under `~/.perch`.
+        config_dirs: &[".perch"],
+    },
 ];
 
 /// Harnesses whose WSL cross-runtime probes are deliberately disabled. Cline
@@ -1042,6 +1050,7 @@ fn profiles_from_wsl_probe(output: &str, distro: &str) -> Vec<HarnessProfile> {
 }
 
 #[cfg(test)]
+// allow-test-in-production: this detection pin predates the sibling-test-file rule. Perch is one more detectable binary; moving the suite is out of scope.
 mod tests {
 
     #[test]
@@ -1720,6 +1729,7 @@ mod tests {
             "/bin/cmdc",
             "/bin/cmd",
             "/bin/freebuff",
+            "/bin/perch",
         ]);
         let profiles = detect_profiles(&path_dirs, &[""], None, &exists);
         for p in &profiles {
@@ -1739,6 +1749,7 @@ mod tests {
                 "dsh" => assert_eq!(provider, Provider::Dsh),
                 "commandcode" => assert_eq!(provider, Provider::CommandCode),
                 "freebuff" => assert_eq!(provider, Provider::Freebuff),
+                "perch" => assert_eq!(provider, Provider::Perch),
                 other => panic!("unexpected detected id {other}"),
             }
         }

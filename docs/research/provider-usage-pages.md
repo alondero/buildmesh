@@ -1,10 +1,10 @@
 # Provider usage page destinations
 
-Investigated 2026-10-02 for the usage meter link feature. This is a point-in-time evidence note for maintainers; provider routes and account interfaces may change. It records first-party destinations for all 14 built-in usage adapters, distinguishes dashboards from useful fallbacks, and matches each destination to the identity whose quota Buildmesh reads.
+Investigated 2026-10-02 for the usage meter link feature. This is a point-in-time evidence note for maintainers; provider routes and account interfaces may change. It records first-party destinations for all 15 built-in usage adapters, distinguishes dashboards from useful fallbacks, and matches each destination to the identity whose quota Buildmesh reads.
 
 ## Recommended destinations
 
-Use the provider-owned destination and label together. Ten destinations show usage or the wallet being measured; the remaining four are explicitly labeled console, guide, or subscription-management entries. Browser sign-in and account/workspace selection remain the provider's responsibility.
+Use the provider-owned destination and label together. Ten destinations show usage or the wallet being measured; the remaining five are explicitly labeled console, guide, or subscription-management entries. Browser sign-in and account/workspace selection remain the provider's responsibility.
 
 | Adapter | Tracked account | Destination | Link label | First-party evidence |
 | --- | --- | --- | --- | --- |
@@ -22,6 +22,7 @@ Use the provider-owned destination and label together. Ten destinations show usa
 | `deepseek` | DeepSeek API wallet | [DeepSeek API console](https://platform.deepseek.com/) | Open console | [Official API quickstart](https://api-docs.deepseek.com/quick_start/) establishes this provider console; [balance API docs](https://api-docs.deepseek.com/api/get-user-balance/) match the wallet being measured. Direct `/usage` verification was blocked by HTTP 403. |
 | `freebuff` | CLI-managed Freebuff account's daily allowance | [Freebuff usage settings](https://freebuff.com/?settings=usage) | View usage | Updated 2026-10-22 after inspecting the authenticated page and replaying its daily allowance request with the CLI bearer; see the [Freebuff contract](../development/providers.md#first-class-model-providers-and-the-credential-per-row-invariant). Supersedes the original Codebuff destination. |
 | `muse_code` | Meta account's Muse Code subscription | [Meta Accounts Center](https://accountscenter.meta.com/) | Manage plan | [Official Muse subscription docs](https://dev.meta.ai/docs/muse-code/subscriptions) direct subscription management and CLI `/upgrade` to Accounts Center. A subscription quota dashboard on the web was not established. |
+| `perch` | Perch CLI account's hosted PT allowance | [Perch Pro plan guide](https://www.perchai.app/docs/plans/pro) | Usage guide | [Pro](https://www.perchai.app/docs/plans/pro) and [Starter](https://www.perchai.app/docs/plans/starter) plan docs state the PT allowances. The account endpoint and row shapes were confirmed in perchai-cli 2.4.116 source, plus a 401 from an expired session, not a captured live snapshot. The link is a plan guide, not a settings deep link. |
 
 ## Scope of verification
 
@@ -58,6 +59,8 @@ DeepSeek `/usage` and the console home could not be inspected through the provid
 Antigravity's [plans documentation](https://antigravity.google/docs/plans) points to application Settings for baseline quota consumption; its [CLI usage command documentation](https://antigravity.google/docs/cli/commands/usage) describes an in-terminal quota panel. The guide is a useful provider destination and should be labeled **Usage guide**. Google One billing or AI credit balances have not been established as equivalent to the model quotas read by this adapter.
 
 Muse's [subscription documentation](https://dev.meta.ai/docs/muse-code/subscriptions) separates the CLI subscription from API keys billed pay-as-you-go, and directs subscription management to Accounts Center. The [Muse adapter](../../src-tauri/src/services/usage/adapters/muse_code.rs) requires Meta OAuth and reads subscription window/weekly percentages. Use **Manage plan** for Accounts Center; do not imply that the generic Meta API token/spend dashboard shows these subscription quotas.
+
+Perch's [Pro plan guide](https://www.perchai.app/docs/plans/pro) and [Starter plan guide](https://www.perchai.app/docs/plans/starter) explain the PT allowances the [Perch adapter](../../src-tauri/src/services/usage/adapters/perch.rs) reads from the CLI session. The product shows consumption in its own Settings, and the CLI shows it with `/usage`. Neither is a stable web route Buildmesh can open, so the Pro guide is labelled **Usage guide**. The Starter guide is cited beside it because that plan's monthly allowance is a different shape.
 
 ## Implementation implications
 

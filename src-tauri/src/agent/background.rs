@@ -307,6 +307,7 @@ fn decode_json_lines(stdout: &str, format: BackgroundResultOutput) -> Result<Str
 }
 
 #[cfg(test)]
+// allow-test-in-production: this background-recipe pin predates the sibling-test-file rule. Perch joins the harnesses with no one-shot recipe; moving the suite is out of scope.
 mod tests {
     use super::*;
     use crate::preferences::launch_configurations::{capture, LaunchOverrides};
@@ -489,7 +490,9 @@ mod tests {
 
     #[test]
     fn missing_capability_and_non_native_runtime_report_the_requirement() {
-        for harness in ["terminal", "freebuff", "cline", "cursor", "muse", "dsh"] {
+        for harness in [
+            "terminal", "freebuff", "cline", "cursor", "muse", "dsh", "perch",
+        ] {
             let error = resolve_plan(plan(harness), &AppPreferences::default())
                 .err()
                 .unwrap();

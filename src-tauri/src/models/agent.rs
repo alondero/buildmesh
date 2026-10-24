@@ -89,6 +89,9 @@ pub enum Provider {
     /// Cline CLI (`cline`) — interactive terminal coding agent.
     /// See `agent::provider::adapters::cline` (issue #1773).
     Cline,
+    /// Perch CLI (`perch`) — interactive coding agent from perchai-cli.
+    /// See `agent::provider::adapters::perch`.
+    Perch,
     /// Plain shell terminal (PowerShell on Windows, `sh` on macOS/Linux,
     /// routed through `wsl.exe` on WSL meshes). No LLM agent loop.
     /// See `agent::provider::adapters::terminal`.
@@ -112,6 +115,7 @@ impl Provider {
             Provider::Freebuff,
             Provider::Muse,
             Provider::Cline,
+            Provider::Perch,
             Provider::Terminal,
         ]
     }
@@ -155,6 +159,7 @@ impl Provider {
             "freebuff" => Some(Provider::Freebuff),
             "muse" => Some(Provider::Muse),
             "cline" => Some(Provider::Cline),
+            "perch" => Some(Provider::Perch),
             "terminal" => Some(Provider::Terminal),
             _ => None,
         }
@@ -178,6 +183,7 @@ impl Provider {
             Provider::Freebuff => &adapters::FREEBUFF,
             Provider::Muse => &adapters::MUSE,
             Provider::Cline => &adapters::CLINE,
+            Provider::Perch => &adapters::PERCH,
             Provider::Terminal => &adapters::TERMINAL,
         }
     }
@@ -199,6 +205,7 @@ impl std::fmt::Display for Provider {
             Provider::Freebuff => write!(f, "freebuff"),
             Provider::Muse => write!(f, "muse"),
             Provider::Cline => write!(f, "cline"),
+            Provider::Perch => write!(f, "perch"),
             Provider::Terminal => write!(f, "terminal"),
         }
     }

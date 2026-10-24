@@ -582,6 +582,10 @@ pub const COMMANDCODE_EFFORT_ALLOWED: &[&str] = &["low", "medium", "high"];
 /// resolver and the capability descriptor agree on the same vocabulary.
 pub const CLINE_EFFORT_ALLOWED: &[&str] = &["none", "low", "medium", "high", "xhigh"];
 
+/// The closed vocabulary Perch's `--effort` flag accepts (perchai-cli 2.4.116).
+pub const PERCH_EFFORT_ALLOWED: &[&str] =
+    &["off", "low", "medium", "high", "xhigh", "max", "ultra"];
+
 /// The closed vocabulary Muse Code's `--reasoning-effort <EFFORT>` accepts
 /// (issue #1704). Verified against the installed `Muse Code 1.3.0
 /// (1.3.0-R3401.1)` — `muse --help` prints "Meta reasoning effort:
@@ -601,6 +605,7 @@ pub const MUSE_EFFORT_ALLOWED: &[&str] = &[
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+// allow-test-in-production: this inventory predates the sibling-test-file rule. Perch extends the existing harness tables; moving the suite is out of scope.
 mod tests {
     use super::*;
 
@@ -664,6 +669,10 @@ mod tests {
 
     fn cline_caps() -> HarnessCapabilities {
         capabilities_for(&crate::agent::provider::adapters::CLINE)
+    }
+
+    fn perch_caps() -> HarnessCapabilities {
+        capabilities_for(&crate::agent::provider::adapters::PERCH)
     }
 
     /// Inventory pin (issue #1149 step 1) — every adapter's capability
@@ -1165,6 +1174,37 @@ mod tests {
                 "macos".to_string()
             ]
         );
+
+        // Perch is an interactive CLI. Resume is `--thread` on a fresh spawn
+        // and on resume. Effort is the closed `--effort` vocabulary. There is
+        // no attention hook, transcript reader, or prefill.
+        let perch = perch_caps();
+        assert_eq!(perch.harness_id, "perch");
+        assert!(perch.supports_resume);
+        assert!(perch.auto_resume_on_startup);
+        assert!(!perch.requires_attention_hook);
+        assert!(!perch.supports_passive_turn_watcher);
+        assert!(!perch.produces_readable_transcript);
+        assert!(perch.supports_model_override);
+        assert!(perch.supports_effort_override);
+        assert!(perch.supports_extra_args);
+        assert!(!perch.supports_prefill);
+        assert!(!perch.is_plain_terminal);
+        assert!(perch.background_inference.is_none());
+        assert_eq!(
+            perch.effort_control,
+            EffortControlKind::Closed {
+                allowed: PERCH_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
+            }
+        );
+        assert_eq!(
+            perch.available_on,
+            vec![
+                "windows".to_string(),
+                "linux".to_string(),
+                "macos".to_string()
+            ]
+        );
     }
 
     /// `supports_effort_override` must mirror `effort_control != None`. The
@@ -1188,6 +1228,7 @@ mod tests {
             muse_caps(),
             freebuff_caps(),
             cline_caps(),
+            perch_caps(),
         ] {
             let has_effort_control = !matches!(caps.effort_control, EffortControlKind::None);
             assert_eq!(
@@ -1227,6 +1268,7 @@ mod tests {
             &crate::agent::provider::adapters::MUSE,
             &crate::agent::provider::adapters::FREEBUFF,
             &crate::agent::provider::adapters::CLINE,
+            &crate::agent::provider::adapters::PERCH,
         ] {
             let from_trait = adapter.effort_control();
             let from_descriptor = capabilities_for(adapter).effort_control;
@@ -1806,6 +1848,7 @@ mod tests {
             ("opencode", opencode_caps(), "--auto"),
             ("commandcode", commandcode_caps(), "--yolo"),
             ("muse", muse_caps(), "--disable-approval"),
+            ("perch", perch_caps(), "--permission take_the_wheel"),
         ];
         for (id, caps, flag) in flag_harnesses {
             assert_eq!(caps.permission_modes.len(), 2, "{id}");

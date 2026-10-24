@@ -35,6 +35,7 @@ pub(crate) mod muse_code;
 pub(crate) mod openai;
 pub(crate) mod opencode;
 pub(crate) mod openrouter;
+pub(crate) mod perch;
 
 pub(crate) use agy::AgyAdapter;
 pub(crate) use anthropic::AnthropicAdapter;
@@ -50,3 +51,4 @@ pub(crate) use muse_code::MuseCodeAdapter;
 pub(crate) use openai::OpenaiAdapter;
 pub(crate) use opencode::OpencodeAdapter;
 pub(crate) use openrouter::OpenrouterAdapter;
+pub(crate) use perch::PerchAdapter;

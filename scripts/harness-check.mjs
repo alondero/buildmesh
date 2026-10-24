@@ -87,6 +87,7 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/agent/provider/adapters/codex_tests.rs': 'agent::provider::adapters::codex::tests',
   'src-tauri/src/agent/provider/adapters/grok_tests.rs': 'agent::provider::adapters::grok::provisioning_tests',
   'src-tauri/src/agent/provider/adapters/mcode_tests.rs': 'agent::provider::adapters::mcode::tests',
+  'src-tauri/src/agent/provider/adapters/perch_tests.rs': 'agent::provider::adapters::perch::tests',
   'src-tauri/src/circuit/delivery_tests.rs': 'circuit::delivery::tests',
   'src-tauri/src/commands/git_status_bench.rs': 'commands::git_tests',
   'src-tauri/src/commands/git_status_counts_tests.rs': 'commands::git_tests::status_counts',
@@ -138,6 +139,7 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/services/usage/adapters/grok_tests.rs': 'services::usage::adapters::grok::tests',
   'src-tauri/src/services/usage/adapters/minimax_tests.rs': 'services::usage::adapters::minimax::tests',
   'src-tauri/src/services/usage/adapters/opencode_tests.rs': 'services::usage::adapters::opencode::tests',
+  'src-tauri/src/services/usage/adapters/perch_tests.rs': 'services::usage::adapters::perch::tests',
 };
 
 // A Rust production file whose tests live in a sibling `<stem>_tests` module

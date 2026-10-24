@@ -110,6 +110,7 @@ fn inspector_label(provider: Provider) -> &'static str {
         Provider::Freebuff => "Freebuff",
         Provider::Muse => "Meta Muse",
         Provider::Cline => "Cline",
+        Provider::Perch => "Perch",
         Provider::Terminal => "Terminal",
     }
 }

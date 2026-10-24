@@ -20,6 +20,7 @@ export type InspectorHarnessId =
   | "freebuff"
   | "muse"
   | "cline"
+  | "perch"
   | "terminal";
 
 type Catalog = {
@@ -44,6 +45,7 @@ export const HARNESS_CATALOG = {
     "freebuff",
     "muse",
     "cline",
+    "perch",
     "terminal"
   ],
   "labels": {
@@ -60,6 +62,7 @@ export const HARNESS_CATALOG = {
     "mcode": "MiniMax Code",
     "muse": "Meta Muse",
     "opencode": "OpenCode",
+    "perch": "Perch",
     "terminal": "Terminal"
   },
   "capabilities": {
@@ -677,6 +680,53 @@ export const HARNESS_CATALOG = {
       "supports_model_override": true,
       "supports_passive_turn_watcher": false,
       "supports_prefill": true,
+      "supports_resume": true
+    },
+    "perch": {
+      "attention_capability": {
+        "kind": "none"
+      },
+      "auto_resume_on_startup": true,
+      "available_on": [
+        "windows",
+        "linux",
+        "macos"
+      ],
+      "background_inference": null,
+      "default_permission_mode": "unattended",
+      "effort_control": {
+        "allowed": [
+          "off",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max",
+          "ultra"
+        ],
+        "kind": "closed"
+      },
+      "harness_id": "perch",
+      "is_plain_terminal": false,
+      "permission_modes": [
+        {
+          "description": "Prompts off — Perch acts without asking (required for unattended runs).",
+          "id": "unattended",
+          "label": "--permission take_the_wheel"
+        },
+        {
+          "description": "Perch asks for confirmation the way a human-launched session does.",
+          "id": "prompt",
+          "label": "Prompts on (no flag)"
+        }
+      ],
+      "produces_readable_transcript": false,
+      "requires_attention_hook": false,
+      "supports_effort_override": true,
+      "supports_extra_args": true,
+      "supports_model_override": true,
+      "supports_passive_turn_watcher": false,
+      "supports_prefill": false,
       "supports_resume": true
     },
     "terminal": {
