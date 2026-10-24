@@ -96,7 +96,6 @@ makes a move behaviour-preserving.
 | `agent/provider/adapters/codex.rs` | ~3.8k | One harness adapter. Attention-hook provisioning, install and runtime detection, native and WSL profile materialisation, then the `impl AgentProvider` trait surface. |
 | `circuit/stepper.rs` | ~3.6k | The pure `advance` decision core. Its tests live in `circuit/stepper/tests.rs` (~6.1k non-blank lines). |
 | `circuit/model.rs` | ~3.4k | The graph AST and its validation and serialisation. |
-| `services/usage.rs` | ~3.2k | Usage-meter orchestration. Per-provider logic already lives in `services/usage/adapters/`. |
 | `services/agent_node.rs` | ~3.2k | Agent Node create, regenerate, and teardown orchestration. |
 | `commands/pr.rs` | ~3.0k | Pull-request commands. Also [seam debt](#seam-debt): it still opens repositories. |
 | `agent/process.rs` | ~2.8k | Agent process supervision and teardown. |

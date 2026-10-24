@@ -1,0 +1,7 @@
+{
+  "windowLimits": {
+    "fiveHour": { "cap": 14, "used": 0, "resetAt": 0 },
+    "weekly": { "cap": 35, "used": 7, "resetAt": 1789547227218 }
+  },
+  "credits": { "monthlyCredits": 35, "purchasedCredits": 3, "freeCredits": 2 }
+}

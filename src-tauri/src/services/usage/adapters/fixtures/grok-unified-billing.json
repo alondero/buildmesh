@@ -1,0 +1,8 @@
+{
+  "config": {
+    "currentPeriod": { "type": "USAGE_PERIOD_TYPE_WEEKLY" },
+    "creditUsagePercent": 37.0,
+    "isUnifiedBillingUser": true,
+    "billingPeriodEnd": "2026-08-31T00:00:00+00:00"
+  }
+}

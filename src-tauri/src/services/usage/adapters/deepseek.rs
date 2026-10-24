@@ -65,10 +65,10 @@ impl UsageAdapter for DeepseekAdapter {
 // need a separate fetcher.
 //
 // `deepseek_usage` mirrors `kimi_usage` / `openrouter_usage`: a direct HTTP
-// fetch (not via the shared `fetch_usage` driver) because it populates
-// `balance`, not `windows` + `detail`. The `fetch_usage` driver could be
-// generalised to support both shapes; that work is deferred behind
-// `parse_minimax_balance`'s follow-up (see comment near `parse_kimi_response`).
+// fetch rather than the shared `fetch_usage` driver. The driver's parse step
+// returns a `UsageReading`, which carries a balance alongside the windows
+// (issue #2528 step 1) — so the balance-only shape fits the driver's parse
+// step, and moving DeepSeek onto the driver is a separate piece of work.
 
 #[derive(Deserialize, Debug)]
 struct DeepSeekBalanceInfo {

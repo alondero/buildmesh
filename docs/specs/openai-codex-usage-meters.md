@@ -199,7 +199,7 @@ A mixed reply may include both rolling windows and spend/credit fields. `plan_ty
 
 ## 4. TypeScript & Rust Wire Types
 
-### 4.1 Rust Structs (`src-tauri/src/services/usage.rs`)
+### 4.1 Rust Structs (`src-tauri/src/services/usage/types.rs`)
 
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
@@ -282,5 +282,5 @@ export interface ProviderUsage {
 - [x] Specify cross-platform auth file discovery across Windows host and WSL (#1110).
 - [x] Standardize wire contract and DTO mapping (#1111).
 - [x] Lock technical specification and ADR document (#1112).
-- [ ] Implement `codex_usage()` and `openai_usage()` in `src-tauri/src/services/usage.rs`.
-- [ ] Add unit and mock integration tests in `src-tauri/src/services/usage.rs`.
+- [ ] Implement `codex_usage()` and `openai_usage()` in `src-tauri/src/services/usage/adapters/codex.rs` and `src-tauri/src/services/usage/adapters/openai.rs`.
+- [ ] Add unit and mock integration tests in the same adapter modules.
