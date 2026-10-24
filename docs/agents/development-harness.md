@@ -458,6 +458,21 @@ are collector unit tests, with one real-browser warning case retaining the CLI
 integration. Exact millisecond search benchmarks do not belong in the shared
 correctness gate; Omnibar matching, ranking and limits remain covered there.
 
+React Testing Library polls an async query for 1s before it reports a miss.
+The suite gives that wait the same budget philosophy as its 30s per-test
+budget: `tests/setup/vitest.setup.ts` sets a 10s async-query budget for the
+suite's files, because on Windows the machine decides how long a render
+takes. The last #2539 failure was that budget rather than a product defect —
+the Agent Harness defaults reset button renders only after `list_providers`
+lands, `get_app_preferences` delivers the stored default and the section's
+re-key effect has flushed, and that wait measured 305-889ms inside a real
+`npm run verify`, whose `frontend-tests` gate shares the machine with a
+concurrent Rust compile. That is within 11% of RTL's 1s default, so one
+more contention burst failed a test that passes in isolation. The ceiling
+applies to the wait, not to the expectation: a query that is already
+satisfied resolves on its first check, so a larger ceiling only widens the
+window in which a slow render can still land.
+
 Vite's ordinary optimizer cache lives in this worktree's `.tmp/vite`, outside
 the potentially shared `node_modules`. Each `ui-shot --serve` child instead gets
 a private directory under `.tmp/ui-shot-vite`, passed through
