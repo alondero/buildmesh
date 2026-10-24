@@ -91,16 +91,25 @@ makes a move behaviour-preserving.
 | File | Non-blank lines | Notes |
 |---|---|---|
 | `services/circuit_worker/tests.rs` | 7,186 | The largest file in the crate — the circuit loop's tests. |
-| `circuit/stepper/tests.rs` | 6,738 | The pure `advance` decision core's tests. |
+| `circuit/stepper/tests.rs` | 6,739 | The pure `advance` decision core's tests. |
+| `db/circuit/evidence_tests.rs` | 4,667 | The circuit evidence module's tests. |
 | `circuit/stepper.rs` | 4,454 | The pure `advance` decision core. |
-| `services/usage.rs` | 3,468 | Usage-meter orchestration. Per-provider logic already lives in `services/usage/adapters/`. |
+| `db/circuit_tests.rs` | 4,143 | The `db/circuit` module's tests. |
+| `http/routes/attention/tests.rs` | 3,326 | The attention route's tests. |
+| `db/migration_tests.rs` | 2,781 | The schema-migration suite. |
 | `db/circuit/ledger.rs` | 2,777 | The `commit_circuit_advance` transaction. |
+| `services/github/prs.rs` | 2,535 | Pull-request listing, merge strategy, and contributor data. |
+| `db/agent_node.rs` | 2,508 | Agent Node persistence and the pending worktree-removal queue. |
+| `services/transcript_reader/report_snapshot_tests.rs` | 2,452 | The report snapshot module's tests. |
+| `db/migrations.rs` | 2,401 | The schema-evolution registry — `SCHEMA_VERSION` lives here. |
 | `db/circuit/evidence.rs` | 2,337 | Circuit evidence and outcome recording: `history`, `attention`, `record_outcome`, `commit_transition`, effect claiming. |
 | `agent/process.rs` | 1,999 | Agent process supervision and teardown. |
+| `commands/agent.rs` | 1,967 | Agent spawn command wrappers. |
+| `services/usage/adapters/cursor.rs` | 1,962 | The Cursor usage adapter. Per-provider usage logic lives in `services/usage/adapters/`. |
 | `services/circuit_worker/mod.rs` | 1,950 | The impure circuit loop. Effect dispatch lives in `dispatch.rs`. |
 | `agent/provider/adapters/codex.rs` | 1,867 | One harness adapter. Attention-hook provisioning, install and runtime detection, native and WSL profile materialisation, then the `impl AgentProvider` trait surface. |
-| `commands/diff.rs` | 1,841 | The per-file diff view: hunk building and syntax highlighting. The git2 side lives in `git/diff.rs` and `git/state.rs`. |
 | `circuit/model.rs` | 1,840 | The graph AST and its validation and serialisation. |
+| `commands/diff.rs` | 1,837 | The per-file diff view: hunk building and syntax highlighting. The git2 side lives in `git/diff.rs` and `git/state.rs`. |
 | `commands/build_run.rs` | 1,733 | Build and run command orchestration. |
 | `services/agent_node.rs` | 1,579 | Agent Node create, regenerate, and teardown orchestration. |
 | `commands/pr.rs` | 1,283 | Pull-request commands. The git2 side lives in `git/remote.rs`. |

@@ -45,9 +45,10 @@ impl UsageAdapter for CodexAdapter {
     // Issue #1745 phase 2 step 13: codex migrated to the outcome seam.
     // Missing credential → `NoCredential`. 401/403 → `Rejected` with the
     // session-expired remediation. 429 → `RateLimited`. Transport /
-    // non-2xx / parse → `Unavailable`. The ladder stays hand-rolled (the
-    // kimi precedent): the shared `fetch_usage` driver cannot carry codex's
-    // balance + meters reading.
+    // non-2xx / parse → `Unavailable`. The ladder stays hand-rolled for now:
+    // since issue #2528 the shared driver's parse step returns a
+    // `UsageReading`, so it can carry codex's balance + meters reading —
+    // moving codex onto it is a separate piece of work.
     fn fetch(&self, _accounts: &[ProviderAccount]) -> UsageOutcome {
         codex_usage()
     }

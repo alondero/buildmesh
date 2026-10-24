@@ -1,0 +1,7 @@
+{
+  "windows": [
+    { "label": "5-hour", "usedPercent": 25.0, "resetsAt": "2026-07-20T22:00:00Z" },
+    { "label": "Weekly", "usedPercent": 12.0, "resetsAt": "2026-07-22T00:00:00Z" },
+    { "label": "Monthly", "usedPercent": 4.5, "resetsAt": "2026-08-01T00:00:00Z" }
+  ]
+}

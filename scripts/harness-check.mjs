@@ -130,6 +130,14 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/services/pool_worker_tests.rs': 'services::pool_worker::tests',
   'src-tauri/src/services/transcript_reader/report_snapshot_tests.rs': 'services::transcript_reader::report_snapshot::tests',
   'src-tauri/src/services/warm_pool_tests.rs': 'services::warm_pool::tests',
+  'src-tauri/src/commands/usage_tests.rs': 'commands::usage::tests',
+  'src-tauri/src/services/usage/adapter_tests.rs': 'services::usage::adapter::tests',
+  'src-tauri/src/services/usage/outcome_tests.rs': 'services::usage::outcome::tests',
+  'src-tauri/src/services/usage/adapters/agy_tests.rs': 'services::usage::adapters::agy::tests',
+  'src-tauri/src/services/usage/adapters/commandcode_tests.rs': 'services::usage::adapters::commandcode::tests',
+  'src-tauri/src/services/usage/adapters/grok_tests.rs': 'services::usage::adapters::grok::tests',
+  'src-tauri/src/services/usage/adapters/minimax_tests.rs': 'services::usage::adapters::minimax::tests',
+  'src-tauri/src/services/usage/adapters/opencode_tests.rs': 'services::usage::adapters::opencode::tests',
 };
 
 // A Rust production file whose tests live in a sibling `<stem>_tests` module

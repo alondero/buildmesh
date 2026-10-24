@@ -34,7 +34,7 @@ For backend seams and module ownership, see the
 | Area | Owner doc | Owning code |
 |---|---|---|
 | Frontend IPC facets, transport ownership, live event streams | [frontend-ipc.md](development/frontend-ipc.md) | `src/lib/tauri/`, `src/lib/tauri.ts`, `src/lib/streams/`, `eslint.config.js` |
-| Model providers, usage meters, credentials, spawn recipes | [providers.md](development/providers.md) | `src-tauri/src/preferences/`, `src-tauri/src/services/usage.rs`, `src-tauri/src/services/windows_cred.rs`, `src-tauri/src/agent/provider/` |
+| Model providers, usage meters, credentials, spawn recipes | [providers.md](development/providers.md) | `src-tauri/src/preferences/`, `src-tauri/src/services/usage/adapters/`, `src-tauri/src/services/windows_cred.rs`, `src-tauri/src/agent/provider/` |
 | Terminals, xterm lifecycle, PTY input and output streaming | [terminals.md](development/terminals.md) | `src/components/Terminal/`, `src-tauri/src/pty/` |
 | Agent Node lifecycle, process registry, worktrees | [agent-nodes.md](development/agent-nodes.md) | `src-tauri/src/services/agent_node.rs`, `src-tauri/src/agent/`, `src-tauri/src/git/worktree/` |
 | Attention system, hooks, turn counting, node naming | [attention.md](development/attention.md) | `src-tauri/src/http/routes/attention.rs`, `src-tauri/src/commands/attention.rs`, `src-tauri/src/agent/session_lifecycle/` |

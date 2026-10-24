@@ -61,7 +61,7 @@ pub struct HarnessProfile {
 /// How a [`ProviderAccount`] is billed — drives how usage is rendered (issue #537).
 ///
 /// `Plan` accounts (seat/subscription) show utilization percentage bars; `PayAsYouGo`
-/// accounts (API credits) show a cash [`crate::services::usage::BillingBalance`] card.
+/// accounts (API credits) show a cash [`crate::services::usage::types::BillingBalance`] card.
 ///
 /// Generated to src/types/generated/BillingMode.ts (issue #537).
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, TS)]

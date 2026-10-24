@@ -1,0 +1,15 @@
+{
+  "models": {
+    "m-claude": {
+      "displayName": "Claude Sonnet 4.6 (Thinking)",
+      "quotaInfo": { "remainingFraction": 1.0, "resetTime": "2026-05-31T16:51:02Z" }
+    },
+    "m-flash": {
+      "displayName": "Gemini 3.5 Flash (Medium)",
+      "quotaInfo": { "remainingFraction": 0.5, "resetTime": "2026-05-31T12:22:46Z" }
+    }
+  },
+  "agentModelSorts": [
+    { "displayName": "Recommended", "groups": [{ "modelIds": ["m-claude", "m-flash"] }] }
+  ]
+}

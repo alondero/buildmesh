@@ -27,7 +27,7 @@ Use the provider-owned destination and label together. Ten destinations show usa
 
 The original investigation used public documentation, first-party web routes/redirects, and publicly deployed JavaScript. The Freebuff follow-up on 2026-10-22 additionally used the user's authenticated browser and CLI bearer for read-only allowance requests. An unauthenticated page or sign-in redirect establishes a public entry route, not the contents or permissions of every signed-in account.
 
-The repository account contexts were checked against the owning [usage adapters](../../src-tauri/src/services/usage/adapters/mod.rs), the remaining [legacy fetchers](../../src-tauri/src/services/usage.rs), and the [Freebuff fetcher](../../src-tauri/src/services/freebuff_usage.rs). These sources establish which identity each meter measures; first-party documentation establishes the corresponding web destination.
+The repository account contexts were checked against the owning [usage adapters](../../src-tauri/src/services/usage/adapters/mod.rs), the [Freebuff fetcher](../../src-tauri/src/services/freebuff_usage.rs), and the [usage seam](../../src-tauri/src/services/usage/adapter.rs). These sources establish which identity each meter measures; first-party documentation establishes the corresponding web destination.
 
 ### Claude, Codex, and OpenAI identity boundaries
 
@@ -43,13 +43,13 @@ The old `https://platform.moonshot.ai/console` now redirects to `https://platfor
 
 ### Grok deep-link evidence
 
-The [Grok adapter](../../src-tauri/src/services/usage/adapters/grok.rs) delegates to the CLI billing fetcher, which uses `cli-chat-proxy.grok.com` and CLI-specific authentication. Its payload includes unified weekly usage, on-demand spending, prepaid balance, and legacy monthly-limit shapes. The [official consumer FAQ](https://docs.x.ai/grok/faq) describes Settings > Usage for the shared pool across products including Build; the API team's separate xAI Console is not interchangeable with that account.
+The [Grok adapter](../../src-tauri/src/services/usage/adapters/grok.rs) owns the CLI billing fetcher, which uses `cli-chat-proxy.grok.com` and CLI-specific authentication. Its payload includes unified weekly usage, on-demand spending, prepaid balance, and legacy monthly-limit shapes. The [official consumer FAQ](https://docs.x.ai/grok/faq) describes Settings > Usage for the shared pool across products including Build; the API team's separate xAI Console is not interchangeable with that account.
 
 The public [Grok settings-store module](https://cdn.grok.com/_next/static/chunks/2c4yk92w1hb5e.js) includes `usage` in its allowed settings tabs, reads `_s` from the URL, and opens the specified allowed tab. That establishes `https://grok.com/?_s=usage` without guessing a route from the documented billing deep link. The [public billing-view module](https://cdn.grok.com/_next/static/chunks/3vdn2ugwfi7dx.js) includes the same credit-usage percentage, on-demand cap/used, prepaid balance, and reset fields as the CLI parser. Account-specific legacy presentation was not authenticated during this investigation.
 
 ### Console and management fallbacks
 
-OpenCode's [Go docs](https://opencode.ai/docs/go/) explicitly link current usage to `https://opencode.ai/auth`. The [Buildmesh live fetcher](../../src-tauri/src/services/usage.rs) needs a workspace ID for `billing.get`; its SQLite fallback is a local estimate. Use the official console entry with **Open console**, letting the provider select a workspace. A static route must not embed a workspace ID from another account. The console can differ from a local estimate during fallback operation.
+OpenCode's [Go docs](https://opencode.ai/docs/go/) explicitly link current usage to `https://opencode.ai/auth`. The [Buildmesh live fetcher](../../src-tauri/src/services/usage/adapters/opencode.rs) needs a workspace ID for `billing.get`; its SQLite fallback is a local estimate. Use the official console entry with **Open console**, letting the provider select a workspace. A static route must not embed a workspace ID from another account. The console can differ from a local estimate during fallback operation.
 
 Command Code's [official Usage link](https://commandcode.ai/docs/resources/pricing-limits) is `/usage`. It redirects unauthenticated requests to `/signin?returnTo=/settings/usage`. This avoids embedding the account slug used in the earlier [monthly-usage investigation](command-code-monthly-usage.md). The destination is more durable than a personal `/<slug>/settings/usage` URL.
 

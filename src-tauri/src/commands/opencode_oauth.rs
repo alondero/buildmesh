@@ -228,7 +228,7 @@ pub async fn get_opencode_console_status() -> Result<OpenCodeConsoleStatus, Stri
 
 /// Switches the persisted credential's `workspace_id` to a new value
 /// without touching the bearer or refresh_token. The live probe at
-/// `services::usage::opencode_usage_impl_with_hosts` reads
+/// `services::usage::adapters::opencode::opencode_usage_impl_with_hosts` reads
 /// `workspace_id` from the freshly-persisted blob, so the next
 /// `getProviderMeters(force=true)` fetch returns usage for the
 /// newly-bound account.

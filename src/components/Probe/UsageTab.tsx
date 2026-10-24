@@ -116,7 +116,7 @@ import { useProbeResource, type ProbeLoadContext } from '../../lib/probeResource
  * The "Refreshed just now" / "Xs ago" indicator is stamped on the
  * React side at the moment the resource read resolves, NOT at the moment
  * each provider's vendor endpoint returned. The Rust cache
- * (`services/usage.rs::CACHE_TTL`, 5 min) means a request can come
+ * (`services/usage/cache.rs::CACHE_TTL`, 5 min) means a request can come
  * back fast without any vendor being contacted — the indicator
  * then mislabels a cache hit as a fresh fetch. The fix is a wire-
  * shape change:
