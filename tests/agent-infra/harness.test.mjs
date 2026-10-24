@@ -261,7 +261,11 @@ test('one + (exact) sibling', () => { throw new Error('persistent sibling'); });
   assert.equal(collection.failures[0].rerun, undefined);
   fixture.put('vitest.config.mjs', 'export default { test: { include: ["tests/*.test.*"], environment: "node" } };');
   fixture.put('tests/isolation.test.js', "import { test, expect } from 'vitest'; test.skipIf(process.env.VITEST_MAX_WORKERS === '1')('same name', () => { expect(false).toBe(true); });");
-  fixture.put('tests/isolation.test.jsx', "import { test, expect } from 'vitest'; test('same name', () => { expect(true).toBe(true); });");
+  // The sibling test has to be GREEN so the gate has one passing and one
+  // failing test with the same name. Its assertion must not compare a value
+  // with itself — that assertion passes for any value, and issue #2534's
+  // tautology guard rejects it.
+  fixture.put('tests/isolation.test.jsx', "import { test, expect } from 'vitest'; test('same name', () => { expect([1, 2, 3].length).toBe(3); });");
   const skipped = await runGate(fixture.cwd, gate, fixture.base);
   assert.equal(skipped.outcome, 'FAIL');
   assert.equal(skipped.failures[0].rerun.count, 0);
@@ -285,7 +289,7 @@ test('a green Vitest gate is not failed by a passing test named after a runtime 
   fixture.put('tests/title.test.js', `import { test, expect } from 'vitest';
 test('does NOT leak an unhandled rejection on a failing blur save', () => {
   console.error('Project setting save failed: Error: mock: update_mesh_column rejected');
-  expect(true).toBe(true);
+  expect([1, 2, 3].length).toBe(3);
 });
 `);
 
@@ -2053,7 +2057,10 @@ test('new Vitest references to src-tauri are audited against the frontend-tests 
   // test file (including files already referencing src-tauri) forces re-audit against
   // VITEST_READS_FROM_SRC_TAURI in scripts/harness-plan.mjs.
   const files = execFileSync('git', ['ls-files', '--', 'tests/unit', 'tests/integration', 'tests/e2e', 'tests/setup'], { cwd: root, encoding: 'utf8' })
-    .split('\n').filter(file => /\.(?:tsx?|mjs)$/.test(file));
+    // `git ls-files` also lists files that are deleted in the working tree but
+    // not yet committed. A file that is not on disk has no referencing lines
+    // to audit, so it is not an input to this snapshot.
+    .split('\n').filter(file => /\.(?:tsx?|mjs)$/.test(file) && existsSync(join(root, file)));
   const referencingLines = files.flatMap(file =>
     readFileSync(join(root, file), 'utf8')
       .split(/\r?\n/)
