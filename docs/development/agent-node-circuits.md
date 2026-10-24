@@ -143,11 +143,18 @@ checkpoint, including its association, worktree and report; cleanup stops its
 live process without deleting the evidence.
 
 Approval closes the reviewer, then `merge` asks the source to squash-merge the
-pull request: it marks a draft ready, brings a behind-base branch up to date
-with `gh pr update-branch` (never a rebase, which would rewrite the approved
-commits), waits for the pushed commit's own workflow run, and only then
-squash-merges. The run completes once that prompt is delivered: it does
-not wait for the merge.
+pull request: it marks a draft ready, rebases its branch onto the base branch
+the pull request targets, resolves the merge conflicts that rebase produces in
+favour of the approved work, pushes the rebased branch, waits for the pushed
+commit's own workflow run, and only then squash-merges. The hand-off
+authorises the rebase and the conflict resolution explicitly, because an agent
+told only to *report* a conflict reads that as unauthorised and stops. The
+boundary is explicit too: a conflict that cannot be resolved without changing
+what the reviewer approved is reported instead of merged. The rebase rewrites
+the approved commits, so a branch protection rule that dismisses a stale
+approval leaves the merge blocked; that is the "the merge stays blocked for
+any other reason" stop condition, and the agent reports it. The run completes
+once that prompt is delivered: it does not wait for the merge.
 
 The issue-driven blueprint then verifies the merge instead of trusting the
 report: `merge_wait` classifies the implementer's turn and `merge_verify`
@@ -223,10 +230,13 @@ graphs through a one-time startup upgrade of the built-in preset and of
 issue-review circuits whose topology is exactly the previous stock shape.
 Edited prompts and reviewer settings are kept; stock feedback, approval, and
 merge texts
-move to their new wording. Each existing run is pinned to the graph it started
-with first, so active runs and failed-run recovery are unaffected. Review-derived
-copies are user-owned and keep their shape; the previous shape still satisfies
-the local review contract for continuation.
+move to their new wording. Every merge hand-off shipped before the rebase one
+is upgraded, including the text that updated an out-of-date branch with
+`gh pr update-branch`, so an existing install stops refusing to resolve the
+conflicts that branch cannot merge through. Each existing run is pinned to the
+graph it started with first, so active runs and failed-run recovery are
+unaffected. Review-derived copies are user-owned and keep their shape; the
+previous shape still satisfies the local review contract for continuation.
 
 Runs use the existing Circuits queue, capacity limits, run history, pause,
 approval, and cancellation controls. A repeated start while the source already
