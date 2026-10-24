@@ -76,21 +76,8 @@ fn validate_worktree_exists(
 
     // Use git2 to verify the worktree is registered in git metadata,
     // not just the directory exists on disk. This catches broken/corrupted worktrees.
-    let repo = git2::Repository::open(&resolved.host_path)
-        .or_else(|_| git2::Repository::discover(&resolved.host_path))
-        .map_err(|e| format!("Failed to open repository: {}", e))?;
-
-    let worktrees = repo
-        .worktrees()
-        .map_err(|e| format!("Failed to list worktrees: {}", e))?;
-
-    // Check if our worktree name is in the list
-    for i in 0..worktrees.len() {
-        if let Ok(Some(name)) = worktrees.get(i) {
-            if name == wt_name {
-                return Ok(());
-            }
-        }
+    if crate::git::worktree::worktree_registered_at(&resolved.host_path, wt_name)? {
+        return Ok(());
     }
 
     // Also check if the path itself is a valid git worktree (it could be the main worktree)

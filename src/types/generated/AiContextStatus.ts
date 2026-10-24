@@ -34,7 +34,7 @@ agents_skills_exists: boolean,
  * amends `.gitignore` so ephemeral files like `.agents/hooks.json` do not
  * pollute `git status` on a freshly-ported project.
  *
- * Reads HEAD's blob (via the same `git2::TreeBuilder` the commit uses)
+ * Reads HEAD's blob (via the same tree builder the commit uses)
  * rather than the working-tree file, so the probe and the commit
  * operate on the same state — uncommitted local edits don't create a
  * false ✓ in the UI followed by a merge-conflicting `.gitignore` on

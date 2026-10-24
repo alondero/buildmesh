@@ -6,7 +6,6 @@ use crate::models::SessionStatus;
 use crate::services::github::{
     self, CreatePrRequest, GitHubClient, GitHubError, GitHubPageCompleteness, PullRequest,
 };
-use git2::Repository;
 use serde::{Deserialize, Serialize};
 use tauri::command;
 use ts_rs::TS;
@@ -1249,33 +1248,6 @@ struct RepoInfo {
     remotes: Vec<String>,
 }
 
-/// Return the URL for a configured remote, preserving the optional-metadata
-/// behavior used by repo information and GitHub-link callers.
-fn configured_remote_url(repo: &Repository, name: &str) -> Option<String> {
-    let remote = match repo.find_remote(name) {
-        Ok(remote) => remote,
-        Err(error) if error.code() == git2::ErrorCode::NotFound => return None,
-        Err(_) => {
-            tracing::warn!(
-                remote = name,
-                "Could not read Git remote; treating it as unavailable"
-            );
-            return None;
-        }
-    };
-
-    match remote.url() {
-        Ok(url) => Some(url.to_string()),
-        Err(_) => {
-            tracing::warn!(
-                remote = name,
-                "Could not read Git remote URL; treating it as unavailable"
-            );
-            None
-        }
-    }
-}
-
 impl RepoInfo {
     fn owner_repo(&self) -> Result<(String, String), String> {
         match self.owner_repo.clone() {
@@ -1300,78 +1272,18 @@ fn resolve_open_pr(info: &RepoInfo, client: &GitHubClient) -> Result<Option<Pull
         .map_err(|e| e.to_string())
 }
 
-fn safe_directory_command(host_path: &str, windows: bool) -> String {
-    let quoted = if windows {
-        // PowerShell accepts smart apostrophes as string delimiters too, so the
-        // shared literal is the only escaping that survives such a path.
-        env::powershell_literal(&host_path.replace('\\', "/"))
-    } else {
-        format!("'{}'", host_path.replace('\'', "'\\''"))
-    };
-    format!("git config --global --add safe.directory {quoted}")
-}
-
-fn open_github_repo(path: &str) -> Result<Repository, String> {
-    crate::git::primitives::open_from_host_path(path).map_err(|error| {
-        if error.code() == git2::ErrorCode::Owner {
-            let command = safe_directory_command(&env::to_host_path(path), cfg!(windows));
-            let runtime = if cfg!(windows) { "Windows" } else { "host" };
-            format!("git error: {error}. If you trust this repository, add its exact path to {runtime} Git configuration: {command}")
-        } else {
-            format!("git error: {error}")
-        }
-    })
-}
-
 /// Open the repo once and extract both the current branch and origin URL.
 fn repo_info(path: &str) -> Result<RepoInfo, String> {
-    let repo = open_github_repo(path)?;
-
-    let branch = match repo.head() {
-        Ok(head) => {
-            if head.is_branch() {
-                match head.shorthand() {
-                    Ok(name) => name.to_string(),
-                    Err(_) => {
-                        tracing::warn!(
-                            "Could not read Git branch name; treating it as unavailable"
-                        );
-                        String::new()
-                    }
-                }
-            } else {
-                head.target()
-                    .map(|oid| oid.to_string()[..8].to_string())
-                    .unwrap_or_default()
-            }
-        }
-        Err(_) => String::new(),
-    };
-
-    let remote_url = configured_remote_url(&repo, "origin");
-    let owner_repo = remote_url.as_deref().and_then(github::parse_owner_repo);
-    let remotes = match repo.remotes() {
-        Ok(names) => (0..names.len())
-            .filter_map(|index| match names.get(index) {
-                Ok(Some(name)) => Some(name.to_string()),
-                Ok(None) => None,
-                Err(_) => {
-                    tracing::warn!(index, "Could not read a Git remote name; omitting it");
-                    None
-                }
-            })
-            .collect(),
-        Err(_) => {
-            tracing::warn!("Could not list Git remotes; returning an empty remote list");
-            Vec::new()
-        }
-    };
-
+    let identity = crate::git::remote::repo_identity(path)?;
+    let owner_repo = identity
+        .remote_url
+        .as_deref()
+        .and_then(github::parse_owner_repo);
     Ok(RepoInfo {
-        branch,
-        remote_url,
+        branch: identity.branch,
+        remote_url: identity.remote_url,
         owner_repo,
-        remotes,
+        remotes: identity.remotes,
     })
 }
 
@@ -1395,8 +1307,7 @@ pub(crate) fn resolve_github_owner_repo(
 
 /// Resolve owner/repo from a path, returning None if no origin remote.
 pub(crate) fn resolve_owner_repo(path: &str) -> Result<Option<(String, String)>, String> {
-    let repo = open_github_repo(path)?;
-    let url = configured_remote_url(&repo, "origin");
+    let url = crate::git::remote::remote_url(path, "origin")?;
     Ok(url.and_then(|url| github::parse_owner_repo(&url)))
 }
 

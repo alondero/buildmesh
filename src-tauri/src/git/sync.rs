@@ -849,6 +849,17 @@ pub(crate) fn current_branch_upstream_remote(repo: &git2::Repository) -> Option<
         .ok()
 }
 
+/// The upstream remote of the current branch, for the repository at
+/// `host_path`.
+///
+/// The path-shaped door to [`current_branch_upstream_remote`] — the command
+/// layer must not open a repository to answer this (issue #2526).
+pub(crate) fn current_branch_upstream_remote_at(host_path: &str) -> Result<Option<String>, String> {
+    let repo = super::primitives::open_at(host_path)
+        .map_err(|e| format!("failed to open repo at {}: {}", host_path, e))?;
+    Ok(current_branch_upstream_remote(&repo))
+}
+
 /// Fetch from the configured upstream and fast-forward the parent
 /// **Mesh**'s current branch onto the remote tip.
 ///
@@ -1004,7 +1015,7 @@ pub fn fetch_origin(project_root: &str, base_ref: &str) -> Result<FetchOutcome, 
 /// `fetch_origin` (auto-sync) and the manual `git_sync` command to decide
 /// whether a `git pull --ff-only` would do anything. Returns `Err` when there's
 /// no upstream to compare against — both callers treat that as "nothing to pull".
-pub fn commits_behind_upstream(repo: &git2::Repository) -> Result<u32, String> {
+pub(crate) fn commits_behind_upstream(repo: &git2::Repository) -> Result<u32, String> {
     let head_oid = repo
         .head()
         .map_err(|e| format!("Failed to read HEAD: {}", e))?

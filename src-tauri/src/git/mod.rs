@@ -9,15 +9,21 @@
 //! stay in `commands/`. See ADR 0007.
 
 pub mod ai_context_runtime;
+pub mod branches;
+pub mod diff;
 pub mod fetch_freshness;
 pub mod health;
+pub mod index;
 pub mod primitives;
 pub mod project;
 #[cfg(test)]
 mod project_path_tests;
+pub mod remote;
 pub mod sha;
+pub mod state;
 pub(crate) mod status_stats;
 pub mod sync;
 pub mod sync_lock;
+pub mod tree;
 mod trust;
 pub mod worktree;

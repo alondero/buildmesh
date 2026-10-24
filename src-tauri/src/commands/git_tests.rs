@@ -1170,26 +1170,26 @@ mod tests {
         repo
     }
 
-    /// `default_branch_from_repo` returns the branch the origin/HEAD
+    /// `default_branch_at` returns the branch the origin/HEAD
     /// symbolic ref points at, with the `refs/remotes/origin/` prefix
     /// stripped.
     #[test]
-    fn default_branch_from_repo_returns_origin_head_target() {
+    fn default_branch_at_returns_origin_head_target() {
         let _repo = TempGitRepo::new();
-        let repo = make_repo_with_origin_head(_repo.path(), "master");
+        let _repo_handle = make_repo_with_origin_head(_repo.path(), "master");
 
-        let branch = crate::commands::git::default_branch_from_repo(&repo);
+        let branch = crate::git::primitives::default_branch_at(_repo.path().to_str().unwrap());
         assert_eq!(branch, "master");
     }
 
-    /// `default_branch_from_repo` falls back to `"main"` when the repo has
+    /// `default_branch_at` falls back to `"main"` when the repo has
     /// no origin/HEAD symbolic ref (e.g. freshly initialised, no fetch).
     #[test]
-    fn default_branch_from_repo_falls_back_to_main_without_origin_head() {
+    fn default_branch_at_falls_back_to_main_without_origin_head() {
         let _repo = TempGitRepo::new();
-        let repo = init_git_repo(_repo.path());
+        let _repo_handle = init_git_repo(_repo.path());
 
-        let branch = crate::commands::git::default_branch_from_repo(&repo);
+        let branch = crate::git::primitives::default_branch_at(_repo.path().to_str().unwrap());
         assert_eq!(branch, "main");
     }
 

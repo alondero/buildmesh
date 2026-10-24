@@ -98,6 +98,7 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/git/fetch_freshness_tests.rs': 'git::fetch_freshness::tests',
   'src-tauri/src/git/mesh_health_tests.rs': 'git::health::mesh_health_tests',
   'src-tauri/src/git/sha_tests.rs': 'git::sha::tests',
+  'src-tauri/src/git/state_tests.rs': 'git::state::state_tests',
   'src-tauri/src/git/sync_lock_tests.rs': 'git::sync_lock::tests',
   'src-tauri/src/git/worktree/provision_tests.rs': 'git::worktree::provision::tests',
   'src-tauri/src/git/worktree/warm_tests.rs': 'git::worktree::warm::tests',

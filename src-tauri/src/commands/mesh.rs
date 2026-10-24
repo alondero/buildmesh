@@ -274,14 +274,10 @@ pub(crate) fn clone_target_into_mesh(
     // Cut worktrees from the cloned repo's real default branch rather than the
     // `origin/main` literal `create_mesh` writes — otherwise a repo whose
     // default is `master` lands as a **drifted root**.
-    let base_ref = crate::git::primitives::open_from_host_path(&dest_str)
-        .map(|repo| {
-            format!(
-                "origin/{}",
-                crate::commands::git::default_branch_from_repo(&repo)
-            )
-        })
-        .unwrap_or_else(|_| "origin/main".to_string());
+    let base_ref = format!(
+        "origin/{}",
+        crate::git::primitives::default_branch_at(&dest_str)
+    );
 
     // The same repository detection as the open-folder path, so all three
     // entrypoints share one rule for the worktree default. A successful clone

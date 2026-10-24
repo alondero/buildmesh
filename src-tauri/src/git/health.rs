@@ -332,6 +332,33 @@ pub(crate) fn find_base_branch_holder(
     None
 }
 
+/// The whole mesh-health snapshot for the repository at `host_path`.
+///
+/// One open for the snapshot and its holder refinement — the holder lookup
+/// needs the same repository, and the command layer must not hold a
+/// `Repository` to get there (issue #2526).
+pub(crate) fn mesh_health_at(
+    host_path: &str,
+    base_ref: &str,
+    active_paths: &[String],
+) -> Result<MeshHealth, String> {
+    let repo = primitives::open_at(host_path)
+        .map_err(|e| format!("failed to open repo at {}: {}", host_path, e))?;
+    let mut health = compute_mesh_health(&repo, base_ref)?;
+    if let Some(local_base) = health.local_base_branch.clone() {
+        health.base_branch_holder = find_base_branch_holder(&repo, &local_base, active_paths);
+    }
+    Ok(health)
+}
+
+/// Restore the repository at `host_path` to `base_branch` — the rules live in
+/// [`restore_to_base_impl`], this is the path-shaped door to them.
+pub(crate) fn restore_to_base_at(host_path: &str, base_branch: &str) -> Result<bool, String> {
+    let repo = primitives::open_at(host_path)
+        .map_err(|e| format!("failed to open repo at {}: {}", host_path, e))?;
+    restore_to_base_impl(&repo, base_branch)
+}
+
 fn make_holder(path: &str, active_paths: &[String]) -> HoldingWorktree {
     let norm = primitives::normalize_for_compare(path);
     let is_active = active_paths

@@ -7,11 +7,18 @@ import { ALLOWED_PRODUCTION_GIT2, productionGit2Paths, seamDebtPaths, stripCfgTe
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
 
-test("production git2 outside git/ matches the module-map seam-debt list", () => {
+test("no production file outside git/ names git2::", () => {
   const found = productionGit2Paths(root);
   const allowed = [...ALLOWED_PRODUCTION_GIT2].sort();
   assert.deepEqual(found, allowed, `production git2 outside git/:\n${found.join("\n")}`);
   assert.deepEqual(seamDebtPaths(root).sort(), allowed);
+});
+
+test("the seam-debt list in the module map is empty", () => {
+  // The module map is the human-readable half of the same rule the tree
+  // walk enforces. A stale entry there would send the next reader looking
+  // for debt that no longer exists.
+  assert.deepEqual(seamDebtPaths(root), []);
 });
 
 test("an unbalanced cfg(test) module does not hide later production functions", () => {

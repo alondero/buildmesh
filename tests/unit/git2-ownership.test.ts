@@ -63,4 +63,22 @@ describe("git2 ownership", () => {
     expect(stripped).toContain("fn kept()");
     expect(stripped).not.toContain("Repository::init");
   });
+
+  it("strips a fixture whose attribute carries an escape-hatch comment", () => {
+    // The escape hatch the Rust test-layout rule mandates sits between the
+    // attribute and the item. A semicolon in that reason must not end the
+    // item early and expose the fixture as production use.
+    const source = [
+      "#[cfg(test)]",
+      "// allow-test-in-production: this inline suite predates the sibling-test-file rule;",
+      "// issue #2526 only re-points its calls at the new git/ seam.",
+      "mod tests {",
+      "    fn fixture() { let _ = git2::Repository::init(path); }",
+      "}",
+      "fn open() { let _ = git2::Repository::open(path); }",
+    ].join("\n");
+    const stripped = stripCfgTestItems(source);
+    expect(stripped).toContain("fn open()");
+    expect(stripped).not.toContain("Repository::init");
+  });
 });

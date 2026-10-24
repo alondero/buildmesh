@@ -13,6 +13,7 @@ use crate::env::test_helpers::init_repo_with_commit as init_repo_for_test;
 use crate::git::worktree::create_git_worktree;
 use crate::models::AgentNode;
 use crate::services::github::tests::{fake_server, Scripted};
+use git2::Repository;
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -29,13 +30,16 @@ fn safe_directory_commands_preserve_shell_paths() {
         ("\u{201b}", "\u{201b}\u{201b}"),
     ] {
         assert_eq!(
-            safe_directory_command(&format!("C:\\don{apostrophe}t\\repo"), true),
+            crate::git::remote::safe_directory_command(
+                &format!("C:\\don{apostrophe}t\\repo"),
+                true
+            ),
             format!("git config --global --add safe.directory 'C:/don{quoted}t/repo'"),
             "apostrophe: {apostrophe:?}",
         );
     }
     assert_eq!(
-        safe_directory_command(r"/tmp/alice's\repo", false),
+        crate::git::remote::safe_directory_command(r"/tmp/alice's\repo", false),
         r"git config --global --add safe.directory '/tmp/alice'\''s\repo'",
     );
 }
@@ -60,7 +64,7 @@ fn safe_directory_commands_hand_git_one_exact_argument() {
              function git {{ [Console]::Out.WriteLine($args[-1]) }}\n{}",
         paths
             .iter()
-            .map(|path| safe_directory_command(path, true))
+            .map(|path| crate::git::remote::safe_directory_command(path, true))
             .collect::<Vec<_>>()
             .join("\n"),
     );
