@@ -479,6 +479,18 @@ a private directory under `.tmp/ui-shot-vite`, passed through
 `BUILDMESH_VITE_CACHE_DIR`. Stopping an exited owned child removes its cache;
 reusing an existing server does not take ownership of its cache or process.
 
+That separation is not tidiness. Vite removes `<cacheDir>/deps` when it starts
+with a config hash that differs from the cached one — it logs `Re-optimizing
+dependencies because vite config has changed` — and that hash covers the
+absolute root, so servers in different worktrees compute different hashes.
+With Vite's default `node_modules/.vite` — one directory when the worktrees
+share a node_modules junction — that is what happened: the second server
+removed the dependency graph the first one was serving, and the browser
+answered `504 (Outdated Optimize Dep)` instead of the app (#2515). A
+worktree-local cache is not shared with a sibling worktree, and a private one
+is not shared with another server; `tests/integration/ui-shot-server.test.ts`
+reads the directory each server serves its dependencies from and asserts both.
+
 The `ui-shot` mock renders charge their time to named phases in
 `scripts/ui-shot-budgets.mjs`: dev-server startup, browser launch, page setup,
 reading the mock fixtures, navigation, mount, the step script, importing the
