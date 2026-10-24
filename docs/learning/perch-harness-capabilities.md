@@ -33,7 +33,9 @@ Verified against:
 
 The account response shape comes from that CLI source. A live
 `GET /api/perchai/account` with an expired access token returned HTTP 401
-`not_authenticated`. No live account snapshot was captured, so the meter tests
+`not_authenticated`. A live account read on 2026-10-24 confirmed the payload
+shape: `usageMeter` carries the rolling windows' `nextFreedAt` and no monthly
+reset, and `billingSubscription` is `null` on a free plan. The meter tests
 use synthetic fixtures.
 
 ## Launch
@@ -117,14 +119,23 @@ CLI's own display rules:
 
 - Monthly hosted spend is `ceil(usd / 0.001)` PT. Rolling windows are
   `round(usd * 1000)` PT and are omitted when the cap is not positive.
-- A reset time is kept only when `nextFreedAt` parses. Buildmesh does not
-  invent one. Starter and Pro monthly rows have no reset in the CLI.
+- A capped row is a percentage window, and only that. It is not also an
+  explicit meter: the panel's "Amount used / Limit / Remaining" block would
+  repeat the bar it sits under, so Buildmesh does not emit one for Perch.
+  An uncapped row has no percentage to draw, so it stays an explicit meter.
+- A rolling window's reset time is kept only when `nextFreedAt` parses.
+  Buildmesh does not invent one. The monthly allowance follows the
+  subscription's billing period, so its reset comes from the account
+  payload's `billingSubscription` period end, and only when Perch sends one:
+  free plans send `null` there and keep no monthly reset. A subscription
+  shape Buildmesh does not recognise yields no reset rather than a wrong one.
 - Starter (and a plan labelled Starter) is one Monthly row. The default limit
   is 20,000 PT. A positive `usage.monthly_pt` entitlement replaces it.
 - Pro does not show a monthly Roost percentage. The detail notes "Roost fair
   use", then the enabled 5-hour and 7-day Roost windows, then Manual monthly
   (75,000 PT unless `usage.manual_monthly_pt` is a positive entitlement) and
-  the enabled manual rolling windows.
+  the enabled manual rolling windows. The Manual row carries the billing
+  period's end as its reset.
 - Admin, internal membership, or an `internal` plan is one Monthly meter with
   no individual limit, showing the PT already used. It is not a percentage bar.
 - `billingLane` exactly `byo` is reported as managed by the user's own API key,

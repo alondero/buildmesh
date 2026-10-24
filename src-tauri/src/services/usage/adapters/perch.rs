@@ -766,11 +766,17 @@ fn outcome_from_account(body: &str) -> UsageOutcome {
         .or_else(|| value.get("usage_meter"))
         .cloned()
         .unwrap_or(serde_json::Value::Null);
+    // The paid subscription record, when the account has one. Free plans send
+    // `null` here, and Perch's own CLI shows no monthly reset for them.
+    let billing = value
+        .get("billingSubscription")
+        .or_else(|| value.get("billing_subscription"))
+        .filter(|subscription| subscription.is_object());
     let credits = finite_number(&value, &["creditBalancePt", "credit_balance_pt"])
         .filter(|amount| *amount > 0.0)
         .map(|amount| amount.floor() as i64)
         .unwrap_or(0);
-    reading_from(session, &meter, credits)
+    reading_from(session, &meter, credits, billing)
 }
 
 enum EntitlementLimit {
@@ -882,12 +888,18 @@ fn reading_from(
     session: &serde_json::Value,
     meter: &serde_json::Value,
     credits: i64,
+    billing: Option<&serde_json::Value>,
 ) -> UsageOutcome {
     let code = plan_code(session);
     let label = plan_label(plan_name(session).as_deref(), &code);
     let monthly_used =
         ceil_pt(finite_number(meter, &["monthlyUsd", "monthly_usd"]).unwrap_or(0.0)) as f64;
     let manual_used = manual_used_pt(meter);
+    // When the allowance refreshes. Perch's rolling windows each carry their
+    // own `nextFreedAt`; the monthly allowance follows the subscription's
+    // billing period, so its reset comes from the subscription record. Free
+    // plans have no subscription and therefore no monthly reset to show.
+    let period_end = billing_period_end(billing);
     let mut rows = Vec::new();
     if unlimited_account(session, &code) {
         rows.push(Row {
@@ -910,7 +922,7 @@ fn reading_from(
             label: "Manual",
             used: manual_used,
             limit: Some(limit),
-            resets_at: None,
+            resets_at: period_end.clone(),
         });
         push_rolling(
             &mut rows,
@@ -926,7 +938,7 @@ fn reading_from(
             label: "Monthly",
             used: monthly_used,
             limit,
-            resets_at: None,
+            resets_at: period_end.clone(),
         });
         push_rolling(
             &mut rows,
@@ -1026,32 +1038,123 @@ fn used_percent(used: f64, limit: Option<f64>) -> Option<f64> {
     Some((used / limit * 100.0).clamp(0.0, 100.0))
 }
 
+/// Project the rows onto the wire shapes.
+///
+/// A capped row becomes a percentage window — the bar the Usage panel draws.
+/// It does not *also* become an explicit meter: the "Amount used / Limit /
+/// Remaining" block would repeat, line for line, the row the bar already
+/// shows, and the Perch panel reads better with the percentage alone. An
+/// uncapped row has no percentage to draw, so it stays an explicit meter and
+/// reports the PT already spent.
 fn project_rows(rows: &[Row]) -> (Vec<UsageWindow>, Vec<UsageMeter>) {
     let mut windows = Vec::new();
     let mut meters = Vec::new();
     for row in rows {
-        let percent = used_percent(row.used, row.limit);
-        let remaining = row.limit.map(|limit| (limit - row.used).max(0.0));
-        let amount = UsageAmount {
-            used: row.used,
-            limit: row.limit,
-            remaining,
-            unit: "PT".into(),
-            used_percent: percent,
-            resets_at: row.resets_at.clone(),
-        };
-        if let Some(percent) = percent {
-            windows.push(UsageWindow {
+        match used_percent(row.used, row.limit) {
+            Some(percent) => windows.push(UsageWindow {
                 label: row.label.into(),
                 used_percent: Some(percent),
                 resets_at: row.resets_at.clone(),
-            });
-            meters.push(UsageMeter::Metered { amount });
-        } else {
-            meters.push(UsageMeter::NoIndividualLimit { amount });
+            }),
+            None => meters.push(UsageMeter::NoIndividualLimit {
+                amount: UsageAmount {
+                    used: row.used,
+                    limit: row.limit,
+                    remaining: row.limit.map(|limit| (limit - row.used).max(0.0)),
+                    unit: "PT".into(),
+                    used_percent: None,
+                    resets_at: row.resets_at.clone(),
+                },
+            }),
         }
     }
     (windows, meters)
+}
+
+/// Keys that carry a subscription's period end. Stripe-style names first,
+/// then the camelCase and plain-English variants.
+const PERIOD_END_KEYS: &[&str] = &[
+    "current_period_end",
+    "currentPeriodEnd",
+    "period_end",
+    "periodEnd",
+    "billing_period_end",
+    "billingPeriodEnd",
+    "renews_at",
+    "renewsAt",
+    "renew_at",
+    "renewAt",
+    "ends_at",
+    "endsAt",
+    "next_billing_at",
+    "nextBillingAt",
+];
+
+/// Nested objects that may hold the subscription record itself.
+const PERIOD_END_WRAPPERS: &[&str] = &[
+    "subscription",
+    "current_period",
+    "currentPeriod",
+    "billing_period",
+    "billingPeriod",
+];
+
+/// The end of the subscription's billing period, when Perch reports one.
+///
+/// `billingSubscription` is `null` on free plans — Starter has no paid
+/// subscription, and Perch's own CLI shows no monthly reset for it either.
+/// Paid plans carry the subscription record, but Perch does not document its
+/// shape, so this reads a small set of period-end key names and takes the
+/// first value that parses as an instant. A shape we do not recognise yields
+/// no reset date: Buildmesh does not invent one.
+fn billing_period_end(billing: Option<&serde_json::Value>) -> Option<String> {
+    billing.and_then(|value| period_end_in(value, 0))
+}
+
+fn period_end_in(value: &serde_json::Value, depth: usize) -> Option<String> {
+    let object = value.as_object()?;
+    for key in PERIOD_END_KEYS {
+        if let Some(instant) = object.get(*key).and_then(instant_from_value) {
+            return Some(instant);
+        }
+    }
+    if depth > 0 {
+        return None;
+    }
+    for wrapper in PERIOD_END_WRAPPERS {
+        let Some(nested) = object.get(*wrapper) else {
+            continue;
+        };
+        if let Some(instant) = period_end_in(nested, depth + 1) {
+            return Some(instant);
+        }
+    }
+    None
+}
+
+/// An instant as RFC 3339, from an ISO string or an epoch timestamp.
+fn instant_from_value(value: &serde_json::Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        let text = text.trim();
+        if text.is_empty() {
+            return None;
+        }
+        if chrono::DateTime::parse_from_rfc3339(text).is_ok() {
+            return Some(text.to_string());
+        }
+        // A numeric string is an epoch timestamp in disguise.
+        return text.parse::<f64>().ok().and_then(epoch_to_rfc3339);
+    }
+    value.as_f64().and_then(epoch_to_rfc3339)
+}
+
+fn epoch_to_rfc3339(epoch: f64) -> Option<String> {
+    if !epoch.is_finite() || epoch <= 0.0 {
+        return None;
+    }
+    // Epoch seconds, or milliseconds when the magnitude says so.
+    let seconds = if epoch >= 1e11 { epoch / 1000.0 } else { epoch };
+    chrono::DateTime::from_timestamp(seconds as i64, 0).map(|dt| dt.to_rfc3339())
 }
 
 #[cfg(test)]

@@ -115,11 +115,20 @@ does not delete the session. Sign in with `perch login`. The meter reads
 Roost percentage: the detail says "Roost fair use", then rolling 5-hour and 7-day
 windows when the payload enables them and the cap is positive, then Manual monthly
 (75,000 PT unless an entitlement overrides it) and the manual rolling windows. A
-reset time is copied from `nextFreedAt` only when that string parses. An admin,
+capped row is a percentage window and only that — Perch emits no explicit
+"Amount used / Limit / Remaining" meter, because that block would repeat the bar
+it sits under. An uncapped row keeps its meter. A rolling window's reset time is
+copied from `nextFreedAt` only when that string parses. The monthly allowance
+follows the subscription's billing period, so its reset comes from the payload's
+`billingSubscription` period end when Perch sends one; free plans send `null`
+there and keep no monthly reset, and an unrecognised subscription shape yields no
+reset rather than a wrong one. Buildmesh does not invent one. An admin,
 internal, or internal-plan account is one Monthly meter with no individual limit
 and the PT already used. Bring-your-own-key (`billingLane` exactly `byo`) is
-managed externally. Confirmed against perchai-cli 2.4.116 source, plus a 401 from
-an expired session, not a captured live account snapshot. The usage link is the
+managed externally. Confirmed against perchai-cli 2.4.116 source and a live
+account read on 2026-10-24, whose payload carries the rolling windows'
+`nextFreedAt`, no monthly reset, and a null `billingSubscription` on a free
+plan. The usage link is the
 [Pro plan guide](https://www.perchai.app/docs/plans/pro) (Starter is
 [documented separately](https://www.perchai.app/docs/plans/starter)), labelled
 **Usage guide**, not a settings deep link.
