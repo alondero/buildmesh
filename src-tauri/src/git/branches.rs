@@ -7,6 +7,7 @@
 //! so the command layer never holds a `Repository` handle.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use git2::{BranchType, Oid, Repository};
 
@@ -80,11 +81,39 @@ pub(crate) fn delete_branches_in_repo(
 ///    branch pass below can stamp `checked_out_in_worktree` on every
 ///    branch that is HEAD of some working tree (live or orphan).
 /// 3. Full `BranchInfo` list with worktree annotation.
+///
+/// The squash-merge classification runs under a wall-clock budget
+/// ([`MERGE_SCAN_BUDGET`]). A budget that runs out truncates the
+/// classification, not the read: the affected branches report
+/// `is_merged_into_main: None` (unknown) and the returned info carries
+/// `merge_scan_truncated: true` (issue #2580).
 pub(crate) fn collect_prune_info(
     repo_path: &str,
     active_paths: &[String],
     active_branches: &[String],
     is_pool_path: &dyn Fn(&str) -> bool,
+) -> Result<GitRepoPruneInfo, String> {
+    let mut budget = MergeScanBudget::new(MERGE_SCAN_BUDGET);
+    collect_prune_info_within(
+        repo_path,
+        active_paths,
+        active_branches,
+        is_pool_path,
+        &mut budget,
+    )
+}
+
+/// [`collect_prune_info`] with a caller-supplied budget.
+///
+/// [`collect_prune_info`] uses [`MERGE_SCAN_BUDGET`]; this variant exists so a
+/// test can pin the budget (a zero-length one truncates the scan
+/// immediately) and assert what the read reports when it runs out.
+pub(crate) fn collect_prune_info_within(
+    repo_path: &str,
+    active_paths: &[String],
+    active_branches: &[String],
+    is_pool_path: &dyn Fn(&str) -> bool,
+    budget: &mut MergeScanBudget,
 ) -> Result<GitRepoPruneInfo, String> {
     let repo = primitives::open_at(repo_path).map_err(|e| e.to_string())?;
 
@@ -166,6 +195,12 @@ pub(crate) fn collect_prune_info(
     }
 
     // ── Pass 3: local branches with worktree annotation ─────────────────
+    //
+    // `patch_ids` is shared across every branch in this pass: a commit's
+    // patch-id does not depend on which branch asks for it, so computing it
+    // once turns the scan from `O(branches x history)` into
+    // `O(history + branches)` (issue #2580).
+    let mut patch_ids = PatchIdCache::new(&repo);
     let mut local_branches: Vec<BranchInfo> = Vec::new();
     for entry in repo
         .branches(Some(BranchType::Local))
@@ -209,7 +244,14 @@ pub(crate) fn collect_prune_info(
         }
 
         let is_merged_into_main = match (main_oid, branch_oid) {
-            (Some(main), Some(b)) => Some(branch_is_merged_into_main(&repo, main, b)),
+            (Some(main), Some(b)) => {
+                // `branch_is_merged_into_main` answers from the cheap
+                // ancestry check even when the budget is spent, and returns
+                // `None` (*unknown*) when the budget stopped the expensive
+                // squash scan. A truncated scan must never claim a branch is
+                // safe to delete.
+                branch_is_merged_into_main(&repo, &mut patch_ids, budget, main, b)
+            }
             _ => None,
         };
 
@@ -257,6 +299,7 @@ pub(crate) fn collect_prune_info(
         local_branches,
         worktrees,
         remote_tracking_branches,
+        merge_scan_truncated: budget.was_truncated(),
     })
 }
 
@@ -316,45 +359,206 @@ fn main_branch_oid(repo: &Repository) -> Option<Oid> {
 }
 
 /// Cap on how many commits to scan back from `main` when hunting for the squash
-/// commit that integrated a branch. A real integration sits within a handful of
-/// commits of the tip; the cap stops a pathological history from making the
-/// prune scan crawl.
-const SQUASH_SCAN_CAP: usize = 2000;
+/// commit that integrated a branch.
+///
+/// A real integration sits within a handful of commits of the tip, so the scan
+/// only needs the recent tail of `main`. The cap is what makes that true
+/// rather than aspirational: the previous value (2,000) was larger than this
+/// repository's entire `main` history, so on a repository of this shape the
+/// cap never fired and every unmerged branch paid a walk over the whole
+/// history.
+///
+/// The trade-off is deliberate and one-directional. A squash merge that
+/// landed further back than the cap is no longer recognised, so the branch
+/// reads as *not merged* and is not auto-recommended for cleanup. That is
+/// the safe direction - the user keeps a stale branch instead of losing the
+/// signal that told them to delete one - and it is the direction the squash
+/// heuristic has always been documented to fail in.
+const SQUASH_SCAN_CAP: usize = 200;
+
+/// Wall-clock budget for the squash-merge scan of one prune read.
+///
+/// The scan is bounded so a repository with many branches over a long `main`
+/// history cannot hold the Probe's Repository tab in its loading state for
+/// tens of minutes (issue #2580). When the budget runs out the read still
+/// returns: the branches it did not classify report `is_merged_into_main` as
+/// unknown, and the read flags `merge_scan_truncated` so the UI can say so
+/// instead of rendering a silently missing "merged" badge.
+///
+/// The budget is a safety net, not the normal path. A repository with a
+/// normal number of branches classifies in well under a second; the
+/// pathological case this repository happens to be (419 local branches over a
+/// 1,861-commit `main`) measures at roughly 30-50 seconds, so the budget is
+/// set above that: cutting it lower would truncate the read on the very
+/// repository the fix is for, and the truncation is durable — the cached
+/// answer keeps saying "unknown" until `main` moves.
+///
+/// A false negative is the safe failure direction here — an unclassified
+/// branch is simply not recommended for cleanup — so cutting the scan short
+/// can only under-report, never delete work that is still unmerged.
+pub(crate) const MERGE_SCAN_BUDGET: Duration = Duration::from_secs(60);
+
+/// The wall-clock budget for one read's merge scan, plus whether it ran out.
+///
+/// The budget is checked *inside* the commit walk as well as between
+/// branches: the first branch to reach a long stretch of `main` is the one
+/// that pays for computing its patch-ids, and it must not be able to run past
+/// the budget in a single step.
+pub(crate) struct MergeScanBudget {
+    started: Instant,
+    limit: Duration,
+    truncated: bool,
+}
+
+impl MergeScanBudget {
+    /// A budget that allows `limit` of wall-clock time for the scan.
+    pub(crate) fn new(limit: Duration) -> Self {
+        Self {
+            started: Instant::now(),
+            limit,
+            truncated: false,
+        }
+    }
+
+    /// Whether the budget is spent. The scan stops doing further work once
+    /// this is true.
+    pub(crate) fn expired(&self) -> bool {
+        self.started.elapsed() >= self.limit
+    }
+
+    /// Record that the scan gave up before classifying every branch.
+    fn mark_truncated(&mut self) {
+        self.truncated = true;
+    }
+
+    /// Whether the scan gave up before classifying every branch.
+    pub(crate) fn was_truncated(&self) -> bool {
+        self.truncated
+    }
+}
+
+/// Per-commit patch-ids, memoised for the lifetime of one prune read.
+///
+/// A commit's patch-id is a pure function of `(parent, commit)` — it does not
+/// depend on which branch asks for it. `main_contains_patch` used to re-diff
+/// and re-hash the same commit of `main` once per unmerged branch, so a
+/// repository with `N` unmerged branches over an `H`-commit history paid
+/// `N x H` tree diffs for a single read: 131,600 diffs on this repository's
+/// 418 branches and 1,861-commit `main` (issue #2580). Caching by commit OID
+/// makes the cost `O(H + N)`.
+///
+/// `None` in the map means "this commit has no usable patch-id" — it is a
+/// merge commit, or its diff could not be computed. That is the same
+/// distinction the pre-memoisation code drew by skipping the commit.
+struct PatchIdCache<'repo> {
+    repo: &'repo Repository,
+    ids: HashMap<Oid, Option<Oid>>,
+}
+
+impl<'repo> PatchIdCache<'repo> {
+    fn new(repo: &'repo Repository) -> Self {
+        Self {
+            repo,
+            ids: HashMap::new(),
+        }
+    }
+
+    /// The patch-id of `oid`'s own diff against its first parent, or `None`
+    /// when the commit has no single parent or the diff cannot be computed.
+    fn patch_id(&mut self, oid: Oid) -> Option<Oid> {
+        if let Some(cached) = self.ids.get(&oid) {
+            return *cached;
+        }
+        let computed = self.compute(oid);
+        self.ids.insert(oid, computed);
+        computed
+    }
+
+    fn compute(&self, oid: Oid) -> Option<Oid> {
+        let commit = self.repo.find_commit(oid).ok()?;
+        // A squash lands as a single-parent commit; skip merge commits, whose
+        // patch-id isn't comparable to a linear branch diff.
+        if commit.parent_count() != 1 {
+            return None;
+        }
+        let (Ok(tree), Ok(parent_tree)) = (commit.tree(), commit.parent(0).and_then(|p| p.tree()))
+        else {
+            return None;
+        };
+        let diff = self
+            .repo
+            .diff_tree_to_tree(Some(&parent_tree), Some(&tree), None)
+            .ok()?;
+        diff.patchid(None).ok()
+    }
+}
 
 /// Whether `branch_oid`'s work is already present in `main_oid`.
 ///
-/// Ancestry (`graph_descendant_of`) catches fast-forward and merge-commit
-/// integration. But GitHub's default *squash and merge* rewrites the whole
-/// branch into a single new commit on main with no ancestry link back — so an
-/// ancestry-only check reports squash-merged branches as unmerged, and they
-/// pile up locally forever. A squash commit's patch is, by construction, the
-/// branch's *cumulative* diff against the merge base, so we compute that one
-/// patch-id and look for a commit on main (since the merge base) whose own
-/// patch matches. Rebase-and-merge that collapses to an equal patch is caught
-/// the same way. False negatives are safe (the branch just isn't recommended);
+/// Ancestry catches fast-forward and merge-commit integration. But GitHub's
+/// default *squash and merge* rewrites the whole branch into a single new
+/// commit on main with no ancestry link back — so an ancestry-only check
+/// reports squash-merged branches as unmerged, and they pile up locally
+/// forever. A squash commit's patch is, by construction, the branch's
+/// *cumulative* diff against the merge base, so we compute that one patch-id
+/// and look for a commit on main (since the merge base) whose own patch
+/// matches. Rebase-and-merge that collapses to an equal patch is caught the
+/// same way. False negatives are safe (the branch just isn't recommended);
 /// a patch-id match is strong evidence the identical change is already on main.
-fn branch_is_merged_into_main(repo: &Repository, main_oid: Oid, branch_oid: Oid) -> bool {
-    if main_oid == branch_oid
-        || repo
-            .graph_descendant_of(main_oid, branch_oid)
-            .unwrap_or(false)
-    {
-        return true;
+///
+/// `None` means *unknown* — the merge base could not be found, or the scan ran
+/// out of budget before it could answer. It is deliberately not `false`: a
+/// truncated scan must not claim a branch is unmerged.
+fn branch_is_merged_into_main(
+    repo: &Repository,
+    patch_ids: &mut PatchIdCache<'_>,
+    budget: &mut MergeScanBudget,
+    main_oid: Oid,
+    branch_oid: Oid,
+) -> Option<bool> {
+    if main_oid == branch_oid {
+        return Some(true);
+    }
+    // The ancestry check and the merge base are the same question, and the
+    // merge base is the cheap way to ask it.
+    //
+    // The previous code asked `graph_descendant_of(main, branch)` first and
+    // then `merge_base(main, branch)`. The ancestry question was what made
+    // the read expensive: libgit2 answers it by walking `main`'s *entire*
+    // history to prove the branch is not in it, so a repository with
+    // hundreds of branches paid a full history walk per branch — roughly
+    // 70 seconds of this read on this repository. The merge base stops at
+    // the first common ancestor, so it is far cheaper, and
+    // `base == branch_oid` answers the ancestry question exactly: the merge
+    // base of `main` and `branch` is the branch's own tip precisely when the
+    // branch is an ancestor of `main`.
+    //
+    // The merge base is also what the squash scan needs next, so this
+    // replaces one history walk with one, rather than adding a cheap check
+    // in front of an expensive one.
+    let Ok(base) = repo.merge_base(main_oid, branch_oid) else {
+        return Some(false);
+    };
+    if base == branch_oid {
+        return Some(true);
     }
 
-    let Ok(base) = repo.merge_base(main_oid, branch_oid) else {
-        return false;
-    };
+    // From here on the work is a tree diff plus a commit walk, so the budget
+    // decides whether it happens at all.
+    if budget.expired() {
+        budget.mark_truncated();
+        return None;
+    }
 
     let cumulative = match cumulative_patch_id(repo, base, branch_oid) {
         // Identical trees → the branch adds nothing main lacks → nothing to
         // lose, so treat it as merged.
-        Ok(None) => return true,
+        Ok(None) => return Some(true),
         Ok(Some(pid)) => pid,
-        Err(()) => return false,
+        Err(()) => return Some(false),
     };
 
-    main_contains_patch(repo, main_oid, base, cumulative)
+    main_contains_patch(repo, patch_ids, budget, main_oid, base, cumulative)
 }
 
 /// Patch-id of the cumulative diff from `from` to `to`. `Ok(None)` = the trees
@@ -379,36 +583,39 @@ fn cumulative_patch_id(repo: &Repository, from: Oid, to: Oid) -> Result<Option<O
 
 /// Scan commits added to `main` since `base` for one whose own patch equals
 /// `target` — the fingerprint a squash merge of the branch leaves behind.
-fn main_contains_patch(repo: &Repository, main_oid: Oid, base: Oid, target: Oid) -> bool {
+///
+/// Returns `None` when the scan ran out of budget before it could answer;
+/// `Some(false)` is a real answer ("no such commit on main").
+fn main_contains_patch(
+    repo: &Repository,
+    patch_ids: &mut PatchIdCache<'_>,
+    budget: &mut MergeScanBudget,
+    main_oid: Oid,
+    base: Oid,
+    target: Oid,
+) -> Option<bool> {
     let Ok(mut walk) = repo.revwalk() else {
-        return false;
+        return Some(false);
     };
     if walk.push(main_oid).is_err() {
-        return false;
+        return Some(false);
     }
     let _ = walk.hide(base);
 
     for oid in walk.flatten().take(SQUASH_SCAN_CAP) {
-        let Ok(commit) = repo.find_commit(oid) else {
-            continue;
-        };
-        // A squash lands as a single-parent commit; skip merge commits, whose
-        // patch-id isn't comparable to a linear branch diff.
-        if commit.parent_count() != 1 {
-            continue;
+        // The budget is checked inside the walk as well as between branches:
+        // the first branch to reach a long stretch of `main` is the one that
+        // pays for computing its patch-ids, and it must not be able to run
+        // past the budget in a single step.
+        if budget.expired() {
+            budget.mark_truncated();
+            return None;
         }
-        let (Ok(tree), Ok(parent_tree)) = (commit.tree(), commit.parent(0).and_then(|p| p.tree()))
-        else {
-            continue;
-        };
-        let Ok(diff) = repo.diff_tree_to_tree(Some(&parent_tree), Some(&tree), None) else {
-            continue;
-        };
-        if diff.patchid(None).map(|pid| pid == target).unwrap_or(false) {
-            return true;
+        if patch_ids.patch_id(oid) == Some(target) {
+            return Some(true);
         }
     }
-    false
+    Some(false)
 }
 
 fn format_commit_time(time: git2::Time) -> Option<String> {

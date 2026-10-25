@@ -7,4 +7,15 @@ import type { WorktreeInfo } from "./WorktreeInfo";
  *
  * Generated to src/types/generated/GitRepoPruneInfo.ts (issue #404).
  */
-export type GitRepoPruneInfo = { path: string, local_branches: Array<BranchInfo>, worktrees: Array<WorktreeInfo>, remote_tracking_branches: Array<string>, };
+export type GitRepoPruneInfo = { path: string, local_branches: Array<BranchInfo>, worktrees: Array<WorktreeInfo>, remote_tracking_branches: Array<string>, 
+/**
+ * `true` when the squash-merge scan hit its wall-clock budget and gave
+ * up before classifying every branch. The branches it did not classify
+ * carry `is_merged_into_main: None` — *unknown*, not *not merged* — and
+ * the UI says so rather than rendering a silently missing badge
+ * (issue #2580).
+ *
+ * `#[serde(default)]` keeps the wire additive: a payload written before
+ * this field existed still deserialises, as `false`.
+ */
+merge_scan_truncated: boolean, };
