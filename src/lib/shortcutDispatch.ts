@@ -1,7 +1,6 @@
 import { useAgentNodeStore } from '../stores/agentNodeStore';
-import { useMeshStore } from '../stores/meshStore';
 import { useNodeActivityStore } from '../stores/nodeActivityStore';
-import { useUIStore, type NonSingleViewMode } from '../stores/uiStore';
+import { useUIStore } from '../stores/uiStore';
 import { jumpToNextAwaitingNode } from './awaitingInputShortcuts';
 import { isTextInputFocused } from './focusGuard';
 import {
@@ -15,7 +14,7 @@ import { createKeyRepeatThrottle } from './keyRepeatThrottle';
 import { focusNode } from './navigation';
 import { activityRootId, groupActivityNodes, indexAgentNodes } from './nodeActivities';
 import { createShortcutGuard } from './shortcutGuard';
-import { deriveScope } from './viewModes';
+import { readScope } from '../hooks/useScope';
 import type { GlobalShortcutBinding } from '../hooks/useGlobalShortcuts';
 import type { ShortcutEntry } from './shortcutCatalog';
 
@@ -159,21 +158,6 @@ function rateGateFor(action: string, rate: RateLimitSpec): RateGate {
 }
 
 /**
- * Controls snapshot for the arrow-traversal handler. Read at dispatch time
- * (not subscribed) so App re-renders stay independent of filter keystrokes —
- * #1609 moved search-driven narrowing into the Filtered view, and traversal
- * must match that grid exactly.
- */
-function gridFilterControls() {
-  const s = useUIStore.getState();
-  return {
-    gridSearchQuery: s.gridSearchQuery,
-    gridProviderFilter: s.gridProviderFilter,
-    gridStatusFilter: s.gridStatusFilter,
-  };
-}
-
-/**
  * Move focus one cell across the on-screen grid (Ctrl/Cmd+Alt+Arrow).
  *
  * Arrow traversal works in two phases: in Single view mode the first arrow
@@ -198,19 +182,15 @@ function traverseGrid(direction: ArrowDirection): void {
     ui.exitSingleMode();
     return;
   }
-  // Capture the narrowed mode here — right after the 'single' guard, before
-  // any intervening call — so TS keeps `ui.viewMode` as NonSingleViewMode.
-  const mode: NonSingleViewMode = ui.viewMode;
 
   // Phase 2: walk the grid the active View Mode actually renders. Ticket
-  // #987 — the derived scope returns exactly the on-screen node set (Mesh
-  // for the selected mesh, Pinned cross-mesh, All, or Filtered narrowed by
-  // the Grid Controls — #1609) in the store's canonical (mesh_id, position)
-  // order, so traversal matches AgentNodeView cell-for-cell. This replaces
-  // the old `mesh_id === activeNode.mesh_id` filter, which stranded
-  // Ctrl+Alt+Arrow on the active node's mesh in Pinned/All. #2071 reads the
-  // one `deriveScope` definition the grid render reads, instead of
-  // re-deriving scope here — and with the Mesh fallback chain gone, a Mesh
+  // #987 — `readScope` returns exactly the on-screen node set (Mesh for the
+  // selected mesh, Pinned cross-mesh, All, or Filtered narrowed by the Grid
+  // Controls — #1609) in the store's canonical (mesh_id, position) order, so
+  // traversal matches AgentNodeView cell-for-cell. This replaces the old
+  // `mesh_id === activeNode.mesh_id` filter, which stranded Ctrl+Alt+Arrow
+  // on the active node's mesh in Pinned/All. The scope comes from the same
+  // assembly the grid renders, and with the Mesh fallback chain gone, a Mesh
   // Grid with no selection walks an empty set (there is nothing on screen to
   // walk). Focusing within the current grid preserves its mesh scope.
   const activeNode = useAgentNodeStore.getState().getActiveNode();
@@ -221,13 +201,10 @@ function traverseGrid(direction: ArrowDirection): void {
   // imperative-reader pattern used by `awaitingInputShortcuts` /
   // `meshStore.deleteMesh`.
   const agentNodes = useAgentNodeStore.getState().getAgentNodes();
-  const selectedMeshId = useMeshStore.getState().selectedMeshId;
-  // #1609 — pass the Grid Controls so traversal in Filtered walks the same
-  // narrowed set the grid renders (the other scopes ignore them).
   const ownerships = useAgentNodeStore.getState().circuitOwnerships;
   const nodeIndex = indexAgentNodes(agentNodes);
   const groups = useNodeActivityStore.getState().groups;
-  const scope = deriveScope({ viewMode: mode, lastNonSingleMode: ui.lastNonSingleMode, agentNodes, selectedMeshId, activeNodeId: activeNode.id, controls: gridFilterControls() });
+  const scope = readScope();
   const visibleNodes = groupActivityNodes(scope.visibleNodes, nodeIndex, ownerships, groups);
   const targetId = traversalTargetId(visibleNodes, activityRootId(activeNode.id, nodeIndex, ownerships, groups), direction);
   if (targetId !== null) {
