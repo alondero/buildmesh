@@ -82,6 +82,29 @@ The `circuit/` and `services/circuit_worker/` pair is the reference example of
 the pure/impure split: one domain, one pure decision module, one worker that
 performs the effects.
 
+## Responsibility modules
+
+The stable entrypoints delegate to private implementations (ADR [0047](../adr/0047-backend-responsibility-modules.md)).
+Read the child that owns the operation before changing the facade.
+
+| Entrypoint | Implementation ownership |
+|---|---|
+| `services/agent_node.rs` | `agent_node/create.rs`: fresh/pending creation and launch snapshots; `discovery.rs`: import and resumable harness provenance; `lifecycle.rs`: close/delete/regenerate; `cleanup.rs`: durable removal queue, retry, and operator recovery. |
+| `agent/process.rs` | Process handle and constructor; `process/input.rs`: incarnation stamps and bounded replay; `registry.rs`: registry claims and teardown; `commands.rs`: live input, interrupt, kill, and handover orchestration. Spawn arrangement remains in `agent/spawn/`. |
+| `agent/provider/adapters/codex.rs` | `AgentProvider` implementation; `codex/hooks.rs`: callbacks/config retirement; `install_cache.rs`: single-flight cache; `install_probe.rs`: bounded runtime probes; `profiles.rs`: proxy profiles; `runtime_files.rs`: native/WSL file access; `trust.rs`: project trust edits. |
+| `commands/pr.rs` | IPC DTOs and command/offload adapters; `services/github/feeds.rs`: feed queries and mergeability batching; `pr_workflow.rs`: source validation, create/open/merge workflows; `repository.rs`: GitHub origin identity. All reuse `github/prs.rs` and its `GitHubClient`; there is no second HTTP client. |
+| `git/worktree/mod.rs` | Shared Git deadlines and close-safety wire type; `create.rs`: worktree creation/husk recovery; `include.rs`: included files; `maintenance.rs`: move/reset/sanitise/cross-runtime links; `safety.rs`: retained work checks; `remove.rs`: staged deletion and admin cleanup. `provision.rs` still owns the spawn decision and `warm.rs` the consumer-owned pool seam. |
+| `db/circuit/evidence.rs` | Shared history vocabulary and DTOs; `evidence/read_view.rs`: view assembly and post-read capability resolution; `native_hooks.rs`: receipt/submission binding; `outcome.rs`: operator decisions; `waits.rs`: wait history; `transition.rs`: atomic stepper writes; `effects.rs`: durable claims and acknowledgements. Locked helpers keep the caller's connection. |
+| `services/circuit_worker/tests.rs` | Source index for responsibility groups in `tests/`: effect commits, cleanup, recovery, report/review gates, classifier retry, continuation, parked evidence, result delivery/repair, admission/capacity, lineage/watchdog, GitHub, spawn, waits, and naming. `include!` retains full test names and existing CI filters. |
+
+Usage already dispatches through `services/usage/adapters/`; report snapshot
+reading lives in `services/transcript_reader/report_snapshot.rs`. Those completed
+cuts remain the pattern for per-provider work.
+
+The original facade tests exercise extracted implementations. `harness -- check`
+maps these implementation files back to their owning suite; source-scanning
+regression guards inspect the extracted files as well as their facade.
+
 ## Where the large files still are
 
 These modules are past the size where a change is easy to review. Treat each as
@@ -90,29 +113,23 @@ makes a move behaviour-preserving.
 
 | File | Non-blank lines | Notes |
 |---|---|---|
-| `services/circuit_worker/tests.rs` | 7,186 | The largest file in the crate — the circuit loop's tests. |
 | `circuit/stepper/tests.rs` | 6,739 | The pure `advance` decision core's tests. |
-| `db/circuit/evidence_tests.rs` | 4,667 | The circuit evidence module's tests. |
+| `db/circuit/evidence_tests.rs` | 4,670 | The circuit evidence module's tests. |
 | `circuit/stepper.rs` | 4,454 | The pure `advance` decision core. |
 | `db/circuit_tests.rs` | 4,143 | The `db/circuit` module's tests. |
-| `http/routes/attention/tests.rs` | 3,326 | The attention route's tests. |
+| `http/routes/attention/tests.rs` | 3,453 | The attention route's tests. |
 | `db/migration_tests.rs` | 2,781 | The schema-migration suite. |
 | `db/circuit/ledger.rs` | 2,777 | The `commit_circuit_advance` transaction. |
 | `services/github/prs.rs` | 2,535 | Pull-request listing, merge strategy, and contributor data. |
 | `db/agent_node.rs` | 2,508 | Agent Node persistence and the pending worktree-removal queue. |
 | `services/transcript_reader/report_snapshot_tests.rs` | 2,452 | The report snapshot module's tests. |
 | `db/migrations.rs` | 2,401 | The schema-evolution registry — `SCHEMA_VERSION` lives here. |
-| `db/circuit/evidence.rs` | 2,337 | Circuit evidence and outcome recording: `history`, `attention`, `record_outcome`, `commit_transition`, effect claiming. |
-| `agent/process.rs` | 1,999 | Agent process supervision and teardown. |
 | `commands/agent.rs` | 1,967 | Agent spawn command wrappers. |
 | `services/usage/adapters/cursor.rs` | 1,962 | The Cursor usage adapter. Per-provider usage logic lives in `services/usage/adapters/`. |
 | `services/circuit_worker/mod.rs` | 1,950 | The impure circuit loop. Effect dispatch lives in `dispatch.rs`. |
-| `agent/provider/adapters/codex.rs` | 1,867 | One harness adapter. Attention-hook provisioning, install and runtime detection, native and WSL profile materialisation, then the `impl AgentProvider` trait surface. |
 | `circuit/model.rs` | 1,840 | The graph AST and its validation and serialisation. |
 | `commands/diff.rs` | 1,837 | The per-file diff view: hunk building and syntax highlighting. The git2 side lives in `git/diff.rs` and `git/state.rs`. |
 | `commands/build_run.rs` | 1,733 | Build and run command orchestration. |
-| `services/agent_node.rs` | 1,579 | Agent Node create, regenerate, and teardown orchestration. |
-| `commands/pr.rs` | 1,283 | Pull-request commands. The git2 side lives in `git/remote.rs`. |
 | `circuit/delivery.rs` | 940 | Delivering a step's prompt to a live agent. |
 
 The counts are measured, not estimated. Re-measure before quoting one: the

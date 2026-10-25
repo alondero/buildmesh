@@ -51,7 +51,7 @@ pub fn unsubscribe_agent_output(session_id: i64) {
     unregister(session_id);
 }
 
-#[cfg(test)]
+#[cfg(test)] // allow-test-in-production: retain the existing source guard while its allowed owner moves; inline-test relocation is separate
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -103,7 +103,9 @@ mod tests {
         let mut unregister_sites = Vec::new();
         collect_sink_unregister_sites(&src_root, &src_root, &mut unregister_sites);
 
-        let allowed = [std::path::Path::new("services").join("agent_node.rs")];
+        let allowed = [std::path::Path::new("services")
+            .join("agent_node")
+            .join("lifecycle.rs")];
         let unexpected: Vec<_> = unregister_sites
             .iter()
             .filter(|(rel, _)| !allowed.iter().any(|ok| rel == ok))
@@ -248,7 +250,7 @@ mod tests {
     /// site would hide it. Rather than make the scanner understand gates, this
     /// fails and names the file: move the gated item into a `*_tests` module at
     /// the bottom of its file. The one call site in the tree is in
-    /// `services/agent_node.rs`, above that file's test modules.
+    /// `services/agent_node/lifecycle.rs`, which contains no test gates.
     ///
     /// This file is skipped for the same reason the walk skips it: its own
     /// source quotes the needle.
