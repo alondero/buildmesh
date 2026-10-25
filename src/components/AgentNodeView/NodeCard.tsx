@@ -2,6 +2,7 @@ import { useDraggable, useDroppable } from '@dnd-kit/core';
 import { memo, Suspense, lazy, useMemo, useState, type KeyboardEvent } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
+import { selectedActivityMember } from '../../hooks/useScope';
 import { activityRootId, activityStatus, indexAgentNodes } from '../../lib/nodeActivities';
 import { resolveCircuitOutcome } from '../../lib/circuitNodePresentation';
 import { useNodeActivityStore, type UtilityMode } from '../../stores/nodeActivityStore';
@@ -73,10 +74,9 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
   const showOverview = useNodeActivityStore(s => s.showOverview);
   const ungroupNode = useNodeActivityStore(s => s.ungroupNode);
   const activeMember = members.find(n => n.id === activeNodeId);
-  // The entity store is the primary navigation source. Activity selection is
-  // a detail of that entity and only supplies the fallback used before an
-  // external navigation action has committed.
-  const selectedId = activeMember?.id ?? members.find(n => n.id === selection?.nodeId)?.id ?? nodeId;
+  // Member choice lives in `selectedActivityMember`. This card still reads
+  // its own selection so a utility toggle does not re-render every card.
+  const selectedId = selectedActivityMember(members, activeNodeId, selection?.nodeId, nodeId);
   const selectedUtilityMode = utilities.get(selectedId);
   const showingUtility = selection?.nodeId === selectedId && !!selection?.utility && !!selectedUtilityMode;
   const focusOnAttach = keyboardSelection?.nodeId !== selectedId || keyboardSelection.utility !== showingUtility;

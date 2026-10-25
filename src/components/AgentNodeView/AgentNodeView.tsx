@@ -4,13 +4,12 @@ import {
   type DragStartEvent, type DragMoveEvent, type DragEndEvent,
 } from '@dnd-kit/core';
 import { useAgentNodeStore, useAllAgentNodes, type AgentNode } from '../../stores/agentNodeStore';
-import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { terminalManager } from '../Terminal/Terminal';
 import { watchAgentNode, unwatchAgentNode } from '../../lib/tauri';
 import { GridSplitter } from './GridSplitter';
-import { deriveScope, resolveSingleNode } from '../../lib/viewModes';
 import { deriveVisibleNodes } from './gridFilterSort';
+import { useScope } from '../../hooks/useScope';
 import { CenterDiffOverlay } from './CenterDiffOverlay';
 import { CircuitEditorOverlay } from '../Circuits/CircuitEditorOverlay';
 import { NodeCard } from './NodeCard';
@@ -141,7 +140,6 @@ function ResizablePanes({ nodes, activityMembersByRoot, draggable = true }: Resi
 
 
 export function AgentNodeView() {
-  const selectedMeshId = useMeshStore(state => state.selectedMeshId);
   // Granular selectors: subscribing to the whole store (useAgentNodeStore())
   // re-rendered the view on every unrelated change — including each
   // attention status flip — even though only agentNodes/activeNodeId affect
@@ -176,11 +174,12 @@ export function AgentNodeView() {
   );
 
   // View Modes (wayfinder #982): 'single' solos the active node (it subsumes
-  // the old maximizedNodeId); the grid modes derive their visible set from
-  // the pure helpers in src/lib/viewModes.ts so keyboard traversal (#987)
-  // reads the same definition.
-  const viewMode = useUIStore(state => state.viewMode);
-  const lastNonSingleMode = useUIStore(state => state.lastNonSingleMode);
+  // the old maximizedNodeId). The grid modes and the Single fallback come
+  // from `useScope`, which delegates to the pure helpers keyboard traversal
+  // reads through `readScope` (#987, #2529).
+  const scope = useScope();
+  const viewMode = scope.viewMode;
+  const selectedMeshId = scope.selectedMeshId;
   const exitSingleMode = useUIStore(state => state.exitSingleMode);
   const probeOpen = useUIStore(state => state.probeOpen);
   const activeDiffFile = useUIStore(state => state.activeDiffFile);
@@ -190,22 +189,6 @@ export function AgentNodeView() {
   const gridStatusFilter = useUIStore(state => state.gridStatusFilter);
   const gridSortBy = useUIStore(state => state.gridSortBy);
   const gridSortDirection = useUIStore(state => state.gridSortDirection);
-
-  // #2071 — one derived scope per render, shared by the grid render below
-  // and the canvas empty state's counts. Neither re-derives "which Mesh is
-  // this, and what does it hold" from the sidebar selection and the focused
-  // node, so the two can't disagree about the scope they render.
-  const scope = useMemo(
-    () => deriveScope({
-      viewMode,
-      lastNonSingleMode,
-      agentNodes,
-      selectedMeshId,
-      activeNodeId,
-      controls: { gridSearchQuery, gridProviderFilter, gridStatusFilter },
-    }),
-    [viewMode, lastNonSingleMode, agentNodes, selectedMeshId, activeNodeId, gridSearchQuery, gridProviderFilter, gridStatusFilter],
-  );
 
   // The ordered nodes the active grid mode renders. 'single' is not a grid
   // mode — it renders `singleNode` below instead, so its list stays empty.
@@ -230,24 +213,15 @@ export function AgentNodeView() {
     ],
   );
 
-  // The node Single mode solos: the active node regardless of mesh scope
-  // (explicit focus wins — cross-mesh by nature, like Pinned), else the
-  // first node of the scope single was entered from, else any node. Unlike
-  // the old maximize derivation there is NO visibility check against a mesh
-  // filter and no auto-clear effect — ticket #983 deleted both.
+  // `useScope` already applied the Single fallback. This only lifts a grouped
+  // member to its activity root so the solo card shows the group.
   const singleNode = useMemo(
     () => {
-      if (viewMode !== 'single') return null;
-      const resolved = resolveSingleNode(agentNodes, activeNodeId, lastNonSingleMode, selectedMeshId, {
-          gridSearchQuery,
-          gridProviderFilter,
-          gridStatusFilter,
-        });
-      return resolved ? nodesById[activityRootId(resolved.id, nodesById, ownerships, groups)] ?? resolved : null;
+      const resolved = scope.currentNode;
+      if (resolved === null) return null;
+      return nodesById[activityRootId(resolved.id, nodesById, ownerships, groups)] ?? resolved;
     },
-    // Controls shape (not each field) keeps the memo dep list stable and the
-    // Filtered fallback controls-aware (`resolveSingleNode` narrows by them).
-    [viewMode, agentNodes, activeNodeId, nodesById, ownerships, groups, lastNonSingleMode, selectedMeshId, gridSearchQuery, gridProviderFilter, gridStatusFilter],
+    [scope.currentNode, nodesById, ownerships, groups],
   );
 
   useEffect(() => {

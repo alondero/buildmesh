@@ -1,10 +1,11 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useLayoutEffect, useRef, useState } from 'react';
 
-import { useAgentNodeStore, useAllAgentNodes, type AgentNode } from '../../stores/agentNodeStore';
+import { type AgentNode } from '../../stores/agentNodeStore';
 import { useMeshStore, type Mesh } from '../../stores/meshStore';
 import { enterMesh } from '../../lib/navigation';
 import { useUIStore } from '../../stores/uiStore';
-import { deriveScope, resolveSingleNode, type DerivedScope } from '../../lib/viewModes';
+import { type DerivedScope } from '../../lib/viewModes';
+import { useScope } from '../../hooks/useScope';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 import { dropdownId } from '../../lib/dropdownId';
@@ -17,17 +18,14 @@ import { dropdownId } from '../../lib/dropdownId';
  *
  * Every fact this control renders — is the scope Mesh-anchored, which Mesh,
  * how many Agent Nodes are visible, how many the scope held before the
- * filters narrowed it — comes from `deriveScope` (#2071). It never re-derives
- * scope from `selectedMeshId` or the focused node, which is exactly the drift
- * #2071 existed to delete: the switcher beside it picks the View Mode, this
- * reads the scope that mode produces, and the two cannot disagree.
+ * filters narrowed it — comes from `useScope`, which delegates to
+ * `deriveScope` (#2071). It never re-derives scope from the stores itself.
+ * The switcher beside it picks the View Mode, this reads the scope that mode
+ * produces, and the two cannot disagree.
  *
- * This is also the caller #2071's `ScopeInput.meshes` was written for. The
- * Mesh list is optional there because `AgentNodeView` renders no name; here
- * the name IS the label, so the list is passed. Subscription cost: the
- * indicator re-renders on a Mesh rename, which is one button's worth of work.
- * Adding the same subscription to `AgentNodeView` instead would re-render the
- * whole terminal grid on every rename — the reason the input is optional.
+ * Mesh names are requested here (`meshNames: true`) and not on the canvas.
+ * `AgentNodeView` renders no name, and subscribing it to the Mesh list would
+ * re-render the terminal grid on every rename.
  *
  * ## The picker
  *
@@ -311,13 +309,6 @@ function fullScopeLabel(scope: DerivedScope, soloNode: AgentNode | null, meshes:
   }
 }
 
-/**
- * The scope label for the current View Mode, plus the Mesh list and selection
- * the picker renders. One hook so `ScopeIndicator` and the compact
- * `ViewSelector` (#2421) read the same `deriveScope` result — neither can
- * name a scope the other would not.
- */
-
 /** The label the bar draws. Cross-Mesh Filtered and Pinned use the short form
  *  (see `ScopeLabel.visible`); every other mode draws its full text. */
 function scopeLabel(scope: DerivedScope, soloNode: AgentNode | null, meshes: Mesh[]): ScopeLabel {
@@ -326,47 +317,16 @@ function scopeLabel(scope: DerivedScope, soloNode: AgentNode | null, meshes: Mes
   return { ...full, visible: crossMesh ? full.detail : full.text };
 }
 
+/**
+ * The scope label for the current View Mode, plus the Mesh list and selection
+ * the picker renders. One hook so `ScopeIndicator` and the compact
+ * `ViewSelector` (#2421) read the same `useScope` result — neither can
+ * name a scope the other would not.
+ */
 export function useScopeLabel(): ScopeLabel & { meshes: Mesh[]; selectedMeshId: number | null } {
-  const viewMode = useUIStore(s => s.viewMode);
-  const lastNonSingleMode = useUIStore(s => s.lastNonSingleMode);
-  const gridSearchQuery = useUIStore(s => s.gridSearchQuery);
-  const gridProviderFilter = useUIStore(s => s.gridProviderFilter);
-  const gridStatusFilter = useUIStore(s => s.gridStatusFilter);
-  const selectedMeshId = useMeshStore(s => s.selectedMeshId);
+  const scope = useScope({ meshNames: true });
   const meshes = useMeshStore(s => s.meshes);
-  const activeNodeId = useAgentNodeStore(s => s.activeNodeId);
-  // `useShallow` on the element list, so a status flip re-renders this one
-  // button while unrelated node writes (terminal output, circuit indicators)
-  // leave the title bar alone. `GridFilterPopover` already holds this
-  // subscription in the Filtered view, so the cost is new only elsewhere.
-  const agentNodes = useAllAgentNodes();
-
-  const controls = useMemo(
-    () => ({ gridSearchQuery, gridProviderFilter, gridStatusFilter }),
-    [gridSearchQuery, gridProviderFilter, gridStatusFilter],
-  );
-  const scope = useMemo(
-    () => deriveScope({
-      viewMode,
-      lastNonSingleMode,
-      agentNodes,
-      selectedMeshId,
-      activeNodeId,
-      meshes,
-      controls,
-    }),
-    [viewMode, lastNonSingleMode, agentNodes, selectedMeshId, activeNodeId, meshes, controls],
-  );
-  // The node Single solos, from the same helper the grid reads — so this
-  // control can never name a different node than the one on screen.
-  const soloNode = useMemo(
-    () => viewMode === 'single'
-      ? resolveSingleNode(agentNodes, activeNodeId, lastNonSingleMode, selectedMeshId, controls)
-      : null,
-    [viewMode, agentNodes, activeNodeId, lastNonSingleMode, selectedMeshId, controls],
-  );
-
-  return { ...scopeLabel(scope, soloNode, meshes), meshes, selectedMeshId };
+  return { ...scopeLabel(scope, scope.currentNode, meshes), meshes, selectedMeshId: scope.selectedMeshId };
 }
 
 /** Lucide `chevron-down` — marks a trigger as a dropdown, so the scope
