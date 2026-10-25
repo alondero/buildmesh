@@ -1,0 +1,33 @@
+[
+  {
+    "meter": {
+      "cachedAt": 1700000000,
+      "provider": "anthropic",
+      "usage": {
+        "balance": {
+          "currency": "USD",
+          "monthlySpend": 12.0,
+          "remaining": 0.0
+        },
+        "detail": "Pro plan",
+        "error": null,
+        "loggedIn": true,
+        "meters": [
+          {
+            "state": "unlimited"
+          }
+        ],
+        "provider": "anthropic",
+        "windows": [
+          {
+            "label": "Weekly",
+            "resetsAt": "2026-11-01T12:00:00Z",
+            "usedPercent": 0.0
+          }
+        ]
+      },
+      "usageTracked": true
+    },
+    "name": "Claude subscription"
+  }
+]
