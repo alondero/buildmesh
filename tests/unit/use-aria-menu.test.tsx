@@ -28,11 +28,15 @@ function Harness({
   enabled = true,
   itemCount,
   initialActiveIndex,
+  disabledIndices = [],
+  skipDisabled = false,
 }: {
   onClose: () => void;
   enabled?: boolean;
   itemCount?: number;
   initialActiveIndex?: number;
+  disabledIndices?: number[];
+  skipDisabled?: boolean;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const [activeIndex, setActiveIndex] = useState(0);
@@ -44,6 +48,7 @@ function Harness({
     setActiveIndex,
     onClose,
     enabled,
+    skipDisabled,
     ...(initialActiveIndex === undefined ? {} : { initialActiveIndex }),
   });
   return (
@@ -56,6 +61,7 @@ function Harness({
             role="menuitem"
             tabIndex={activeIndex === i ? 0 : -1}
             data-testid={`item-${i}`}
+            disabled={disabledIndices.includes(i)}
           >
             item {i}
           </button>
@@ -89,6 +95,29 @@ describe('useAriaMenu — WAI-ARIA keyboard contract', () => {
   it('falls back to the first item when initialActiveIndex is out of range', () => {
     render(<Harness onClose={() => {}} itemCount={3} initialActiveIndex={7} />);
     expect(document.activeElement).toBe(screen.getByTestId('item-0'));
+  });
+
+  it('skips native-disabled items for initial focus and keyboard navigation', () => {
+    render(<Harness onClose={() => {}} disabledIndices={[0]} skipDisabled />);
+    const items = screen.getAllByRole('menuitem');
+    expect(document.activeElement).toBe(items[1]);
+    fireEvent.keyDown(items[1], { key: 'ArrowUp' });
+    expect(document.activeElement).toBe(items[2]);
+    fireEvent.keyDown(items[2], { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(items[1]);
+    fireEvent.keyDown(items[1], { key: 'Home' });
+    expect(document.activeElement).toBe(items[1]);
+    fireEvent.keyDown(items[1], { key: 'End' });
+    expect(document.activeElement).toBe(items[2]);
+  });
+
+  it('does not try to focus a disabled item when every item is disabled', () => {
+    render(<Harness onClose={() => {}} disabledIndices={[0, 1, 2]} skipDisabled />);
+    expect(document.activeElement).toBe(document.body);
+    for (const key of ['ArrowDown', 'ArrowUp', 'Home', 'End']) {
+      fireEvent.keyDown(document.body, { key });
+      expect(document.activeElement).toBe(document.body);
+    }
   });
 
   it('falls back to the rendered menuitems when itemCount is omitted', () => {

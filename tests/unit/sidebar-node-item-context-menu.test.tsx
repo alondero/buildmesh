@@ -195,13 +195,37 @@ describe('NodeItem context menu (issue #776)', () => {
     expect(menu.parentElement).toBe(document.body);
   });
 
-  it('auto-focuses the first menuitem with preventScroll so the sidebar does not jump', () => {
+  it('skips disabled Regenerate and focuses the first enabled menuitem without scrolling', () => {
     const focusSpy = vi.spyOn(HTMLElement.prototype, 'focus');
     renderNode();
     openContextMenu();
-    expect(document.activeElement).toBe(screen.getByText(/Regenerate/).closest('button'));
+    const regenerate = screen.getByText(/Regenerate/).closest('button')!;
+    const pin = screen.getByText('Pin node').closest('button')!;
+    expect(regenerate.disabled).toBe(true);
+    expect(document.activeElement).toBe(pin);
+    expect(pin.getAttribute('tabindex')).toBe('0');
+    expect(regenerate.getAttribute('tabindex')).toBe('-1');
     expect(focusSpy.mock.calls.some((call) => call[0]?.preventScroll === true)).toBe(true);
     focusSpy.mockRestore();
+  });
+
+  it('keeps keyboard navigation on enabled actions when the first item is disabled', () => {
+    renderNode();
+    openContextMenu();
+    const regenerate = screen.getByText(/Regenerate/).closest('button')!;
+    const pin = screen.getByText('Pin node').closest('button')!;
+
+    expect(document.activeElement).toBe(pin);
+    pressKey('ArrowDown');
+    expect(document.activeElement).toBe(pin);
+    pressKey('ArrowUp');
+    expect(document.activeElement).toBe(pin);
+    pressKey('Home');
+    expect(document.activeElement).toBe(pin);
+    pressKey('End');
+    expect(document.activeElement).toBe(pin);
+    expect(regenerate.disabled).toBe(true);
+    expect(regenerate.getAttribute('tabindex')).toBe('-1');
   });
 
   it('marks the menu container with role="menu" and two items (Regenerate + Pin) with role="menuitem"', () => {
@@ -231,17 +255,18 @@ describe('NodeItem context menu (issue #776)', () => {
     expect(document.getElementById('node-item-name-99')!.textContent).toBe(node.name);
   });
 
-  it('autofocuses the first (and only) menuitem on open (roving tabindex)', async () => {
+  it('autofocuses the first enabled menuitem on open (roving tabindex)', async () => {
     renderNode();
     openContextMenu();
     const items = Array.from(document.querySelectorAll('[role="menuitem"]')) as HTMLButtonElement[];
-    expect(items[0].getAttribute('tabindex')).toBe('0');
-    // Focus moves to the menuitem via `setActiveIndex(0)` +
-    // `menuItemRefs.current[0]?.focus()` inside the layout effect —
-    // wait one tick so the assertion doesn't race the synchronous
-    // layout-effect commit.
+    expect(items[0].disabled).toBe(true);
+    expect(items[0].getAttribute('tabindex')).toBe('-1');
+    expect(items[1].getAttribute('tabindex')).toBe('0');
+    // The unavailable Regenerate row remains visible but jsdom 30 correctly
+    // refuses to focus it; the enabled Pin row receives focus in the layout
+    // effect.
     await waitFor(() => {
-      expect(document.activeElement).toBe(items[0]);
+      expect(document.activeElement).toBe(items[1]);
     });
   });
 
@@ -1125,7 +1150,7 @@ describe('NodeItem context menu (issue #776)', () => {
       });
     });
 
-    it('ArrowDown wraps through all 3 items (Regenerate -> Start Fresh -> Pin -> Regenerate)', () => {
+    it('ArrowDown wraps through enabled items (Start Fresh -> Pin -> Start Fresh)', () => {
       const node = makeNode({
         status: 'error',
         cli_session_id: 'stale-uuid-1234',
@@ -1134,19 +1159,19 @@ describe('NodeItem context menu (issue #776)', () => {
       openContextMenu();
 
       const items = () => Array.from(document.querySelectorAll('[role="menuitem"]')) as HTMLButtonElement[];
-      expect(document.activeElement).toBe(items()[0]);
-
-      fireEvent.keyDown(document, { key: 'ArrowDown' });
       expect(document.activeElement).toBe(items()[1]);
 
       fireEvent.keyDown(document, { key: 'ArrowDown' });
       expect(document.activeElement).toBe(items()[2]);
 
       fireEvent.keyDown(document, { key: 'ArrowDown' });
-      expect(document.activeElement).toBe(items()[0]);
+      expect(document.activeElement).toBe(items()[1]);
+
+      fireEvent.keyDown(document, { key: 'ArrowDown' });
+      expect(document.activeElement).toBe(items()[2]);
     });
 
-    it('ArrowUp wraps backwards through all 3 items (Regenerate -> Pin -> Start Fresh -> Regenerate)', () => {
+    it('ArrowUp wraps backwards through enabled items (Start Fresh -> Pin -> Start Fresh)', () => {
       const node = makeNode({
         status: 'error',
         cli_session_id: 'stale-uuid-1234',
@@ -1155,7 +1180,7 @@ describe('NodeItem context menu (issue #776)', () => {
       openContextMenu();
 
       const items = () => Array.from(document.querySelectorAll('[role="menuitem"]')) as HTMLButtonElement[];
-      expect(document.activeElement).toBe(items()[0]);
+      expect(document.activeElement).toBe(items()[1]);
 
       fireEvent.keyDown(document, { key: 'ArrowUp' });
       expect(document.activeElement).toBe(items()[2]);
@@ -1164,7 +1189,7 @@ describe('NodeItem context menu (issue #776)', () => {
       expect(document.activeElement).toBe(items()[1]);
 
       fireEvent.keyDown(document, { key: 'ArrowUp' });
-      expect(document.activeElement).toBe(items()[0]);
+      expect(document.activeElement).toBe(items()[2]);
     });
 
     it('Home and End jump to first and last items', () => {
@@ -1181,7 +1206,7 @@ describe('NodeItem context menu (issue #776)', () => {
       expect(document.activeElement).toBe(items()[2]);
 
       fireEvent.keyDown(document, { key: 'Home' });
-      expect(document.activeElement).toBe(items()[0]);
+      expect(document.activeElement).toBe(items()[1]);
     });
 
     it('surfaces toast on Start Fresh failure', async () => {

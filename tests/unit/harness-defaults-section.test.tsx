@@ -215,7 +215,7 @@ describe('Settings — Agent Harness defaults', () => {
       true,
     );
     const calls = mockBackend({ providers: [CLAUDE_ROW, proxied_claude, CODEX_ROW] });
-    render(<AppSettingsModal onClose={() => {}} />);
+    render(<AppSettingsModal initialTab="harnesses" onClose={() => {}} />);
 
     // Wait for hydration; Claude's card is identifiable by its model input.
     await screen.findByTestId('harness-default-claude');
@@ -229,7 +229,7 @@ describe('Settings — Agent Harness defaults', () => {
 
   it('renders capability-gated controls — Claude has both, Agy has model + permission, OpenCode has permission only', async () => {
     mockBackend({ providers: [CLAUDE_ROW, AGY_ROW, OPENCODE_ROW, CODEX_ROW, TERMINAL_ROW] });
-    render(<AppSettingsModal onClose={() => {}} />);
+    render(<AppSettingsModal initialTab="harnesses" onClose={() => {}} />);
 
     // Claude: model input + effort select.
     await screen.findByTestId('harness-default-model-input-claude');
@@ -251,7 +251,7 @@ describe('Settings — Agent Harness defaults', () => {
 
   it('styles the model, effort and permission fields with the input surface tokens', async () => {
     mockBackend({ providers: [CLAUDE_ROW, AGY_ROW] });
-    render(<AppSettingsModal onClose={() => {}} />);
+    render(<AppSettingsModal initialTab="harnesses" onClose={() => {}} />);
 
     const fields = [
       await screen.findByTestId('harness-default-model-input-claude'),
@@ -269,7 +269,7 @@ describe('Settings — Agent Harness defaults', () => {
 
   it('effort choices and guidance match each harness\'s declared vocabulary', async () => {
     mockBackend({ providers: [CLAUDE_ROW, CODEX_ROW] });
-    render(<AppSettingsModal onClose={() => {}} />);
+    render(<AppSettingsModal initialTab="harnesses" onClose={() => {}} />);
 
     const claudeSelect = await screen.findByTestId<HTMLSelectElement>('harness-default-effort-select-claude');
     const claudeOptions = Array.from(claudeSelect.querySelectorAll('option')).map((o) => o.value);
@@ -297,7 +297,7 @@ describe('Settings — Agent Harness defaults', () => {
       },
       providers: [CLAUDE_ROW, CODEX_ROW],
     });
-    render(<AppSettingsModal onClose={() => {}} />);
+    render(<AppSettingsModal initialTab="harnesses" onClose={() => {}} />);
 
     const claudeModel = await screen.findByTestId<HTMLInputElement>('harness-default-model-input-claude');
     await waitFor(() => expect(claudeModel.value).toBe('opus-4-1'));
@@ -312,14 +312,18 @@ describe('Settings — Agent Harness defaults', () => {
   it('commits a typed model value via set_harness_default on blur', async () => {
     const calls = mockBackend();
     const user = userEvent.setup();
-    render(<AppSettingsModal onClose={() => {}} />);
+    // These controls are inside the hidden Harnesses tab by default. Mount
+    // that tab so Chromium/jsdom can perform a real focus → edit → blur path.
+    render(<AppSettingsModal initialTab="harnesses" onClose={() => {}} />);
 
     const input = await screen.findByTestId<HTMLInputElement>('harness-default-model-input-claude');
     await waitFor(() => expect(input.disabled).toBe(false));
+    await user.click(input);
     await user.type(input, 'opus-4-1');
+    expect(document.activeElement).toBe(input);
     // No save until blur (mirrors the autopilot-pool commit-on-blur).
     expect(calls['set_harness_default']).toBeUndefined();
-    input.blur();
+    await user.tab();
 
     await waitFor(() => expect(calls['set_harness_default']).toBeTruthy());
     const last = calls['set_harness_default']!.at(-1);
@@ -336,13 +340,15 @@ describe('Settings — Agent Harness defaults', () => {
     const calls = mockBackend();
     const onClose = vi.fn();
     const user = userEvent.setup();
-    render(<AppSettingsModal onClose={onClose} />);
+    render(<AppSettingsModal initialTab="harnesses" onClose={onClose} />);
 
     const input = await screen.findByTestId<HTMLInputElement>('harness-default-model-input-claude');
     await waitFor(() => expect(input.disabled).toBe(false));
+    await user.click(input);
     await user.type(input, 'opus-4-1');
+    expect(document.activeElement).toBe(input);
 
-    fireEvent.keyDown(document, { key: 'Escape' });
+    await user.keyboard('{Escape}');
 
     expect(onClose).not.toHaveBeenCalled();
     screen.getByTestId('modal-discard-banner');
@@ -352,12 +358,14 @@ describe('Settings — Agent Harness defaults', () => {
   it('failed save rolls the draft back to the last confirmed value', async () => {
     mockBackend({ failOnSave: true });
     const user = userEvent.setup();
-    render(<AppSettingsModal onClose={() => {}} />);
+    render(<AppSettingsModal initialTab="harnesses" onClose={() => {}} />);
 
     const input = await screen.findByTestId<HTMLInputElement>('harness-default-model-input-claude');
     await waitFor(() => expect(input.disabled).toBe(false));
+    await user.click(input);
     await user.type(input, 'opus-4-1');
-    input.blur();
+    expect(document.activeElement).toBe(input);
+    await user.tab();
 
     // Wait for the rolled-back input. The draft returns to empty (the
     // last confirmed value is `null` — the harness had no stored default
@@ -373,7 +381,7 @@ describe('Settings — Agent Harness defaults', () => {
       providers: [CLAUDE_ROW],
     });
     const user = userEvent.setup();
-    render(<AppSettingsModal onClose={() => {}} />);
+    render(<AppSettingsModal initialTab="harnesses" onClose={() => {}} />);
 
     const resetButton = await screen.findByTestId('harness-default-reset-claude');
     await user.click(resetButton);
@@ -408,14 +416,14 @@ describe('Settings — Agent Harness defaults', () => {
       providers: [CLAUDE_ROW],
       preferencesDelayMs: 1200,
     });
-    render(<AppSettingsModal onClose={() => {}} />);
+    render(<AppSettingsModal initialTab="harnesses" onClose={() => {}} />);
 
     expect(await screen.findByTestId('harness-default-reset-claude')).toBeTruthy();
   });
 
   it('omits harnesses with nothing to configure, so Terminal gets no card', async () => {
     mockBackend({ providers: [CLAUDE_ROW, TERMINAL_ROW] });
-    render(<AppSettingsModal onClose={() => {}} />);
+    render(<AppSettingsModal initialTab="harnesses" onClose={() => {}} />);
     await screen.findByTestId('harness-default-claude');
     expect(screen.queryByTestId('harness-default-terminal')).toBeNull();
     expect(screen.queryByTestId('harness-default-empty-terminal')).toBeNull();
@@ -425,7 +433,7 @@ describe('Settings — Agent Harness defaults', () => {
   it('permission select offers the harness modes in its own words and commits on blur', async () => {
     const calls = mockBackend({ providers: [CLAUDE_ROW] });
     const user = userEvent.setup();
-    render(<AppSettingsModal onClose={() => {}} />);
+    render(<AppSettingsModal initialTab="harnesses" onClose={() => {}} />);
 
     const select = await screen.findByTestId<HTMLSelectElement>('harness-permission-select-claude');
     const options = Array.from(select.querySelectorAll('option')).map((o) => o.value);
@@ -440,8 +448,10 @@ describe('Settings — Agent Harness defaults', () => {
       .toBe('— harness default (--dangerously-skip-permissions) —');
     expect(screen.queryByTestId('harness-permission-effective-claude')).toBeNull();
 
+    await user.click(select);
     await user.selectOptions(select, 'prompt');
-    select.blur();
+    expect(document.activeElement).toBe(select);
+    await user.tab();
 
     await waitFor(() => expect(calls['set_harness_default']).toBeTruthy());
     const last = calls['set_harness_default']!.at(-1);
@@ -458,7 +468,7 @@ describe('Settings — Agent Harness defaults', () => {
       defaults: { codex: { model: null, effort: null, permission_mode: 'prompt' } },
       providers: [CODEX_ROW],
     });
-    render(<AppSettingsModal onClose={() => {}} />);
+    render(<AppSettingsModal initialTab="harnesses" onClose={() => {}} />);
 
     const select = await screen.findByTestId<HTMLSelectElement>('harness-permission-select-codex');
     await waitFor(() => expect(select.value).toBe('prompt'));
@@ -467,7 +477,7 @@ describe('Settings — Agent Harness defaults', () => {
 
   it('single enforced mode renders as read-only text, not a select', async () => {
     mockBackend({ providers: [MCODE_ROW] });
-    render(<AppSettingsModal onClose={() => {}} />);
+    render(<AppSettingsModal initialTab="harnesses" onClose={() => {}} />);
 
     const fixed = await screen.findByTestId('harness-permission-fixed-mcode');
     expect(fixed.textContent).toBe('Full Access (permissionMode: bypassPermissions)');
@@ -479,7 +489,7 @@ describe('Settings — Agent Harness defaults', () => {
     // Kimi Code genuinely ships no permission flag (unlike Agy/OpenCode,
     // which both offer unattended + prompt).
     mockBackend({ providers: [KIMI_ROW] });
-    render(<AppSettingsModal onClose={() => {}} />);
+    render(<AppSettingsModal initialTab="harnesses" onClose={() => {}} />);
 
     // Kimi keeps its model input (unchanged behavior) …
     await screen.findByTestId('harness-default-model-input-kimi');
