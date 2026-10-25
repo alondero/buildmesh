@@ -15,6 +15,7 @@ pub(super) fn classify(
 ) -> Classified {
     match payload.event().as_str() {
         "sessionstart" => ignore(detail),
+        "userpromptsubmit" => running(detail),
         "permissionrequest" => permission(detail),
         // Native reconciliation is bound to the resolved node/session by the
         // route. Its compatible transcript path is optional and often expires;

@@ -4,11 +4,11 @@ description: MiniMax Code (mcode) capability review against Buildmesh's harness 
 metadata:
   type: reference
   harness: mcode
-  mcode_version: 0.6.5 (model CLI); 0.4.12 (attention validation)
-  date: 2026-10-09
-  attention_validation: Stop validated 2026-09-20 against installed 0.4.12;
-    SessionStart provisioned for identity capture but delivery unvalidated
-    against the installed TUI as of 2026-10-01
+  mcode_version: 0.6.13 (installed native Windows CLI and TUI)
+  date: 2026-10-25
+  attention_validation: SessionStart, UserPromptSubmit and Stop captured from
+    installed 0.6.13 exec and interactive ConPTY with an isolated local BYOK endpoint;
+    Buildmesh HTTP delivery and WSL remain unvalidated by this probe
 ---
 
 # MiniMax Code harness capabilities vs Buildmesh
@@ -16,8 +16,9 @@ metadata:
 Review of what the `mcode` binary actually exposes, versus what Buildmesh's
 Mcode adapter advertises and uses. Both primary concerns have landed:
 **transcript understanding** (`TranscriptFormat::Mcode`) and **attention
-hooks** (the provisioned Agent-Plugin, validated against a live 0.4.12 TUI —
-issue #1797). The Circuit compatibility gate is open for mcode.
+hooks** (the provisioned compatible plugin). Native 0.6.13 evidence below
+extends the original 0.4.12 completion validation. The Circuit compatibility
+gate is open for mcode.
 
 ## Sources (primary only)
 
@@ -26,6 +27,11 @@ issue #1797). The Circuit compatibility gate is open for mcode.
 | `@minimax-ai/code@0.4.12` npm bundle (`cli.js` + `chunks/*.js` strings) | Shipped CLI: data-dir resolution, session layout, plugin scan, hook payload |
 | Installed `mcode 0.4.12` driven on Windows, 2026-09-20 | Live `exec` and interactive-TUI runs against a local listener (issue #1797) |
 | Installed `mcode 0.6.5` on Windows, 2026-10-09 | `mcode --version` and interactive `mcode --help`: `-m, --model <provider/model>` selects the model for this Session only |
+| [Official npm package metadata](https://registry.npmjs.org/@minimax-ai/code) and [0.6.13 package](https://registry.npmjs.org/@minimax-ai/code/-/code-0.6.13.tgz) | Latest stable npm version, publication timestamp, shipped changelog and hook implementation |
+| Installed `mcode 0.6.13`, 2026-10-25 | Help and bundle inspection; native `exec` and interactive ConPTY against an isolated local OpenAI-compatible endpoint; no real model/account used |
+| [Public release v0.6.5](https://github.com/MiniMax-AI/minimax-code/releases/tag/v0.6.5) | Separate source-release channel; does not establish the npm 0.6.13 implementation |
+| [Public hook contracts](https://github.com/MiniMax-AI/minimax-code/blob/da22f11c55d4748155d7162c1030414228a00565/packages/agent-modules/plugin-hooks/src/contracts.ts), [hook runner](https://github.com/MiniMax-AI/minimax-code/blob/da22f11c55d4748155d7162c1030414228a00565/packages/agent-modules/plugin-hooks/src/runner.ts) and [TUI notice docs](https://github.com/MiniMax-AI/minimax-code/blob/da22f11c55d4748155d7162c1030414228a00565/docs/hooks.md) | Pinned public source comparison; shipped npm code and native captures take precedence where the channels differ |
+| [Official BYOK examples](https://github.com/MiniMax-AI/minimax-code/blob/da22f11c55d4748155d7162c1030414228a00565/docs/examples.md) | Provider ids from `provider list`, model reference selection, supported API formats and local endpoint setup |
 | [MiniMax CLI features](https://agent.minimax.io/docs/cli/features#model-references) | Model reference syntax: `provider/model`, optionally `#variant` |
 | `MiniMax-AI/minimax-code-plugins` (`proposals/hooks-v0.4-spec.md`, `docs/plugin-compatibility.md`) | The mcode 0.4.0+ plugin format: `.claude-plugin/plugin.json`, inline `hooks` |
 | `MiniMax-AI/minimax-code-plugins` (`proposals/hooks-detailed-spec.md`, `examples/hello-mcode-hooks`) | The superseded v0.3.x Agent-Plugin format (`io.minimax.mcode/hooks/hooks.json`) |
@@ -36,6 +42,86 @@ issue #1797). The Circuit compatibility gate is open for mcode.
 Delivery, layout, and payload claims below are backed by the live run; the
 scanner and manifest rules are traceable to the shipped bundle and the
 first-party plugin spec.
+
+## Review against the latest npm release
+
+Audience: Buildmesh integration maintainers. Status: current evidence as of
+2026-10-25. The latest npm release is **0.6.13**, published 2026-10-23; the
+latest GitHub source archive is **v0.6.5**, published 2026-10-09. Their matching
+version labels do not imply matching artifacts: the installed npm changelog
+contains releases and capabilities absent from the public source changelog.
+
+The concrete attention gap is **`UserPromptSubmit`**. Buildmesh already
+provisions identity capture and completion, but without the submit callback it
+misses authoritative evidence that the next user turn began. Provisioning that
+event and projecting it as work resumed lets the shared lifecycle clear old
+attention and fence delayed completion callbacks by their prompt identity.
+
+The second gap is the BYOK provider reference: `mcode provider list --json`
+returns ids such as `custom_provider:probe`, and the supported override is
+`custom_provider:probe/probe`. The old model validator rejected its colon.
+Buildmesh now admits that exact provider namespace while retaining its safe
+identifier grammar for the remaining provider, model and variant components.
+The local native probe successfully selected that reference in exec and TUI.
+
+The shipped 0.6.13 event list is `SessionStart`, `SessionEnd`,
+`UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`,
+`SubagentStart`, `SubagentStop`, `Stop`, `PreCompact`, and `PostCompact`.
+`Notification`, `PermissionDenied`, `StopFailure`, and `StopCancelled` are
+absent from that parser. The older twelve-event list has been corrected
+to this released implementation. Failed or cancelled turns do not fire the
+normal `Stop`; `SessionEnd` is best-effort session teardown, so it cannot stand
+in for a reliable turn failure or cancellation event.
+
+Other additions work inside the existing terminal without a Buildmesh adapter
+change: hook `systemMessage` notices (0.5.8), system-prompt replacement and
+append flags, lightweight conversations, Computer Use selection (0.6.13), and
+the remote App Server (0.6.12). The TUI still has no permission or effort flag;
+`exec --effort` and `exec --permission` do not extend interactive launch support.
+Headless JSON/stream JSON, output schemas, and final-message files remain
+separate entry-point capabilities. Lightweight mode omits coding tools and
+cannot be combined with `--session` or `--continue`, so it is not an automatic
+replacement for ordinary coding sessions.
+
+Newer user/project `hooks.json` management is present in the shipped bundle,
+but the existing Claude-compatible plugin remains loadable and needs no format
+migration. Native `ask_user` questions can return while waiting for input;
+unconditionally treating `PostToolUse` as work resumed would erase that wait.
+Question hooks, noninteractive permission modes, remote App Server integration,
+and cancellation detection need their own behavioral evidence before expansion.
+
+### Native 0.6.13 delivery evidence
+
+An isolated `MINIMAX_DATA_DIR` contained a plugin at the same
+`plugins/io.buildmesh.attention/.claude-plugin/plugin.json` path and with the
+same `command`/`args` registration form as Buildmesh. The command captured its
+stdin. A local HTTP server returned a deterministic OpenAI-compatible streamed
+completion; no signed-in MiniMax account or paid model request was involved.
+Both `mcode exec` and the actual interactive TUI driven through Windows ConPTY
+produced exactly this sequence:
+
+```json
+{"hook_event_name":"SessionStart","session_id":"mvs_example","prompt_id":"turn_example","source":"startup","cwd":"<workspace>","transcript_path":"<temporary compatible transcript>","model":"probe"}
+{"hook_event_name":"UserPromptSubmit","session_id":"mvs_example","prompt_id":"turn_example","prompt":"Please say probe ok.","cwd":"<workspace>","transcript_path":"<temporary compatible transcript>","permission_mode":"bypassPermissions"}
+{"hook_event_name":"Stop","session_id":"mvs_example","prompt_id":"turn_example","stop_hook_active":false,"last_assistant_message":"probe ok","cwd":"<workspace>","transcript_path":"<temporary compatible transcript>","permission_mode":"bypassPermissions","effort":{"level":"medium"}}
+```
+
+The example is sanitized; the real ids used the normal `mvs_<hex>` and
+`turn_<suffix>` shapes. The exec used `--permission full`; the isolated TUI
+kept its default `auto`, proving the same event sequence in both modes.
+`SessionStart` is admitted with the first turn rather than guaranteed merely
+by opening an empty TUI. `UserPromptSubmit` and `Stop` share **`prompt_id`**,
+and the Claude-compatible projection omits `turn_id`; regression fixtures must
+exercise the actual field. The runtime uses its native turn id as that prompt
+id. `BUILDMESH_*` was absent in every captured hook environment, preserving
+the need for baked callback targets. Explicit `args` still selects exec form
+with no shell interpretation.
+
+This validates native event delivery into the registered command. It does not
+prove the entire Buildmesh HTTP route, a real model/account, macOS/Linux/WSL,
+permission prompts, session teardown, or failure/cancellation delivery. The
+minimum previously validated hook version remains 0.4.12; 0.6.13 delivery
+evidence does not establish which earlier release first delivered submit hooks.
 
 ## What Buildmesh wants from a harness
 
@@ -49,7 +135,7 @@ interactive TUI over PTY, no harness-owned worktree flag.
 |---|---|---|
 | `supports_resume` | `true` | `resume_args` → `--session <id>` |
 | `auto_resume_on_startup` | `true` | |
-| `self_assigns_session_id` | `true` | A delivered callback binds session id plus workspace. `Stop` delivery was observed live; `SessionStart` is provisioned but unvalidated, so identity is not established at startup. |
+| `self_assigns_session_id` | `true` | A delivered callback binds session id plus workspace. `SessionStart`, submit and completion were captured from native 0.6.13; first-turn admission owns startup identity. |
 | `supports_prefill` | `true` | Trailing positional `[prompt]`, no `--prefill` flag |
 | `supports_model_override` | `true` | Interactive `mcode 0.6.5` accepts session-only `--model <provider/model>`; supersedes the older limitation in issue #1179 |
 | `effort_control` | `None` | The TUI has no supported effort override |
@@ -64,9 +150,10 @@ interactive TUI over PTY, no harness-owned worktree flag.
 The native Windows `mcode.cmd 0.6.5` interactive help advertises `--model`
 alongside `--session` and `--continue`, so model selection does not require
 changing to `mcode exec`.
-Buildmesh validates the `provider/model[#variant]` syntax and accepts only ASCII
-letters, digits, `.`, `_` and `-` in each part to prevent Windows Cmd parsing or
-expansion. Validation is adapter-owned and runs on configuration/default saves
+Buildmesh validates the `provider/model[#variant]` syntax, including the exact
+BYOK namespace `custom_provider:<name>/model[#variant]`. Provider names, model
+ids and variants accept only ASCII letters, digits, `.`, `_` and `-` to prevent
+Windows Cmd parsing or expansion. Validation is adapter-owned and runs on configuration/default saves
 and before spawn, including Circuit overrides. Accepted references are forwarded
 unchanged on fresh and resumed launches, before the trailing positional prompt. Saved configurations
 override native defaults; an absent model retains the existing default cascade.
@@ -236,27 +323,35 @@ Known limits, stated rather than papered over:
   as `uncertain` and the step is surfaced. It is never re-sent, because the
   prompt may already have reached the terminal.
 
-## Attention — validated against a live 0.4.12 TUI (issue #1797)
+## Attention — compatible plugin contract
 
-mcode exposes a twelve-event hook surface. For mcode 0.4.0+ the plugin format
-is the Claude-compatible one; the older `io.minimax.mcode/hooks/hooks.json`
-document is ignored.
+mcode 0.6.13 accepts the Claude-compatible plugin format used by Buildmesh.
+The older manifest-free `io.minimax.mcode/hooks/hooks.json` layout is not the
+compatible plugin registration used here. MiniMax's current native plugin
+format also exists; it does not require migrating this working compatible plugin.
 
 - Hook stdin JSON (captured live from a `Stop` callback): `hook_event_name`,
   `session_id`, `prompt_id`, `transcript_path`, `cwd`, `permission_mode`,
   `effort`, `last_assistant_message`.
 - Events: `PreToolUse`, `PostToolUse`, `SessionStart`, `SessionEnd`,
-  `UserPromptSubmit`, `Stop`, `PreCompact`, `Notification`, `SubagentStart`,
-  `SubagentStop`, `PermissionRequest`, `PermissionDenied`.
-- Hooks must be **inlined** on `.claude-plugin/plugin.json`, each event mapping
+  `UserPromptSubmit`, `Stop`, `PreCompact`, `PostCompact`, `SubagentStart`,
+  `SubagentStop`, `PermissionRequest` (shipped 0.6.13 parser).
+- Buildmesh keeps hooks **inlined** on `.claude-plugin/plugin.json` for
+  compatibility with its validated 0.4.12 installation, each event mapping
   to `[{ "matcher": "*", "hooks": [{ "type": "command", "command", "args",
-  "timeout" }] }]`.
+  "timeout" }] }]`. The 0.6.13 compatible loader also accepts referenced hook
+  documents and defaults to `hooks/hooks.json` when the manifest omits `hooks`;
+  inline hooks are no longer required. This is verified in the shipped
+  0.6.13 loader (`chunk-H6JEREKX.js`, `yP` → `UV` → `Jet`), not by the native
+  probe, which used inline hooks.
 
 ### What Buildmesh provisions
 
 `McodeAdapter::provision_attention_hooks` writes
 `<dataDir>/plugins/io.buildmesh.attention/.claude-plugin/plugin.json` with
-`Stop` and `PermissionRequest` handlers. Three mcode constraints shape the
+`SessionStart`, `UserPromptSubmit`, `Stop` and `PermissionRequest` handlers.
+Submit supplies work-resumed evidence; completion retains native pending-work
+reconciliation. Three mcode constraints shape the
 write, and all three were found the hard way:
 
 1. The manifest must live at `.claude-plugin/plugin.json`. A plugin directory
@@ -283,8 +378,9 @@ Against the installed `@minimax-ai/code` **0.4.12** on Windows, 2026-09-20:
   **interactive TUI driven through a ConPTY** (a genuine model turn completed):
   `{"stop_hook_active":false,"last_assistant_message":"OK","hook_event_name":"Stop","session_id":"mvs_…","prompt_id":"turn_…","transcript_path":"…","permission_mode":"auto","effort":{"level":"medium"}}`.
 - The node-id URL above records that 0.4.12 validation setup. The corrected
-  adapter now provisions `/api/attention/mcode`; SessionStart delivery from the
-  TUI has not yet been observed.
+  adapter now provisions `/api/attention/mcode`. The newer native 0.6.13
+  command-level capture above observes SessionStart, submit and completion;
+  it does not exercise this HTTP route.
 - Each run produced exactly one `Stop` POST — no duplicate turns.
 - The attention route's parser already accepts this envelope (`hook_event_name`,
   `session_id`, `transcript_path`, `last_assistant_message`), so no route change
@@ -399,15 +495,13 @@ and sessions too and breaks the transcript reader.
 
 ## Session identity — native callbacks
 
-mcode assigns `mvs_<hex>` ids. Buildmesh provisions `SessionStart`, `Stop`, and
-`PermissionRequest` handlers. Static inspection of the installed 0.4.12 bundle
-shows a SessionStart payload schema with `session_id`, `cwd`, and
-`transcript_path`; delivery from the installed TUI remains unvalidated. The
-handler is provisioned to capture identity without publishing Ready. Live
-validation established that `Stop` also delivers the session id, so identity
-can be captured when the first turn completes; startup-time `SessionStart`
-delivery is still unproven. The removed timestamp poller has no verified
-replacement. Until a callback carrying identity is delivered, a new node has
+mcode assigns `mvs_<hex>` ids. Buildmesh provisions `SessionStart`,
+`UserPromptSubmit`, `Stop`, and `PermissionRequest` handlers. Native 0.6.13
+exec and interactive TUI captures establish that SessionStart delivers
+`session_id`, `cwd`, and `transcript_path` at first-turn admission, before
+UserPromptSubmit and Stop. The handler captures identity without publishing
+Ready. These command-level captures do not establish end-to-end delivery to
+Buildmesh's shared HTTP route. Until a callback carrying identity is delivered, a new node has
 no `cli_session_id`, which startup resume and transcript lookup require.
 Session/workspace routing and the conditional database write reject ambiguous
 or duplicate owners, but do not establish process identity.
