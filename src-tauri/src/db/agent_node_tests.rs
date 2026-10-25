@@ -30,7 +30,10 @@ mod tests {
             (2,2,'archived','C:/web','archived','saved-session','claude','2026-10-02')", []).unwrap();
         let history = crate::db::list_agent_history_inner(&conn).unwrap();
         assert_eq!(
-            history.iter().map(|entry| entry.node.id).collect::<Vec<_>>(),
+            history
+                .iter()
+                .map(|entry| entry.node.id)
+                .collect::<Vec<_>>(),
             vec![2, 1]
         );
         assert_eq!(history[0].node.status, SessionStatus::Archived);
@@ -99,10 +102,37 @@ mod tests {
 
         let history = crate::db::list_agent_history_inner(&conn).unwrap();
         assert_eq!(
-            history[0].status_changed_at.as_deref(),
-            Some("2026-10-25T01:09:28.890242700+00:00")
+            history[0].status_changed_at.map(|at| at.to_rfc3339()),
+            Some("2026-10-25T01:09:28.890242700+00:00".to_string())
         );
         assert_eq!(history[0].session_started_at, Some(1792884381722));
+    }
+
+    /// The v14 backfill and column DEFAULT write SQLite's zone-less
+    /// `YYYY-MM-DD HH:MM:SS` (UTC). Shipped verbatim, a browser parses it as
+    /// local time, which reads "just now" west of UTC. The wire must carry the
+    /// UTC instant with an explicit offset.
+    #[test]
+    fn history_normalizes_sqlite_default_status_changed_at_to_utc() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id,name,path) VALUES (1,'API','C:/api')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_nodes (id,mesh_id,name,path,status,created_at,status_changed_at)
+             VALUES (1,1,'n','C:/api','archived','2026-10-24 23:26:21','2026-10-25 14:00:00')",
+            [],
+        )
+        .unwrap();
+
+        let history = crate::db::list_agent_history_inner(&conn).unwrap();
+        let changed = history[0].status_changed_at.unwrap();
+        assert_eq!(changed.to_rfc3339(), "2026-10-25T14:00:00+00:00");
+        let wire = serde_json::to_value(&history[0]).unwrap();
+        assert_eq!(wire["status_changed_at"], "2026-10-25T14:00:00Z");
     }
 
     /// Minimal `agent_nodes` schema carrying only the columns the conditional

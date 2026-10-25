@@ -176,9 +176,9 @@ you restart.
 
 **Agent History** finds lifecycle records across repositories, including
 archived nodes. Search by name, repository, branch or session, and filter by
-repository or lifecycle state. Each card shows when the session last changed
-state (for an archived node, when it was archived) and when its process
-started, so you can tell two similarly named sessions apart by age.
+repository or lifecycle state. Cards show when the session last changed
+state (for an archived node, when it was archived) and, when known, when its
+process started, so you can tell two similarly named sessions apart by age.
 **Reopen** restores an archived node to the
 workspace without starting its process; **Resume** starts it separately using
 its saved session when available. **Discovered sessions** scans CLI history

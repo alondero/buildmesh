@@ -1416,11 +1416,13 @@ pub fn list_agent_history() -> SqlResult<Vec<crate::models::AgentHistoryEntry>> 
 pub(crate) fn list_agent_history_inner(
     conn: &Connection,
 ) -> SqlResult<Vec<crate::models::AgentHistoryEntry>> {
-    // `status_changed_at` is already part of `AGENT_NODE_COLUMNS` (index 23),
-    // so only `session_started_at` is appended (index 25). Both are nullable: a
-    // pre-v14 row has no `status_changed_at`, and a node that never ran has no
+    // `status_changed_at` is already part of `AGENT_NODE_COLUMNS`, so only
+    // `session_started_at` is appended. Both are read by column name so a
+    // schema addition cannot shift them. Both are nullable: a pre-v14 row has
+    // no `status_changed_at`, and a node that never ran has no
     // `session_started_at`. Reading them as `Option` keeps one NULL row from
-    // erroring the whole list.
+    // erroring the whole list. `status_changed_at` is normalized through
+    // `parse_db_timestamp`, the same as `created_at`.
     let mut stmt = conn.prepare(&format!(
         "SELECT {}, session_started_at FROM agent_nodes ORDER BY created_at DESC, id DESC",
         AGENT_NODE_COLUMNS
@@ -1428,8 +1430,10 @@ pub(crate) fn list_agent_history_inner(
     let rows = stmt.query_map([], |row| {
         let node = map_agent_node_row(row)?;
         Ok(crate::models::AgentHistoryEntry {
-            status_changed_at: row.get::<_, Option<String>>(23)?,
-            session_started_at: row.get::<_, Option<i64>>(25)?,
+            status_changed_at: row
+                .get::<_, Option<String>>("status_changed_at")?
+                .map(|raw| parse_db_timestamp(&raw)),
+            session_started_at: row.get::<_, Option<i64>>("session_started_at")?,
             node,
         })
     })?;

@@ -52,12 +52,13 @@ function sessionTiming(entry: AgentHistoryEntry): { label: string; exact?: strin
 }
 
 /** When the session's process started, when that is known. */
-function sessionSpan(entry: AgentHistoryEntry): string | undefined {
+function sessionSpan(entry: AgentHistoryEntry): { label: string; exact?: string } | undefined {
   const started = entry.session_started_at;
   if (!started) return undefined;
-  const startedAt = new Date(started);
-  if (Number.isNaN(startedAt.getTime())) return undefined;
-  return `Started ${formatListTimestamp(startedAt.toISOString())}`;
+  const iso = new Date(started);
+  if (Number.isNaN(iso.getTime())) return undefined;
+  const isoString = iso.toISOString();
+  return { label: `Started ${formatListTimestamp(isoString)}`, exact: absoluteTimestamp(isoString) };
 }
 
 export async function loadHistory() {
@@ -167,7 +168,7 @@ export function AgentHistoryTab() {
               <p className="break-all text-xs text-text-secondary">{meshes.find(m => m.id === node.mesh_id)?.name ?? `Missing repository ${node.mesh_id}`} · {node.branch}</p>
               <p className={`text-xs ${config.color}`} title={config.title}>{config.label}</p>
               <p className="break-words text-2xs text-text-secondary" title={timing.exact}>{timing.label}</p>
-              {span && <p className="break-words text-2xs text-text-secondary">{span}</p>}
+              {span && <p className="break-words text-2xs text-text-secondary" title={span.exact}>{span.label}</p>}
               <div className="mt-2 flex flex-wrap gap-2">
                 {node.status !== 'archived' && <button type="button" onClick={() => activate(node.id)} className="min-h-[24px] rounded-md border border-border-default px-2 text-xs text-text-primary hover:bg-bg-card-hover">Open terminal</button>}
                 {['archived', 'suspended', 'error', 'lost'].includes(node.status) && <button type="button" disabled={busy !== null} onClick={() => void recover(node)}

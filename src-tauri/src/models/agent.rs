@@ -476,14 +476,16 @@ pub struct AgentHistoryEntry {
     #[serde(flatten)]
     #[ts(flatten)]
     pub node: AgentNode,
-    /// When the node last changed status, verbatim from the column.
+    /// When the node last changed status, normalized to UTC.
     ///
-    /// Stored in two shapes: RFC 3339 (every status write since migration v14)
-    /// and SQLite's `datetime('now')` text (the v14 backfill). For an archived
-    /// node this is when it was archived, which is the closest thing to "when
-    /// it finished" the schema records. `None` only for a row that predates
-    /// the column and was never backfilled.
-    pub status_changed_at: Option<String>,
+    /// The column holds two text shapes: RFC 3339 (status writes since
+    /// migration v14) and SQLite's zone-less `datetime('now')` text (the v14
+    /// backfill). The read boundary parses both, so the wire is always RFC 3339
+    /// with an explicit offset and a browser never reads it as local time. For
+    /// an archived node this is when it was archived, which is the closest
+    /// thing to "when it finished" the schema records. `None` for a row that
+    /// predates the column and was never backfilled.
+    pub status_changed_at: Option<DateTime<Utc>>,
     /// Epoch milliseconds when the agent process last started, or `None` for a
     /// node that never ran. Lets the history card show a session's real span
     /// instead of guessing from `created_at`.

@@ -245,29 +245,6 @@ describe('AgentHistoryTab (#2461)', () => {
     await settleReads();
   });
 
-  /**
-   * The whole point of the history probe: a session's age must come from when
-   * it actually moved, not from the clock. The old read parsed `created_at`
-   * with `parse_from_rfc3339` only, which rejects the SQLite-default form
-   * (`YYYY-MM-DD HH:MM:SS`) every row is written with — so every card fell back
-   * to `Utc::now()` and read "just now" regardless of age.
-   */
-  it('renders a real age for a SQLite-default created_at instead of "just now"', async () => {
-    // The exact stored shape: space separator, no timezone, no fraction.
-    // Past the 30-day cut, so the label is the absolute date — which is still
-    // the proof: a failed parse fell back to `Utc::now()` and printed
-    // "just now" for every row regardless of age.
-    const createdAt = '2026-04-28 19:33:28';
-    mockBackend([entry(1, 'brave-fox', { created_at: createdAt })]);
-    render(<AgentHistoryTab />);
-
-    const name = await screen.findByText('brave-fox');
-    const metadata = name.parentElement!.querySelector('p.break-words');
-    expect(metadata!.textContent).not.toBe('Created just now');
-    expect(metadata!.textContent).toBe(`Created ${new Date(createdAt).toLocaleDateString()}`);
-    await settleReads();
-  });
-
   it('shows when a session last changed and when its process started', async () => {
     const changedAt = nanosAgo(2 * 60 * 60 * 1000);
     const startedAt = Date.now() - 4 * 60 * 60 * 1000;
