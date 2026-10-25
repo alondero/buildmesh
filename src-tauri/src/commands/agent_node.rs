@@ -162,9 +162,11 @@ pub async fn list_agent_nodes() -> Result<Vec<AgentNode>, String> {
     .await
 }
 
-/// Get agent node by ID
+/// Agent History: every node, newest first, with the two timestamps the
+/// history card needs and `AgentNode` does not carry (`status_changed_at`,
+/// `session_started_at`).
 #[command]
-pub async fn list_agent_history() -> Result<Vec<AgentNode>, String> {
+pub async fn list_agent_history() -> Result<Vec<crate::models::AgentHistoryEntry>, String> {
     crate::commands::run_blocking("list_agent_history", || {
         db::list_agent_history().map_err(|error| error.to_string())
     })

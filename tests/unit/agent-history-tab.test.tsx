@@ -25,6 +25,7 @@ import { useMeshStore } from '../../src/stores/meshStore';
 import { useUIStore } from '../../src/stores/uiStore';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
 import type { AgentNode } from '../../src/types/generated/AgentNode';
+import type { AgentHistoryEntry } from '../../src/types/generated/AgentHistoryEntry';
 
 const MESH = { id: 1, name: 'api', path: '/repos/api', base_ref: 'main', use_worktree: true };
 
@@ -56,7 +57,26 @@ function node(id: number, name: string, extra: Partial<AgentNode> = {}): AgentNo
   } as AgentNode;
 }
 
-function mockBackend(history: AgentNode[] = [node(1, 'brave-fox')]) {
+/**
+ * A history row: the node plus the two timestamps `list_agent_history` now
+ * carries. The wire shape is flat (ts-rs `flatten`), so this is just an
+ * `AgentNode` with two extra nullable fields. Defaults are null so a fixture
+ * that does not care about timing keeps rendering the `Created …` clause.
+ */
+function entry(
+  id: number,
+  name: string,
+  extra: Partial<AgentNode> = {},
+  timing: { status_changed_at?: string | null; session_started_at?: number | null } = {},
+): AgentHistoryEntry {
+  return {
+    ...node(id, name, extra),
+    status_changed_at: timing.status_changed_at ?? null,
+    session_started_at: timing.session_started_at ?? null,
+  };
+}
+
+function mockBackend(history: AgentHistoryEntry[] = [entry(1, 'brave-fox')]) {
   vi.mocked(invoke).mockImplementation((cmd: string) => {
     switch (cmd) {
       case 'list_agent_history': return Promise.resolve(history);
@@ -213,11 +233,11 @@ describe('AgentHistoryTab (#2461)', () => {
 
   it('shows a readable relative timestamp instead of the stored nanosecond string', async () => {
     const observedAt = nanosAgo(5 * 60 * 1000);
-    mockBackend([node(1, 'brave-fox', { lifecycle: lifecycleAt(observedAt) })]);
+    mockBackend([entry(1, 'brave-fox', { lifecycle: lifecycleAt(observedAt) }, { status_changed_at: observedAt })]);
     render(<AgentHistoryTab />);
 
     const card = (await screen.findByText('brave-fox')).parentElement!;
-    expect(card.textContent).toContain('Last observed 5m ago');
+    expect(card.textContent).toContain('Archived 5m ago');
     // Nine fractional digits and a trailing `Z` are what `break-all` used to
     // push onto a line of their own.
     expect(card.textContent).not.toContain('596700');
@@ -225,9 +245,44 @@ describe('AgentHistoryTab (#2461)', () => {
     await settleReads();
   });
 
+  /**
+   * The whole point of the history probe: a session's age must come from when
+   * it actually moved, not from the clock. The old read parsed `created_at`
+   * with `parse_from_rfc3339` only, which rejects the SQLite-default form
+   * (`YYYY-MM-DD HH:MM:SS`) every row is written with — so every card fell back
+   * to `Utc::now()` and read "just now" regardless of age.
+   */
+  it('renders a real age for a SQLite-default created_at instead of "just now"', async () => {
+    // The exact stored shape: space separator, no timezone, no fraction.
+    // Past the 30-day cut, so the label is the absolute date — which is still
+    // the proof: a failed parse fell back to `Utc::now()` and printed
+    // "just now" for every row regardless of age.
+    const createdAt = '2026-04-28 19:33:28';
+    mockBackend([entry(1, 'brave-fox', { created_at: createdAt })]);
+    render(<AgentHistoryTab />);
+
+    const name = await screen.findByText('brave-fox');
+    const metadata = name.parentElement!.querySelector('p.break-words');
+    expect(metadata!.textContent).not.toBe('Created just now');
+    expect(metadata!.textContent).toBe(`Created ${new Date(createdAt).toLocaleDateString()}`);
+    await settleReads();
+  });
+
+  it('shows when a session last changed and when its process started', async () => {
+    const changedAt = nanosAgo(2 * 60 * 60 * 1000);
+    const startedAt = Date.now() - 4 * 60 * 60 * 1000;
+    mockBackend([entry(1, 'brave-fox', {}, { status_changed_at: changedAt, session_started_at: startedAt })]);
+    render(<AgentHistoryTab />);
+
+    const card = (await screen.findByText('brave-fox')).parentElement!;
+    expect(card.textContent).toContain('Archived 2h ago');
+    expect(card.textContent).toContain('Started 4h ago');
+    await settleReads();
+  });
+
   it('formats the created timestamp and wraps the metadata line on word boundaries', async () => {
     const createdAt = nanosAgo(3 * 60 * 60 * 1000);
-    mockBackend([node(1, 'brave-fox', { created_at: createdAt })]);
+    mockBackend([entry(1, 'brave-fox', { created_at: createdAt })]);
     render(<AgentHistoryTab />);
 
     const name = await screen.findByText('brave-fox');

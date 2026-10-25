@@ -456,6 +456,41 @@ pub struct AgentNode {
     pub project_scope: Option<String>,
 }
 
+/// One row of Agent History: the node plus the two timestamps the history
+/// surface needs and `AgentNode` does not carry.
+///
+/// `AgentNode` is the live-grid projection, so it deliberately omits
+/// `status_changed_at` and `session_started_at` — the coordinator read path
+/// returns them as a tuple alongside the node for the same reason. A history
+/// list is the one place a user asks "when did this finish?", and without
+/// these two columns the answer is not on the wire at all: the card could only
+/// show `created_at` (when the worktree appeared) or the lifecycle snapshot
+/// (which is dropped whenever the row has moved on).
+///
+/// Modelled as a flatten wrapper rather than new `AgentNode` fields so the
+/// ~160 existing `AgentNode { .. }` construction sites stay untouched; the
+/// wire shape is the flat merge, matching the `IssueNodeDraft` precedent.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "AgentHistoryEntry.ts")]
+pub struct AgentHistoryEntry {
+    #[serde(flatten)]
+    #[ts(flatten)]
+    pub node: AgentNode,
+    /// When the node last changed status, verbatim from the column.
+    ///
+    /// Stored in two shapes: RFC 3339 (every status write since migration v14)
+    /// and SQLite's `datetime('now')` text (the v14 backfill). For an archived
+    /// node this is when it was archived, which is the closest thing to "when
+    /// it finished" the schema records. `None` only for a row that predates
+    /// the column and was never backfilled.
+    pub status_changed_at: Option<String>,
+    /// Epoch milliseconds when the agent process last started, or `None` for a
+    /// node that never ran. Lets the history card show a session's real span
+    /// instead of guessing from `created_at`.
+    #[ts(as = "Option<i32>")]
+    pub session_started_at: Option<i64>,
+}
+
 /// A worktree whose node is already closed but whose on-disk directory still
 /// needs removing. Recording the intent durably lets the slow, retry-prone
 /// removal run in the background (or resume on next launch) without the node

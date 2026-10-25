@@ -662,9 +662,13 @@ fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
                 Some(t.to_string())
             }
         }),
-        created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
-            .map(|dt| dt.with_timezone(&chrono::Utc))
-            .unwrap_or_else(|_| chrono::Utc::now()),
+        // `created_at` is written by the column DEFAULT
+        // (`datetime('now')` → `YYYY-MM-DD HH:MM:SS`), not by Rust, so it is
+        // the SQLite text form rather than RFC 3339. Parsing it with
+        // `parse_from_rfc3339` alone failed on every such row and fell through
+        // to `Utc::now()`, which made every Agent History card read "just now"
+        // regardless of its real age. `parse_db_timestamp` accepts both forms.
+        created_at: parse_db_timestamp(&row.get::<_, String>(10)?),
     })
 }
 
@@ -1404,17 +1408,31 @@ pub fn list_agent_nodes_by_mesh(mesh_id: i64) -> SqlResult<Vec<AgentNode>> {
     rows.collect()
 }
 
-pub fn list_agent_history() -> SqlResult<Vec<AgentNode>> {
+pub fn list_agent_history() -> SqlResult<Vec<crate::models::AgentHistoryEntry>> {
     let conn = read_conn()?;
     list_agent_history_inner(&conn)
 }
 
-pub(crate) fn list_agent_history_inner(conn: &Connection) -> SqlResult<Vec<AgentNode>> {
+pub(crate) fn list_agent_history_inner(
+    conn: &Connection,
+) -> SqlResult<Vec<crate::models::AgentHistoryEntry>> {
+    // `status_changed_at` is already part of `AGENT_NODE_COLUMNS` (index 23),
+    // so only `session_started_at` is appended (index 25). Both are nullable: a
+    // pre-v14 row has no `status_changed_at`, and a node that never ran has no
+    // `session_started_at`. Reading them as `Option` keeps one NULL row from
+    // erroring the whole list.
     let mut stmt = conn.prepare(&format!(
-        "SELECT {} FROM agent_nodes ORDER BY created_at DESC, id DESC",
+        "SELECT {}, session_started_at FROM agent_nodes ORDER BY created_at DESC, id DESC",
         AGENT_NODE_COLUMNS
     ))?;
-    let rows = stmt.query_map([], map_agent_node_row)?;
+    let rows = stmt.query_map([], |row| {
+        let node = map_agent_node_row(row)?;
+        Ok(crate::models::AgentHistoryEntry {
+            status_changed_at: row.get::<_, Option<String>>(23)?,
+            session_started_at: row.get::<_, Option<i64>>(25)?,
+            node,
+        })
+    })?;
     rows.collect()
 }
 
