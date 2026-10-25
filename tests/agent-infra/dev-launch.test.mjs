@@ -266,9 +266,17 @@ Promise.all(listening).then(bound => {
     // -Id and -Name: the launcher's name sweep is how it finds an instance whose
     // ownership record was lost, so a mock that silently dropped -Name would
     // leave that path untested.
+    //
+    // The readiness window is a hang detector, not a load detector: the fixture
+    // app has to start and bind its ports, and how long that takes is set by
+    // the machine. Eight seconds was enough for an idle machine and not for a
+    // busy one, so an overlapping check failed the launch rather than the
+    // behaviour under test (issue #2254). The window is a maximum - a launch
+    // that is ready returns as soon as it is ready - so a longer one costs
+    // nothing on the happy path.
     const wrapper = join(dir, 'launch.ps1');
     const quote = value => `'${value.replaceAll("'", "''")}'`;
-    writeFileSync(wrapper, `function npm { $global:LASTEXITCODE = 0 }\nfunction Get-Process { param($Name, $Id) if ($Id) { Microsoft.PowerShell.Management\\Get-Process -Id $Id -ErrorAction SilentlyContinue } elseif ($Name) { Microsoft.PowerShell.Management\\Get-Process -Name $Name -ErrorAction SilentlyContinue } }\nfunction Start-Process { param($FilePath, [switch]$PassThru, $WindowStyle) if ($WindowStyle -eq 'Hidden') { throw 'Dev GUI visibility must not be forced hidden' }; Microsoft.PowerShell.Management\\Start-Process -FilePath $FilePath -PassThru:$PassThru -WindowStyle Hidden }\n& ${quote(join(dir, 'scripts', 'run-dev.ps1'))} -Detach -ReadinessTimeoutSeconds 8\nexit $LASTEXITCODE\n`);
+    writeFileSync(wrapper, `function npm { $global:LASTEXITCODE = 0 }\nfunction Get-Process { param($Name, $Id) if ($Id) { Microsoft.PowerShell.Management\\Get-Process -Id $Id -ErrorAction SilentlyContinue } elseif ($Name) { Microsoft.PowerShell.Management\\Get-Process -Name $Name -ErrorAction SilentlyContinue } }\nfunction Start-Process { param($FilePath, [switch]$PassThru, $WindowStyle) if ($WindowStyle -eq 'Hidden') { throw 'Dev GUI visibility must not be forced hidden' }; Microsoft.PowerShell.Management\\Start-Process -FilePath $FilePath -PassThru:$PassThru -WindowStyle Hidden }\n& ${quote(join(dir, 'scripts', 'run-dev.ps1'))} -Detach -ReadinessTimeoutSeconds 30\nexit $LASTEXITCODE\n`);
     return run(ps, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', wrapper], {
       env: {
         ...environment,
@@ -283,7 +291,7 @@ Promise.all(listening).then(bound => {
   }
   const shellQuote = value => "'" + value.replaceAll("'", "'\\''") + "'";
   const wrapper = join(dir, 'launch.sh');
-  writeFileSync(wrapper, `function npm() { return 0; }; export -f npm\nexec bash ${shellQuote(join(dir, 'scripts', 'run-dev.sh'))} --detach --readiness-timeout-seconds 8\n`);
+  writeFileSync(wrapper, `function npm() { return 0; }; export -f npm\nexec bash ${shellQuote(join(dir, 'scripts', 'run-dev.sh'))} --detach --readiness-timeout-seconds 30\n`);
   return run('bash', [wrapper], {
     env: {
       ...environment,
