@@ -177,6 +177,38 @@ export const RUST_SIBLING_TESTS = {
   'src-tauri/src/services/github/pagination.rs': 'services::github::pagination_tests',
 };
 
+// Private implementations keep their contract tests at the owning facade.
+// Map them explicitly so editing an extracted child still executes that suite.
+export const RUST_IMPLEMENTATION_TESTS = {
+  'src-tauri/src/agent/process/input.rs': 'agent::process',
+  'src-tauri/src/agent/process/registry.rs': 'agent::process',
+  'src-tauri/src/agent/process/commands.rs': 'agent::process',
+  'src-tauri/src/agent/provider/adapters/codex/hooks.rs': 'agent::provider::adapters::codex',
+  'src-tauri/src/agent/provider/adapters/codex/install_cache.rs': 'agent::provider::adapters::codex',
+  'src-tauri/src/agent/provider/adapters/codex/install_probe.rs': 'agent::provider::adapters::codex',
+  'src-tauri/src/agent/provider/adapters/codex/profiles.rs': 'agent::provider::adapters::codex',
+  'src-tauri/src/agent/provider/adapters/codex/runtime_files.rs': 'agent::provider::adapters::codex',
+  'src-tauri/src/agent/provider/adapters/codex/trust.rs': 'agent::provider::adapters::codex',
+  'src-tauri/src/services/agent_node/create.rs': 'services::agent_node',
+  'src-tauri/src/services/agent_node/discovery.rs': 'services::agent_node',
+  'src-tauri/src/services/agent_node/cleanup.rs': 'services::agent_node',
+  'src-tauri/src/services/agent_node/lifecycle.rs': 'services::agent_node',
+  'src-tauri/src/git/worktree/create.rs': 'git::worktree',
+  'src-tauri/src/git/worktree/include.rs': 'git::worktree',
+  'src-tauri/src/git/worktree/maintenance.rs': 'git::worktree',
+  'src-tauri/src/git/worktree/remove.rs': 'git::worktree',
+  'src-tauri/src/git/worktree/safety.rs': 'git::worktree',
+  'src-tauri/src/db/circuit/evidence/read_view.rs': 'db::circuit::evidence',
+  'src-tauri/src/db/circuit/evidence/native_hooks.rs': 'db::circuit::evidence',
+  'src-tauri/src/db/circuit/evidence/outcome.rs': 'db::circuit::evidence',
+  'src-tauri/src/db/circuit/evidence/waits.rs': 'db::circuit::evidence',
+  'src-tauri/src/db/circuit/evidence/transition.rs': 'db::circuit::evidence',
+  'src-tauri/src/db/circuit/evidence/effects.rs': 'db::circuit::evidence',
+  'src-tauri/src/services/github/feeds.rs': 'commands::pr',
+  'src-tauri/src/services/github/pr_workflow.rs': 'commands::pr',
+  'src-tauri/src/services/github/repository.rs': 'commands::pr',
+};
+
 // Every `#[path = "..."]` module in the crate, as repo-relative paths. Entries
 // in RUST_PATH_INCLUDES that no declaration backs are drift too: they would mask
 // a file that stops being included.
@@ -200,6 +232,10 @@ export function pathIncludeDrift(root) {
 export function rustModule(path) {
   if (RUST_PATH_INCLUDES[path]) return RUST_PATH_INCLUDES[path];
   if (RUST_SIBLING_TESTS[path]) return RUST_SIBLING_TESTS[path];
+  if (RUST_IMPLEMENTATION_TESTS[path]) return RUST_IMPLEMENTATION_TESTS[path];
+  if (path.startsWith('src-tauri/src/services/circuit_worker/tests/') && path.endsWith('.rs')) {
+    return 'services::circuit_worker::tests';
+  }
   if (!path.startsWith(RUST_SRC)) return null;
   const rest = path.slice(RUST_SRC.length);
   // The crate root and the binary entry can reach every module.

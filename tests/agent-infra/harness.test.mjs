@@ -2026,6 +2026,24 @@ test('a Rust file attached with #[path] selects the module that owns it', () => 
   assert.deepEqual(pathIncludeDrift(root), { missing: [], stale: [] });
 });
 
+test('extracted Rust implementations and included worker tests select their contract suites', () => {
+  const owners = [
+    ['agent/process/registry.rs', 'agent::process'],
+    ['agent/provider/adapters/codex/install_probe.rs', 'agent::provider::adapters::codex'],
+    ['services/agent_node/cleanup.rs', 'services::agent_node'],
+    ['services/github/pr_workflow.rs', 'commands::pr'],
+    ['git/worktree/maintenance.rs', 'git::worktree'],
+    ['db/circuit/evidence/transition.rs', 'db::circuit::evidence'],
+    ['services/circuit_worker/tests/result_delivery.rs', 'services::circuit_worker::tests'],
+  ];
+  for (const [file, owner] of owners) {
+    const path = `src-tauri/src/${file}`;
+    assert.equal(rustModule(path), owner, file);
+    const checks = planChecks([path]).checks.filter(check => check.module);
+    assert.deepEqual(checks.map(check => check.module), [owner], file);
+  }
+});
+
 test('the #[path] drift check runs on the Rust diff that can introduce one', () => {
   // agent-tests owns the guard but is skipped for a Rust-only diff, so the
   // scoped check carries it too (review of PR #2232).

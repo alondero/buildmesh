@@ -40,3 +40,5 @@ Use the next numeric filename and include:
    user-visible.
 
 - [0045: Companion CLI tool boundary](0045-companion-cli-tool-boundary.md)
+
+- [0047: Backend responsibility modules](0047-backend-responsibility-modules.md)

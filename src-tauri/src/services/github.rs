@@ -12,6 +12,10 @@
 //!   live-over-cache helpers live here as tested policy for a future
 //!   snapshot store; live list methods fetch every time.
 
+pub(crate) mod feeds;
+pub(crate) mod pr_workflow;
+pub(crate) mod repository;
+
 pub mod issues;
 pub mod pagination;
 pub mod prs;
@@ -19,24 +23,6 @@ pub mod sync;
 
 // In scope for the `deserialize_opt_string` helper below.
 use serde::Deserialize;
-
-#[cfg(test)]
-mod label_tests;
-#[cfg(test)]
-mod pagination_tests;
-
-pub use issues::{parse_blocked_by, Issue};
-pub use pagination::GitHubPageCompleteness;
-pub use prs::{CollaboratorPermission, CreatePrRequest, PullRequest, PullRequestMergeState};
-pub use sync::{parse_clone_input, parse_owner_repo, CloneTarget, GitHubClient, GitHubError};
-
-/// Fake GitHub server used by command-layer tests. The implementation lives
-/// with the pull-request client; this re-export keeps `services::github::tests`
-/// stable.
-#[cfg(test)]
-pub(crate) mod tests {
-    pub(crate) use super::prs::tests::{fake_node, fake_server, Scripted};
-}
 
 /// Tolerates both an *absent* key (rescued by `#[serde(default)]` on the
 /// field) and a present-but-`null` value. The latter is the gotcha: serde
@@ -54,4 +40,22 @@ where
     D: serde::Deserializer<'de>,
 {
     Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+#[cfg(test)]
+mod label_tests;
+#[cfg(test)]
+mod pagination_tests;
+
+pub use issues::{parse_blocked_by, Issue};
+pub use pagination::GitHubPageCompleteness;
+pub use prs::{CollaboratorPermission, CreatePrRequest, PullRequest, PullRequestMergeState};
+pub use sync::{parse_clone_input, parse_owner_repo, CloneTarget, GitHubClient, GitHubError};
+
+/// Fake GitHub server used by command-layer tests. The implementation lives
+/// with the pull-request client; this re-export keeps `services::github::tests`
+/// stable.
+#[cfg(test)] // allow-test-in-production: preserve the shared fake-server export path used by command tests
+pub(crate) mod tests {
+    pub(crate) use super::prs::tests::{fake_node, fake_server, Scripted};
 }
