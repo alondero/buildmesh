@@ -1,4 +1,5 @@
 import { readProjectFiles, readAgentChanges } from './probePathReads';
+import { readGitPruneInfo } from './gitPruneInfo';
 import { FilesIcon, ReviewIcon, UsageIcon, BellIcon, WorktreesIcon, PropertiesIcon, CircuitsIcon, IssuesIcon, PullsIcon, ArchiveIcon, NotesIcon, type ProbeIcon } from '../components/Probe/probeIcons';
 import type { ComponentType } from 'react';
 import { probeTabAdapter } from './probeTabAdapter';
@@ -137,7 +138,10 @@ export const PROBE_TAB_DEFINITIONS = {
       keywords: ['repository', 'worktree', 'branch', 'git', 'prune', 'cleanup', 'maintenance'],
     },
     icon: WorktreesIcon,
-    ...probeTabAdapter(() => import('../components/Probe/RepositoryTab').then(m => ({ Component: m.RepositoryTab, load: m.loadRepository }))),
+    // The prune read is shared with the destination's own cache-backed hook
+    // (issue #2580), so it lives in `gitPruneInfo` rather than in the tab
+    // body: the shared read must not import tab bodies.
+    ...probeTabAdapter(() => import('../components/Probe/RepositoryTab').then(m => ({ Component: m.RepositoryTab, load: m.loadRepository })), readGitPruneInfo),
     // Issue #1460 — renamed from "Worktree Manager". The destination is
     // maintenance only (health, recovery, cleanup, prune); the worktree
     // *configuration* that used to sit here moved to Project Settings, and
