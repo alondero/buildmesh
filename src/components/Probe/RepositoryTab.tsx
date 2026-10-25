@@ -477,14 +477,22 @@ function RepositoryContents() {
 
         {/* Read failure and action failure are separate channels — a failed
             read means the list is unavailable, a failed action happened
-            against a list that did load. Either can be showing at once. */}
+            against a list that did load. Either can be showing at once.
+            Both are `role="alert"` regions, so a screen reader announces the
+            failure (probe-ui-checklist.md §1.4). */}
         {readErrorText && (
-          <p className="text-xs text-status-error break-words" data-testid="repository-read-error">
+          <p
+            role="alert"
+            className="text-xs text-status-error break-words"
+            data-testid="repository-read-error"
+          >
             {readErrorText}
           </p>
         )}
         {actionError && (
-          <p className="text-xs text-status-error break-words">{actionError}</p>
+          <p role="alert" className="text-xs text-status-error break-words">
+            {actionError}
+          </p>
         )}
         {/* Issue #657 — success channel for prune_remote_tracking. Same
             inline style + 4s auto-clear as the `gitSync` pattern in
@@ -502,6 +510,7 @@ function RepositoryContents() {
             difference decides what the user deletes. */}
         {mergeScanTruncated && (
           <p
+            role="status"
             className="text-xs text-text-muted break-words"
             data-testid="repository-merge-scan-truncated"
           >
