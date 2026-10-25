@@ -5,7 +5,7 @@
 //! status-changed) we maintain a single `tokio::sync::broadcast` channel
 //! per process and a WebSocket endpoint that subscribes to it.
 //!
-//! Pattern mirrors the per-node PTY broadcast in `ws.rs` â€” generalised
+//! Pattern mirrors the per-node PTY broadcast in `ws.rs` — generalised
 //! to one shared channel.
 
 use std::sync::OnceLock;
@@ -30,8 +30,8 @@ pub enum EventMsg {
     /// The node's PTY input queue refused an inbound mobile keystroke
     /// (issue #1530) because the agent is not draining its input.
     ///
-    /// The WS input direction is fire-and-forget â€” there is no inbound
-    /// channel to acknowledge a write on â€” so without this event a phone that
+    /// The WS input direction is fire-and-forget — there is no inbound
+    /// channel to acknowledge a write on — so without this event a phone that
     /// typed into a wedged agent would simply lose the keystroke, which is the
     /// exact failure #1530 exists to close. The client shows a stalled-input
     /// state and knows to re-send. `queued_bytes`/`queued_messages` let it
@@ -49,7 +49,7 @@ pub enum EventMsg {
         #[ts(as = "i32")]
         queued_messages: i32,
     },
-    /// Normalized lifecycle event (issue #1364) â€” the same wire shape the
+    /// Normalized lifecycle event (issue #1364) — the same wire shape the
     /// desktop receives as the `agent-lifecycle` Tauri event, so both clients
     /// patch the affected node identically. Boxed: the full envelope dwarfs
     /// the 8-byte `attention-cleared` variant (clippy::large_enum_variant)
@@ -79,7 +79,7 @@ pub(crate) fn receiver_count() -> usize {
     channel().receiver_count()
 }
 
-/// Fire-and-forget â€” if no receivers, the send returns Err which we ignore.
+/// Fire-and-forget — if no receivers, the send returns Err which we ignore.
 pub fn emit(msg: EventMsg) {
     let _ = channel().send(msg);
 }
