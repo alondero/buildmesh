@@ -21,6 +21,7 @@ const BuildRunTerminal = lazy(() => import('../Terminal/BuildRunTerminal').then(
 // The Overview shares the Probe's run components; loading it on first open keeps
 // them out of the first-paint bundle (#1568).
 const CircuitRunOverview = lazy(() => import('../Circuits/CircuitRunOverview').then((m) => ({ default: m.CircuitRunOverview })));
+const NodeCircuitSummary = lazy(() => import('./NodeCircuitSummary').then((m) => ({ default: m.NodeCircuitSummary })));
 
 interface NodeCardProps {
   nodeId: number;
@@ -108,9 +109,9 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
   );
   // The card's Circuit Run: the root's own, else the first member's. Members
   // of one card share their run (circuit lineage is what grouped them).
-  const runId = memberCircuitOwnerships[stableMemberIds.indexOf(nodeId)]?.run_id
-    ?? memberCircuitOwnerships.find(ownership => ownership !== undefined)?.run_id
-    ?? null;
+  const circuitOwnership = memberCircuitOwnerships[stableMemberIds.indexOf(nodeId)]
+    ?? memberCircuitOwnerships.find(ownership => ownership !== undefined);
+  const runId = circuitOwnership?.run_id ?? null;
   const runOverview = useCircuitRunOverview(runId);
   const showingOverview = runId !== null && !!selection?.overview;
   const writeToAgent = useAgentNodeStore((s) => s.writeToAgent);
@@ -230,6 +231,12 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
             needsYou: runOverview.overview !== null && overviewNeedsYou(runOverview.overview),
             onSelect: () => showOverview(nodeId, selectedId),
           }} />
+      )}
+      {!showingOverview && !showingUtility && (
+        <Suspense fallback={null}>
+          <NodeCircuitSummary node={node} ownership={circuitOwnership} resource={runOverview}
+            onOpenOverview={() => showOverview(nodeId, selectedId)} />
+        </Suspense>
       )}
       {!showingUtility && node.status === 'awaiting_input' && semanticTurn && (
         <SemanticTurnBanner

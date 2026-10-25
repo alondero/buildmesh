@@ -138,12 +138,17 @@ provisioned only where the installed harness contract is verified; Terminal,
 Freebuff, and unvalidated DeepSeek profiles retain explicit capability gaps
 rather than guessing from PTY output. MiniMax's Agent-Plugin attention hook is
 live: `requires_attention_hook` is `true` after the issue #1797 validation
-delivered `Stop` from the installed 0.4.12 TUI. SessionStart is provisioned
-for identity capture, but delivery from that TUI is unvalidated; live Stop also
-delivered the session id after a completed turn. mcode 0.4.0+ reads
-`.claude-plugin/plugin.json` with `hooks` **inlined** (a separate
-`hooks/hooks.json` document is ignored, and a directory with no manifest is
-skipped silently), runs `command` + `args` with no shell interpretation, and
+delivered `Stop` from the installed 0.4.12 TUI. A native Windows 0.6.13 TUI
+probe with an isolated BYOK model and hook collector captured SessionStart,
+UserPromptSubmit and Stop. This validates native delivery and payloads, not the
+running Buildmesh app's shared route. SessionStart captures identity when the
+first turn starts; an empty TUI has not emitted it yet. Buildmesh provisions
+`UserPromptSubmit` as `work_resumed`,
+clearing attention when another prompt starts. Claude-compatible callbacks carry
+the native turn identity in `prompt_id`, which the ordering fence uses to reject
+a delayed Stop from an earlier turn. Buildmesh retains the inline
+`.claude-plugin/plugin.json` hooks used by 0.4.12 and verified on 0.6.13,
+runs `command` + `args` with no shell interpretation, and
 `env_clear()`s `BUILDMESH_*` — so the shared callback URL bakes the ports. It
 bakes every Buildmesh instance listening on the machine, not just the one
 that spawned the node: the manifest is one user-global file, so naming only the
@@ -161,8 +166,7 @@ the same in the interop relay. Without it, one sibling that has exited would
 surface as a hook error instead of a lost notification. See
 [Remote Access](remote-access.md#multiple-instances-on-one-machine) for the
 registry's location and lifetime. Native session/workspace payloads resolve the
-node; the provisioned SessionStart handler is capture-only, but its delivery
-has not been observed live.
+node; the provisioned SessionStart handler is capture-only.
 Only `TurnCompleted` is advertised: the launch pins Full Access
 (`permissionMode: bypassPermissions`, a surgical one-line edit to
 `<dataDir>/config.yaml` — the TUI has no permission flag), so no permission
@@ -231,7 +235,7 @@ Only the chain's terminal session is adoptable. Absent, malformed or non-UUID re
 `AgentTerminal` component auto-spawns the agent when mounting an agent node with `status === 'idle'` and a `provider`. It uses `fitAddon.proposeDimensions()` to get PTY size before calling `spawn_agent`. This couples terminal mount directly to agent spawn — debugging attention issues requires tracing this path.
 
 ## Agent Node ID Capture
-Session IDs are **assigned, not captured**, for providers whose CLI accepts a caller-chosen id (Anthropic): the orchestrator mints a UUID up front, writes it to `agent_nodes.cli_session_id` *before* launch, and passes it via `--session-id <uuid>` (`agent/spawn.rs`, `SessionIdMode::Assign`; ADR 0024). The PTY reader thread's labeled-UUID sniff (`session_capture.rs`) runs **only** for self-assigning providers that print a UUID banner (Codex, Antigravity) — gated by `reader_should_capture_session_id` / `captures_session_id_from_pty` so there is exactly one writer per spawn (issue #651). Recent Codex TUIs often omit the banner: SessionStart (hook payload) and the rollout `session_meta` poller (`after_fresh_spawn`) are the load-bearing capture paths; PTY sniff is opportunistic. Antigravity also self-assigns UUIDs without printing them: `services::agy_session` scans transcripts past the mtime gate, reads matching launch `workspace_uris` from the sibling read-only `conversation_summaries.db`, and uses a single unambiguous decodable file root as an anchor when its path form matches the spawn directory; multi-root rows fall back to transcript Cwd. WSL guest paths and host UNC paths are not reconciled here; transcript Cwd follows the same limitation. Missing or unreadable summary data, blank rows, rows with no decodable root, and ambiguous multi-root rows fall back to transcript Cwd; malformed metadata for that conversation remains unverified. OpenCode also self-assigns, but its ids are `ses_…` (not UUIDs) and are not printed on the TUI: a fresh spawn uses `SessionIdMode::None` and `OpenCodeAdapter::after_fresh_spawn` reads the local `opencode.db` SQLite store (`services::opencode_session`) for a row created in the spawn time window whose `directory` matches the node; resume is `--session <id>`. MiniMax Code (`mcode`) also self-assigns: Buildmesh provisions SessionStart capture, but delivery from the installed TUI is unvalidated. Live Stop callbacks do deliver the session id and can capture identity after the first completed turn. Until a callback arrives, a new node has no stored session id; the removed time-window manifest poller has no verified replacement. The callback route binds a unique live node by conversation id and workspace (`services::mcode_session`), with a conditional write fenced by provider, workspace, process generation, and duplicate ownership. PTY sniff remains off. Don't replicate any of these paths — they are backend-only. `CLAUDE_CODE_SESSION_ID` is deliberately **not** used: Claude Code sets its `CLAUDE_CODE_*` vars *downward* into its own subprocesses, so a parent that spawns `claude` can't read it, and for Claude we already know the ID (we assigned it). See ADR 0024 and `docs/learning/opencode-harness-capabilities.md`.
+Session IDs are **assigned, not captured**, for providers whose CLI accepts a caller-chosen id (Anthropic): the orchestrator mints a UUID up front, writes it to `agent_nodes.cli_session_id` *before* launch, and passes it via `--session-id <uuid>` (`agent/spawn.rs`, `SessionIdMode::Assign`; ADR 0024). The PTY reader thread's labeled-UUID sniff (`session_capture.rs`) runs **only** for self-assigning providers that print a UUID banner (Codex, Antigravity) — gated by `reader_should_capture_session_id` / `captures_session_id_from_pty` so there is exactly one writer per spawn (issue #651). Recent Codex TUIs often omit the banner: SessionStart (hook payload) and the rollout `session_meta` poller (`after_fresh_spawn`) are the load-bearing capture paths; PTY sniff is opportunistic. Antigravity also self-assigns UUIDs without printing them: `services::agy_session` scans transcripts past the mtime gate, reads matching launch `workspace_uris` from the sibling read-only `conversation_summaries.db`, and uses a single unambiguous decodable file root as an anchor when its path form matches the spawn directory; multi-root rows fall back to transcript Cwd. WSL guest paths and host UNC paths are not reconciled here; transcript Cwd follows the same limitation. Missing or unreadable summary data, blank rows, rows with no decodable root, and ambiguous multi-root rows fall back to transcript Cwd; malformed metadata for that conversation remains unverified. OpenCode also self-assigns, but its ids are `ses_…` (not UUIDs) and are not printed on the TUI: a fresh spawn uses `SessionIdMode::None` and `OpenCodeAdapter::after_fresh_spawn` reads the local `opencode.db` SQLite store (`services::opencode_session`) for a row created in the spawn time window whose `directory` matches the node; resume is `--session <id>`. MiniMax Code (`mcode`) also self-assigns: native Windows 0.6.13 hook captures establish SessionStart delivery when the first turn starts, followed by UserPromptSubmit and Stop with the same session identity. These captures use a command collector, not the running Buildmesh app. Until a callback arrives, a new node has no stored session id; an empty TUI has not emitted SessionStart yet. The callback route binds a unique live node by conversation id and workspace (`services::mcode_session`), with a conditional write fenced by provider, workspace, process generation, and duplicate ownership. PTY sniff remains off. Don't replicate any of these paths — they are backend-only. `CLAUDE_CODE_SESSION_ID` is deliberately **not** used: Claude Code sets its `CLAUDE_CODE_*` vars *downward* into its own subprocesses, so a parent that spawns `claude` can't read it, and for Claude we already know the ID (we assigned it). See ADR 0024 and `docs/learning/opencode-harness-capabilities.md`.
 
 ## Turn Counting and Node Naming
 

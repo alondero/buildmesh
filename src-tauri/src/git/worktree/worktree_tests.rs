@@ -121,7 +121,15 @@ fn run_bounded_git_surfaces_a_hung_command_as_a_named_err() {
 fn spawn_path_git_shellouts_are_all_budgeted() {
     const UNBOUNDED: [&str; 2] = [".output()", ".status()"];
 
-    for file in ["git/worktree/mod.rs", "git/worktree/provision.rs"] {
+    for file in [
+        "git/worktree/mod.rs",
+        "git/worktree/provision.rs",
+        "git/worktree/create.rs",
+        "git/worktree/include.rs",
+        "git/worktree/maintenance.rs",
+        "git/worktree/remove.rs",
+        "git/worktree/safety.rs",
+    ] {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join(file);
         let source =
             fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
@@ -145,9 +153,16 @@ fn spawn_path_git_shellouts_are_all_budgeted() {
 
     // Not vacuous: the guard must be looking at code that really does
     // shell out through the bounded seam.
-    let mod_source =
-        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/git/worktree/mod.rs"))
-            .unwrap();
+    let mod_source = ["mod.rs", "create.rs", "maintenance.rs"]
+        .map(|name| {
+            fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("src/git/worktree")
+                    .join(name),
+            )
+            .unwrap()
+        })
+        .join("\n");
     assert!(
         mod_source.matches("run_bounded_git(").count() >= 4,
         "expected the mutators to route through `run_bounded_git`"

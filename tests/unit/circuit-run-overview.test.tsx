@@ -191,6 +191,18 @@ describe('Overview tab on a circuit card', () => {
     expect(disposeUtility).not.toHaveBeenCalled();
   });
 
+  it('shows compact circuit status on arrival and opens the same run from View circuit', async () => {
+    vi.mocked(circuitRunOverview).mockResolvedValue(overview());
+    render(card());
+    const summary = await screen.findByRole('region', { name: 'Node review circuit' });
+    expect(within(summary).getByText('Running')).toBeTruthy();
+    expect(screen.getByLabelText('Agent 1')).toBeTruthy();
+    fireEvent.click(within(summary).getByRole('button', { name: 'View circuit' }));
+    expect(await screen.findByTestId('run-overview-10')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Node review circuit' })).toBeNull();
+    expect(circuitRunOverview).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps showing the Overview when a click inside it activates the card', async () => {
     vi.mocked(circuitRunOverview).mockResolvedValue(overview());
     render(<NodeCard nodeId={1} isActive={false}

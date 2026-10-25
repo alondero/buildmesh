@@ -488,6 +488,13 @@ two jobs: click it to change the mesh colour, drag it to reorder the mesh. From
 the keyboard, <kbd>Enter</kbd> opens the colour picker and <kbd>Space</kbd> picks
 the card up for reordering, so both jobs stay reachable without a mouse.
 
+The mesh name is the card's select control: <kbd>Tab</kbd> reaches it and
+<kbd>Enter</kbd> or <kbd>Space</kbd> switches the canvas to that mesh, the same
+as clicking the name or the card. The mesh you are currently in is marked as the
+current one for screen readers. Right-clicking a card and closing its menu with
+<kbd>Escape</kbd> puts focus back on the mesh name, so the keyboard can carry on
+from there.
+
 Under the mesh name, a row of status dots summarises the mesh's agents — one dot
 per agent, coloured by that agent's status, with the count beside it. There are
 no text status labels. Click that line to expand or collapse the mesh's agents;
@@ -609,7 +616,7 @@ The current built-in catalog is:
 | Grok Code | Yes | Hook | Cross-runtime hooks need working Windows/WSL networking |
 | Cursor | Yes | Hook | Effort control is not available through Buildmesh |
 | Kimi Code | Yes | Hook | Needs Kimi Code 0.27.0 or newer; has no transcript reader |
-| MiniMax Code | Yes | Hook | Attention reports completed turns; supports session model selection, no effort override; launched in Full Access |
+| MiniMax Code | Yes | Hook | Reports completed turns and clears attention when another prompt starts; supports session model selection, no effort override; launched in Full Access |
 | DeepSeek Harness | Yes | None | Use the terminal for progress when no signal is available |
 | Command Code | Yes | Passive watcher | Transcript-based lifecycle support is available. If typing does nothing, see [Command Code does not accept typing](troubleshooting.md#command-code-does-not-accept-typing) |
 | Freebuff | Yes | None | Model and effort overrides are not available |
@@ -861,7 +868,9 @@ For **MiniMax Code**, enter the model reference from mcode's `/model` picker
 as `provider/model` (or `provider/model#variant`) in the configuration's
 **Model** field. The selected model applies to fresh and resumed sessions
 without changing mcode's global model default. Buildmesh accepts ASCII letters,
-digits, `.`, `_` and `-` in each reference part; other characters are rejected
+digits, `.`, `_` and `-` in each identifier, plus mcode's `custom_provider:`
+provider prefix for your own endpoints (for example,
+`custom_provider:local/MiniMax-M3`); other characters are rejected
 when saving or launching so Windows command parsing cannot alter the reference.
 Leave the field blank to inherit MiniMax Code's **Model** from
 **Settings → Launch Configurations**, in the **Agent Harness defaults** section,

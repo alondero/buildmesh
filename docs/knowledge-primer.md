@@ -28,8 +28,8 @@
 Each owner doc below was split out of this primer (issue #2045) and is now the
 place to add or change that area's durable architecture.
 
-For backend seams and module ownership, see the
-[Rust module map](development/module-map.md).
+For backend responsibility ownership, see the
+[Rust module map](development/module-map.md#responsibility-modules).
 
 | Area | Owner doc | Owning code |
 |---|---|---|

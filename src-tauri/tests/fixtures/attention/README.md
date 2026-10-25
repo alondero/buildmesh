@@ -18,7 +18,7 @@ They establish parsing/mapping parity, not installed CLI delivery reliability.
 | Claude / Anthropic profiles | Stop, idle Notification, permission, question tool, SessionStart | Compatible model profiles resolve to the Anthropic harness |
 | Codex | Stop, PermissionRequest, request_user_input, SessionStart, PostToolUse, Interrupt | Tool results resume only with an outstanding approval marker |
 | Cline | agent_end, session_shutdown, unprovisioned tool events | No permission, question or idle file hook is provisioned |
-| MiniMax Code | Stop, SessionStart, PermissionRequest, mvs session/workspace | SessionStart delivery remains unvalidated; permission is disabled by launch |
+| MiniMax Code | Stop, SessionStart, UserPromptSubmit, PermissionRequest, mvs session/workspace | 0.6.13 native Windows TUI hook capture validates the wire shape; live Buildmesh app delivery remains unverified; permission is disabled by launch |
 | Kimi Code | Stop, permission/reply, question tool, failure, terminal task Notification | Background task completion also requires the ordering fence |
 | Grok | Stop, idle/permission Notifications, question tool, cancellation | Runtime token validation remains in the HTTP gate |
 | Antigravity | Settled/background Stop, neutral PreToolUse | No permission/question observer is provisioned |

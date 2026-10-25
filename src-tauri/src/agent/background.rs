@@ -329,6 +329,10 @@ mod tests {
         let launch = resolve_plan(saved.clone(), &prefs).unwrap();
         assert_eq!(launch.args, ["--model", "minimax/MiniMax-M3#variant"]);
 
+        saved.model = Some("custom_provider:local/M3#variant".into());
+        let launch = resolve_plan(saved.clone(), &prefs).unwrap();
+        assert_eq!(launch.args, ["--model", "custom_provider:local/M3#variant"]);
+
         saved.model = Some("minimax/M3&echo x".into());
         let error = resolve_plan(saved, &prefs)
             .err()

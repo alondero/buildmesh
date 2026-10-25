@@ -67,6 +67,10 @@ describe("parentOf", () => {
     });
   });
 
+  it("usage returns to mobile home", () => {
+    expect(parentOf({ kind: "usage" })).toEqual({ kind: "list" });
+  });
+
   it("list and connect are roots (back leaves the app)", () => {
     expect(parentOf({ kind: "list" })).toEqual({ kind: "list" });
     expect(parentOf({ kind: "connect" })).toEqual({ kind: "connect" });

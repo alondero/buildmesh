@@ -2,6 +2,23 @@
 
 Status: current
 
+## Provider usage on the phone
+
+Tap **Usage** in the browser home header or Android home toolbar to open
+read-only provider meters. Back returns home. Quotas, reset times, balances,
+explicit billing states and last-known timestamps come from the desktop's
+existing usage command. Configure providers and credentials on the desktop.
+
+`GET /api/usage?refresh=false|true` requires a paired Admin session and returns
+`MobileProviderUsage[]`: an account display name and its `ProviderMeters`.
+Disabled and removed accounts are excluded; account credentials are never
+serialized. Automatic reads use the provider cache; **Refresh** requests a
+fresh reading. Both clients refresh once per minute while foregrounded and
+stop when the screen is left. Failed reads keep prior rows and show an error;
+retry from the page. A last-known provider reading retains its own timestamp,
+independent of the time the phone requested it. Older desktops need updating
+to supply this route.
+
 ## Create PR is node-scoped
 
 A pull request the phone creates comes from an **agent node's worktree**, never from

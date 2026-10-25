@@ -259,6 +259,13 @@ export async function listProviders(signal?: AbortSignal): Promise<Provider[]> {
   return (await apiFetch("/api/providers", { signal })).json();
 }
 
+export async function getUsage(refresh = false, signal?: AbortSignal): Promise<import('../types/generated/MobileProviderUsage').MobileProviderUsage[]> {
+  const response = await apiFetch(`/api/usage?refresh=${refresh}`, { signal });
+  const rows: unknown = await response.json();
+  if (!Array.isArray(rows)) throw new Error("Usage requires an updated desktop app.");
+  return rows;
+}
+
 export const launchConfigurationApi = {
   list: async (): Promise<import('../types/generated/SpawnConfiguration').SpawnConfiguration[]> => (await apiFetch('/api/launch-configurations')).json(),
   targets: async (): Promise<import('../types/generated/LaunchTarget').LaunchTarget[]> => (await apiFetch('/api/launch-targets')).json(),

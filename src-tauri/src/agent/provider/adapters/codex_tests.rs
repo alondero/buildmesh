@@ -37,7 +37,16 @@ fn no_codex_read_probe_spawns_without_a_timeout() {
     // used to `split_once("#[cfg(test)]\nmod tests {")` and `.expect(...)`
     // that marker, which made the file's own layout a load-bearing fixture:
     // the split became the assertion's premise rather than its subject.
-    let production = include_str!("codex.rs");
+    let production = [
+        include_str!("codex.rs"),
+        include_str!("codex/hooks.rs"),
+        include_str!("codex/install_cache.rs"),
+        include_str!("codex/install_probe.rs"),
+        include_str!("codex/profiles.rs"),
+        include_str!("codex/runtime_files.rs"),
+        include_str!("codex/trust.rs"),
+    ]
+    .join("\n");
     // Strip comment lines first: this file's own doc comments name
     // `.output()` when explaining the bug, and prose about the hazard
     // must not read as an instance of it.

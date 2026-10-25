@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { runGuarded } from './ci/run-guarded.mjs';
 import { availableParallelism } from 'node:os';
 import { executedTests, formatDiffPaths, gateReads, planGates } from './harness-plan.mjs';
-import { acquireSlot, heavyGateEnv, heavyGateLimit, runPlan } from './harness-lanes.mjs';
+import { acquireSlot, agentTestLimit, agentTestSlotDirectory, heavyGateEnv, heavyGateLimit, runPlan } from './harness-lanes.mjs';
 import { selfReviewReport } from './self-review.mjs';
 import { conptyPrerequisite, failureLines, gatePassed, isolatedCommand, isolateTests, knownFlakes, readTestReport, validateFlakeIssues } from './harness-test-failures.mjs';
 import { fastGates, pathIncludeDrift, planChecks } from './harness-check.mjs';
@@ -455,12 +455,22 @@ export async function verify(root, { base: requestedBase, full = false, plan = p
       return { ...cached, cached: true, log };
     }
     let slot = null;
+    let slotEnv = {};
     if (gate.heavy) {
       slot = await acquireSlot({ gate: gate.id, root, onQueued: holders => console.log(`QUEUED ${gate.id}: waiting for a heavy-gate slot (limit ${heavyGateLimit()}; held by ${holders.map(held => `${held.gate} in ${held.root}`).join(', ') || 'a process that just exited'})`) });
+    } else if (gate.agentTest && process.env.BUILDMESH_AGENT_TEST_SLOT !== 'held' && existsSync(join(root, 'scripts/agent-tests.mjs'))) {
+      // The infrastructure suite's own budget (issue #2254). The slot is taken
+      // here so this gate's deadline starts once it holds it, and the suite is
+      // told the slot is already held so it does not wait for itself. A
+      // repository that cannot run the suite - a fixture that verifies a plan -
+      // takes no slot: it would hold a machine-wide budget for a simulation.
+      const limit = agentTestLimit();
+      slot = await acquireSlot({ dir: agentTestSlotDirectory(), limit, gate: gate.id, root, onQueued: holders => console.log(`QUEUED ${gate.id}: waiting for an infrastructure-suite slot (limit ${limit}; held by ${holders.map(held => `${held.gate} in ${held.root}`).join(', ') || 'a process that just exited'})`) });
+      slotEnv = { BUILDMESH_AGENT_TEST_SLOT: 'held' };
     }
     try {
       if (slot && isStopped?.()) return null;
-      const row = { ...await runGate(root, gate, base, paths, heavyGateEnv(gate, gates, availableParallelism()), { deferIsolation: true }), inputs };
+      const row = { ...await runGate(root, gate, base, paths, { ...heavyGateEnv(gate, gates, availableParallelism()), ...slotEnv }, { deferIsolation: true }), inputs };
       if (slot?.queuedMs) row.queuedMs = slot.queuedMs;
       event(root, { type: 'gate', taskId: receipt.taskId, attempt: task?.verificationAttempts ?? null, ...row });
       return row;

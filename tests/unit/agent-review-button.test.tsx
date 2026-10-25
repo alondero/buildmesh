@@ -166,6 +166,16 @@ describe('agent workflow title-bar control', () => {
     await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'codex'));
   });
 
+  it.each(['0', '11', '1.5', ''])('refuses an invalid review round limit %p', value => {
+    renderButton();
+    fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
+    fireEvent.change(screen.getByLabelText('Maximum review rounds'), { target: { value } });
+    const start = screen.getByRole('button', { name: 'Start review' }) as HTMLButtonElement;
+    expect(start.disabled).toBe(true);
+    fireEvent.click(start);
+    expect(trigger).not.toHaveBeenCalled();
+  });
+
   it('themes its dropdowns with a defined surface token (regression: bg-surface-raised)', () => {
     // bg-surface-raised was never declared in @theme, so Tailwind v4 emitted
     // no CSS for it: the native controls fell back to the OS white field while

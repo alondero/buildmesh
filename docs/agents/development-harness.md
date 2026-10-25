@@ -362,6 +362,52 @@ Windows; `BUILDMESH_GATE_SLOTS_DIR` overrides). A slot held by a dead process is
 reclaimed, so a killed run needs no cleanup. The per-worktree `.harness/lock` is
 unchanged.
 
+### The agent-infrastructure suite's own budget
+
+`npm run test:agent` runs the agent-infrastructure contract suite, and Node's
+test runner starts one process per test file with a default concurrency of the
+machine's core count minus one. The suite's files are not equally heavy — a
+few compile Rust or build a Tauri app — so on a 24-core workstation 23 of its
+30 files ran at once, while a 2-core CI runner ran them one at a time. The
+suite's demand scaled with the machine, and under overlapping checks the
+fixtures that carry a wall-clock budget expired on contention rather than on a
+defect (issue #2254).
+
+Two bounds own that now:
+
+- `scripts/agent-tests.mjs` caps the file concurrency at four, and never raises
+  it above the runner's own default, so a small runner keeps running as few
+  files as it did and a workstation asks for about what CI asks for.
+- The suite takes a machine-wide slot of its own, so `scripts/check.ps1 all-ts`
+  and `npm run verify` do not both run a copy beside the frontend suite and a
+  Rust compile. The copy that waits prints `QUEUED agent-tests: ...`. The
+  budget lives in `scripts/harness-lanes.mjs` beside the heavy-gate slots, but
+  it is deliberately separate from them: the product lanes need both of those
+  to overlap, and a suite holding one for minutes would serialise them.
+  `BUILDMESH_AGENT_TEST_LIMIT` changes the limit and
+  `BUILDMESH_AGENT_TEST_SLOTS_DIR` moves the slot directory.
+
+The slot is taken by the harness before it starts the `agent-tests` gate, so
+the gate's own deadline starts once it holds the slot, exactly as a heavy
+gate's does. Everything the suite starts inherits
+`BUILDMESH_AGENT_TEST_SLOT=held`, so a nested run — the suite's own
+`agent-tests` gate, or a fixture that verifies a plan — never waits for a slot
+its own tree holds. That flag is trusted as set: exporting it in a shell
+profile would disable the mutual exclusion for every copy of the suite.
+
+A fixture gate's own budget is a hang detector, not a load detector. The gates
+in `tests/agent-infra/harness.test.mjs` that compile a crate or run a real
+Vitest suite get half the `agent-tests` gate's budget
+(`AGENT_TEST_GATE_MINUTES` in `scripts/harness-plan.mjs`), and the harness CLI
+the fixture drives gets that budget plus a minute. Half, and not the whole,
+because the two nest: a fixture gate that outlives the gate that runs it is
+killed by the enclosing run, and the fixture gate's own attribution — its name,
+its log, the failing test — is destroyed with it. The half that is left has to
+cover the suite's own runtime, so a hung fixture keeps its attribution for as
+long as the suite's runtime stays under the other half. Thirty seconds for the
+CLI was a load detector: under issue #2254 it killed a child that was still
+working and reported a null exit status instead of the failure that caused it.
+
 Without an active task, `npm run verify -- --base <commit>` runs the same checks
 and records a standalone receipt. It cannot finish a task. `--full` expands
 verification to both frontend and Rust even for documentation changes.

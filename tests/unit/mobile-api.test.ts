@@ -18,6 +18,7 @@ import {
   createPr,
   createNode,
   listProviders,
+  getUsage,
   newOperationKey,
   importAndResume,
   spawnFromIssue,
@@ -153,6 +154,20 @@ describe("mobile api wire shape (issue #1262)", () => {
       const [path, init] = fetchMock.mock.calls[0];
       expect(path).toBe("/api/providers");
       expect(init.signal).toBe(controller.signal);
+    });
+  });
+
+  describe("getUsage", () => {
+    it("uses the paired usage route and forwards refresh and cancellation", async () => {
+      const controller = new AbortController();
+      fetchMock.mockResolvedValue(okJson([]));
+      expect(await getUsage(true, controller.signal)).toEqual([]);
+      expect(fetchMock.mock.calls[0][0]).toBe('/api/usage?refresh=true');
+      expect(fetchMock.mock.calls[0][1].signal).toBe(controller.signal);
+    });
+    it("reports an older desktop's unknown-route response", async () => {
+      fetchMock.mockResolvedValue(okJson({ error: 'not found' }));
+      await expect(getUsage()).rejects.toThrow('updated desktop');
     });
   });
 

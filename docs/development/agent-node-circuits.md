@@ -2,7 +2,8 @@
 
 Status: current
 
-Use the Circuit icon beside Build/Run in an Agent Node's title bar. Choose
+Use **Add review** in the compact Review circuit panel above an Agent Node's
+terminal, or the Circuit icon beside Build/Run in its title bar. Choose
 **Automated review loop** or a saved Circuit with a manual trigger on the same
 Mesh. Saved Circuits keep their configured timing and actions; the review
 preset waits for the source task to finish.
@@ -18,6 +19,12 @@ approval. When the source's completion cannot be
 read or classified, a visible approval step lets the user confirm completion
 before review begins.
 
+The **Reviewer launch configuration** picker uses the shared Spawn Menu:
+choose a harness directly or expand it to select a saved Launch Configuration.
+Set **Maximum review rounds** before starting (three by default, one to ten).
+**How the reviewer is launched** explains the defaults without expanding the
+setup form. Saved manual Circuits use the configuration in their own graph.
+
 The reviewer uses the provider picked in the Start Review dialog when one is
 chosen, otherwise the configured Reviewer provider, otherwise the source
 agent's provider. Model and effort come from a picked Launch Configuration
@@ -27,7 +34,8 @@ preset graphs do not override that configuration.
 It receives its working directory, Mesh base ref, name, and latest completion report. It is instructed
 to review committed changes from the merge-base and uncommitted/untracked
 changes, without editing files or posting to GitHub. It has its own worktree;
-no commit, push, or PR is required for this workflow.
+the built-in preset's publication and merge steps are described in
+[Review presentation contract](#review-presentation-contract).
 
 From a paired phone's browser or Android client, the node card and node screen show the run, its
 review round and the latest verdict, and a run that needs a person can be approved,
@@ -36,6 +44,16 @@ review or a saved manual Review Circuit from the same Mesh. See
 [Circuit Runs on the phone](mobile.md#circuit-runs-on-the-phone).
 
 ## Overview tab
+
+On arrival, the compact panel keeps the terminal visible and shows the card's
+Circuit name, status, review round and limit, current steps, and **Needs
+attention** when a person must act. It shares the Overview's snapshot and live
+updates. **View circuit** opens that run's full Overview. While details load,
+the known ownership status remains visible; a failed refresh offers **Retry**.
+An active run replaces **Add review** with **View circuit**, preventing a
+competing launch. Finished runs keep their status and Overview link alongside
+**Add review**; use the Overview's recovery controls to continue a failed run.
+The compact panel is hidden while viewing Overview or a utility terminal.
 
 A desktop node card whose agents belong to a Circuit Run shows an **Overview**
 tab first in its activity tab strip, for live and finished runs alike. It never

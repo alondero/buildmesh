@@ -393,13 +393,16 @@ function MeshItemView({
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   // Issue #735 — the menu container ref lets us measure its rendered size
-  // for clamping; the trigger ref remembers the row that opened the menu so
-  // Escape can return focus there.
+  // for clamping.
   //
   // Issue #837 — keyboard nav (Escape/Tab/Arrow/Home/End + auto-focus on
   // open) is the shared `useAriaMenu` hook below.
   const menuRef = useRef<HTMLDivElement>(null);
-  const triggerRef = useRef<HTMLDivElement>(null);
+  // Issue #2464 — the mesh title is the row's keyboard-selectable control,
+  // so it is also where the context menu returns focus. The header div it
+  // replaced carried `tabIndex={-1}`: focusable, but inert — Enter and
+  // Space on it had no effect, which is the trap the issue reports.
+  const meshTitleRef = useRef<HTMLButtonElement>(null);
   const [activeIndex, setActiveIndex] = useState(0);
   // View on GitHub — only shown when the mesh's `origin` resolves to a
   // github.com URL. The hook fires the IPC on mount so by the time the
@@ -412,12 +415,17 @@ function MeshItemView({
   // GitHub mesh's wraps at 6.
   const itemCount = 5 + (githubUrl ? 1 : 0);
 
-  // Issue #735 — close the menu and return focus to the trigger. Used by
+  // Issue #735 — close the menu and return focus to the row. Used by
   // Escape and any menuitem click so the user's focus stays predictable
   // across menu interactions. The `requestAnimationFrame` runs after the
-  // unmount so the trigger ref is still attached when the focus() lands.
+  // unmount so the title ref is still attached when the focus() lands.
+  //
+  // Issue #2464 — focus lands on the mesh title, the one control in the
+  // row that a keyboard user can actually activate, so the user can carry
+  // straight on from the menu instead of sitting on a focusable-but-inert
+  // row.
   const closeContextMenu = () => {
-    const trigger = triggerRef.current;
+    const trigger = meshTitleRef.current;
     setContextMenu(null);
     requestAnimationFrame(() => trigger?.focus({ preventScroll: true }));
   };
@@ -507,14 +515,13 @@ function MeshItemView({
           (dots + count, no textual labels) and doubles as the expand toggle,
           so no chevron takes up horizontal space. */}
       {/* Header is a plain clickable container like the pre-merge row
-          (issue #735): tabIndex -1 keeps it out of the natural Tab order
-          (and gives the context menu a focus target to return to), and it
-          carries no role so the bar/dots/drift/sync/spawn buttons nested
-          inside are valid interactive descendants. Keyboard users drive
-          those buttons directly. */}
+          (issue #735) and it carries no role, so the bar/dots/drift/sync/
+          spawn buttons nested inside are valid interactive descendants.
+          Issue #2464 — it also carries no tabindex: the old `tabIndex={-1}`
+          made the header a focusable-but-inert stop (Enter and Space on it
+          had no effect), and the keyboard-selectable control is the mesh
+          title below. */}
       <div
-        ref={triggerRef}
-        tabIndex={-1}
         onClick={() => onSelectMesh(mesh.id)}
         onContextMenu={(e) => {
           e.preventDefault();
@@ -556,12 +563,26 @@ function MeshItemView({
           </button>
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
-              <span
+              {/* Issue #2464 — the mesh title IS the row's select control.
+                  It used to be a non-focusable span, so the row had no
+                  keyboard-reachable way to invoke `onSelectMesh`: Tab
+                  visited the bar, the badges and the spawn button and
+                  skipped selection entirely. As a button it takes focus in
+                  the Tab order, activates on Enter and Space, and carries
+                  `aria-current` while its mesh is the selected one.
+                  `stopPropagation` keeps the header's own click handler
+                  from selecting the mesh a second time. The `id` stays the
+                  context menu's `aria-labelledby` anchor. */}
+              <button
+                type="button"
                 id={`mesh-item-name-${mesh.id}`}
-                className={`font-sans font-semibold text-sm truncate flex-1 ${dimmed ? 'text-text-muted' : 'text-text-primary'}`}
+                ref={meshTitleRef}
+                onClick={(e) => { e.stopPropagation(); onSelectMesh(mesh.id); }}
+                aria-current={isSelected ? 'true' : undefined}
+                className={`min-w-0 flex-1 truncate text-left cursor-pointer font-sans font-semibold text-sm ${dimmed ? 'text-text-muted' : 'text-text-primary'}`}
               >
                 {mesh.name}
-              </span>
+              </button>
               {drifted && (
                 <button
                   type="button"

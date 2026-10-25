@@ -166,7 +166,7 @@ pub struct ProviderMeters {
     // typecheck; `as = "Option<i32>"` only pins the *declared* TS type to
     // `number` (ts-rs would otherwise emit `bigint`, which JSON-over-IPC never
     // sends).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, rename = "cachedAt", skip_serializing_if = "Option::is_none")]
     #[ts(optional, rename = "cachedAt", as = "Option<i32>")]
     pub cached_at: Option<i64>,
 }

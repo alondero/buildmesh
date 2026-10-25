@@ -716,7 +716,8 @@ Model-reference syntax belongs to the harness adapter through
 invoke it after normalization; interactive command composition and background
 launch resolution check the final model again. This catches Circuit overrides
 and stored snapshots that bypass save validation. MiniMax Code restricts
-`provider/model[#variant]` parts to ASCII letters, digits, `.`, `_` and `-` so
+`provider/model[#variant]` identifiers to ASCII letters, digits, `.`, `_` and `-`,
+also accepting the native `custom_provider:` provider prefix for BYOK models, so
 Windows Cmd cannot split or expand the reference. Syntax validation does not
 prove account availability or CLI-version compatibility.
 
