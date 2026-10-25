@@ -45,9 +45,9 @@ see [desktop interaction and theme polish](../archive/2026-10/desktop-polish-202
 
 ## Local development
 
-Prerequisites are Node.js 20+ with npm, Rust stable, Git, and the Tauri 2
-platform dependencies. Optional WSL2 and `gh` are needed only for the features
-that use them.
+Prerequisites are Node.js 22.22.2+ (22.x), 24.15.0+ (24.x), or 26+ with npm,
+Rust stable, Git, and the Tauri 2 platform dependencies. Optional WSL2 and `gh`
+are needed only for the features that use them.
 
 ```powershell
 npm install

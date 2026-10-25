@@ -24,7 +24,8 @@ others are welcome. This document is the contract for contributing.
 
 ## Dev loop
 
-**Prerequisites:** Node.js 20+ (LTS), Rust stable (1.74+), the platform deps
+**Prerequisites:** Node.js 22.22.2+ (22.x), 24.15.0+ (24.x), or 26+; Rust
+stable (1.74+); the platform deps
 listed in the Tauri 2 prerequisites, Git CLI, and (optionally) the `gh` CLI
 for the GitHub Issues / PR features.
 

@@ -76,7 +76,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
 
       - name: Setup Rust
@@ -257,7 +257,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
 
       - name: Setup Rust
@@ -385,7 +385,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: "20"
+          node-version: "22"
 
       - name: Verify candidate audit success path through its CLI
         run: node --test tests/agent-infra/macos-candidate-audit.test.mjs
@@ -432,7 +432,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: "20"
+          node-version: "22"
 
       - name: Download the draft feed and its asset list
         shell: bash

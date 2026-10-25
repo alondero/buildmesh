@@ -285,7 +285,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
 
       # `npm ci` must precede every step that loads a dependency. `test:lint`
@@ -467,7 +467,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
 
       # `npm ci` is a dependency of `npx vitest`, and of the browser install.
@@ -577,7 +577,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
 
       - name: Install frontend dependencies
@@ -1137,7 +1137,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
 
       - name: Install frontend dependencies
@@ -1217,7 +1217,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
 
       - name: Setup Rust
@@ -1294,7 +1294,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
 
       - name: Run the native candidate audit CLI success path

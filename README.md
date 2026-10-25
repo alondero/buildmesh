@@ -250,7 +250,7 @@ so every binding works the same way on Windows, Linux, and macOS.
 
 ## Tech stack
 
-- **Frontend** — React 19, Zustand 5, xterm.js 6, Tailwind 4, TypeScript ~5.8, Vite 7
+- **Frontend** — React 19, Zustand 5, xterm.js 6, Tailwind 4, TypeScript ~5.9, Vite 8
 - **Backend** — Tauri 2, Rust, `portable-pty`, `rusqlite` (SQLite), `git2`
 - **Persistence** — local SQLite (`app_settings`, `meshes`, `agent_nodes`)
 - **Runtime** — Windows 10/11, with optional WSL2 support; macOS ships as an ad-hoc-signed app
@@ -262,7 +262,7 @@ This section is for contributors and for users on macOS/Linux (Linux is not publ
 
 ### Prerequisites
 
-- **Node.js 20+ (LTS)** and **npm**
+- **Node.js 22.22.2+ (22.x), 24.15.0+ (24.x), or 26+** and **npm**
 - **Rust stable** (1.74+, the minimum Tauri 2 supports)
 - **Platform deps** — see [Tauri 2 prerequisites](https://tauri.app/start/prerequisites/) for your OS
   - Windows: WebView2 runtime (preinstalled on Win 11), Microsoft C++ Build Tools
