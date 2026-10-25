@@ -263,7 +263,7 @@ This section is for contributors and for users on macOS/Linux (Linux is not publ
 ### Prerequisites
 
 - **Node.js 22.22.2+ (22.x), 24.15.0+ (24.x), or 26+** and **npm**
-- **Rust stable** (1.74+, the minimum Tauri 2 supports)
+- **Rust stable**
 - **Platform deps** — see [Tauri 2 prerequisites](https://tauri.app/start/prerequisites/) for your OS
   - Windows: WebView2 runtime (preinstalled on Win 11), Microsoft C++ Build Tools
   - macOS: Xcode Command Line Tools
