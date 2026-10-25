@@ -79,6 +79,14 @@ export function gateReads(gate, path) {
   return !gate._ignoreRegexes.some(rx => rx.test(path));
 }
 
+// The budget of the gate that runs the agent-infrastructure suite. The suite's
+// own fixture gates each carry a hang detector of their own, and this budget
+// has to leave room for the suite plus one of those: a nested budget equal to
+// the enclosing one lets the enclosing kill land first, and the fixture gate's
+// own attribution - its name, its log, the failing test - is lost with it
+// (issue #2254).
+export const AGENT_TEST_GATE_MINUTES = process.platform === 'win32' ? 15 : 10;
+
 // A single local verification plan. Unknown inputs retain CI's conservative scope.
 export function planGates(paths, { full = false } = {}) {
   let frontend = full;
@@ -107,7 +115,12 @@ export function planGates(paths, { full = false } = {}) {
   node('readme', ['scripts/check-readme-drift.mjs']);
   node('process-spawns', ['scripts/check-process-spawn-discipline.mjs']);
   node('known-flakes', ['scripts/harness.mjs', 'gate', 'flakes']);
-  scoped('agent-tests', 'test:agent', { tests: 'node', ignores: AGENT_TEST_IGNORES, minutes: process.platform === 'win32' ? 15 : 5 });
+  // The infrastructure suite is machine-heavy too, and `npm run test:agent`
+  // takes its own machine-wide slot so an overlapping copy waits instead of
+  // doubling the demand (issue #2254). The gate takes that slot here rather
+  // than inside the npm script, so its own deadline starts once it holds the
+  // slot, exactly as a heavy gate's does.
+  scoped('agent-tests', 'test:agent', { tests: 'node', ignores: AGENT_TEST_IGNORES, minutes: AGENT_TEST_GATE_MINUTES, agentTest: true });
   scoped('docs-tests', 'test:docs', { tests: 'node' });
   scoped('readme-tests', 'test:readme', { tests: 'node', ignores: README_TEST_IGNORES });
   scoped('lint-tests', 'test:lint', { tests: 'node', ignores: LINT_FIXTURE_IGNORES });
@@ -169,7 +182,7 @@ export function formatDiffPaths(output) {
 }
 
 export function isHarnessPath(path) {
-  return /^(?:scripts\/harness(?:-plan|-lanes|-check|-vitest-isolate)?\.mjs|scripts\/self-review\.mjs|scripts\/known-flakes\.json|scripts\/harness-corpus\.json|scripts\/ci\/run-guarded\.mjs|tests\/agent-infra\/|\.claude\/|\.agents\/|\.github\/PULL_REQUEST_TEMPLATE\.md$)/.test(path);
+  return /^(?:scripts\/harness(?:-plan|-lanes|-check|-vitest-isolate)?\.mjs|scripts\/agent-tests\.mjs|scripts\/self-review\.mjs|scripts\/known-flakes\.json|scripts\/harness-corpus\.json|scripts\/ci\/run-guarded\.mjs|tests\/agent-infra\/|\.claude\/|\.agents\/|\.github\/PULL_REQUEST_TEMPLATE\.md$)/.test(path);
 }
 
 export function executedTests(kind, output) {

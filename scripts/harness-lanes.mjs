@@ -6,6 +6,13 @@ import { gatePassed } from './harness-test-failures.mjs';
 
 export const DEFAULT_HEAVY_GATE_LIMIT = 2;
 
+// The agent-infrastructure contract suite is machine-heavy as well: its files
+// compile Rust, build a Tauri app and run real Vitest fixtures, so a second
+// copy running beside it doubles the demand. It gets its own budget instead of
+// one of the heavy-gate slots, because the product lanes need both of those to
+// overlap (#2126) and a suite that held one for minutes would serialise them.
+export const DEFAULT_AGENT_TEST_LIMIT = 1;
+
 function alive(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; }
 }
@@ -76,6 +83,18 @@ export function heavyGateLimit(env = process.env) {
   return Number.isInteger(value) && value > 0 ? value : DEFAULT_HEAVY_GATE_LIMIT;
 }
 
+// How many copies of the agent-infrastructure suite may run at once, across
+// every worktree and every check that starts one.
+export function agentTestLimit(env = process.env) {
+  const value = Number(env.BUILDMESH_AGENT_TEST_LIMIT);
+  return Number.isInteger(value) && value > 0 ? value : DEFAULT_AGENT_TEST_LIMIT;
+}
+
+// The state directory both slot budgets live in.
+function stateBase(env) {
+  return process.platform === 'win32' ? env.LOCALAPPDATA : (env.XDG_STATE_HOME ?? (homedir() ? join(homedir(), '.local', 'state') : null));
+}
+
 // Two heavy suites running at once would each assume the whole machine: vitest
 // starts one worker per core and every Rust shard runs one test thread per
 // core. Oversubscribed, tests with real-time bounds (process spawns, pipe
@@ -92,8 +111,17 @@ export function heavyGateEnv(gate, gates, cores) {
 
 export function slotDirectory(env = process.env) {
   if (env.BUILDMESH_GATE_SLOTS_DIR) return env.BUILDMESH_GATE_SLOTS_DIR;
-  const base = process.platform === 'win32' ? env.LOCALAPPDATA : (env.XDG_STATE_HOME ?? (homedir() ? join(homedir(), '.local', 'state') : null));
+  const base = stateBase(env);
   return join(base ?? tmpdir(), 'buildmesh', 'gate-slots');
+}
+
+// A separate directory, so the infrastructure suite's budget is counted apart
+// from the product gates' heavy slots: the two budgets do not wait on each
+// other, so a suite that holds its slot for minutes cannot hold one of theirs.
+export function agentTestSlotDirectory(env = process.env) {
+  if (env.BUILDMESH_AGENT_TEST_SLOTS_DIR) return env.BUILDMESH_AGENT_TEST_SLOTS_DIR;
+  const base = stateBase(env);
+  return join(base ?? tmpdir(), 'buildmesh', 'agent-test-slots');
 }
 
 function readSlot(path) {
