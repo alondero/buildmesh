@@ -104,15 +104,26 @@ const SORTABLE_IDS = [MESH.id];
 /**
  * The clickable header inside this mesh's card — the card root's single
  * direct child div (colour bar + text column + spawn form), and the
- * element the context menu is anchored to and returns focus to. Reached
- * through the mesh-name span so it stays unambiguous; the pre-fold-in
- * row carried a `border-l-3` left accent to hook onto and this one has
- * the `data-mesh-card` seam instead.
+ * element the context menu is anchored to. Reached through the mesh-name
+ * button so it stays unambiguous; the pre-fold-in row carried a
+ * `border-l-3` left accent to hook onto and this one has the
+ * `data-mesh-card` seam instead.
  */
 function headerEl(): HTMLElement {
   const header = screen.getByText('my-mesh').closest('div[data-mesh-card] > div');
   if (!header) throw new Error('mesh header div not found');
   return header as HTMLElement;
+}
+
+/**
+ * The mesh title — the row's select control since issue #2464. It is a
+ * real `<button>`, so it takes focus in the Tab order and activates on
+ * Enter and Space; it is also where the context menu returns focus.
+ */
+function meshTitleEl(): HTMLElement {
+  const title = document.getElementById(`mesh-item-name-${MESH.id}`);
+  if (!title) throw new Error('mesh title not found');
+  return title as HTMLElement;
 }
 
 /**
@@ -891,11 +902,12 @@ describe('MeshItem', () => {
       const bar = colourBar();
       expect(bar.getAttribute('aria-roledescription')).toBe('sortable');
       // The header is a plain clickable div, not a widget: no role would
-      // make the buttons nested inside it invalid descendants, and
-      // tabindex -1 keeps it out of the natural Tab order while still
-      // giving the context menu a focus target to return to.
+      // make the buttons nested inside it invalid descendants. It also
+      // carries no tabindex — issue #2464 removed the old `tabIndex={-1}`,
+      // which made the header a focusable-but-inert stop (Enter and Space
+      // on it had no effect). The mesh title is the row's select control.
       const header = bar.closest('[data-mesh-card]')?.firstElementChild;
-      expect(header?.getAttribute('tabindex')).toBe('-1');
+      expect(header?.getAttribute('tabindex')).toBeNull();
       expect(header?.getAttribute('role')).toBeNull();
     });
 
@@ -975,6 +987,16 @@ describe('MeshItem', () => {
       await waitFor(() => expect(screen.queryByText('Colour for my-mesh')).toBeNull());
       // A pickup must not select the mesh either.
       expect(props.onSelectMesh).not.toHaveBeenCalled();
+
+      // Cancel the pickup so the drag does not outlive this test.
+      // dnd-kit's KeyboardSensor attaches a document-level keydown
+      // listener while a drag is live and treats Tab as a drag-end
+      // (`keyboardCodes.end` is Space/Enter/Tab), so a drag left running
+      // here would swallow a later Tab keypress with `preventDefault()` —
+      // breaking later tests in this file that tab between controls.
+      await new Promise((r) => setTimeout(r, 0));
+      fireEvent.keyDown(document, { key: 'Escape', code: 'Escape' });
+      expect(bar.getAttribute('aria-pressed')).not.toBe('true');
     });
 
     it('expands when heat arrives after mount, but yields to a manual collapse', async () => {
@@ -1318,7 +1340,7 @@ describe('MeshItem', () => {
       expect(items[1].getAttribute('tabindex')).toBe('0');
     });
 
-    it('Escape closes the menu and returns focus to the trigger row (#735, #837)', async () => {
+    it('Escape closes the menu and returns focus to the mesh title (#735, #837, #2464)', async () => {
       // Per-component rAF behavior — the hook fires `onClose`, the
       // component's own closure does `requestAnimationFrame(() =>
       // trigger.focus())`. The hook tests cover the Escape-dispatch
@@ -1334,23 +1356,23 @@ describe('MeshItem', () => {
       await waitFor(() => {
         expect(document.querySelector('[role="menu"]')).toBeNull();
       });
-      // Focus is restored to the row that opened the menu — the header
-      // div carries `tabIndex={-1}` precisely for this purpose. The
-      // component defers the focus call via requestAnimationFrame, so we
-      // poll until the trigger gains focus (within a generous window).
-      const trigger = headerEl();
-      await waitFor(() => expect(document.activeElement).toBe(trigger));
+      // Focus is restored to the mesh title — the row's select control,
+      // the one a keyboard user can activate to choose the mesh (issue
+      // #2464). It used to land on the header div, which carried
+      // `tabIndex={-1}` and had no effect on Enter or Space.
+      const title = meshTitleEl();
+      await waitFor(() => expect(document.activeElement).toBe(title));
     });
 
-    it('clicking outside the menu closes it and returns focus to the trigger (#735)', () => {
+    it('clicking outside the menu closes it and returns focus to the mesh title (#735, #2464)', () => {
       // Review catch: the document-level mousedown handler must route
       // through closeContextMenu() — otherwise outside-click closes the
       // menu but leaves focus on document.body instead of returning it
-      // to the trigger row.
+      // to the row.
       renderMeshItem();
       openContextMenu();
       expect(document.querySelector('[role="menu"]')).toBeTruthy();
-      const trigger = headerEl();
+      const title = meshTitleEl();
 
       // Mouse down somewhere outside both the menu and the trigger row.
       // The menu div uses onMouseDown={e => e.stopPropagation()}, so a
@@ -1360,7 +1382,7 @@ describe('MeshItem', () => {
       expect(document.querySelector('[role="menu"]')).toBeNull();
       // Focus returns to the trigger via requestAnimationFrame; flush it.
       // (Promise.resolve + immediate rAF callback both fire in jsdom.)
-      return waitFor(() => expect(document.activeElement).toBe(trigger));
+      return waitFor(() => expect(document.activeElement).toBe(title));
     });
 
     it('Tab closes the menu so the user can move focus to the next tabbable element (#735, #837)', async () => {
@@ -1388,7 +1410,9 @@ describe('MeshItem', () => {
       openContextMenu();
       const items = Array.from(document.querySelectorAll('[role="menuitem"]')) as HTMLButtonElement[];
       // Force focus elsewhere to simulate the user having left the menu.
-      const trigger = headerEl();
+      // The mesh title is the row's focusable control (#2464), so it is
+      // the natural "focus is outside the menu" target.
+      const trigger = meshTitleEl();
       trigger.focus();
 
       fireEvent.keyDown(document, { key: 'ArrowDown' });
@@ -1461,6 +1485,81 @@ describe('MeshItem', () => {
       await new Promise((r) => setTimeout(r, 10));
       expect(menu.style.top).toBe(before.top);
       expect(menu.style.left).toBe(before.left);
+    });
+  });
+
+  // Issue #2464 — the mesh row had no keyboard-reachable way to select a
+  // mesh. The header div carried `tabIndex={-1}` (focusable, but Enter and
+  // Space on it had no effect) and the mesh title was a non-focusable span,
+  // so Tab walked the bar, the badges and the spawn button and skipped
+  // selection entirely.
+  describe('mesh title as the keyboard-selectable control (issue #2464)', () => {
+    it('is a button in the natural tab order, not a focusable-but-inert div', () => {
+      renderMeshItem();
+      const title = meshTitleEl();
+      expect(title.tagName).toBe('BUTTON');
+      // No negative tabindex: Tab reaches the title on its own.
+      expect(title.getAttribute('tabindex')).toBeNull();
+      // The header around it is not a focus stop of its own.
+      const header = headerEl();
+      expect(header.getAttribute('tabindex')).toBeNull();
+      expect(header.getAttribute('role')).toBeNull();
+    });
+
+    it('is reached by Tab right after the colour bar', async () => {
+      renderMeshItem();
+      colourBar().focus();
+      await userEvent.tab();
+      expect(document.activeElement).toBe(meshTitleEl());
+    });
+
+    it('selects the mesh on Enter', async () => {
+      const { props } = renderMeshItem();
+      meshTitleEl().focus();
+      await userEvent.keyboard('{Enter}');
+      expect(props.onSelectMesh).toHaveBeenCalledTimes(1);
+      expect(props.onSelectMesh).toHaveBeenCalledWith(3);
+    });
+
+    it('selects the mesh on Space', async () => {
+      const { props } = renderMeshItem();
+      meshTitleEl().focus();
+      await userEvent.keyboard(' ');
+      expect(props.onSelectMesh).toHaveBeenCalledTimes(1);
+      expect(props.onSelectMesh).toHaveBeenCalledWith(3);
+    });
+
+    it('selects the mesh once when the title is clicked', async () => {
+      // The title sits inside the clickable header, so the header's own
+      // handler must not fire a second selection.
+      const { props } = renderMeshItem();
+      await userEvent.click(meshTitleEl());
+      expect(props.onSelectMesh).toHaveBeenCalledTimes(1);
+      expect(props.onSelectMesh).toHaveBeenCalledWith(3);
+    });
+
+    it('marks the selected mesh with aria-current', () => {
+      const { rerenderWith } = renderMeshItem({ isSelected: false });
+      expect(meshTitleEl().getAttribute('aria-current')).toBeNull();
+      rerenderWith({ isSelected: true });
+      expect(meshTitleEl().getAttribute('aria-current')).toBe('true');
+    });
+
+    it('leaves the secondary action buttons on their own controls', () => {
+      renderMeshItem({ nodeClusters: [loneCluster(makeNode())] });
+      const title = meshTitleEl();
+      // Each secondary action stays a separate button rather than a mode
+      // of the title: the colour bar reorders/paints the mesh, the dots
+      // line expands the agents.
+      expect(colourBar()).not.toBe(title);
+      expect(screen.getByRole('button', { name: 'Show agents for my-mesh' })).not.toBe(title);
+    });
+
+    it('still selects the mesh when the header row itself is clicked', async () => {
+      const { props } = renderMeshItem();
+      await userEvent.click(headerEl());
+      expect(props.onSelectMesh).toHaveBeenCalledTimes(1);
+      expect(props.onSelectMesh).toHaveBeenCalledWith(3);
     });
   });
 });
