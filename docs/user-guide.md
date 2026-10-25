@@ -485,6 +485,13 @@ two jobs: click it to change the mesh colour, drag it to reorder the mesh. From
 the keyboard, <kbd>Enter</kbd> opens the colour picker and <kbd>Space</kbd> picks
 the card up for reordering, so both jobs stay reachable without a mouse.
 
+The mesh name is the card's select control: <kbd>Tab</kbd> reaches it and
+<kbd>Enter</kbd> or <kbd>Space</kbd> switches the canvas to that mesh, the same
+as clicking the name or the card. The mesh you are currently in is marked as the
+current one for screen readers. Right-clicking a card and closing its menu with
+<kbd>Escape</kbd> puts focus back on the mesh name, so the keyboard can carry on
+from there.
+
 Under the mesh name, a row of status dots summarises the mesh's agents — one dot
 per agent, coloured by that agent's status, with the count beside it. There are
 no text status labels. Click that line to expand or collapse the mesh's agents;
