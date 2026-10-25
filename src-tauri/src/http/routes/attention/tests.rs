@@ -310,6 +310,47 @@ fn minimax_first_stop_reads_the_ownership_resolved_session() {
     );
 }
 
+#[test]
+fn mcode_prompt_submission_resumes_attention_and_fences_previous_turn() {
+    let mut state = crate::agent::hook_state::HookState::default();
+    let observe = |state: &mut crate::agent::hook_state::HookState, event: &str, turn: &str| {
+        // The Claude-compatible plugin receives prompt_id, not turn_id.
+        let raw = serde_json::json!({
+            "hook_event_name": event,
+            "session_id": "mvs_0123456789abcdef0123456789abcdef",
+            "cwd": "F:/repo",
+            "transcript_path": null,
+            "prompt_id": turn,
+        });
+        let normalized = normalizers::normalize(Some(&raw), "mcode", |_| {
+            assert_eq!(event, "Stop", "only Stop reconciles background tasks");
+            Some(0)
+        });
+        let payload = normalized.payload.as_ref().expect("valid mcode callback");
+        assert_eq!(payload.turn_id.as_deref(), Some(turn));
+        let accepted = accept_hook(state, payload, &normalized.classified);
+        if accepted.accepted {
+            lifecycle_decision(normalized.classified.decision, state, false, accepted)
+        } else {
+            Decision::Ignore
+        }
+    };
+
+    assert_eq!(
+        observe(&mut state, "UserPromptSubmit", "turn-1"),
+        Decision::Running
+    );
+    assert_eq!(observe(&mut state, "Stop", "turn-1"), Decision::Ready);
+    // A new prompt after attention must begin another turn; a delayed Stop
+    // from the previous prompt must not return that active turn to Ready.
+    assert_eq!(
+        observe(&mut state, "UserPromptSubmit", "turn-2"),
+        Decision::Running
+    );
+    assert_eq!(observe(&mut state, "Stop", "turn-1"), Decision::Ignore);
+    assert_eq!(observe(&mut state, "Stop", "turn-2"), Decision::Ready);
+}
+
 fn apply_status_fixture(
     state: &mut crate::agent::hook_state::HookState,
     value: serde_json::Value,

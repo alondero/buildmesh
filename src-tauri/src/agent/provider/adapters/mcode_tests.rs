@@ -124,6 +124,28 @@ fn supports_resume_and_session_model_override() {
     assert!(MCODE.supports_model_override());
 }
 
+#[test]
+fn model_override_accepts_native_and_byok_references() {
+    for model in [
+        "minimax/MiniMax-M3",
+        "minimax/MiniMax-M3#variant",
+        "custom_provider:local/M3",
+        "custom_provider:my-endpoint_1/M3#fast",
+    ] {
+        assert!(MCODE.validate_model_override(model).is_ok(), "{model}");
+    }
+    for model in [
+        "custom_provider:/M3",
+        "custom_provider:local:extra/M3",
+        "other:local/M3",
+        "custom_provider:local/M3#",
+        "custom_provider:local/M3#variant:extra",
+        "custom_provider:local/M3&echo",
+    ] {
+        assert!(MCODE.validate_model_override(model).is_err(), "{model}");
+    }
+}
+
 /// Pin the capability descriptor end-to-end: the harness-id,
 /// model override support, and the absence of effort
 /// controls. Drift here means the Spawn Menu or autopilot
@@ -147,8 +169,8 @@ fn capabilities_descriptor_supports_model_without_effort() {
     );
 }
 
-/// Issue #1797: `Stop` is the only validated lifecycle event. SessionStart is
-/// provisioned for identity capture but remains unvalidated on the TUI.
+/// Stop requests attention; SessionStart captures identity and UserPromptSubmit
+/// resumes work. These observers do not add attention-requesting capabilities.
 /// Buildmesh launches mcode with its default
 /// (auto-approving) permission policy, so no permission prompt is raised
 /// and `PermissionRequested` must NOT be advertised. The `min_version` pin
@@ -168,8 +190,7 @@ fn attention_capability_advertises_validated_stop_only() {
             assert_eq!(
                 events,
                 &vec![LifecycleKind::TurnCompleted],
-                "`Stop` is the only validated event; advertising more would \
-                     claim a signal we never observed"
+                "only Stop requests attention under the Full Access launch policy"
             );
             assert!(
                 !events.contains(&LifecycleKind::PermissionRequested),
@@ -379,8 +400,8 @@ fn provision_fresh_install_writes_manifest_with_inlined_hooks() {
         "plugin.json was not written: {manifest:?}"
     );
 
-    // The ignored v0.3.x document must NOT be created — mcode 0.4.0+
-    // reads `hooks` from the manifest and skips a directory without one.
+    // Retain the inline manifest layout verified on 0.4.12 and 0.6.13;
+    // do not emit the superseded v0.3.x document alongside it.
     let legacy = home
         .path()
         .join("plugins")
@@ -389,8 +410,7 @@ fn provision_fresh_install_writes_manifest_with_inlined_hooks() {
         .join("hooks.json");
     assert!(
         !legacy.exists(),
-        "mcode 0.4.0+ ignores `hooks/hooks.json`; writing it would be dead \
-             weight that looks like a working integration: {legacy:?}"
+        "the inline plugin must not also emit a legacy hooks document: {legacy:?}"
     );
 
     let value: serde_json::Value =
@@ -1211,15 +1231,20 @@ fn mcode_hook_constants_are_pinned() {
         "plugin dir name must be non-empty: {MCODE_PLUGIN_DIR:?}"
     );
     assert_eq!(
-            MCODE_PROVISIONED_EVENTS,
-            &["SessionStart", "Stop", "PermissionRequest"],
-            "SessionStart is provisioned for capture without publishing Ready, but remains unvalidated; Stop completes a turn"
-        );
+        MCODE_PROVISIONED_EVENTS,
+        &[
+            "SessionStart",
+            "UserPromptSubmit",
+            "Stop",
+            "PermissionRequest"
+        ],
+        "SessionStart captures identity, UserPromptSubmit resumes work, and Stop completes a turn"
+    );
 }
 
 /// Issue #1797: `requires_attention_hook` is `true` — live mcode 0.4.12
 /// testing validated the Stop event shape on the historical per-node URL.
-/// The current shared URL and SessionStart remain unvalidated. Reverting
+/// The current shared URL remains unvalidated in the running app. Reverting
 /// this without new evidence would re-close the Autopilot gate.
 #[test]
 fn requires_attention_hook_is_enabled_after_tui_validation() {
