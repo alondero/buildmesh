@@ -114,6 +114,8 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/http/events_tests.rs': 'http::events::tests',
   'src-tauri/src/http/read_status_tests.rs': 'http::read_status::tests',
   'src-tauri/src/http/mobile_wire_tests.rs': 'http::mobile_wire::tests',
+  'src-tauri/src/http/router_tests.rs': 'http::router::tests',
+  'src-tauri/src/http/routes/providers_tests.rs': 'http::routes::providers::usage_tests',
   'src-tauri/src/http/routes/circuit_tests.rs': 'http::routes::circuit::tests',
   'src-tauri/src/preferences/launch_catalog_tests.rs': 'preferences::launch_catalog::tests',
   'src-tauri/src/preferences/resolver/accounts_tests.rs': 'preferences::resolver::accounts::tests',
