@@ -33,6 +33,7 @@ type Props = {
   onOpenAgentNodes: (mesh: Mesh) => void;
   onOpenIssues: (mesh: Mesh) => void;
   onOpenPulls?: (mesh: Mesh) => void;
+  onOpenUsage?: () => void;
   onOffline: () => void;
   /**
    * A poll succeeded, so the desktop answered a request again.
@@ -60,6 +61,7 @@ export default function NodeList({
   onOpenAgentNodes,
   onOpenIssues,
   onOpenPulls,
+  onOpenUsage,
   onOffline,
   onReachable = () => {},
   onAuthFailed,
@@ -375,7 +377,9 @@ export default function NodeList({
             ? undefined
             : `${meshes.length} ${meshes.length === 1 ? "mesh" : "meshes"} · ${visibleNodes.length} ${visibleNodes.length === 1 ? "node" : "nodes"}`
         }
-      />
+      >
+        {onOpenUsage && <button className="btn-ghost" disabled={captureBusy} onClick={onOpenUsage}>Usage</button>}
+      </AppBar>
 
       {activeView === "capture" ? (
         <div className="list-scroll">

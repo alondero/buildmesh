@@ -27,6 +27,7 @@ const DiffScreen = lazy(() => import("./screens/DiffScreen"));
 const CreatePrSheet = lazy(() => import("./screens/CreatePrSheet"));
 const ArchivedNodesScreen = lazy(() => import("./screens/ArchivedNodesScreen"));
 const IssuesScreen = lazy(() => import("./screens/IssuesScreen"));
+const UsageScreen = lazy(() => import("./screens/UsageScreen"));
 
 type WorkState = {
   visitId: number;
@@ -39,6 +40,7 @@ type WorkState = {
 export type Screen =
   | { kind: "connect" }
   | { kind: "list" }
+  | { kind: "usage" }
   | ({ kind: "overview"; node: AgentNode } & WorkState)
   | ({ kind: "terminal"; node: AgentNode; fromOverview?: boolean } & WorkState)
   | ({
@@ -118,6 +120,7 @@ export function parentOf(s: Screen): Screen {
           }
         : { kind: "list" };
     case "sessions":
+    case "usage":
     case "issues":
     case "pulls":
       return { kind: "list" };
@@ -415,6 +418,7 @@ export default function App() {
           key={listKey}
           view={homeView}
           onViewChange={setHomeView}
+          onOpenUsage={() => navigate({ kind: "usage" })}
           onOpenNode={(node, prompt) => {
             if (activeRecoveryVersion !== recoveryVersionRef.current) return;
             navigate({
@@ -452,6 +456,9 @@ export default function App() {
           onAuthFailed={handleAuthFailedForActiveScreen}
         />
       )}
+      {screen.kind === "usage" && <Suspense fallback={<ScreenLoading />}>
+        <UsageScreen onBack={goBack} onAuthFailed={handleAuthFailedForActiveScreen} />
+      </Suspense>}
       {screen.kind === "overview" && (
         <NodeOverview
           key={`${screen.node.id}:${screen.visitId}`}

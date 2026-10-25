@@ -377,6 +377,35 @@ fn fixtures() -> Vec<Fixture> {
         fixture("meshes", &vec![mesh()]),
         fixture("nodes", &vec![agent_node()]),
         fixture("providers", &provider_menu()),
+        fixture(
+            "usage",
+            &vec![crate::http::routes::providers::MobileProviderUsage {
+                name: "Claude subscription".to_string(),
+                meter: crate::services::usage::ProviderMeters {
+                    provider: "anthropic".to_string(),
+                    usage_tracked: true,
+                    usage_page: None,
+                    cached_at: Some(1_700_000_000),
+                    usage: Some(crate::services::usage::ProviderUsage {
+                        provider: "anthropic".to_string(),
+                        logged_in: true,
+                        windows: vec![crate::services::usage::types::UsageWindow {
+                            label: "Weekly".to_string(),
+                            used_percent: Some(0.0),
+                            resets_at: Some("2026-11-01T12:00:00Z".to_string()),
+                        }],
+                        balance: Some(crate::services::usage::types::BillingBalance {
+                            remaining: 0.0,
+                            monthly_spend: Some(12.0),
+                            currency: "USD".to_string(),
+                        }),
+                        meters: vec![crate::services::usage::types::UsageMeter::Unlimited],
+                        detail: Some("Pro plan".to_string()),
+                        error: None,
+                    }),
+                },
+            }],
+        ),
         fixture("agent_node", &agent_node()),
         fixture("issues_feed", &issues_feed()),
         fixture("pulls_feed", &pulls_feed()),
