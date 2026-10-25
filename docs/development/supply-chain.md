@@ -83,6 +83,14 @@ precede the catch-all. Grouping the whole development toolchain together is
 what produced the nineteen-update pull request that no single reviewer could
 install (issue #2247).
 
+Tauri plugins have Rust crates and npm companion packages; update a plugin pair
+to the same major/minor together in `Cargo.lock`, `package.json`, and
+`package-lock.json`. The Tauri CLI rejects a mismatch during native builds
+(`Found version mismatched Tauri packages`). The PR macOS candidate audit in
+[verify.yml](../../.github/workflows/verify.yml) exercises that guard for Rust
+changes, while an npm-only change can skip the Rust graph, so frontend CI alone
+does not prove the pair is aligned.
+
 TypeScript majors are `ignore`d outright. `typescript-eslint` publishes
 `typescript: ">=4.8.4 <6.1.0"`, so a TypeScript 7 bump arriving in the same
 batch made `npm ci` fail with `ERESOLVE` before `tsc`, ESLint, or Vitest could
