@@ -116,10 +116,35 @@ browser checks do not replace required real-runtime acceptance evidence.
 
 ## Worktree setup
 
-Use `npm ci` in a fresh checkout, or junction `node_modules` to the main
-checkout's absolute dependency directory (`git worktree list` identifies it).
-Use absolute junction targets: worktree nesting depths vary. Reviews that must
-leave the dependency checkout's caches alone use [isolated review checks](#isolated-review-checks).
+Use `npm ci` in a fresh checkout. In a secondary worktree, link the main
+checkout's installed packages instead:
+
+```powershell
+npm run harness -- link-deps                  # packages from the main checkout
+npm run harness -- link-deps --cargo-target   # also share src-tauri/target (below)
+npm run harness -- link-deps --from <path>    # another checkout instead of the main one
+npm run harness -- unlink-deps                # remove the links link-deps made
+```
+
+`link-deps` finds the main checkout from `git worktree list` and refuses, with
+a message to run `npm ci`, when `package.json` dependency fields or
+`package-lock.json` differ, when the source has no `node_modules`, or when the
+worktree already has a real install. Each package is linked individually under a
+private `node_modules` root; `.bin` shims are copied and bundler caches
+(`.vite`, `.vite-temp`) stay local. Running it again refreshes its own links.
+Do not run `npm install` or `npm ci` over linked packages: they write through
+the links into the main checkout. Run `unlink-deps` first.
+
+`unlink-deps` removes links with non-recursive unlinks, so it does not prompt
+and leaves the main checkout's files in place. It also removes a manual whole-directory
+`node_modules` junction and a linked `src-tauri/target`, and leaves a real install
+alone. In a `node_modules` that `link-deps` created, it removes the links found on
+disk (any symlink or junction there, including ones left by an interrupted
+`link-deps`), so rerunning `unlink-deps` or `link-deps` recovers from an interrupted run.
+Do not remove a junction with `Remove-Item`: PowerShell prompts, which hangs a
+headless runner indefinitely, and `-Recurse` can delete the junction's target.
+Reviews that must leave the dependency checkout's caches alone use
+[isolated review checks](#isolated-review-checks), which share the same linking code.
 
 Run Vitest with `NODE_ENV=test`; a production React runtime makes render tests
 fail with `React.act is not a function`. The harness sets the environment for
@@ -128,7 +153,8 @@ Cargo tests, and rebuild it after mobile source changes.
 
 On Windows, run Rust checks through `scripts/rust-test-shards.mjs` or
 `scripts\check.ps1`. A junction from `src-tauri/target` to the main checkout's
-absolute Cargo target reuses dependencies and satisfies the git gates (ADR 0044).
+absolute Cargo target (`link-deps --cargo-target`) reuses dependencies and
+satisfies the git gates (ADR 0044).
 Cargo can otherwise report a different worktree's same-name test binary as
 fresh; the runner checks the worktree stamp, rebuilds this repository's packages
 when needed, and copies binaries out before running them. A task-local
@@ -336,6 +362,52 @@ Windows; `BUILDMESH_GATE_SLOTS_DIR` overrides). A slot held by a dead process is
 reclaimed, so a killed run needs no cleanup. The per-worktree `.harness/lock` is
 unchanged.
 
+### The agent-infrastructure suite's own budget
+
+`npm run test:agent` runs the agent-infrastructure contract suite, and Node's
+test runner starts one process per test file with a default concurrency of the
+machine's core count minus one. The suite's files are not equally heavy — a
+few compile Rust or build a Tauri app — so on a 24-core workstation 23 of its
+30 files ran at once, while a 2-core CI runner ran them one at a time. The
+suite's demand scaled with the machine, and under overlapping checks the
+fixtures that carry a wall-clock budget expired on contention rather than on a
+defect (issue #2254).
+
+Two bounds own that now:
+
+- `scripts/agent-tests.mjs` caps the file concurrency at four, and never raises
+  it above the runner's own default, so a small runner keeps running as few
+  files as it did and a workstation asks for about what CI asks for.
+- The suite takes a machine-wide slot of its own, so `scripts/check.ps1 all-ts`
+  and `npm run verify` do not both run a copy beside the frontend suite and a
+  Rust compile. The copy that waits prints `QUEUED agent-tests: ...`. The
+  budget lives in `scripts/harness-lanes.mjs` beside the heavy-gate slots, but
+  it is deliberately separate from them: the product lanes need both of those
+  to overlap, and a suite holding one for minutes would serialise them.
+  `BUILDMESH_AGENT_TEST_LIMIT` changes the limit and
+  `BUILDMESH_AGENT_TEST_SLOTS_DIR` moves the slot directory.
+
+The slot is taken by the harness before it starts the `agent-tests` gate, so
+the gate's own deadline starts once it holds the slot, exactly as a heavy
+gate's does. Everything the suite starts inherits
+`BUILDMESH_AGENT_TEST_SLOT=held`, so a nested run — the suite's own
+`agent-tests` gate, or a fixture that verifies a plan — never waits for a slot
+its own tree holds. That flag is trusted as set: exporting it in a shell
+profile would disable the mutual exclusion for every copy of the suite.
+
+A fixture gate's own budget is a hang detector, not a load detector. The gates
+in `tests/agent-infra/harness.test.mjs` that compile a crate or run a real
+Vitest suite get half the `agent-tests` gate's budget
+(`AGENT_TEST_GATE_MINUTES` in `scripts/harness-plan.mjs`), and the harness CLI
+the fixture drives gets that budget plus a minute. Half, and not the whole,
+because the two nest: a fixture gate that outlives the gate that runs it is
+killed by the enclosing run, and the fixture gate's own attribution — its name,
+its log, the failing test — is destroyed with it. The half that is left has to
+cover the suite's own runtime, so a hung fixture keeps its attribution for as
+long as the suite's runtime stays under the other half. Thirty seconds for the
+CLI was a load detector: under issue #2254 it killed a child that was still
+working and reported a null exit status instead of the failure that caused it.
+
 Without an active task, `npm run verify -- --base <commit>` runs the same checks
 and records a standalone receipt. It cannot finish a task. `--full` expands
 verification to both frontend and Rust even for documentation changes.
@@ -423,6 +495,47 @@ Rust tests compile the desktop target as well as executing tests; this is a
 compile smoke, not a packaged Tauri or real-window smoke. Playwright smoke uses
 mock IPC. Visible UI or backend acceptance still requires the relevant real
 dev-profile evidence from [verify-ui](../../.claude/skills/verify-ui/SKILL.md).
+
+Vitest partitions the same unit/integration file patterns into the parallel
+`jsdom` project and the `browser-tools` project. The four process-owning suites
+listed in `vitest.config.ts` run after jsdom drains, one file at a time; this
+also applies to the integration-only CI leg. Browser diagnostic string variants
+are collector unit tests, with one real-browser warning case retaining the CLI
+integration. Exact millisecond search benchmarks do not belong in the shared
+correctness gate; Omnibar matching, ranking and limits remain covered there.
+
+React Testing Library polls an async query for 1s before it reports a miss.
+The suite gives that wait the same budget philosophy as its 30s per-test
+budget: `tests/setup/vitest.setup.ts` sets a 10s async-query budget for the
+suite's files, because on Windows the machine decides how long a render
+takes. The last #2539 failure was that budget rather than a product defect —
+the Agent Harness defaults reset button renders only after `list_providers`
+lands, `get_app_preferences` delivers the stored default and the section's
+re-key effect has flushed, and that wait measured 305-889ms inside a real
+`npm run verify`, whose `frontend-tests` gate shares the machine with a
+concurrent Rust compile. That is within 11% of RTL's 1s default, so one
+more contention burst failed a test that passes in isolation. The ceiling
+applies to the wait, not to the expectation: a query that is already
+satisfied resolves on its first check, so a larger ceiling only widens the
+window in which a slow render can still land.
+
+Vite's ordinary optimizer cache lives in this worktree's `.tmp/vite`, outside
+the potentially shared `node_modules`. Each `ui-shot --serve` child instead gets
+a private directory under `.tmp/ui-shot-vite`, passed through
+`BUILDMESH_VITE_CACHE_DIR`. Stopping an exited owned child removes its cache;
+reusing an existing server does not take ownership of its cache or process.
+
+That separation is not tidiness. Vite removes `<cacheDir>/deps` when it starts
+with a config hash that differs from the cached one — it logs `Re-optimizing
+dependencies because vite config has changed` — and that hash covers the
+absolute root, so servers in different worktrees compute different hashes.
+With Vite's default `node_modules/.vite` — one directory when the worktrees
+share a node_modules junction — that is what happened: the second server
+removed the dependency graph the first one was serving, and the browser
+answered `504 (Outdated Optimize Dep)` instead of the app (#2515). A
+worktree-local cache is not shared with a sibling worktree, and a private one
+is not shared with another server; `tests/integration/ui-shot-server.test.ts`
+reads the directory each server serves its dependencies from and asserts both.
 
 The `ui-shot` mock renders charge their time to named phases in
 `scripts/ui-shot-budgets.mjs`: dev-server startup, browser launch, page setup,

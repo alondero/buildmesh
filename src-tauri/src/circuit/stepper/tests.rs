@@ -5997,7 +5997,8 @@ fn issue_review_approval_closes_reviewer_asks_implementer_to_merge_and_waits_for
         Effect::InjectPty { node_id, target_node_id: Some(target), prompt }
             if node_id == "merge" && target == "implementer"
                 && prompt.contains("gh pr merge 314 --squash") && prompt.contains("gh pr ready 314")
-                && prompt.contains("gh pr update-branch 314"))));
+                && prompt.contains("git rebase origin/<base-branch>")
+                && prompt.contains("authorised to rebase the branch, to resolve the merge conflicts"))));
     let delivered = acknowledge_prompt(&mut run, "merge");
     assert!(
         delivered

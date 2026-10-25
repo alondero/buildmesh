@@ -6,7 +6,7 @@
  *
  * The init script is a string injected via `page.addInitScript`; here we eval
  * it against jsdom's `window` and assert the shim behaves: fixtures resolve,
- * plugin calls get benign defaults, unknown commands resolve null (not throw),
+ * allowlisted plugin calls get benign defaults, unknown commands reject,
  * and the listen/emit event roundtrip works.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -45,19 +45,44 @@ describe('tauri-mock harness', () => {
     expect(meta.currentWebview.label).toBe('main'); // getCurrentWebview() needs this
   });
 
-  it('resolves fixtured commands and null for unknown ones (never throws)', async () => {
+  it('resolves fixtured commands and rejects unknown app commands by name', async () => {
     install();
     const invoke = window.__TAURI_INTERNALS__.invoke;
     await expect(invoke('list_meshes')).resolves.toHaveLength(2);
-    await expect(invoke('this_command_has_no_fixture')).resolves.toBeNull();
+    await expect(invoke('this_command_has_no_fixture')).rejects.toThrow('this_command_has_no_fixture');
   });
 
-  it('gives plugin calls benign defaults', async () => {
+  it('gives only explicitly modelled plugin commands benign defaults', async () => {
     install();
     const invoke = window.__TAURI_INTERNALS__.invoke;
     await expect(invoke('plugin:window|is_focused')).resolves.toBe(true);
+    await expect(invoke('plugin:window|is_maximized')).resolves.toBe(false);
     await expect(invoke('plugin:global-shortcut|is_registered')).resolves.toBe(false);
     await expect(invoke('plugin:global-shortcut|register')).resolves.toBeNull();
+    await expect(invoke('plugin:global-shortcut|register_typo')).rejects.toThrow('plugin:global-shortcut|register_typo');
+    await expect(invoke('plugin:window|is_focused_typo')).rejects.toThrow('plugin:window|is_focused_typo');
+    await expect(invoke('plugin:event|listen_typo')).rejects.toThrow('plugin:event|listen_typo');
+  });
+
+  it('admits an ignored command only when the caller opts it in', async () => {
+    install();
+    await expect(window.__TAURI_INTERNALS__.invoke('intentional_noop')).rejects.toThrow('intentional_noop');
+    eval(buildInitScript(undefined, undefined, { ignoredCommands: ['intentional_noop'] }));
+    await expect(window.__TAURI_INTERNALS__.invoke('intentional_noop')).resolves.toBeNull();
+    await expect(window.__TAURI_INTERNALS__.invoke('unlisted_noop')).rejects.toThrow('unlisted_noop');
+  });
+
+  it.each([
+    ['resize_agent', { sessionId: 1, cols: 80, rows: 24 }],
+    ['watch_agent_node', { nodeId: 1 }],
+    ['unwatch_agent_node', { nodeId: 1 }],
+  ])('models %s only when the boot fixtures are installed', async (command, args) => {
+    install({});
+    await expect(window.__TAURI_INTERNALS__.invoke(command, args))
+      .rejects.toThrow(command);
+    install();
+    await expect(window.__TAURI_INTERNALS__.invoke(command, args))
+      .resolves.toBeNull();
   });
 
   it('roundtrips listen → emit → unlisten through the callback registry', async () => {
@@ -118,13 +143,22 @@ describe('tauri-mock harness', () => {
     await expect(window.__TAURI_INTERNALS__.invoke('list_circuits_with_runs', { meshId: 2 })).resolves.toEqual([]);
   });
 
+  it('preserves the circuit probe contract while filtering by mesh', async () => {
+    install();
+    await expect(window.__TAURI_INTERNALS__.invoke('list_circuit_probe', { meshId: 2 }))
+      .resolves.toEqual({ circuits: [], queue: [], queue_waits: {} });
+  });
+
   it('does not send unknown-command diagnostics through console.info', async () => {
     const info = vi.spyOn(console, 'info').mockImplementation(() => {});
     const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
     try {
+      console.info('info spy control');
+      expect(info).toHaveBeenCalledWith('info spy control');
+      info.mockClear();
       install();
       window.__BUILDMESH_MOCK__.quiet = false;
-      await expect(window.__TAURI_INTERNALS__.invoke('unknown_command')).resolves.toBeNull();
+      await expect(window.__TAURI_INTERNALS__.invoke('unknown_command')).rejects.toThrow('unknown_command');
       expect(info).not.toHaveBeenCalled();
       expect(debug).toHaveBeenCalled();
     } finally {

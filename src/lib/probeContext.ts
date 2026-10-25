@@ -1,19 +1,16 @@
+import { readProjectFiles, readAgentChanges } from './probePathReads';
+import { readGitPruneInfo } from './gitPruneInfo';
+import { FilesIcon, ReviewIcon, UsageIcon, BellIcon, WorktreesIcon, PropertiesIcon, CircuitsIcon, IssuesIcon, PullsIcon, ArchiveIcon, NotesIcon, type ProbeIcon } from '../components/Probe/probeIcons';
+import type { ComponentType } from 'react';
+import { probeTabAdapter } from './probeTabAdapter';
+import type { ProbeLoader } from './probeResource';
 import type { ViewMode } from '../stores/uiStore';
 import { selectionMeshId } from './viewModes';
 import { getNodeGitPath } from './paths';
 
-// Tabs the Probe Panel can show. Kept as a string-literal union (not a
-// generated wire enum) because it's a pure UI concern — no backend serialises
-// it. `usage` was added in issue #601 as the dedicated glanceable surface
-// for Usage Meters (subscription quota + cash balance), reached from a
-// meter icon in the sidebar header. `circuits` was added for the Circuit
-// configure + monitor surface (spec #1205 / issue #1206).
-// Lives here (not in the store) so pure domain modules — probeWorkingSet,
-// this file — never import from `stores/`; `uiStore` re-exports it. The one
-// runtime import is `./viewModes`, which is itself store-free (its `stores/`
-// imports are types) — the resolver reads the scope rule from the same pure
-// module `deriveScope` uses instead of keeping a second copy of it.
-export type ProbeTab = 'files' | 'review' | 'usage' | 'notifications' | 'properties' | 'circuits' | 'issues' | 'pulls' | 'sessions' | 'worktrees' | 'scratchpad';
+// The destination vocabulary and presentation order derive from the registry.
+// Tab modules remain dynamic imports so domain consumers do not initialize stores.
+export type ProbeTab = keyof typeof PROBE_TAB_DEFINITIONS;
 
 /**
  * The three ownership lenses available to a Probe destination.
@@ -39,6 +36,12 @@ export type ProbeContextMode = 'fixed' | 'following';
 export type ProbeBaseline = 'host' | 'mesh' | 'head' | 'node-base';
 
 export interface ProbeTabDefinition {
+  icon: ProbeIcon;
+  command: { label: string; subtitle: string; keywords: readonly string[] };
+  discovery: { group: 'code' | 'project' | 'github' | 'automate' | 'remember' | 'app'; order: number };
+  Component: ComponentType;
+  load: ProbeLoader<unknown>;
+  preload: () => Promise<unknown>;
   /** Human-readable title used by the inspector header. */
   label: string;
   /** Longer accessible label for destinations whose short title is ambiguous. */
@@ -62,8 +65,16 @@ export interface ProbeTabDefinition {
  * a switch in ProbePanel. Adding a new ProbeTab therefore requires an
  * ownership decision before TypeScript will allow the destination to ship.
  */
-export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
+export const PROBE_TAB_DEFINITIONS = {
   files: {
+    discovery: { group: 'code', order: 0 },
+    command: {
+      label: 'Open Files',
+      subtitle: 'Browse the project explorer',
+      keywords: ['project', 'explorer', 'file tree'],
+    },
+    icon: FilesIcon,
+    ...probeTabAdapter(() => import('../components/Probe/ProjectFilesTab').then(m => ({ Component: m.ProjectFilesTab, load: readProjectFiles })), readProjectFiles),
     label: 'Project Files',
     lens: 'mesh',
     followsSelection: true,
@@ -73,6 +84,14 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
       'Mesh-owned repository view; when an Agent Node in that Mesh is focused, its working tree is the displayed path.',
   },
   review: {
+    discovery: { group: 'code', order: 1 },
+    command: {
+      label: 'Open Agent Changes',
+      subtitle: 'Review what the focused agent changed',
+      keywords: ['changes', 'diff', 'review'],
+    },
+    icon: ReviewIcon,
+    ...probeTabAdapter(() => import('../components/Probe/AgentChangesTab').then(m => ({ Component: m.AgentChangesTab, load: readAgentChanges })), readAgentChanges),
     label: 'Agent Changes',
     lens: 'agent',
     followsSelection: true,
@@ -80,6 +99,14 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
     stateful: false,
   },
   usage: {
+    discovery: { group: 'app', order: 0 },
+    command: {
+      label: 'Open Usage',
+      subtitle: 'Check provider usage and limits',
+      keywords: ['meters', 'limits', 'quota', 'balance'],
+    },
+    icon: UsageIcon,
+    ...probeTabAdapter(() => import('../components/Probe/UsageTab').then(m => ({ Component: m.UsageTab, load: m.loadUsage }))),
     label: 'Usage',
     tooltip: 'Provider usage meters',
     lens: 'host',
@@ -88,6 +115,14 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
     stateful: false,
   },
   notifications: {
+    discovery: { group: 'app', order: 1 },
+    command: {
+      label: 'Open Notifications',
+      subtitle: 'Review app activity and resolve worktree problems',
+      keywords: ['bell', 'toast', 'history', 'errors', 'cleanup', 'attention'],
+    },
+    icon: BellIcon,
+    ...probeTabAdapter(() => import('../components/Probe/NotificationsTab').then(m => ({ Component: m.NotificationsTab, load: m.loadNotifications }))),
     label: 'Notifications',
     tooltip: 'App activity and problems needing attention',
     lens: 'host',
@@ -96,6 +131,17 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
     stateful: true,
   },
   worktrees: {
+    discovery: { group: 'project', order: 1 },
+    command: {
+      label: 'Open Repository',
+      subtitle: 'Check health, recover, and clean up branches',
+      keywords: ['repository', 'worktree', 'branch', 'git', 'prune', 'cleanup', 'maintenance'],
+    },
+    icon: WorktreesIcon,
+    // The prune read is shared with the destination's own cache-backed hook
+    // (issue #2580), so it lives in `gitPruneInfo` rather than in the tab
+    // body: the shared read must not import tab bodies.
+    ...probeTabAdapter(() => import('../components/Probe/RepositoryTab').then(m => ({ Component: m.RepositoryTab, load: m.loadRepository })), readGitPruneInfo),
     // Issue #1460 — renamed from "Worktree Manager". The destination is
     // maintenance only (health, recovery, cleanup, prune); the worktree
     // *configuration* that used to sit here moved to Project Settings, and
@@ -112,6 +158,24 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
       'Mesh-owned maintenance: health and cleanup act on the project root, never on a focused Agent Node worktree.',
   },
   properties: {
+    discovery: { group: 'project', order: 0 },
+    command: {
+      label: 'Open Project Settings',
+      subtitle: 'Identity, agent defaults, commands, worktrees',
+      keywords: [
+        'project',
+        'properties',
+        'build',
+        'run',
+        'worktree',
+        'base ref',
+        'harness',
+        'sandbox',
+        'pool',
+      ],
+    },
+    icon: PropertiesIcon,
+    ...probeTabAdapter(() => import('../components/Probe/ProjectSettingsTab').then(m => ({ Component: m.ProjectSettingsTab, load: m.loadProjectSettings }))),
     // Issue #1375 — the inspector header and the palette entry must agree on
     // the user-facing task name ("Open Project Settings" in the palette).
     // Issue #1460 — this destination also absorbed the worktree strategy
@@ -126,6 +190,14 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
     stateful: true,
   },
   circuits: {
+    discovery: { group: 'automate', order: 0 },
+    command: {
+      label: 'Open Circuits',
+      subtitle: 'Inspect connected automations',
+      keywords: ['automation', 'flows', 'graphs'],
+    },
+    icon: CircuitsIcon,
+    ...probeTabAdapter(() => import('../components/Probe/CircuitsProbeTab').then(m => ({ Component: m.CircuitsProbeTab, load: m.loadCircuits }))),
     label: 'Circuits',
     lens: 'mesh',
     followsSelection: true,
@@ -133,6 +205,14 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
     stateful: true,
   },
   issues: {
+    discovery: { group: 'github', order: 0 },
+    command: {
+      label: 'Open GitHub Issues',
+      subtitle: 'Find work to pick up',
+      keywords: ['github', 'bugs', 'backlog'],
+    },
+    icon: IssuesIcon,
+    ...probeTabAdapter(() => import('../components/Probe/GitIssuesTab').then(m => ({ Component: m.GitIssuesTab, load: m.loadIssues }))),
     // Issue #1375 — the header names the user-facing destination; the palette
     // entry is "Open GitHub Issues".
     label: 'GitHub Issues',
@@ -142,6 +222,14 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
     stateful: true,
   },
   pulls: {
+    discovery: { group: 'github', order: 1 },
+    command: {
+      label: 'Open GitHub Pull Requests',
+      subtitle: 'See what is ready to merge',
+      keywords: ['github', 'pr', 'merge'],
+    },
+    icon: PullsIcon,
+    ...probeTabAdapter(() => import('../components/Probe/GitPullRequestsTab').then(m => ({ Component: m.GitPullRequestsTab, load: m.loadPulls }))),
     label: 'Pull Requests',
     lens: 'mesh',
     followsSelection: true,
@@ -149,6 +237,14 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
     stateful: true,
   },
   sessions: {
+    discovery: { group: 'remember', order: 0 },
+    command: {
+      label: 'Open Agent History',
+      subtitle: 'Return to previous agent work',
+      keywords: ['archive', 'resume', 'history', 'completed', 'failed'],
+    },
+    icon: ArchiveIcon,
+    ...probeTabAdapter(() => import('../components/Probe/AgentHistoryTab').then(m => ({ Component: m.AgentHistoryTab, load: m.loadHistory }))),
     // Issue #1375 — "Agent History" is the user-facing destination name (the
     // palette entry matches); the body lists completed, archived, failed, and
     // resumable agent work.
@@ -162,6 +258,14 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
       'Host-wide lifecycle finder. Repository filters and discovery select an explicit Mesh; reopen/resume acts on the listed Agent Node.',
   },
   scratchpad: {
+    discovery: { group: 'remember', order: 1 },
+    command: {
+      label: 'Open Notes',
+      subtitle: 'Keep notes beside the work',
+      keywords: ['scratch pad', 'notes', 'memo'],
+    },
+    icon: NotesIcon,
+    ...probeTabAdapter(() => import('../components/Probe/ScratchpadTab').then(m => ({ Component: m.ScratchpadTab, load: m.loadNotes }))),
     // Issue #1375 — "Notes" is the user-facing destination name; the body it
     // opens is the mesh-aware Scratch Pad (the textarea label keeps that name).
     label: 'Notes',
@@ -171,25 +275,16 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
     baseline: 'mesh',
     stateful: true,
   },
-};
+} as const;
+
+// Check completeness without contextually widening each loader's data type.
+void (PROBE_TAB_DEFINITIONS satisfies Record<string, ProbeTabDefinition>);
 
 /** Inspector destination order — feeds the `PROBE_TABS` presentation list
  *  (header chip + placeholder lookups) and, via the omnibar's
  *  `PROBE_TAB_COMMANDS` alias, the palette destination coverage. The
  *  palette's DISPLAY order is `APP_COMMANDS`' array order, not this one. */
-export const PROBE_TAB_ORDER: readonly ProbeTab[] = [
-  'files',
-  'review',
-  'usage',
-  'notifications',
-  'worktrees',
-  'properties',
-  'circuits',
-  'issues',
-  'pulls',
-  'sessions',
-  'scratchpad',
-];
+export const PROBE_TAB_ORDER = Object.keys(PROBE_TAB_DEFINITIONS) as ProbeTab[];
 
 export interface ProbeContextMesh {
   id: number;

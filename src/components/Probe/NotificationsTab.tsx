@@ -1,3 +1,5 @@
+import { PROBE_TAB_DEFINITIONS } from '../../lib/probeContext';
+import { useProbeResource } from '../../lib/probeResource';
 import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react';
 import { useToastStore } from '../../stores/toastStore';
 import { openBlockedCleanups, useBlockedCleanupStore } from '../../stores/blockedCleanupStore';
@@ -106,7 +108,13 @@ function WorktreeAttentionCard({ notice, onResolve }: { notice: Notification & {
       onClick={() => onResolve(notice)}>Resolve <span aria-hidden="true">→</span></button>} />;
 }
 
+export async function loadNotifications() {
+  await refreshWorktreeNotifications();
+  return null;
+}
+
 export function NotificationsTab() {
+  useProbeResource(PROBE_TAB_DEFINITIONS.notifications.load, { meshId: null }, 'host');
   const notices = useToastStore(s => s.notifications);
   const loading = useToastStore(s => s.cleanupLoading);
   const error = useToastStore(s => s.cleanupError);
@@ -127,7 +135,6 @@ export function NotificationsTab() {
     (n): n is Notification & { action: MeshSyncNotificationAction } => isMeshSyncFailure(n.action));
 
   useEffect(() => {
-    void refreshWorktreeNotifications();
     return () => useBlockedCleanupStore.getState().close();
   }, []);
 

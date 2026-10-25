@@ -435,30 +435,29 @@ fn attention_hook_user_narrow_matcher_survives_and_buildmesh_is_appended() {
     assert_eq!(notification[1]["matcher"], "");
 }
 
-/// The marker predicate (`is_buildmesh_handler`) must recognise a
-/// handler by the canonical command anchors alone — future URL refactors
-/// (adding `?token=…`, swapping `localhost` for `127.0.0.1`, etc.) must
-/// keep the merge stable.
+/// The declared ownership rule must recognise a handler by the canonical
+/// command anchors alone — future URL refactors (adding `?token=…`, swapping
+/// `localhost` for `127.0.0.1`, etc.) must keep the merge stable.
 #[test]
 fn attention_hook_marker_predicate_recognises_canonical_command() {
-    use super::process::is_buildmesh_handler;
+    use super::process::CLAUDE_OWNERSHIP;
     let buildmesh = serde_json::json!({
         "type": "command",
         "command": "curl ... http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID || true",
     });
-    assert!(is_buildmesh_handler(&buildmesh));
+    assert!(CLAUDE_OWNERSHIP.owns_handler(&buildmesh));
 
     let user = serde_json::json!({
         "type": "command",
         "command": "/usr/local/bin/user-hook.sh",
     });
     assert!(
-        !is_buildmesh_handler(&user),
+        !CLAUDE_OWNERSHIP.owns_handler(&user),
         "user-authored handlers must NOT match the Buildmesh marker"
     );
 
     let bare = serde_json::json!({"type": "command"});
-    assert!(!is_buildmesh_handler(&bare));
+    assert!(!CLAUDE_OWNERSHIP.owns_handler(&bare));
 }
 
 /// Stop entries must NOT carry a `matcher` field. Claude Code's docs

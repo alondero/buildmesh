@@ -12,11 +12,11 @@ use super::provision::WorkspaceToProvision;
 use super::reader::{SessionIdMode, SpawnTimer};
 use super::WorktreePolicy;
 use crate::agent::provider::SpawnOptionId;
+use crate::git::worktree::warm::WarmClaim as _;
 use crate::models::{AgentNode, Provider};
 use crate::{db, env};
 
-/// Default `worktree_mode` when the mesh config leaves it unset. Pinned by
-/// `default_worktree_mode_is_branched` in `prepare_tests.rs`.
+/// Default `worktree_mode` when the mesh config leaves it unset.
 ///
 /// This was previously paired with a TS sentinel at `src/lib/worktreeMode.ts`,
 /// deleted in #411 once the TS side lost its only consumer (a self-referential
@@ -334,15 +334,24 @@ pub(super) async fn prepare_context(
     // to match (issue #612). Consumed by the post-spawn name adoption
     // (in the provisioner) and by the SpawnContext built during provision.
     let is_rename_spawn = node.source_issue.is_some() || node.source_pr.is_some();
-    let mut warm_claimed: Option<crate::services::warm_pool::ClaimedWarmEntry> = None;
+    // The pool's claim handle for this spawn (issue #2533). It is the only way
+    // the provisioner reaches the pre-spawn pool — `git/worktree` asks it
+    // through the consumer-owned `WarmClaim` seam instead of importing the
+    // pool. It exists even for a cold spawn: the pool-side operations the
+    // provisioner needs (the count emit, the post-spawn maintenance) are
+    // still needed then.
+    //
+    // The claim is the single carrier of the claimed row: `claim.entry()` is
+    // the entry this spawn adopted (and is `None` once the use-site recheck
+    // drops it), and `claim.needs_refill()` says whether the pool's inventory
+    // is one short because of this claim.
+    let mut warm_claim = crate::services::warm_pool::PoolClaim::new(app.clone(), None);
     // Issue #653: a successful `try_claim` that the use-site recheck later
-    // dropped still drained the pool by one row — `warm_claimed` is None
+    // dropped still drained the pool by one row — the claim holds no entry
     // (the spawn fell back to cold), but the mesh's pool inventory is one
-    // short. Track "we claimed at least once this spawn" so the post-spawn
-    // refill still fires (otherwise the pool stays at target-1 until the
-    // next reconcile). Distinct from `warm_claimed` because `warm_claimed`
-    // tracks "we adopted the warm entry as this node's worktree" — that's
-    // what `forget_after_spawn` and the manual name adoption gate on.
+    // short. The claim carries that on its own (`needs_refill` stays "yes"
+    // after a failed recheck), so the post-spawn refill still fires
+    // (otherwise the pool stays at target-1 until the next reconcile).
     let mut pool_was_drained_by_this_spawn = false;
     timer.checkpoint("before_warm_claim");
     if use_worktree {
@@ -370,27 +379,20 @@ pub(super) async fn prepare_context(
                     // seconds inside `fetch_origin` + git worktree move;
                     // another thread can delete the directory in that gap.
                     // Re-check immediately before committing to the warm
-                    // path. On false, `recheck_after_claim` already dropped
-                    // the row + tombstone; we just leave `warm_claimed`
-                    // None so the existing `spawn_worktree_name` fallback
-                    // resolves to the throwaway slug and the cold-create
-                    // block runs naturally for both spawn modes (Issue/PR
-                    // and manual).
-                    if crate::services::warm_pool::recheck_after_claim(entry.id, &entry.path) {
-                        warm_claimed = Some(entry);
-                        pool_was_drained_by_this_spawn = true;
-                    } else {
-                        // Note: `recheck_after_claim` already logs the
-                        // reason (claimed row N's directory disappeared...),
-                        // so don't duplicate that WARN here.
-                        // warm_claimed stays None — do NOT adopt. The row
-                        // was already dropped by recheck_after_claim, but
-                        // the pool inventory is still down by one; the
-                        // post-spawn refill below must run regardless of
-                        // the local `did_claim_warm` flag (which checks
-                        // `warm_claimed.is_some()`, not the DB).
-                        pool_was_drained_by_this_spawn = true;
-                    }
+                    // path. When the directory is gone, `recheck_after_claim`
+                    // already dropped the row + tombstone and the claim then
+                    // holds no entry, so the existing `spawn_worktree_name`
+                    // fallback resolves to the throwaway slug and the
+                    // cold-create block runs naturally for both spawn modes
+                    // (Issue/PR and manual).
+                    let mut claim =
+                        crate::services::warm_pool::PoolClaim::new(app.clone(), Some(entry));
+                    claim.recheck();
+                    // The pool's inventory is short whenever this spawn took
+                    // a row out of it — including the recheck-dropped case,
+                    // where the row is gone but the pool is still one short.
+                    pool_was_drained_by_this_spawn = claim.needs_refill();
+                    warm_claim = claim;
                 }
                 Ok(None) => {
                     tracing::info!(
@@ -423,11 +425,11 @@ pub(super) async fn prepare_context(
     //  * No claim: fall back to whatever the node row carries (resumes, or a
     //    cold issue/PR spawn).
     //
-    // Owned (`Option<String>`, not `Option<&str>`) on purpose: provision
-    // later `take()`s `warm_claimed`, so `spawn_worktree_name` must not
-    // hold a borrow into it. The slugs are short, so the clone is
+    // Owned (`Option<String>`, not `Option<&str>`) on purpose: the claim is
+    // moved into the workspace handle below, so `spawn_worktree_name` must
+    // not hold a borrow into it. The slugs are short, so the clone is
     // negligible.
-    let spawn_worktree_name: Option<String> = if let Some(ref entry) = warm_claimed {
+    let spawn_worktree_name: Option<String> = if let Some(entry) = warm_claim.entry() {
         if is_rename_spawn {
             node.worktree_name.clone()
         } else {
@@ -452,7 +454,7 @@ pub(super) async fn prepare_context(
     // HOST path (UNC on WSL) while `worktree_path` stores the RAW form, so
     // normalize UNC back to POSIX here — the DB adoption then persists the
     // same raw value `node_working_path` resolves.
-    if let (false, Some(ref entry)) = (is_rename_spawn, &warm_claimed) {
+    if let (false, Some(entry)) = (is_rename_spawn, warm_claim.entry()) {
         node.worktree_name = Some(entry.preassigned_name.clone());
         node.worktree_path = Some(crate::env::normalize_unc_to_wsl(&entry.path).into_owned());
     }
@@ -496,7 +498,7 @@ pub(super) async fn prepare_context(
             use_worktree,
             worktree_mode: worktree_mode.to_string(),
             base_ref,
-            warm_claimed,
+            warm_claim: Box::new(warm_claim),
             pool_was_drained_by_this_spawn,
             spawn_worktree_name,
             resolved,

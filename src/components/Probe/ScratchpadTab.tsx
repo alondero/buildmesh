@@ -1,3 +1,4 @@
+import { PROBE_TAB_DEFINITIONS } from '../../lib/probeContext';
 /**
  * ScratchpadTab — the Probe Panel's Scratch Pad tab.
  *
@@ -15,8 +16,8 @@
  * Before that, this file held a second copy of the guard — an
  * `AbortSignal` ref for "which mesh's load is current" plus an edit
  * revision counter — and four pieces of its own load state. The component is
- * now just the view plus the two things it alone owns: the reload trigger and
- * the effect that flushes on unmount.
+ * now the view, a shared Probe resource for reloads, and the effect that
+ * flushes on unmount.
  *
  * Save status shares the session's `status` channel and the shared
  * `<SaveIndicator>` primitive (issue #813). The "Load failed" pill at the
@@ -24,10 +25,16 @@
  * the save status which auto-clears on success.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
+import { useProbeResource, type ProbeLoadContext } from '../../lib/probeResource';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useMeshSettingsStore } from '../../stores/meshSettingsStore';
 import { SaveIndicator } from '../shared/SaveIndicator';
+
+export async function loadNotes({ meshId }: ProbeLoadContext) {
+  useMeshSettingsStore.getState().loadScratchpad(meshId);
+  return null;
+}
 
 export function ScratchpadTab() {
   const { activeMeshId } = useProbeContext();
@@ -35,12 +42,11 @@ export function ScratchpadTab() {
   const scratchpad = useMeshSettingsStore((s) => s.scratchpad);
   const status = useMeshSettingsStore((s) => s.status);
   const statusError = useMeshSettingsStore((s) => s.statusError);
-  const loadScratchpad = useMeshSettingsStore((s) => s.loadScratchpad);
   const editScratchpad = useMeshSettingsStore((s) => s.editScratchpad);
   const flushScratchpad = useMeshSettingsStore((s) => s.flushScratchpad);
   const resetSaveStatus = useMeshSettingsStore((s) => s.resetSaveStatus);
 
-  const [reloadKey, setReloadKey] = useState(0);
+  const resource = useProbeResource(PROBE_TAB_DEFINITIONS.scratchpad.load, { meshId: activeMeshId }, String(activeMeshId));
 
   // Load the note on mesh change (and on Retry). The session flushes the
   // outgoing mesh's pending write before it rebinds, and drops a read that
@@ -50,11 +56,10 @@ export function ScratchpadTab() {
   // runs it in both cases, so closing the Probe mid-debounce still reaches
   // the DB.
   useEffect(() => {
-    loadScratchpad(activeMeshId);
     return () => {
       flushScratchpad();
     };
-  }, [activeMeshId, reloadKey, loadScratchpad, flushScratchpad]);
+  }, [activeMeshId, flushScratchpad]);
 
   return (
     <div className="flex flex-col h-full">
@@ -69,7 +74,7 @@ export function ScratchpadTab() {
             <span className="text-status-error" title={scratchpad.loadError}>Load failed</span>
             <button type="button" aria-label="Retry loading notes"
               className="text-text-secondary hover:text-text-primary"
-              onClick={() => setReloadKey(key => key + 1)}>Retry</button>
+              onClick={() => void resource.reload()}>Retry</button>
           </div>
         )}
         <SaveIndicator

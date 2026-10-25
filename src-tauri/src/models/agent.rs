@@ -89,6 +89,9 @@ pub enum Provider {
     /// Cline CLI (`cline`) — interactive terminal coding agent.
     /// See `agent::provider::adapters::cline` (issue #1773).
     Cline,
+    /// Perch CLI (`perch`) — interactive coding agent from perchai-cli.
+    /// See `agent::provider::adapters::perch`.
+    Perch,
     /// Plain shell terminal (PowerShell on Windows, `sh` on macOS/Linux,
     /// routed through `wsl.exe` on WSL meshes). No LLM agent loop.
     /// See `agent::provider::adapters::terminal`.
@@ -112,6 +115,7 @@ impl Provider {
             Provider::Freebuff,
             Provider::Muse,
             Provider::Cline,
+            Provider::Perch,
             Provider::Terminal,
         ]
     }
@@ -155,6 +159,7 @@ impl Provider {
             "freebuff" => Some(Provider::Freebuff),
             "muse" => Some(Provider::Muse),
             "cline" => Some(Provider::Cline),
+            "perch" => Some(Provider::Perch),
             "terminal" => Some(Provider::Terminal),
             _ => None,
         }
@@ -178,6 +183,7 @@ impl Provider {
             Provider::Freebuff => &adapters::FREEBUFF,
             Provider::Muse => &adapters::MUSE,
             Provider::Cline => &adapters::CLINE,
+            Provider::Perch => &adapters::PERCH,
             Provider::Terminal => &adapters::TERMINAL,
         }
     }
@@ -199,6 +205,7 @@ impl std::fmt::Display for Provider {
             Provider::Freebuff => write!(f, "freebuff"),
             Provider::Muse => write!(f, "muse"),
             Provider::Cline => write!(f, "cline"),
+            Provider::Perch => write!(f, "perch"),
             Provider::Terminal => write!(f, "terminal"),
         }
     }
@@ -447,6 +454,43 @@ pub struct AgentNode {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub project_scope: Option<String>,
+}
+
+/// One row of Agent History: the node plus the two timestamps the history
+/// surface needs and `AgentNode` does not carry.
+///
+/// `AgentNode` is the live-grid projection, so it deliberately omits
+/// `status_changed_at` and `session_started_at` — the coordinator read path
+/// returns them as a tuple alongside the node for the same reason. A history
+/// list is the one place a user asks "when did this finish?", and without
+/// these two columns the answer is not on the wire at all: the card could only
+/// show `created_at` (when the worktree appeared) or the lifecycle snapshot
+/// (which is dropped whenever the row has moved on).
+///
+/// Modelled as a flatten wrapper rather than new `AgentNode` fields so the
+/// ~160 existing `AgentNode { .. }` construction sites stay untouched; the
+/// wire shape is the flat merge, matching the `IssueNodeDraft` precedent.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "AgentHistoryEntry.ts")]
+pub struct AgentHistoryEntry {
+    #[serde(flatten)]
+    #[ts(flatten)]
+    pub node: AgentNode,
+    /// When the node last changed status, normalized to UTC.
+    ///
+    /// The column holds two text shapes: RFC 3339 (status writes since
+    /// migration v14) and SQLite's zone-less `datetime('now')` text (the v14
+    /// backfill). The read boundary parses both, so the wire is always RFC 3339
+    /// with an explicit offset and a browser never reads it as local time. For
+    /// an archived node this is when it was archived, which is the closest
+    /// thing to "when it finished" the schema records. `None` for a row that
+    /// predates the column and was never backfilled.
+    pub status_changed_at: Option<DateTime<Utc>>,
+    /// Epoch milliseconds when the agent process last started, or `None` for a
+    /// node that never ran. Lets the history card show a session's real span
+    /// instead of guessing from `created_at`.
+    #[ts(as = "Option<i32>")]
+    pub session_started_at: Option<i64>,
 }
 
 /// A worktree whose node is already closed but whose on-disk directory still

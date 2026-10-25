@@ -865,7 +865,8 @@ pub(crate) const OPENCODE_CONSOLE_CHANGED_EVENT: &str = "opencode-console-change
 /// body; `refresh_token` + `expires_at` drive the lazy refresh;
 /// `server_id` is the SolidStart deployment id the OAuth device-flow
 /// exchange returns and is consumed by
-/// `services::usage::opencode_usage_impl` at the `X-Server-Id` header
+/// `services::usage::adapters::opencode::opencode_usage_impl` at the
+/// `X-Server-Id` header
 /// (issue #972) — with a documented legacy default (`OPENCODE_SERVER_ID`)
 /// for blobs written before this field was added by #956.
 ///

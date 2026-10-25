@@ -109,13 +109,15 @@ function AllNodesIcon({ className }: IconProps) {
   );
 }
 
-interface Segment {
+export interface ViewModeSegment {
   mode: ViewMode;
   label: string;
   Icon: (props: IconProps) => React.JSX.Element;
 }
 
-const SEGMENTS: Segment[] = [
+/** The five View Modes in switcher order — shared with the compact
+    `ViewSelector` (#2421) so both name and draw a mode identically. */
+export const VIEW_MODE_SEGMENTS: ViewModeSegment[] = [
   { mode: 'single', label: 'Single', Icon: SingleIcon },
   { mode: 'mesh', label: 'Mesh Grid', Icon: MeshGridIcon },
   { mode: 'pinned', label: 'Pinned', Icon: PinnedIcon },
@@ -123,60 +125,60 @@ const SEGMENTS: Segment[] = [
   { mode: 'filtered', label: 'Filtered', Icon: FilteredIcon },
 ];
 
+/** Select a View Mode the way a switcher segment does. Shared by the
+  segments and the compact `ViewSelector` (#2421), so Mesh Grid's "ask for a
+  Mesh" and Filtered's "focus the search" have one spelling. */
+export function selectViewMode(mode: ViewMode): void {
+  // #2071/#2076 — Mesh Grid picks no Mesh. The mode is set and the Mesh
+  // comes from the sidebar alone; #2071 deleted the fallback chain
+  // (the active node's mesh, else the first loaded) that showed the user
+  // a scope they never chose. With no selection this segment ASKS: it
+  // requests the title bar's Mesh picker, which lists every Mesh and
+  // chooses nothing. The mode still flips first — the notice never
+  // suppresses the path it describes, and the canvas keeps its honest
+  // "no Mesh selected" state behind the panel.
+  //
+  // #2081 review — `enterMeshGrid` owns that rule now, so the Ctrl+Alt+G
+  // cycle asks identically instead of this being a second spelling of it.
+  if (mode === 'mesh') {
+    enterMeshGrid();
+    return;
+  }
+  if (mode === 'filtered') {
+    // #1609 — switch first, then request focus. The request counter
+    // pattern (App.tsx `focus-grid-search`) means the consumer's layout
+    // effect runs on the bump, but the input only exists once this
+    // render mounts `GridControls`; the bump is observed after commit,
+    // so the ordering here is what makes the first click focus the
+    // search. Re-clicking while already in Filtered re-arms the request
+    // — the user's intent when clicking a segment they're already on is
+    // "get me to the search box".
+    //
+    // #2076 — both halves of the gesture (the mode flip, the focus
+    // request) and the cross-Mesh-results notice live in one store
+    // action, because "the notice fires once per escape" is a property of
+    // the gesture, not of each caller. Calling it is also why the notice
+    // cannot fire on a re-click from Filtered: no escape happens then.
+    useUIStore.getState().enterFilteredFromSearch();
+    return;
+  }
+  useUIStore.getState().setViewMode(mode);
+}
+
 export function ViewModeSwitcher() {
   const viewMode = useUIStore(state => state.viewMode);
-  const setViewMode = useUIStore(state => state.setViewMode);
-
-  const handleSelect = (mode: ViewMode) => {
-    // #2071/#2076 — Mesh Grid picks no Mesh. The mode is set and the Mesh
-    // comes from the sidebar alone; #2071 deleted the fallback chain
-    // (the active node's mesh, else the first loaded) that showed the user
-    // a scope they never chose. With no selection this segment ASKS: it
-    // requests the title bar's Mesh picker, which lists every Mesh and
-    // chooses nothing. The mode still flips first — the notice never
-    // suppresses the path it describes, and the canvas keeps its honest
-    // "no Mesh selected" state behind the panel.
-    //
-    // #2081 review — `enterMeshGrid` owns that rule now, so the Ctrl+Alt+G
-    // cycle asks identically instead of this being a second spelling of it.
-    if (mode === 'mesh') {
-      enterMeshGrid();
-      return;
-    }
-    if (mode === 'filtered') {
-      // #1609 — switch first, then request focus. The request counter
-      // pattern (App.tsx `focus-grid-search`) means the consumer's layout
-      // effect runs on the bump, but the input only exists once this
-      // render mounts `GridControls`; the bump is observed after commit,
-      // so the ordering here is what makes the first click focus the
-      // search. Re-clicking while already in Filtered re-arms the request
-      // — the user's intent when clicking a segment they're already on is
-      // "get me to the search box".
-      //
-      // #2076 — both halves of the gesture (the mode flip, the focus
-      // request) and the cross-Mesh-results notice live in one store
-      // action, because "the notice fires once per escape" is a property of
-      // the gesture, not of each caller. Calling it is also why the notice
-      // cannot fire on a re-click from Filtered: no escape happens then.
-      useUIStore.getState().enterFilteredFromSearch();
-      return;
-    }
-    setViewMode(mode);
-  };
 
   return (
     <div role="group" aria-label="View mode" className="flex items-center gap-1">
-      {SEGMENTS.map(({ mode, label, Icon }) => {
+      {VIEW_MODE_SEGMENTS.map(({ mode, label, Icon }) => {
         const active = viewMode === mode;
         return (
           <button
             key={mode}
             type="button"
             aria-pressed={active}
-            // aria-label keeps the accessible name when the visible label
-            // hides on narrow windows (see the span below).
             aria-label={label}
-            onClick={() => handleSelect(mode)}
+            onClick={() => selectViewMode(mode)}
             className={`inline-flex items-center gap-1.5 px-2 py-1.5 rounded-md text-sm font-sans font-medium whitespace-nowrap transition-colors ${
               active
                 ? 'bg-bg-card text-accent-cyan'
@@ -184,25 +186,11 @@ export function ViewModeSwitcher() {
             }`}
           >
             <Icon className="w-4 h-4 shrink-0" />
-            {/* Icon-only below 1440px window width — the PR #1623 finding was that
-                the floor cannot be 1300px: at exactly 1300px the labels
-                become visible but the centre's `w-80` (260px at the 13px
-                root) plus the side clusters' min-content (~565px each when
-                labels are visible) overflows the available side tracks and
-                clips the last segment ("Filtered"). That moved the floor to
-                1400px, and #2081 review moved it again to 1440px, which is
-                the first width MEASURED clean in both header grids. In
-                Filtered (`grid-cols-[auto_minmax(0,1fr)_auto]` — both side
-                tracks content-sized `auto`, the centre absorbing the rest
-                down to a 16px floor) the labelled layout needs left 726px +
-                centre min-content 143px + right 538px = 1407px, so the
-                1400–1439 range overflowed (38px at exactly 1400 with the
-                scope indicator present, 6px with it hidden); in Mesh Grid
-                (`minmax(0,1fr)_auto_minmax(0,1fr)`) the left cell clipped by
-                6px at exactly 1400 while 1420 and 1440+ were clean. At 1440
-                Filtered the centre is 145px against a 145px min-content.
-                The aria-label keeps the accessible name stable. */}
-            <span className="max-[1439px]:hidden">{label}</span>
+            {/* Always labelled: the title bar mounts the segments only at
+                `LABELLED_SWITCHER_MIN_WIDTH` and up, and narrower windows get
+                the compact `ViewSelector` instead (#2421), so a row of bare
+                mode glyphs can no longer appear. */}
+            <span>{label}</span>
           </button>
         );
       })}

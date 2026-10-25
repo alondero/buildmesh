@@ -73,6 +73,7 @@ import { startDevServer, stopDevServer } from './ui-shot-server.mjs';
 import { runSteps } from './ui-shot-steps.mjs';
 import { withDeadline } from './ui-shot-deadline.mjs';
 import { closeBrowser } from './ui-shot-close.mjs';
+import { collectPageErrors } from './ui-shot-errors.mjs';
 import { PHASE_FILE_ENV, createPhaseRecorder } from './phase-watchdog.mjs';
 import {
   BROWSER_LAUNCH_TIMEOUT_MS,
@@ -201,19 +202,7 @@ async function getPage() {
         BROWSER_SETUP_TIMEOUT_MS,
         'Installing the mock IPC script',
       );
-      // Surface app-side crashes (a React error, an unhandled rejection) on
-      // stderr so a mock render that "renders blank" is diagnosable.
-      const pageErrors = [];
-      page.on('pageerror', (e) => {
-        pageErrors.push(e.message);
-        console.error('[page error]', e.message);
-      });
-      page.on('console', (message) => {
-        if (message.type() === 'error') {
-          pageErrors.push(message.text());
-          console.error('[page console error]', message.text());
-        }
-      });
+      const diagnostics = collectPageErrors(page);
       // NOT networkidle: index.html preconnects to Google Fonts, which never
       // settles on an offline/proxied host. Wait for the DOM, then for the app
       // to actually mount something under #root.
@@ -232,10 +221,11 @@ async function getPage() {
       });
       phase('mount wait');
       await page.locator('#root > *').first().waitFor({ state: 'attached', timeout: MOUNT_TIMEOUT_MS }).catch(() => {
-        const details = pageErrors.length > 0 ? ` Page errors: ${pageErrors.join(' | ')}` : '';
+        const errors = diagnostics.messages();
+        const details = errors.length > 0 ? ` Page errors: ${errors.join(' | ')}` : '';
         throw new Error(`[tauri-mock] #root never populated within ${MOUNT_TIMEOUT_MS / 1000}s.${details}`);
       });
-      return { browser, page, devServer };
+      return { browser, page, devServer, diagnostics };
     } catch (e) {
       // Don't leak the browser or a dev server we spawned if setup failed. This
       // is the mount-failure path the wrapper relays, so the close is bounded
@@ -260,8 +250,9 @@ async function getPage() {
     const [w, h] = viewport.split('x').map(Number);
     const browser = await launchChromium();
     const page = await browser.newPage({ viewport: { width: w || 390, height: h || 844 } });
+    const diagnostics = collectPageErrors(page);
     await page.goto(url, { waitUntil: 'domcontentloaded' });
-    return { browser, page };
+    return { browser, page, diagnostics };
   }
   const browser = await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`).catch((e) => {
     console.error(
@@ -279,10 +270,10 @@ async function getPage() {
     await browser.close();
     throw new Error('No pages found over CDP — is the app window open?');
   }
-  return { browser, page };
+  return { browser, page, diagnostics: collectPageErrors(page) };
 }
 
-const { browser, page, devServer } = await getPage();
+const { browser, page, devServer, diagnostics } = await getPage();
 // In --mock mode steps drive fixtures/events through the page instead of the
 // HTTP bridge (which has no backend here).
 const mockHelper = {
@@ -292,6 +283,8 @@ const mockHelper = {
 // Held so a teardown failure cannot mask the reason the run failed.
 let failure = null;
 try {
+  phase('UI error check');
+  await diagnostics.assertHealthy();
   if (stepsFile) {
     // Only `--mock` runs are supervised by a wrapper with a watchdog deadline
     // (`UI_SHOT_WATCHDOG_DEADLINE_MS`). `--url` and CDP-attach drive a real app
@@ -313,6 +306,8 @@ try {
     );
   }
 
+  phase('UI error check');
+  await diagnostics.assertHealthy();
   mkdirSync(dirname(resolve(out)), { recursive: true });
   if (selector) {
     phase('selector wait');
@@ -324,6 +319,8 @@ try {
     phase('screenshot');
     await page.screenshot({ path: out, timeout: SCREENSHOT_TIMEOUT_MS });
   }
+  phase('UI error check');
+  await diagnostics.assertHealthy();
   console.log(`Saved ${out} (page: ${page.url()})`);
 } catch (error) {
   // A teardown failure must not replace the reason the run actually failed: a

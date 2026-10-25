@@ -32,6 +32,7 @@ pub mod kimi;
 pub mod mcode;
 pub mod muse;
 pub mod opencode;
+pub mod perch;
 pub mod terminal;
 
 pub use agy::AGY;
@@ -47,4 +48,5 @@ pub use kimi::KIMI;
 pub use mcode::MCODE;
 pub use muse::MUSE;
 pub use opencode::OPENCODE;
+pub use perch::PERCH;
 pub use terminal::TERMINAL;

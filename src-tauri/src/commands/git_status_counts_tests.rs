@@ -1,8 +1,9 @@
 use super::super::git::{
     get_git_status_blocking, get_git_summary_blocking, revert_file_blocking, stage_file_blocking,
-    status_metrics, GitStatus,
+    GitStatus,
 };
 use crate::env::test_helpers::{init_repo_with_commit, TestDir};
+use crate::git::status_stats::status_metrics;
 use git2::{DiffOptions, Patch, Repository};
 use std::collections::HashMap;
 use std::fs;

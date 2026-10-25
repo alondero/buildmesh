@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { changedPaths, completion, fingerprint, identityMismatch, runGate, runIdentity, scopePaths, verify, waitForVerify } from '../../scripts/harness.mjs';
-import { executedTests, formatDiffPaths, gateReads, planGates } from '../../scripts/harness-plan.mjs';
+import { AGENT_TEST_GATE_MINUTES, executedTests, formatDiffPaths, gateReads, planGates } from '../../scripts/harness-plan.mjs';
 import { acquireSlot, heavyGateEnv, heavyGateLimit, runPlan, slotHolders } from '../../scripts/harness-lanes.mjs';
 import { RUST_PATH_INCLUDES, fastGates, frontendInScope, lintablePaths, pathIncludeDrift, planChecks, rustModule, rustScope } from '../../scripts/harness-check.mjs';
 import { conptyPrerequisite, gatePassed, isolatedCommand, isolateTests, knownFlakes, readTestReport, reportsRuntimeError, rustFailures, validateFlakeIssues, vitestReport } from '../../scripts/harness-test-failures.mjs';
@@ -15,6 +15,32 @@ import { decide as formatDecision } from '../../.claude/hooks/guard-rustfmt.mjs'
 
 const script = fileURLToPath(new URL('../../scripts/harness.mjs', import.meta.url));
 const root = fileURLToPath(new URL('../../', import.meta.url));
+
+// A fixture gate's budget is a hang detector, not a load detector. One minute
+// was enough for a gate that runs a quick command, but a gate that compiles a
+// crate or runs a real Vitest suite pays a machine-dependent process startup,
+// and under the overlapping checks of issue #2254 those gates were still
+// working when their deadline expired: the test reported TIMEOUT instead of
+// the failure it was looking for.
+//
+// The budget is derived from the gate that runs this suite, because the two
+// have to nest: a fixture gate that outlives the enclosing gate is killed by
+// the enclosing run, and the fixture gate's own attribution - its name, its
+// log, the failing test - is destroyed with it. Half the enclosing budget
+// leaves room for the suite's own runtime plus one hung fixture, for as long
+// as that runtime stays under the other half.
+const FIXTURE_GATE_MINUTES = Math.floor(AGENT_TEST_GATE_MINUTES / 2);
+
+// The harness CLI in the fixture runs real Git and real Vitest work, so its
+// cost multiplies with the machine's load. Thirty seconds was a load detector
+// rather than a hang detector: under issue #2254 the child was still working
+// when the wrapper killed it, and the test reported the null exit status of a
+// kill instead of the failure that caused it.
+//
+// The wrapper outlives the gate budget it wraps by a minute, so a gate that
+// hangs is reported by the child - with its name and its log - and the wrapper
+// only catches a child that overruns even that.
+const CLI_TIMEOUT_MS = (FIXTURE_GATE_MINUTES + 1) * 60 * 1000;
 
 // The plan `completion()` recomputes for a task. It narrows through `scopePaths`
 // exactly as `verify` does, so a hand-written receipt has to be built from the
@@ -140,7 +166,7 @@ test('closed known-flake issues surface their exact validation error in the gate
   const fixture = repo(t);
   fixture.put('scripts/known-flakes.json', '{"test":1410}');
   fixture.put('closed-issue.cjs', "globalThis.fetch = async () => ({ ok: true, json: async () => ({ state: 'closed' }) });");
-  const row = await runGate(fixture.cwd, { id: 'known-flakes', command: ['node', script, 'gate', 'flakes'], minutes: 1 }, fixture.base, [], { NODE_OPTIONS: `--require="${join(fixture.cwd, 'closed-issue.cjs').replaceAll('\\', '/')}"` });
+  const row = await runGate(fixture.cwd, { id: 'known-flakes', command: ['node', script, 'gate', 'flakes'], minutes: FIXTURE_GATE_MINUTES }, fixture.base, [], { NODE_OPTIONS: `--require="${join(fixture.cwd, 'closed-issue.cjs').replaceAll('\\', '/')}"` });
   assert.equal(row.outcome, 'FAIL');
   assert.match(row.reason, /Known-flake issue #1410 must be an open issue/, readFileSync(row.log, 'utf8'));
 });
@@ -149,7 +175,7 @@ test('doctest failures remain named and FAIL without an unsupported isolation at
   const fixture = repo(t);
   fixture.put('src-tauri/Cargo.toml', '[package]\nname="doc-fixture"\nversion="0.1.0"\nedition="2021"\n');
   fixture.put('src-tauri/src/lib.rs', '/// ```\n/// assert!(false);\n/// ```\npub fn f() {}\n/// ```\n/// assert!(true);\n/// ```\npub fn g() {}\n');
-  const row = await runGate(fixture.cwd, { id: 'rust-tests', command: ['cargo', 'test', '--doc'], cwd: 'src-tauri', tests: 'rust', minutes: 1 }, fixture.base, [], { CARGO_TERM_COLOR: 'always' });
+  const row = await runGate(fixture.cwd, { id: 'rust-tests', command: ['cargo', 'test', '--doc'], cwd: 'src-tauri', tests: 'rust', minutes: FIXTURE_GATE_MINUTES }, fixture.base, [], { CARGO_TERM_COLOR: 'always' });
   assert.equal(row.outcome, 'FAIL');
   assert.match(row.failures[0].name, /lib.rs - f \(line 1\)/);
   assert.equal(row.failures[0].target.kind, 'doc');
@@ -168,7 +194,7 @@ test('a clippy warning in a touched file fails the gate for a Windows span path 
   const paths = ['src-tauri/src/services/transcript_reader/readers/claude_code.rs', 'src-tauri/src/lib.rs'];
   const warning = file => JSON.stringify({ reason: 'compiler-message', message: { level: 'warning', message: 'calls to `.last()` on a `DoubleEndedIterator`', code: { code: 'double_ended_iterator_last' }, spans: [{ file_name: file, is_primary: true }] } });
   const clippy = (...files) => ({
-    id: 'rust-clippy', warnings: true, minutes: 1,
+    id: 'rust-clippy', warnings: true, minutes: FIXTURE_GATE_MINUTES,
     command: ['node', '-e', files.map(file => `console.log(${JSON.stringify(warning(file))})`).join(';')],
   });
   // The gate runs with `src-tauri` as its cwd, so its spans are crate-relative.
@@ -242,7 +268,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 test('one + (exact)', () => { mkdirSync('.harness', {recursive:true}); const seen=existsSync('.harness/seen'); writeFileSync('.harness/seen','yes'); expect(seen).toBe(true); });
 test('one + (exact) sibling', () => { throw new Error('persistent sibling'); });
 `);
-  const gate = { id: 'frontend-tests', command: ['node', 'node_modules/vitest/vitest.mjs', 'run'], tests: 'vitest', minutes: 1 };
+  const gate = { id: 'frontend-tests', command: ['node', 'node_modules/vitest/vitest.mjs', 'run'], tests: 'vitest', minutes: FIXTURE_GATE_MINUTES };
   const row = await runGate(fixture.cwd, gate, fixture.base);
   assert.equal(row.outcome, 'FAIL', JSON.stringify(row));
   assert.deepEqual(row.failures.map(test => test.outcome), ['FLAKY', 'FAIL']);
@@ -261,7 +287,11 @@ test('one + (exact) sibling', () => { throw new Error('persistent sibling'); });
   assert.equal(collection.failures[0].rerun, undefined);
   fixture.put('vitest.config.mjs', 'export default { test: { include: ["tests/*.test.*"], environment: "node" } };');
   fixture.put('tests/isolation.test.js', "import { test, expect } from 'vitest'; test.skipIf(process.env.VITEST_MAX_WORKERS === '1')('same name', () => { expect(false).toBe(true); });");
-  fixture.put('tests/isolation.test.jsx', "import { test, expect } from 'vitest'; test('same name', () => { expect(true).toBe(true); });");
+  // The sibling test has to be GREEN so the gate has one passing and one
+  // failing test with the same name. Its assertion must not compare a value
+  // with itself — that assertion passes for any value, and issue #2534's
+  // tautology guard rejects it.
+  fixture.put('tests/isolation.test.jsx', "import { test, expect } from 'vitest'; test('same name', () => { expect([1, 2, 3].length).toBe(3); });");
   const skipped = await runGate(fixture.cwd, gate, fixture.base);
   assert.equal(skipped.outcome, 'FAIL');
   assert.equal(skipped.failures[0].rerun.count, 0);
@@ -285,11 +315,11 @@ test('a green Vitest gate is not failed by a passing test named after a runtime 
   fixture.put('tests/title.test.js', `import { test, expect } from 'vitest';
 test('does NOT leak an unhandled rejection on a failing blur save', () => {
   console.error('Project setting save failed: Error: mock: update_mesh_column rejected');
-  expect(true).toBe(true);
+  expect([1, 2, 3].length).toBe(3);
 });
 `);
 
-  const row = await runGate(fixture.cwd, { id: 'frontend-tests', command: ['node', 'node_modules/vitest/vitest.mjs', 'run'], tests: 'vitest', minutes: 1 }, fixture.base);
+  const row = await runGate(fixture.cwd, { id: 'frontend-tests', command: ['node', 'node_modules/vitest/vitest.mjs', 'run'], tests: 'vitest', minutes: FIXTURE_GATE_MINUTES }, fixture.base);
 
   // Asserted first, so the assertions below mean something only when the phrase
   // is really in the log. A gate parses its report once it has already failed, so
@@ -345,7 +375,7 @@ test('real Cargo gate names a suite failure and reruns just that library test', 
   const fixture = repo(t);
   fixture.put('src-tauri/Cargo.toml', '[package]\nname="harness-fixture"\nversion="0.1.0"\nedition="2021"\n');
   fixture.put('src-tauri/src/lib.rs', '#[test] fn transient() { assert!(std::env::args().any(|arg| arg == "--exact")); }\n#[test] fn sibling() {}\n');
-  const row = await runGate(fixture.cwd, { id: 'rust-tests', command: ['cargo', 'test'], cwd: 'src-tauri', tests: 'rust', minutes: 1 }, fixture.base);
+  const row = await runGate(fixture.cwd, { id: 'rust-tests', command: ['cargo', 'test'], cwd: 'src-tauri', tests: 'rust', minutes: FIXTURE_GATE_MINUTES }, fixture.base);
   assert.equal(row.outcome, 'FLAKY', JSON.stringify(row));
   assert.equal(row.failures[0].id, 'transient');
   assert.equal(row.count, 1);
@@ -360,7 +390,7 @@ test('duplicate Vitest names report ambiguity even when both isolated matches pa
   fixture.put('package.json', '{"type":"module"}');
   fixture.put('vitest.config.mjs', 'export default { test: { include: ["tests/*.test.js"], environment: "node" } };');
   fixture.put('tests/duplicate.test.js', "import { test, expect } from 'vitest'; test('same', () => { expect(process.env.VITEST_MAX_WORKERS).toBe('1'); }); test('same', () => {});");
-  const row = await runGate(fixture.cwd, { id: 'frontend-tests', command: ['node', 'node_modules/vitest/vitest.mjs', 'run'], tests: 'vitest', minutes: 1 }, fixture.base);
+  const row = await runGate(fixture.cwd, { id: 'frontend-tests', command: ['node', 'node_modules/vitest/vitest.mjs', 'run'], tests: 'vitest', minutes: FIXTURE_GATE_MINUTES }, fixture.base);
   assert.equal(row.outcome, 'FAIL');
   assert.equal(row.failures[0].rerun.exitCode, 0);
   assert.equal(row.failures[0].rerun.count, 2);
@@ -376,10 +406,14 @@ test('evaluation accepts a listed isolated pass and still rejects an unlisted fl
   fixture.put('package.json', '{"type":"module"}');
   fixture.put('vitest.config.mjs', 'export default { test: { include: ["tests/*.test.js"], environment: "node" } };');
   fixture.put('tests/evaluate.test.js', "import { test, expect } from 'vitest'; test('alone', () => { expect(process.env.VITEST_MAX_WORKERS).toBe('1'); });");
-  fixture.put('scripts/harness-corpus.json', JSON.stringify([{ id: 'listed', boundary: 'fixture Vitest', gate: { command: ['node', 'node_modules/vitest/vitest.mjs', 'run'], tests: 'vitest' } }]));
+  fixture.put('scripts/harness-corpus.json', JSON.stringify([{ id: 'listed', boundary: 'fixture Vitest', gate: { command: ['node', 'node_modules/vitest/vitest.mjs', 'run'], tests: 'vitest', minutes: FIXTURE_GATE_MINUTES } }]));
   fixture.put('scripts/known-flakes.json', '{"tests/evaluate.test.js > alone":1833}');
   const listed = fixture.cli('evaluate', '--case', 'listed');
-  assert.equal(listed.status, 0, listed.stdout + listed.stderr);
+  // A killed child has no exit status, so the message says which of the two
+  // happened: the CLI failed, or the wrapper stopped waiting for it. Under
+  // issue #2254 the second case was reported as a bare `null` and read as a
+  // defect in the evaluation rather than as the load that caused it.
+  assert.equal(listed.status, 0, `the evaluate CLI ${listed.status === null ? `was still running after ${CLI_TIMEOUT_MS / 1000}s and was killed` : `exited with status ${listed.status}`}\n${listed.error?.message ?? ''}\n${listed.stdout}${listed.stderr}`);
   const receipt = JSON.parse(readFileSync(join(fixture.cwd, '.harness/evaluation.json')));
   assert.equal(receipt.outcome, 'PASS');
   assert.equal(receipt.results[0].outcome, 'FLAKY');
@@ -402,7 +436,7 @@ test('the Rust shard runner records targets and reruns library and integration f
   // This std-only crate does not load ConPTY; stage placeholder assets to
   // exercise the runner's prerequisite seam separately from Tauri packaging.
   for (const asset of ['conpty.dll', 'x64/OpenConsole.exe', 'arm64/OpenConsole.exe', 'x86/OpenConsole.exe']) fixture.put(`src-tauri/target/debug/deps/${asset}`, 'fixture');
-  const gate = { id: 'rust-tests', command: ['node', 'scripts/rust-test-shards.mjs'], tests: 'rust', minutes: 1 };
+  const gate = { id: 'rust-tests', command: ['node', 'scripts/rust-test-shards.mjs'], tests: 'rust', minutes: FIXTURE_GATE_MINUTES };
   const extraEnv = { CARGO_TARGET_DIR: join(fixture.cwd, 'src-tauri/target') };
   const row = await runGate(fixture.cwd, gate, fixture.base, [], extraEnv);
   assert.equal(row.outcome, 'FLAKY', `${JSON.stringify(row)}\n${readFileSync(row.log, 'utf8')}`);
@@ -462,9 +496,9 @@ test('isolated', async () => {
 });`);
     fixture.put('scripts/known-flakes.json', JSON.stringify(listed ? { 'tests/lane.test.js > isolated': 1833 } : {}));
     const plan = () => [
-      { id: 'frontend-tests', lane: 'frontend', tests: 'vitest', minutes: 1, command: ['node', 'node_modules/vitest/vitest.mjs', 'run'] },
-      { id: 'other', lane: 'rust', minutes: 1, command: ['node', '-e', "const fs=require('fs'); fs.mkdirSync('.harness',{recursive:true}); fs.writeFileSync('.harness/other-started','yes'); const timer=setInterval(()=>{if(fs.existsSync('.harness/failed')){clearInterval(timer);fs.writeFileSync('.harness/other-finished','yes');}},10);"] },
-      { id: 'after', lane: 'frontend', minutes: 1, command: ['node', '-e', "require('fs').writeFileSync('.harness/after','yes')"] },
+      { id: 'frontend-tests', lane: 'frontend', tests: 'vitest', minutes: FIXTURE_GATE_MINUTES, command: ['node', 'node_modules/vitest/vitest.mjs', 'run'] },
+      { id: 'other', lane: 'rust', minutes: FIXTURE_GATE_MINUTES, command: ['node', '-e', "const fs=require('fs'); fs.mkdirSync('.harness',{recursive:true}); fs.writeFileSync('.harness/other-started','yes'); const timer=setInterval(()=>{if(fs.existsSync('.harness/failed')){clearInterval(timer);fs.writeFileSync('.harness/other-finished','yes');}},10);"] },
+      { id: 'after', lane: 'frontend', minutes: FIXTURE_GATE_MINUTES, command: ['node', '-e', "require('fs').writeFileSync('.harness/after','yes')"] },
     ];
     const printed = [];
     const originalLog = console.log;
@@ -500,9 +534,13 @@ function repo(t) {
   put('.gitignore', '.harness/\n.task.json\n');
   put('src/owner.ts', 'export const owner = 1;\n');
   const base = commit();
-  const run = (args, env) => spawnSync(process.execPath, [script, ...args], { cwd, encoding: 'utf8', timeout: 30000, env: env ? { ...process.env, ...env } : process.env });
+  const run = (args, env) => spawnSync(process.execPath, [script, ...args], { cwd, encoding: 'utf8', timeout: CLI_TIMEOUT_MS, env: env ? { ...process.env, ...env } : process.env });
   const cli = (...args) => run(args);
-  const hook = (payload, env) => spawnSync(process.execPath, [script, 'hook'], { cwd, encoding: 'utf8', input: JSON.stringify(payload), timeout: 15000, env: env ? { ...process.env, ...env } : process.env });
+  // The hook is the same harness CLI, reading the same task state, so it gets
+  // the same budget: fifteen seconds was a load detector, and a hook that was
+  // killed on a busy machine left the test with an empty stdout to parse
+  // (issue #2254).
+  const hook = (payload, env) => spawnSync(process.execPath, [script, 'hook'], { cwd, encoding: 'utf8', input: JSON.stringify(payload), timeout: CLI_TIMEOUT_MS, env: env ? { ...process.env, ...env } : process.env });
   const start = () => {
     put('.task.json', JSON.stringify({ goal: 'Preserve owner state', criteria: ['Switches preserve state'], plannedEdits: ['src/owner.ts'], base }));
     const result = cli('start', '--spec', '.task.json');
@@ -666,7 +704,9 @@ test('review repairs require final-tree verification, acceptance and renewed ind
   assert.equal(fixture.cli('finish').status, 2, 'fresh checks and acceptance cannot carry approval across an unreviewed edit');
   assert.match(completion(fixture.cwd).reason, /independent APPROVE/);
   update({ review: { reviewer: 'independent fixture', verdict: 'APPROVE', findings: [], summary: 'Subsequent edit inspected; approved the complete final change' } });
-  assert.equal(fixture.cli('finish').status, 0);
+  // The completion reason names the way out, so a failure here says which
+  // precondition the tree still misses rather than only the exit status.
+  assert.equal(fixture.cli('finish').status, 0, completion(fixture.cwd).reason);
   assert.equal(JSON.parse(fixture.cli('status').stdout).task.phase, 'complete');
 });
 
@@ -731,7 +771,7 @@ test('fingerprint ignores local logs but sees tests, lockfile, deletions and unt
 test('a short --base passes binding-drift, and a gate that rewrites the bindings still fails it (#2350)', async t => {
   const fixture = repo(t);
   // The gate is the real CLI in the fixture, so the harness it spawns must be there.
-  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-check.mjs', 'scripts/harness-test-failures.mjs', 'scripts/self-review.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
+  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-check.mjs', 'scripts/harness-test-failures.mjs', 'scripts/self-review.mjs', 'scripts/worktree-deps.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
   fixture.put('src/types/generated/Example.ts', 'export type Example = { id: number };\n');
   const base = fixture.commit();
   const short = base.slice(0, 8);
@@ -746,7 +786,7 @@ test('a short --base passes binding-drift, and a gate that rewrites the bindings
   assert.equal(clean.outcome, 'PASS', `${clean.reason ?? ''} ${JSON.stringify(clean.gates)}`);
   // ...and the gate keeps its teeth: a gate that regenerates the bindings is drift.
   fixture.put('regenerate.mjs', 'import { writeFileSync } from \'node:fs\';\nwriteFileSync(\'src/types/generated/Example.ts\', \'export type Example = { id: string };\\n\');\n');
-  const regenerated = await verify(fixture.cwd, { base: short, plan: () => [{ id: 'regenerate', command: ['node', 'regenerate.mjs'], minutes: 1 }, drift], selfReview: false });
+  const regenerated = await verify(fixture.cwd, { base: short, plan: () => [{ id: 'regenerate', command: ['node', 'regenerate.mjs'], minutes: FIXTURE_GATE_MINUTES }, drift], selfReview: false });
   assert.equal(regenerated.gates.find(gate => gate.id === 'regenerate').outcome, 'PASS', JSON.stringify(regenerated.gates));
   const driftRow = regenerated.gates.find(gate => gate.id === 'binding-drift');
   assert.equal(driftRow.outcome, 'FAIL', JSON.stringify(regenerated.gates));
@@ -792,7 +832,7 @@ test('real gate execution separates assertion failure, unavailable tool and time
 test('the format gate fails on any rustfmt diff and names the files', async t => {
   const fixture = repo(t);
   const formatter = output => ['node', '-e', `console.log(${JSON.stringify(output)}); process.exit(1)`];
-  const gate = output => runGate(fixture.cwd, { id: 'rust-format', command: formatter(output), minutes: 1 }, fixture.base);
+  const gate = output => runGate(fixture.cwd, { id: 'rust-format', command: formatter(output), minutes: FIXTURE_GATE_MINUTES }, fixture.base);
   const diff = await gate([
     'Diff in \\\\?\\F:\\repo\\src-tauri\\src\\agent\\background.rs:104:',
     'Diff in F:\\repo\\src-tauri\\src\\db\\mod.rs:40:',
@@ -811,11 +851,11 @@ test('the format gate fails on any rustfmt diff and names the files', async t =>
 });
 test('behavior gates reject zero tests and preserve executed counts', async t => {
   const fixture = repo(t);
-  const zero = await runGate(fixture.cwd, { id: 'zero', command: ['node', '-e', 'console.log("# pass 0")'], minutes: 1, tests: 'node' }, fixture.base);
+  const zero = await runGate(fixture.cwd, { id: 'zero', command: ['node', '-e', 'console.log("# pass 0")'], minutes: FIXTURE_GATE_MINUTES, tests: 'node' }, fixture.base);
   assert.equal(zero.outcome, 'FAIL');
   assert.equal(zero.count, 0);
   fixture.put('behavior.test.mjs', 'import { test } from "node:test"; import assert from "node:assert/strict"; test("literal output", () => assert.equal(2 + 2, 4));\n');
-  const executed = await runGate(fixture.cwd, { id: 'test', command: ['node', '--test', 'behavior.test.mjs'], minutes: 1, tests: 'node' }, fixture.base);
+  const executed = await runGate(fixture.cwd, { id: 'test', command: ['node', '--test', 'behavior.test.mjs'], minutes: FIXTURE_GATE_MINUTES, tests: 'node' }, fixture.base);
   assert.equal(executed.outcome, 'PASS', executed.log ? readFileSync(executed.log, 'utf8') : executed.reason);
   assert.equal(executed.count, 1);
   assert.equal(executedTests('rust', 'test result: ok. 2 passed;\ntest result: ok. 3 passed;'), 5);
@@ -825,7 +865,7 @@ test('a gate receives the environment it declares, and the test environment othe
   const fixture = repo(t);
   for (const [declared, expected] of [[{ nodeEnv: 'production' }, 'production'], [undefined, 'test']]) {
     const result = await runGate(fixture.cwd, {
-      id: 'boundary', minutes: 1, ...(declared ? declared : {}),
+      id: 'boundary', minutes: FIXTURE_GATE_MINUTES, ...(declared ? declared : {}),
       command: ['node', '-e', `if (process.env.NODE_ENV !== '${expected}') throw new Error(process.env.NODE_ENV);`],
     }, fixture.base);
     assert.equal(result.outcome, 'PASS', result.log ? readFileSync(result.log, 'utf8') : result.reason);
@@ -1037,7 +1077,7 @@ test('the env scrub clears the leaks, keeps the documented test environment, and
   const probe = (label, plants, survey) => {
     const file = join(cwd, `probe-${label}.ps1`);
     writeFileSync(file, [...plants, shippedEnvScrub(), ...survey].join('\n'));
-    const run = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file], { encoding: 'utf8', timeout: 30000, env: childEnv });
+    const run = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file], { encoding: 'utf8', timeout: CLI_TIMEOUT_MS, env: childEnv });
     // A missing or unlaunchable powershell has no exit status, so checking that
     // first reports "powershell could not start" instead of a bare null !== 0.
     assert.ok(!run.error, `could not run powershell: ${run.error?.message ?? 'unknown'}`);
@@ -1087,7 +1127,7 @@ test('the env scrub clears the leaks, keeps the documented test environment, and
 });
 test('missing dependencies preflight BLOCKED without launching tests', async t => {
   const fixture = repo(t);
-  const result = await runGate(fixture.cwd, { id: 'frontend', command: ['npm', 'run', 'test'], minutes: 1, tests: 'vitest' }, fixture.base);
+  const result = await runGate(fixture.cwd, { id: 'frontend', command: ['npm', 'run', 'test'], minutes: FIXTURE_GATE_MINUTES, tests: 'vitest' }, fixture.base);
   assert.equal(result.outcome, 'BLOCKED');
   assert.equal(result.log, null);
   assert.match(result.reason, /node_modules/);
@@ -1096,7 +1136,7 @@ test('canonical verification rejects a source mutation even when every child che
   const fixture = repo(t);
   // Stand-in executables keep this a process/orchestration regression, without
   // coupling it to a full Tauri or frontend installation.
-  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-check.mjs', 'scripts/harness-test-failures.mjs', 'scripts/self-review.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
+  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-check.mjs', 'scripts/harness-test-failures.mjs', 'scripts/self-review.mjs', 'scripts/worktree-deps.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
   for (const path of ['scripts/check-agent-diff.mjs', 'scripts/check-docs.mjs', 'scripts/check-readme-drift.mjs', 'scripts/check-process-spawn-discipline.mjs']) fixture.put(path, 'process.exit(0);\n');
   fixture.put('.gitignore', '.harness/\n.task.json\nnode_modules/\n');
   fixture.put('node_modules/eslint/package.json', '{"version":"fixture"}');
@@ -1109,7 +1149,7 @@ if (script.endsWith('tests') || script.startsWith('test:')) {
 } else if (script === 'lint') writeFileSync('src/owner.ts', 'export const owner = 999;\\n');
 `);
   const base = fixture.commit();
-  const result = spawnSync(process.execPath, [script, 'verify', '--base', base], { cwd: fixture.cwd, encoding: 'utf8', timeout: 30000, env: { ...process.env, npm_execpath: join(fixture.cwd, 'npm-cli.mjs') } });
+  const result = spawnSync(process.execPath, [script, 'verify', '--base', base], { cwd: fixture.cwd, encoding: 'utf8', timeout: CLI_TIMEOUT_MS, env: { ...process.env, npm_execpath: join(fixture.cwd, 'npm-cli.mjs') } });
   assert.equal(result.status, 1, result.stderr);
   const receipt = JSON.parse(readFileSync(join(fixture.cwd, '.harness/receipt.json')));
   assert.ok(receipt.gates.every(gate => gate.outcome === 'PASS'), result.stdout);
@@ -1549,7 +1589,7 @@ test('wait never reports a stale or missing result as success', async t => {
 });
 test('verify queues a heavy gate behind held machine-wide slots and runs it once one frees', async t => {
   const fixture = repo(t);
-  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-check.mjs', 'scripts/harness-test-failures.mjs', 'scripts/self-review.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
+  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-check.mjs', 'scripts/harness-test-failures.mjs', 'scripts/self-review.mjs', 'scripts/worktree-deps.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
   for (const path of ['scripts/check-agent-diff.mjs', 'scripts/check-docs.mjs', 'scripts/check-readme-drift.mjs', 'scripts/check-process-spawn-discipline.mjs']) fixture.put(path, 'process.exit(0);\n');
   fixture.put('.gitignore', '.harness/\n.task.json\nnode_modules/\n');
   fixture.put('node_modules/eslint/package.json', '{"version":"fixture"}');
@@ -1583,6 +1623,52 @@ test('verify queues a heavy gate behind held machine-wide slots and runs it once
   assert.deepEqual(order, planGates(['src/owner.ts']).map(gate => gate.id).filter(id => order.includes(id)));
 });
 
+test('verify queues the infrastructure suite behind a held agent-test slot and runs it once one frees', async t => {
+  const fixture = repo(t);
+  // The suite's scheduling owner has to be in the fixture: the harness only
+  // takes the agent-test slot for a repository that can run the suite.
+  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-check.mjs', 'scripts/harness-test-failures.mjs', 'scripts/agent-tests.mjs', 'scripts/self-review.mjs', 'scripts/worktree-deps.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
+  for (const path of ['scripts/check-agent-diff.mjs', 'scripts/check-docs.mjs', 'scripts/check-readme-drift.mjs', 'scripts/check-process-spawn-discipline.mjs']) fixture.put(path, 'process.exit(0);\n');
+  fixture.put('.gitignore', '.harness/\n.task.json\nnode_modules/\n');
+  fixture.put('node_modules/eslint/package.json', '{"version":"fixture"}');
+  fixture.put('npm-cli.mjs', [
+    'const script = process.argv[3];',
+    "if (script === 'test') console.log('Tests  1 passed (1)');",
+    // The gate that runs the suite is told the slot is already held, so the
+    // suite never waits for a slot its own tree holds. Without that flag the
+    // real runner would wait for itself, and the gate would run out of time;
+    // here it exits with a status no gate treats as success.
+    "else if (script === 'test:agent') { if (process.env.BUILDMESH_AGENT_TEST_SLOT !== 'held') process.exit(3); console.log('# pass 1'); }",
+    "else if (script.startsWith('test:')) console.log('# pass 1');",
+  ].join('\n'));
+  const base = fixture.commit();
+  // A path the infrastructure suite reads, so the plan includes the gate:
+  // `src/**` is one of the paths that gate ignores.
+  fixture.put('tests/unit/owner.test.ts', 'export const owner = 2;\n');
+  const slots = slotsDir(t);
+  // Another worktree's copy of the suite (a live process: this one) holds the
+  // only slot.
+  writeFileSync(join(slots, 'slot-0.json'), JSON.stringify({ pid: process.pid, token: 'other-worktree', gate: 'agent-tests', root: 'elsewhere' }));
+  const env = { ...process.env, npm_execpath: join(fixture.cwd, 'npm-cli.mjs'), BUILDMESH_AGENT_TEST_SLOTS_DIR: slots, BUILDMESH_AGENT_TEST_LIMIT: '1' };
+  // The harness under test is an independent caller, not a nested run, so it
+  // must not inherit the flag that says the slot is already held.
+  delete env.BUILDMESH_AGENT_TEST_SLOT;
+  const proc = spawn(process.execPath, [script, 'verify', '--base', base], { cwd: fixture.cwd, stdio: ['ignore', 'pipe', 'pipe'], env });
+  t.after(() => proc.kill());
+  let stdout = '';
+  proc.stdout.on('data', chunk => { stdout += chunk; });
+  const closed = new Promise(resolve => proc.on('close', resolve));
+  for (let i = 0; i < 600 && !/QUEUED agent-tests/.test(stdout); i += 1) await new Promise(done => setTimeout(done, 100));
+  assert.match(stdout, /QUEUED agent-tests: waiting for an infrastructure-suite slot \(limit 1; held by agent-tests in elsewhere\)/);
+  assert.doesNotMatch(stdout, /PASS agent-tests/, 'the suite must not run while the slot is held');
+  unlinkSync(join(slots, 'slot-0.json'));
+  await closed;
+  const receipt = JSON.parse(readFileSync(join(fixture.cwd, '.harness/receipt.json')));
+  const rows = Object.fromEntries(receipt.gates.map(row => [row.id, row]));
+  assert.equal(rows['agent-tests'].outcome, 'PASS', stdout);
+  assert.ok(rows['agent-tests'].queuedMs > 0, 'the gate must record that it waited');
+});
+
 // Fake gates append their id to an untracked log, so a test can tell which gates
 // really ran. `ignores` is the same input declaration the real plan uses.
 function fakeGates(fixture) {
@@ -1592,7 +1678,7 @@ function fakeGates(fixture) {
     return join(fixture.cwd, '.harness', name);
   };
   const gate = (id, ignores, body = '') => ({
-    id, minutes: 1, ...(ignores ? { ignores } : {}),
+    id, minutes: FIXTURE_GATE_MINUTES, ...(ignores ? { ignores } : {}),
     command: ['node', '-e', `const fs=require('node:fs');fs.appendFileSync(${JSON.stringify(log)},${JSON.stringify(`${id}\n`)});${body}`],
   });
   const failWhen = name => `if(fs.existsSync(${JSON.stringify(marker(name))}))process.exit(1);`;
@@ -1925,6 +2011,21 @@ test('the scoped check maps each changed-file category to its own command', () =
   const rust = commands(['src-tauri/src/db/mod.rs']);
   assert.deepEqual(rust.find(([id]) => id === 'check-rust-1'), ['check-rust-1', 'cargo test --lib db::']);
 
+  // A deleted or moved Rust file has no module left to select: its filter
+  // would match no test, and the strict zero-test rule would fail the gate
+  // on a module that is gone. The new path of a move carries the coverage.
+  const gone = path => path !== 'src-tauri/src/db/gone.rs';
+  assert.deepEqual(
+    rustScope(['src-tauri/src/db/gone.rs'], { exists: gone }),
+    { modules: [], whole: false, unscoped: [] },
+    'a deleted Rust path must select nothing',
+  );
+  assert.deepEqual(
+    rustScope(['src-tauri/src/db/gone.rs', 'src-tauri/src/db/mod.rs'], { exists: gone }),
+    { modules: ['db'], whole: false, unscoped: [] },
+    'a moved file keeps the coverage of its new path',
+  );
+
   // The crate root, a manifest and an integration test cannot narrow, so the
   // whole lib suite runs and the unscoped paths are reported.
   for (const path of ['src-tauri/src/lib.rs', 'src-tauri/src/main.rs', 'src-tauri/Cargo.toml', 'src-tauri/build.rs', 'Cargo.lock', 'src-tauri/tests/command.rs']) {
@@ -1970,6 +2071,28 @@ test('a Rust file attached with #[path] selects the module that owns it', () => 
   assert.equal(rustModule('src-tauri/src/commands/prune_tests.rs'), 'commands::prune::prune_tests');
   assert.equal(rustModule('src-tauri/src/services/legacy_retirement/retirement_crash_tests.rs'), 'services::legacy_retirement::retirement_crash_tests');
   assert.equal(rustModule('src-tauri/src/agent/terminal_input.rs'), 'agent::process::terminal_input');
+  // A production file whose tests live in a sibling `<stem>_tests` module the
+  // PARENT declares: a plain path walk maps it to a module that holds no
+  // tests, so the filter would select zero and the strict zero-test rule
+  // would report a failure that carries no information about the code.
+  assert.equal(rustModule('src-tauri/src/db/warm_pool.rs'), 'db::warm_pool_tests');
+  assert.equal(rustModule('src-tauri/src/agent/spawn/provision.rs'), 'agent::spawn::provision_tests');
+  assert.equal(rustModule('src-tauri/src/agent/spawn/prepare.rs'), 'agent::spawn::prepare_tests');
+  // The siblings of that shape, so an edit to one of these files does not
+  // leave the scoped check with a filter that selects zero tests.
+  assert.equal(rustModule('src-tauri/src/agent/spawn/command.rs'), 'agent::spawn::command_tests');
+  assert.equal(rustModule('src-tauri/src/agent/spawn/orchestrator.rs'), 'agent::spawn::orchestrator_tests');
+  assert.equal(rustModule('src-tauri/src/agent/spawn/preflight.rs'), 'agent::spawn::preflight_tests');
+  assert.equal(rustModule('src-tauri/src/agent/spawn/reader.rs'), 'agent::spawn::reader_tests');
+  assert.equal(rustModule('src-tauri/src/agent/spawn/streams.rs'), 'agent::spawn::streams_tests');
+  assert.equal(rustModule('src-tauri/src/db/circuit/operator_push.rs'), 'db::circuit::operator_push_tests');
+  assert.equal(rustModule('src-tauri/src/db/create_operation.rs'), 'db::create_operation_tests');
+  assert.equal(rustModule('src-tauri/src/db/mesh.rs'), 'db::mesh_tests');
+  assert.equal(rustModule('src-tauri/src/services/github/pagination.rs'), 'services::github::pagination_tests');
+  // A production file that carries test items of its own keeps its own
+  // module: redirecting it to the sibling module would skip those tests.
+  assert.equal(rustModule('src-tauri/src/agent/spawn/launch.rs'), 'agent::spawn::launch');
+  assert.equal(rustModule('src-tauri/src/commands/git.rs'), 'commands::git');
   // A module file maps to its own module; a directory mod.rs to its directory.
   assert.equal(rustModule('src-tauri/src/db/mod.rs'), 'db');
   assert.equal(rustModule('src-tauri/src/env/host_path.rs'), 'env::host_path');
@@ -1983,6 +2106,24 @@ test('a Rust file attached with #[path] selects the module that owns it', () => 
   // the same function the `rust-paths` gate runs on a Rust-only diff, so the two
   // cannot disagree.
   assert.deepEqual(pathIncludeDrift(root), { missing: [], stale: [] });
+});
+
+test('extracted Rust implementations and included worker tests select their contract suites', () => {
+  const owners = [
+    ['agent/process/registry.rs', 'agent::process'],
+    ['agent/provider/adapters/codex/install_probe.rs', 'agent::provider::adapters::codex'],
+    ['services/agent_node/cleanup.rs', 'services::agent_node'],
+    ['services/github/pr_workflow.rs', 'commands::pr'],
+    ['git/worktree/maintenance.rs', 'git::worktree'],
+    ['db/circuit/evidence/transition.rs', 'db::circuit::evidence'],
+    ['services/circuit_worker/tests/result_delivery.rs', 'services::circuit_worker::tests'],
+  ];
+  for (const [file, owner] of owners) {
+    const path = `src-tauri/src/${file}`;
+    assert.equal(rustModule(path), owner, file);
+    const checks = planChecks([path]).checks.filter(check => check.module);
+    assert.deepEqual(checks.map(check => check.module), [owner], file);
+  }
 });
 
 test('the #[path] drift check runs on the Rust diff that can introduce one', () => {
@@ -2016,7 +2157,10 @@ test('new Vitest references to src-tauri are audited against the frontend-tests 
   // test file (including files already referencing src-tauri) forces re-audit against
   // VITEST_READS_FROM_SRC_TAURI in scripts/harness-plan.mjs.
   const files = execFileSync('git', ['ls-files', '--', 'tests/unit', 'tests/integration', 'tests/e2e', 'tests/setup'], { cwd: root, encoding: 'utf8' })
-    .split('\n').filter(file => /\.(?:tsx?|mjs)$/.test(file));
+    // `git ls-files` also lists files that are deleted in the working tree but
+    // not yet committed. A file that is not on disk has no referencing lines
+    // to audit, so it is not an input to this snapshot.
+    .split('\n').filter(file => /\.(?:tsx?|mjs)$/.test(file) && existsSync(join(root, file)));
   const referencingLines = files.flatMap(file =>
     readFileSync(join(root, file), 'utf8')
       .split(/\r?\n/)
@@ -2061,7 +2205,6 @@ test('new Vitest references to src-tauri are audited against the frontend-tests 
     "tests/unit/ipc-contract.test.ts: const services = normalize(readFileSync(join(REPO_ROOT, 'src-tauri', 'src', 'services', 'mod.rs'), 'utf8'));",
     "tests/unit/ipc-contract.test.ts: const startup = normalize(readFileSync(join(REPO_ROOT, 'src-tauri', 'src', 'startup', 'mod.rs'), 'utf8'));",
     'tests/unit/opencode-attention-plugin.test.ts: const source = readFileSync(resolve("src-tauri/src/agent/provider/adapters/opencode_attention_plugin.js"), "utf8");',
-    'tests/unit/rust-dead-code-policy.test.ts: const RUST_ROOT = join(process.cwd(), "src-tauri", "src");',
     "tests/unit/tauri-capabilities.test.ts: describe('src-tauri/capabilities/default.json', () => {",
     "tests/unit/tauri-capabilities.test.ts: readFileSync(resolve(process.cwd(), 'src-tauri/capabilities/default.json'), 'utf8'),",
     "tests/unit/tauri-dev-config.test.ts: readFileSync(resolve(process.cwd(), 'src-tauri/tauri.conf.json'), 'utf8'),",

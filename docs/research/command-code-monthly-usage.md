@@ -70,7 +70,7 @@ The organization path is an explicit implementation assumption backed by the dep
 
 ### Integration recommendation
 
-The owning backend is `src-tauri/src/services/usage.rs`; `src/components/AppSettings/UsageRender.tsx` already renders generic usage windows with percentages and reset information. An additional `UsageWindow` labeled `Monthly` can use the existing wire type.
+The owning backend is `src-tauri/src/services/usage/adapters/commandcode.rs`; `src/components/AppSettings/UsageRender.tsx` already renders generic usage windows with percentages and reset information. An additional `UsageWindow` labeled `Monthly` can use the existing wire type.
 
 Keep Buildmesh's existing presentation: one decimal place for percentage and a local-time reset date/time. Match Studio's underlying calculation and reset instant; its whole-number rounding and UTC formatting do not require provider-specific rendering.
 

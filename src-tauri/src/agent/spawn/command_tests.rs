@@ -79,7 +79,7 @@ fn mcode_spawn_validates_final_model_for_fresh_and_resumed_sessions() {
             SessionIdMode::Resume("mvs_test".into()),
         ] {
             let mut config = ResolvedAgentConfig {
-                model: Some("minimax/MiniMax-M3#variant".into()),
+                model: Some("custom_provider:local/MiniMax-M3#variant".into()),
                 ..Default::default()
             };
             let command = build_spawn_command_prepared(SpawnCommandInput {
@@ -110,13 +110,13 @@ fn mcode_spawn_validates_final_model_for_fresh_and_resumed_sessions() {
                     .collect();
                 let script = String::from_utf16(&utf16).unwrap();
                 assert!(
-                    script.contains("'--model' 'minimax/MiniMax-M3#variant'"),
+                    script.contains("'--model' 'custom_provider:local/MiniMax-M3#variant'"),
                     "{script}"
                 );
             } else {
                 assert!(
                     argv.windows(2)
-                        .any(|pair| pair == ["--model", "minimax/MiniMax-M3#variant"]),
+                        .any(|pair| pair == ["--model", "custom_provider:local/MiniMax-M3#variant"]),
                     "{runtime:?}: {argv:?}"
                 );
             }
@@ -142,6 +142,11 @@ fn mcode_spawn_validates_final_model_for_fresh_and_resumed_sessions() {
                 "minimax/M3#variant#extra",
                 "minimax/M3/extra",
                 "minimax/M3#variant&echo",
+                "custom_provider:/M3",
+                "custom_provider:local:extra/M3",
+                "custom_provider:local&echo/M3",
+                "custom_provider:%PATH%/M3",
+                "custom_provider:local/M3&echo",
             ] {
                 config.model = Some(invalid.into());
                 let error = build_spawn_command_prepared(SpawnCommandInput {

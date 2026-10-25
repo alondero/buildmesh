@@ -65,7 +65,7 @@ Buildmesh so the detection cache is refreshed.
 
 | Credential path | Applies to | Where to configure it |
 |---|---|---|
-| Harness-owned login or API key | Claude Code, Codex, Antigravity, OpenCode, Cursor, Grok Code, Kimi Code, MiniMax Code, DeepSeek Harness, Command Code, Freebuff, and Meta Muse | The selected CLI's own login/configuration flow |
+| Harness-owned login or API key | Claude Code, Codex, Antigravity, OpenCode, Cursor, Grok Code, Kimi Code, MiniMax Code, DeepSeek Harness, Command Code, Freebuff, Meta Muse, and Perch | The selected CLI's own login/configuration flow |
 | Buildmesh provider account | Anthropic, MiniMax, and Kimi usage/quota integrations | **Settings → Providers** |
 | Custom compatible endpoint | Claude-compatible model endpoints | **Settings → Providers**, then select the proxied profile for a harness |
 
@@ -176,7 +176,10 @@ you restart.
 
 **Agent History** finds lifecycle records across repositories, including
 archived nodes. Search by name, repository, branch or session, and filter by
-repository or lifecycle state. **Reopen** restores an archived node to the
+repository or lifecycle state. Cards show when the session last changed
+state (for an archived node, when it was archived) and, when known, when its
+process started, so you can tell two similarly named sessions apart by age.
+**Reopen** restores an archived node to the
 workspace without starting its process; **Resume** starts it separately using
 its saved session when available. **Discovered sessions** scans CLI history
 for the explicitly selected repository. The highlighted button is the view you
@@ -323,12 +326,15 @@ issue-driven review flow run the same loop:
    to the implementation agent, which commits and pushes fixes. The same reviewer,
    still open, is then asked to review again, up to the round limit.
 3. On approval the reviewer is closed and the implementation agent is asked to
-squash and merge the pull request. It marks a draft ready, brings an
-   out-of-date branch up to date with the base branch first, and waits for
-   required checks before merging. It stops and reports instead of merging only
-   if a check genuinely fails on the code or the merge stays blocked for any
-   other reason. The circuit then finishes and hands the agent
-   back to you. The agent stays open, so read its report to confirm the merge.
+   squash and merge the pull request. It marks a draft ready, rebases its
+   branch onto the base branch the pull request targets, resolves the merge
+   conflicts that rebase produces in favour of the reviewed work, pushes the
+   rebased branch, and waits for required checks before merging. It stops and
+   reports instead of merging only if a check genuinely fails on the code, a
+   conflict cannot be resolved without changing what the reviewer approved, or
+   the merge stays blocked for any other reason. The circuit then finishes and
+   hands the agent back to you. The agent stays open, so read its report to
+   confirm the merge.
 
 Legacy Autopilot controls are removed. Existing nodes, worktrees and history are
 retained, and the previous global agent cap and custom wrap-up template are carried
@@ -380,6 +386,17 @@ it is kept in the run history when you write one, and the action works without i
 An action that cannot work is not offered; the box says why instead, for example
 that a closed agent has to be resumed from Archive before a retry. A review
 approval can never be recorded on the reviewer's behalf; use **Review again**.
+
+If a prompt could not be delivered, choose **Copy payload** in the run card,
+the agent's Circuit Overview, or Circuit Run History. Paste it into the target
+agent's terminal and submit it, then choose **Sent manually** and confirm.
+The clipboard receives the exact prepared prompt, which may be a short reference
+to its full task file. This works for feedback injections, initial prompts and
+continuation prompts when a payload was retained. Copy errors stay visible and
+can be retried. The confirmation records delivery and lets the circuit continue
+observing the agent; it does not finish the agent's task or approve a review.
+Resolve any new permission or question in the terminal as usual. If the run
+changes while you act, refresh its actions before confirming again.
 
 Some runs ask for attention only because Buildmesh recorded no outcome, not
 because there is anything left to do — you may have fixed it by hand and moved on.
@@ -470,6 +487,13 @@ Each mesh is a card. The card's left edge is a full-height colour bar that does
 two jobs: click it to change the mesh colour, drag it to reorder the mesh. From
 the keyboard, <kbd>Enter</kbd> opens the colour picker and <kbd>Space</kbd> picks
 the card up for reordering, so both jobs stay reachable without a mouse.
+
+The mesh name is the card's select control: <kbd>Tab</kbd> reaches it and
+<kbd>Enter</kbd> or <kbd>Space</kbd> switches the canvas to that mesh, the same
+as clicking the name or the card. The mesh you are currently in is marked as the
+current one for screen readers. Right-clicking a card and closing its menu with
+<kbd>Escape</kbd> puts focus back on the mesh name, so the keyboard can carry on
+from there.
 
 Under the mesh name, a row of status dots summarises the mesh's agents — one dot
 per agent, coloured by that agent's status, with the count beside it. There are
@@ -592,12 +616,13 @@ The current built-in catalog is:
 | Grok Code | Yes | Hook | Cross-runtime hooks need working Windows/WSL networking |
 | Cursor | Yes | Hook | Effort control is not available through Buildmesh |
 | Kimi Code | Yes | Hook | Needs Kimi Code 0.27.0 or newer; has no transcript reader |
-| MiniMax Code | Yes | Hook | Attention reports completed turns; supports session model selection, no effort override; launched in Full Access |
+| MiniMax Code | Yes | Hook | Reports completed turns and clears attention when another prompt starts; supports session model selection, no effort override; launched in Full Access |
 | DeepSeek Harness | Yes | None | Use the terminal for progress when no signal is available |
 | Command Code | Yes | Passive watcher | Transcript-based lifecycle support is available. If typing does nothing, see [Command Code does not accept typing](troubleshooting.md#command-code-does-not-accept-typing) |
 | Freebuff | Yes | None | Model and effort overrides are not available |
 | Cline | Yes | Hook | Needs Cline 3.0.62 or newer. Manage providers with `cline auth`; Buildmesh injects account credentials at spawn |
 | Meta Muse | Yes | Passive watcher | Native on Windows since v1.3.0; WSL guest otherwise. Reasoning effort is available as `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra` |
+| Perch | Yes | None | Interactive CLI. Model and effort overrides are available; there is no transcript reader. |
 | Terminal | No | None | A plain shell; closing the app loses its live process |
 
 Capabilities can change with the installed CLI and runtime. Buildmesh hides
@@ -843,7 +868,9 @@ For **MiniMax Code**, enter the model reference from mcode's `/model` picker
 as `provider/model` (or `provider/model#variant`) in the configuration's
 **Model** field. The selected model applies to fresh and resumed sessions
 without changing mcode's global model default. Buildmesh accepts ASCII letters,
-digits, `.`, `_` and `-` in each reference part; other characters are rejected
+digits, `.`, `_` and `-` in each identifier, plus mcode's `custom_provider:`
+provider prefix for your own endpoints (for example,
+`custom_provider:local/MiniMax-M3`); other characters are rejected
 when saving or launching so Windows command parsing cannot alter the reference.
 Leave the field blank to inherit MiniMax Code's **Model** from
 **Settings → Launch Configurations**, in the **Agent Harness defaults** section,
@@ -1053,6 +1080,7 @@ auto mode because there is nobody to answer a prompt.
 | OpenCode | `--auto` | Asks |
 | Command Code | `--yolo` | Asks |
 | Meta Muse | `--disable-approval --disable-sandbox` | Asks (its own OS sandbox stays on) |
+| Perch | `--permission take_the_wheel` | Asks |
 | MiniMax Code | Full Access (`permissionMode: bypassPermissions`, pinned in its config) | Not offered — always Full Access |
 | Kimi Code, Grok Code, Cline, DeepSeek Harness, Freebuff, Terminal | No permission flag | Each runs with its own defaults |
 

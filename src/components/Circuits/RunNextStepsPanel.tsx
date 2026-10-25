@@ -18,7 +18,7 @@
  */
 
 import { useEffect, useState } from 'react';
-import { listen } from '@tauri-apps/api/event';
+import { useCircuitRunUpdates } from '../../lib/streams/circuitRunStream';
 import {
   circuitRunAttention,
   recordCircuitOutcome,
@@ -30,6 +30,7 @@ import type { CheckpointAction } from '../../types/generated/CheckpointAction';
 import type { CircuitRunAttention } from '../../types/generated/CircuitRunAttention';
 import { checkpointActionLabel, checkpointActionNeedsEvidence, describeProblem, lastRoundGuidance, recoveryGuidance } from './runNextSteps';
 import { runFailureStep } from './runStepPresentation';
+import { CopyPromptPayload } from './CopyPromptPayload';
 
 /** A backend answer we can rely on, or `null` (a mock or a skewed build). */
 function usable(value: unknown): CircuitRunAttention | null {
@@ -69,33 +70,21 @@ export function RunNextSteps({ run, steps, roleLabel, busy }: RunNextStepsProps)
     nodeId: string;
     attempt: number;
     action: CheckpointAction;
+    revision: number;
     startsNextReview: boolean;
     endsReview: boolean;
   } | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Live transitions of THIS run. `circuit-run-updated` is owned by
+  // `lib/streams/circuitRunStream` (issue #2531) — the owner filters the
+  // event down to the run in scope, so this panel never matches a raw
+  // payload itself.
+  const runUpdates = useCircuitRunUpdates(run.id);
+  // Manual refresh counter — the panel's own actions re-read the run
+  // after the backend accepted the outcome.
   const [refresh, setRefresh] = useState(0);
   const failed = run.state === 'failed';
-
-  useEffect(() => {
-    let current = true;
-    const subscription = listen<unknown>('circuit-run-updated', ({ payload }) => {
-      if (
-        current &&
-        typeof payload === 'object' &&
-        payload !== null &&
-        'run_id' in payload &&
-        payload.run_id === run.id
-      ) {
-        setRefresh((value) => value + 1);
-      }
-    });
-    void subscription.catch(() => {});
-    return () => {
-      current = false;
-      void subscription.then((unlisten) => unlisten(), () => {});
-    };
-  }, [run.id]);
 
   useEffect(() => {
     let current = true;
@@ -110,7 +99,7 @@ export function RunNextSteps({ run, steps, roleLabel, busy }: RunNextStepsProps)
     return () => {
       current = false;
     };
-  }, [run.id, run.updated_at, refresh]);
+  }, [run.id, run.updated_at, refresh, runUpdates]);
 
   const failure = runFailureStep(steps);
   const recovery = attention?.recovery ?? null;
@@ -164,13 +153,13 @@ export function RunNextSteps({ run, steps, roleLabel, busy }: RunNextStepsProps)
         reason: note,
       }),
     );
-  const record = (nodeId: string, attempt: number, action: CheckpointAction) =>
+  const record = (nodeId: string, attempt: number, action: CheckpointAction, revision = attention!.revision) =>
     act(() =>
       recordCircuitOutcome({
         run_id: run.id,
         node_id: nodeId,
         attempt,
-        expected_revision: attention!.revision,
+        expected_revision: revision,
         action,
         // Checking again changes nothing, so it needs no justification.
         reason: note.trim() === '' && action === 'recheck' ? 'Checked again from the run card.' : note,
@@ -271,6 +260,11 @@ export function RunNextSteps({ run, steps, roleLabel, busy }: RunNextStepsProps)
             <div key={`${checkpoint.node_id}:${checkpoint.attempt}`} data-testid={`run-checkpoint-${run.id}-${checkpoint.node_id}`}>
               <p className="text-text-secondary">{roleLabel(checkpoint.node_id)}</p>
               <div className="mt-0.5 flex items-center gap-1.5 flex-wrap">
+                {checkpoint.actions.includes('manual_delivered') && <CopyPromptPayload
+                  key={`${checkpoint.node_id}:${checkpoint.attempt}:${attention.revision}`}
+                  request={{ run_id: run.id, node_id: checkpoint.node_id, attempt: checkpoint.attempt, expected_revision: attention.revision }}
+                  disabled={disabled}
+                />}
                 {checkpoint.actions.map((action) => {
                   // Checking again changes nothing and acts at once; recording a
                   // result is a statement, so it asks what you checked first.
@@ -287,11 +281,11 @@ export function RunNextSteps({ run, steps, roleLabel, busy }: RunNextStepsProps)
                       aria-expanded={needsNote ? open : undefined}
                       onClick={() =>
                         needsNote
-                          ? setRecording(open ? null : { nodeId: checkpoint.node_id, attempt: checkpoint.attempt, action, startsNextReview: checkpoint.starts_next_review, endsReview: checkpoint.ends_review })
+                          ? setRecording(open ? null : { nodeId: checkpoint.node_id, attempt: checkpoint.attempt, action, revision: attention.revision, startsNextReview: checkpoint.starts_next_review, endsReview: checkpoint.ends_review })
                           : void record(checkpoint.node_id, checkpoint.attempt, action)
                       }
                       data-testid={`run-checkpoint-${run.id}-${checkpoint.node_id}-${action}`}
-                      className="px-1.5 py-1 rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40"
+                      className="min-h-6 px-1.5 py-1 rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40"
                     >
                       {checkpointActionLabel(action, checkpoint.starts_next_review, checkpoint.ends_review)}
                     </button>
@@ -306,7 +300,9 @@ export function RunNextSteps({ run, steps, roleLabel, busy }: RunNextStepsProps)
           {recording !== null && (
             <div className="space-y-1">
               <label className="block text-text-secondary">
-{recording.action === 'review_pass' || recording.action === 'review_fail' ? 'Your review decision and evidence will be recorded. Autopilot will follow this verdict.' : 'What did you check? Optional — saved in the run history when given; it does not grant approval.'}
+{recording.action === 'manual_delivered'
+  ? 'Confirm you pasted the payload into the agent terminal and submitted it. This records delivery and waits for the agent where required. Optional note:'
+  : recording.action === 'review_pass' || recording.action === 'review_fail' ? 'Your review decision and evidence will be recorded. Autopilot will follow this verdict.' : 'What did you check? Optional — saved in the run history when given; it does not grant approval.'}
                 <textarea
                   value={note}
                   onChange={(event) => setNote(event.target.value)}
@@ -319,9 +315,9 @@ export function RunNextSteps({ run, steps, roleLabel, busy }: RunNextStepsProps)
               <button
                 type="button"
                 disabled={disabled || (checkpointActionNeedsEvidence(recording.action) && note.trim() === '')}
-                onClick={() => void record(recording.nodeId, recording.attempt, recording.action)}
+                onClick={() => void record(recording.nodeId, recording.attempt, recording.action, recording.revision)}
                 data-testid={`run-checkpoint-confirm-${run.id}`}
-                className="px-1.5 py-1 rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40"
+                className="min-h-6 px-1.5 py-1 rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40"
               >
                 Confirm: {checkpointActionLabel(recording.action, recording.startsNextReview, recording.endsReview)}
               </button>

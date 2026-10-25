@@ -2,7 +2,7 @@ import type { ReactNode, Ref } from 'react';
 
 /**
  * Shared skeleton for the right-hand utility cluster (Usage, Zoom, Settings,
- * Remote Access). Same style vocabulary as the ViewModeSwitcher segments
+ * Remote Access, More). Same style vocabulary as the ViewModeSwitcher segments
  * (issue #1609): borderless, card-hover, active cyan — the pills read as
  * part of the same toolbar instead of a separate bordered group.
  *
@@ -45,21 +45,11 @@ export function HeaderPillButton({ icon, label, onClick, title, ariaLabel, activ
       }`}
     >
       {icon}
-      {/* Icon-only below 1440px window width — unified with the
-          switcher's ladder (issue #1609; previously the pills dropped at
-          1150px, so between the two tiers the bar mixed labelled
-          segments with icon pills). The threshold moved from 1300px to
-          1400px to avoid a 2px clip on the rightmost ViewModeSwitcher
-          segment ("Filtered") at exactly 1300px, then from 1400px to
-          1440px in #2081 review: 1400px was measured over budget in both
-          header grids. In Filtered (`grid-cols-[auto_minmax(0,1fr)_auto]`,
-          both side tracks content-sized) the labelled bar needs left
-          726px + centre min-content 143px + right 538px = 1407px, and in
-          Mesh Grid the left cell clipped by 6px at exactly 1400px. 1440 is
-          the first width measured clean in both (Filtered centre 145px
-          against a 145px min-content). The aria-label above keeps the
-          accessible name stable. */}
-      <span className="max-[1439px]:hidden">{label}</span>
+      {/* Always labelled (#2421). The bar no longer degrades pills to bare
+          glyphs: below `UTILITIES_IN_BAR_MIN_WIDTH` the utilities fold into
+          the More panel instead, and More — the one pill left — keeps its
+          name because it is the route to them. */}
+      <span className="whitespace-nowrap">{label}</span>
     </button>
   );
 }

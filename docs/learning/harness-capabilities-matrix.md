@@ -49,7 +49,7 @@ Run `cargo test -p buildmesh agent::capabilities` after an adapter edit, then
 
 ## Harness catalog
 
-Thirteen detected harnesses plus the always-present Terminal give fourteen rows.
+Fourteen detected harnesses plus the always-present Terminal give fifteen rows.
 "Adapter id" is the stable id matching the database `provider` column.
 
 | Harness | Adapter id | Detection binary | Config dir(s) |
@@ -67,6 +67,7 @@ Thirteen detected harnesses plus the always-present Terminal give fourteen rows.
 | Freebuff | `freebuff` | `freebuff` | `.config/manicode` |
 | Meta Muse | `muse` | `muse` | — |
 | Cline | `cline` | `cline` | `.cline` |
+| Perch | `perch` | `perch` | `.perch` |
 | Terminal | `terminal` | — (always present) | — |
 
 Two entries are not harnesses of their own:
@@ -100,17 +101,18 @@ Legend: ✅ advertised, ❌ not advertised. Column shorthand:
 | OpenCode | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Attention arrives through the project plugin |
 | Kimi Code | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ | ❌ | ❌ | Hook needs 0.27.0+; no transcript reader |
 | Grok Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Hook validated against 1.0.5 |
-| MiniMax Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Session-only `--model` verified in native Windows `mcode.cmd 0.6.5` help; macOS/Linux/WSL model support unverified; attention hook validated on 0.4.12 (`Stop` only) |
+| MiniMax Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Session-only `--model` verified in native Windows help; `UserPromptSubmit` resumes work using the 0.6.13 hook contract; see the [capability review](mcode-harness-capabilities.md) for delivery evidence and platform limits |
 | DeepSeek Harness | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | Capabilities deliberately gated (no validated profile) |
 | Command Code | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Passive watcher replaces a native hook |
 | Freebuff | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | No model or effort override |
 | Meta Muse | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Native on Windows since Muse 1.3.0; workspace trust pre-provisioned (#1706); `--reasoning-effort` closed vocabulary (#1704) |
 | Cline | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Native Provider; hook delivers turn completion only (no clean-exit dispatch); reader over `<id>.messages.json` (#1776) |
+| Perch | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ | Resume via `--thread`; closed `--effort`; [deep dive](perch-harness-capabilities.md) |
 | Terminal | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | Plain shell; the only `PlainShell` launch mode |
 
 Ten harnesses are archive-resumable (Resume **and** Transcript): Claude Code,
 Codex, Cursor, Antigravity, OpenCode, Grok Code, MiniMax Code, Command Code, Meta
-Muse, and Cline. Kimi Code and Freebuff support process resume
+Muse, and Cline. Kimi Code, Freebuff, and Perch support process resume
 but are **not** resumable from the archive picker because they have no
 transcript reader. DeepSeek Harness and Terminal do not resume at all.
 
@@ -142,7 +144,7 @@ the node being named still needs a turn signal to trigger naming.
 | Command Code | stdin (`--print`) | JSON result event | Native only |
 | MiniMax Code | stdin (`exec --input -`) | `--output-last-message` file | Native only |
 
-Cursor, Cline, Freebuff, Meta Muse, DeepSeek Harness, and Terminal currently
+Cursor, Cline, Freebuff, Meta Muse, DeepSeek Harness, Perch, and Terminal currently
 advertise no background recipe. This does not imply their CLI lacks a headless
 mode: Buildmesh requires a validated recipe and final-answer extractor before
 offering one. New adapters inherit unavailable background support by default.
@@ -165,7 +167,7 @@ and [Kimi Code command reference](https://www.kimi.com/code/docs/en/kimi-code-cl
 ## Attention hooks
 
 Non-boolean detail for the nine harnesses with a native attention hook
-(`attention_capability`). The other five have no hook wired yet.
+(`attention_capability`). The other six have no hook wired yet.
 
 | Harness | Launch mode | Lifecycle events | Min. CLI version | Trust requirement |
 |---|---|---|---|---|
@@ -235,6 +237,7 @@ executor at the spawn seam.
 | Meta Muse | Watcher | ✅ |
 | DeepSeek Harness | None | ❌ |
 | Freebuff | None | ❌ |
+| Perch | None | ❌ |
 | Terminal | None (plain shell) | ❌ |
 
 Eligibility is necessary, not sufficient, and two of the ✅ rows are weaker than
@@ -267,6 +270,7 @@ See [node review circuits](../development/agent-node-circuits.md).
 | Grok Code | Closed flag | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` |
 | Command Code | Closed flag | `low`, `medium`, `high` |
 | Cline | Closed flag (`--thinking`) | `none`, `low`, `medium`, `high`, `xhigh` |
+| Perch | Closed flag (`--effort`) | `off`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra` |
 | All other harnesses | None | — (the resolver drops the effort layer) |
 
 Claude Code and Grok expose the union of their model-specific effort levels;
@@ -293,6 +297,7 @@ chooses its own and Buildmesh recovers it.
 | Freebuff | Buildmesh mints | No |
 | Meta Muse | Self-assigns | No |
 | Cline | Self-assigns | No |
+| Perch | Buildmesh mints | No |
 | Terminal | Buildmesh mints | No |
 
 Three other adapter-level behaviours worth knowing when adding support:
@@ -354,6 +359,6 @@ column here.
 - [Harness attention reliability audit](harness-attention-reliability.md) — per-harness hook evidence and remaining gaps
 - [User guide: harnesses and capabilities](../user-guide.md#harnesses-and-capabilities)
 - [Troubleshooting](../troubleshooting.md)
-- Per-harness deep dives: [Antigravity](agy-harness-capabilities.md), [Claude Code](claude-code-harness-capabilities.md), [Grok Code](grok-harness-capabilities.md), [MiniMax Code](mcode-harness-capabilities.md), [OpenCode](opencode-harness-capabilities.md), [Cline](cline-harness-capabilities.md), [Meta Muse](muse-harness-capabilities.md)
+- Per-harness deep dives: [Antigravity](agy-harness-capabilities.md), [Claude Code](claude-code-harness-capabilities.md), [Grok Code](grok-harness-capabilities.md), [MiniMax Code](mcode-harness-capabilities.md), [OpenCode](opencode-harness-capabilities.md), [Cline](cline-harness-capabilities.md), [Meta Muse](muse-harness-capabilities.md), [Perch](perch-harness-capabilities.md)
 - [Domain vocabulary](../../CONTEXT.md) — Agent Harness vs Model Provider
 - [AI context](../knowledge-primer.md)

@@ -1,3 +1,5 @@
+import { PROBE_TAB_DEFINITIONS } from '../../lib/probeContext';
+import { useProbeResource, type ProbeLoadContext } from '../../lib/probeResource';
 /**
  * UsageTab — the Probe Panel's "Usage" tab body (issue #601).
  *
@@ -48,15 +50,9 @@
  *   body falls back to `<ErrorState>` ONLY when no rows have ever
  *   loaded (cold-cache first-load rejection).
  *
- *   Request sequencing (review item #7): `loadMeters` tags each
- *   in-flight call with a monotonic id and drops stale resolves /
- *   rejections. Without this, a Refresh click racing an invalidation
- *   re-fetch could overwrite newer state with older data and clear
- *   the spinner mid-flight.
- *
- *   `isRefreshing` is owned by `handleRefresh` only — the mount-time
- *   and invalidation paths don't flip it (the cold-cache early-return
- *   hides the toolbar/body anyway, and invalidations are background).
+ *   The shared Probe resource owns request sequencing and busy feedback.
+ *   A background invalidation that supersedes a manual Refresh keeps its
+ *   spinner until the newest read settles.
  *
  *   OPEN FOLLOW-UP (issue #857, deferred — see "Cache age wire gap"
  *   below): the indicator currently labels every successful read
@@ -96,7 +92,7 @@
  * Issue #857 — fetch-failure error UI de-duplication (revised by #1488)
  * ---------------------------------------------------------------------
  * The pre-#857 tab rendered the IPC error message in *two* places when
- * `loadMeters` rejected after rows had loaded: the inline red alert
+ * the resource read rejected after rows had loaded: the inline red alert
  * banner above the rows region AND the body's `<ErrorState>`. The
  * duplicated copy is the exact pattern the shared vocabulary was
  * created to prevent (issue #813).
@@ -118,9 +114,9 @@
  * Cache age wire gap (issue #857 follow-up — out of scope here)
  * -------------------------------------------------------------
  * The "Refreshed just now" / "Xs ago" indicator is stamped on the
- * React side at the moment `loadMeters` resolves, NOT at the moment
+ * React side at the moment the resource read resolves, NOT at the moment
  * each provider's vendor endpoint returned. The Rust cache
- * (`services/usage.rs::CACHE_TTL`, 5 min) means a request can come
+ * (`services/usage/cache.rs::CACHE_TTL`, 5 min) means a request can come
  * back fast without any vendor being contacted — the indicator
  * then mislabels a cache hit as a fresh fetch. The fix is a wire-
  * shape change:
@@ -145,11 +141,9 @@
  * UI semantics — as warranting a separate commit).
  */
 
-import { formatError } from '../../lib/errorUtils';
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import * as api from '../../lib/tauri';
 import type { ProviderAccount, ProviderMeters } from '../../lib/tauri';
-import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
 import { useOpencodeAccountInvalidation } from '../../hooks/useOpencodeAccountInvalidation';
 import { UsagePanel } from '../AppSettings/UsageRender';
@@ -199,84 +193,19 @@ export function RefreshedAgo({ since }: { since: Date }) {
   );
 }
 
+export async function loadUsage({ force }: ProbeLoadContext) {
+  const [meters, accounts] = await Promise.all([
+    api.getProviderMeters(force ?? false), api.getProviderAccounts(),
+  ]);
+  return { meters, accounts, refreshedAt: new Date() };
+}
+
 export function UsageTab() {
-  const [meters, setMeters] = useState<ProviderMeters[] | null>(null);
-  const [accounts, setAccounts] = useState<ProviderAccount[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  // Flips true once the first load attempt has resolved (success or
-  // failure). Distinguishes "first fetch is still in flight" from
-  // "first fetch rejected" — the prior `meters === null` early-return
-  // hid a first-load rejection behind `<LoadingState>` indefinitely,
-  // leaving the user staring at a spinner even though `loadMeters`
-  // had already populated `error`. Issue #813 review caught this.
-  const [attempted, setAttempted] = useState(false);
-  // Owned by `handleRefresh` only (review item #3 — the previous
-  // "mount-time wiring" of this flag was a placebo; the cold-cache
-  // `<LoadingState>` early-return wins before the toolbar / body is
-  // ever rendered). Set synchronously before the await so React
-  // renders the busy state before the IPC roundtrip; cleared in
-  // `handleRefresh`'s `finally` so a rejected fetch can't leave
-  // the button stuck disabled.
-  const [isRefreshing, setIsRefreshing] = useState(false);
-  // Wall-clock timestamp of the last successful load. Updated only when
-  // `loadMeters` resolves without throwing — a failed refresh leaves the
-  // previous timestamp in place so the staleness indicator continues
-  // to point at the last known-good moment. `null` until the very
-  // first successful load completes (the header hides the indicator
-  // during the initial loading state and after a first-load rejection).
-  const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
-
-  // Request sequencing (#1488 review item #7). When a Refresh click
-  // races an invalidation hook, the older promise resolving last
-  // would otherwise overwrite newer state with stale data and clear
-  // `isRefreshing` mid-flight. Each in-flight call tags itself with a
-  // monotonic id; resolves / rejections whose tag no longer matches
-  // the latest id are dropped before they touch React state. A ref is
-  // correct here — the id is render-irrelevant.
-  const requestIdRef = useRef(0);
-
-  // Tracks the latest user-initiated Refresh's id (review #1508 item
-  // #2). `handleRefresh`'s `finally` only clears `isRefreshing` if
-  // THIS call is still the latest — without this guard, an older
-  // Refresh click whose load was dropped as stale (because a newer
-  // click or an invalidation hook fired a competing load) would
-  // clear the spinner mid-flight. A second counter — separate from
-  // `requestIdRef` — means the user-driven lifecycle can be reasoned
-  // about independently of the data-staleness guard.
-  const refreshIdRef = useRef(0);
-
-  const loadMeters = useCallback(async (force: boolean) => {
-    const requestId = ++requestIdRef.current;
-    try {
-      const [meterRows, accountRows] = await Promise.all([
-        api.getProviderMeters(force),
-        api.getProviderAccounts(),
-      ]);
-      // Idempotent — first settled request flips `attempted` for good;
-      // later stale settles can't un-flip it. Sequencing below prevents
-      // a stale resolve from overwriting newer state.
-      setAttempted(true);
-      if (requestId !== requestIdRef.current) return;
-      setLastRefreshedAt(new Date());
-      setMeters(meterRows);
-      setAccounts(accountRows);
-      setError(null);
-    } catch (e) {
-      setAttempted(true);
-      if (requestId !== requestIdRef.current) return;
-      console.error('Failed to load usage:', e);
-      setError(formatError(e));
-    }
-  }, []);
-
-  // Initial load — non-forced. The cold-cache first load renders
-  // `<LoadingState>` (see the early-return below); `isRefreshing` is
-  // intentionally NOT flipped here because nothing on screen carries
-  // the affordance until the early-return is gone (review item #3 —
-  // the previous "mount-time wiring" was a placebo).
-  useAsyncEffect(() => {
-    void loadMeters(false);
-  }, [loadMeters]);
+  const resource = useProbeResource(PROBE_TAB_DEFINITIONS.usage.load, { meshId: null }, 'host');
+  const { error, attempted, refreshing: isRefreshing } = resource.state;
+  const meters = resource.state.data?.meters ?? null;
+  const accounts = resource.state.data?.accounts ?? [];
+  const lastRefreshedAt = resource.state.data?.refreshedAt ?? null;
 
   // Cross-surface invalidation (issue #601 review): when the user enables,
   // disables, or removes a provider in `AppSettingsModal`, the Rust backend
@@ -285,7 +214,7 @@ export function UsageTab() {
   // and a removed provider's row drops out immediately if the tab is already
   // mounted. Same hook every other Probe tab uses — module-scope event-name
   // constant lives in `useProviderListInvalidation.ts` (Rust+TS drift guard).
-  useProviderListInvalidation(() => { void loadMeters(false); });
+  useProviderListInvalidation(() => { void resource.reload(); });
 
   // OpenCode account surface — when the user signs in, signs out, or
   // switches workspaces, the `opencode-console-changed` event fires
@@ -294,7 +223,7 @@ export function UsageTab() {
   // emit sites, so a `force=true` re-fetch here can't hit a stale
   // envelope. Without this, a freshly-signed-in user would see
   // outdated numbers for up to 5 minutes (the `CACHE_TTL`).
-  useOpencodeAccountInvalidation(() => { void loadMeters(true); });
+  useOpencodeAccountInvalidation(() => { void resource.reload({ force: true }); });
 
   // No tab-level ticker (issue #1751): the "Refreshed X ago" label
   // ticks inside `RefreshedAgo`, so the tab itself never re-renders on
@@ -324,34 +253,7 @@ export function UsageTab() {
         )
     : [];
 
-  // User-driven Refresh. Owns the `isRefreshing` lifecycle (the mount
-  // and invalidation paths don't flip it — the cold-cache early-return
-  // hides the surface, and invalidations are background). `loadMeters`
-  // swallows rejections internally, so there's no try/catch here
-  // either — it would never fire (review item #5). We `await` rather
-  // than fire-and-forget so the button's spinner stays up until the
-  // IPC settles; `finally` clears the flag ONLY if both (a) THIS call
-  // is still the latest user-initiated refresh (no second click
-  // overtook us), AND (b) no other `loadMeters` — from any source
-  // including background invalidations — has fired since ours
-  // (review #1508 item #2). Two ref-based snapshots: `refreshIdRef`
-  // catches user-clicks; the post-increment value of `requestIdRef`
-  // catches everything.
-  const handleRefresh = async () => {
-    const myRefreshId = ++refreshIdRef.current;
-    const myLoadId = requestIdRef.current + 1;
-    setIsRefreshing(true);
-    try {
-      await loadMeters(true);
-    } finally {
-      if (
-        refreshIdRef.current === myRefreshId &&
-        requestIdRef.current === myLoadId
-      ) {
-        setIsRefreshing(false);
-      }
-    }
-  };
+  const handleRefresh = () => resource.reload({ force: true, manual: true });
 
   // The staleness indicator hides entirely until the first successful
   // load completes (the LoadingState placeholder is showing anyway, and

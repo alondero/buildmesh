@@ -45,11 +45,36 @@ ordering, health, recovery and harness capability limits.
 ### False-Yield Suppression (issue #878)
 
 MiniMax Code Stop reconciliation reads the node's canonical `messages.jsonl`
-and native `background-tasks` store, resolved through its own session ID and
+and native task stores, resolved through its own session ID and
 spawn environment. It does not apply Claude's task scanner to MiniMax's
 temporary compatible hook transcript. Explicit and timeout-promoted launches
-remain pending until a native terminal tool receipt or terminal summary settles
-them. Missing or partial canonical history remains unavailable evidence. An
+remain pending until native terminal evidence settles them. MiniMax 0.6.13's
+`v2/sqlite/runtime-state.sqlite` retains task status in
+`local_runtime_background_tasks`; the reader opens it read-only and matches
+both the launched task ID and the canonical manifest's session ID. A terminal
+status with an end time at or after native task creation settles failed,
+cancelled and `lost` tasks too. `lost` is MiniMax's terminal startup-recovery
+state when its runtime restarted before a task completed; it proves termination,
+not successful work. The same terminal-status predicate reads native tool
+receipts and database rows. Their last `task_output` can still say `running`, and unlike successful
+commands they need not produce `background-tasks/<id>/summary.txt` or a later
+terminal transcript receipt. A running or unknown native row remains pending;
+missing SQLite storage retains the legacy receipt/summary behavior. An
+unreadable native store, or an existing database missing the task table, is
+unavailable evidence rather than a legacy fallback. Stop then degrades to an
+attention mark. The idle-stall detector uses the same session-bound registry
+reconciliation: an earlier failed or lost task cannot suppress a wake for
+another task that finished after the last assistant activity. Its canonical
+transcript path identifies the runtime store through the same resolver Stop
+uses, without reading another home. If an existing registry is busy, corrupt or
+missing its task table, wake detection returns no candidate even when a
+`summary.txt` exists. This conservatively preserves a possible newer native
+running-state veto. This is an intentional exception to the callback rule below:
+the periodic wake probe emits no attention mark itself. A permanently unreadable
+registry can suppress the nudge indefinitely without operator repair or a fresh
+Stop callback. A fresh Stop still marks unavailable evidence, even when summaries
+exist; a later probe resumes nudges once the registry is readable.
+Missing or partial canonical history remains unavailable evidence. An
 unanswered foreground tool call also leaves Stop completion evidence unavailable;
 its matching native result must arrive before Stop can report Ready. The
 native lookup runs even when the compatible transcript path is missing or empty.
@@ -57,7 +82,7 @@ If the first Stop precedes identity capture, it uses the validated callback
 session of the already resolved workspace owner; application still requires the
 existing generation and conditional identity fences.
 
-Claude Code ends its turn when it launches background work (`run_in_background` Bash, timeout-backgrounded commands) and re-invokes itself when the `<task-notification>` arrives — so a Stop (or 60s-idle Notification) is *not* always "the user is needed". The route reads `transcript_path` from the hook payload and asks `transcript_reader::count_pending_background_tasks` for launched-but-unnotified task IDs; finish = a `<task-id>` notification with a **terminal** status — `running`-status notifications don't count. A launch needs both halves of one exchange: a `tool_result` promising "You will be notified when it completes" **and** the `tool_use` it answers, named as a launch-capable tool (`Bash` — the only tool Claude Code launches background work from), with the receipt opening the result text. Wording alone is not evidence, since a tool result carries text too: an agent reading this repository's own source sees both launch phrasings quoted back in a `Read` result, and no notification can settle the task that wording alone would have registered. A receipt with no launch-capable call behind it owns no task. Pending work → the Node Turn is published via `node_turn::publish_hook` with `background_running` (naming/autopilot still fire; no attention mark). Permission-prompt Notifications always mark, even mid-background-wait. Any unknown (empty/garbage body, unreadable transcript) degrades to marking — never to silence.
+Claude Code ends its turn when it launches background work (`run_in_background` Bash, timeout-backgrounded commands) and re-invokes itself when the `<task-notification>` arrives — so a Stop (or 60s-idle Notification) is *not* always "the user is needed". The route reads `transcript_path` from the hook payload and asks `transcript_reader::count_pending_background_tasks` for launched-but-unnotified task IDs; finish = a `<task-id>` notification with a **terminal** status — `running`-status notifications don't count. A launch needs both halves of one exchange: a `tool_result` promising "You will be notified when it completes" **and** the `tool_use` it answers, named as a launch-capable tool (`Bash` — the only tool Claude Code launches background work from), with the receipt opening the result text. Wording alone is not evidence, since a tool result carries text too: an agent reading this repository's own source sees both launch phrasings quoted back in a `Read` result, and no notification can settle the task that wording alone would have registered. A receipt with no launch-capable call behind it owns no task. Pending work → the Node Turn is published via `node_turn::publish_hook` with `background_running` (naming/autopilot still fire; no attention mark). Permission-prompt Notifications always mark, even mid-background-wait. For Stop and Notification attention callbacks, unknown evidence (empty/garbage body, unreadable transcript) degrades to marking. The periodic MiniMax wake probe has the conservative silence exception described above.
 
 Claude Code can stop a background command through `TaskStop` without queuing a terminal task notification. The transcript scan also accepts a successful `TaskStop` result bound to the matching tool call and task ID. A failed stop, a request without its result, or unrelated tool output keeps that task pending. Stop and idle Notification callbacks use this same scan.
 
@@ -113,12 +138,17 @@ provisioned only where the installed harness contract is verified; Terminal,
 Freebuff, and unvalidated DeepSeek profiles retain explicit capability gaps
 rather than guessing from PTY output. MiniMax's Agent-Plugin attention hook is
 live: `requires_attention_hook` is `true` after the issue #1797 validation
-delivered `Stop` from the installed 0.4.12 TUI. SessionStart is provisioned
-for identity capture, but delivery from that TUI is unvalidated; live Stop also
-delivered the session id after a completed turn. mcode 0.4.0+ reads
-`.claude-plugin/plugin.json` with `hooks` **inlined** (a separate
-`hooks/hooks.json` document is ignored, and a directory with no manifest is
-skipped silently), runs `command` + `args` with no shell interpretation, and
+delivered `Stop` from the installed 0.4.12 TUI. A native Windows 0.6.13 TUI
+probe with an isolated BYOK model and hook collector captured SessionStart,
+UserPromptSubmit and Stop. This validates native delivery and payloads, not the
+running Buildmesh app's shared route. SessionStart captures identity when the
+first turn starts; an empty TUI has not emitted it yet. Buildmesh provisions
+`UserPromptSubmit` as `work_resumed`,
+clearing attention when another prompt starts. Claude-compatible callbacks carry
+the native turn identity in `prompt_id`, which the ordering fence uses to reject
+a delayed Stop from an earlier turn. Buildmesh retains the inline
+`.claude-plugin/plugin.json` hooks used by 0.4.12 and verified on 0.6.13,
+runs `command` + `args` with no shell interpretation, and
 `env_clear()`s `BUILDMESH_*` — so the shared callback URL bakes the ports. It
 bakes every Buildmesh instance listening on the machine, not just the one
 that spawned the node: the manifest is one user-global file, so naming only the
@@ -136,8 +166,7 @@ the same in the interop relay. Without it, one sibling that has exited would
 surface as a hook error instead of a lost notification. See
 [Remote Access](remote-access.md#multiple-instances-on-one-machine) for the
 registry's location and lifetime. Native session/workspace payloads resolve the
-node; the provisioned SessionStart handler is capture-only, but its delivery
-has not been observed live.
+node; the provisioned SessionStart handler is capture-only.
 Only `TurnCompleted` is advertised: the launch pins Full Access
 (`permissionMode: bypassPermissions`, a surgical one-line edit to
 `<dataDir>/config.yaml` — the TUI has no permission flag), so no permission
@@ -206,7 +235,7 @@ Only the chain's terminal session is adoptable. Absent, malformed or non-UUID re
 `AgentTerminal` component auto-spawns the agent when mounting an agent node with `status === 'idle'` and a `provider`. It uses `fitAddon.proposeDimensions()` to get PTY size before calling `spawn_agent`. This couples terminal mount directly to agent spawn — debugging attention issues requires tracing this path.
 
 ## Agent Node ID Capture
-Session IDs are **assigned, not captured**, for providers whose CLI accepts a caller-chosen id (Anthropic): the orchestrator mints a UUID up front, writes it to `agent_nodes.cli_session_id` *before* launch, and passes it via `--session-id <uuid>` (`agent/spawn.rs`, `SessionIdMode::Assign`; ADR 0024). The PTY reader thread's labeled-UUID sniff (`session_capture.rs`) runs **only** for self-assigning providers that print a UUID banner (Codex, Antigravity) — gated by `reader_should_capture_session_id` / `captures_session_id_from_pty` so there is exactly one writer per spawn (issue #651). Recent Codex TUIs often omit the banner: SessionStart (hook payload) and the rollout `session_meta` poller (`after_fresh_spawn`) are the load-bearing capture paths; PTY sniff is opportunistic. Antigravity also self-assigns UUIDs without printing them: `services::agy_session` scans transcripts past the mtime gate, reads matching launch `workspace_uris` from the sibling read-only `conversation_summaries.db`, and uses a single unambiguous decodable file root as an anchor when its path form matches the spawn directory; multi-root rows fall back to transcript Cwd. WSL guest paths and host UNC paths are not reconciled here; transcript Cwd follows the same limitation. Missing or unreadable summary data, blank rows, rows with no decodable root, and ambiguous multi-root rows fall back to transcript Cwd; malformed metadata for that conversation remains unverified. OpenCode also self-assigns, but its ids are `ses_…` (not UUIDs) and are not printed on the TUI: a fresh spawn uses `SessionIdMode::None` and `OpenCodeAdapter::after_fresh_spawn` reads the local `opencode.db` SQLite store (`services::opencode_session`) for a row created in the spawn time window whose `directory` matches the node; resume is `--session <id>`. MiniMax Code (`mcode`) also self-assigns: Buildmesh provisions SessionStart capture, but delivery from the installed TUI is unvalidated. Live Stop callbacks do deliver the session id and can capture identity after the first completed turn. Until a callback arrives, a new node has no stored session id; the removed time-window manifest poller has no verified replacement. The callback route binds a unique live node by conversation id and workspace (`services::mcode_session`), with a conditional write fenced by provider, workspace, process generation, and duplicate ownership. PTY sniff remains off. Don't replicate any of these paths — they are backend-only. `CLAUDE_CODE_SESSION_ID` is deliberately **not** used: Claude Code sets its `CLAUDE_CODE_*` vars *downward* into its own subprocesses, so a parent that spawns `claude` can't read it, and for Claude we already know the ID (we assigned it). See ADR 0024 and `docs/learning/opencode-harness-capabilities.md`.
+Session IDs are **assigned, not captured**, for providers whose CLI accepts a caller-chosen id (Anthropic): the orchestrator mints a UUID up front, writes it to `agent_nodes.cli_session_id` *before* launch, and passes it via `--session-id <uuid>` (`agent/spawn.rs`, `SessionIdMode::Assign`; ADR 0024). The PTY reader thread's labeled-UUID sniff (`session_capture.rs`) runs **only** for self-assigning providers that print a UUID banner (Codex, Antigravity) — gated by `reader_should_capture_session_id` / `captures_session_id_from_pty` so there is exactly one writer per spawn (issue #651). Recent Codex TUIs often omit the banner: SessionStart (hook payload) and the rollout `session_meta` poller (`after_fresh_spawn`) are the load-bearing capture paths; PTY sniff is opportunistic. Antigravity also self-assigns UUIDs without printing them: `services::agy_session` scans transcripts past the mtime gate, reads matching launch `workspace_uris` from the sibling read-only `conversation_summaries.db`, and uses a single unambiguous decodable file root as an anchor when its path form matches the spawn directory; multi-root rows fall back to transcript Cwd. WSL guest paths and host UNC paths are not reconciled here; transcript Cwd follows the same limitation. Missing or unreadable summary data, blank rows, rows with no decodable root, and ambiguous multi-root rows fall back to transcript Cwd; malformed metadata for that conversation remains unverified. OpenCode also self-assigns, but its ids are `ses_…` (not UUIDs) and are not printed on the TUI: a fresh spawn uses `SessionIdMode::None` and `OpenCodeAdapter::after_fresh_spawn` reads the local `opencode.db` SQLite store (`services::opencode_session`) for a row created in the spawn time window whose `directory` matches the node; resume is `--session <id>`. MiniMax Code (`mcode`) also self-assigns: native Windows 0.6.13 hook captures establish SessionStart delivery when the first turn starts, followed by UserPromptSubmit and Stop with the same session identity. These captures use a command collector, not the running Buildmesh app. Until a callback arrives, a new node has no stored session id; an empty TUI has not emitted SessionStart yet. The callback route binds a unique live node by conversation id and workspace (`services::mcode_session`), with a conditional write fenced by provider, workspace, process generation, and duplicate ownership. PTY sniff remains off. Don't replicate any of these paths — they are backend-only. `CLAUDE_CODE_SESSION_ID` is deliberately **not** used: Claude Code sets its `CLAUDE_CODE_*` vars *downward* into its own subprocesses, so a parent that spawns `claude` can't read it, and for Claude we already know the ID (we assigned it). See ADR 0024 and `docs/learning/opencode-harness-capabilities.md`.
 
 ## Turn Counting and Node Naming
 

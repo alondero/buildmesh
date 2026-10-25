@@ -1,5 +1,35 @@
 import { vi } from 'vitest';
-import { cleanup } from '@testing-library/react';
+import { cleanup, configure } from '@testing-library/react';
+
+// ============================================================
+// Async-query budget (issues #1520, #2539)
+// ============================================================
+
+// React Testing Library polls an async query (`findBy*`, `waitFor`) for 1s
+// before it reports a miss. The suite's own per-test budget is 30s
+// (vitest.config.ts), and the reason for raising that one is the same: on
+// Windows the machine decides how long a render takes, so the budget — not
+// the behaviour — used to decide the result. The query budget was the one
+// left behind at RTL's default.
+//
+// This setup file runs for both projects (`vitest.config.ts` `setupFiles`),
+// so the ceiling applies across the suite's files.
+//
+// Inside `npm run verify` the `frontend-tests` gate shares the machine with
+// a concurrent Rust compile — the plan's own Rust lane when the change
+// touches `src-tauri/`, another worktree's verify otherwise. The Agent
+// Harness defaults card is the last thing to render in its file: the reset
+// button appears only after `list_providers` lands, `get_app_preferences`
+// delivers the stored default and the section's re-key effect has flushed.
+// Measured in that window, that wait took 305-889ms — within 11% of the 1s
+// deadline — so one more contention burst failed a test that passes in
+// isolation (#2539).
+//
+// The ceiling applies to the wait, not to the expectation: a query that is
+// already satisfied resolves on its first check, so a larger ceiling only
+// widens the window in which a slow render can still land. No assertion
+// reads this value.
+configure({ asyncUtilTimeout: 10_000 });
 
 // ============================================================
 // jsdom canvas shim (issue #1386, round-3 review)
@@ -393,13 +423,17 @@ beforeEach(async () => {
   // top-level import would cause `platform.ts` to be cached with the
   // real `navigator.platform` value, defeating the test files that
   // mock it to force `isWindows = true` (issue #354 follow-up).
-  const [{ resetPathInvalidatedCacheForTests }, { resetProviderCachesForTests }, { __resetSharedProviderListForTests }, { _resetEscapeKeyStackForTests }, { __resetDefaultChangedListeningForTests }] =
+  const [{ resetPathInvalidatedCacheForTests }, { resetProviderCachesForTests }, { __resetSharedProviderListForTests }, { _resetEscapeKeyStackForTests }, { __resetDefaultChangedListeningForTests }, { __resetCircuitRunStreamForTests }, { __resetProviderListStreamForTests }, { __resetWorktreeDirectoryStreamForTests }, { __resetMeshSyncWarningStreamForTests }] =
     await Promise.all([
       import('../../src/lib/pathInvalidatedCache'),
       import('../../src/lib/providerCache'),
       import('../../src/hooks/useProviderList'),
       import('../../src/hooks/useEscapeKey'),
       import('../../src/components/Sidebar/SpawnButtonCluster'),
+      import('../../src/lib/streams/circuitRunStream'),
+      import('../../src/lib/streams/providerListStream'),
+      import('../../src/lib/streams/worktreeDirectoryStream'),
+      import('../../src/lib/streams/meshSyncWarningStream'),
     ]);
   resetPathInvalidatedCacheForTests();
   resetProviderCachesForTests();
@@ -408,6 +442,15 @@ beforeEach(async () => {
   // cluster holds ONE process-lifetime `provider-list-changed` subscription
   // shared by every mounted row, so reset it alongside the mock bus.
   __resetDefaultChangedListeningForTests();
+  // Issue #2531 — the live event streams each hold ONE backend
+  // subscription for the whole app and fan it out to their consumers.
+  // The subscription outlives the component that caused it (the agent-node
+  // store attaches at boot), so each owner is reset alongside the mock bus
+  // to keep "the stream is fresh between tests" automatic.
+  __resetCircuitRunStreamForTests();
+  __resetProviderListStreamForTests();
+  __resetWorktreeDirectoryStreamForTests();
+  __resetMeshSyncWarningStreamForTests();
   // Issue #649 — the useEscapeKey hook maintains a module-level LIFO
   // stack of Escape handlers so the topmost mounted surface wins. RTL's
   // `cleanup()` already unmounts components between tests, but the reset

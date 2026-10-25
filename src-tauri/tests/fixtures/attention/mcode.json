@@ -40,6 +40,31 @@
     "health": "ok"
   },
   {
+    "name": "UserPromptSubmit-0.6.13",
+    "payload": {
+      "hook_event_name": "UserPromptSubmit",
+      "session_id": "mvs_abcdef0123456789",
+      "cwd": "F:\\src\\repo",
+      "transcript_path": null,
+      "prompt_id": "turn-2",
+      "prompt": "Continue the implementation",
+      "permission_mode": "bypassPermissions"
+    },
+    "decision": "Running",
+    "kind": "work_resumed",
+    "health": "ok"
+  },
+  {
+    "name": "UserPromptSubmit-malformed-identity",
+    "payload": {
+      "hook_event_name": "UserPromptSubmit",
+      "session_id": 17
+    },
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  },
+  {
     "name": "malformed-envelope",
     "body": "not json",
     "decision": "MarkInput",

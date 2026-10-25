@@ -1,4 +1,4 @@
-//! Low-level git2 helpers shared across commands and services.
+//! Low-level git2 helpers, private to the `git` module.
 //!
 //! Each helper takes an already-open `&Repository` (or an OID pair) and returns
 //! a `Result`/`Option` — deliberately **not** a bare `bool`. The previous
@@ -8,6 +8,13 @@
 //! the raw computation keeps that choice at the call site — gates use
 //! `.unwrap_or(true)`, display uses `.unwrap_or(false)` — instead of baking one
 //! direction into a shared helper and silently breaking the other.
+//!
+//! Every helper that takes a repository handle is `pub(crate)`: the raw
+//! `Repository` stays inside `git/`. Callers outside this module ask for
+//! what they need through [`super::state`] — a baseline, a branch, a
+//! changed-file list — instead of opening a repository themselves (issue
+//! #2526). The one public helper is a pure path comparison, which carries
+//! no handle.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -17,7 +24,7 @@ use git2::{Oid, Repository, StatusOptions};
 /// Discover the nearest repository using the host-readable spelling. Source
 /// folder callers that need the Git root use `project::resolve`; owned checkout
 /// validation uses exact `Repository::open` to avoid discovering an ancestor.
-pub fn open_from_host_path(path: &str) -> Result<Repository, git2::Error> {
+pub(crate) fn open_at(path: &str) -> Result<Repository, git2::Error> {
     super::project::open(path)
 }
 
@@ -42,7 +49,7 @@ pub fn open_from_host_path(path: &str) -> Result<Repository, git2::Error> {
 ///   Note: `commands/prune.rs` reads this kind of dirty signal too, but as a
 ///   UI badge (with `.unwrap_or(false)`), not a gate; that call site is fine
 ///   either way and intentionally stays on the strict helper today.
-pub fn is_dirty(repo: &Repository) -> Result<bool, git2::Error> {
+pub(crate) fn is_dirty(repo: &Repository) -> Result<bool, git2::Error> {
     let mut opts = StatusOptions::new();
     opts.include_untracked(true).recurse_untracked_dirs(true);
     Ok(repo
@@ -223,7 +230,7 @@ fn dirty_paths_mirrors_git_status(
 /// `Ok(vec![])` means the fast-forward is safe despite a dirty tree. `Err` means
 /// "could not determine" (unreadable status, detached HEAD, no upstream) — the
 /// caller must fail closed and skip the pull, because we cannot prove it safe.
-pub fn ff_pull_blockers(repo: &Repository) -> Result<Vec<String>, String> {
+pub(crate) fn ff_pull_blockers(repo: &Repository) -> Result<Vec<String>, String> {
     let dirty = match dirty_paths_mirrors_git_status(repo).map_err(|e| e.to_string())? {
         Some(paths) => paths,
         None => return Err("working-tree status had an unnameable entry".to_string()),
@@ -313,7 +320,7 @@ fn read_submodule_ignore_rules(repo: &Repository) -> HashMap<String, String> {
 /// `git rev-parse --short` would print it. Returns an empty string if the OID
 /// can't be resolved (e.g. unborn HEAD passed a sentinel) rather than failing —
 /// callers use it for display.
-pub fn short_sha(repo: &Repository, oid: Oid) -> String {
+pub(crate) fn short_sha(repo: &Repository, oid: Oid) -> String {
     repo.find_object(oid, None)
         .ok()
         .and_then(|obj| obj.short_id().ok())
@@ -324,7 +331,7 @@ pub fn short_sha(repo: &Repository, oid: Oid) -> String {
 /// The branch a repo's HEAD points at, read from HEAD's symbolic target so it
 /// survives the branch ref being deleted. Returns `None` for a detached HEAD
 /// (no symbolic target).
-pub fn head_branch_name(repo: &Repository) -> Option<String> {
+pub(crate) fn head_branch_name(repo: &Repository) -> Option<String> {
     let head = repo.find_reference("HEAD").ok()?;
     let target = head.symbolic_target().ok()??;
     target.strip_prefix("refs/heads/").map(|s| s.to_string())
@@ -345,7 +352,7 @@ pub fn head_branch_name(repo: &Repository) -> Option<String> {
 /// minus refs/heads/>`. Without it, every behind-count in the app reads 0 for
 /// such a repo — the sidebar ↓N badge never shows and the sync machinery
 /// reports "Already up to date" against a frozen ref.
-pub fn upstream_oid_for_branch(repo: &Repository, branch: &str) -> Option<Oid> {
+pub(crate) fn upstream_oid_for_branch(repo: &Repository, branch: &str) -> Option<Oid> {
     let refname = format!("refs/heads/{}", branch);
     if let Ok(buf) = repo.branch_upstream_name(&refname) {
         if let Ok(name) = buf.as_str() {
@@ -371,7 +378,7 @@ pub fn upstream_oid_for_branch(repo: &Repository, branch: &str) -> Option<Oid> {
 ///
 /// Uses git2's `graph_ahead_behind` rather than `git rev-list ...@{u}`: the
 /// `@{u}` brace syntax is silently mangled by `Command::args` on Windows.
-pub fn ahead_behind(
+pub(crate) fn ahead_behind(
     repo: &Repository,
     local: Oid,
     upstream: Oid,
@@ -381,6 +388,42 @@ pub fn ahead_behind(
         ahead.try_into().unwrap_or(u32::MAX),
         behind.try_into().unwrap_or(u32::MAX),
     ))
+}
+
+/// The default branch of the remote named "origin".
+///
+/// Read from the local symbolic ref `refs/remotes/origin/HEAD`, so it costs
+/// no network round-trip. Falls back to `"main"` when the remote is not
+/// configured or the ref is missing.
+pub(crate) fn default_branch(repo: &Repository) -> String {
+    if let Ok(reference) = repo.find_reference("refs/remotes/origin/HEAD") {
+        if let Ok(Some(target)) = reference.symbolic_target() {
+            if let Some(branch) = target.strip_prefix("refs/remotes/origin/") {
+                return branch.to_string();
+            }
+        }
+    }
+    "main".to_string()
+}
+
+/// The default branch of the repository at `path`, or `"main"` when the path
+/// is not a repository.
+pub(crate) fn default_branch_at(path: &str) -> String {
+    match open_at(path) {
+        Ok(repo) => default_branch(&repo),
+        Err(_) => "main".to_string(),
+    }
+}
+
+/// Whether `path` is a Git repository, and its default branch.
+///
+/// One open for both facts — the sidebar's static snapshot asks for them
+/// together, and opening twice was the pre-#431 double-open this replaced.
+pub(crate) fn repo_static_at(path: &str) -> (bool, String) {
+    match open_at(path) {
+        Ok(repo) => (true, default_branch(&repo)),
+        Err(_) => (false, "main".to_string()),
+    }
 }
 
 /// Normalise a path for equality comparison: convert to host form, trim a

@@ -209,7 +209,7 @@ pub(crate) fn publication_flow_issue_review() -> CircuitGraph {
             "PR #{{pr.number}} ({{pr.url}})",
             " {{pr.number}}",
         ),
-        &crate::review_contract::legacy_merge_approved_pr(
+        &crate::review_contract::legacy_merge_prompt(
             "PR #{{pr.number}} ({{pr.url}})",
             " {{pr.number}}",
         ),

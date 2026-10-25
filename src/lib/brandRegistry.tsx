@@ -130,6 +130,18 @@ function CommandCodeIcon({ className, title }: InlineIconProps) {
 // Official Cline mark (Simple Icons, CC0), rendered monochrome via
 // currentColor like the other inline brands. The chip carries Cline's
 // mascot green (#3DDC84).
+function PerchIcon({ className, title }: InlineIconProps) {
+  return (
+    <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" className={className} aria-hidden="true">
+      <title>{title}</title>
+      <path
+        fill="currentColor"
+        d="M7 3h7.2a5.2 5.2 0 0 1 0 10.4H10v7.6H7V3zm3 2.6v5.2h4.1a2.6 2.6 0 0 0 0-5.2H10z"
+      />
+    </svg>
+  );
+}
+
 function ClineIcon({ className, title }: InlineIconProps) {
   return (
     <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" className={className} aria-hidden="true">
@@ -170,6 +182,7 @@ const BRANDS: readonly BrandRegistration[] = [
   { id: 'freebuff', icon: { kind: 'image', src: freebuffLogo }, chipHex: '#f97316', chipClass: 'bg-orange-500' },
   { id: 'muse-code', aliases: ['muse'], icon: { kind: 'inline', component: MetaIcon }, chipHex: '#0866FF', chipClass: 'bg-blue-600' },
   { id: 'cline', icon: { kind: 'inline', component: ClineIcon }, chipHex: '#3DDC84', chipClass: 'bg-emerald-400' },
+  { id: 'perch', icon: { kind: 'inline', component: PerchIcon }, chipHex: '#c2410c', chipClass: 'bg-orange-600' },
 ];
 
 const BRAND_REGISTRY = new Map<string, Brand>();

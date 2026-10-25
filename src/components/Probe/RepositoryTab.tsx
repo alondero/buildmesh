@@ -1,3 +1,4 @@
+import type { ProbeLoadContext } from '../../lib/probeResource';
 /**
  * RepositoryTab — the Probe Panel's Repository destination (issue #1460).
  *
@@ -30,14 +31,21 @@
  *
  * The IPC seam (ADR-0010) is observed: every `invoke` goes through
  * `src/lib/tauri.ts` (`getGitPruneInfo`, `deleteBranches`, `deleteWorktrees`,
- * `pruneRemoteTracking`). The drift test at
- * `tests/unit/tauri-ipc-seam.test.ts` fails on a new component that
- * imports raw `invoke`, so this stays in the ratchet.
+ * `pruneRemoteTracking`). ESLint rejects raw static `invoke` imports.
  *
- * Reactivity: the prune info is fetched on mount and after every delete /
- * free / restore (the recovery hook invalidates both health + prune on
- * success). The health block re-renders whenever the shared cache updates,
- * including on GIT_CHANGED events from the file-watcher.
+ * Reactivity: the prune info is read through the shared git cache, so it is
+ * fetched on mount, refreshed after every delete / free / restore (the
+ * recovery hook invalidates both health + prune on success), and re-read when
+ * `GIT_CHANGED` says the repository moved (a burst of events collapses into
+ * one trailing refetch). The health block re-renders whenever the shared
+ * cache updates, including on GIT_CHANGED events from the file-watcher.
+ *
+ * Issue #2580 — the read is bounded and honest. The backend caps the
+ * squash-merge scan with a wall-clock budget and reports when it gave up, and
+ * the cache means a return visit does not re-run the whole walk. Before that,
+ * a repository with many branches over a long `main` history kept this
+ * destination spinning for tens of minutes before it could render even the
+ * worktree list.
  *
  * The destination id is still `worktrees` and is deliberately NOT renamed:
  * ADR-0030 keeps `probe-<tab>` ids stable for existing callers and deep
@@ -49,11 +57,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useMeshHealth } from '../../hooks/useMeshHealth';
 import { useMeshRecovery } from '../../hooks/useMeshRecovery';
+import { useGitPruneInfo } from '../../hooks/useGitPruneInfo';
+import { readGitPruneInfo } from '../../lib/gitPruneInfo';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import {
   deleteBranches,
   deleteWorktrees,
-  getGitPruneInfo,
   openInFileManager,
   pruneRemoteTracking,
   type BranchInfo,
@@ -149,6 +158,17 @@ const isRecommendedBranch = (b: BranchInfo) =>
 
 const isRecommendedWorktree = (w: WorktreeInfo) => !w.is_active && w.is_stale;
 
+/**
+ * The Probe loader for this destination.
+ *
+ * It reads through the shared cache (`readGitPruneInfo`) so the Probe's
+ * speculative read and the destination's own read are one fetch, not two
+ * competing walks of the same repository (issue #2580).
+ */
+export async function loadRepository(context: ProbeLoadContext) {
+  return readGitPruneInfo(context);
+}
+
 export function RepositoryTab() {
   const { activeMeshId } = useProbeContext();
   // Cleanup selections and confirmations belong to one mesh. Remounting the
@@ -170,52 +190,46 @@ function RepositoryContents() {
   const { activeMeshId, activeMeshPath, activeMeshName } = useProbeContext();
 
   // The health hook subscribes to the shared cache (used by the sidebar's
-  // `!` badge too) and refetches on GIT_CHANGED / focus. The prune info is
-  // local to this tab — only it cares about the full list, so it doesn't
-  // share a cache.
+  // `!` badge too) and refetches on GIT_CHANGED / focus.
   const { health, refresh: refreshHealth } = useMeshHealth(activeMeshId, activeMeshPath);
 
-  const [repos, setRepos] = useState<GitRepoPruneInfo[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // The prune read goes through the shared cache (issue #2580): it is
+  // invalidated by GIT_CHANGED, rate-limited, and cached per mesh, so a
+  // return visit does not re-run the whole walk from scratch. The health
+  // block above already worked this way.
+  const {
+    repos,
+    loading,
+    error: readError,
+    refresh: refreshPrune,
+    mergeScanTruncated,
+  } = useGitPruneInfo(activeMeshId, activeMeshPath);
+  // A failed read and a failed action are different states, so they get
+  // different channels: a read failure means the list itself is unavailable,
+  // while an action failure (delete, remote prune) happened against a list
+  // that did load. Sharing one channel let either message overwrite the
+  // other — a read failure could be masked by a stale action message.
+  const [actionError, setActionError] = useState<string | null>(null);
+  const readErrorText = readError ? formatError(readError) : null;
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
   // Issue #657 — per-repo in-flight flag for `prune_remote_tracking`, plus
   // a transient success message that auto-clears after 4s (matches the
-  // `gitSync` pattern in `src/components/Sidebar/MeshItem.tsx`). The
-  // existing `error` channel is reserved for prune / recovery / remote-
-  // tracking failures — we prefix prune failures with "Prune failed: "
-  // so the user can distinguish them from `deleteBranches`/`deleteWorktrees`
-  // errors that share the same renderer.
+  // `gitSync` pattern in `src/components/Sidebar/MeshItem.tsx`). The action
+  // error channel above is reserved for prune / recovery / remote-tracking
+  // failures — we prefix prune failures with "Prune failed: " so the user
+  // can distinguish them from `deleteBranches`/`deleteWorktrees` errors that
+  // share the same renderer.
   const [pruningPaths, setPruningPaths] = useState<Set<string>>(new Set());
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(true);
-  const loadRevisionRef = useRef(0);
-
-  // Single prune-fetch body. Mount, mesh-switch, manual Refresh, and
-  // post-recovery all route through `load`. The function returns the
-  // promise so callers that need to sequence AFTER the refresh (e.g.
-  // `handleDelete` wants the partial-failure error to land on top of
-  // `load`'s own `setError(null)`) can `await load()`. A shared revision
-  // gates mount, manual and post-mutation refreshes,
-  // so a rapid Refresh click while the previous fetch is still pending
-  // can't clobber state with a stale response.
   const load = useCallback(() => {
-    if (activeMeshId === null || !mountedRef.current) return Promise.resolve();
-    const revision = ++loadRevisionRef.current;
-    const current = () => mountedRef.current && revision === loadRevisionRef.current;
-    setLoading(true);
-    setError(null);
     setSelected(new Set());
-    return getGitPruneInfo(activeMeshId)
-      .then((data) => {
-        if (current()) setRepos(data);
-      })
-      .catch((e) => { if (current()) setError(formatError(e)); })
-      .finally(() => { if (current()) setLoading(false); });
-  }, [activeMeshId]);
+    setActionError(null);
+    refreshPrune();
+  }, [refreshPrune]);
 
   // Mesh-switch reset (review findings B1 + B2): clear any in-flight
   // pruning set (the repo paths belong to the previous mesh) and wipe
@@ -232,14 +246,10 @@ function RepositoryContents() {
   }, [activeMeshId]);
 
   useEffect(() => {
-    const revisions = loadRevisionRef;
     mountedRef.current = true;
-    void load();
-    return () => {
-      mountedRef.current = false;
-      ++revisions.current;
-    };
-  }, [load]);
+    setSelected(new Set());
+    return () => { mountedRef.current = false; };
+  }, [activeMeshId]);
 
   // Issue #657 — clear any pending prune-success timer on unmount so a
   // late-firing `setSuccessMessage` can't land on an unmounted tree
@@ -352,12 +362,12 @@ function RepositoryContents() {
     // otherwise leave the user staring at a non-responsive confirmation.
     if (activeMeshId === null) {
       setConfirming(false);
-      setError('No active project — cannot delete.');
+      setActionError('No active project — cannot delete.');
       return;
     }
     setConfirming(false);
     setDeleting(true);
-    setError(null);
+    setActionError(null);
     const errors: string[] = [];
     try {
       for (const [repoPath, names] of branchesByRepo) {
@@ -380,7 +390,7 @@ function RepositoryContents() {
         // Refresh first, then restore partial deletion failures after load()
         // has cleared the previous error.
         await load();
-        if (mountedRef.current && errors.length > 0) setError(errors.join('; '));
+        if (mountedRef.current && errors.length > 0) setActionError(errors.join('; '));
       }
     }
   };
@@ -465,7 +475,25 @@ function RepositoryContents() {
           </button>
         </div>
 
-        {error && <p className="text-xs text-status-error break-words">{error}</p>}
+        {/* Read failure and action failure are separate channels — a failed
+            read means the list is unavailable, a failed action happened
+            against a list that did load. Either can be showing at once.
+            Both are `role="alert"` regions, so a screen reader announces the
+            failure (probe-ui-checklist.md §1.4). */}
+        {readErrorText && (
+          <p
+            role="alert"
+            className="text-xs text-status-error break-words"
+            data-testid="repository-read-error"
+          >
+            {readErrorText}
+          </p>
+        )}
+        {actionError && (
+          <p role="alert" className="text-xs text-status-error break-words">
+            {actionError}
+          </p>
+        )}
         {/* Issue #657 — success channel for prune_remote_tracking. Same
             inline style + 4s auto-clear as the `gitSync` pattern in
             `MeshItem.tsx` (cleaner than wiring the global toast system
@@ -475,8 +503,37 @@ function RepositoryContents() {
           <p className="text-xs text-status-success whitespace-pre-wrap break-words">{successMessage}</p>
         )}
 
+        {/* Issue #2580 — the backend bounds the squash-merge scan with a
+            wall-clock budget. When it runs out, the branches it did not
+            classify carry an *unknown* merge status. Say so, instead of
+            letting a missing "merged" badge look like "not merged" — the
+            difference decides what the user deletes. */}
+        {mergeScanTruncated && (
+          <p
+            role="status"
+            className="text-xs text-text-muted break-words"
+            data-testid="repository-merge-scan-truncated"
+          >
+            Some branches were not checked against the base branch — the scan
+            hit its time limit, so their merged status is unknown.
+          </p>
+        )}
+
         {loading && repos.length === 0 ? (
-          <LoadingState label="Loading git objects…" />
+          <>
+            <LoadingState label="Scanning branches and worktrees…" />
+            {/* Issue #2580 — the read is bounded, so say so. A scan over a
+                repository with hundreds of branches is not instant, and
+                "not instant" without a word about it reads as "hung". */}
+            <p
+              className="text-xs text-text-muted text-center px-2"
+              data-testid="repository-scan-hint"
+            >
+              Comparing every branch against the base branch takes a moment on
+              a large repository. The scan is time-limited — anything it
+              cannot finish is reported as unknown rather than as unchanged.
+            </p>
+          </>
         ) : (
           <div className="space-y-4">
             {repos.map((repo) => (
@@ -499,7 +556,7 @@ function RepositoryContents() {
                   // Mirrors the legacy `handleDelete` pattern — accumulate
                   // partial-failure errors, refresh in `finally`, then
                   // restore the error AFTER `load()`'s own
-                  // `setError(null)` runs. Keeps a post-prune refresh
+                  // `setActionError(null)` runs. Keeps a post-prune refresh
                   // failure from being mislabelled "Prune failed:"
                   // (review finding A1/C1).
                   let pruneError: string | null = null;
@@ -537,7 +594,7 @@ function RepositoryContents() {
                       // Refresh failures should not be labelled as prune failures.
                       await load();
                       // Restore the prune error after load() clears the old error.
-                      if (mountedRef.current && pruneError) setError(pruneError);
+                      if (mountedRef.current && pruneError) setActionError(pruneError);
                     }
                   }
                 }}

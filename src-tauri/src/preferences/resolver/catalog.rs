@@ -125,6 +125,13 @@ pub(crate) const BUILTIN_PROVIDER_ACCOUNTS: &[BuiltInProviderAccount] = &[
         name: "Meta Muse Code",
         self_auth: true,
     },
+    // Perch owns `~/.perch/cli-auth-session.json` (or the macOS keychain).
+    // The same id names the native Agent Harness.
+    BuiltInProviderAccount {
+        id: "perch",
+        name: "Perch",
+        self_auth: true,
+    },
 ];
 
 // One row per credential/billing identity. Pairings live in the Spawn Menu
@@ -381,17 +388,30 @@ pub(crate) fn deepseek_default_tiers() -> ModelTiers {
 }
 
 /// Resolve the Claude harness id from a list of harness profiles (typed form
-/// of the JSON `claude_harness_id_from_json` used by the migration) — first
-/// profile with `harness == "anthropic"`, else `"claude"`.
+/// of the JSON `claude_harness_id_from_json` used by the migration) — the
+/// first profile whose executor is the adapter the Claude harness id is
+/// aliased onto, else the Claude harness id itself.
+///
+/// The *executor* is resolved through the one alias table
+/// ([`HARNESS_PROFILE_ALIASES`](crate::agent::harness_catalog::HARNESS_PROFILE_ALIASES)),
+/// so this function names only the profile id and does not restate the mapping
+/// (issue #2532).
 pub(crate) fn claude_harness_id_from(profiles: &[super::super::model::HarnessProfile]) -> String {
+    const CLAUDE_HARNESS_ID: &str = "claude";
+    let executor = crate::agent::harness_catalog::harness_profile_alias(CLAUDE_HARNESS_ID)
+        .unwrap_or(CLAUDE_HARNESS_ID);
     profiles
         .iter()
-        .find(|p| p.harness == "anthropic")
+        .find(|p| p.harness == executor)
         .map(|p| p.id.clone())
-        .unwrap_or_else(|| "claude".to_string())
+        .unwrap_or_else(|| CLAUDE_HARNESS_ID.to_string())
 }
 
 /// Disk-reading wrapper over [`claude_harness_id_from`].
 pub(crate) fn claude_harness_id() -> String {
     claude_harness_id_from(&harness_profiles())
 }
+
+#[cfg(test)]
+#[path = "catalog_tests.rs"]
+mod tests;

@@ -1,7 +1,10 @@
+use crate::agent::attention_hooks::{
+    provision_attention_hooks, EventMerge, EventRule, HandlerShape, HookFormat,
+    HookProvisioningSpec, JsonHookShape, Ownership,
+};
 use crate::agent::capabilities::{
     EffortControlKind, PermissionModeOption, PERMISSION_MODE_UNATTENDED,
 };
-use crate::agent::managed_config;
 use crate::agent::provider::{
     AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell,
 };
@@ -90,62 +93,80 @@ fn question_hook_command(platform: Platform, event: &str) -> Option<String> {
     ))
 }
 
+/// AGY's hook file, declared once as provisioning data. `Stop` uses the
+/// simple `[{type, command}]` form; tool hooks use matcher groups scoped to
+/// the question tool, whose required pre-tool decision must never gate any
+/// other tool (`ask_question` is the matcher).
+const AGY_HOOKS: HookProvisioningSpec<'static> = HookProvisioningSpec {
+    harness: "agy",
+    file: "hooks.json",
+    label: "agy hooks.json",
+    command: "",
+    event_commands: &[],
+    format: HookFormat::Json(JsonHookShape {
+        // Buildmesh owns this namespace outright, so a re-provision replaces
+        // it instead of merging event by event (the pre-#2525 behaviour).
+        root_key: Some("buildmesh-attention"),
+        replace_root: true,
+        required_root: &[],
+        handler: HandlerShape::TypedCommand,
+        // A replace-root namespace never consults ownership: Buildmesh owns
+        // the whole key, so every re-provision rewrites its exact content.
+        ownership: Ownership {
+            fields: &[],
+            anchors: &[],
+        },
+        events: &[
+            EventRule {
+                name: "Stop",
+                optional: false,
+                merge: EventMerge::Flat,
+            },
+            EventRule {
+                name: "PreToolUse",
+                optional: true,
+                merge: EventMerge::MatcherGroup {
+                    matcher: Some(QUESTION_TOOL),
+                },
+            },
+            EventRule {
+                name: "PostToolUse",
+                optional: true,
+                merge: EventMerge::MatcherGroup {
+                    matcher: Some(QUESTION_TOOL),
+                },
+            },
+        ],
+    }),
+};
+
 /// Ensure `<project>/.agents/hooks.json` carries the attention webhooks
-/// under the `buildmesh-attention` namespace. `Stop` uses the simple
-/// `[{type, command}]` form. Tool hooks use matcher groups, scoped to the
-/// question tool so their required pre-tool decision never gates any other
-/// tool. Idempotent, and preserves any unrelated top-level keys the user
-/// added. Writes atomically to prevent corruption.
+/// under the `buildmesh-attention` namespace. Idempotent, and preserves any
+/// unrelated top-level keys the user added.
+///
+/// The `question` pair is absent on hosts whose PowerShell callback has not
+/// been validated as a pre-tool gate; optional events are provisioned only
+/// when an override names them.
 fn ensure_hooks_json(
     path: &Path,
     command: &str,
     question: Option<(&str, &str)>,
 ) -> Result<(), String> {
-    let mut document = match managed_config::read_document(path) {
-        Ok(document) => document,
-        // A file that is readable but not JSON is the user's to repair, and
-        // every harness now answers that one case the same way.
-        Err(error) if error.is_malformed() => return Err(error.to_string()),
-        // A file Buildmesh could not read at all — a directory in the target's
-        // place, or bytes that are not UTF-8 — is a different failure, and AGY
-        // names its own file in it.
-        Err(error) => {
-            return Err(format!(
-                "failed to read agy hooks.json at {}: {}",
-                path.display(),
-                error.reason()
-            ))
-        }
+    let target_dir = path
+        .parent()
+        .ok_or_else(|| "agy hooks.json has no parent directory".to_string())?;
+    let overrides: Vec<(&'static str, &str)> = match question {
+        Some((pre, post)) => vec![("PreToolUse", pre), ("PostToolUse", post)],
+        None => Vec::new(),
     };
-    managed_config::root_object(&mut document, "agy hooks.json top-level")?;
-
-    // Stop fires the moment a turn ends. The simple shape — AGY's harness
-    // doesn't need a matcher (no tool name to filter on; the whole turn
-    // is the event) and the `[{type, command}]` form is the one the
-    // spec documents for end-of-turn.
-    let stop_hook = serde_json::json!({ "type": "command", "command": command });
-    let mut expected = serde_json::json!({ "Stop": [stop_hook] });
-    if let Some((pre, post)) = question {
-        let scoped = |command: &str| {
-            serde_json::json!([{
-                "matcher": QUESTION_TOOL,
-                "hooks": [{ "type": "command", "command": command }],
-            }])
-        };
-        expected["PreToolUse"] = scoped(pre);
-        expected["PostToolUse"] = scoped(post);
-    }
-    if document.root.get("buildmesh-attention") == Some(&expected) {
-        return Ok(());
-    }
-    document.root["buildmesh-attention"] = expected;
-    let content = document
-        .to_pretty_json()
-        .map_err(|e| format!("serialize hooks.json failed: {e}"))?;
-    managed_config::atomic_write(path, &content)
-        .map_err(|e| format!("failed to write hooks.json: {e}"))?;
-    tracing::info!("agy provision_attention_hooks: wrote {:?}", path);
-    Ok(())
+    let spec = HookProvisioningSpec {
+        command,
+        event_commands: &overrides,
+        ..AGY_HOOKS
+    };
+    provision_attention_hooks(&spec, target_dir)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// Antigravity (`agy`) `Stop` receipts (issue #1901).

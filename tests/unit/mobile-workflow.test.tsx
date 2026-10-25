@@ -450,6 +450,7 @@ it("surfaces errors and degraded signals before normal work, and filters work by
 it("keeps Capture mounted until a pending launch is confirmed", async () => {
   let finish!: (value: Response) => void;
   const onOpenNode = vi.fn();
+  const onOpenUsage = vi.fn();
   const fetcher = vi.fn((url: string) => {
     if (url === "/api/nodes/create")
       return new Promise<Response>((resolve) => {
@@ -471,6 +472,7 @@ it("keeps Capture mounted until a pending launch is confirmed", async () => {
   render(
     <NodeList
       onOpenNode={onOpenNode}
+      onOpenUsage={onOpenUsage}
       onOpenAgentNodes={vi.fn()}
       onOpenIssues={vi.fn()}
       onOffline={vi.fn()}
@@ -485,12 +487,17 @@ it("keeps Capture mounted until a pending launch is confirmed", async () => {
   fireEvent.click(screen.getByText("Start working on this"));
   const work = screen.getByRole("button", { name: "Work", exact: true });
   expect(work).toHaveProperty("disabled", true);
+  const usage = screen.getByRole("button", { name: "Usage", exact: true });
+  expect(usage).toHaveProperty("disabled", true);
+  fireEvent.click(usage);
+  expect(onOpenUsage).not.toHaveBeenCalled();
   fireEvent.click(work);
   expect(screen.getByLabelText("Your idea")).toBeTruthy();
   await act(async () => finish(response(created())));
   expect(onOpenNode).toHaveBeenCalledTimes(1);
   expect(localStorage.getItem("buildmesh_mobile_idea")).toBeNull();
   expect(work).toHaveProperty("disabled", false);
+  expect(usage).toHaveProperty("disabled", false);
 });
 
 it("remembers the chosen destination when returning to a captured idea", () => {

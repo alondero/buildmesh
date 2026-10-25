@@ -17,7 +17,7 @@ import { CircuitsIcon } from '../Probe/probeIcons';
  *  picker. */
 const excludeTerminal = (provider: SpawnOption) => provider.harness_id !== 'terminal';
 
-export function AgentReviewButton({ node, providerList }: { node: AgentNode; providerList: SpawnOption[] }) {
+export function AgentReviewButton({ node, providerList, label }: { node: AgentNode; providerList: SpawnOption[]; label?: string }) {
   const [open, setOpen] = useState(false);
   const [rounds, setRounds] = useState(3);
   const [busy, setBusy] = useState(false);
@@ -139,12 +139,12 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
 
   return <>
     <button type="button"
-      aria-label="Start review or circuit"
-      title={!activeOwnership && blockedReason ? blockedReason : 'Start review or circuit'}
+      aria-label={label ?? 'Start review or circuit'}
+      title={!activeOwnership && !eligible ? blockedReason ?? 'Resume this agent before starting a review.' : 'Start review or circuit'}
       disabled={!activeOwnership && !eligible}
       onClick={() => { setReviewerProvider(''); setOpen(true); }}
-      className="p-1 rounded-md text-accent-violet hover:bg-accent-violet/15 disabled:opacity-40"
-    ><CircuitsIcon className="h-4 w-4" /></button>
+      className={`inline-flex min-h-6 min-w-6 items-center justify-center gap-1 rounded-md text-accent-violet hover:bg-accent-violet/15 disabled:opacity-40 ${label ? 'border border-border-subtle px-2 py-1 text-xs' : 'p-1'}`}
+    ><CircuitsIcon className="h-4 w-4 shrink-0" />{label}</button>
     {open && createPortal(
       <Modal onClose={() => { if (!busy) setOpen(false); }} ariaLabel="Start review or circuit" maxWidth="max-w-sm">
         <h2 className="text-sm font-semibold mb-2">Review or circuit for {node.name}</h2>
@@ -176,7 +176,7 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
         {circuitId === null ? <>
         <div className="mb-4">
           <div className="flex items-baseline justify-between mb-1">
-            <span className="text-xs">Reviewer provider</span>
+            <span className="text-xs">Reviewer launch configuration</span>
             <span className="text-2xs text-text-muted" data-testid="reviewer-provider-selection">{reviewerLabel ?? 'Default'}</span>
           </div>
           {/* The shared Spawn Menu, rendered inline the way the canvas spawn
@@ -191,21 +191,23 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
             <GroupedProviderMenu providers={reviewOptions} onSelect={pickReviewer} />
           </div>
         </div>
-        <p className="text-xs text-text-secondary mb-4">
-          After this agent finishes its task, a separate reviewer checks its local changes.
-          Findings return here for fixes and another review. The loop stops on approval or the round limit.
-          The reviewer uses the app-wide Reviewer provider when configured, otherwise this
-          agent's provider — pick a harness or saved configuration above to override it for this
-          review. Model and effort come from the picked configuration, otherwise the harness's own
-          Mesh and application defaults.
-          You can pause or cancel in Circuits.
+        <p className="text-xs text-text-secondary mb-3">
+          Review starts after this agent finishes. Findings return here for fixes;
+          the loop stops on approval or the round limit.
         </p>
         <label className="text-xs flex items-center justify-between gap-3 mb-4">
           Maximum review rounds
           <input type="number" min={1} max={10} value={rounds}
             onChange={e => setRounds(Number(e.target.value))}
             className="w-16 bg-bg-overlay border border-border-subtle rounded-md px-2 py-1 text-text-primary" />
-        </label></> : <p className="text-xs text-text-secondary mb-4">
+        </label>
+        <details className="mb-4 text-xs text-text-secondary">
+          <summary className="cursor-pointer min-h-6">How the reviewer is launched</summary>
+          <p className="mt-1">Choose a harness or expand its saved Launch Configurations above.
+            Model and effort come from the chosen configuration, otherwise the harness's Mesh
+            and application defaults. Default uses the app Reviewer provider or this agent's provider.
+            Pause or cancel from the circuit Overview.</p>
+        </details></> : <p className="text-xs text-text-secondary mb-4">
           Start this Circuit with {node.name} as its triggering agent. Its configured steps control when work starts.
           You can pause or cancel in Circuits.
         </p>}

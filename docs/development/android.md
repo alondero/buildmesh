@@ -262,7 +262,7 @@ snapshot (`/api/meshes`, `/api/nodes`, `/api/providers`) every 5s while
 foregrounded, so it hits the desktop's provider-menu route even when nothing
 changed; that route memoizes its derivation per preferences generation rather
 than re-deriving per poll (see
-[providers.md](providers.md#the-spawn-menu-derivation-is-memoized-per-preferences-generation)).
+[providers.md](providers.md#the-spawn-menu-derivation-reads-one-preferences-snapshot-and-one-alias-table)).
 Refresh requests are coalesced and versioned so polling cannot starve slow
 responses and older responses do not overwrite a newer event or session
 (`RefreshController.refresh()` publishes only when the request's revision is

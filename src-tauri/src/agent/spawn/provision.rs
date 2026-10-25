@@ -26,7 +26,12 @@ pub(super) struct WorkspaceToProvision {
     pub use_worktree: bool,
     pub worktree_mode: String,
     pub base_ref: String,
-    pub warm_claimed: Option<crate::services::warm_pool::ClaimedWarmEntry>,
+    /// The pool's claim handle for this spawn (issue #2533). The provisioner
+    /// reaches the pre-spawn pool through it — the consumer-owned
+    /// `WarmClaim` seam — so `git/worktree` names no service module (a
+    /// `grep -rn 'services::' src-tauri/src/git/` returns no matches).
+    /// The claimed entry travels inside it.
+    pub warm_claim: Box<dyn crate::git::worktree::warm::WarmClaim>,
     pub pool_was_drained_by_this_spawn: bool,
     pub spawn_worktree_name: Option<String>,
     pub resolved: crate::env::ResolvedPath,
@@ -255,7 +260,7 @@ pub(super) async fn provision_workspace(
         use_worktree,
         worktree_mode,
         base_ref,
-        mut warm_claimed,
+        warm_claim,
         pool_was_drained_by_this_spawn,
         spawn_worktree_name,
         resolved,
@@ -307,14 +312,14 @@ pub(super) async fn provision_workspace(
         if !host_path_exists {
             let freshness_path = node.path.clone();
             let since_fetch = crate::blocking::run_blocking("fetch_freshness", move || {
-                Ok(crate::services::fetch_freshness::time_since_success(
+                Ok(crate::git::fetch_freshness::time_since_success(
                     &freshness_path,
                 ))
             })
             .await?;
-            if crate::services::fetch_freshness::is_fresh_enough(
+            if crate::git::fetch_freshness::is_fresh_enough(
                 since_fetch,
-                crate::services::fetch_freshness::SPAWN_FETCH_TTL,
+                crate::git::fetch_freshness::SPAWN_FETCH_TTL,
             ) {
                 tracing::info!(
                     "provision_workspace: skipping auto-sync for session {} — mesh {} was synced {}s ago (< TTL)",
@@ -481,16 +486,19 @@ pub(super) async fn provision_workspace(
     //      block — not the original `base_ref` — is what makes every PR
     //      spawn land on the freshly fetched PR head rather than going
     //      cold. For Resume / Root Node it's `base_ref` (no fetch ran).
-    //    * `warm_claimed.take()` moves the claim into the context; on a warm
-    //      failure the provisioner cleans both possible paths up, forgets the
-    //      row, and re-cuts cold — all internally.
+    //    * the pool's claim carries the claimed entry into the context
+    //      (`warm_claim.entry()`); on a warm failure the provisioner cleans
+    //      both possible paths up, forgets the row, and re-cuts cold — all
+    //      internally.
     let provision_ctx = SpawnContext {
         node: node.clone(),
         source: SpawnSource::from_node(&node),
         base_ref: worktree_base_ref.clone(),
         worktree_mode: worktree_mode.to_string(),
         use_worktree,
-        warm_entry: warm_claimed.take(),
+        // The claimed entry travels inside the pool's claim handle (issue
+        // #2533) — one carrier for the claim and the row it holds.
+        warm_entry: warm_claim.entry().cloned(),
         host_path: resolved.host_path.clone(),
     };
 
@@ -498,7 +506,10 @@ pub(super) async fn provision_workspace(
         ref_advanced_for_pool,
         pool_was_drained_by_this_spawn,
     };
-    let provision_sink = AppHandleSink { app: app.clone() };
+    let provision_sink = AppHandleSink {
+        app: app.clone(),
+        warm_claim,
+    };
     timer.checkpoint("before_provision");
     let provision_result = tokio::task::spawn_blocking(move || {
         provision_for_spawn(provision_ctx, &provision_hooks, &provision_sink)

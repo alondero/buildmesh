@@ -3,7 +3,7 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
 // @ts-expect-error process is a nodejs global
-const host = process.env.TAURI_DEV_HOST;
+const { TAURI_DEV_HOST: host, BUILDMESH_VITE_CACHE_DIR: cacheDir } = process.env;
 
 // Build modes:
 //   default — desktop Tauri webview entry (index.html, base "/")
@@ -17,6 +17,9 @@ export default defineConfig(async ({ mode }) => {
 
   return {
     plugins: [react(), tailwindcss()],
+    // Worktrees may junction node_modules. Optimizer output belongs to this
+    // checkout; ui-shot additionally supplies a private directory per server.
+    cacheDir: cacheDir || ".tmp/vite",
     root: isMobile ? "mobile" : undefined,
     // Mobile served at `/` (matches the QR code URL) — Vite emits asset
     // hrefs as `/assets/...` which the embedded HTTP server now routes

@@ -176,7 +176,7 @@ Pending Circuit Runs have a persisted, per-Mesh queue position and are admitted 
 _Avoid_: workflow graph, pipeline (when meaning a Circuit), flow (when meaning the blueprint)
 
 **Review Blueprint**:
-The built-in local workflow for reviewing an Agent Node's work. It asks the Agent Node to publish a pull request, keeps one reviewer open across review rounds, and on approval asks the Agent Node to update an out-of-date branch and squash-merge. The issue-driven form then verifies the merge on GitHub and closes the implementation agent only when the pull request is merged; otherwise it hands the agent back open. It can be inspected read-only and copied into an independent, editable Review-derived Circuit tied to the built-in behavior revision at copy time.
+The built-in local workflow for reviewing an Agent Node's work. It asks the Agent Node to publish a pull request, keeps one reviewer open across review rounds, and on approval asks the Agent Node to rebase its branch onto the pull request's base branch, resolve the merge conflicts that rebase produces, and squash-merge. The issue-driven form then verifies the merge on GitHub and closes the implementation agent only when the pull request is merged; otherwise it hands the agent back open. It can be inspected read-only and copied into an independent, editable Review-derived Circuit tied to the built-in behavior revision at copy time.
 _Avoid_: Automated review loop, issue-driven PR review blueprint
 
 **Hand-back**:

@@ -448,7 +448,10 @@ macOS/Linux, use the resolved native executable. If its interactive help has no
 
 Use mcode's `/model` picker to find a model available to your account and enter
 its full `provider/model` reference, optionally with `#variant`. Buildmesh accepts
-only ASCII letters, digits, `.`, `_` and `-` in each part. Invalid references,
+ASCII letters, digits, `.`, `_` and `-` in identifiers, and the native
+`custom_provider:` provider prefix for your own endpoints. Use `mcode provider
+list --json` to find the exact provider id; for example,
+`custom_provider:local/MiniMax-M3`. Invalid references,
 including shell characters, fail before spawning even if they came from a
 Circuit override or a previously stored default. Replace or clear that value.
 Clearing the configuration's Model field restores the application default from

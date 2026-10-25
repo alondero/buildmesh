@@ -2,7 +2,8 @@
 
 Status: current
 
-Use the Circuit icon beside Build/Run in an Agent Node's title bar. Choose
+Use **Add review** in the compact Review circuit panel above an Agent Node's
+terminal, or the Circuit icon beside Build/Run in its title bar. Choose
 **Automated review loop** or a saved Circuit with a manual trigger on the same
 Mesh. Saved Circuits keep their configured timing and actions; the review
 preset waits for the source task to finish.
@@ -18,6 +19,12 @@ approval. When the source's completion cannot be
 read or classified, a visible approval step lets the user confirm completion
 before review begins.
 
+The **Reviewer launch configuration** picker uses the shared Spawn Menu:
+choose a harness directly or expand it to select a saved Launch Configuration.
+Set **Maximum review rounds** before starting (three by default, one to ten).
+**How the reviewer is launched** explains the defaults without expanding the
+setup form. Saved manual Circuits use the configuration in their own graph.
+
 The reviewer uses the provider picked in the Start Review dialog when one is
 chosen, otherwise the configured Reviewer provider, otherwise the source
 agent's provider. Model and effort come from a picked Launch Configuration
@@ -27,7 +34,8 @@ preset graphs do not override that configuration.
 It receives its working directory, Mesh base ref, name, and latest completion report. It is instructed
 to review committed changes from the merge-base and uncommitted/untracked
 changes, without editing files or posting to GitHub. It has its own worktree;
-no commit, push, or PR is required for this workflow.
+the built-in preset's publication and merge steps are described in
+[Review presentation contract](#review-presentation-contract).
 
 From a paired phone's browser or Android client, the node card and node screen show the run, its
 review round and the latest verdict, and a run that needs a person can be approved,
@@ -36,6 +44,16 @@ review or a saved manual Review Circuit from the same Mesh. See
 [Circuit Runs on the phone](mobile.md#circuit-runs-on-the-phone).
 
 ## Overview tab
+
+On arrival, the compact panel keeps the terminal visible and shows the card's
+Circuit name, status, review round and limit, current steps, and **Needs
+attention** when a person must act. It shares the Overview's snapshot and live
+updates. **View circuit** opens that run's full Overview. While details load,
+the known ownership status remains visible; a failed refresh offers **Retry**.
+An active run replaces **Add review** with **View circuit**, preventing a
+competing launch. Finished runs keep their status and Overview link alongside
+**Add review**; use the Overview's recovery controls to continue a failed run.
+The compact panel is hidden while viewing Overview or a utility terminal.
 
 A desktop node card whose agents belong to a Circuit Run shows an **Overview**
 tab first in its activity tab strip, for live and finished runs alike. It never
@@ -143,11 +161,18 @@ checkpoint, including its association, worktree and report; cleanup stops its
 live process without deleting the evidence.
 
 Approval closes the reviewer, then `merge` asks the source to squash-merge the
-pull request: it marks a draft ready, brings a behind-base branch up to date
-with `gh pr update-branch` (never a rebase, which would rewrite the approved
-commits), waits for the pushed commit's own workflow run, and only then
-squash-merges. The run completes once that prompt is delivered: it does
-not wait for the merge.
+pull request: it marks a draft ready, rebases its branch onto the base branch
+the pull request targets, resolves the merge conflicts that rebase produces in
+favour of the approved work, pushes the rebased branch, waits for the pushed
+commit's own workflow run, and only then squash-merges. The hand-off
+authorises the rebase and the conflict resolution explicitly, because an agent
+told only to *report* a conflict reads that as unauthorised and stops. The
+boundary is explicit too: a conflict that cannot be resolved without changing
+what the reviewer approved is reported instead of merged. The rebase rewrites
+the approved commits, so a branch protection rule that dismisses a stale
+approval leaves the merge blocked; that is the "the merge stays blocked for
+any other reason" stop condition, and the agent reports it. The run completes
+once that prompt is delivered: it does not wait for the merge.
 
 The issue-driven blueprint then verifies the merge instead of trusting the
 report: `merge_wait` classifies the implementer's turn and `merge_verify`
@@ -223,10 +248,13 @@ graphs through a one-time startup upgrade of the built-in preset and of
 issue-review circuits whose topology is exactly the previous stock shape.
 Edited prompts and reviewer settings are kept; stock feedback, approval, and
 merge texts
-move to their new wording. Each existing run is pinned to the graph it started
-with first, so active runs and failed-run recovery are unaffected. Review-derived
-copies are user-owned and keep their shape; the previous shape still satisfies
-the local review contract for continuation.
+move to their new wording. Every merge hand-off shipped before the rebase one
+is upgraded, including the text that updated an out-of-date branch with
+`gh pr update-branch`, so an existing install stops refusing to resolve the
+conflicts that branch cannot merge through. Each existing run is pinned to the
+graph it started with first, so active runs and failed-run recovery are
+unaffected. Review-derived copies are user-owned and keep their shape; the
+previous shape still satisfies the local review contract for continuation.
 
 Runs use the existing Circuits queue, capacity limits, run history, pause,
 approval, and cancellation controls. A repeated start while the source already

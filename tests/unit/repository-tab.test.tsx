@@ -109,6 +109,10 @@ const PRUNE_INFO = [
       },
     ],
     remote_tracking_branches: ['origin/main'],
+    // Issue #2580 — the backend raises this when its wall-clock budget
+    // stopped the squash-merge scan. The default fixture is a scan that
+    // finished, so the notice stays out of the other tests' way.
+    merge_scan_truncated: false,
   },
 ];
 
@@ -1087,5 +1091,77 @@ describe('RepositoryTab branches held in a worktree (issue #1460)', () => {
     });
     expect(selectRecommended.textContent).toMatch(/\(1\)/);
     expect(selectRecommended.textContent).not.toMatch(/\(2\)/);
+  });
+});
+
+/**
+ * Issue #2580 — the read states of the Repository destination.
+ *
+ * The destination used to show an indefinite "Loading git objects..."
+ * spinner and nothing else: a read that never finished looked exactly like a
+ * read that was still working. The backend now bounds the scan, the frontend
+ * caches it, and each of the three states the destination can be in has a
+ * rendering that says which one it is.
+ */
+describe('RepositoryTab read states (issue #2580)', () => {
+  // A failed read has to say so in an announced region, not fail silently —
+  // probe-ui-checklist.md §1.4 requires errors in a role="alert" region.
+  it('surfaces a failed read in a role="alert" region', async () => {
+    mockBackend();
+    const fallback = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) =>
+      cmd === 'get_git_prune_info'
+        ? Promise.reject(new Error('git exploded'))
+        : fallback!(cmd, args),
+    );
+    openProbeDestination('worktrees');
+
+    const alert = await screen.findByTestId('repository-read-error');
+    expect(alert.getAttribute('role')).toBe('alert');
+    expect(alert.textContent).toContain('git exploded');
+    // Wrap, don't truncate: the message is unbounded prose.
+    expect(alert.className).toContain('break-words');
+    expect(alert.className).not.toContain('truncate');
+  });
+
+  // A truncated merge scan is a state the user has to see. The branches the
+  // backend did not classify carry an *unknown* merged status, and a missing
+  // badge would read as "not merged" — which is what decides what gets
+  // deleted.
+  it('shows the truncation notice when the backend cut the merge scan short', async () => {
+    mockBackend({
+      prune: [{ ...PRUNE_INFO[0], merge_scan_truncated: true }],
+    });
+    openProbeDestination('worktrees');
+
+    const notice = await screen.findByTestId('repository-merge-scan-truncated');
+    expect(notice.getAttribute('role')).toBe('status');
+    expect(notice.textContent).toContain('unknown');
+    expect(notice.className).toContain('break-words');
+  });
+
+  // The waiting state has to name what it is waiting for, and say that the
+  // wait is bounded — an unexplained spinner reads as a hang.
+  it('names the scan and says it is time-limited while the read is in flight', async () => {
+    mockBackend();
+    const fallback = vi.mocked(invoke).getMockImplementation();
+    let release!: (value: unknown) => void;
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) =>
+      cmd === 'get_git_prune_info'
+        ? new Promise((resolve) => {
+            release = resolve;
+          })
+        : fallback!(cmd, args),
+    );
+    openProbeDestination('worktrees');
+
+    await waitFor(() =>
+      expect(screen.getByText(/Scanning branches and worktrees/)).toBeTruthy(),
+    );
+    expect(screen.getByTestId('repository-scan-hint').textContent).toContain(
+      'time-limited',
+    );
+
+    release(PRUNE_INFO);
   });
 });

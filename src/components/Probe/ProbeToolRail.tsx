@@ -44,7 +44,7 @@ import {
   TOOL_DISCOVERY_TILES,
   toolDiscoveryArrowTarget,
 } from '../CommandOmnibar/toolDiscovery';
-import { LayoutGridIcon, PROBE_TAB_ICONS } from './probeIcons';
+import { LayoutGridIcon } from './probeIcons';
 
 /** Panel width at which rail tab labels collapse to icons. The dock
  *  resizes 240–720 (`PROBE_PANEL_BOUNDS`); below 320 four labeled tabs
@@ -236,7 +236,7 @@ export function ProbeToolRail({ narrow }: { narrow: boolean }) {
         >
           {tabs.map((tab) => {
             const def = { ...PROBE_TAB_DEFINITIONS[tab], label: probeGroup(tab)?.label ?? PROBE_TAB_DEFINITIONS[tab].label };
-            const Icon = PROBE_TAB_ICONS[tab];
+            const Icon = PROBE_TAB_DEFINITIONS[tab].icon;
             const active = tab === probeTab;
             return (
               <button
@@ -312,7 +312,7 @@ export function ProbeToolRail({ narrow }: { narrow: boolean }) {
                   tile names to ~4 characters at the dock's 240px minimum. */}
               <div className={`grid gap-1 ${narrow ? 'grid-cols-1' : 'grid-cols-2'}`}>
                 {group.tiles.map((tile) => {
-                  const Icon = PROBE_TAB_ICONS[tile.tab];
+                  const Icon = PROBE_TAB_DEFINITIONS[tile.tab].icon;
                   const active = tile.tab === probeTab;
                   return (
                     <button

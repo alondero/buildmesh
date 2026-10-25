@@ -1620,7 +1620,10 @@ fn available_providers_emits_one_greppable_derivation_log_line() {
             }),
             || {
                 tracing::callsite::rebuild_interest_cache();
-                available_providers_with_preferences(crate::preferences::load().ok())
+                available_providers_with_preferences(
+                    crate::preferences::snapshot_or_default(),
+                    &crate::agent::detection::detection_snapshot(),
+                )
             },
         )
     };
@@ -1767,6 +1770,15 @@ fn memo_row() -> ProviderInfo {
     }
 }
 
+/// The memo key a test pins: the preferences generation plus the detection
+/// epoch (issue #2532).
+fn memo_key(generation: u64, detection_epoch: u64) -> MenuKey {
+    MenuKey {
+        generation,
+        detection_epoch,
+    }
+}
+
 /// A repeat read inside one generation must not re-derive. Driven
 /// through the memo seam with a pinned generation and a counting closure
 /// rather than through wall-clock: the count is the observable, and no
@@ -1779,8 +1791,8 @@ fn a_repeat_read_within_the_ttl_does_not_re_derive() {
         derivations += 1;
         vec![memo_row()]
     };
-    let first = derived_menu_at(7, &mut derive);
-    let second = derived_menu_at(7, &mut derive);
+    let first = derived_menu_at(memo_key(7, 0), &mut derive);
+    let second = derived_menu_at(memo_key(7, 0), &mut derive);
     assert_eq!(derivations, 1, "the second read must be a memo hit");
     let ids = |rows: &[ProviderInfo]| {
         rows.iter()
@@ -1804,11 +1816,30 @@ fn a_newer_generation_re_derives_the_menu() {
         derivations += 1;
         vec![memo_row()]
     };
-    derived_menu_at(7, &mut derive);
-    derived_menu_at(8, &mut derive);
+    derived_menu_at(memo_key(7, 0), &mut derive);
+    derived_menu_at(memo_key(8, 0), &mut derive);
     assert_eq!(
         derivations, 2,
         "a settings write must invalidate the memoized menu"
+    );
+}
+
+/// The detection epoch is the second half of the memo key (issue #2532). A
+/// probe that observes a different set of installed harnesses bumps it, and
+/// the memo must re-derive on that — inside the TTL, without waiting for the
+/// timer.
+#[test]
+fn a_newer_detection_epoch_re_derives_the_menu() {
+    let mut derivations = 0;
+    let mut derive = || {
+        derivations += 1;
+        vec![memo_row()]
+    };
+    derived_menu_at(memo_key(7, 0), &mut derive);
+    derived_menu_at(memo_key(7, 1), &mut derive);
+    assert_eq!(
+        derivations, 2,
+        "a new detection epoch must invalidate the memoized menu"
     );
 }
 
@@ -1821,15 +1852,20 @@ fn a_memoized_menu_expires_after_the_ttl() {
     let mut cache = DerivedMenuCache::default();
     let derived_at = Instant::now();
     let menu = Arc::new(Vec::<ProviderInfo>::new());
-    cache.put(0, derived_at, Arc::clone(&menu));
+    cache.put(memo_key(0, 0), derived_at, Arc::clone(&menu));
     assert!(
         cache
-            .get(0, derived_at + DERIVED_MENU_TTL - Duration::from_nanos(1))
+            .get(
+                memo_key(0, 0),
+                derived_at + DERIVED_MENU_TTL - Duration::from_nanos(1)
+            )
             .is_some(),
         "a memoized menu is served until its TTL expires"
     );
     assert!(
-        cache.get(0, derived_at + DERIVED_MENU_TTL).is_none(),
+        cache
+            .get(memo_key(0, 0), derived_at + DERIVED_MENU_TTL)
+            .is_none(),
         "an expired menu must re-derive so an out-of-process install shows up"
     );
 }
@@ -1841,15 +1877,34 @@ fn a_memoized_menu_expires_after_the_ttl() {
 fn a_derivation_from_an_older_generation_cannot_publish() {
     let mut cache = DerivedMenuCache::default();
     let now = Instant::now();
-    cache.get(2, now); // moves the slot to generation 2
-    cache.put(1, now, Arc::new(Vec::new()));
+    cache.get(memo_key(2, 0), now); // moves the slot to generation 2
+    cache.put(memo_key(1, 0), now, Arc::new(Vec::new()));
     assert!(
-        cache.get(2, now).is_none(),
+        cache.get(memo_key(2, 0), now).is_none(),
         "a stale derivation must not become serveable state"
     );
     assert!(
-        cache.get(1, now).is_none(),
+        cache.get(memo_key(1, 0), now).is_none(),
         "an older reader must not evict the newer generation"
+    );
+}
+
+/// The same race guard on the detection epoch: a derivation that observed
+/// epoch `E` does not publish or evict once a probe has moved the slot to
+/// `E+1`.
+#[test]
+fn a_derivation_from_an_older_detection_epoch_cannot_publish() {
+    let mut cache = DerivedMenuCache::default();
+    let now = Instant::now();
+    cache.get(memo_key(2, 1), now); // moves the slot to epoch 1
+    cache.put(memo_key(2, 0), now, Arc::new(Vec::new()));
+    assert!(
+        cache.get(memo_key(2, 1), now).is_none(),
+        "a stale derivation must not become serveable state"
+    );
+    assert!(
+        cache.get(memo_key(2, 0), now).is_none(),
+        "an older reader must not evict the newer detection epoch"
     );
 }
 
@@ -1888,4 +1943,185 @@ fn both_menu_entry_points_follow_a_preferences_write() {
         "the route must serve the menu a write just changed"
     );
     crate::preferences::reset_for_tests();
+}
+
+// -----------------------------------------------------------------------
+// Issue #2532 — the derivation reads one preferences snapshot.
+//
+// The derivation used to reach preferences through several independent
+// accessors, each with its own load, so a write landing between two of them
+// could hand the derivation a torn view. These pin the replacement: one read
+// per derivation, and a derivation a concurrent write leaves alone.
+// -----------------------------------------------------------------------
+
+/// Write an empty preferences file into a scratch directory and point the
+/// preferences module at it, so a test owns its preferences.
+fn scratch_preferences() -> tempfile::TempDir {
+    let scratch = tempfile::tempdir().unwrap();
+    std::fs::write(
+        scratch.path().join("preferences.json"),
+        serde_json::to_vec_pretty(&crate::preferences::AppPreferences::default()).unwrap(),
+    )
+    .unwrap();
+    crate::preferences::init_for_tests(scratch.path().into());
+    scratch
+}
+
+/// The row ids of a menu, for order-independent comparison.
+fn menu_ids(rows: &[ProviderInfo]) -> Vec<String> {
+    rows.iter().map(|row| row.id.clone()).collect()
+}
+
+/// The derivation reads preferences **once** (issue #2532): the snapshot is
+/// the single read, and the derivation that consumes it reads no preferences
+/// of its own.
+///
+/// The counter is per-thread, like the preferences cache itself, so a
+/// parallel test on another worker thread leaves this thread's count alone.
+#[test]
+fn a_derivation_reads_preferences_exactly_once() {
+    let scratch = scratch_preferences();
+
+    let before = crate::preferences::load_count();
+    let snapshot = crate::preferences::load_snapshot().expect("preferences read");
+    assert_eq!(
+        crate::preferences::load_count() - before,
+        1,
+        "the snapshot must read preferences exactly once"
+    );
+
+    let before = crate::preferences::load_count();
+    let _menu = available_providers_with_preferences(
+        snapshot,
+        &crate::agent::detection::detection_snapshot(),
+    );
+    assert_eq!(
+        crate::preferences::load_count() - before,
+        0,
+        "the derivation must not read preferences at all — the snapshot is its \
+         only source"
+    );
+
+    crate::preferences::reset_for_tests();
+    drop(scratch);
+}
+
+/// A torn derivation is impossible (issue #2532): the rows are a pure
+/// function of the snapshot the derivation was handed, so a write that lands
+/// afterwards does not reach into a derivation already in flight.
+///
+/// The write is proven to have landed — a *fresh* snapshot sees it — so the
+/// first assertion is about isolation, not about a write that failed to land.
+#[test]
+fn a_derivation_cannot_be_torn_by_a_concurrent_write() {
+    let scratch = scratch_preferences();
+    crate::preferences::update(|prefs| {
+        prefs
+            .harness_profiles
+            .push(profile("first-terminal", "terminal"))
+    })
+    .expect("preferences write lands");
+
+    let detection = crate::agent::detection::detection_snapshot();
+    let snapshot = crate::preferences::load_snapshot().expect("preferences read");
+    let before = available_providers_with_preferences(snapshot.clone(), &detection);
+
+    // A write lands while the derivation is in flight.
+    crate::preferences::update(|prefs| {
+        prefs
+            .harness_profiles
+            .push(profile("second-terminal", "terminal"))
+    })
+    .expect("preferences write lands");
+
+    let after_write = available_providers_with_preferences(snapshot.clone(), &detection);
+    assert_eq!(
+        menu_ids(&before),
+        menu_ids(&after_write),
+        "a write must not reach into a derivation that already holds its snapshot"
+    );
+
+    // The write really landed: a fresh snapshot sees it.
+    let fresh = crate::preferences::load_snapshot().expect("preferences read");
+    let fresh_menu = available_providers_with_preferences(fresh, &detection);
+    assert!(
+        menu_ids(&fresh_menu).contains(&"second-terminal".to_string()),
+        "the write must reach a derivation that starts after it"
+    );
+
+    crate::preferences::reset_for_tests();
+    drop(scratch);
+}
+
+/// The detection epoch is what makes a harness installed while the app runs
+/// appear in the menu (issue #2532) — without waiting for the TTL.
+///
+/// The observation is the derivation's second input and the epoch the second
+/// half of the memo key, so a probe that observes a new install invalidates
+/// the memoized menu straight away.
+#[test]
+fn a_harness_installed_after_startup_appears_without_waiting_for_the_ttl() {
+    let scratch = scratch_preferences();
+    crate::preferences::update(|prefs| prefs.harness_profiles.push(profile("codex", "codex")))
+        .expect("preferences write lands");
+
+    let previous = crate::agent::detection::detection_snapshot();
+
+    // Startup: the probe did not see `codex` installed.
+    let startup = crate::agent::detection::observe_installations(Default::default());
+    assert!(
+        startup.observed(),
+        "a probe that found nothing installed is still an observation — the set is \
+         known to be empty, not unknown"
+    );
+    assert!(
+        startup.epoch > previous.epoch,
+        "the first observation must move the epoch"
+    );
+    let snapshot = crate::preferences::load_snapshot().expect("preferences read");
+    let menu = derived_menu(snapshot, available_providers_with_preferences);
+    assert!(
+        !menu_ids(&menu).contains(&"codex".to_string()),
+        "a harness the probe did not see installed must not be offered"
+    );
+
+    // A later probe observes the install.
+    let after = crate::agent::detection::observe_installations(std::collections::HashSet::from([
+        "codex".to_string(),
+    ]));
+    assert!(
+        after.epoch > startup.epoch,
+        "a probe that observes a different set must bump the epoch"
+    );
+
+    // The memo key changed with it, so the menu is derived again — inside the
+    // TTL, without the timer being involved.
+    let snapshot = crate::preferences::load_snapshot().expect("preferences read");
+    let menu = derived_menu(snapshot, available_providers_with_preferences);
+    assert!(
+        menu_ids(&menu).contains(&"codex".to_string()),
+        "the newly installed harness must appear without waiting for the TTL"
+    );
+
+    crate::agent::detection::restore_detection_state(&previous);
+    crate::preferences::reset_for_tests();
+    drop(scratch);
+}
+
+/// The epoch only moves on a real change: re-publishing the same observation
+/// leaves it alone, so a repeated probe does not re-derive the menu.
+#[test]
+fn republishing_the_same_detection_observation_keeps_the_epoch() {
+    let previous = crate::agent::detection::detection_snapshot();
+    let first = crate::agent::detection::observe_installations(std::collections::HashSet::from([
+        "codex".to_string(),
+    ]));
+    let second = crate::agent::detection::observe_installations(std::collections::HashSet::from([
+        "codex".to_string(),
+    ]));
+    assert_eq!(
+        first.epoch, second.epoch,
+        "an unchanged observation must not move the epoch"
+    );
+    crate::agent::detection::restore_detection_state(&previous);
 }

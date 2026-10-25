@@ -414,11 +414,13 @@ pub(super) fn dispatch_effects(
                         // and that echo only proves *this* submission if the
                         // record already exists when the hook is handled
                         // (issue #1898).
-                        match db::circuit::evidence::record_prompt_submission(
+                        match crate::services::circuit_prompt::retain(
                             active.run.id,
                             node_id,
                             attempt,
                             &prepared,
+                            crate::services::circuit_prompt::DeliveryKind::Inject,
+                            staged.turn.as_ref(),
                         ) {
                             Ok(revision) => {
                                 view.context.set("evidence.revision", revision.to_string())
@@ -585,7 +587,8 @@ pub(super) fn dispatch_effects(
                 let expected = view
                     .context
                     .get(&format!("node.{node_id}.continuation.input"))
-                    .ok_or_else(|| "Continuation lacks an input ownership stamp".to_string())?;
+                    .ok_or_else(|| "Continuation lacks an input ownership stamp".to_string())?
+                    .to_owned();
                 // The agent may owe a result file from an earlier turn. Archive it so the
                 // continuation cannot be judged from that stale report.
                 let prompt = crate::circuit::handoff::prepare_continuation(
@@ -595,7 +598,19 @@ pub(super) fn dispatch_effects(
                     prompt,
                 );
                 let prepared = PreparedPrompt::prepare(*target_agent_id, &prompt)?;
-                match host.write_prompt(&prepared, Some(expected)) {
+                let attempt = view.step(node_id).map_or(1, |s| s.attempt);
+                let turn = crate::circuit::handoff::agent_turn(active.run.id, *target_agent_id);
+                let revision = crate::services::circuit_prompt::retain(
+                    active.run.id,
+                    node_id,
+                    attempt,
+                    &prepared,
+                    crate::services::circuit_prompt::DeliveryKind::Continuation,
+                    turn.as_ref(),
+                )
+                .map_err(|e| e.to_string())?;
+                view.context.set("evidence.revision", revision.to_string());
+                match host.write_prompt(&prepared, Some(&expected)) {
                     Ok(true) => {
                         let _ =
                             db::update_agent_node_status(*target_agent_id, SessionStatus::Running);
@@ -769,32 +784,39 @@ pub(super) fn dispatch_effects(
                 let expected = view
                     .context
                     .get(&format!("node.{node_id}.nudge.input"))
-                    .ok_or_else(|| "Wake-up lacks an input ownership stamp".to_string())?;
+                    .ok_or_else(|| "Wake-up lacks an input ownership stamp".to_string())?
+                    .to_owned();
                 let prepared = PreparedPrompt::prepare(*target_agent_id, prompt)?;
                 // The nudge is a real prompt submission, so it is recorded the
                 // same way an injected one is: the receipt it may produce has to
                 // bind to a submission Buildmesh itself made.
-                if let Err(error) = db::circuit::evidence::record_prompt_submission(
+                let turn = crate::circuit::handoff::agent_turn(active.run.id, *target_agent_id);
+                match crate::services::circuit_prompt::retain(
                     active.run.id,
                     node_id,
                     attempt,
                     &prepared,
+                    crate::services::circuit_prompt::DeliveryKind::Nudge,
+                    turn.as_ref(),
                 ) {
-                    tracing::warn!(
-                        "circuits: run {}: could not record wake-up submission: {}",
-                        active.run.id,
-                        error
-                    );
-                    outcome_events.push(CircuitEvent::NudgeUncertain {
-                        node_id: node_id.clone(),
-                        attempt,
-                        error: format!(
-                            "Wake-up submission could not be recorded for correlation: {error}"
-                        ),
-                    });
-                    continue;
+                    Ok(revision) => view.context.set("evidence.revision", revision.to_string()),
+                    Err(error) => {
+                        tracing::warn!(
+                            "circuits: run {}: could not record wake-up submission: {}",
+                            active.run.id,
+                            error
+                        );
+                        outcome_events.push(CircuitEvent::NudgeUncertain {
+                            node_id: node_id.clone(),
+                            attempt,
+                            error: format!(
+                                "Wake-up submission could not be recorded for correlation: {error}"
+                            ),
+                        });
+                        continue;
+                    }
                 }
-                match host.write_prompt(&prepared, Some(expected)) {
+                match host.write_prompt(&prepared, Some(&expected)) {
                     Ok(true) => {
                         let _ =
                             db::update_agent_node_status(*target_agent_id, SessionStatus::Running);

@@ -3,7 +3,7 @@
 //! Every typed wrapper in the `tauri/` facet modules (`mesh`, `provider`,
 //! `circuit`, etc.) routes through this `_invoke`. The chokepoint is the
 //! only file that imports `_rawInvoke` from `@tauri-apps/api/core`; the
-//! `tests/unit/tauri-ipc-seam.test.ts` drift ratchet enforces that rule.
+//! ESLint import restrictions enforce static transport ownership.
 //!
 //! On rejection, the chokepoint logs a sanitized arg-shape via
 //! `frontendLog` then re-throws the original `Error` so every consumer
@@ -15,8 +15,7 @@
 //! - `tests/unit/ipc-error-logging.test.ts` stubs `_rawInvoke` via
 //!   `vi.mock('@tauri-apps/api/core', …)` and asserts on the formatted
 //!   shape.
-//! - The seam test (`tauri-ipc-seam.test.ts`) hard-pins this file as the
-//!   sole allowed raw-invoke site alongside `frontendLog.ts`.
+//! - `tauri-ipc-seam.test.ts` exercises the ESLint import restrictions.
 
 import { invoke as _rawInvoke } from '@tauri-apps/api/core';
 import { logFrontend } from '../frontendLog';

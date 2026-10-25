@@ -246,14 +246,19 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
                 must_contain: "{{node.reviewer.output}}",
             },
             // Approval asks the implementation agent to squash-merge this PR,
-            // bringing an out-of-date branch up to date first.
+            // rebasing onto the base branch and resolving the conflicts that
+            // rebase produces.
             PromptAssertion {
                 node_id: "merge",
                 must_contain: "gh pr merge {{pr.number}} --squash",
             },
             PromptAssertion {
                 node_id: "merge",
-                must_contain: "gh pr update-branch",
+                must_contain: "git rebase origin/<base-branch>",
+            },
+            PromptAssertion {
+                node_id: "merge",
+                must_contain: "authorised to rebase the branch, to resolve the merge conflicts",
             },
         ],
     },

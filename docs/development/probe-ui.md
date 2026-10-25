@@ -3,7 +3,9 @@
 Status: current
 
 ## Canvas Layout (View Modes)
-The canvas exposes five **View Modes** (wayfinder #982; state model #983; rendering #986; Filtered added #1609). The active mode is a pure UI string-literal union — no backend serialises it. Every surface that must answer "what is the user looking at, and which Mesh is it" reads one pure, store-independent derivation instead of re-deriving scope for itself: `deriveScope` in `src/lib/viewModes.ts` resolves the effective scope once — the View Mode, the anchoring Mesh or none, whether the scope is Mesh-scoped, the visible and pre-filter node counts, and the Mesh the focused node contributes. The grid render, the canvas empty state's counts, keyboard traversal (#987), the title-bar scope indicator, and unit tests all consume that single value, so no two of them can disagree about the scope (#2071).
+The canvas exposes five **View Modes** (wayfinder #982; state model #983; rendering #986; Filtered added #1609). The active mode is a pure UI string-literal union — no backend serialises it. `deriveScope` in `src/lib/viewModes.ts` is the pure definition of the effective scope: the View Mode, the anchoring Mesh or none, whether the scope is Mesh-scoped, the visible and pre-filter node counts, and the Mesh the focused node contributes. `resolveSingleNode` is the Single-mode fallback (the active node, then the first node of the grid Single was entered from, then any node).
+
+React surfaces read that answer through `useScope` (`src/hooks/useScope.ts`). The hook is the only place that joins View Mode, the selected Mesh, and the active Agent Node for the scope question, and it delegates to those two functions instead of restating them. Keyboard traversal calls `readScope`, the same assembly against the current store snapshot. Mesh names are opt-in (`useScope({ meshNames: true })`) so a rename re-renders the title-bar scope indicator and not the terminal grid. Two rules that are not the grid scope live in the same module: `diffLensDiverged` closes a diff when the focused node or the selected Mesh leaves the lens the diff was opened on, and `selectedActivityMember` chooses which member a Node Activity card shows. Card selections stay a per-card subscription, so a utility toggle does not re-render every scope consumer. The grid render, the canvas empty state's counts, keyboard traversal (#987), the title-bar scope indicator, and unit tests therefore cannot disagree about the scope (#2071).
 
 - **single** — Solo the active node; subsumes the old maximize toggle. Escape returns to the grid mode `single` was entered from.
 - **mesh** — Scope to the sidebar-selected Mesh, and nothing else. There is no fallback chain: with no Mesh selected, Mesh Grid is an explicit empty state rather than a guessed Mesh, because silently showing the focused node's Mesh (or the first loaded Mesh) shows a scope the user never chose. Entering Mesh Grid with no Mesh selected opens the Mesh picker. Mesh selection is sticky — re-clicking the highlighted Mesh is a no-op while the canvas is already that Mesh's grid, and returns the canvas to that Mesh's grid from Pinned/Filtered/Single (#2072).
@@ -11,7 +13,7 @@ The canvas exposes five **View Modes** (wayfinder #982; state model #983; render
 - **all** — Every loaded node, across every mesh. All Nodes carries a one-way invariant: `viewMode === 'all'` requires `selectedMeshId === null`. `setViewMode` enforces this transition directly so callers remain side-effect-free.
 - **filtered** — Cross-mesh view narrowed by the Grid Controls (free-text search + provider/status filters; the Search Nodes bar mounts in the title bar only while this mode is active).
 
-The five-segment control is the bespoke `ViewModeSwitcher` in the title bar; the adjacent scope indicator names that scope (the Mesh, or an honest cross-Mesh label carrying an Agent Node count) and doubles as the Mesh picker, so choosing a Mesh is one write that moves the canvas and the Mesh-owned Probe destinations together (#2074, #2077). A search that escapes Mesh scope, and deleting the Mesh the canvas was showing, announce the move instead of changing the view silently (#2076).
+The five-segment control is the bespoke `ViewModeSwitcher` in the title bar (below 1440px a single labelled `ViewSelector` names the View Mode and scope and holds both pickers, #2421); the adjacent scope indicator names that scope (the Mesh, or an honest cross-Mesh label carrying an Agent Node count) and doubles as the Mesh picker, so choosing a Mesh is one write that moves the canvas and the Mesh-owned Probe destinations together (#2074, #2077). A search that escapes Mesh scope, and deleting the Mesh the canvas was showing, announce the move instead of changing the view silently (#2076).
 
 `src/lib/navigation.ts` owns desktop navigation across the mesh, agent activity,
 View Mode and Probe stores. `focusNode` can keep the current grid, follow the
@@ -33,6 +35,41 @@ just became selected — by the row itself (`MeshItem`), which owns the
 `NodeItem` uses for its own active bit (#1748). A collapse the user made by
 hand therefore survives later re-renders and only a newly opened Mesh or agent
 expands the row again.
+
+## Probe adapters and scoped reads
+
+For contributors changing a destination: add its icon, ownership metadata and
+`probeTabAdapter` entry to `PROBE_TAB_DEFINITIONS` in
+`src/lib/probeContext.ts`. The entry names the component and its read in one
+dynamic import. Palette command copy and tool-discovery membership also live
+in that entry. Destination IDs and order derive from the record; the panel
+renders its component, and test preloading traverses its `preload` functions.
+The adapter contains no rendering branches, and tab chunks remain lazy.
+
+`src/lib/probeResource.ts` owns non-path read state. `useProbeResource` takes a
+loader, load context and explicit subject key (including server-side filters).
+A refresh token invalidates the same subject without discarding its data.
+A subject change creates an empty resource and disposes the outgoing one.
+Within a subject, only the newest live request can commit data, error or
+completion. Reload retains that subject's last successful data; rejection keeps
+it with an error. Reads whose old data would assert current eligibility use
+`discardOnError`, which keeps that data absent through pending retries.
+Disposal aborts the signal and drops late success/rejection,
+even when IPC cannot cancel the backend operation. Returning to a subject starts
+a fresh owner. `mutate` aborts older reads before applying an acknowledged write.
+Manual busy feedback survives competing background reads until the latest read
+settles. Optional polling waits until each read settles before arming its timer.
+PR mergeability keeps its bounded retry budget and row disclosure rules in the tab.
+
+Existing shared owners remain authoritative: Project Files and Agent Changes
+route their registry reads through path-invalidated caches, settings and notes
+use the Mesh editing session,
+and Notifications reconciles through the notification store. Their registry
+loaders delegate to those owners rather than introducing a second mutation
+policy. The resource governs local read publication, not store-owned drafts or
+cross-surface reconciliation. `tests/unit/probe-resource.test.tsx` exercises the
+adapter contract for every destination in both completion orders, plus mutation,
+error, refresh and disposal behavior.
 
 ## Probe Context Lenses (issue #1456)
 Probe destinations have explicit ownership in `src/lib/probeContext.ts`; the

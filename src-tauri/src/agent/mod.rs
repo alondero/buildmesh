@@ -12,6 +12,8 @@
 //!   `order_providers`, `order_proxied_children`, `available_providers`,
 //!   `list_providers` Tauri command)
 //! - `launch.rs` — routing a launch request to the orchestrator
+//! - `attention_hooks.rs` — the one read/compare/upsert/write sequence every
+//!   harness's attention-hook file shares (issue #2525)
 //! - `managed_config.rs` — the one place a harness config document is read,
 //!   merged and atomically rewritten (issue #2235)
 //! - `sandbox.rs` — macOS Seatbelt profile generation + `sandbox-exec` wrapping
@@ -22,6 +24,7 @@
 //! - `workspace_trust.rs` — pre-trust the spawned worktree in the agent CLI's
 //!   settings so it doesn't hit the workspace-trust dialog on first prompt
 
+pub(crate) mod attention_hooks;
 pub mod background;
 pub mod capabilities;
 pub mod detection;

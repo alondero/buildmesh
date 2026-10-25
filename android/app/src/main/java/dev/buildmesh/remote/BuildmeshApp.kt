@@ -76,7 +76,7 @@ fun BuildmeshApp(vm: BuildmeshViewModel, invitation: String = "", requestedNodeI
                     val title = when (screen) {
                         "node", "terminal", "changes", "diff", "pr" -> selected?.text("name") ?: "Agent Node"
                         "issues" -> "Issues"; "pulls" -> "Pull requests"; "archive" -> "Archive"; "capture" -> "New task"
-                        "connection" -> "Connection"; else -> "Buildmesh"
+                        "connection" -> "Connection"; "usage" -> "Usage"; else -> "Buildmesh"
                     }
                     Text(title, maxLines = 1)
                 }
@@ -87,7 +87,8 @@ fun BuildmeshApp(vm: BuildmeshViewModel, invitation: String = "", requestedNodeI
                 navigationIcon = {
                     if (screen != "home") IconButton(onClick = ::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
                 }, actions = {
-                    IconButton(onClick = vm::retry) { Icon(Icons.Default.Refresh, "Refresh") }
+                    if (screen == "home") IconButton(onClick = { screen = "usage" }) { Icon(Icons.Default.BarChart, "Usage") }
+                    if (screen != "usage") IconButton(onClick = vm::retry) { Icon(Icons.Default.Refresh, "Refresh") }
                     IconButton(onClick = { screen = "connection" }) { Icon(Icons.Default.Settings, "Connection settings") }
                 })
         },
@@ -125,6 +126,7 @@ fun BuildmeshApp(vm: BuildmeshViewModel, invitation: String = "", requestedNodeI
                     "capture" -> TaskScreen(state, vm, meshId, { meshId = it }, launch, { launch = it }, { id -> nodeId = id; screen = "node" })
                     "issues", "archive" -> vm.api?.let { ResourceScreen(it, meshId, screen, state, vm, { id -> nodeId = id; screen = "node" }) }
                     "pulls" -> vm.api?.let { PullRequestsScreen(it, meshId, vm, { id -> nodeId = id; screen = "node" }) }
+                    "usage" -> vm.api?.let { UsageScreen(it, vm) }
                     "pr" -> if (selected != null) vm.api?.let { CreatePrScreen(it, selected.number("mesh_id"), nodeId, vm) }
                         else EmptyMessage("This node is no longer available.")
                     "connection" -> ConnectionScreen(state.origin, vm, {

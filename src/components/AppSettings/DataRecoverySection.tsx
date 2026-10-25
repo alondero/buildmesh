@@ -42,15 +42,10 @@ type Busy = 'none' | 'quick' | 'full' | 'snapshot' | 'export' | 'inspect' | 'sta
 
 // ## Tolerant reads
 //
-// The Tauri UI mock resolves any command it has no fixture for as `null`, on
-// purpose, so a screen reading a command it does not know "renders empty
-// instead of throwing" (see scripts/ui-mock/tauri-mock.mjs). Honouring that
-// contract matters beyond the harness: `Promise.all` over a pane's initial
-// reads resolves to `null` for anything unmocked, and a bare
-// `snapshots.length` on that value takes down the whole Settings modal
-// through the app's error boundary — losing the dialog, not just the pane.
-// `coerceSnapshots` keeps a bad read to an empty list; `info` is read through
-// optional chaining already.
+// The Tauri UI mock rejects unfixtured commands; null responses require an
+// explicit fixture or ignored-command entry (see scripts/ui-mock/tauri-mock.mjs).
+// `coerceSnapshots` keeps a null or malformed read from taking down Settings
+// through `snapshots.length`; `info` is read through optional chaining already.
 const coerceSnapshots = (value: unknown): StateSnapshot[] =>
   Array.isArray(value) ? value : [];
 

@@ -5,16 +5,15 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
 
-/** Paths relative to src-tauri/src. Keep in step with the seam-debt list. */
-export const ALLOWED_PRODUCTION_GIT2 = [
-  "circuit/verification.rs",
-  "commands/ai_context.rs",
-  "commands/build_run.rs",
-  "commands/diff.rs",
-  "commands/git.rs",
-  "commands/pr.rs",
-  "commands/prune.rs",
-];
+/**
+ * Paths relative to src-tauri/src that may still name `git2::` outside
+ * `git/`. Empty since issue #2526: the raw `Repository` handle no longer
+ * leaves the `git` module, so no production file outside it names `git2::`.
+ *
+ * Keep in step with the seam-debt list in docs/development/module-map.md —
+ * the ownership test asserts the two agree.
+ */
+export const ALLOWED_PRODUCTION_GIT2 = [];
 
 function isCfgTestAttr(line) {
   // `test` as its own predicate, including inside all(...) and any(...).
@@ -36,9 +35,29 @@ export function stripCfgTestItems(source) {
     }
     // Only a whole-line attribute is skipped. An inline `#[cfg(test)] fn`
     // is the item; skipping that line would delete the next production line.
+    // A comment between the attribute and the item belongs to the attribute's
+    // header — the `// allow-test-in-production: <reason>` escape hatch sits
+    // there — so it is skipped too. Otherwise a semicolon inside that reason
+    // ends the item early and exposes the fixture below as production use.
     let j = i;
-    while (j < lines.length && /^\s*#\[[^\]]*\]\s*$/.test(lines[j])) j += 1;
-    while (j < lines.length && lines[j].trim() === "") j += 1;
+    for (;;) {
+      if (j >= lines.length) break;
+      const line = lines[j];
+      const attribute = line.match(/^\s*#\[[^\]]*\](.*)$/);
+      if (attribute) {
+        const rest = attribute[1].trim();
+        // A trailing comment is still the attribute's header; anything else
+        // after the bracket is the item itself.
+        if (rest !== "" && !rest.startsWith("//")) break;
+        j += 1;
+        continue;
+      }
+      if (lines[j].trim() === "" || /^\s*\/\//.test(lines[j])) {
+        j += 1;
+        continue;
+      }
+      break;
+    }
     if (j >= lines.length) {
       kept.push(...lines.slice(i));
       break;

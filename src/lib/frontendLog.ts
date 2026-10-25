@@ -29,8 +29,7 @@
  * `src/lib/tauri.ts`. It is a *peer* of the wrapper, not a consumer: the
  * wrapper may eventually call *it* for central IPC error logging (the
  * "deliberate follow-up" noted in ADR-0010). Routing through the wrapper
- * would risk a logging cycle. The seam guard in
- * `tests/unit/tauri-ipc-seam.test.ts` pins this exemption explicitly.
+ * would risk a logging cycle. The ESLint import restrictions exempt this file.
  */
 
 import { invoke } from '@tauri-apps/api/core';

@@ -113,7 +113,7 @@ describe('effortAllowedFor', () => {
 
 describe('blocksReviewCircuit', () => {
   it('blocks the harnesses with no turn signal, and the plain shell', () => {
-    for (const id of ['dsh', 'freebuff', 'terminal']) {
+    for (const id of ['dsh', 'freebuff', 'perch', 'terminal']) {
       expect(blocksReviewCircuit(id), id).toBe(true);
     }
   });
@@ -180,7 +180,7 @@ describe('review-circuit eligibility across the shipped catalog', () => {
 
   it('excludes the harnesses with no turn signal, plus the plain shell', () => {
     expect(HARNESS_IDS.filter(id => blocksReviewCircuit(id)))
-      .toEqual(['dsh', 'freebuff', 'terminal']);
+      .toEqual(['dsh', 'freebuff', 'perch', 'terminal']);
   });
 });
 

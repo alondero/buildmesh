@@ -1,5 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   isPrStateRetryable,
@@ -188,14 +192,52 @@ test('main in dry-run mode reports without re-running anything', async () => {
 });
 
 test('main fails when every selected rerun fails', async () => {
+  const errors = [];
+  const originalError = console.error;
+  console.error = (message) => { errors.push(message); };
   const gh = async (args) => {
     if (args[0] === 'run' && args[1] === 'list') return [run()];
     if (args[0] === 'pr' && args[1] === 'list') return [{ headRefName: 'feature-a', state: 'open' }];
-    if (args[0] === 'run' && args[1] === 'rerun') throw new Error('rerun rejected');
+    if (args[0] === 'run' && args[1] === 'rerun') throw new Error('gh run rerun 1 --failed exited 1: permission denied');
     return [];
   };
-  const code = await main([], { gh, now: NOW });
-  assert.equal(code, 1);
+  try {
+    const code = await main([], { gh, now: NOW });
+    assert.equal(code, 1);
+    assert.deepEqual(errors, ['ci-retry: rerun of https://example.test/runs/1 failed: gh run rerun 1 --failed exited 1: permission denied']);
+  } finally {
+    console.error = originalError;
+  }
+});
+
+// An executable gh file on PATH assumes POSIX; the Windows CI leg skips this test.
+test('main accepts non-JSON confirmation from a successful gh run rerun', { skip: process.platform === 'win32' }, () => {
+  const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
+  const dir = mkdtempSync(join(repoRoot, '.ci-retry-'));
+  try {
+    writeFileSync(join(dir, 'gh'), `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === 'run' && args[1] === 'list') {
+  console.log(JSON.stringify(${JSON.stringify([run({ createdAt: new Date().toISOString() })])}));
+} else if (args[0] === 'pr' && args[1] === 'list') {
+  console.log(JSON.stringify([{ headRefName: 'feature-a', state: 'OPEN' }]));
+} else if (JSON.stringify(args) === JSON.stringify(['run', 'rerun', '1', '--failed'])) {
+  console.log('✓ Requested rerun of run 1');
+} else {
+  console.error('unexpected gh arguments: ' + JSON.stringify(args));
+  process.exitCode = 1;
+}
+`, { mode: 0o755 });
+    const res = spawnSync(process.execPath, ['scripts/ci/retry-failed-runs.mjs'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${dir}${delimiter}${process.env.PATH}`, GH_TOKEN: 'test-token' },
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stdout, /ci-retry: re-running failed jobs/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('the retry workflow fires when a Build run completes unsuccessfully, with the schedule as a backstop', async () => {

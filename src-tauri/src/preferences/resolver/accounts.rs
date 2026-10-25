@@ -10,35 +10,39 @@ use super::catalog::{
 /// `provider_accounts` merged over them by `id` (user wins / new ids append).
 /// Mirrors [`super::harness::harness_profiles`] so a built-in can never be
 /// removed by an empty or partial `preferences.json`.
+///
+/// An accessor over [`super::snapshot::snapshot_or_default`]: the read and the
+/// load-failure policy happen once, in the snapshot loader (issue #2532).
 pub fn provider_accounts() -> Vec<ProviderAccount> {
-    let mut prefs = match load() {
-        Ok(prefs) => prefs,
-        Err(e) => {
-            tracing::warn!(
-                "preferences::provider_accounts load failed, using defaults: {}",
-                e
-            );
-            return default_provider_accounts();
-        }
-    };
+    super::snapshot::snapshot_or_default().accounts
+}
+
+/// The effective account list for an already-loaded preferences value: the
+/// code-defined defaults with the user's stored `provider_accounts` merged over
+/// them by `id`.
+///
+/// Issue #2411: migrate the **stored** list before it is merged with the
+/// code-defined defaults, and persist only that migrated stored list. A PR
+/// #1044 `kimi-via-claude` companion row is folded into the first-class
+/// `kimi` row and dropped, so the stale row stops haunting subsequent
+/// reads — but built-in defaults do not reach the write path, because a load
+/// must not turn code-defined rows into stored accounts the user did not
+/// choose. Subsequent reads see no companion, so `changed` is false and the
+/// save is skipped.
+///
+/// The stored list is left in place on `prefs` (migrated when it changed), so
+/// a caller that reconciles the same preferences value — the Spawn Menu
+/// derivation — still sees the user's stored accounts.
+pub(super) fn effective_provider_accounts(prefs: &mut AppPreferences) -> Vec<ProviderAccount> {
     let legacy_minimax_key = prefs
         .minimax_api_key
         .as_deref()
         .filter(|key| !key.is_empty())
         .map(str::to_string);
-    // Issue #2411: migrate the **stored** list before it is merged with the
-    // code-defined defaults, and persist only that migrated stored list. A PR
-    // #1044 `kimi-via-claude` companion row is folded into the first-class
-    // `kimi` row and dropped, so the stale row stops haunting subsequent
-    // reads — but built-in defaults never reach the write path, because a load
-    // must not turn code-defined rows into stored accounts the user never
-    // chose. Subsequent reads see no companion, so `changed` is false and the
-    // save is skipped.
-    let stored = std::mem::take(&mut prefs.provider_accounts);
-    let (migrated_stored, changed) = migrate_kimi_companion(stored);
+    let (migrated_stored, changed) = migrate_kimi_companion(prefs.provider_accounts.clone());
     if changed {
         prefs.provider_accounts = migrated_stored.clone();
-        if let Err(e) = save(prefs) {
+        if let Err(e) = save(prefs.clone()) {
             tracing::warn!(
                 "preferences::provider_accounts migration save failed: {}",
                 e
@@ -201,3 +205,7 @@ pub fn set_account_key_if_absent(prefs: &mut AppPreferences, provider_id: &str, 
     );
     true
 }
+
+#[cfg(test)]
+#[path = "accounts_tests.rs"]
+mod tests;

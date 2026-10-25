@@ -32,9 +32,8 @@
 
 import { useEffect, type ReactNode } from 'react';
 import { useUIStore, type DiffContext } from '../../stores/uiStore';
-import { useAgentNodeStore } from '../../stores/agentNodeStore';
-import { useMeshStore } from '../../stores/meshStore';
 import { useDiffViewMode, type DiffViewMode } from '../Diff/Diff';
+import { diffLensDiverged, useScope } from '../../hooks/useScope';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 
 export interface DiffOverlayShellProps {
@@ -76,8 +75,7 @@ export function DiffOverlayShell({
   quickActions,
   children,
 }: DiffOverlayShellProps) {
-  const activeNodeId = useAgentNodeStore((s) => s.activeNodeId);
-  const selectedMeshId = useMeshStore((s) => s.selectedMeshId);
+  const { activeNodeId, selectedMeshId } = useScope();
 
   // Issue #1374 — the Unified/Split preference. Single source of truth
   // lives in `useDiffViewMode()` (Diff.tsx) — every caller (this shell,
@@ -97,22 +95,16 @@ export function DiffOverlayShell({
   // dispatch to the right surface instead of closing both.
   useEscapeKey(() => onClose());
 
-  // Auto-close when the lens diverges from the one the diff was opened
-  // under: a different node focused, or a different project selected.
-  // Selecting the diff's own mesh (narrowing the sidebar to its project)
-  // is not a divergence, hence the `!== null && !== meshId` guard.
-  //
-  // Node-compare is skipped when `diff.nodeId` is null — that's the
-  // shape every PR diff has (its source branch may not even exist
-  // locally), and a strict `activeNodeId !== null` comparison would
-  // close the overlay on mount the moment any background node is
-  // focused (the normal grid state — the regression #421 introduced
-  // and then fixed in this same shell).
+  // `diffLensDiverged` owns the close rule, including the pull-request case
+  // where the captured node is null (#421).
+  const capturedNodeId = diff.nodeId;
+  const capturedMeshId = diff.meshId;
   useEffect(() => {
-    const nodeChanged = diff.nodeId !== null && activeNodeId !== diff.nodeId;
-    const meshChanged = selectedMeshId !== null && selectedMeshId !== diff.meshId;
-    if (nodeChanged || meshChanged) onClose();
-  }, [activeNodeId, selectedMeshId, diff.nodeId, diff.meshId, onClose]);
+    if (diffLensDiverged(
+      { activeNodeId, selectedMeshId },
+      { nodeId: capturedNodeId, meshId: capturedMeshId },
+    )) onClose();
+  }, [activeNodeId, selectedMeshId, capturedNodeId, capturedMeshId, onClose]);
 
   return (
     <div

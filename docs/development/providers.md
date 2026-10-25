@@ -43,6 +43,96 @@ OAuth login.
 Never derive remaining allowance from local requests or MSP token/context
 events, and never fold it into a Meta Model API pay-as-you-go wallet.
 
+**Where a new provider's usage endpoint goes.** The seam is
+`UsageAdapter` (`services/usage/adapter.rs`), and a new provider's file under
+`services/usage/adapters/` owns that provider's whole fetch: the credential
+read, the HTTP request, the response parse, and the wording that provider
+uses for a failure. (`freebuff` is the one adapter whose fetch lives
+elsewhere, in `services/freebuff_usage.rs`.) The shared `fetch_usage` driver
+in the same module owns the request → status → parse flow for the adapters
+that use it — the list is in `adapters/mod.rs`; the adapter supplies the
+request builder, the parse step and a `ResponsePolicy` (in
+`services/usage/outcome.rs`) for the wording. `agy` uses the driver for its
+model-API fallback only; its quota-summary read carries its own status
+handling, as do the adapters outside that list. A provider that needs a
+second, best-effort read — Command Code's subscription lookup supplies the
+monthly meter the credits endpoint does not carry — uses the driver's
+enrichment (`services/usage/adapter.rs`), so a failed second read leaves the
+first read's reading standing. A new provider therefore gets a new file
+under `services/usage/adapters/`, registered in `adapters/mod.rs` and
+dispatched from `catalog.rs`. `services/usage.rs` is orchestration only: it
+holds no provider HTTP code, token read, or response parse (issue #2528).
+
+**Freebuff daily allowance.** The native adapter reads the CLI's
+`$XDG_CONFIG_HOME/manicode/credentials.json` or
+`~/.config/manicode/credentials.json`, accepting the current
+`{"default":{"authToken":"..."}}` shape and the legacy flat login. A present
+`default` entry takes precedence over a top-level token. Sign in through the
+Freebuff CLI if the credential is missing or rejected; browser login alone
+does not create this file.
+
+Verified against the authenticated [Freebuff usage page](https://freebuff.com/?settings=usage)
+on 2026-10-22: `GET https://freebuff.com/api/web/freebuff-session` returns the
+daily meter in `freebucks.daily`. A separate request with the local CLI bearer
+and `Buildmesh-Usage-Probe/1.0` User-Agent returned the same allowance without
+cookies, email, fingerprint, or timezone headers; an anonymous GET returned 401.
+The minimal observed shape is:
+
+```json
+{
+  "status": "none",
+  "freebucks": {
+    "daily": {
+      "limit": 20,
+      "spent": 15,
+      "remaining": 5,
+      "resetAt": "2026-10-22T23:00:00.000Z",
+      "resetTimeZone": "Europe/London"
+    }
+  }
+}
+```
+
+`spent / limit * 100` supplies the Daily percentage (75% in this snapshot).
+Use the server's `resetAt` verbatim rather than inferring midnight or Pacific
+time. `status: "none"` describes the active session and does not hide the daily
+allowance. Missing or invalid daily data reports unavailable instead of a
+healthy empty reading. The response's `freebucks.wallet` contains allowance
+credits, not USD; `rateLimitsByModel` and `/api/web/usage-summary` activity
+statistics do not supply this daily percentage. Neither is projected as a cash
+balance or additional quota. The former Codebuff `/api/usage` route and
+`windows`/`earnedSessions` response assumption have been replaced.
+
+**Perch subscription usage.** Perch owns its sign-in. The session file is
+`~/.perch/cli-auth-session.json`, or `$PERCH_CLI_AUTH_DIR/cli-auth-session.json`.
+On macOS the session lives in the login keychain (service `app.perchai.cli-auth`,
+account `default`) unless `PERCH_CLI_AUTH_DIR` is set. The refresh lock and the
+invalid-grant marker stay in that directory either way. Buildmesh refreshes an
+expired access token and writes the rotated refresh token back. A failed refresh
+does not delete the session. Sign in with `perch login`. The meter reads
+`GET {appUrl}/api/perchai/account`. One PT is $0.001. Starter is one Monthly row
+(20,000 PT unless an entitlement says otherwise). Pro does not invent a monthly
+Roost percentage: the detail says "Roost fair use", then rolling 5-hour and 7-day
+windows when the payload enables them and the cap is positive, then Manual monthly
+(75,000 PT unless an entitlement overrides it) and the manual rolling windows. A
+capped row is a percentage window and only that — Perch emits no explicit
+"Amount used / Limit / Remaining" meter, because that block would repeat the bar
+it sits under. An uncapped row keeps its meter. A rolling window's reset time is
+copied from `nextFreedAt` only when that string parses. The monthly allowance
+follows the subscription's billing period, so its reset comes from the payload's
+`billingSubscription` period end when Perch sends one; free plans send `null`
+there and keep no monthly reset, and an unrecognised subscription shape yields no
+reset rather than a wrong one. Buildmesh does not invent one. An admin,
+internal, or internal-plan account is one Monthly meter with no individual limit
+and the PT already used. Bring-your-own-key (`billingLane` exactly `byo`) is
+managed externally. Confirmed against perchai-cli 2.4.116 source and a live
+account read on 2026-10-24, whose payload carries the rolling windows'
+`nextFreedAt`, no monthly reset, and a null `billingSubscription` on a free
+plan. The usage link is the
+[Pro plan guide](https://www.perchai.app/docs/plans/pro) (Starter is
+[documented separately](https://www.perchai.app/docs/plans/starter)), labelled
+**Usage guide**, not a settings deep link.
+
 **Observed Session Telemetry is not a Usage Meter.** Muse MSP
 `session/tokenUsage` and `session/contextUsage` notifications are ingested by
 `agent/provider/muse/telemetry.rs`, stored per Agent Node, and surfaced on
@@ -106,7 +196,7 @@ with the Antigravity CLI User-Agent, and the API gates the response on the CLI
 version that User-Agent advertises. Below cli `1.2.0` it still answers
 `HTTP 200` but strips the "Gemini Models" (weekly + 5-hour) group, so both
 Gemini meters silently disappear — an old pin is a blank meter, not an error.
-`AGY_USER_AGENT` (`services/usage.rs`) pins the current published CLI version
+`AGY_USER_AGENT` (`services/usage/adapters/agy.rs`) pins the current published CLI version
 (`agy --version`), verified live 2026-10-16 at `1.4.0`: `1.1.5` returned only
 "Claude and GPT models", `1.2.0` added "Gemini Models", and `1.4.0` also returned
 the "Gemini 4 Argon" group.
@@ -190,11 +280,11 @@ What is **never** fine is two rows in `BUILTIN_PROVIDER_ACCOUNTS` for the same
 credential — that produces two cards, two fetcher paths, and confusing UI.
 
 **Pinned by tests** (regression net):
-- `builtin_provider_accounts_have_no_via_substring_in_id` (`src-tauri/src/preferences/tests/catalog_tests.rs`) — any id with `"via"` is a pairing shorthand and must be expressed as a composite Spawn Option (`claude:kimi`), not as a separate row. A mechanical guard against the specific class of bug PR #1044 introduced.
+- `builtin_provider_accounts_have_no_via_substring_in_id` (`src-tauri/src/preferences/resolver/catalog_tests.rs`) — any id with `"via"` is a pairing shorthand and must be expressed as a composite Spawn Option (`claude:kimi`), not as a separate row. A mechanical guard against the specific class of bug PR #1044 introduced.
 - `kimi_via_claude_id_does_not_exist_in_default_provider_accounts` — the literal dual-id bug.
 - `kimi_is_first_class_claude_compatible_with_moonshot_endpoint` — catalog + `first_class_surfaces` shape (not in defaults).
 - `provider_accounts_migrates_stored_kimi_via_claude_into_first_class_kimi` — one-time migration for users who picked up PR #1044.
-- `loading_preferences_never_persists_builtin_defaults_as_stored_accounts` / `loading_a_legacy_kimi_companion_file_leaves_it_byte_identical` (`src-tauri/src/preferences/tests/accounts_tests.rs`) — a load must not turn code-defined defaults into stored accounts (issue #2411).
+- `loading_preferences_never_persists_builtin_defaults_as_stored_accounts` / `loading_a_legacy_kimi_companion_file_leaves_it_byte_identical` (`src-tauri/src/preferences/resolver/accounts_tests.rs`) — a load must not turn code-defined defaults into stored accounts (issue #2411).
 - `default_provider_accounts_are_self_auth_only` / `effective_pairings_stored_only_no_auto_derive` / `migrate_legacy_account_endpoint_into_claude_pairing` — ADR-0025.
 
 **Don't.** Do not add a `kimi-via-claude`-style companion row when restoring
@@ -527,6 +617,21 @@ persist the result without losing the user's content.
 adapter that uses it, plus the merge wherever the document's shape fits one of
 the two shared upserts. How much each adapter shares follows its document.
 
+Above those primitives, `src-tauri/src/agent/attention_hooks.rs` owns the
+attention-hook orchestration once (issue #2525): read, build the expected
+entries, compare, upsert, write atomically and report whether anything changed.
+AGY, Claude Code, Cursor and Grok declare their JSON shape — file, root key,
+event list, matcher rules, handler shape and ownership anchors — as a
+`HookProvisioningSpec`; Kimi declares the TOML shape through the same
+`provision_attention_hooks` entry point, so a caller does not know which format
+its harness writes. The entry point takes the directory holding that file, which
+is the project's config directory for a workspace harness (`.cursor`, `.claude`,
+`.agents`) and the harness's own global config directory for Grok and Kimi, whose
+hook files live outside the project. The module also owns the idempotency
+comparison — including a missing required root entry such as Cursor's
+`"version": 1`, which is persisted even when the events already match — and the
+unreadable-file wording, so a policy fix lands once instead of once per copy.
+
 Claude Code, Cursor, Grok and mcode share all three: their entry is a member of
 an array of handlers or matcher groups, which is what `upsert_entry` and
 `upsert_matcher_group` are for. AGY, Muse and the workspace-trust stores share
@@ -611,7 +716,8 @@ Model-reference syntax belongs to the harness adapter through
 invoke it after normalization; interactive command composition and background
 launch resolution check the final model again. This catches Circuit overrides
 and stored snapshots that bypass save validation. MiniMax Code restricts
-`provider/model[#variant]` parts to ASCII letters, digits, `.`, `_` and `-` so
+`provider/model[#variant]` identifiers to ASCII letters, digits, `.`, `_` and `-`,
+also accepting the native `custom_provider:` provider prefix for BYOK models, so
 Windows Cmd cannot split or expand the reference. Syntax validation does not
 prove account availability or CLI-version compatibility.
 
@@ -647,7 +753,7 @@ For scoped project launch directories, use `env::node_working_path`; checkout
 ownership and Git watcher identity use separate helpers. See
 [Agent Node worktree support](agent-nodes.md#worktree-support-git2-based).
 
-## The Spawn Menu derivation is memoized per preferences generation
+## The Spawn Menu derivation reads one preferences snapshot and one alias table
 
 Both production readers of the Spawn Menu — `available_providers` (the mobile
 route `GET /api/providers`) and `list_providers_blocking` (the `list_providers`
@@ -664,15 +770,66 @@ minute, each pass writing a log line. A cached read is what removes that rate; a
 quieter log level alone would not, because the default filter already admits this
 crate at `debug`.
 
-The memo is keyed on `preferences::generation`, which bumps on every durable
-preference write (`save` / `update`), and a change reaches the rest of the app only
-once one of those lands — so a memoized menu is never older than the preferences
-cache every other reader sees. Generation handling matches
-`agent::launch_routing`: it only moves forward, so a derivation that sampled an
-older generation can neither publish nor evict a newer entry. What the generation
-cannot see is a change made outside Buildmesh (a `npm i -g @openai/codex`, or a
-WSL-side install), so the entry also carries a 45s TTL — the same bound
-`codex::CODEX_INSTALL_CACHE_TTL` already accepts for install metadata.
+### One preferences read per derivation
+
+`preferences::resolver::snapshot::PreferencesSnapshot` is the single read. It
+carries the values the derivation consumes — the effective accounts, the stored
+pairings, the effective harness profiles, the harness order, the proxied child
+order and the pairing-verification records — all from one generation, plus the
+`preferences::generation` number a caller memoises on. The stored collections
+are views over the preferences value that read returned, so each one is stored
+once: the snapshot and the preferences behind it read the same storage.
+
+`agent::provider_menu::available_providers_with_preferences` takes that snapshot
+and a detection snapshot as arguments and reads no preferences itself (it still
+probes the Codex CLI and the WSL environment — the two probes this refactor did
+not touch). The rows it produces are a pure function of those two arguments, so
+a **torn derivation is out of reach**: the read happens in
+`preferences::resolver::snapshot::load_snapshot` and nowhere else, and a write
+landing mid-derivation does not reach a derivation that already holds its
+snapshot. The snapshot loader is also the one place that decides what a failed
+preferences read means — each resolver accessor (`provider_accounts`,
+`harness_profiles`, `provider_pairings`) reads through it, so the
+warn-and-fallback rule exists once rather than per accessor.
+
+The rules above are pinned by the tests that came with the change:
+`a_derivation_reads_preferences_exactly_once` and
+`a_derivation_cannot_be_torn_by_a_concurrent_write` in
+`src-tauri/src/agent/provider_menu_tests.rs`, and
+`the_snapshot_reads_preferences_exactly_once` in
+`src-tauri/src/preferences/resolver/snapshot_tests.rs`.
+
+The harness order and the proxied child order have no standalone accessor: they
+are read from the snapshot, because a caller that wants one of them wants the
+profiles and pairings it ranks against too.
+
+### One alias table
+
+The `claude` → `anthropic` mapping is declared once, in
+`agent::harness_catalog::HARNESS_PROFILE_ALIASES`. `harness_profile_alias` and
+`harness_profile_id_for_adapter` resolve it in both directions, so no module
+re-derives it. `agent::harness_catalog::HARNESS_MENU_LAST` sits next to it: a
+harness declares its own Spawn Menu position rather than the comparator
+special-casing one id, which is why Terminal sorts last.
+
+### The memo key is the generation plus the detection epoch
+
+The memo is keyed on the pair (`preferences::generation`, the detection epoch).
+The generation bumps on each durable preference write (`save` / `update`), and a
+change reaches the rest of the app only once one of those lands — so a
+memoized menu is not older than the preferences cache the rest of the app
+reads. Generation handling matches `agent::launch_routing`: it only moves
+forward, so a derivation that sampled an older generation does not publish
+over, or evict, a newer entry.
+
+The second half of the key is `agent::detection::DetectionSnapshot::epoch`. The
+detection observation is the derivation's other input — the installed set it
+filters the harness profiles against — so it belongs in the key: a probe that
+observes a different set bumps the epoch, and the memoized menu is derived again
+straight away. A harness installed while the app runs therefore appears without
+waiting for a timer. The 45s TTL remains as the backstop for the Codex install
+probe — the same bound `codex::CODEX_INSTALL_CACHE_TTL` already accepts for
+install metadata — but the epoch is the mechanism that reacts to a change.
 
 The derivation's single log line is `debug`, not `info`: it carries the same
 wall-clock and Codex-probe attribution fields it always has, for reading next to a

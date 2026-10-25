@@ -1,7 +1,137 @@
+fn mcode_transcript(root: &std::path::Path, session_id: &str) -> std::path::PathBuf {
+    let transcript = root.join("v2/sessions/2026/10/24/session/messages.jsonl");
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    std::fs::write(
+        transcript.with_file_name("manifest.json"),
+        serde_json::json!({"sessionId":session_id}).to_string(),
+    )
+    .unwrap();
+    transcript
+}
+
+#[test]
+fn minimax_fresh_stop_marks_after_registry_failure_even_when_wake_stays_silent() {
+    for corrupt in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = mcode_transcript(dir.path(), "mvs_owned");
+        let lines = concat!(
+            "{\"message\":{\"role\":\"toolResult\",\"timestamp\":100,\"details\":{\"status\":\"started\",\"task_id\":\"bg_owned\"},\"content\":[]}}\n",
+            "{\"message\":{\"role\":\"assistant\",\"timestamp\":200,\"content\":[{\"type\":\"text\",\"text\":\"Waiting.\"}]}}\n"
+        );
+        std::fs::write(&transcript, lines).unwrap();
+        let database = dir.path().join("v2/sqlite/runtime-state.sqlite");
+        std::fs::create_dir_all(database.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE local_runtime_background_tasks (
+            task_id TEXT PRIMARY KEY, owner_session_id TEXT NOT NULL,
+            status TEXT NOT NULL, created_at_ms INTEGER NOT NULL, ended_at_ms INTEGER);
+            INSERT INTO local_runtime_background_tasks VALUES ('bg_owned','mvs_owned','running',90,NULL);"
+        ).unwrap();
+        let stop =
+            serde_json::json!({"hook_event_name":"Stop","session_id":"mvs_owned","cwd":"repo"});
+        let normalize = || {
+            normalizers::normalize(Some(&stop), "mcode", |_| {
+                crate::services::transcript_reader::adapters::mcode::count_pending_background_tasks(
+                    "mvs_owned",
+                    dir.path(),
+                )
+            })
+            .classified
+        };
+        assert_eq!(normalize().decision, Decision::SuppressPendingBackground);
+        let summary = dir.path().join("background-tasks/bg_owned/summary.txt");
+        std::fs::create_dir_all(summary.parent().unwrap()).unwrap();
+        std::fs::write(summary, "finished").unwrap();
+        conn.execute("DROP TABLE local_runtime_background_tasks", [])
+            .unwrap();
+        drop(conn);
+        if corrupt {
+            std::fs::write(database, b"not sqlite").unwrap();
+        }
+        let reader = crate::services::transcript_reader::adapter::dispatch("mcode").unwrap();
+        for _ in 0..3 {
+            assert_eq!(
+                reader.stalled_background_task(lines, &transcript, i64::MAX),
+                None
+            );
+        }
+        let classified = normalize();
+        assert_eq!(
+            classified.decision,
+            Decision::MarkInput,
+            "corrupt={corrupt}"
+        );
+        assert_eq!(
+            classified.detail.kind,
+            Some(LifecycleKind::SignalUnavailable)
+        );
+    }
+}
+
+#[test]
+fn minimax_stop_reconciles_failed_tasks_from_native_sqlite() {
+    // Runs 658-660: the last task_output raced a failed command's exit.
+    // MiniMax wrote no summary.txt or later terminal transcript receipt,
+    // but its native task registry retained the terminal status.
+    let dir = tempfile::tempdir().unwrap();
+    let worktree = tempfile::tempdir().unwrap();
+    let transcript = mcode_transcript(dir.path(), "mvs_owned");
+    std::fs::write(&transcript, concat!(
+        "{\"message\":{\"role\":\"toolResult\",\"timestamp\":100,\"details\":{\"status\":\"auto_promoted\",\"task_id\":\"bg_failed\"},\"content\":[]}}\n",
+        "{\"message\":{\"role\":\"toolResult\",\"timestamp\":200,\"details\":{\"status\":\"running\",\"task_id\":\"bg_failed\"},\"content\":[]}}\n",
+        "{\"message\":{\"role\":\"assistant\",\"timestamp\":400,\"content\":[{\"type\":\"text\",\"text\":\"Finished.\"}]}}\n"
+    )).unwrap();
+    let sqlite_dir = dir.path().join("v2/sqlite");
+    std::fs::create_dir_all(&sqlite_dir).unwrap();
+    let conn = rusqlite::Connection::open(sqlite_dir.join("runtime-state.sqlite")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE local_runtime_background_tasks (
+        task_id TEXT PRIMARY KEY, owner_session_id TEXT NOT NULL,
+        status TEXT NOT NULL, created_at_ms INTEGER NOT NULL, ended_at_ms INTEGER);
+        INSERT INTO local_runtime_background_tasks VALUES ('bg_failed','mvs_owned','failed',90,300);",
+    )
+    .unwrap();
+    let stop = serde_json::json!({"hook_event_name":"Stop","session_id":"mvs_owned","cwd":"repo"});
+    let normalize = || {
+        normalizers::normalize(Some(&stop), "mcode", |_| {
+            crate::services::transcript_reader::adapters::mcode::count_pending_background_tasks_for_spawn(
+                "mvs_owned",
+                worktree.path().to_str().unwrap(),
+                dir.path().to_path_buf(),
+            )
+        })
+        .classified
+        .decision
+    };
+    assert_eq!(normalize(), Decision::Ready);
+    for (status, owner, expected) in [
+        ("running", "mvs_owned", Decision::SuppressPendingBackground),
+        ("failed", "mvs_other", Decision::SuppressPendingBackground),
+        ("succeeded", "mvs_owned", Decision::Ready),
+        ("canceled", "mvs_owned", Decision::Ready),
+        ("lost", "mvs_owned", Decision::Ready),
+    ] {
+        conn.execute(
+            "UPDATE local_runtime_background_tasks SET status=?1,owner_session_id=?2",
+            rusqlite::params![status, owner],
+        )
+        .unwrap();
+        assert_eq!(normalize(), expected, "{status}/{owner}");
+    }
+    conn.execute("DROP TABLE local_runtime_background_tasks", [])
+        .unwrap();
+    assert_eq!(
+        normalize(),
+        Decision::MarkInput,
+        "an existing registry without its task table is unavailable evidence"
+    );
+}
+
 #[test]
 fn minimax_stop_uses_canonical_background_receipts() {
     let dir = tempfile::tempdir().unwrap();
-    let transcript = dir.path().join("messages.jsonl");
+    let transcript = mcode_transcript(dir.path(), "mvs_owned");
     let launch = serde_json::json!({"message":{"role":"toolResult","timestamp":100,
         "details":{"status":"auto_promoted","task_id":"bg_owned"},"content":[]}})
     .to_string();
@@ -23,13 +153,13 @@ fn minimax_stop_uses_canonical_background_receipts() {
         }
         let normalize = || {
             normalizers::normalize(Some(&stop), "mcode", |_| {
-            crate::services::transcript_reader::adapters::mcode::count_pending_background_tasks_in(
-                &transcript,
-                &dir.path().join("tasks"),
-            )
-        })
-        .classified
-        .decision
+                crate::services::transcript_reader::adapters::mcode::count_pending_background_tasks(
+                    "mvs_owned",
+                    dir.path(),
+                )
+            })
+            .classified
+            .decision
         };
         std::fs::write(&transcript, &launch).unwrap();
         assert_eq!(normalize(), Decision::SuppressPendingBackground);
@@ -51,7 +181,7 @@ fn minimax_stop_uses_canonical_background_receipts() {
 #[test]
 fn minimax_stop_with_unanswered_ask_user_requests_an_answer() {
     let dir = tempfile::tempdir().unwrap();
-    let transcript = dir.path().join("messages.jsonl");
+    let transcript = mcode_transcript(dir.path(), "mvs_0123456789abcdef0123456789abcdef");
     let ask = serde_json::json!({"message":{"role":"assistant","timestamp":100,
         "content":[{"type":"toolCall","id":"call_q","name":"ask_user","arguments":{"mode":"questionnaire",
         "steps":[{"id":"c","question":"Red or blue?","options":[{"id":"r","label":"Red"}]}]}}]}});
@@ -66,9 +196,9 @@ fn minimax_stop_with_unanswered_ask_user_requests_an_answer() {
         "session_id":"mvs_0123456789abcdef0123456789abcdef", "cwd":"repo"});
     let observe = |state: &mut crate::agent::hook_state::HookState| {
         let normalized = normalizers::normalize(Some(&stop), "mcode", |_| {
-            crate::services::transcript_reader::adapters::mcode::count_pending_background_tasks_in(
-                &transcript,
-                &dir.path().join("tasks"),
+            crate::services::transcript_reader::adapters::mcode::count_pending_background_tasks(
+                "mvs_0123456789abcdef0123456789abcdef",
+                dir.path(),
             )
         });
         let normalized = normalizers::reconcile_waiting_question(normalized, || {
@@ -107,14 +237,14 @@ fn minimax_stop_with_unanswered_ask_user_requests_an_answer() {
 #[test]
 fn minimax_stop_waits_for_pending_foreground_call() {
     let dir = tempfile::tempdir().unwrap();
-    let transcript = dir.path().join("messages.jsonl");
+    let transcript = mcode_transcript(dir.path(), "mvs_0123456789abcdef0123456789abcdef");
     let stop = serde_json::json!({"hook_event_name":"Stop",
         "session_id":"mvs_0123456789abcdef0123456789abcdef", "cwd":"repo"});
     let normalize = || {
         normalizers::normalize(Some(&stop), "mcode", |_| {
-            crate::services::transcript_reader::adapters::mcode::count_pending_background_tasks_in(
-                &transcript,
-                &dir.path().join("tasks"),
+            crate::services::transcript_reader::adapters::mcode::count_pending_background_tasks(
+                "mvs_0123456789abcdef0123456789abcdef",
+                dir.path(),
             )
         })
         .classified
@@ -178,6 +308,47 @@ fn minimax_first_stop_reads_the_ownership_resolved_session() {
         normalizers::reconciliation_session_id(Some(&stop), "anthropic", ""),
         ""
     );
+}
+
+#[test]
+fn mcode_prompt_submission_resumes_attention_and_fences_previous_turn() {
+    let mut state = crate::agent::hook_state::HookState::default();
+    let observe = |state: &mut crate::agent::hook_state::HookState, event: &str, turn: &str| {
+        // The Claude-compatible plugin receives prompt_id, not turn_id.
+        let raw = serde_json::json!({
+            "hook_event_name": event,
+            "session_id": "mvs_0123456789abcdef0123456789abcdef",
+            "cwd": "F:/repo",
+            "transcript_path": null,
+            "prompt_id": turn,
+        });
+        let normalized = normalizers::normalize(Some(&raw), "mcode", |_| {
+            assert_eq!(event, "Stop", "only Stop reconciles background tasks");
+            Some(0)
+        });
+        let payload = normalized.payload.as_ref().expect("valid mcode callback");
+        assert_eq!(payload.turn_id.as_deref(), Some(turn));
+        let accepted = accept_hook(state, payload, &normalized.classified);
+        if accepted.accepted {
+            lifecycle_decision(normalized.classified.decision, state, false, accepted)
+        } else {
+            Decision::Ignore
+        }
+    };
+
+    assert_eq!(
+        observe(&mut state, "UserPromptSubmit", "turn-1"),
+        Decision::Running
+    );
+    assert_eq!(observe(&mut state, "Stop", "turn-1"), Decision::Ready);
+    // A new prompt after attention must begin another turn; a delayed Stop
+    // from the previous prompt must not return that active turn to Ready.
+    assert_eq!(
+        observe(&mut state, "UserPromptSubmit", "turn-2"),
+        Decision::Running
+    );
+    assert_eq!(observe(&mut state, "Stop", "turn-1"), Decision::Ignore);
+    assert_eq!(observe(&mut state, "Stop", "turn-2"), Decision::Ready);
 }
 
 fn apply_status_fixture(

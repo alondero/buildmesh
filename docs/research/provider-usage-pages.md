@@ -1,10 +1,10 @@
 # Provider usage page destinations
 
-Investigated 2026-10-02 for the usage meter link feature. This is a point-in-time evidence note for maintainers; provider routes and account interfaces may change. It records first-party destinations for all 14 built-in usage adapters, distinguishes dashboards from useful fallbacks, and matches each destination to the identity whose quota Buildmesh reads.
+Investigated 2026-10-02 for the usage meter link feature. This is a point-in-time evidence note for maintainers; provider routes and account interfaces may change. It records first-party destinations for all 15 built-in usage adapters, distinguishes dashboards from useful fallbacks, and matches each destination to the identity whose quota Buildmesh reads.
 
 ## Recommended destinations
 
-Use the provider-owned destination and label together. Ten destinations show usage or the wallet being measured; the remaining four are explicitly labeled console, guide, or subscription-management entries. Browser sign-in and account/workspace selection remain the provider's responsibility.
+Use the provider-owned destination and label together. Ten destinations show usage or the wallet being measured; the remaining five are explicitly labeled console, guide, or subscription-management entries. Browser sign-in and account/workspace selection remain the provider's responsibility.
 
 | Adapter | Tracked account | Destination | Link label | First-party evidence |
 | --- | --- | --- | --- | --- |
@@ -20,14 +20,15 @@ Use the provider-owned destination and label together. Ten destinations show usa
 | `commandcode` | Command Code CLI account's windows/monthly credits | [Command Code usage entry](https://commandcode.ai/usage) | View usage | [Official pricing and limits docs](https://commandcode.ai/docs/resources/pricing-limits) link to this account-independent Usage entry. |
 | `openai` | OpenAI API organization's costs, with an Admin API key | [OpenAI API usage](https://platform.openai.com/usage) | View usage | [Official OpenAI production guide](https://developers.openai.com/api/docs/guides/production-best-practices) links API usage to this route. |
 | `deepseek` | DeepSeek API wallet | [DeepSeek API console](https://platform.deepseek.com/) | Open console | [Official API quickstart](https://api-docs.deepseek.com/quick_start/) establishes this provider console; [balance API docs](https://api-docs.deepseek.com/api/get-user-balance/) match the wallet being measured. Direct `/usage` verification was blocked by HTTP 403. |
-| `freebuff` | CLI-managed Codebuff account and quotas | [Codebuff usage entry](https://www.codebuff.com/usage) | View usage | The [first-party usage entry](https://www.codebuff.com/usage) redirects to `https://www.codebuff.com/profile?tab=usage`, matching the provider host used by the adapter. |
+| `freebuff` | CLI-managed Freebuff account's daily allowance | [Freebuff usage settings](https://freebuff.com/?settings=usage) | View usage | Updated 2026-10-22 after inspecting the authenticated page and replaying its daily allowance request with the CLI bearer; see the [Freebuff contract](../development/providers.md#first-class-model-providers-and-the-credential-per-row-invariant). Supersedes the original Codebuff destination. |
 | `muse_code` | Meta account's Muse Code subscription | [Meta Accounts Center](https://accountscenter.meta.com/) | Manage plan | [Official Muse subscription docs](https://dev.meta.ai/docs/muse-code/subscriptions) direct subscription management and CLI `/upgrade` to Accounts Center. A subscription quota dashboard on the web was not established. |
+| `perch` | Perch CLI account's hosted PT allowance | [Perch Pro plan guide](https://www.perchai.app/docs/plans/pro) | Usage guide | [Pro](https://www.perchai.app/docs/plans/pro) and [Starter](https://www.perchai.app/docs/plans/starter) plan docs state the PT allowances. The account endpoint and row shapes were confirmed in perchai-cli 2.4.116 source, plus a 401 from an expired session, not a captured live snapshot. The link is a plan guide, not a settings deep link. |
 
 ## Scope of verification
 
-The investigation used public documentation, first-party web routes/redirects, and publicly deployed JavaScript. No private account session, API key, browser cookie, or model invocation was required. An unauthenticated page or sign-in redirect establishes a public entry route, not the contents or permissions of every signed-in account.
+The original investigation used public documentation, first-party web routes/redirects, and publicly deployed JavaScript. The Freebuff follow-up on 2026-10-22 additionally used the user's authenticated browser and CLI bearer for read-only allowance requests. An unauthenticated page or sign-in redirect establishes a public entry route, not the contents or permissions of every signed-in account.
 
-The repository account contexts were checked against the owning [usage adapters](../../src-tauri/src/services/usage/adapters/mod.rs), the remaining [legacy fetchers](../../src-tauri/src/services/usage.rs), and the [Freebuff fetcher](../../src-tauri/src/services/freebuff_usage.rs). These sources establish which identity each meter measures; first-party documentation establishes the corresponding web destination.
+The repository account contexts were checked against the owning [usage adapters](../../src-tauri/src/services/usage/adapters/mod.rs), the [Freebuff fetcher](../../src-tauri/src/services/freebuff_usage.rs), and the [usage seam](../../src-tauri/src/services/usage/adapter.rs). These sources establish which identity each meter measures; first-party documentation establishes the corresponding web destination.
 
 ### Claude, Codex, and OpenAI identity boundaries
 
@@ -43,13 +44,13 @@ The old `https://platform.moonshot.ai/console` now redirects to `https://platfor
 
 ### Grok deep-link evidence
 
-The [Grok adapter](../../src-tauri/src/services/usage/adapters/grok.rs) delegates to the CLI billing fetcher, which uses `cli-chat-proxy.grok.com` and CLI-specific authentication. Its payload includes unified weekly usage, on-demand spending, prepaid balance, and legacy monthly-limit shapes. The [official consumer FAQ](https://docs.x.ai/grok/faq) describes Settings > Usage for the shared pool across products including Build; the API team's separate xAI Console is not interchangeable with that account.
+The [Grok adapter](../../src-tauri/src/services/usage/adapters/grok.rs) owns the CLI billing fetcher, which uses `cli-chat-proxy.grok.com` and CLI-specific authentication. Its payload includes unified weekly usage, on-demand spending, prepaid balance, and legacy monthly-limit shapes. The [official consumer FAQ](https://docs.x.ai/grok/faq) describes Settings > Usage for the shared pool across products including Build; the API team's separate xAI Console is not interchangeable with that account.
 
 The public [Grok settings-store module](https://cdn.grok.com/_next/static/chunks/2c4yk92w1hb5e.js) includes `usage` in its allowed settings tabs, reads `_s` from the URL, and opens the specified allowed tab. That establishes `https://grok.com/?_s=usage` without guessing a route from the documented billing deep link. The [public billing-view module](https://cdn.grok.com/_next/static/chunks/3vdn2ugwfi7dx.js) includes the same credit-usage percentage, on-demand cap/used, prepaid balance, and reset fields as the CLI parser. Account-specific legacy presentation was not authenticated during this investigation.
 
 ### Console and management fallbacks
 
-OpenCode's [Go docs](https://opencode.ai/docs/go/) explicitly link current usage to `https://opencode.ai/auth`. The [Buildmesh live fetcher](../../src-tauri/src/services/usage.rs) needs a workspace ID for `billing.get`; its SQLite fallback is a local estimate. Use the official console entry with **Open console**, letting the provider select a workspace. A static route must not embed a workspace ID from another account. The console can differ from a local estimate during fallback operation.
+OpenCode's [Go docs](https://opencode.ai/docs/go/) explicitly link current usage to `https://opencode.ai/auth`. The [Buildmesh live fetcher](../../src-tauri/src/services/usage/adapters/opencode.rs) needs a workspace ID for `billing.get`; its SQLite fallback is a local estimate. Use the official console entry with **Open console**, letting the provider select a workspace. A static route must not embed a workspace ID from another account. The console can differ from a local estimate during fallback operation.
 
 Command Code's [official Usage link](https://commandcode.ai/docs/resources/pricing-limits) is `/usage`. It redirects unauthenticated requests to `/signin?returnTo=/settings/usage`. This avoids embedding the account slug used in the earlier [monthly-usage investigation](command-code-monthly-usage.md). The destination is more durable than a personal `/<slug>/settings/usage` URL.
 
@@ -58,6 +59,8 @@ DeepSeek `/usage` and the console home could not be inspected through the provid
 Antigravity's [plans documentation](https://antigravity.google/docs/plans) points to application Settings for baseline quota consumption; its [CLI usage command documentation](https://antigravity.google/docs/cli/commands/usage) describes an in-terminal quota panel. The guide is a useful provider destination and should be labeled **Usage guide**. Google One billing or AI credit balances have not been established as equivalent to the model quotas read by this adapter.
 
 Muse's [subscription documentation](https://dev.meta.ai/docs/muse-code/subscriptions) separates the CLI subscription from API keys billed pay-as-you-go, and directs subscription management to Accounts Center. The [Muse adapter](../../src-tauri/src/services/usage/adapters/muse_code.rs) requires Meta OAuth and reads subscription window/weekly percentages. Use **Manage plan** for Accounts Center; do not imply that the generic Meta API token/spend dashboard shows these subscription quotas.
+
+Perch's [Pro plan guide](https://www.perchai.app/docs/plans/pro) and [Starter plan guide](https://www.perchai.app/docs/plans/starter) explain the PT allowances the [Perch adapter](../../src-tauri/src/services/usage/adapters/perch.rs) reads from the CLI session. The product shows consumption in its own Settings, and the CLI shows it with `/usage`. Neither is a stable web route Buildmesh can open, so the Pro guide is labelled **Usage guide**. The Starter guide is cited beside it because that plan's monthly allowance is a different shape.
 
 ## Implementation implications
 

@@ -16,6 +16,18 @@ import org.junit.Test
 class NativeScreensTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
 
+    @Test fun usageCardReadsTheDesktopWireFixture() {
+        val row = MobileWireFixtures.array("usage").objects().single()
+        compose.setContent { BuildmeshTheme { UsageCard(row) } }
+        compose.onNodeWithText("Claude subscription").assertIsDisplayed()
+        compose.onNodeWithText("Weekly").assertIsDisplayed()
+        compose.onNodeWithText("0.0%").assertIsDisplayed()
+        compose.onNodeWithText("Balance remaining: 0.00 USD").assertIsDisplayed()
+        compose.onNodeWithText("Spent this month: 12.00 USD").assertIsDisplayed()
+        compose.onNodeWithText("Unlimited").assertIsDisplayed()
+        compose.onNodeWithText("Last known value", substring = true).assertIsDisplayed()
+    }
+
     @Test fun pairingUsesNativeInputsAndDeliversTheWholeInvitation() {
         var received = ""
         compose.setContent { BuildmeshTheme { PairScreen("", false) { url, _ -> received = url } } }

@@ -232,7 +232,7 @@ impl SyncOutcome {
     /// the remote-tracking refs are now current, regardless of whether new
     /// commits arrived or the parent's checkout could fast-forward. This is
     /// the predicate the per-Mesh fetch-freshness stamp
-    /// (`services::fetch_freshness::note_success`) keys on: a worktree cut
+    /// (`crate::git::fetch_freshness::note_success`) keys on: a worktree cut
     /// after any of these outcomes is cut from up-to-date refs.
     ///
     /// `PullTimedOut` counts — the FETCH succeeded; only the working-tree
@@ -661,7 +661,7 @@ pub(crate) fn do_fetch_only(
 /// refspec negotiation can take 7–36s on the project's 250-branch
 /// remote); 5 minutes is generous headroom while still bounding
 /// "stuck forever". The `gh auth token` and HTTP-client timeouts in
-/// `services::github` are much shorter (30s) — `git fetch` is allowed
+/// the GitHub service module are much shorter (30s) — `git fetch` is allowed
 /// more headroom because the ref negotiation can dominate.
 const MANUAL_FETCH_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -671,7 +671,7 @@ const MANUAL_FETCH_TIMEOUT: Duration = Duration::from_secs(300);
 /// spawn) so 5 minutes is far too long — a wedged spawn-time fetch would
 /// hold the per-Mesh `sync_lock` for the entire window with no UI
 /// feedback. 30s matches the HTTP-client read timeout in
-/// `services::github::sync` so a half-open connection
+/// the GitHub service module's `sync` so a half-open connection
 /// aborts at the same threshold from both directions (issue #762 review).
 pub(crate) const SPAWN_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -849,6 +849,17 @@ pub(crate) fn current_branch_upstream_remote(repo: &git2::Repository) -> Option<
         .ok()
 }
 
+/// The upstream remote of the current branch, for the repository at
+/// `host_path`.
+///
+/// The path-shaped door to [`current_branch_upstream_remote`] — the command
+/// layer must not open a repository to answer this (issue #2526).
+pub(crate) fn current_branch_upstream_remote_at(host_path: &str) -> Result<Option<String>, String> {
+    let repo = super::primitives::open_at(host_path)
+        .map_err(|e| format!("failed to open repo at {}: {}", host_path, e))?;
+    Ok(current_branch_upstream_remote(&repo))
+}
+
 /// Fetch from the configured upstream and fast-forward the parent
 /// **Mesh**'s current branch onto the remote tip.
 ///
@@ -927,7 +938,7 @@ pub fn fetch_origin(project_root: &str, base_ref: &str) -> Result<FetchOutcome, 
     // Uses [`SPAWN_FETCH_TIMEOUT`] (30s) instead of the manual-path
     // 5-min cap — a hung spawn-time fetch holds the per-Mesh sync_lock
     // for the duration; 30s matches the HTTP read timeout in
-    // `services::github` (issue #762 review).
+    // the GitHub service module (issue #762 review).
     let outcome = do_sync(
         &host_root,
         &remote_name,
@@ -1004,7 +1015,7 @@ pub fn fetch_origin(project_root: &str, base_ref: &str) -> Result<FetchOutcome, 
 /// `fetch_origin` (auto-sync) and the manual `git_sync` command to decide
 /// whether a `git pull --ff-only` would do anything. Returns `Err` when there's
 /// no upstream to compare against — both callers treat that as "nothing to pull".
-pub fn commits_behind_upstream(repo: &git2::Repository) -> Result<u32, String> {
+pub(crate) fn commits_behind_upstream(repo: &git2::Repository) -> Result<u32, String> {
     let head_oid = repo
         .head()
         .map_err(|e| format!("Failed to read HEAD: {}", e))?
@@ -1036,7 +1047,7 @@ pub fn commits_behind_upstream(repo: &git2::Repository) -> Result<u32, String> {
 // `locked_prune_remote_tracking` in `commands::prune`) live with the
 // underlying shell-out they wrap, not with the lock primitive. Each
 // helper is the SINGLE point that calls
-// `services::sync_lock::with_mesh_sync_lock` for its underlying work,
+// `crate::git::sync_lock::with_mesh_sync_lock` for its underlying work,
 // so the lock-acquisition shape is auditable in one place per site
 // rather than scattered across `commands/git.rs`, `agent/spawn.rs`,
 // `git/worktree/provision.rs`, and `commands/prune.rs`.
@@ -1072,7 +1083,7 @@ pub(crate) fn locked_do_sync(
     remote: &str,
     branch: Option<&str>,
 ) -> SyncOutcome {
-    let outcome = crate::services::sync_lock::with_mesh_sync_lock(mesh_path, || {
+    let outcome = crate::git::sync_lock::with_mesh_sync_lock(mesh_path, || {
         do_sync(host_path, remote, branch, MANUAL_FETCH_TIMEOUT)
     });
     // Stamp the per-Mesh fetch-freshness registry so a spawn shortly after
@@ -1106,7 +1117,7 @@ pub async fn locked_fetch_origin(
         // held at the deadline) maps to `FetchFailed`, which the spawn
         // orchestrator already surfaces as a non-fatal `mesh-sync-warning`
         // toast and then proceeds from local HEAD (ADR 0001).
-        crate::services::sync_lock::try_with_mesh_sync_lock_timeout(
+        crate::git::sync_lock::try_with_mesh_sync_lock_timeout(
             &mesh_path,
             SPAWN_SYNC_LOCK_TIMEOUT,
             || fetch_origin(&mesh_path, &base_ref),
@@ -1130,7 +1141,7 @@ pub async fn locked_fetch_origin(
             // Bounded-timeout path: stamp the attempt so the background
             // worker backs off, but NOT a success — the spawn-time skip
             // stays conservative because we never actually ran a fetch.
-            crate::services::fetch_freshness::note_attempt(&mesh_path);
+            crate::git::fetch_freshness::note_attempt(&mesh_path);
             Err(FetchError::FetchFailed(format!(
                 "another sync for this mesh is still running (waited {}s)",
                 SPAWN_SYNC_LOCK_TIMEOUT.as_secs(),
@@ -1149,7 +1160,7 @@ pub async fn locked_fetch_origin(
 
 /// Synchronous core of [`locked_fetch_origin`] — the per-Mesh-locked
 /// spawn-style auto-sync, callable from an already-blocking context (the
-/// background mesh-sync pass in `services::pool_worker` runs on its own OS
+/// background mesh-sync pass in the pool worker module runs on its own OS
 /// thread, so the async wrapper's `spawn_blocking` offload would be
 /// pointless there). Follows the `*_blocking` core + thin async wrapper
 /// convention (see *Command Threading* in the knowledge primer).
@@ -1165,9 +1176,8 @@ pub fn locked_fetch_origin_blocking(
     mesh_path: &str,
     base_ref: &str,
 ) -> Result<FetchOutcome, FetchError> {
-    let result = crate::services::sync_lock::with_mesh_sync_lock(mesh_path, || {
-        fetch_origin(mesh_path, base_ref)
-    });
+    let result =
+        crate::git::sync_lock::with_mesh_sync_lock(mesh_path, || fetch_origin(mesh_path, base_ref));
     stamp_fetch_freshness(mesh_path, &fetched_ok_of(&result));
     result
 }
@@ -1179,9 +1189,9 @@ pub fn locked_fetch_origin_blocking(
 /// "consider fetched_only_after_full_pull as success" change is one-line,
 /// not two.
 fn stamp_fetch_freshness(mesh_path: &str, fetched_ok: &bool) {
-    crate::services::fetch_freshness::note_attempt(mesh_path);
+    crate::git::fetch_freshness::note_attempt(mesh_path);
     if *fetched_ok {
-        crate::services::fetch_freshness::note_success(mesh_path);
+        crate::git::fetch_freshness::note_success(mesh_path);
     }
 }
 

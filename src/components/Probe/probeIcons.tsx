@@ -22,7 +22,6 @@
  */
 
 import type { ComponentType } from 'react';
-import type { ProbeTab } from '../../stores/uiStore';
 
 export type ProbeIcon = ComponentType<{ className?: string }>;
 
@@ -207,17 +206,3 @@ export function BellIcon({ className }: IconProps) {
     <path d="M10 21h4" />
   </Svg>;
 }
-
-export const PROBE_TAB_ICONS: Record<ProbeTab, ProbeIcon> = {
-  files: FilesIcon,
-  review: ReviewIcon,
-  usage: UsageIcon,
-  notifications: BellIcon,
-  worktrees: WorktreesIcon,
-  properties: PropertiesIcon,
-  circuits: CircuitsIcon,
-  issues: IssuesIcon,
-  pulls: PullsIcon,
-  sessions: ArchiveIcon,
-  scratchpad: NotesIcon,
-};

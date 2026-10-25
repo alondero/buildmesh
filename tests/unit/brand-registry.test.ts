@@ -84,6 +84,16 @@ describe('brandFor', () => {
     });
   });
 
+  it('registers Perch with an orange letter mark', () => {
+    const perch = brandFor('perch');
+    expect(perch).toMatchObject({
+      id: 'perch',
+      chipHex: '#c2410c',
+      chipClass: 'bg-orange-600',
+    });
+    expect(perch?.icon.kind).toBe('inline');
+  });
+
   it('registers Cline with its mascot-green brand treatment', () => {
     // Issue #1773: the native `cline` harness id resolves to its own inline
     // mark (the official CC0 Simple Icons path), not the wire fallback glyph.

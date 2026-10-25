@@ -254,11 +254,10 @@ fn resolve_plan(
                 .then(|| HarnessProfile {
                     id: id.harness_id.clone(),
                     name: id.harness_id.clone(),
-                    harness: if id.harness_id == "claude" {
-                        "anthropic".into()
-                    } else {
-                        id.harness_id.clone()
-                    },
+                    // The `claude` → `anthropic` mapping comes from the one
+                    // alias table (issue #2532) — not a hand-rolled copy.
+                    harness: crate::agent::harness_catalog::harness_adapter_id(id.harness_id())
+                        .to_string(),
                     runtime: None,
                     wsl_distro: None,
                     executable: None,

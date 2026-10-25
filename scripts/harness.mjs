@@ -8,12 +8,13 @@ import { pathToFileURL } from 'node:url';
 import { runGuarded } from './ci/run-guarded.mjs';
 import { availableParallelism } from 'node:os';
 import { executedTests, formatDiffPaths, gateReads, planGates } from './harness-plan.mjs';
-import { acquireSlot, heavyGateEnv, heavyGateLimit, runPlan } from './harness-lanes.mjs';
+import { acquireSlot, agentTestLimit, agentTestSlotDirectory, heavyGateEnv, heavyGateLimit, runPlan } from './harness-lanes.mjs';
 import { selfReviewReport } from './self-review.mjs';
 import { conptyPrerequisite, failureLines, gatePassed, isolatedCommand, isolateTests, knownFlakes, readTestReport, validateFlakeIssues } from './harness-test-failures.mjs';
 import { fastGates, pathIncludeDrift, planChecks } from './harness-check.mjs';
+import { runWorktreeDeps, WORKTREE_DEPS_USAGE } from './worktree-deps.mjs';
 
-const USAGE = 'harness start --spec <json> | update --spec <json> | status | metrics | check [--base <commit>] | verify [--base <commit>] [--full] | wait [--max-seconds <n>] | finish | evaluate [--case <id>] | checkpoint | record-rollback --ref <commit>';
+const USAGE = 'harness start --spec <json> | update --spec <json> | status | metrics | check [--base <commit>] | verify [--base <commit>] [--full] | wait [--max-seconds <n>] | finish | evaluate [--case <id>] | checkpoint | record-rollback --ref <commit> | ' + WORKTREE_DEPS_USAGE;
 const EXIT = { PASS: 0, FAIL: 1, FLAKY: 1, BLOCKED: 2, TIMEOUT: 124 };
 const statePath = (root, name) => join(root, '.harness', name);
 const git = (root, ...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -257,7 +258,7 @@ async function preflight(root, gate, extraEnv) {
     const probe = spawnSync('git', ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 5000, env: { ...process.env, ...extraEnv } });
     if (probe.error || probe.status !== 0) return 'Git is unavailable on PATH; these tests spawn Git.';
   }
-  if ((gate.command[0] === 'npm' || gate.browser || gate.command.some(arg => arg.startsWith('node_modules/'))) && !existsSync(join(root, 'node_modules/eslint/package.json'))) return 'node_modules is missing; install with npm ci (or the documented worktree junction).';
+  if ((gate.command[0] === 'npm' || gate.browser || gate.command.some(arg => arg.startsWith('node_modules/'))) && !existsSync(join(root, 'node_modules/eslint/package.json'))) return 'node_modules is missing; run `npm run harness -- link-deps` in a secondary worktree, or npm ci.';
   if (gate.rust) {
     const probe = spawnSync('cargo', ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
     if (probe.error || probe.status !== 0) return 'Rust/Cargo is unavailable; install the Tauri platform prerequisites.';
@@ -454,12 +455,22 @@ export async function verify(root, { base: requestedBase, full = false, plan = p
       return { ...cached, cached: true, log };
     }
     let slot = null;
+    let slotEnv = {};
     if (gate.heavy) {
       slot = await acquireSlot({ gate: gate.id, root, onQueued: holders => console.log(`QUEUED ${gate.id}: waiting for a heavy-gate slot (limit ${heavyGateLimit()}; held by ${holders.map(held => `${held.gate} in ${held.root}`).join(', ') || 'a process that just exited'})`) });
+    } else if (gate.agentTest && process.env.BUILDMESH_AGENT_TEST_SLOT !== 'held' && existsSync(join(root, 'scripts/agent-tests.mjs'))) {
+      // The infrastructure suite's own budget (issue #2254). The slot is taken
+      // here so this gate's deadline starts once it holds it, and the suite is
+      // told the slot is already held so it does not wait for itself. A
+      // repository that cannot run the suite - a fixture that verifies a plan -
+      // takes no slot: it would hold a machine-wide budget for a simulation.
+      const limit = agentTestLimit();
+      slot = await acquireSlot({ dir: agentTestSlotDirectory(), limit, gate: gate.id, root, onQueued: holders => console.log(`QUEUED ${gate.id}: waiting for an infrastructure-suite slot (limit ${limit}; held by ${holders.map(held => `${held.gate} in ${held.root}`).join(', ') || 'a process that just exited'})`) });
+      slotEnv = { BUILDMESH_AGENT_TEST_SLOT: 'held' };
     }
     try {
       if (slot && isStopped?.()) return null;
-      const row = { ...await runGate(root, gate, base, paths, heavyGateEnv(gate, gates, availableParallelism()), { deferIsolation: true }), inputs };
+      const row = { ...await runGate(root, gate, base, paths, { ...heavyGateEnv(gate, gates, availableParallelism()), ...slotEnv }, { deferIsolation: true }), inputs };
       if (slot?.queuedMs) row.queuedMs = slot.queuedMs;
       event(root, { type: 'gate', taskId: receipt.taskId, attempt: task?.verificationAttempts ?? null, ...row });
       return row;
@@ -795,6 +806,7 @@ async function main() {
       return;
     }
     if (args[0] === 'gate') { await internalGate(root, args[1]); return; }
+    if (args[0] === 'link-deps' || args[0] === 'unlink-deps') { console.log(runWorktreeDeps(root, args)); return; }
     const options = parse(args);
     if (options.action === 'status') { console.log(JSON.stringify(status(root), null, 2)); return; }
     if (options.action === 'metrics') { console.log(JSON.stringify(metrics(root), null, 2)); return; }

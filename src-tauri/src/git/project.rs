@@ -10,7 +10,7 @@ pub struct ProjectRepository {
     pub identity: String,
 }
 
-pub fn open(selected: &str) -> Result<Repository, git2::Error> {
+pub(crate) fn open(selected: &str) -> Result<Repository, git2::Error> {
     let host = crate::env::to_host_path(selected);
     match Repository::discover(&host) {
         Err(error) if cfg!(windows) && error.code() == git2::ErrorCode::Owner => {

@@ -1,3 +1,5 @@
+import { PROBE_TAB_DEFINITIONS } from '../../lib/probeContext';
+import { useProbeResource, type ProbeLoadContext } from '../../lib/probeResource';
 /**
  * ProjectSettingsTab — the Probe Panel's Project Settings destination
  * (issue #1460; formerly `MeshPropertiesTab`).
@@ -52,16 +54,18 @@
  */
 
 import { useEffect, useState, useCallback } from 'react';
-import { listen } from '@tauri-apps/api/event';
 import { useMeshStore } from '../../stores/meshStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useUIStore } from '../../stores/uiStore';
-import { useMeshSettingsStore } from '../../stores/meshSettingsStore';
+import { useMeshSettingsStore, meshSettingsReady } from '../../stores/meshSettingsStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { usePoolChanged } from '../../hooks/usePoolChanged';
 import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
-import { WORKTREE_DIR_CHANGED_EVENT } from '../../lib/events';
+import {
+  concernsMesh,
+  subscribeWorktreeDirectoryChanges,
+} from '../../lib/streams/worktreeDirectoryStream';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { AiContextSection } from './AiContextSection';
 import { SaveIndicator } from '../shared/SaveIndicator';
@@ -80,6 +84,13 @@ import { ProbeScopeNote, ProbeSection } from './ProbeSection';
 import { Field } from './Field';
 import { WorktreeStrategySection } from './WorktreeStrategySection';
 
+export async function loadProjectSettings({ meshId, meshPath, fallbackName }: ProbeLoadContext) {
+  if (meshId !== null && meshPath) {
+    await useMeshSettingsStore.getState().load({ meshId, meshPath, fallbackName });
+  }
+  return null;
+}
+
 export function ProjectSettingsTab() {
   const { activeMeshId, activeMeshPath } = useProbeContext();
   const mesh = useMeshStore((s) =>
@@ -95,11 +106,10 @@ export function ProjectSettingsTab() {
   const form = useMeshSettingsStore((s) => s.form);
   const detected = useMeshSettingsStore((s) => s.detected);
   const loading = useMeshSettingsStore((s) => s.loading);
-  const loadedMeshId = useMeshSettingsStore((s) => s.loadedMeshId);
+  const settingsReady = useMeshSettingsStore(s => meshSettingsReady(s, activeMeshId));
   const loadError = useMeshSettingsStore((s) => s.loadError);
   const status = useMeshSettingsStore((s) => s.status);
   const statusError = useMeshSettingsStore((s) => s.statusError);
-  const load = useMeshSettingsStore((s) => s.load);
   const editForm = useMeshSettingsStore((s) => s.editForm);
   const save = useMeshSettingsStore((s) => s.save);
   const applyPreset = useMeshSettingsStore((s) => s.applyPreset);
@@ -122,7 +132,9 @@ export function ProjectSettingsTab() {
   // doesn't flash a stale `"anthropic"` label before the async fetch
   // resolves.
   const [appWideDefault, setAppWideDefault] = useState<string>('claude');
-  const [reloadKey, setReloadKey] = useState(0);
+  const resource = useProbeResource(PROBE_TAB_DEFINITIONS.properties.load, {
+    meshId: activeMeshId, meshPath: activeMeshPath, fallbackName: mesh?.name,
+  }, `${activeMeshId}:${activeMeshPath}`);
   // `MeshHealth` does not surface `gh auth` status (it's about branch /
   // drift / dirty, not the GitHub CLI login state), but `<AiContextSection>`
   // needs to know whether to render the "Run gh auth login first" prompt
@@ -205,55 +217,29 @@ export function ProjectSettingsTab() {
     return () => { cancelled = true; };
   }, []);
 
-  // One orchestrated load per mesh selection (issue #1460). The store issues
-  // ONE `getMeshProperties` whose single result feeds the form, the worktree
-  // strategy, the directory resolution, and the project-type detection, and
-  // applies all of it only while this request is still the newest — see the
-  // store's `load` for the request-identity rule that replaced the old
-  // per-effect `AbortSignal` fence.
-  //
-  // Dep discipline is inherited from the Worktree Manager tab (issue #451):
-  // the session state is deliberately NOT a dependency, or every save would
-  // re-fire the load and overwrite the user's in-flight edits.
-  useAsyncEffect(
-    () => {
-      if (activeMeshId === null || !activeMeshPath) return;
-      setShowDeleteConfirm(false);
-      void load({
-        meshId: activeMeshId,
-        meshPath: activeMeshPath,
-        fallbackName: mesh?.name,
-      });
-    },
-    // Dep array intentionally excludes `mesh?.name`: the rename save mutates
-    // `meshesById`, and re-firing here would clobber the user's in-flight
-    // edits with the values that were just saved. `mesh` is read at
-    // effect-run time, which is enough for the store's fallback chain —
-    // the user can rename later via the form itself.
-    [activeMeshId, activeMeshPath, load, reloadKey],
-  );
+  useEffect(() => { setShowDeleteConfirm(false); }, [activeMeshId]);
 
   // Re-resolve when the directory config changes outside this destination
   // (e.g. the app-wide default edited in Settings while the probe is
   // open). Skips events for other meshes; `null` (app default moved)
   // refreshes any mesh. The store owns the reads and drops a response that
   // lands after the user has switched meshes.
+  //
+  // `worktree-directory-changed` has exactly one subscriber in the app
+  // (issue #2531) — the owner module
+  // `lib/streams/worktreeDirectoryStream`, which owns the "is this about
+  // MY mesh?" rule.
   useEffect(() => {
     if (activeMeshId === null) return;
     let cancelled = false;
-    let unlisten: (() => void) | null = null;
-    listen<number | null>(WORKTREE_DIR_CHANGED_EVENT, (event) => {
-      const affected = event.payload;
-      if (affected !== null && affected !== undefined && affected !== activeMeshId) return;
+    const release = subscribeWorktreeDirectoryChanges((change) => {
+      if (!concernsMesh(change, activeMeshId)) return;
       if (cancelled) return;
       void refreshWorktreeDirectory();
-    }).then((fn) => {
-      if (cancelled) fn();
-      else unlisten = fn;
     });
     return () => {
       cancelled = true;
-      unlisten?.();
+      release();
     };
   }, [activeMeshId, refreshWorktreeDirectory]);
 
@@ -347,9 +333,9 @@ export function ProjectSettingsTab() {
         <div>
           <ErrorState title="Couldn't load project settings" detail={loadError} />
           <button type="button" className="text-xs text-text-secondary hover:text-text-primary"
-            onClick={() => setReloadKey(key => key + 1)}>Retry</button>
+            onClick={() => void resource.reload()}>Retry</button>
         </div>
-      ) : loading || loadedMeshId !== activeMeshId ? (
+      ) : loading || !settingsReady ? (
         <LoadingState />
       ) : (
         <>

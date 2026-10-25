@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
 import { useNodeActivityStore } from '../../stores/nodeActivityStore';
-import { useMeshStore } from '../../stores/meshStore';
-import { useUIStore } from '../../stores/uiStore';
+import { useScope } from '../../hooks/useScope';
 import { useGridLayoutStore, resolveLayout } from '../../stores/gridLayoutStore';
 import { terminalManager } from '../Terminal/Terminal';
 import { NodeCard } from './NodeCard';
@@ -46,14 +45,13 @@ export function GridSplitter({ nodes, activityMembersByRoot, draggable = true }:
   const rows = rowCounts.length;
   const rowKey = rowCounts.join(',');
 
-  const selectedMeshId = useMeshStore(state => state.selectedMeshId);
   // Layout persistence is mesh-scoped: only Mesh Grid mode saves/restores
   // under the selected mesh's key (wayfinder #982 / #986). All Nodes and
   // Pinned render cross-mesh sets whose arrangement must not pollute any
   // single mesh's saved layout — they get session-local equal splits, the
   // same behaviour 'all' already had via a null selection.
-  const viewMode = useUIStore(state => state.viewMode);
-  const layoutMeshId = viewMode === 'mesh' ? selectedMeshId : null;
+  const scope = useScope();
+  const layoutMeshId = scope.viewMode === 'mesh' ? scope.selectedMeshId : null;
 
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerSize, setContainerSize] = useState({ width: 1000, height: 600 });

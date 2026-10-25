@@ -18,6 +18,7 @@
 //! (issue #536 AC5).
 
 use crate::preferences::HarnessProfile;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// A harness whose presence we can sniff at startup.
@@ -161,6 +162,14 @@ const DETECTABLE: &[Detectable] = &[
         // Windows) in the npm prefix bin, while its configuration and upstream
         // state live in `~/.config/manicode/`. Either signal counts as installed.
         config_dirs: &[".config/manicode"],
+    },
+    Detectable {
+        id: "perch",
+        name: "Perch",
+        harness: "perch",
+        binaries: &["perch"],
+        // perchai-cli keeps auth, threads, and settings under `~/.perch`.
+        config_dirs: &[".perch"],
     },
 ];
 
@@ -469,13 +478,13 @@ pub fn detect_installed_profiles() -> Vec<HarnessProfile> {
     if crate::env::is_wsl_host() {
         profiles.extend(detect_windows_from_wsl());
     }
-    let _ = CURRENT_INSTALLATIONS.set(profiles.iter().map(|profile| profile.id.clone()).collect());
     let _ = CURRENT_EXECUTABLES.set(
         executable_profiles
             .iter()
             .map(|profile| profile.id.clone())
             .collect(),
     );
+    observe_installations(profiles.iter().map(|profile| profile.id.clone()).collect());
     profiles
 }
 
@@ -485,14 +494,144 @@ pub(crate) fn native_wsl_path() -> Option<&'static std::ffi::OsStr> {
     NATIVE_WSL_PATH.get().map(|path| path.as_os_str())
 }
 
-static CURRENT_INSTALLATIONS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
 static CURRENT_EXECUTABLES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
 
-pub(crate) fn currently_installed_profiles(profiles: Vec<HarnessProfile>) -> Vec<HarnessProfile> {
-    match CURRENT_INSTALLATIONS.get() {
-        Some(ids) => filter_installed_profiles(profiles, ids),
-        None => profiles,
+/// A point-in-time view of the harnesses detection has observed installed
+/// (issue #2532).
+///
+/// The Spawn Menu memo keys on `epoch`, so a probe that observes a different
+/// set invalidates the memo without waiting for the TTL. The epoch only moves
+/// forward: it moves on the first observation, and afterwards only when the
+/// observed set actually changes — a repeated probe of the same set leaves it
+/// alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct DetectionSnapshot {
+    /// The Harness Profile ids detection observed as installed.
+    pub installed: HashSet<String>,
+    /// Bumped whenever a probe observes a set different from the published one.
+    pub epoch: u64,
+}
+
+impl DetectionSnapshot {
+    /// True when a probe has published an observation.
+    ///
+    /// Before the first probe the installed set is *unknown*, not empty — a
+    /// caller must not filter by it, or the automatic harnesses would vanish
+    /// from the menu.
+    pub(crate) fn observed(&self) -> bool {
+        self.epoch > 0
     }
+}
+
+/// The published detection state.
+#[derive(Default)]
+struct DetectionState {
+    installed: HashSet<String>,
+    epoch: u64,
+    /// Whether a probe has published an observation at all.
+    ///
+    /// Separate from the epoch, because the first observation can be an
+    /// *empty* set — a probe that found no installed harness is still an
+    /// observation, and the menu must filter the automatic profiles out
+    /// rather than treat the set as unknown.
+    observed: bool,
+}
+
+// Global in production (one detection pass per process); per-test-thread in
+// tests, so one test's published observation stays out of another's menu —
+// the same split `agent::provider_menu` uses for its derived-menu memo.
+#[cfg(not(test))]
+static DETECTION_STATE: once_cell::sync::Lazy<std::sync::Mutex<DetectionState>> =
+    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(DetectionState::default()));
+
+#[cfg(test)]
+// allow-test-in-production: the published detection state is per-test-thread, so one
+// test's observation stays out of another's menu.
+thread_local! {
+    static DETECTION_STATE: std::cell::RefCell<DetectionState> =
+        std::cell::RefCell::new(DetectionState::default());
+}
+
+fn with_detection_state<R>(f: impl FnOnce(&mut DetectionState) -> R) -> R {
+    #[cfg(not(test))]
+    let result = {
+        let mut guard = DETECTION_STATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        f(&mut guard)
+    };
+    #[cfg(test)]
+    // allow-test-in-production: the per-test-thread state is what keeps one test's
+    // published observation out of another's menu.
+    let result = DETECTION_STATE.with(|cell| f(&mut cell.borrow_mut()));
+    result
+}
+
+/// Publish a probe observation and return the resulting snapshot.
+///
+/// The epoch moves on the **first** observation and on a later one that
+/// observed a different set — the guard below is the whole rule — so a
+/// reader keyed on the epoch re-derives on a real change rather than on a
+/// timer. Re-publishing the same set leaves the epoch alone.
+///
+/// The first observation moves it even when the set is empty: a probe
+/// that found no installed harness has established that the set is *empty*,
+/// not that it is unknown, and the menu filters the automatic profiles out
+/// either way.
+pub(crate) fn observe_installations(installed: HashSet<String>) -> DetectionSnapshot {
+    with_detection_state(|state| {
+        if !state.observed || state.installed != installed {
+            state.installed = installed;
+            state.epoch += 1;
+            state.observed = true;
+        }
+        DetectionSnapshot {
+            installed: state.installed.clone(),
+            epoch: state.epoch,
+        }
+    })
+}
+
+/// The published detection observation.
+///
+/// Before the first probe this is an *unobserved* snapshot — see
+/// [`DetectionSnapshot::observed`].
+pub(crate) fn detection_snapshot() -> DetectionSnapshot {
+    with_detection_state(|state| DetectionSnapshot {
+        installed: state.installed.clone(),
+        epoch: state.epoch,
+    })
+}
+
+/// Restore a previously published observation.
+///
+/// The published state is per-test-thread, so a test that publishes an
+/// observation hands the thread back the state it found — including the
+/// *unobserved* state (epoch `0`), which the epoch alone does not carry.
+#[cfg(test)]
+// allow-test-in-production: a test helper that hands the thread back the observation
+// state it found, including the unobserved state the epoch alone does not carry.
+pub(crate) fn restore_detection_state(previous: &DetectionSnapshot) {
+    with_detection_state(|state| {
+        state.installed = previous.installed.clone();
+        state.epoch = previous.epoch;
+        state.observed = previous.observed();
+    })
+}
+
+/// The harness profiles the observation says are installed.
+///
+/// An unobserved snapshot leaves the list untouched — the installed set is
+/// unknown until the first probe, so filtering by it would empty the menu.
+pub(crate) fn installed_profiles(
+    profiles: Vec<HarnessProfile>,
+    snapshot: &DetectionSnapshot,
+) -> Vec<HarnessProfile> {
+    if !snapshot.observed() {
+        return profiles;
+    }
+    let ids: Vec<String> = snapshot.installed.iter().cloned().collect();
+    filter_installed_profiles(profiles, &ids)
 }
 
 fn filter_installed_profiles(profiles: Vec<HarnessProfile>, ids: &[String]) -> Vec<HarnessProfile> {
@@ -500,6 +639,10 @@ fn filter_installed_profiles(profiles: Vec<HarnessProfile>, ids: &[String]) -> V
         .into_iter()
         .filter(|p| !is_automatic_profile(p) || ids.contains(&p.id))
         .collect()
+}
+
+pub(crate) fn currently_installed_profiles(profiles: Vec<HarnessProfile>) -> Vec<HarnessProfile> {
+    installed_profiles(profiles, &detection_snapshot())
 }
 
 pub(crate) fn canonical_harness(id: &str) -> Option<&'static str> {
@@ -907,6 +1050,7 @@ fn profiles_from_wsl_probe(output: &str, distro: &str) -> Vec<HarnessProfile> {
 }
 
 #[cfg(test)]
+// allow-test-in-production: this detection pin predates the sibling-test-file rule. Perch is one more detectable binary; moving the suite is out of scope.
 mod tests {
 
     #[test]
@@ -1585,6 +1729,7 @@ mod tests {
             "/bin/cmdc",
             "/bin/cmd",
             "/bin/freebuff",
+            "/bin/perch",
         ]);
         let profiles = detect_profiles(&path_dirs, &[""], None, &exists);
         for p in &profiles {
@@ -1604,6 +1749,7 @@ mod tests {
                 "dsh" => assert_eq!(provider, Provider::Dsh),
                 "commandcode" => assert_eq!(provider, Provider::CommandCode),
                 "freebuff" => assert_eq!(provider, Provider::Freebuff),
+                "perch" => assert_eq!(provider, Provider::Perch),
                 other => panic!("unexpected detected id {other}"),
             }
         }

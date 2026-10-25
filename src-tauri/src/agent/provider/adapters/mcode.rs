@@ -9,8 +9,9 @@
 //! **Session resumption** uses `--session [<id>]` or `-c` / `--continue`.
 //! MiniMax Code auto-assigns its own session ids. No PTY banner shape is
 //! verified for the TUI, so PTY capture stays off. SessionStart is provisioned
-//! to capture the workspace and `mvs_<hex>` identity, but delivery is not
-//! validated against the installed TUI. Stop delivery was validated on 0.4.12
+//! to capture the workspace and `mvs_<hex>` identity. A native Windows 0.6.13
+//! TUI probe captured SessionStart, UserPromptSubmit and Stop with an isolated
+//! BYOK model and hook collector (see the capability review). Stop delivery was validated on 0.4.12
 //! using the then-provisioned `/api/attention/<node-id>` callback. The current
 //! node-independent `/api/attention/mcode` route is provisioned but its native
 //! delivery has not been validated. Consequently
@@ -21,7 +22,8 @@
 //! **Model override** uses `--model <provider/model>` for the launched
 //! session, including `--session <id>` resumes. References may include
 //! `#variant`; the adapter validates their syntax before save and spawn,
-//! restricting each part to ASCII letters, digits, `.`, `_` and `-` so the
+//! accepting the native `custom_provider:` prefix and restricting identifier
+//! parts to ASCII letters, digits, `.`, `_` and `-` so the
 //! Windows Cmd wrapper cannot interpret model text. Accepted references are
 //! forwarded unchanged. An omitted model
 //! leaves mcode's own default intact, and the override does not change its
@@ -41,7 +43,9 @@
 //! `mcode` 0.4.12 TUI validated `Stop` delivery of the
 //! (`hook_event_name`, `session_id`, `transcript_path`) envelope to the then-
 //! configured `/api/attention/<node-id>` callback. Current delivery to
-//! `/api/attention/mcode` and SessionStart delivery remain unvalidated. Three
+//! `/api/attention/mcode` remains unvalidated in the running app. The 0.6.13
+//! collector confirmed SessionStart and UserPromptSubmit delivery; the latter
+//! clears attention before the next prompt runs. Three
 //! mcode-0.4.x constraints shape the write:
 //!
 //! 1. The manifest lives at `.claude-plugin/plugin.json` and `hooks` is
@@ -158,7 +162,14 @@ const _: () = assert!(MCODE_HOOK_TIMEOUT_SECONDS > 0);
 /// Access (`permissionMode: bypassPermissions`, pinned by
 /// [`pin_permission_mode`] on every spawn), so no approval prompt is ever
 /// raised and the event is never observed.
-const MCODE_PROVISIONED_EVENTS: &[&str] = &["SessionStart", "Stop", "PermissionRequest"];
+// 0.6.13 also emits UserPromptSubmit before a new prompt runs. Observe it
+// separately from Stop so a new turn clears the previous attention state.
+const MCODE_PROVISIONED_EVENTS: &[&str] = &[
+    "SessionStart",
+    "UserPromptSubmit",
+    "Stop",
+    "PermissionRequest",
+];
 
 /// Marker substring identifying the Buildmesh-owned handler inside the
 /// manifest's inline `hooks` map. Used to detect a stale Buildmesh entry on
@@ -759,18 +770,21 @@ impl AgentProvider for McodeAdapter {
     /// `true` — the Buildmesh Agent-Plugin is provisioned into
     /// `<dataDir>/plugins/io.buildmesh.attention/.claude-plugin/plugin.json`
     /// and `Stop` delivery was validated against a live 0.4.12 TUI using the
-    /// historical per-node callback (issue #1797). The current shared callback
-    /// and SessionStart delivery remain unvalidated. This flag opens the
+    /// historical per-node callback (issue #1797). A 0.6.13 TUI collector also
+    /// captured SessionStart and UserPromptSubmit; app delivery to the shared
+    /// callback remains unvalidated. This flag opens the
     /// spawn-time gate at `provision.rs:557-569` and, downstream, the Autopilot
     /// compatibility gate; see `attention_capability()` for the contract.
     fn requires_attention_hook(&self) -> bool {
         true
     }
 
-    /// Issue #1797: `Stop` is the only live-validated lifecycle signal. That
+    /// Issue #1797: `Stop` is the validated attention signal. That
     /// 0.4.12 validation used the historical `/api/attention/<node-id>` URL;
-    /// current `/api/attention/mcode` and SessionStart delivery remain
-    /// unvalidated. Buildmesh launches mcode in Full Access
+    /// current `/api/attention/mcode` app delivery remains unvalidated.
+    /// SessionStart captures identity; UserPromptSubmit resumes work without
+    /// requesting attention, matching the other adapters' descriptors.
+    /// Buildmesh launches mcode in Full Access
     /// (`permissionMode: bypassPermissions`, pinned by
     /// [`pin_permission_mode`]), so no approval prompt is raised and
     /// `PermissionRequested` is not advertised — exactly like Cursor under
@@ -788,7 +802,7 @@ impl AgentProvider for McodeAdapter {
     /// Provision mcode's Agent-Plugin attention hook (issue #1796; Stop delivery
     /// validated in #1797). Writes
     /// `<mcode-data-dir>/plugins/io.buildmesh.attention/.claude-plugin/plugin.json`
-    /// with the `SessionStart`, `Stop`, and `PermissionRequest` handlers inlined on the manifest
+    /// with `SessionStart`, `UserPromptSubmit`, `Stop`, and `PermissionRequest` handlers inlined on the manifest
     /// in mcode's 0.4.0+ (Claude-compatible) shape.
     ///
     /// The same data dir also gets its `config.yaml` permission mode pinned to
@@ -851,6 +865,11 @@ impl AgentProvider for McodeAdapter {
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
         };
         let valid = model.split_once('/').is_some_and(|(provider, selection)| {
+            // `mcode provider add` assigns BYOK providers this prefix. The
+            // colon is literal in cmd.exe; the suffix keeps the same alphabet.
+            let provider = provider
+                .strip_prefix("custom_provider:")
+                .unwrap_or(provider);
             let (name, variant) = selection
                 .split_once('#')
                 .map_or((selection, None), |(name, variant)| (name, Some(variant)));
@@ -859,7 +878,7 @@ impl AgentProvider for McodeAdapter {
         if valid {
             Ok(())
         } else {
-            Err("MiniMax Code model reference must use provider/model or provider/model#variant; each part allows only ASCII letters, digits, '.', '_' and '-'".into())
+            Err("MiniMax Code model reference must use provider/model or provider/model#variant; identifier parts allow only ASCII letters, digits, '.', '_' and '-', with an optional 'custom_provider:' provider prefix".into())
         }
     }
 

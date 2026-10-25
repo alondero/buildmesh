@@ -1,9 +1,12 @@
 //! Git operations via git2 crate
+//!
+//! The git2 calls this file used to make now go through the `git` module's
+//! capability-shaped reads (issue #2526): this layer validates its inputs,
+//! calls one read or one mutation, and maps the result to a wire type. It
+//! holds no `Repository` handle.
 
-use std::collections::HashMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 
-use git2::{DiffOptions, Patch, Repository, StatusOptions};
 use serde::{Deserialize, Serialize};
 use tauri::command;
 use tauri::Emitter;
@@ -13,35 +16,8 @@ use crate::services::gh_auth_cache::GhAuthCache;
 
 use crate::db;
 use crate::env::to_host_path;
-use crate::git::{health, primitives};
+use crate::git::{health, index, primitives, state};
 use crate::models::MeshHealth;
-
-#[cfg(test)]
-pub(super) mod status_metrics {
-    use std::cell::Cell;
-    thread_local! {
-        static COUNTS: Cell<[usize; 3]> = const { Cell::new([0; 3]) };
-    }
-    fn increment(index: usize) {
-        COUNTS.with(|counts| {
-            let mut value = counts.get();
-            value[index] += 1;
-            counts.set(value);
-        });
-    }
-    pub fn walk() {
-        increment(0);
-    }
-    pub fn diff() {
-        increment(1);
-    }
-    pub fn patch() {
-        increment(2);
-    }
-    pub fn take() -> [usize; 3] {
-        COUNTS.with(|counts| counts.replace([0; 3]))
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "GitSummary.ts")]
@@ -78,71 +54,6 @@ pub struct GitStatus {
     pub deletions: usize,
 }
 
-/// Build a map of `relative path -> (additions, deletions)` covering every
-/// uncommitted change (HEAD → index + working tree), so each status entry can
-/// be annotated with its line-level diff stats.
-///
-/// Untracked files require `show_untracked_content` so their new lines are
-/// counted as additions; without it git2 emits an empty patch for them.
-fn line_stats_by_path(repo: &Repository) -> HashMap<String, (usize, usize)> {
-    #[cfg(test)]
-    status_metrics::diff();
-    let mut diff_opts = DiffOptions::new();
-    diff_opts
-        .include_untracked(true)
-        .recurse_untracked_dirs(true)
-        .show_untracked_content(true);
-
-    // No HEAD yet (repo with no commits) → diff against an empty tree.
-    let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
-
-    let mut stats: HashMap<String, (usize, usize)> = HashMap::new();
-
-    let diff = match repo.diff_tree_to_workdir_with_index(head_tree.as_ref(), Some(&mut diff_opts))
-    {
-        Ok(diff) => diff,
-        Err(_) => return stats,
-    };
-
-    let num_deltas = diff.deltas().len();
-    for idx in 0..num_deltas {
-        let delta = diff.get_delta(idx).expect("index is within diff deltas");
-        if let Some(counts) = crate::git::status_stats::simple_counts(repo, &delta) {
-            for file in [delta.new_file().path(), delta.old_file().path()]
-                .into_iter()
-                .flatten()
-            {
-                stats.insert(file.to_string_lossy().into_owned(), counts);
-            }
-            continue;
-        }
-        #[cfg(test)]
-        status_metrics::patch();
-        // Binary files / errors yield no patch — leave them at (0, 0).
-        let patch = match Patch::from_diff(&diff, idx) {
-            Ok(Some(p)) => p,
-            _ => continue,
-        };
-
-        let (_context, additions, deletions) = match patch.line_stats() {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-
-        // Key on both old and new path so deleted (old) and added (new) files
-        // are both found by the status loop's relative path.
-        let delta = patch.delta();
-        for file in [delta.new_file().path(), delta.old_file().path()]
-            .into_iter()
-            .flatten()
-        {
-            stats.insert(file.to_string_lossy().to_string(), (additions, deletions));
-        }
-    }
-
-    stats
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "GitBranchStatus.ts")]
 /// Generated to src/types/generated/GitBranchStatus.ts (issue #404). `u32`
@@ -174,7 +85,7 @@ pub struct GitBranchStatus {
 ///
 /// Thin async wrapper that offloads the libgit2 work onto the blocking pool
 /// (issue #762 — `#[command(async)]` would park a Tauri tokio worker; WSL UNC
-/// paths with a paused VM can make `open_from_host_path` stall). The sync
+/// paths with a paused VM can make the repository open stall). The sync
 /// core [`get_git_branch_status_blocking`] stays directly callable so the
 /// mobile `/git/branch` HTTP route can `.await` it through here.
 #[command]
@@ -190,44 +101,17 @@ pub async fn get_git_branch_status(path: String) -> Result<Option<GitBranchStatu
 pub(crate) fn get_git_branch_status_blocking(
     path: String,
 ) -> Result<Option<GitBranchStatus>, String> {
-    let repo = match primitives::open_from_host_path(&path) {
-        Ok(r) => r,
-        Err(_) => return Ok(None),
+    // An unreadable repository, an unborn HEAD and a non-UTF8 ref name all
+    // mean "there is no branch to report" — the same `None` the caller saw
+    // when it opened the repository itself.
+    let Ok(Some(status)) = state::branch_status_at(&path) else {
+        return Ok(None);
     };
-
-    let head = match repo.head() {
-        Ok(h) => h,
-        Err(_) => return Ok(None), // unborn HEAD (no commits yet)
-    };
-
-    // shorthand() yields the branch name, "HEAD" when detached, and None only
-    // for a non-UTF8 ref name (which we can't represent, so treat as no branch).
-    let name = match head.shorthand() {
-        Ok(n) => n.to_string(),
-        Err(_) => return Ok(None),
-    };
-
-    let local_oid = head.target();
-
-    // For unborn HEAD the OID is None; we leave short_sha empty rather than fabricate.
-    let short_sha = local_oid
-        .map(|oid| primitives::short_sha(&repo, oid))
-        .unwrap_or_default();
-
-    let (mut ahead, mut behind) = (0u32, 0u32);
-    if let (Some(local), Some(up)) = (local_oid, primitives::upstream_oid_for_branch(&repo, &name))
-    {
-        if let Ok((a, b)) = primitives::ahead_behind(&repo, local, up) {
-            ahead = a;
-            behind = b;
-        }
-    }
-
     Ok(Some(GitBranchStatus {
-        name,
-        ahead,
-        behind,
-        short_sha,
+        name: status.name,
+        ahead: status.ahead,
+        behind: status.behind,
+        short_sha: status.short_sha,
     }))
 }
 
@@ -242,63 +126,23 @@ pub async fn get_git_status(path: String) -> Result<Vec<GitStatus>, String> {
 
 /// Sync core for [`get_git_status`].
 pub(crate) fn get_git_status_blocking(path: String) -> Result<Vec<GitStatus>, String> {
-    let repo = primitives::open_from_host_path(&path).map_err(|e| e.to_string())?;
+    let state = state::state_at(&path, state::Baseline::WorkingTree).map_err(|e| e.to_string())?;
     let project = crate::git::project::resolve(&path)?;
 
-    let mut opts = StatusOptions::new();
-    opts.include_untracked(true).recurse_untracked_dirs(true);
-
-    #[cfg(test)]
-    status_metrics::walk();
-    let statuses = repo.statuses(Some(&mut opts)).map_err(|e| e.to_string())?;
-
-    let mut changed_files: Vec<GitStatus> = Vec::new();
-
-    for entry in statuses.iter() {
-        let path = entry.path().unwrap_or("").to_string();
-        if path.is_empty() {
-            continue;
-        }
-        // `is_ignored_entry`, not `Status::is_ignored`: the latter leaves a
-        // junctioned `src-tauri/target` listed as a changed file (#2193).
-        if primitives::is_ignored_entry(&repo, &entry) {
-            continue;
-        }
-
-        let status_flag = entry.status();
-        let status_str = if status_flag.is_index_new() || status_flag.is_wt_new() {
-            "added"
-        } else if status_flag.is_index_modified() || status_flag.is_wt_modified() {
-            "modified"
-        } else if status_flag.is_index_deleted() || status_flag.is_wt_deleted() {
-            "deleted"
-        } else if status_flag.is_index_renamed() || status_flag.is_wt_renamed() {
-            "renamed"
-        } else {
-            "untracked"
-        };
-
-        changed_files.push(GitStatus {
-            project_path: std::path::Path::new(&path)
+    Ok(state
+        .statuses
+        .into_iter()
+        .map(|entry| GitStatus {
+            project_path: std::path::Path::new(&entry.path)
                 .strip_prefix(&project.relative_folder)
                 .ok()
                 .map(|path| path.to_string_lossy().replace('\\', "/")),
-            path,
-            status: status_str.to_string(),
-            additions: 0,
-            deletions: 0,
-        });
-    }
-
-    if !changed_files.is_empty() {
-        let line_stats = line_stats_by_path(&repo);
-        for file in &mut changed_files {
-            (file.additions, file.deletions) =
-                line_stats.get(&file.path).copied().unwrap_or((0, 0));
-        }
-    }
-
-    Ok(changed_files)
+            path: entry.path,
+            status: entry.status,
+            additions: entry.additions,
+            deletions: entry.deletions,
+        })
+        .collect())
 }
 
 /// Get aggregate git change summary for a directory.
@@ -311,63 +155,13 @@ pub async fn get_git_summary(path: String) -> Result<GitSummary, String> {
 
 /// Sync core for [`get_git_summary`].
 pub(crate) fn get_git_summary_blocking(path: String) -> Result<GitSummary, String> {
-    let repo = primitives::open_from_host_path(&path).map_err(|e| e.to_string())?;
-
-    let mut opts = StatusOptions::new();
-    opts.include_untracked(true).recurse_untracked_dirs(true);
-
-    #[cfg(test)]
-    status_metrics::walk();
-    let statuses = repo.statuses(Some(&mut opts)).map_err(|e| e.to_string())?;
-
-    let mut total = 0usize;
-    let mut added = 0usize;
-    let mut modified = 0usize;
-    let mut deleted = 0usize;
-
-    for entry in statuses.iter() {
-        let status_flag = entry.status();
-        // Same shared verdict as the changed-file list above, so the summary count
-        // cannot report a different set than the rows it summarises (#2193).
-        if primitives::is_ignored_entry(&repo, &entry) {
-            continue;
-        }
-
-        total += 1;
-        if status_flag.is_index_new() || status_flag.is_wt_new() {
-            added += 1;
-        } else if status_flag.is_index_modified() || status_flag.is_wt_modified() {
-            modified += 1;
-        } else if status_flag.is_index_deleted() || status_flag.is_wt_deleted() {
-            deleted += 1;
-        }
-        // renamed and untracked don't affect the count display but contribute to total
-    }
-
+    let summary = state::summary_at(&path).map_err(|e| e.to_string())?;
     Ok(GitSummary {
-        total,
-        added,
-        modified,
-        deleted,
+        total: summary.total,
+        added: summary.added,
+        modified: summary.modified,
+        deleted: summary.deleted,
     })
-}
-
-/// Read the default branch name from an already-open repository.
-///
-/// Extracted from [`get_default_branch`] in #431 so call sites that
-/// already have a `Repository` handle open (e.g. `get_mesh_git_static`'s
-/// trio, `commands::ai_context`'s portability-PR helper) can reuse it
-/// without paying for a second `Repository::open` + refdb lookup. Callers
-/// with only a path still go through [`get_default_branch`].
-pub(crate) fn default_branch_from_repo(repo: &Repository) -> String {
-    if let Ok(reference) = repo.find_reference("refs/remotes/origin/HEAD") {
-        if let Ok(Some(target)) = reference.symbolic_target() {
-            if let Some(branch) = target.strip_prefix("refs/remotes/origin/") {
-                return branch.to_string();
-            }
-        }
-    }
-    "main".to_string()
 }
 
 /// Get the default branch name for the remote named "origin".
@@ -392,11 +186,7 @@ pub async fn get_default_branch(path: String) -> String {
 /// failure so the async wrapper can preserve its infallible contract; the
 /// `Err` variant is reserved for genuine worker-pool join errors.
 pub(crate) fn get_default_branch_blocking(path: String) -> Result<String, String> {
-    let repo = match primitives::open_from_host_path(&path) {
-        Ok(r) => r,
-        Err(_) => return Ok("main".to_string()),
-    };
-    Ok(default_branch_from_repo(&repo))
+    Ok(primitives::default_branch_at(&path))
 }
 
 /// How a manual `git_sync` ended, as the *user* experiences it. This is the
@@ -552,13 +342,10 @@ fn git_sync_blocking(path: String) -> Result<GitSyncResult, String> {
 
     // Resolve the remote the same way `git fetch` (no args) used to:
     // the current branch's configured upstream, falling back to
-    // `origin`. We open the repo here so we can query its branch
-    // config; `do_sync` re-opens (microsecond cost) to keep its
+    // `origin`. `do_sync` re-opens (microsecond cost) to keep its
     // signature self-contained and the call shape uniform with
     // `fetch_origin`.
-    let repo = primitives::open_from_host_path(&host_path)
-        .map_err(|e| format!("failed to open repo at {}: {}", host_path, e))?;
-    let remote = crate::git::sync::current_branch_upstream_remote(&repo)
+    let remote = crate::git::sync::current_branch_upstream_remote_at(&host_path)?
         .unwrap_or_else(|| "origin".to_string());
 
     // Delegate to the shared helper. Pass `None` for the branch —
@@ -827,26 +614,23 @@ pub(crate) fn get_mesh_health_blocking(mesh_id: i64) -> Result<MeshHealth, Strin
     let mesh =
         db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
     let host_path = to_host_path(&mesh.path);
-    let repo = primitives::open_from_host_path(&host_path)
-        .map_err(|e| format!("failed to open repo at {}: {}", host_path, e))?;
-
-    let mut health = health::compute_mesh_health(&repo, &mesh.base_ref)?;
 
     // Refine the holder with the active paths for THIS mesh's nodes so
     // `is_active` reflects whether an agent node points at the worktree.
     // Scoped to `mesh_id` — the holder can only live inside this repo, so
     // nodes from other meshes are dead weight here.
-    if let Some(local_base) = health.local_base_branch.clone() {
-        let nodes = crate::git::project::repository_nodes(
-            &mesh.path,
-            db::list_agent_nodes().map_err(|e| format!("failed to list agent nodes: {e}"))?,
-        )?;
-        let active_paths = crate::git::project::active_paths(&nodes);
-        health.base_branch_holder =
-            health::find_base_branch_holder(&repo, &local_base, &active_paths);
-    }
+    let active_paths = match health::parse_local_branch(&mesh.base_ref) {
+        Some(_) => {
+            let nodes = crate::git::project::repository_nodes(
+                &mesh.path,
+                db::list_agent_nodes().map_err(|e| format!("failed to list agent nodes: {e}"))?,
+            )?;
+            crate::git::project::active_paths(&nodes)
+        }
+        None => Vec::new(),
+    };
 
-    Ok(health)
+    health::mesh_health_at(&host_path, &mesh.base_ref, &active_paths)
 }
 
 /// Restore the Mesh root to its Base Ref. Guarded by the same
@@ -907,10 +691,7 @@ pub(crate) fn restore_mesh_to_base_blocking(
     host_path: String,
     local_base: String,
 ) -> Result<RestoreResult, String> {
-    let repo = primitives::open_from_host_path(&host_path)
-        .map_err(|e| format!("failed to open repo at {}: {}", host_path, e))?;
-
-    let moved = health::restore_to_base_impl(&repo, &local_base)?;
+    let moved = health::restore_to_base_at(&host_path, &local_base)?;
     let message = if moved {
         format!("checked out {}", local_base)
     } else {
@@ -1056,15 +837,10 @@ pub(crate) fn get_mesh_git_static_blocking(
 ) -> Result<MeshGitStatic, String> {
     // Open once and reuse the handle for both `is_git_repo` and
     // `default_branch` (#431 — eliminates the pre-refactor double-open).
-    // `open_from_host_path` handles WSL `\\wsl$\` translation (hard rule
+    // `open_at` handles WSL UNC path translation (hard rule
     // `env::to_host_path` — every host file-op must go through it).
-    let repo = crate::git::primitives::open_from_host_path(&path).ok();
-    let is_git_repo = repo.is_some();
+    let (is_git_repo, default_branch) = primitives::repo_static_at(&path);
     let is_gh_authenticated = cache.check();
-    let default_branch = match &repo {
-        Some(r) => default_branch_from_repo(r),
-        None => "main".to_string(),
-    };
 
     Ok(MeshGitStatic {
         is_git_repo,
@@ -1104,33 +880,7 @@ pub async fn stage_file(repo_path: String, file_path: String) -> Result<(), Stri
 /// Sync core for [`stage_file`].
 pub(crate) fn stage_file_blocking(repo_path: &str, file_path: &str) -> Result<(), String> {
     reject_traversal(file_path)?;
-    let host = to_host_path(repo_path);
-    let repo = primitives::open_from_host_path(&host)
-        .map_err(|e| format!("failed to open repo at {}: {}", host, e))?;
-    let rel = std::path::Path::new(file_path);
-    let root = repo
-        .workdir()
-        .ok_or_else(|| "Git repository has no working directory".to_string())?;
-    let abs = root.join(rel);
-    assert_inside_repo(root, rel)?;
-
-    let mut index = repo.index().map_err(|e| e.to_string())?;
-    if abs.exists() {
-        index
-            .add_path(rel)
-            .map_err(|e| format!("failed to stage {}: {}", file_path, e))?;
-    } else {
-        // Missing on disk = deleted (or rename source). Remove from the
-        // index so the deletion is staged; `remove_path` is a no-op-safe
-        // Err when the path isn't in the index, which we surface as-is.
-        index
-            .remove_path(rel)
-            .map_err(|e| format!("failed to stage deletion of {}: {}", file_path, e))?;
-    }
-    index
-        .write()
-        .map_err(|e| format!("failed to write index: {}", e))?;
-    Ok(())
+    index::stage_path(repo_path, file_path)
 }
 
 /// Revert one file (by repo-relative path) to its HEAD state — the
@@ -1162,53 +912,7 @@ pub async fn revert_file(repo_path: String, file_path: String) -> Result<(), Str
 /// Sync core for [`revert_file`].
 pub(crate) fn revert_file_blocking(repo_path: &str, file_path: &str) -> Result<(), String> {
     reject_traversal(file_path)?;
-    let host = to_host_path(repo_path);
-    let repo = primitives::open_from_host_path(&host)
-        .map_err(|e| format!("failed to open repo at {}: {}", host, e))?;
-    let rel = std::path::Path::new(file_path);
-    let root = repo
-        .workdir()
-        .ok_or_else(|| "Git repository has no working directory".to_string())?;
-    let abs = root.join(rel);
-    assert_inside_repo(root, rel)?;
-
-    // Is the path tracked in HEAD? (Unborn HEAD → nothing is tracked.)
-    let in_head = repo
-        .head()
-        .ok()
-        .and_then(|h| h.peel_to_commit().ok())
-        .and_then(|c| c.tree().ok())
-        .map(|tree| tree.get_path(rel).is_ok())
-        .unwrap_or(false);
-
-    if in_head {
-        // `git checkout HEAD -- <path>`: check the HEAD blob out over the
-        // worktree. `force` overwrites local edits — that's the whole point
-        // of Revert, and the button is explicitly labelled destructive.
-        // `update_index` defaults to true, so the index entry is refreshed
-        // in the same pass and `git status` reads clean afterwards.
-        let obj = repo
-            .revparse_single("HEAD^{tree}")
-            .map_err(|e| format!("failed to resolve HEAD tree: {}", e))?;
-        let mut opts = git2::build::CheckoutBuilder::new();
-        opts.force().path(rel);
-        repo.checkout_tree(&obj, Some(&mut opts))
-            .map_err(|e| format!("failed to revert {}: {}", file_path, e))?;
-        Ok(())
-    } else {
-        // Not in HEAD → added/untracked/rename-target. Reverting = remove.
-        if abs.exists() {
-            std::fs::remove_file(&abs)
-                .map_err(|e| format!("failed to delete {}: {}", file_path, e))?;
-        }
-        // Drop any staged entry too (a previously `git add`ed new file).
-        if let Ok(mut index) = repo.index() {
-            if index.remove_path(rel).is_ok() {
-                let _ = index.write();
-            }
-        }
-        Ok(())
-    }
+    index::revert_path(repo_path, file_path)
 }
 
 /// Reject path-traversal inputs at the command boundary. Defense in depth
@@ -1256,33 +960,6 @@ fn reject_traversal(file_path: &str) -> Result<(), String> {
     }
     if !saw_normal {
         return Err(format!("invalid path: {}", file_path));
-    }
-    Ok(())
-}
-
-/// Belt-and-braces: after `reject_traversal` passes, canonicalize the
-/// joined absolute path (when the file actually exists on disk) and
-/// verify the result lives under the repo's canonicalized root. Catches
-/// the symlink-escape case where a relative clean path like
-/// `src/outside-link` points at a symlink whose target is outside the
-/// worktree. Files that don't exist yet (worktree-deleted tracked files,
-/// staged-add paths) skip this check — their canonicalize would fail and
-/// we don't want a missing-file to break staging. The structural
-/// `reject_traversal` is the load-bearing gate; this is defense in
-/// depth.
-fn assert_inside_repo(repo_root: &Path, file_path: &Path) -> Result<(), String> {
-    let abs: PathBuf = repo_root.join(file_path);
-    let Ok(canon_abs) = abs.canonicalize() else {
-        // File missing or otherwise not canonicalizable — let the caller
-        // produce the user-visible error from the operation that
-        // triggered this check.
-        return Ok(());
-    };
-    let canon_root = repo_root
-        .canonicalize()
-        .map_err(|e| format!("repo root canonicalize: {}", e))?;
-    if !canon_abs.starts_with(&canon_root) {
-        return Err(format!("path escapes repository: {}", file_path.display()));
     }
     Ok(())
 }

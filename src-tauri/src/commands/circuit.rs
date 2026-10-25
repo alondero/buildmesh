@@ -80,13 +80,33 @@ pub(crate) fn record_circuit_outcome_now(
 }
 
 #[command]
-pub fn record_circuit_outcome(
+pub async fn record_circuit_outcome(
     app: AppHandle,
     request: crate::db::circuit::evidence::CheckpointRequest,
 ) -> Result<(), String> {
-    record_circuit_outcome_now(&request)?;
-    emit_run_updated(Some(&app), request.run_id, "running");
+    let run_id = request.run_id;
+    crate::blocking::run_blocking("record_circuit_outcome", move || {
+        record_circuit_outcome_now(&request).map_err(String::from)
+    })
+    .await?;
+    emit_run_updated(Some(&app), run_id, "running");
     Ok(())
+}
+
+pub(crate) fn circuit_prompt_payload_blocking(
+    request: crate::db::circuit::evidence::prompt_delivery::CircuitPromptRequest,
+) -> Result<String, String> {
+    crate::services::circuit_prompt::payload(&request).map_err(String::from)
+}
+
+#[command]
+pub async fn circuit_prompt_payload(
+    request: crate::db::circuit::evidence::prompt_delivery::CircuitPromptRequest,
+) -> Result<String, String> {
+    crate::blocking::run_blocking("circuit_prompt_payload", move || {
+        circuit_prompt_payload_blocking(request)
+    })
+    .await
 }
 
 /// Everything a node card's Overview tab draws for one run, read at once.

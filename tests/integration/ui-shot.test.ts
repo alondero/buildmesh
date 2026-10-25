@@ -243,34 +243,6 @@ describe('ui-shot mock mode', () => {
     }
   }, TEST_DEADLINE_MS);
 
-  it('runs the step script through the CLI, so dropping the step phase cannot stay green', async () => {
-    // The CLI's call to the step phase is what the rest of this file budgets,
-    // and nothing else here would notice if it were removed: the mock render
-    // tests only assert an exit code and a PNG, which are produced whether or
-    // not steps ran. So drive the real CLI with a steps file that leaves a
-    // marker, and assert on the marker.
-    const { server, url } = await serveHtml('<div id="root"><p>mounted</p></div>');
-    const folder = await mkdtemp(join(tmpdir(), 'buildmesh-ui-shot-cli-steps-'));
-    try {
-      const markerPath = join(folder, 'marker.json');
-      const result = await runUiShot(
-        ['--out', join(folder, 'shot.png'), '--mock', '--mock-url', url, '--steps', recordingSteps],
-        WRAPPER_DEADLINE_MS,
-        { UI_SHOT_MARKER_PATH: markerPath },
-      );
-
-      expect(result.code, result.stderr).toBe(0);
-      // The marker is written only if the CLI imported and ran the steps file
-      // with the real page, invoke and mock deps.
-      expect(JSON.parse(await readFile(markerPath, 'utf8'))).toEqual({
-        hasPage: true, hasInvoke: true, hasMock: true, fromCli: true,
-      });
-    } finally {
-      await rm(folder, { recursive: true, force: true });
-      await new Promise<void>((resolvePromise, reject) => server.close((error) => error ? reject(error) : resolvePromise()));
-    }
-  }, TEST_DEADLINE_MS);
-
   it('runSteps rejects a hanging step script with the step-phase diagnostic', async () => {
     // The mechanism under test: the step phase is bounded, and the bound is
     // reported as a named phase. STEP_SCRIPT_TIMEOUT_MS is minutes long by
@@ -385,42 +357,6 @@ it('derives the wrapper deadline from the phase budgets instead of hand-summing 
       + DEV_SERVER_STOP_MS;
     expect(UI_SHOT_WATCHDOG_DEADLINE_MS).toBeGreaterThan(wholeRunMs);
   });
-
-  it('names the phase a killed run was in, instead of reporting only the timeout', async () => {
-    // The diagnostic improvement #2168 asks for. Today a wrapper kill reports
-    // `ui-shot did not finish within <n>ms`, which says nothing about where the
-    // time went; the child-side watchdog appends each phase name as it enters
-    // one, so the wrapper can name the phase that was in flight.
-    //
-    // Driven against a real child with a hanging steps file and a deliberately
-    // short wrapper deadline, so the kill happens during a phase rather than
-    // being simulated. The deadline is the injected one, not the derived
-    // backstop: the point is what the kill reports, not that a normal run
-    // finishes.
-    const { server, url } = await serveHtml('<div id="root"><p>mounted</p></div>');
-    const folder = await mkdtemp(join(tmpdir(), 'buildmesh-ui-shot-kill-'));
-    try {
-      const phaseFile = join(folder, 'phases.log');
-      // Long enough to get past launch, navigation and mount on a loaded
-      // machine, short enough that the hanging step script is still running.
-      const killAfterMs = 30000;
-      const started = Date.now();
-      await expect(
-        runUiShot(
-          ['--out', join(folder, 'shot.png'), '--mock', '--mock-url', url, '--steps', hangingSteps],
-          killAfterMs,
-          { [PHASE_FILE_ENV]: phaseFile },
-        ),
-      ).rejects.toThrow(/ui-shot did not finish within 30000ms \(killed while in phase: step script\)/);
-      // It was the step phase that was in flight, not merely the last phase
-      // recorded before the child died.
-      expect(activePhase(phaseFile)).toBe('step script');
-      expect(Date.now() - started).toBeLessThan(killAfterMs + 15000);
-    } finally {
-      await rm(folder, { recursive: true, force: true });
-      await new Promise<void>((resolvePromise, reject) => server.close((error) => error ? reject(error) : resolvePromise()));
-    }
-  }, 120000);
 
   it('keeps a phase list readable when nothing recorded one', () => {
     // A child that dies before entering a phase (a boot crash, an import

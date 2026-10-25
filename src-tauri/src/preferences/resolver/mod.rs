@@ -10,6 +10,7 @@
 //! | [`accounts`]       | Account list — effective-account resolution, key lookups, mutators |
 //! | [`pairings`]       | Pairing resolution — stored-pairing lookups, attach-form defaults, ordering |
 //! | [`pairing_compat`] | Pairing compatibility matching — descriptor extractor, decision, predicate |
+//! | [`snapshot`]       | One preferences read resolved into the values a derivation needs (issue #2532) |
 //! | [`default_provider`] | Default-provider precedence resolver |
 //! | [`cascade`]        | Shared per-harness cascade (`explicit > mesh_legacy > application`) + capability mask — single source of truth for the resolver that the spawn path AND the IPC `get_resolved_harness_view` (issue #1656) both call |
 //!
@@ -23,6 +24,7 @@ pub mod default_provider;
 pub mod harness;
 pub mod pairing_compat;
 pub mod pairings;
+pub mod snapshot;
 
 // `mod preferences` (and so this module) is private to the crate, so each
 // re-export here has crate-internal reachability. Names only a `#[cfg(test)]`
@@ -33,9 +35,9 @@ pub mod pairings;
 #[cfg(test)]
 pub use harness::is_known_harness_id;
 pub use harness::{
-    default_harness_profiles, harness_capabilities_for, harness_order, harness_profiles,
-    harness_runtime, merge_detected_profiles, resolve_harness_provider,
-    resolve_harness_provider_for, resolved_harness_profile, set_harness_order,
+    default_harness_profiles, harness_capabilities_for, harness_profiles, harness_runtime,
+    merge_detected_profiles, resolve_harness_provider, resolve_harness_provider_for,
+    resolved_harness_profile, set_harness_order,
 };
 
 // ----- Re-exports: catalog -----------------------------------------------
@@ -69,13 +71,17 @@ pub(crate) use pairings::effective_pairings;
 pub use pairings::proxied_order_for;
 pub use pairings::{
     compatible_providers_by_harness, compatible_providers_for_harness, effective_provider_pairings,
-    pairing_for, provider_pairings, proxied_provider_order, remove_provider_pairing,
-    resolve_stored_pairing_and_account, set_proxied_provider_order, upsert_provider_pairing,
+    pairing_for, provider_pairings, remove_provider_pairing, resolve_stored_pairing_and_account,
+    set_proxied_provider_order, upsert_provider_pairing,
 };
 
 // ----- Re-exports: pairing_compat ---------------------------------------
 
 pub use pairing_compat::{endpoint_model_descriptor, pairing_compatibility};
+
+// ----- Re-exports: snapshot ----------------------------------------------
+
+pub use snapshot::{load_snapshot, snapshot_or_default, PreferencesSnapshot};
 
 // ----- Re-exports: default_provider --------------------------------------
 

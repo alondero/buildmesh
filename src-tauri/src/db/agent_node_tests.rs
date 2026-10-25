@@ -30,10 +30,13 @@ mod tests {
             (2,2,'archived','C:/web','archived','saved-session','claude','2026-10-02')", []).unwrap();
         let history = crate::db::list_agent_history_inner(&conn).unwrap();
         assert_eq!(
-            history.iter().map(|node| node.id).collect::<Vec<_>>(),
+            history
+                .iter()
+                .map(|entry| entry.node.id)
+                .collect::<Vec<_>>(),
             vec![2, 1]
         );
-        assert_eq!(history[0].status, SessionStatus::Archived);
+        assert_eq!(history[0].node.status, SessionStatus::Archived);
         let reopened = crate::db::reopen_agent_node_inner(&conn, 2).unwrap();
         assert_eq!(reopened.status, SessionStatus::Suspended);
         assert_eq!(reopened.cli_session_id.as_deref(), Some("saved-session"));
@@ -43,6 +46,93 @@ mod tests {
         assert_eq!(active.status, SessionStatus::Running);
         assert_eq!(active.cli_session_id.as_deref(), Some("active-session"));
         assert!(crate::db::reopen_agent_node_inner(&conn, 404).is_err());
+    }
+
+    /// Regression: `created_at` is written by the column DEFAULT
+    /// (`datetime('now')` → `YYYY-MM-DD HH:MM:SS`), which
+    /// `DateTime::parse_from_rfc3339` rejects. The old read fell through to
+    /// `Utc::now()`, so every Agent History card rendered "just now" no matter
+    /// how old the row was — the exact symptom that made the history probe
+    /// useless. The parsed value must be the stored instant, not the clock.
+    #[test]
+    fn history_parses_sqlite_default_created_at_instead_of_falling_back_to_now() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id,name,path) VALUES (1,'API','C:/api')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_nodes (id,mesh_id,name,path,status,created_at)
+             VALUES (1,1,'old','C:/api','archived','2026-04-28 19:33:28')",
+            [],
+        )
+        .unwrap();
+
+        let history = crate::db::list_agent_history_inner(&conn).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history[0].node.created_at.to_rfc3339(),
+            "2026-04-28T19:33:28+00:00",
+            "a SQLite-default created_at must parse to its stored instant, not `now`"
+        );
+    }
+
+    /// The history payload must carry the timestamps the card needs. Without
+    /// these, "when did this session finish?" is not answerable from the wire at
+    /// all — `created_at` is when the worktree appeared, and the lifecycle
+    /// snapshot is dropped whenever the row has moved on.
+    #[test]
+    fn history_exposes_status_changed_at_and_session_started_at() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id,name,path) VALUES (1,'API','C:/api')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_nodes (id,mesh_id,name,path,status,created_at,status_changed_at,session_started_at)
+             VALUES (1,1,'n','C:/api','archived','2026-10-24 23:26:21',
+                     '2026-10-25T01:09:28.890242700+00:00', 1792884381722)",
+            [],
+        )
+        .unwrap();
+
+        let history = crate::db::list_agent_history_inner(&conn).unwrap();
+        assert_eq!(
+            history[0].status_changed_at.map(|at| at.to_rfc3339()),
+            Some("2026-10-25T01:09:28.890242700+00:00".to_string())
+        );
+        assert_eq!(history[0].session_started_at, Some(1792884381722));
+    }
+
+    /// The v14 backfill and column DEFAULT write SQLite's zone-less
+    /// `YYYY-MM-DD HH:MM:SS` (UTC). Shipped verbatim, a browser parses it as
+    /// local time, which reads "just now" west of UTC. The wire must carry the
+    /// UTC instant with an explicit offset.
+    #[test]
+    fn history_normalizes_sqlite_default_status_changed_at_to_utc() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id,name,path) VALUES (1,'API','C:/api')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_nodes (id,mesh_id,name,path,status,created_at,status_changed_at)
+             VALUES (1,1,'n','C:/api','archived','2026-10-24 23:26:21','2026-10-25 14:00:00')",
+            [],
+        )
+        .unwrap();
+
+        let history = crate::db::list_agent_history_inner(&conn).unwrap();
+        let changed = history[0].status_changed_at.unwrap();
+        assert_eq!(changed.to_rfc3339(), "2026-10-25T14:00:00+00:00");
+        let wire = serde_json::to_value(&history[0]).unwrap();
+        assert_eq!(wire["status_changed_at"], "2026-10-25T14:00:00Z");
     }
 
     /// Minimal `agent_nodes` schema carrying only the columns the conditional

@@ -1,42 +1,11 @@
 #!/usr/bin/env node
 import { execFileSync, spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { linkDependencies, removeLinkIfPresent } from './worktree-deps.mjs';
 
 const git = (root, ...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }).trim();
-
-function linkDependencies(root, checkout, links) {
-  const source = join(root, 'node_modules');
-  if (!existsSync(source)) return;
-  for (const file of ['package-lock.json', 'package.json']) {
-    const original = join(root, file);
-    const reviewed = join(checkout, file);
-    if (existsSync(original) !== existsSync(reviewed)) throw new Error(`Dependency inputs differ (${file}); use --no-deps and install inside the isolated checkout.`);
-    if (!existsSync(original)) continue;
-    const bytes = path => readFileSync(path, 'utf8');
-    const value = text => file === 'package.json'
-      ? JSON.stringify(Object.fromEntries(['dependencies', 'devDependencies', 'optionalDependencies', 'overrides'].map(key => [key, JSON.parse(text)[key]])))
-      : text;
-    if (value(bytes(original)) !== value(bytes(reviewed))) throw new Error(`Dependency inputs differ (${file}); use --no-deps and install inside the isolated checkout.`);
-  }
-  const target = join(checkout, 'node_modules');
-  mkdirSync(target, { recursive: true });
-  const link = (from, to) => {
-    symlinkSync(realpathSync(from), to, process.platform === 'win32' ? 'junction' : 'dir');
-    links.push(to);
-  };
-  for (const entry of readdirSync(source, { withFileTypes: true })) {
-    const from = join(source, entry.name);
-    const to = join(target, entry.name);
-    if (entry.name === '.bin') cpSync(from, to, { recursive: true, verbatimSymlinks: true });
-    else if (entry.name.startsWith('.')) continue; // .vite, .vite-temp and other caches stay local.
-    else if (entry.name.startsWith('@')) {
-      mkdirSync(to, { recursive: true });
-      for (const name of readdirSync(from)) link(join(from, name), join(to, name));
-    } else if (entry.isDirectory() || entry.isSymbolicLink()) link(from, to);
-  }
-}
 
 export async function withReviewCheckout(root, ref, action, { dependencies = true } = {}) {
   root = resolve(root);
@@ -47,10 +16,13 @@ export async function withReviewCheckout(root, ref, action, { dependencies = tru
   const checkout = join(owned, 'tree');
   const links = [];
   let registered = false;
+  let outcome;
+  let failed = false;
+  let failure;
   try {
     git(root, 'worktree', 'add', '--detach', checkout, revision);
     registered = true;
-    if (dependencies) linkDependencies(root, checkout, links);
+    if (dependencies) linkDependencies(root, checkout, links, { remedy: 'use --no-deps and install inside the isolated checkout.' });
     const temporary = join(checkout, '.tmp', 'review-runtime');
     mkdirSync(temporary, { recursive: true });
     const env = {
@@ -60,14 +32,25 @@ export async function withReviewCheckout(root, ref, action, { dependencies = tru
       TMP: temporary, TEMP: temporary, TMPDIR: temporary,
     };
     delete env.TS_RS_EXPORT_DIR;
-    return await action({ path: checkout, revision, env });
-  } finally {
-    // Remove our package links first; git's cleanup never needs to traverse a
-    // junction into the dependency checkout. Every path was created under owned.
-    for (const path of links.reverse()) rmSync(path, { recursive: true, force: true });
-    if (registered) git(root, 'worktree', 'remove', '--force', checkout);
-    rmSync(owned, { recursive: true, force: true });
+    outcome = await action({ path: checkout, revision, env });
+  } catch (error) {
+    failed = true;
+    failure = error;
   }
+  // Remove our package links first; git's cleanup never needs to traverse a
+  // junction into the dependency checkout. Every path was created under owned.
+  // A link that dangles or was replaced by a real directory is handled by
+  // removeLinkIfPresent; if a real link cannot be removed, leave the checkout in
+  // place rather than let git's cleanup traverse it into the dependency checkout.
+  let stuck;
+  for (const path of links.reverse()) {
+    try { removeLinkIfPresent(path); } catch (error) { stuck ??= { path, error }; }
+  }
+  if (stuck) throw new Error(`Could not remove dependency link ${stuck.path}; the review checkout ${owned} was left in place: ${stuck.error.message}`);
+  if (registered) git(root, 'worktree', 'remove', '--force', checkout);
+  rmSync(owned, { recursive: true, force: true });
+  if (failed) throw failure;
+  return outcome;
 }
 
 function commandFor(root, command) {

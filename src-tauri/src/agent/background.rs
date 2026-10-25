@@ -307,6 +307,7 @@ fn decode_json_lines(stdout: &str, format: BackgroundResultOutput) -> Result<Str
 }
 
 #[cfg(test)]
+// allow-test-in-production: this background-recipe pin predates the sibling-test-file rule. Perch joins the harnesses with no one-shot recipe; moving the suite is out of scope.
 mod tests {
     use super::*;
     use crate::preferences::launch_configurations::{capture, LaunchOverrides};
@@ -327,6 +328,10 @@ mod tests {
         saved.model = Some("minimax/MiniMax-M3#variant".into());
         let launch = resolve_plan(saved.clone(), &prefs).unwrap();
         assert_eq!(launch.args, ["--model", "minimax/MiniMax-M3#variant"]);
+
+        saved.model = Some("custom_provider:local/M3#variant".into());
+        let launch = resolve_plan(saved.clone(), &prefs).unwrap();
+        assert_eq!(launch.args, ["--model", "custom_provider:local/M3#variant"]);
 
         saved.model = Some("minimax/M3&echo x".into());
         let error = resolve_plan(saved, &prefs)
@@ -489,7 +494,9 @@ mod tests {
 
     #[test]
     fn missing_capability_and_non_native_runtime_report_the_requirement() {
-        for harness in ["terminal", "freebuff", "cline", "cursor", "muse", "dsh"] {
+        for harness in [
+            "terminal", "freebuff", "cline", "cursor", "muse", "dsh", "perch",
+        ] {
             let error = resolve_plan(plan(harness), &AppPreferences::default())
                 .err()
                 .unwrap();

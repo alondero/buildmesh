@@ -41,6 +41,54 @@ pub struct HarnessCatalogEntry {
 /// lists both so the SQL whitelist covers stored profile rows.
 pub const HARNESS_PROFILE_ALIASES: &[(&str, &str)] = &[("claude", "anthropic")];
 
+/// The adapter id a Harness Profile id executes through, when the alias table
+/// names one. `None` for a profile id that already *is* an adapter id.
+///
+/// This is the one place the `claude` → `anthropic` mapping is declared
+/// (issue #2532). Callers resolve through here instead of re-deriving the
+/// mapping, so the next harness alias is one table edit rather than a grep
+/// across the tree.
+pub fn harness_profile_alias(id: &str) -> Option<&'static str> {
+    HARNESS_PROFILE_ALIASES
+        .iter()
+        .find(|(from, _)| *from == id)
+        .map(|(_, to)| *to)
+}
+
+/// The Harness Profile id that executes through `adapter_id` — the reverse
+/// lookup over [`HARNESS_PROFILE_ALIASES`].
+///
+/// `None` when no profile id is aliased onto that adapter.
+pub fn harness_profile_id_for_adapter(adapter_id: &str) -> Option<&'static str> {
+    HARNESS_PROFILE_ALIASES
+        .iter()
+        .find(|(_, to)| *to == adapter_id)
+        .map(|(from, _)| *from)
+}
+
+/// The adapter id a Harness Profile id executes through, defaulting to the id
+/// itself when no alias applies.
+///
+/// The one-call form of [`harness_profile_alias`] for the callers that want
+/// the effective adapter id rather than "is there an alias?" — building a
+/// fallback [`crate::preferences::HarnessProfile`] from a bare harness id,
+/// where an unaliased id is its own adapter.
+pub fn harness_adapter_id(id: &str) -> &str {
+    harness_profile_alias(id).unwrap_or(id)
+}
+
+/// Harness ids whose Spawn Menu row is pinned to the bottom of the menu.
+///
+/// A harness declares its own menu position here rather than the comparator
+/// special-casing one id (issue #2532). Terminal is the plain-shell escape
+/// hatch, so it stays last.
+pub const HARNESS_MENU_LAST: &[&str] = &["terminal"];
+
+/// True when `harness_id` declares itself as the last row of the Spawn Menu.
+pub fn harness_sorts_last(harness_id: &str) -> bool {
+    HARNESS_MENU_LAST.contains(&harness_id)
+}
+
 /// Inspector / README / user-guide display name for a [`Provider`] variant.
 ///
 /// Exhaustive so a new variant without a label is a compile error. These
@@ -62,6 +110,7 @@ fn inspector_label(provider: Provider) -> &'static str {
         Provider::Freebuff => "Freebuff",
         Provider::Muse => "Meta Muse",
         Provider::Cline => "Cline",
+        Provider::Perch => "Perch",
         Provider::Terminal => "Terminal",
     }
 }
@@ -229,165 +278,5 @@ pub fn export_harness_capabilities_table() -> std::io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::agent::provider::BUILTIN_HARNESS_IDS;
-    use std::collections::HashSet;
-
-    #[test]
-    fn catalog_keys_match_provider_enum() {
-        let catalog = builtin_harness_catalog();
-        let catalog_ids: Vec<String> = catalog.iter().map(|e| e.id.clone()).collect();
-        let provider_ids: Vec<String> = Provider::all().iter().map(|p| p.to_string()).collect();
-        assert_eq!(
-            catalog_ids, provider_ids,
-            "builtin_harness_catalog() must enumerate Provider::all() in the same order"
-        );
-        assert_eq!(
-            catalog_ids.len(),
-            catalog_ids.iter().collect::<HashSet<_>>().len(),
-            "catalog ids must be unique"
-        );
-    }
-
-    #[test]
-    fn catalog_id_matches_adapter_id() {
-        for provider in Provider::all() {
-            let adapter = provider.adapter();
-            assert_eq!(
-                provider.to_string(),
-                adapter.id(),
-                "Provider Display ({provider}) must equal adapter.id() ({})",
-                adapter.id()
-            );
-        }
-    }
-
-    #[test]
-    fn catalog_capabilities_match_adapter() {
-        for entry in builtin_harness_catalog() {
-            let provider = Provider::from_db_str(&entry.id);
-            assert_eq!(
-                provider.to_string(),
-                entry.id,
-                "from_db_str({:?}) must round-trip the catalog id (not fall back to anthropic)",
-                entry.id
-            );
-            let expected = provider.adapter().capabilities();
-            let actual_json = serde_json::to_value(&entry.capabilities).unwrap();
-            let expected_json = serde_json::to_value(&expected).unwrap();
-            assert_eq!(
-                actual_json, expected_json,
-                "catalog capabilities for {} drifted from adapter.capabilities()",
-                entry.id
-            );
-            assert_eq!(entry.capabilities.harness_id, entry.id);
-            assert_eq!(entry.label, inspector_label(provider));
-        }
-    }
-
-    #[test]
-    fn builtin_harness_ids_are_catalog_keys_or_aliases() {
-        let catalog_ids: HashSet<String> = builtin_harness_catalog()
-            .into_iter()
-            .map(|e| e.id)
-            .collect();
-        let alias_from: HashSet<&str> = HARNESS_PROFILE_ALIASES
-            .iter()
-            .map(|(from, _)| *from)
-            .collect();
-
-        for (from, to) in HARNESS_PROFILE_ALIASES {
-            assert!(
-                !catalog_ids.contains(*from),
-                "alias source {from:?} collides with a catalog key"
-            );
-            assert!(
-                catalog_ids.contains(*to),
-                "alias target {to:?} is not a catalog key"
-            );
-        }
-
-        let mut covered: HashSet<&str> = catalog_ids.iter().map(String::as_str).collect();
-        covered.extend(alias_from.iter().copied());
-
-        let builtin: HashSet<&str> = BUILTIN_HARNESS_IDS.iter().copied().collect();
-        assert_eq!(
-            builtin,
-            covered,
-            "BUILTIN_HARNESS_IDS must equal catalog keys ∪ HARNESS_PROFILE_ALIASES.\n\
-             only in BUILTIN: {:?}\nonly in catalog/aliases: {:?}",
-            builtin.difference(&covered).collect::<Vec<_>>(),
-            covered.difference(&builtin).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn claude_alias_targets_anthropic() {
-        assert_eq!(HARNESS_PROFILE_ALIASES, &[("claude", "anthropic")]);
-        assert!(
-            builtin_harness_catalog()
-                .iter()
-                .any(|e| e.id == "anthropic"),
-            "anthropic adapter must remain in the catalog so the claude alias resolves"
-        );
-    }
-
-    /// ts-rs-style export: `cargo test` (cwd `src-tauri/`) refreshes the
-    /// committed artifact. CI's `git diff --exit-code src/types/generated`
-    /// fails when the committed file lags the adapters.
-    #[test]
-    fn export_bindings_harness_capabilities_table() {
-        export_harness_capabilities_table().expect("export HarnessCapabilitiesTable");
-
-        let dir = generated_export_dir();
-        let json_path = dir.join("HarnessCapabilitiesTable.json");
-        let ts_path = dir.join("HarnessCapabilitiesTable.ts");
-        let json = std::fs::read_to_string(&json_path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", json_path.display()));
-        let ts = std::fs::read_to_string(&ts_path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", ts_path.display()));
-
-        let parsed: serde_json::Value =
-            serde_json::from_str(&json).expect("exported JSON must parse");
-        let expected: serde_json::Value =
-            serde_json::from_str(&catalog_json()).expect("in-memory JSON");
-        assert_eq!(
-            parsed, expected,
-            "exported JSON must match the in-memory catalog"
-        );
-
-        for entry in builtin_harness_catalog() {
-            assert!(
-                ts.contains(&format!("\"{}\"", entry.id)),
-                "generated TS missing catalog id {}",
-                entry.id
-            );
-            assert!(
-                ts.contains(&entry.label),
-                "generated TS missing label {}",
-                entry.label
-            );
-        }
-        let ids = parsed
-            .get("ids")
-            .and_then(|v| v.as_array())
-            .expect("catalog JSON must include ids in Provider::all() order");
-        let expected_ids: Vec<serde_json::Value> = catalog_ids()
-            .into_iter()
-            .map(serde_json::Value::String)
-            .collect();
-        assert_eq!(
-            ids, &expected_ids,
-            "exported ids must follow Provider::all()"
-        );
-        assert!(
-            ts.contains("HARNESS_PROFILE_ALIASES"),
-            "generated TS must export the claude → anthropic alias table"
-        );
-        assert!(
-            ts.starts_with("// This file was generated by the harness catalog exporter"),
-            "generated TS must carry the do-not-edit banner"
-        );
-    }
-}
+#[path = "harness_catalog_tests.rs"]
+mod tests;

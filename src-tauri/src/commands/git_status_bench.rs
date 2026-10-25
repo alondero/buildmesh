@@ -1,6 +1,7 @@
 //! Fresh-process driver for scripts/bench-git-status.mjs. Fixture setup is
 //! outside this process so its allocations do not contaminate query peaks.
-use super::super::git::{get_git_status_blocking, get_git_summary_blocking, status_metrics};
+use super::super::git::{get_git_status_blocking, get_git_summary_blocking};
+use crate::git::status_stats::status_metrics;
 use std::sync::{Arc, Barrier};
 use std::time::Instant;
 
