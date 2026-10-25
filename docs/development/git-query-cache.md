@@ -3,12 +3,14 @@
 Status: current
 
 The frontend's Git reads (`git status`, `git summary`, branch status, mesh
-health, open PR, changed files) run through one primitive,
-`src/lib/pathInvalidatedCache.ts`. Every hook client is a module-level
-singleton built by `createPathKeyedCache` (key is a repo path) or
+health, open PR, changed files, the branch/worktree prune read) run through one
+primitive, `src/lib/pathInvalidatedCache.ts`. Every hook client is a
+module-level singleton built by `createPathKeyedCache` (key is a repo path) or
 `createDualKeyCache` (key is an entity id such as `nodeId`/`meshId`), and
 React glue in `src/hooks/usePathInvalidatedQuery.ts` reads through
-`client.read` / `client.refresh`.
+`client.read` / `client.refresh`. The Repository destination's prune read is
+the mesh-keyed client in `src/lib/gitPruneInfo.ts`, read through
+`src/hooks/useGitPruneInfo.ts`.
 
 That shared singleton is process-lifetime state. This document is the
 contract for how much of it buildmesh keeps, and for how fresh a value read

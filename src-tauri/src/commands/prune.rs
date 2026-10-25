@@ -54,6 +54,13 @@ fn get_git_prune_info_blocking(mesh_id: i64) -> Result<Vec<GitRepoPruneInfo>, St
     // so they don't need the global DB initialized — production here
     // wraps `db::is_warm_pool_path` for the real pool-entry classification.
     let is_pool_path = |p: &str| db::is_warm_pool_path(p).unwrap_or(false);
+    // `collect_prune_info` bounds the squash-merge scan with a wall-clock
+    // budget. Without it a repository with many branches over a long `main`
+    // history kept the Probe's Repository tab spinning for tens of minutes
+    // before it could render even the worktree list (issue #2580). A budget
+    // that runs out truncates the classification, not the read: the branches
+    // it did not classify report an unknown merge status, and the payload
+    // says so.
     let info = collect_prune_info(&repo_path, &active_paths, &active_branches, &is_pool_path)?;
     Ok(vec![info])
 }
