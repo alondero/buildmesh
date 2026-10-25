@@ -1,9 +1,16 @@
+import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { createRequire } from 'node:module';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { startDevServer, stopDevServer } from '../../scripts/ui-shot-server.mjs';
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+const require = createRequire(import.meta.url);
+const viteEntrypoint = resolve(dirname(require.resolve('vite/package.json')), 'bin', 'vite.js');
 
 const children = new Set<any>();
 
@@ -52,11 +59,143 @@ afterEach(async () => {
   children.clear();
 });
 
+/** Paths compared as forward-slash strings, folded to lower case where the file system is. */
+function comparable(value: string) {
+  const normalized = value.replaceAll('\\', '/').replace(/\/+$/, '');
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+/** Whether `child` sits inside `parent`. */
+function isInside(child: string, parent: string) {
+  const from = comparable(parent);
+  const to = comparable(child);
+  return to === from || to.startsWith(`${from}/`);
+}
+
+/**
+ * The directory a server serves its optimized dependencies from, read from the
+ * URLs it hands the browser. A served URL names the cache directory, so this
+ * observes where the server really put its optimizer output.
+ */
+async function dependencyDirectory(url: string, root = repoRoot) {
+  const entry = await fetch(`${url}/src/main.tsx`);
+  const text = await entry.text();
+  const match = text.match(/["']([^"']+\/deps\/[^"']+)["']/);
+  if (!match) throw new Error(`the server at ${url} served no optimized dependency URL`);
+  const pathname = decodeURIComponent(new URL(match[1], url).pathname);
+  // `/@fs/C:/checkout/.tmp/vite/deps/react.js` names an absolute path;
+  // `/.tmp/vite/deps/react.js` is relative to the server's root.
+  const absolute = pathname.startsWith('/@fs/')
+    ? pathname.slice(4).replace(/^\/([a-zA-Z]:)/, '$1')
+    : resolve(root, `.${pathname}`);
+  const normalized = absolute.replaceAll('\\', '/');
+  const marker = normalized.toLowerCase().indexOf('/deps/');
+  if (marker < 0) throw new Error(`unexpected dependency URL: ${pathname}`);
+  return normalized.slice(0, marker);
+}
+
+/**
+ * The optimized dependency graph a browser fetches: the entry's shims and the
+ * bundles those shims re-export from.
+ */
+async function dependencyGraph(url: string) {
+  const entry = await fetch(`${url}/src/main.tsx`);
+  const text = await entry.text();
+  const shims = [...text.matchAll(/from\s+["']([^"']+\/deps\/[^"']+)["']/g)]
+    .map((match) => new URL(match[1], url));
+  const bundles: URL[] = [];
+  for (const shim of shims) {
+    const body = await (await fetch(shim)).text();
+    for (const match of body.matchAll(/from\s+["']([^"']+\/deps\/[^"']+)["']/g)) {
+      bundles.push(new URL(match[1], shim));
+    }
+  }
+  return { shims, bundles };
+}
+
+/**
+ * Start this worktree's own Vite server, the way `npm run dev` does: this
+ * checkout's configuration and no private cache directory.
+ */
+async function startWorktreeDevServer(url: string, timeoutMs = 120000) {
+  const env = { ...process.env };
+  delete env.BUILDMESH_VITE_CACHE_DIR;
+  const child = spawn(
+    process.execPath,
+    [viteEntrypoint, '--host', '127.0.0.1', '--port', new URL(url).port],
+    { cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  children.add(child);
+  // Drain the child's pipes: a full pipe buffer would block the server, and
+  // the test would wait for a server that had stopped making progress.
+  child.stdout?.resume();
+  child.stderr?.resume();
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(url);
+      if (response.ok) return child;
+    } catch { /* the server is not answering yet */ }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 200));
+  }
+  throw new Error(`the worktree dev server did not answer at ${url} within ${timeoutMs}ms`);
+}
+
 describe('ui-shot Vite server', () => {
+  it("keeps each server's dependency cache inside this worktree and out of a shared node_modules", async () => {
+    // The optimizer cache is the on-disk state two Vite servers can share.
+    // Vite removes `<cacheDir>/deps` when it starts with a config hash that
+    // differs from the cached one, and that hash covers the absolute root, so
+    // servers in different worktrees compute different hashes. With Vite's
+    // default `node_modules/.vite` — one directory when the worktrees share a
+    // node_modules junction — the second server removed the dependency graph
+    // the first one was serving, and the browser got `504 (Outdated Optimize
+    // Dep)` instead of the app (#2515). The served dependency URLs name the
+    // directory each server used, so this observes the layout instead of
+    // reading the configuration text.
+    const port = await freePort();
+    const url = `http://127.0.0.1:${port}`;
+    const worktree = await startWorktreeDevServer(url);
+
+    const uiShotPort = await freePort();
+    const uiShotUrl = `http://127.0.0.1:${uiShotPort}`;
+    const uiShot = await startDevServer(uiShotUrl);
+    expect(uiShot).not.toBeNull();
+    children.add(uiShot);
+
+    const worktreeCache = await dependencyDirectory(url);
+    const uiShotCache = await dependencyDirectory(uiShotUrl);
+
+    // Inside this checkout: a sibling worktree's directory is a different path.
+    expect(isInside(worktreeCache, repoRoot)).toBe(true);
+    expect(isInside(uiShotCache, repoRoot)).toBe(true);
+    // Outside node_modules: a junction may share that directory between
+    // worktrees, and Vite's default cache lives there.
+    expect(isInside(worktreeCache, resolve(repoRoot, 'node_modules'))).toBe(false);
+    expect(isInside(uiShotCache, resolve(repoRoot, 'node_modules'))).toBe(false);
+    // Not the same directory: two servers on one cache remove each other's
+    // dependency graph.
+    expect(comparable(worktreeCache)).not.toBe(comparable(uiShotCache));
+
+    // Each server still serves its dependency graph while the other one runs.
+    for (const server of [url, uiShotUrl]) {
+      const { bundles } = await dependencyGraph(server);
+      expect(bundles.length, 'the optimizer must expose bundles behind the dependency shims').toBeGreaterThan(0);
+      for (const bundle of bundles) {
+        const response = await fetch(bundle);
+        expect(response.status, `${bundle.pathname} must survive the other server`).toBe(200);
+      }
+    }
+
+    await stopDevServer(worktree);
+    children.delete(worktree);
+  }, 180000);
+
   it('isolates optimizer caches for concurrent servers and removes them on stop', async () => {
     const cacheRoot = await mkdtemp(join(tmpdir(), 'buildmesh-vite-caches-'));
     const owned: any[] = [];
     const dependencies: URL[] = [];
+    const servedDirectories: string[] = [];
     try {
       // Warm the first graph before starting the second. Each must remain
       // readable after the other server initializes its optimizer.
@@ -71,7 +210,11 @@ describe('ui-shot Vite server', () => {
         const imports = [...(await entry.text()).matchAll(/from\s+["']([^"']+\/deps\/[^"']+)["']/g)];
         expect(imports.length).toBeGreaterThan(0);
         dependencies.push(...imports.map(match => new URL(match[1], url)));
+        servedDirectories.push(await dependencyDirectory(url));
       }
+      // Each server serves its graph from its own directory, not from a shared
+      // one: a shared cache is deleted by whichever server starts last.
+      expect(comparable(servedDirectories[0])).not.toBe(comparable(servedDirectories[1]));
       const directories = await readdir(cacheRoot);
       expect(directories).toHaveLength(2);
       const metadata = await Promise.all(directories.map(async directory => {

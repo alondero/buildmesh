@@ -65,13 +65,6 @@ fn close(actual: f64, expected: f64) {
     );
 }
 
-fn metered(meter: &UsageMeter) -> &UsageAmount {
-    match meter {
-        UsageMeter::Metered { amount } => amount,
-        other => panic!("expected a metered amount, got {other:?}"),
-    }
-}
-
 #[test]
 fn access_token_usable_treats_the_skew_boundary_as_expired() {
     let now = 1_700_000_000;
@@ -124,24 +117,69 @@ fn starter_monthly_uses_ceil_points_and_rolling_uses_rounded_points() {
         Some("2026-11-01T00:00:00Z")
     );
 
-    let monthly = metered(&meters[0]);
-    assert_eq!(monthly.used, 1500.0);
-    assert_eq!(monthly.limit, Some(20_000.0));
-    assert_eq!(monthly.unit, "PT");
-    let five_hour = metered(&meters[1]);
-    assert_eq!(five_hour.used, 500.0);
-    assert_eq!(five_hour.limit, Some(5_000.0));
-    let weekly = metered(&meters[2]);
-    assert_eq!(weekly.used, 2500.0);
-    assert_eq!(weekly.limit, Some(20_000.0));
+    // A capped row is a percentage window, not also an explicit meter: the
+    // "Amount used / Limit / Remaining" block would only repeat the bar.
+    // The percentages above pin the points each bar is computed from
+    // (1,500 of 20,000 PT; 500 of 5,000 PT; 2,500 of 20,000 PT).
+    assert!(meters.is_empty());
 }
 
 #[test]
-fn pro_roost_is_a_note_and_manual_allowance_is_metered() {
+fn a_paid_subscription_supplies_the_monthly_reset_date() {
+    // Free plans send `billingSubscription: null`, so the Monthly row keeps
+    // no reset. A paid plan's subscription record carries the period end.
+    let free = r#"{
+        "ok": true,
+        "session": {"planCode": "starter"},
+        "usageMeter": {"monthlyUsd": 1.5},
+        "billingSubscription": null
+    }"#;
+    let (windows, _, _) = reading(outcome_from_account(free));
+    assert_eq!(windows[0].label, "Monthly");
+    assert_eq!(windows[0].resets_at, None);
+
+    let epoch = r#"{
+        "ok": true,
+        "session": {"planCode": "starter"},
+        "usageMeter": {"monthlyUsd": 1.5},
+        "billingSubscription": {"status": "active", "current_period_end": 1793491200}
+    }"#;
+    let (windows, _, _) = reading(outcome_from_account(epoch));
+    assert_eq!(
+        windows[0].resets_at.as_deref(),
+        Some("2026-11-01T00:00:00+00:00")
+    );
+
+    let iso = r#"{
+        "ok": true,
+        "session": {"planCode": "starter"},
+        "usageMeter": {"monthlyUsd": 1.5},
+        "billingSubscription": {"currentPeriodEnd": "2026-12-01T00:00:00Z"}
+    }"#;
+    let (windows, _, _) = reading(outcome_from_account(iso));
+    assert_eq!(
+        windows[0].resets_at.as_deref(),
+        Some("2026-12-01T00:00:00Z")
+    );
+
+    // A shape we do not recognise yields no reset rather than a wrong one.
+    let unknown = r#"{
+        "ok": true,
+        "session": {"planCode": "starter"},
+        "usageMeter": {"monthlyUsd": 1.5},
+        "billingSubscription": {"status": "active", "invoiceDue": "2026-11-01T00:00:00Z"}
+    }"#;
+    let (windows, _, _) = reading(outcome_from_account(unknown));
+    assert_eq!(windows[0].resets_at, None);
+}
+
+#[test]
+fn pro_roost_is_a_note_and_the_manual_allowance_is_a_window() {
     let body = r#"{
         "ok": true,
         "session": {"planCode": "pro", "planName": "Pro", "membershipRole": "member"},
         "creditBalancePt": 42.7,
+        "billingSubscription": {"status": "active", "current_period_end": 1793491200},
         "usageMeter": {
             "monthlyUsd": 10,
             "monthlyManualPt": 1000,
@@ -184,16 +222,16 @@ fn pro_roost_is_a_note_and_manual_allowance_is_metered() {
         ]
     );
     assert!(windows.iter().all(|window| window.used_percent.is_some()));
-    let manual = metered(&meters[2]);
-    assert_eq!(manual.used, 1000.0);
-    assert_eq!(manual.limit, Some(75_000.0));
-    let manual_five = metered(&meters[3]);
-    assert_eq!(manual_five.used, 250.0);
-    assert_eq!(manual_five.limit, Some(15_000.0));
-    let manual_week = metered(&meters[4]);
-    assert_eq!(manual_week.used, 3000.0);
-    assert_eq!(manual_week.limit, Some(37_500.0));
+    // The manual allowance follows the subscription's billing period, so it
+    // carries that period's end as its reset.
+    assert_eq!(
+        windows[2].resets_at.as_deref(),
+        Some("2026-11-01T00:00:00+00:00")
+    );
+    close(windows[2].used_percent.unwrap(), 1.333_333_333_333_333_3);
+    close(windows[3].used_percent.unwrap(), 1.666_666_666_666_666_7);
     close(windows[4].used_percent.unwrap(), 8.0);
+    assert!(meters.is_empty());
 }
 
 #[test]
@@ -236,7 +274,8 @@ fn entitlement_limits_override_the_plan_fallback() {
         "usageMeter": {"monthlyUsd": 1.5}
     }"#;
     let (windows, meters, _) = reading(outcome_from_account(body));
-    assert_eq!(metered(&meters[0]).limit, Some(5_000.0));
+    assert!(meters.is_empty());
+    // 1,500 PT of the entitlement's 5,000 PT.
     close(windows[0].used_percent.unwrap(), 30.0);
 
     let pro = r#"{
@@ -249,12 +288,14 @@ fn entitlement_limits_override_the_plan_fallback() {
         },
         "usageMeter": {"monthlyUsd": 1, "monthlyManualPt": 250}
     }"#;
-    let (_, meters, _) = reading(outcome_from_account(pro));
-    let manual = meters.iter().find_map(|meter| match meter {
-        UsageMeter::Metered { amount } if amount.limit == Some(1_000.0) => Some(amount),
-        _ => None,
-    });
-    assert_eq!(manual.unwrap().used, 250.0);
+    let (windows, meters, _) = reading(outcome_from_account(pro));
+    assert!(meters.is_empty());
+    let manual = windows
+        .iter()
+        .find(|window| window.label == "Manual")
+        .expect("the manual allowance is a window");
+    // 250 PT of the entitlement's 1,000 PT.
+    close(manual.used_percent.unwrap(), 25.0);
 }
 
 #[test]
@@ -279,8 +320,10 @@ fn snake_case_account_fields_parse() {
     let (windows, meters, detail) = reading(outcome_from_account(body));
     assert_eq!(detail.as_deref(), Some("Starter · 8 PT credits"));
     assert_eq!(windows.len(), 2);
-    assert_eq!(metered(&meters[0]).used, 500.0);
-    assert_eq!(metered(&meters[1]).used, 500.0);
+    assert!(meters.is_empty());
+    // 500 PT of 20,000 PT, then 500 PT of 5,000 PT.
+    close(windows[0].used_percent.unwrap(), 2.5);
+    close(windows[1].used_percent.unwrap(), 10.0);
     assert_eq!(
         windows[1].resets_at.as_deref(),
         Some("2026-10-24T12:00:00Z")
