@@ -443,6 +443,9 @@ function MeshItemView({
     setActiveIndex,
     onClose: closeContextMenu,
     enabled: !!contextMenu,
+    // Force-sync remains visible while a sync is running, but shouldn't
+    // take focus or interrupt arrow navigation during that interval.
+    skipDisabled: true,
   });
 
   // Issue #814 — outside-mousedown close goes through the shared

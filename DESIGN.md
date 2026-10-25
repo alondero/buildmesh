@@ -257,6 +257,12 @@ other.
   caret edge (omnibar). Hover paint is CSS-only and must not fight the
   keyboard caret.
 - Section labels inside menus: 2xs, uppercase, `text-text-muted`.
+- Native-disabled actions in a roving `role="menu"` may stay visible to
+  explain unavailable operations, but they are excluded from initial focus
+  and arrow/Home/End navigation. If every action is disabled, opening the menu
+  must not move focus to a disabled control. Use `useAriaMenu`'s
+  `skipDisabled` option, or apply the same enabled-item rule in menus with
+  custom nested-menu navigation.
 
 ### Modals, sheets, overlays
 

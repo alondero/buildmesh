@@ -170,6 +170,15 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
     ).filter((el) => el.closest('[role="menu"]') === menu);
   }, []);
 
+  // Disabled actions stay visible, but native-disabled menuitems cannot
+  // receive focus. Preserve their DOM index to keep it aligned with
+  // `menuActions` and the rendered roving tabindex values.
+  const getEnabledParentMenuItems = useCallback(() =>
+    getParentMenuItems()
+      .map((element, index) => ({ element, index }))
+      .filter(({ element }) => !element.disabled && element.getAttribute('aria-disabled') !== 'true'),
+  [getParentMenuItems]);
+
   // Close and return focus to the row that opened the menu. Used by
   // Escape and any menuitem click so the user's focus stays
   // predictable across menu interactions. The `requestAnimationFrame`
@@ -287,13 +296,13 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
           // first row, never the middle).
           regenSubmenu.stepSubmenuFocus(1);
         } else {
-          const parentItems = getParentMenuItems();
+          const parentItems = getEnabledParentMenuItems();
           if (parentItems.length === 0) return;
-          const current = parentItems.findIndex((el) => el === active);
-          const start = current === -1 ? activeIndexRef.current : current;
-          const next = (start + 1) % parentItems.length;
-          setActiveIndex(next);
-          focusWithoutScroll(parentItems[next]);
+          const current = parentItems.findIndex(({ element }) => element === active);
+          const start = current === -1 ? parentItems.findIndex(({ index }) => index === activeIndexRef.current) : current;
+          const next = parentItems[(start + 1 + parentItems.length) % parentItems.length];
+          setActiveIndex(next.index);
+          focusWithoutScroll(next.element);
         }
         return;
       }
@@ -302,31 +311,31 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
         if (inSubmenu) {
           regenSubmenu.stepSubmenuFocus(-1);
         } else {
-          const parentItems = getParentMenuItems();
+          const parentItems = getEnabledParentMenuItems();
           if (parentItems.length === 0) return;
-          const current = parentItems.findIndex((el) => el === active);
-          const start = current === -1 ? activeIndexRef.current : current;
-          const next = (start - 1 + parentItems.length) % parentItems.length;
-          setActiveIndex(next);
-          focusWithoutScroll(parentItems[next]);
+          const current = parentItems.findIndex(({ element }) => element === active);
+          const start = current === -1 ? parentItems.findIndex(({ index }) => index === activeIndexRef.current) : current;
+          const next = parentItems[(start - 1 + parentItems.length) % parentItems.length];
+          setActiveIndex(next.index);
+          focusWithoutScroll(next.element);
         }
         return;
       }
       if (e.key === 'Home' && !inSubmenu) {
         e.preventDefault();
-        const parentItems = getParentMenuItems();
+        const parentItems = getEnabledParentMenuItems();
         if (parentItems.length === 0) return;
-        setActiveIndex(0);
-        focusWithoutScroll(parentItems[0]);
+        setActiveIndex(parentItems[0].index);
+        focusWithoutScroll(parentItems[0].element);
         return;
       }
       if (e.key === 'End' && !inSubmenu) {
         e.preventDefault();
-        const parentItems = getParentMenuItems();
+        const parentItems = getEnabledParentMenuItems();
         if (parentItems.length === 0) return;
-        const last = parentItems.length - 1;
-        setActiveIndex(last);
-        focusWithoutScroll(parentItems[last]);
+        const last = parentItems[parentItems.length - 1];
+        setActiveIndex(last.index);
+        focusWithoutScroll(last.element);
         return;
       }
     };
@@ -334,8 +343,8 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- the body reads `closeContextMenu` and `regenSubmenu` (Zustand / hook callbacks with stable identity). Adding them to deps would re-bind the document listener on every render that recreates the Zustand selectors, which `getParentMenuItems` is part of — and `getParentMenuItems` is the only value here that genuinely needs to be a dep (it captures the active submenu list).
-  }, [contextMenuOpen, getParentMenuItems]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the handler reads stable callbacks and the latest menu state through refs.
+  }, [contextMenuOpen, getParentMenuItems, getEnabledParentMenuItems]);
 
   // Issue #776 — viewport clamping. Runs after the menu mounts so we
   // can read its rendered size; pushes the position back into state if
@@ -373,16 +382,17 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
   // (`openSubmenuViaKeyboard`) stay immediate because they don't go
   // through `mouseenter`.
 
-  // Issue #776 — on open, reset the roving index and move focus to the
-  // first menuitem so keyboard nav starts somewhere. `useLayoutEffect`
+  // Issue #776 — on open, move focus to the first enabled menuitem so
+  // keyboard navigation starts somewhere. `useLayoutEffect`
   // (not `useEffect` + setTimeout) — fires synchronously after commit
   // so subsequent arrow-key presses don't race a deferred focus call.
   useLayoutEffect(() => {
     if (!contextMenuOpen) return;
-    setActiveIndex(0);
-    const parentItems = getParentMenuItems();
-    if (parentItems[0]) focusWithoutScroll(parentItems[0]);
-  }, [contextMenuOpen, getParentMenuItems]);
+    const firstEnabled = getEnabledParentMenuItems()[0];
+    if (!firstEnabled) return;
+    setActiveIndex(firstEnabled.index);
+    focusWithoutScroll(firstEnabled.element);
+  }, [contextMenuOpen, getEnabledParentMenuItems]);
 
   return (
     <div

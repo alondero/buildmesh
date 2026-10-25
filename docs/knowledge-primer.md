@@ -9,7 +9,7 @@
 > vocabulary) are the other two always-loaded documents.
 
 ## Tech Stack
-- **Frontend:** React 19, Zustand 5, xterm.js 6.x, Tailwind 4, TypeScript ~5.8, Vite 7
+- **Frontend:** React 19, Zustand 5, xterm.js 6.x, Tailwind 4, TypeScript ~5.9, Vite 8
 - **Backend:** Tauri 2, Rust, portable-pty, rusqlite 0.40, git2, tokio
 - **Testing:** Vitest (unit/integration) + Playwright (e2e)
 

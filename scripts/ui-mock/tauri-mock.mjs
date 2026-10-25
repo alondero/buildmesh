@@ -28,7 +28,7 @@ import { fileURLToPath, pathToFileURL } from 'url';
 import { dirname, resolve } from 'path';
 
 // Keep the browser script JavaScript while sourcing its JSON from the same
-// TypeScript fixture builder checked by tsc. Transpile in memory for Node 20.
+// TypeScript fixture builder checked by tsc. Transpile in memory for Node 22+.
 const fixturePath = resolve(dirname(fileURLToPath(import.meta.url)), 'default-fixtures.ts');
 const fixtureSource = readFileSync(fixturePath, 'utf8');
 const { outputText, diagnostics } = transpileModule(fixtureSource, {
