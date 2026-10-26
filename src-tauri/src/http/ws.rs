@@ -368,11 +368,12 @@ fn run_autoclear_side_effects(
     if !activity.submitted {
         return;
     }
-    // Routes through SessionLifecycle (issue #132) for the DB write +
-    // desktop emit; the mobile broadcast is a separate channel kept below.
-    // Shared with the desktop path so an Enter that starts no turn is
-    // reverted the same way whichever client sent it.
-    let _ = crate::agent::process::commit_submitted_input(sink, node_id);
+    // `commit_submitted_input` owns the shell rule and the DB write + desktop emit
+    // (issues #132, #535); only a committed resume reaches the mobile
+    // broadcast below, the same condition the desktop path publishes on.
+    let Ok(Some(_)) = crate::agent::process::commit_submitted_input(sink, node_id) else {
+        return;
+    };
     // Also fan out to mobile event subscribers — the desktop Tauri event
     // above only reaches the webview.
     super::events::emit(super::events::EventMsg::AttentionCleared {

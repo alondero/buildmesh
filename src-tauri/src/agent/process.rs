@@ -747,27 +747,4 @@ fn input_buffer_state_after(len: usize, bracketed_paste: bool, data: &[u8]) -> (
     )
 }
 
-/// Sync core for [`write_to_agent`] — **legacy combined entry point**
-/// retained for the existing test suite and for any future mobile HTTP
-/// route that wants to mirror the identical behaviour in one call. New
-/// IPC callers should use [`write_to_agent`] directly (which splits the
-/// fast PTY write from the slow DB work) — issue #1122.
-///
-/// PTY write happens first; a failed write must NOT claim "user input
-/// accepted" — the reader thread's exit-detector would see no signal for
-/// the dead child, and the status flip would land on a session that
-/// never received the byte.
-#[cfg(test)] // allow-test-in-production: retain the existing fixture and test paths during responsibility extraction
-pub(crate) fn write_to_agent_blocking(session_id: i64, data: String) -> Result<bool, String> {
-    let outcome = PROCESS_REGISTRY.write_input(session_id, data.as_bytes())?;
-    if outcome.activity.user_input {
-        crate::attention_autoclear::disarm(session_id);
-    }
-    let should_signal = outcome.is_accepted()
-        && outcome.activity.submitted
-        && !should_skip_attention_signals(session_id);
-    if should_signal {
-        session_lifecycle::on_attention_cleared(&session_lifecycle::DbOnlySink, session_id).ok();
-    }
-    Ok(should_signal)
-}
+

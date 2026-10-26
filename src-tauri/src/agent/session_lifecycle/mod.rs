@@ -531,6 +531,10 @@ pub trait SessionLifecycleSink {
     }
     fn emit_attention_cleared(&self, node_id: i64);
     fn disarm_attention_autoclear(&self, node_id: i64);
+    /// Whether the node runs a plain shell (no LLM turn to resume). Required,
+    /// not defaulted: a new sink that forgot it would silently fail open and
+    /// paint shells as "Running".
+    fn is_plain_terminal(&self, node_id: i64) -> bool;
     fn emit_resume_failed(&self, node_id: i64, reason: &str);
     /// Emit the normalized `agent-lifecycle` event (issue #1364). The
     /// `AppSessionLifecycleSink` implementation fans out to BOTH the desktop
@@ -629,6 +633,10 @@ impl SessionLifecycleSink for AppSessionLifecycleSink<'_> {
 
     fn disarm_attention_autoclear(&self, node_id: i64) {
         crate::attention_autoclear::disarm(node_id);
+    }
+
+    fn is_plain_terminal(&self, node_id: i64) -> bool {
+        node_is_plain_terminal(node_id)
     }
 
     fn emit_resume_failed(&self, node_id: i64, reason: &str) {
@@ -760,6 +768,9 @@ impl SessionLifecycleSink for DbOnlySink {
     }
     fn disarm_attention_autoclear(&self, node_id: i64) {
         crate::attention_autoclear::disarm(node_id);
+    }
+    fn is_plain_terminal(&self, node_id: i64) -> bool {
+        node_is_plain_terminal(node_id)
     }
     fn emit_resume_failed(&self, _node_id: i64, _reason: &str) {}
     fn emit_lifecycle_changed(&self, _payload: LifecycleChangedPayload) {}
@@ -1043,6 +1054,24 @@ pub fn on_attention_cleared(sink: &dyn SessionLifecycleSink, node_id: i64) -> Re
     Ok(())
 }
 
+/// Whether the stored harness id resolves to a plain shell. Resolving through
+/// the harness profile (not just the legacy enum) keeps a node spawned via
+/// the **Terminal profile** on the shell side of the rule (issue #535). A
+/// missing row reads as "not a shell", so a vanished node never swallows a
+/// real agent's resume.
+pub(crate) fn node_is_plain_terminal(node_id: i64) -> bool {
+    db::get_agent_node_by_id(node_id)
+        .ok()
+        .map(|node| harness_is_plain_terminal(&node.provider))
+        .unwrap_or(false)
+}
+
+pub(crate) fn harness_is_plain_terminal(provider: &str) -> bool {
+    crate::preferences::resolve_harness_provider(provider)
+        .adapter()
+        .is_plain_terminal()
+}
+
 /// Commit a user-submitted resume and return the envelope that was stored.
 ///
 /// The blocking PTY path has no `AppHandle`, so it commits through
@@ -1050,7 +1079,7 @@ pub fn on_attention_cleared(sink: &dyn SessionLifecycleSink, node_id: i64) -> Re
 /// returned payload. Dropping it leaves the desktop badge on whatever status
 /// the last list read saw — including `spawning` ("Starting…") — because the
 /// legacy `attention-cleared` event does not carry a status.
-pub fn commit_user_resumed(
+fn commit_user_resumed(
     sink: &dyn SessionLifecycleSink,
     node_id: i64,
 ) -> Result<Option<LifecycleChangedPayload>, String> {
@@ -1134,6 +1163,24 @@ pub fn on_turn_interrupted(
     }
     sink.emit_lifecycle_changed(payload);
     Ok(true)
+}
+
+/// The user submitted a prompt (Enter outside a bracketed paste). The single
+/// owner of what that means for the node: a plain shell has no LLM turn, so
+/// its Enter is just shell input and resumes nothing (issue #535); any other
+/// harness commits `Running`. The desktop IPC write and the mobile WebSocket
+/// and HTTP writes route here, so the shell rule lives in one place.
+///
+/// Returns the stored envelope. `None` means the node is a shell or the row
+/// refused the transition (a stopped node is not revived by typing).
+pub fn on_user_submitted(
+    sink: &dyn SessionLifecycleSink,
+    node_id: i64,
+) -> Result<Option<LifecycleChangedPayload>, String> {
+    if sink.is_plain_terminal(node_id) {
+        return Ok(None);
+    }
+    commit_user_resumed(sink, node_id)
 }
 
 /// A harness reports that work resumed. Unlike manual input, a delayed hook
@@ -1511,7 +1558,7 @@ pub fn on_exit_sweep() -> Result<usize, String> {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(test)] // allow-test-in-production: this inline session_lifecycle suite predates the sibling-test-file rule; relocating the pre-existing suite is out of scope.
 mod tests {
     #[test]
     fn attention_clear_cannot_resurrect_a_terminal_node() {
@@ -2103,6 +2150,45 @@ mod tests {
             sink.resume_failed().is_empty(),
             "attention mark must not emit resume-failed"
         );
+    }
+
+    // The shell rule (issues #535 / #550): a plain terminal's Enter is shell
+    // input, so submitting must not paint it "Running" on any input surface.
+
+    #[test]
+    fn on_user_submitted_resumes_an_agent_and_returns_the_stored_envelope() {
+        let sink = RecordingSink::new();
+        let payload = on_user_submitted(&sink, 7).unwrap().expect("a live row resumes");
+        assert_eq!(payload.kind, LifecycleKind::WorkResumed);
+        assert_eq!(sink.status(), Some(SessionStatus::Running));
+        assert_eq!(*sink.attention_cleared(), vec![7]);
+    }
+
+    #[test]
+    fn on_user_submitted_leaves_a_plain_terminal_alone() {
+        let sink = RecordingSink::plain_terminal();
+        assert!(on_user_submitted(&sink, 7).unwrap().is_none());
+        assert_eq!(sink.status(), None);
+        assert!(sink.writes().is_empty() && sink.writes_unless().is_empty());
+        assert!(sink.attention_cleared().is_empty());
+        assert!(sink.lifecycle_changed().is_empty());
+    }
+
+    #[test]
+    fn on_user_submitted_does_not_revive_a_stopped_node() {
+        let sink = RecordingSink::with_status(SessionStatus::Idle);
+        assert!(on_user_submitted(&sink, 7).unwrap().is_none());
+        assert_eq!(sink.status(), Some(SessionStatus::Idle));
+    }
+
+    #[test]
+    fn only_the_terminal_harness_is_a_plain_terminal() {
+        assert!(harness_is_plain_terminal("terminal"));
+        // "minimax"/"kimi" are legacy ids that now resolve to the Anthropic
+        // executor (still an LLM, still not plain-terminal).
+        for id in ["anthropic", "minimax", "kimi", "agy", "opencode", "codex"] {
+            assert!(!harness_is_plain_terminal(id), "{id:?} is an LLM harness");
+        }
     }
 
     #[test]
