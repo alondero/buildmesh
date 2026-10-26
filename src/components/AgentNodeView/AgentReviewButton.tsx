@@ -17,6 +17,7 @@ import { CircuitsIcon } from '../Probe/probeIcons';
  *  picker. */
 const excludeTerminal = (provider: SpawnOption) => provider.harness_id !== 'terminal';
 
+/** `label` is visible text beside the icon; the accessible name stays fixed. */
 export function AgentReviewButton({ node, providerList, label }: { node: AgentNode; providerList: SpawnOption[]; label?: string }) {
   const [open, setOpen] = useState(false);
   const [rounds, setRounds] = useState(3);
@@ -139,11 +140,11 @@ export function AgentReviewButton({ node, providerList, label }: { node: AgentNo
 
   return <>
     <button type="button"
-      aria-label={label ?? 'Start review or circuit'}
+      aria-label="Start review or circuit"
       title={!activeOwnership && !eligible ? blockedReason ?? 'Resume this agent before starting a review.' : 'Start review or circuit'}
       disabled={!activeOwnership && !eligible}
       onClick={() => { setReviewerProvider(''); setOpen(true); }}
-      className={`inline-flex min-h-6 min-w-6 items-center justify-center gap-1 rounded-md text-accent-violet hover:bg-accent-violet/15 disabled:opacity-40 ${label ? 'border border-border-subtle px-2 py-1 text-xs' : 'p-1'}`}
+      className={`inline-flex h-6 min-w-6 items-center justify-center gap-1 rounded-md text-accent-violet hover:bg-accent-violet/15 disabled:opacity-40 ${label ? 'px-1.5 text-xs font-medium' : 'p-1'}`}
     ><CircuitsIcon className="h-4 w-4 shrink-0" />{label}</button>
     {open && createPortal(
       <Modal onClose={() => { if (!busy) setOpen(false); }} ariaLabel="Start review or circuit" maxWidth="max-w-sm">

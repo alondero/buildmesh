@@ -38,14 +38,23 @@ the same change.
    see [Accessibility](#accessibility).
 5. **Borders are hairlines.** 1px white-alpha (dark) / black-alpha (light)
    lines that composite cleanly on any elevation. No pre-mixed border hexes.
-6. **Prominent space is scarce space.** A node's title bar is the most
-   persistent, most-glanced-at strip in the product, and it competes with the
-   terminal for the same horizontal room. It carries the essentials only: the
-   node's identity, its status, and a fault the user can act on. Everything
-   else — provenance, configuration detail, and states that merely mean *not
-   yet known* — belongs in a tooltip, a detail panel, or nowhere. A permanent
-   badge is a standing claim on attention; spend it only when there is
-   something to do. See [Pills, badges, chips](#pills-badges-chips).
+6. **Usable space is the product.** A node card exists to show its terminal,
+   and several cards share one window, so each row of chrome is taken from
+   each visible terminal. The rows between a card's top edge and its
+   terminal — title bar, activity tab strip, banners — carry the
+   essentials only: the node's identity, its status, and something the user
+   can act on now. Provenance, configuration detail, empty states ("No circuit
+   attached") and states that merely mean *not yet known* belong in a tooltip,
+   a menu, a detail panel, or nowhere. A permanent row or badge is a standing
+   claim on attention and space; spend it only while there is something to
+   do. See [Node card chrome](#node-card-chrome) and
+   [Pills, badges, chips](#pills-badges-chips).
+7. **Extend the surface that already says it.** Before adding a strip, panel,
+   badge or chip, find where the product already presents that information
+   and extend it there: a tab label, its tooltip, the node glyph's orbit ring,
+   the title-bar outcome chip, the kebab menu. A parallel surface duplicates
+   the same facts, drifts from them, and costs space twice. New status for a
+   Circuit Run, for example, belongs on the card's Overview tab.
 
 Compact desktop controls still provide a **24 by 24 CSS pixel minimum hit
 area**. A small colour swatch or glyph may sit inside that area; the surrounding
@@ -192,8 +201,11 @@ floor for micro-labels.
 
 ## Spacing, radius, shadow, motion
 
-- **Spacing:** 4px base unit (`--spacing-1` = 4px … `--spacing-8` = 32px);
-  Tailwind's numeric utilities match it.
+- **Spacing:** 4px base unit. Only the named steps are fixed pixels:
+  `1`–`6` (4–24px) and `8` (32px). Any other numeric utility (`h-7`,
+  `min-h-9`, `py-0.5`) is computed from the 13px root type scale, so `h-7` is
+  about 22.75px, below the 24px hit-area minimum. Size controls with `h-6`,
+  `h-8` or an explicit `h-[Npx]`.
 - **Radius (desktop):** `--radius-sm` 2px, `--radius-md` 4px, `--radius-lg`
   6px, `--radius-pill` 9999px. Small dense UI; when in doubt pick the smaller
   radius. **Radius (mobile):** 8px controls, 10px cards/fields, 12px sheets —
@@ -249,6 +261,35 @@ signal health and for a genuinely lost conversation. The shared predicate is
 `isSignalHealthProblem` in `src/lib/status.ts` — desktop and mobile must both
 use it so a node is never badged on one client and sorted as healthy on the
 other.
+
+### Node card chrome
+
+The rows a desktop node card may draw above its terminal, measured in
+Chromium at the default 13px root:
+
+| Row | Shown when | Height |
+|---|---|---|
+| Title bar | Always | 28px: 24px controls in a 1px-bordered row |
+| Activity tab strip | Several sessions, a utility terminal, or a Circuit Run | 25px: 24px tabs plus a border |
+| Semantic-turn banner | The agent is waiting on a decision | about 29px |
+
+A card with no tabs therefore has about 30px of chrome, and a card with a
+Circuit Run about 55px. `tests/integration/ui-shot-node-review.steps.mjs`
+asserts both budgets (32px and 56px) when run with `scripts/ui-shot.mjs`.
+
+- **Absence takes no space.** No row for a state that has nothing in it: no
+  circuit, no PR, nothing to review.
+- **A new row must earn its place.** It has to be actionable now, fit no
+  existing surface ([principle 7](#principles)), and disappear once it is not
+  actionable. Name which in the PR and report the chrome height above the
+  terminal before and after.
+- **Labels follow width.** Title-bar actions show text only above a named
+  `HEADER_TIER_BREAKPOINTS` width; below it they are icons with an
+  `aria-label` and tooltip. Width tiers swap text for icons rather than adding rows.
+- **Precedent.** A full-width Review circuit panel (43px idle, 58px with a run)
+  repeated the title-bar Circuit button, the glyph's orbit ring and the
+  Overview tab. Its only new facts, run state and review round, now ride on
+  the Overview tab label.
 
 ### Menus and list rows
 

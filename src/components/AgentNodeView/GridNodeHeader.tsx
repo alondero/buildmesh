@@ -89,6 +89,8 @@ function getCircuitPillDetails(node: AgentNode, ownership: CircuitAgentOwnership
 export const HEADER_TIER_BREAKPOINTS = {
   compact: 380,
   attentionLabel: 500,
+  /** The review button names itself in text; narrower headers keep the icon. */
+  reviewLabel: 500,
   menuWidth: 240,
 } as const;
 
@@ -187,7 +189,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
     <div {...dragHandleProps} ref={headerRef} data-testid="grid-node-header" data-node-id={node.id}
       onDoubleClick={handleToggleSolo}
       title={`Double-click or press ${toggleShortcutHint} to ${isSingleMode ? 'restore grid' : 'maximize'}`}
-      className={`flex shrink-0 min-w-0 overflow-hidden items-center gap-1.5 border-b border-border-default px-2 py-1 ${dragHandleProps ? 'touch-none cursor-grab active:cursor-grabbing' : ''}`}
+      className={`flex shrink-0 min-w-0 overflow-hidden items-center gap-1.5 border-b border-border-default px-2 py-0.5 ${dragHandleProps ? 'touch-none cursor-grab active:cursor-grabbing' : ''}`}
       style={{ backgroundColor: `${meshColor.hex}14` }}>
       <div className="flex min-w-0 flex-1 items-center gap-1.5">
         <NodeStatusGlyph shape={statusGlyphShape} colorClass={statusGlyphColor}
@@ -208,7 +210,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
         aria-label={`${attentionOutcome.label}${outcomeCount > 1 ? ` (${outcomeCount} sessions)` : ''}. ${attentionOutcome.detail} ${outcomeCount > 1 ? 'Show next session.' : 'Show this session.'}`}
         title={attentionOutcome.detail}
         data-testid="circuit-outcome-chip" data-outcome={attentionOutcome.kind}
-        className={`flex h-7 shrink-0 items-center gap-1 rounded-full px-1.5 text-2xs font-medium ring-1 ${CIRCUIT_OUTCOME_CLASSES[attentionOutcome.tone]}`}>
+        className={`flex h-6 shrink-0 items-center gap-1 rounded-full px-1.5 text-2xs font-medium ring-1 ${CIRCUIT_OUTCOME_CLASSES[attentionOutcome.tone]}`}>
         <CircuitIndicatorGlyph phase={attentionOutcome.phase} tone={attentionOutcome.tone} className="h-3 w-3 shrink-0" />
         {width >= HEADER_TIER_BREAKPOINTS.attentionLabel && <span className="truncate">{attentionOutcome.label}</span>}
         {outcomeCount > 1 && <span aria-hidden="true" className="tabular-nums">{outcomeCount}</span>}
@@ -217,9 +219,10 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
         onDoubleClick={event => event.stopPropagation()} onClick={event => event.stopPropagation()}>
         {openPr && <PrPill nodeId={node.id} meshId={node.mesh_id} gitPath={gitPath} openPr={openPr} providers={providerList} compact={compactHeader} />}
         <BuildRunDropdown node={node} onBuildRun={onBuildRun} />
-        <AgentReviewButton node={node} providerList={providerList} />
+        <AgentReviewButton node={node} providerList={providerList}
+          label={width >= HEADER_TIER_BREAKPOINTS.reviewLabel ? 'Review' : undefined} />
         {canResume && <button type="button" onClick={handleResume} aria-label="Resume agent" title="Resume agent"
-          data-testid="grid-resume-button" className="flex h-7 w-7 items-center justify-center rounded-md text-accent-violet hover:bg-accent-violet/10">↻</button>}
+          data-testid="grid-resume-button" className="flex h-6 w-6 items-center justify-center rounded-md text-accent-violet hover:bg-accent-violet/10">↻</button>}
         <KebabActions key={node.id} isPinned={node.is_pinned} onTogglePin={handleTogglePin}
           onOpenInExplorer={handleOpenInExplorer} node={node} providerList={providerList}
           isRegenerateDisabled={regen.isRegenerateDisabled} hasRegenerateTargets={regen.hasRegenerateTargets}
@@ -253,13 +256,13 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
           </>} />
         <button type="button" onClick={handleToggleSolo} aria-label={isSingleMode ? 'Restore grid layout' : 'Maximize agent node'}
           title={`${isSingleMode ? 'Restore grid' : 'Maximize'} (${toggleShortcutHint})`}
-          className="flex h-7 w-7 items-center justify-center rounded-md text-text-muted hover:bg-bg-base hover:text-text-primary">
+          className="flex h-6 w-6 items-center justify-center rounded-md text-text-muted hover:bg-bg-base hover:text-text-primary">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
             <path d={isSingleMode ? 'M9 3v6H3m12 12v-6h6M9 9 3 3m12 12 6 6' : 'M15 3h6v6m0-6-7 7M9 21H3v-6m0 6 7-7'} />
           </svg>
         </button>
         <button type="button" onClick={handleClose} aria-label="Close agent node" title="Close agent node"
-          className="flex h-7 w-7 items-center justify-center rounded-md text-text-muted hover:bg-status-error-bg hover:text-status-error transition-colors">
+          className="flex h-6 w-6 items-center justify-center rounded-md text-text-muted hover:bg-status-error-bg hover:text-status-error transition-colors">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
             <path d="M18 6 6 18" />
             <path d="m6 6 12 12" />
@@ -436,7 +439,7 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
         aria-controls={open ? menuId : undefined}
         aria-label="Agent node actions"
         title="Agent node actions"
-        className="w-7 h-7 flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-base transition-[color,background-color]"
+        className="w-6 h-6 flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-base transition-[color,background-color]"
       >
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
           <circle cx="12" cy="5" r="1.2" fill="currentColor" />

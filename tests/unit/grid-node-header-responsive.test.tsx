@@ -191,6 +191,11 @@ describe('GridNodeHeader compact layout behaviour', () => {
     expect(screen.getByRole('menuitem', { name: 'Agent node details' })).toBeTruthy();
   });
 
+  it.each([[300, ''], [600, 'Review']])('names the review entry point in text only when the header is wide (%ipx)', (width, text) => {
+    renderHeader(width);
+    expect(screen.getByRole('button', { name: 'Start review or circuit' }).textContent).toBe(text);
+  });
+
   it('places overflow before maximize, with close as the trailing window control', () => {
     setupWithSummaryAndPr();
     renderHeader(700);

@@ -54,18 +54,18 @@ describe('BuildRunDropdown', () => {
     expect(screen.getAllByText('Build')).toHaveLength(1);
   });
 
-  it('trigger matches the close + maximise trio surface (h-7 + bg + border)', () => {
+  it('trigger matches the close + maximise trio surface (h-6 + bg + border)', () => {
     // The trio lives on a single row in GridNodeHeader. The close + expand
     // asserts live in grid-node-header.test.tsx (where BuildRunDropdown is
     // mocked to null for unrelated git-summary-chip tests); the Build-side
     // counterpart has to live here where BuildRunDropdown is the real DOM.
-    // Note: the trio shares HEIGHT (h-7), not width — Build is content-width
-    // (wrench + chevron), while close + maximise are fixed square w-7 h-7.
+    // Note: the trio shares HEIGHT (h-6, the 24px hit-area step), not width — Build is content-width
+    // (wrench + chevron), while close + maximise are fixed square w-6 h-6.
     const onBuildRun = vi.fn();
     render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
 
     const cls = screen.getByLabelText('Open build menu').className;
-    expect(cls).toMatch(/\bh-7\b/);
+    expect(cls).toMatch(/\bh-6\b/);
     expect(cls).toContain('bg-bg-base/60');
     expect(cls).toContain('border-border-default');
   });

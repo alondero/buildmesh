@@ -75,7 +75,10 @@ export function CircuitRunOverview({ overview, error, onRefresh, onChanged, onOp
   if (overview === null || run === undefined) {
     return (
       <div className="flex-1 bg-bg-card p-3 text-xs text-text-muted" data-testid="run-overview-loading">
-        {error === null ? 'Loading the circuit run…' : <span role="alert" className="text-status-error">{error}</span>}
+        {error === null ? 'Loading the circuit run…' : <span className="flex flex-wrap items-center gap-2">
+          <span role="alert" className="min-w-0 break-words text-status-error">{error}</span>
+          <button type="button" onClick={onRefresh} className="min-h-6 text-accent-cyan hover:underline">Retry</button>
+        </span>}
       </div>
     );
   }
@@ -130,7 +133,10 @@ export function CircuitRunOverview({ overview, error, onRefresh, onChanged, onOp
       )}
 
       {review !== null && <p className="mb-2 text-2xs text-text-secondary break-words">{review.detail}</p>}
-      {error !== null && <p role="alert" className="mb-2 text-2xs text-status-error">Could not refresh: {error}</p>}
+      {error !== null && <div className="mb-2 flex flex-wrap items-center gap-2 text-2xs">
+        <p role="alert" className="min-w-0 break-words text-status-error">Could not refresh: {error}</p>
+        <button type="button" onClick={onRefresh} className="min-h-6 text-accent-cyan hover:underline">Retry</button>
+      </div>}
 
       {live && (
         <div className="mb-2 flex flex-wrap items-center gap-1">

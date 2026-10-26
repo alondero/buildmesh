@@ -14,6 +14,7 @@ import { NodeActivityTabs } from './NodeActivityTabs';
 import { buildRunTerminalManager } from '../Terminal/BuildRunTerminalRegistry';
 import { useCircuitRunOverview } from '../Circuits/useCircuitRunOverview';
 import { overviewNeedsYou } from '../Circuits/runOverviewModel';
+import { overviewTabStatus } from './overviewTabStatus';
 import { openAgentNode } from '../../lib/focusAgentNode';
 
 // Keep the utility terminal's second xterm registry out of the initial bundle.
@@ -21,7 +22,6 @@ const BuildRunTerminal = lazy(() => import('../Terminal/BuildRunTerminal').then(
 // The Overview shares the Probe's run components; loading it on first open keeps
 // them out of the first-paint bundle (#1568).
 const CircuitRunOverview = lazy(() => import('../Circuits/CircuitRunOverview').then((m) => ({ default: m.CircuitRunOverview })));
-const NodeCircuitSummary = lazy(() => import('./NodeCircuitSummary').then((m) => ({ default: m.NodeCircuitSummary })));
 
 interface NodeCardProps {
   nodeId: number;
@@ -229,14 +229,9 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
           overview={runId === null ? undefined : {
             selected: showingOverview,
             needsYou: runOverview.overview !== null && overviewNeedsYou(runOverview.overview),
+            status: overviewTabStatus(circuitOwnership, runOverview),
             onSelect: () => showOverview(nodeId, selectedId),
           }} />
-      )}
-      {!showingOverview && !showingUtility && (
-        <Suspense fallback={null}>
-          <NodeCircuitSummary node={node} ownership={circuitOwnership} resource={runOverview}
-            onOpenOverview={() => showOverview(nodeId, selectedId)} />
-        </Suspense>
       )}
       {!showingUtility && node.status === 'awaiting_input' && semanticTurn && (
         <SemanticTurnBanner
