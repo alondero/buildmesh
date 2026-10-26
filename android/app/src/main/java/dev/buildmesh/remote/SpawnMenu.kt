@@ -28,6 +28,7 @@ fun SpawnSplitButton(
     enabled: Boolean,
     onDefault: () -> Unit,
     onChoose: (JsonObject) -> Unit,
+    compact: Boolean = false,
 ) {
     var expanded by remember { mutableStateOf(false) }
     val corners = MaterialTheme.shapes.small as CornerBasedShape
@@ -37,18 +38,22 @@ fun SpawnSplitButton(
             shape = corners.copy(topEnd = CornerSize(0.dp), bottomEnd = CornerSize(0.dp)),
             enabled = enabled, onClick = onDefault,
             contentPadding = PaddingValues(start = 12.dp, end = 14.dp),
-            modifier = Modifier.weight(1f, fill = false).semantics { contentDescription = "Start $subject with $label" },
+            modifier = (if (compact) Modifier.size(48.dp) else Modifier.weight(1f, fill = false))
+                .semantics { contentDescription = "Start $subject with $label" },
         ) {
             Icon(Icons.Default.Add, null, Modifier.size(18.dp))
-            Spacer(Modifier.width(6.dp))
-            Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (!compact) {
+                Spacer(Modifier.width(6.dp))
+                Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
         }
         Box {
             Button(
                 shape = corners.copy(topStart = CornerSize(0.dp), bottomStart = CornerSize(0.dp)),
                 enabled = enabled && options.isNotEmpty(), onClick = { expanded = true },
                 contentPadding = PaddingValues(horizontal = 10.dp),
-                modifier = Modifier.semantics { contentDescription = "Choose how to start $subject" },
+                modifier = (if (compact) Modifier.size(48.dp) else Modifier)
+                    .semantics { contentDescription = "Choose how to start $subject" },
             ) { Icon(Icons.Default.ExpandMore, null) }
             DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
                 options.forEach { option ->

@@ -178,7 +178,12 @@ from the backend menu, including saved configurations and capability filtering.
 Tapping an Overview mesh name selects its ID and switches to Work, clearing the
 search and attention filter. Mesh headers summarize open (non-archived) nodes
 with wrapping status dots and a count, independent of dashboard filters. Empty
-mesh names and paths use the muted text token; their actions remain available.
+mesh names use the muted text token; their actions remain available. Overview
+cards omit filesystem paths and put the compact Spawn split button beside the
+name. Like the desktop sidebar, meshes with non-archived nodes come first;
+both groups preserve saved mesh order, regardless of search or attention filters.
+Pull requests, Issues and Archive live under each mesh header in Your work,
+including meshes without open agents or matches for the current filters.
 Work uses compact rows under mesh headers, with the desktop status-circle shapes
 and Circuit orbit glyphs. Circuit-linked agents share one bracket, ordered with
 the representative first; each row opens that agent. Search and Needs attention
@@ -198,9 +203,10 @@ Option, so Capture, issue and pull request launches send it as `configuration_id
 neither, and the desktop resolves its own default chain.
 
 Mesh cards, issue cards and the mesh's open pull requests carry the same split
-button as the desktop spawn cluster (`SpawnSplitButton`). The main half names the
-mesh's pinned default, or reads **Mesh default** when the app-wide default
-applies, which the phone cannot see. The chevron lists the backend menu in its
+button as the desktop spawn cluster (`SpawnSplitButton`). Issue and pull request
+buttons name the mesh's pinned default, or read **Mesh default** when the app-wide
+default applies, which the phone cannot see. Overview uses a compact **+** instead,
+with that default name in its accessibility description. The chevron lists the backend menu in its
 own order, saved configurations included, without unavailable rows. On a mesh
 card both halves open Capture with that mesh and launch already selected, because
 Capture is where the first prompt is written; an empty prompt opens a plain
