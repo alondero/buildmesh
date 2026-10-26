@@ -1,8 +1,16 @@
 package dev.buildmesh.remote
 
+import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.speech.RecognizerIntent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -60,6 +68,26 @@ fun NodeScreen(node: JsonObject, vm: BuildmeshViewModel, terminal: () -> Unit, c
 fun TaskScreen(state: RemoteState, vm: BuildmeshViewModel, selectedMesh: Long, selectMesh: (Long) -> Unit,
     launch: String, selectLaunch: (String) -> Unit, openNode: (Long) -> Unit) {
     var prompt by rememberSaveable(state.draftNamespace) { mutableStateOf(vm.draft("capture")) }
+    // Keep the launch's desktop identity across recreation and re-pairing.
+    var speechNamespace by rememberSaveable { mutableStateOf<String?>(null) }
+    var speechError by rememberSaveable(state.draftNamespace) { mutableStateOf<String?>(null) }
+    val speechInput = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val owner = speechNamespace
+        speechNamespace = null
+        val current = vm.state.value
+        if (owner == null || !current.paired || current.draftNamespace != owner) return@rememberLauncherForActivityResult
+        if (result.resultCode == Activity.RESULT_OK) {
+            val transcript = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()?.trim()
+            if (transcript.isNullOrEmpty()) {
+                speechError = "No speech was recognised. Tap the microphone to try again, or type your task."
+            } else {
+                val separator = if (prompt.isEmpty() || prompt.last().isWhitespace()) "" else " "
+                prompt += separator + transcript
+                vm.saveDraft("capture", prompt)
+                speechError = null
+            }
+        }
+    }
     // Issue #2331 — one operation key per *submission*, reused for every retry
     // of it, so a retry after a lost response resolves to the same node instead
     // of creating a duplicate. Editing the prompt, the mesh, or the launch
@@ -89,13 +117,39 @@ fun TaskScreen(state: RemoteState, vm: BuildmeshViewModel, selectedMesh: Long, s
         Text("Start something", style = MaterialTheme.typography.headlineSmall)
         Text("Give an agent a task, or leave the prompt empty to open a new session.", color = MeshColors.secondary)
         Selector("Mesh", state.meshes.map { it.number("id") to it.text("name") }, selectedMesh, selectMesh, enabled = !state.busy)
-        OutlinedTextField(colors = buildmeshTextFieldColors(), enabled = !state.busy, value = prompt, onValueChange = { prompt = it; vm.saveDraft("capture", it) }, label = { Text("What should the agent do?") }, modifier = Modifier.fillMaxWidth(), minLines = 5, maxLines = 12)
+        OutlinedTextField(
+            colors = buildmeshTextFieldColors(), enabled = !state.busy,
+            value = prompt, onValueChange = { prompt = it; vm.saveDraft("capture", it) },
+            label = { Text("What should the agent do?") },
+            modifier = Modifier.fillMaxWidth(), minLines = 5, maxLines = 12,
+            trailingIcon = {
+                IconButton(enabled = !state.busy && speechNamespace == null, onClick = {
+                    speechError = null
+                    speechNamespace = state.draftNamespace
+                    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                        putExtra(RecognizerIntent.EXTRA_PROMPT, "What should the agent do?")
+                        putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                    }
+                    try {
+                        speechInput.launch(intent)
+                    } catch (_: ActivityNotFoundException) {
+                        speechNamespace = null
+                        speechError = "Speech input isn't available on this phone. You can type your task or use your keyboard's microphone."
+                    } catch (_: SecurityException) {
+                        speechNamespace = null
+                        speechError = "Speech input couldn't open. Check your phone's speech input permissions, or type your task."
+                    }
+                }) { Icon(Icons.Default.Mic, contentDescription = "Dictate task") }
+            },
+        )
+        speechError?.let { Text(it, color = MeshColors.amber) }
         Selector("Launch configuration", listOf("" to (defaultName?.let { "Mesh default ($it)" } ?: "Mesh default")) + options.map { it.text("id") to it.text("label") }, launch, selectLaunch, enabled = !state.busy)
         if (options.isEmpty()) Text("No launch configuration is available. Configure an agent harness on the desktop.", color = MeshColors.amber)
         if (promptRejected) Text("${chosen?.text("label")} can't take an initial prompt. Clear the prompt to open a plain session, or choose another launch configuration.", color = MeshColors.amber)
         val fits = prompt.toByteArray(Charsets.UTF_8).size <= 16_000
         if (!fits) Text("The prompt must be at most 16000 bytes.", color = MeshColors.amber)
-        Button(shape = MaterialTheme.shapes.small, enabled = !state.busy && mesh != null && options.isNotEmpty() && !promptRejected && fits, onClick = {
+        Button(shape = MaterialTheme.shapes.small, enabled = !state.busy && speechNamespace == null && mesh != null && options.isNotEmpty() && !promptRejected && fits, onClick = {
             val key = operationKey.ifEmpty { newOperationKey() }
             operationKey = key
             vm.action { api ->

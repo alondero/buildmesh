@@ -197,6 +197,18 @@ Option, so Capture, issue and pull request launches send it as `configuration_id
 `spawn_option_id` (the same pair the web client sends). **Mesh default** sends
 neither, and the desktop resolves its own default chain.
 
+The task prompt's **Dictate task** microphone opens Android's speech input
+dialog using [`ACTION_RECOGNIZE_SPEECH`](https://developer.android.com/reference/android/speech/RecognizerIntent#ACTION_RECOGNIZE_SPEECH).
+The returned transcript appends to the editable, saved Capture draft; the user
+still chooses **Start agent**. Cancelling leaves the draft intact. If no speech
+activity is installed or it cannot open, the form explains how to continue by
+typing or using the keyboard's microphone. Recognition is provided by the
+phone's speech provider, which may use its own online service; offline support
+depends on that provider. Buildmesh delegates recording to that activity and
+does not request microphone permission or send audio to the desktop. Pending
+results retain their desktop draft identity across recreation and are ignored
+after disconnecting or pairing with a different desktop.
+
 Mesh cards, issue cards and the mesh's open pull requests carry the same split
 button as the desktop spawn cluster (`SpawnSplitButton`). The main half names the
 mesh's pinned default, or reads **Mesh default** when the app-wide default
