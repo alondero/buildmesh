@@ -1141,7 +1141,10 @@ fn a_mobile_submit_into_a_plain_terminal_does_not_resume_the_node() {
     let mock = MockRegistry::submitted();
     let sink = RecordingSink::plain_terminal();
     let outcome = write_mobile_input_with_sink(&mock, &sink, 1, "ls\r").unwrap();
-    assert!(outcome.is_accepted(), "the keystrokes still reach the shell");
+    assert!(
+        outcome.is_accepted(),
+        "the keystrokes still reach the shell"
+    );
     assert_eq!(*mock.last_write_data.lock().unwrap(), b"ls\r");
     assert_eq!(sink.status(), None, "a shell has no turn to mark Running");
     assert!(sink.lifecycle_changed().is_empty());

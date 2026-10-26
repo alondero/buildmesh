@@ -365,8 +365,6 @@ pub(in crate::agent) fn harness_replays_unconfirmed_submit(provider: &str) -> bo
         .replays_unconfirmed_submit()
 }
 
-
-
 #[command]
 pub async fn send_to_agent(
     app: AppHandle,
