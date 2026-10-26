@@ -93,7 +93,14 @@ kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarg
 val terminalAssets by tasks.registering(Exec::class) {
     workingDir(rootProject.projectDir.parentFile)
     commandLine(if (System.getProperty("os.name").startsWith("Windows")) "npm.cmd" else "npm", "run", "build:android-terminal")
-    inputs.files(fileTree(rootProject.file("terminal")), rootProject.file("../package-lock.json"))
+    // The bundle imports the shared touch-scroll contract from `src/`, so that
+    // whole tree is an input too — without it Gradle would keep a stale
+    // bundle when only the shared module changed.
+    inputs.files(
+        fileTree(rootProject.file("terminal")),
+        fileTree(rootProject.file("../src")),
+        rootProject.file("../package-lock.json"),
+    )
     outputs.dir(layout.buildDirectory.dir("generated/terminal"))
 }
 tasks.named("preBuild") { dependsOn(terminalAssets) }

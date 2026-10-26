@@ -7,10 +7,14 @@
  * through `term.scrollLines()` — the public API that works regardless of
  * which renderer/scroller xterm uses internally.
  *
+ * This module is shared by the mobile terminal surfaces (the browser mobile
+ * client and the native Android client's WebView bundle); the drift guard for
+ * that lives in `tests/unit/mobile-terminal-touch-scroll.test.ts`.
+ *
  * Run: npm test -- --run tests/unit/attach-touch-pan.test.ts
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { attachTouchPan } from "../../src/mobile/screens/attachTouchPan";
+import { attachTouchPan } from "../../src/components/Terminal/attachTouchPan";
 
 type FakeTerm = { scrollLines: ReturnType<typeof vi.fn> };
 

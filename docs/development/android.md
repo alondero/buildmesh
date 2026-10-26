@@ -257,6 +257,22 @@ responses into the current desktop prompt. Input controls report disconnection i
 queueing keystrokes. HTTP replies enforce the server's 1024-byte encoded-body
 limit. Enumerated answers are shown as guidance rather than guessed PTY keys.
 
+The terminal scrolls by touch. xterm's own scroller answers the mouse wheel
+only, so the bundled WebView wires the shared touch-pan bridge described in
+[Terminals](terminals.md#mobile-terminals-scroll-by-touch-through-one-shared-bridge):
+a vertical drag on the terminal surface moves the xterm scrollback. The
+terminal's CSS keeps `touch-action: none` on the host, so the WebView leaves
+the drag to the page instead of claiming it for a scroll it does not have.
+Older output is often the only way to read what an agent did, and the soft
+keyboard shrinks the pane to the point where scrolling is the only way to keep
+reading — so the pane also reports when the viewport leaves or returns to the
+live tail (`scrollState` over the `BuildmeshTerminal` bridge) and offers a
+**Latest** control in its app bar while it is away from the tail.
+`buildmeshScrollToBottom()` returns the viewport to the tail. The control sits
+in the app bar rather than floating over the terminal because an `AndroidView`
+is a real View: it draws above, and takes the touch before, any Compose
+content that overlaps it.
+
 The ViewModel owns foreground polling and its share of the event feed. The poll reads one
 snapshot (`/api/meshes`, `/api/nodes`, `/api/providers`) every 5s while
 foregrounded, so it hits the desktop's provider-menu route even when nothing
