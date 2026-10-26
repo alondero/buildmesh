@@ -457,6 +457,23 @@ own, so a menu read can never sign the user out of a screen they have not
 acted on. The surface's own read — the issue feed, the pull request feed —
 owns the session-expiry signal.
 
+## The phone's terminal scrolls by touch
+
+xterm's own scroller answers the mouse wheel only, so a phone reaches older
+output only through a touch bridge — the shared one described in
+[Terminals](terminals.md#mobile-terminals-scroll-by-touch-through-one-shared-bridge).
+This client wires it in `src/mobile/screens/TerminalScreen.tsx`; the native
+Android client wires the same module into its WebView bundle. A vertical drag
+on the terminal surface moves the xterm scrollback, and the app bar keeps its
+own swipe-to-dismiss gesture on the surface above it.
+
+This matters more on a phone than it looks. The soft keyboard shrinks the
+terminal to a fraction of the screen, so the amount a user can read at once
+drops sharply — scrolling is what keeps the history reachable. The client
+also tracks whether the viewport still sits on the live tail and offers
+**Jump to latest output** when it does not, because a panned-back terminal
+would otherwise have no way back to the running output.
+
 ## Mobile terminal socket lifecycle
 
 The mobile terminal socket is a **separate** fanout (`http::ws`), keyed by node id in one

@@ -22,6 +22,7 @@ import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 class TerminalRenderingTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
@@ -45,9 +46,11 @@ class TerminalRenderingTest {
             server.start(java.net.InetAddress.getByName("127.0.0.1"), 0)
             val input = CountDownLatch(1)
             val frames = ConcurrentLinkedQueue<String>()
+            val live = AtomicReference<WebSocket?>()
             server.enqueue(MockResponse().setBody("{\"ticket\":\"test-socket\"}"))
             server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
+                    live.set(webSocket)
                     webSocket.send("Native snapshot\r\n\u001b[c" + "context line\r\n".repeat(6))
                     webSocket.send("Live Unicode ✓\r\n".encodeUtf8())
                 }
@@ -101,6 +104,51 @@ class TerminalRenderingTest {
                 compose.waitUntil(5000) { frames.count { !it.startsWith('{') } >= 7 }
                 assertEquals("Only explicit native input reaches the PTY", listOf("pwd\r", "\u001b[Z", "\u001b[D", "\u001b[C", "y", "n", "\r"),
                     frames.filter { !it.startsWith('{') })
+
+                // Touch scrolling (the phone has no wheel, so the xterm scrollback
+                // is only reachable through the shared touch-pan bridge). Fill the
+                // scrollback with numbered lines first, so the rendered rows say
+                // which part of the history is on screen.
+                val socket = live.get() ?: error("Terminal socket never opened")
+                socket.send((0 until 600).joinToString("") { "history $it\r\n" })
+                compose.waitUntil(10000) {
+                    evaluate(view, "document.querySelector('.xterm-rows').innerText").contains("history 599")
+                }
+                // The finger has to travel DOWN to walk back through the history:
+                // the shared bridge maps a downward drag to a negative scroll,
+                // which is the direction that reaches older output. Dragging up
+                // moves toward the newest line, which is a no-op at the tail.
+                val dragged = evaluate(view, """
+                    (function () {
+                      const el = document.querySelector('.xterm');
+                      if (!el) return 'no .xterm';
+                      const touch = (type, y) => {
+                        const t = new Touch({identifier: 1, target: el, clientX: 10, clientY: y});
+                        return new TouchEvent(type, {touches: [t], targetTouches: [t], changedTouches: [t], bubbles: true, cancelable: true});
+                      };
+                      el.dispatchEvent(touch('touchstart', 120));
+                      el.dispatchEvent(touch('touchmove', 500));
+                      el.dispatchEvent(touch('touchend', 500));
+                      return 'dragged';
+                    })()
+                """)
+                assertTrue("Touch drag did not reach the terminal surface: $dragged", dragged.contains("dragged"))
+                // The last line has left the screen, so the viewport really is
+                // back in the history rather than still pinned to the tail.
+                compose.waitUntil(10000) {
+                    !evaluate(view, "document.querySelector('.xterm-rows').innerText").contains("history 599")
+                }
+                compose.waitUntil(10000) {
+                    compose.onAllNodesWithText("Latest").fetchSemanticsNodes().isNotEmpty()
+                }
+                compose.onNodeWithText("Latest").performClick()
+                compose.waitUntil(10000) {
+                    compose.onAllNodesWithText("Latest").fetchSemanticsNodes().isEmpty()
+                }
+                compose.waitUntil(10000) {
+                    evaluate(view, "document.querySelector('.xterm-rows').innerText").contains("history 599")
+                }
+
                 assertEquals("/api/ws-ticket", server.takeRequest(5, TimeUnit.SECONDS)!!.path)
                 assertEquals("/ws/terminal/7?ticket=test-socket", server.takeRequest(5, TimeUnit.SECONDS)!!.path)
             } finally {

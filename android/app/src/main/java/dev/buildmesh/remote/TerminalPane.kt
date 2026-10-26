@@ -40,6 +40,13 @@ fun TerminalPane(api: BuildmeshApi, nodeId: Long, vm: BuildmeshViewModel) {
     var rows by remember { mutableIntStateOf(24) }
     var ready by remember { mutableStateOf(false) }
     var viewport by remember { mutableStateOf(IntSize.Zero) }
+    // False once the user has panned the xterm scrollback away from the live
+    // tail. xterm's own scroller only answers the mouse wheel, so the phone
+    // pans through `attachTouchPan` in the WebView bundle; this carries that
+    // position back to the pane so the "latest" control can appear. Keyed by
+    // node, because the pane slot is reused when the user switches nodes and
+    // a stale tail position would show the control on a fresh terminal.
+    var liveTail by remember(nodeId) { mutableStateOf(true) }
     val view = remember(nodeId) { WebView(context) }
     val socket = remember(api, nodeId, view) {
         RemoteSocket(api, scope, "terminal", nodeId,
@@ -73,6 +80,9 @@ fun TerminalPane(api: BuildmeshApi, nodeId: Long, vm: BuildmeshViewModel) {
                 ready = true
                 if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) socket.start()
             } }
+            @JavascriptInterface fun scrollState(atBottom: Boolean) { scope.launch {
+                liveTail = atBottom
+            } }
         }, "BuildmeshTerminal")
         view.loadUrl("https://appassets.androidplatform.net/assets/index.html")
         val observer = LifecycleEventObserver { _, event ->
@@ -95,7 +105,18 @@ fun TerminalPane(api: BuildmeshApi, nodeId: Long, vm: BuildmeshViewModel) {
     Column(Modifier.fillMaxSize().imePadding()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(status, style = MaterialTheme.typography.labelMedium)
-            TextButton(onClick = { socket.stop(); socket.start() }) { Text("Reconnect") }
+            Row {
+                // Appears only while the user is reading back through the
+                // scrollback: the phone has no wheel, so the live tail is
+                // otherwise out of reach. It lives in the app bar rather than
+                // over the terminal because an `AndroidView` is a real View —
+                // it draws above, and takes the touch before, any Compose
+                // content that overlaps it.
+                if (!liveTail) {
+                    TextButton(onClick = { view.evaluateJavascript("window.buildmeshScrollToBottom()", null) }) { Text("Latest") }
+                }
+                TextButton(onClick = { socket.stop(); socket.start() }) { Text("Reconnect") }
+            }
         }
         AndroidView(factory = { view }, modifier = Modifier.fillMaxWidth().weight(1f).onSizeChanged { viewport = it })
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 6.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {

@@ -1,11 +1,18 @@
 import type { Terminal as XTerm } from "@xterm/xterm";
 
 // xterm.js v6 replaced its native overflow-scroll viewport with VS Code's
-// SmoothScrollableElement, so `.xterm-viewport.scrollTop` is no longer the
-// scroll axis — that element is just a positional shell now and any scrollTop
-// mutation gets re-synced to zero by the synthetic scrollbar. Use the public
+// SmoothScrollableElement, so `.xterm-viewport.scrollTop` is not the scroll
+// axis — that element is a positional shell now and any scrollTop mutation
+// gets re-synced to zero by the synthetic scrollbar. Use the public
 // `term.scrollLines()` API instead, converting touch pixel deltas into whole
 // rows once we cross a row threshold.
+//
+// This module is the touch-scroll contract shared by the mobile terminal
+// surfaces: the browser mobile client (`src/mobile/`) and the native Android
+// client's WebView bundle (`android/terminal/`) both drive scrolling through
+// it, so the two stay in step — `tests/unit/mobile-terminal-touch-scroll.test.ts`
+// pins that. xterm's own scroller answers the mouse wheel only, which a phone
+// does not have, so without this bridge older output stays out of reach.
 export function attachTouchPan(host: HTMLElement, term: XTerm): () => void {
   const xtermEl = host.querySelector<HTMLElement>(".xterm");
   if (!xtermEl) return () => {};

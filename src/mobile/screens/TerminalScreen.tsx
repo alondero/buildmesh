@@ -3,7 +3,7 @@ import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { AgentNode, isAuthError, isRateLimited, terminalWsUrl } from "../api";
-import { attachTouchPan } from "./attachTouchPan";
+import { attachTouchPan } from "../../components/Terminal/attachTouchPan";
 import { QUICK_KEYS } from "./quickKeys";
 import { AppBar } from "../ui";
 import { loadUnicode11Widths } from "../../components/Terminal/loadUnicode11Widths";
@@ -242,12 +242,14 @@ export default function TerminalScreen({
       detachTouchPan = attachTouchPan(termHostRef.current, term);
 
       // Drive the "jump to latest" pill off xterm's public scroll event and
-      // buffer coordinates. In v6 the DOM `.xterm-viewport` is no longer the
-      // real scroll axis (SmoothScrollableElement owns the scroll state), so
-      // a DOM scroll listener would never fire. `buffer.active.viewportY`
-      // tracks the top line of the viewport in scrollback coords, and equals
-      // `baseY` exactly when scrolled to the tail — no event fires when new
-      // output arrives while pinned to the tail, which is what we want.
+      // buffer coordinates. In v6 the DOM `.xterm-viewport` is not the real
+      // scroll axis (SmoothScrollableElement owns the scroll state), so a DOM
+      // scroll listener would not fire. `buffer.active.viewportY` tracks the
+      // top line of the viewport in scrollback coords, and equals `baseY`
+      // when the viewport sits on the tail. xterm fires the scroll event per
+      // line feed (`BufferService.scroll`), so this also runs while output
+      // streams — the comparison is what decides, and at the tail the two stay
+      // equal.
       const updateAtBottom = () => {
         const buf = term.buffer.active;
         setAtBottom(buf.viewportY >= buf.baseY);
