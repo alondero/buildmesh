@@ -9,6 +9,24 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class CircuitRunsTest {
+    @Test fun reviewerPickerUsesBackendLaunchOrderAndExcludesUnavailableOrUnsupportedRows() {
+        val providers = Json.parseToJsonElement("""[
+            {"id":"codex","harness_id":"codex","capabilities":{"supports_passive_turn_watcher":true}},
+            {"id":"launch/reviewer","harness_id":"claude","is_proxied":true,"configuration":{"id":"launch/reviewer","name":"Careful reviewer"},"capabilities":{"requires_attention_hook":true}},
+            {"id":"claude:proxy","harness_id":"claude","is_proxied":true,"capabilities":{"requires_attention_hook":true}},
+            {"id":"launch/offline","harness_id":"codex","unavailable_reason":"Route disabled","capabilities":{"supports_passive_turn_watcher":true}},
+            {"id":"freebuff","harness_id":"freebuff","capabilities":{"requires_attention_hook":false,"supports_passive_turn_watcher":false}},
+            {"id":"terminal","harness_id":"terminal","capabilities":{"supports_passive_turn_watcher":true}}
+        ]""").objects()
+        assertEquals(listOf("codex", "launch/reviewer"), reviewerLaunchOptions(providers).map { it.text("id") })
+    }
+
+    @Test fun builtInReviewSendsTheLaunchIdentityAndSavedCircuitsKeepTheirOwnReviewer() {
+        assertEquals(Json.parseToJsonElement("""{"circuit_id":null,"max_rounds":4,"reviewer_provider":"launch/reviewer"}"""), startReviewRequest(null, 4, "launch/reviewer").toJson())
+        assertEquals(Json.parseToJsonElement("""{"circuit_id":null,"max_rounds":3}"""), startReviewRequest(null, 3, "").toJson())
+        assertEquals(Json.parseToJsonElement("""{"circuit_id":9,"max_rounds":3}"""), startReviewRequest(9, 4, "launch/reviewer").toJson())
+    }
+
     @Test fun ownershipApiPreservesPairingAndOnlyAnAbsentRouteMeansNoSupport() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody("""[{"node_id":18,"run_id":7,"circuit_id":3,"circuit_name":"Review","state":"running","parent_node_id":17}]"""))
