@@ -182,24 +182,32 @@ pub fn count_retained_circuit_agent_nodes_total() -> SqlResult<i64> {
     count_retained_circuit_agent_nodes_total_inner(&db)
 }
 
+/// The SQL [`count_retained_circuit_agent_nodes_total`] runs, kept as a
+/// constant so the plan test pins the statement production executes.
+///
+/// The circuit worker runs this twice per 2-second pass. No index can serve
+/// the review-source flag inside `context_json`, and without `ANALYZE`
+/// statistics the planner started from the runs and parsed each run's context
+/// (about 23 MB per count on a hub where 2 of 546 runs had a live source
+/// agent). `CROSS JOIN` fixes the join order so the branch starts from live
+/// agents and parses only the contexts of runs those agents sourced.
+pub(crate) const RETAINED_CIRCUIT_AGENT_NODES_SQL: &str = "SELECT COUNT(DISTINCT agent_id) FROM ( \
+       SELECT s.agent_node_id AS agent_id FROM autopilot_circuit_run_steps s \
+       JOIN autopilot_circuit_runs r ON r.id = s.run_id \
+       JOIN agent_nodes a ON a.id = s.agent_node_id \
+       WHERE r.state IN ('completed', 'failed', 'cancelled') \
+         AND s.agent_node_id IS NOT NULL AND a.status != 'archived' \
+       UNION \
+       SELECT r.source_agent_node_id AS agent_id FROM agent_nodes a \
+       CROSS JOIN autopilot_circuit_runs r ON r.source_agent_node_id = a.id \
+       WHERE a.status != 'archived' \
+         AND json_extract(CASE WHEN json_valid(r.context_json) THEN r.context_json ELSE '{}' END, \
+           '$.\"review.source_was_circuit_owned\"')='1' \
+     )";
+
 /// Per-test isolated variant of [`count_retained_circuit_agent_nodes_total`] (issue #1691).
 pub(crate) fn count_retained_circuit_agent_nodes_total_inner(db: &Connection) -> SqlResult<i64> {
-    db.query_row(
-        "SELECT COUNT(DISTINCT agent_id) FROM ( \
-           SELECT s.agent_node_id AS agent_id FROM autopilot_circuit_run_steps s \
-           JOIN autopilot_circuit_runs r ON r.id = s.run_id \
-           JOIN agent_nodes a ON a.id = s.agent_node_id \
-           WHERE r.state IN ('completed', 'failed', 'cancelled') \
-             AND s.agent_node_id IS NOT NULL AND a.status != 'archived' \
-           UNION \
-           SELECT r.source_agent_node_id AS agent_id FROM autopilot_circuit_runs r \
-           JOIN agent_nodes a ON a.id = r.source_agent_node_id \
-           WHERE json_extract(CASE WHEN json_valid(r.context_json) THEN r.context_json ELSE '{}' END, \
-               '$.\"review.source_was_circuit_owned\"')='1' AND a.status != 'archived' \
-         )",
-        [],
-        |row| row.get(0),
-    )
+    db.query_row(RETAINED_CIRCUIT_AGENT_NODES_SQL, [], |row| row.get(0))
 }
 
 const NODE_LEASE_TTL_SECS: i64 = 300;
