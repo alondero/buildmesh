@@ -1,6 +1,8 @@
 package dev.buildmesh.remote
 
 import android.annotation.SuppressLint
+import android.content.ActivityNotFoundException
+import android.content.Intent
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -18,6 +20,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.net.toUri
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -82,6 +85,15 @@ fun TerminalPane(api: BuildmeshApi, nodeId: Long, vm: BuildmeshViewModel) {
             } }
             @JavascriptInterface fun scrollState(atBottom: Boolean) { scope.launch {
                 liveTail = atBottom
+            } }
+            @JavascriptInterface fun openUrl(url: String) { scope.launch {
+                val uri = url.toUri().normalizeScheme()
+                if (uri.scheme !in listOf("http", "https") || uri.host.isNullOrEmpty()) return@launch
+                try {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, uri).addCategory(Intent.CATEGORY_BROWSABLE))
+                } catch (_: ActivityNotFoundException) {
+                    vm.notice("No browser is available to open this link.")
+                }
             } }
         }, "BuildmeshTerminal")
         view.loadUrl("https://appassets.androidplatform.net/assets/index.html")

@@ -4,6 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 // the mouse wheel, so on a phone the scrollback was unreachable until this
 // converts a vertical drag into a scroll through xterm's public API.
 import { attachTouchPan } from '../../src/components/Terminal/attachTouchPan';
+import { attachMobileTerminalLinks } from '../../src/components/Terminal/attachMobileTerminalLinks';
 import '@xterm/xterm/css/xterm.css';
 import './terminal.css';
 
@@ -16,6 +17,7 @@ terminal.loadAddon(fit);
 const host = document.getElementById('terminal');
 terminal.open(host);
 attachTouchPan(host, terminal);
+attachMobileTerminalLinks(terminal, uri => window.BuildmeshTerminal.openUrl(uri));
 terminal.onResize(({ cols, rows }) => window.BuildmeshTerminal.resize(cols, rows));
 // `viewportY >= baseY` means the viewport shows the newest line — the same
 // test the browser mobile client uses for its "jump to latest" affordance. The
