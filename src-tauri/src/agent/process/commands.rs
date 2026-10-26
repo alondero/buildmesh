@@ -121,19 +121,15 @@ pub(crate) fn publish_submitted_input(
 
 /// Commit a submitted keystroke's resume on the blocking pool.
 ///
-/// Plain-shell providers have no LLM attention state to clear — a shell's
-/// Enter is just shell input, and flipping status to `Running` would render
-/// a spurious "Running" badge for a shell sitting at a prompt (issue #535).
-/// Returns the stored envelope so the async caller can publish it. `None`
-/// means the keystroke was shell input, or the row rejected the transition.
-/// A commit error is logged and treated as "nothing to publish": the PTY
-/// bytes were already accepted.
+/// `session_lifecycle::on_user_submitted` decides whether the submission
+/// resumes anything (a plain shell's Enter does not — issue #535). Returns the
+/// stored envelope so the async caller can publish it. `None` means the
+/// keystroke was shell input, or the row rejected the transition. A commit
+/// error is logged and treated as "nothing to publish": the PTY bytes were
+/// already accepted.
 pub(crate) fn write_to_agent_signal_blocking(
     session_id: i64,
 ) -> Result<Option<crate::agent::session_lifecycle::LifecycleChangedPayload>, String> {
-    if should_skip_attention_signals(session_id) {
-        return Ok(None);
-    }
     match commit_submitted_input(&crate::agent::session_lifecycle::DbOnlySink, session_id) {
         Ok(payload) => Ok(payload),
         Err(error) => {
@@ -153,6 +149,9 @@ pub(crate) fn commit_submitted_input(
     session_id: i64,
 ) -> Result<Option<crate::agent::session_lifecycle::LifecycleChangedPayload>, String> {
     use crate::agent::session_lifecycle as lifecycle;
+    if sink.is_plain_terminal(session_id) {
+        return Ok(None);
+    }
     // One row read answers both questions about this node's harness, and both
     // collapse to plain values so the confirmation thread below carries no DB
     // handle across its 30-second sleep.
@@ -166,7 +165,7 @@ pub(crate) fn commit_submitted_input(
         ),
         Err(_) => (false, false),
     };
-    let committed = lifecycle::commit_user_resumed(sink, session_id)?;
+    let committed = lifecycle::on_user_submitted(sink, session_id)?;
     if let Some(submitted) = committed.clone().filter(|_| awaits_confirmation) {
         std::thread::spawn(move || {
             std::thread::sleep(lifecycle::SUBMIT_CONFIRM_WINDOW);
@@ -366,26 +365,7 @@ pub(in crate::agent) fn harness_replays_unconfirmed_submit(provider: &str) -> bo
         .replays_unconfirmed_submit()
 }
 
-/// Returns true if a newline in `write_to_agent` should NOT flip the
-/// node to `Running` and should NOT emit `attention-cleared`. A plain
-/// terminal's "Enter" is just shell input — the node has no LLM
-/// attention state to clear, and flipping status would render a
-/// spurious cyan "Running" badge for a shell sitting at a prompt.
-pub(in crate::agent) fn should_skip_attention_signals(session_id: i64) -> bool {
-    db::get_agent_node_by_id(session_id)
-        .ok()
-        .map(|n| provider_is_plain_terminal(&n.provider))
-        .unwrap_or(false)
-}
 
-/// Whether the stored harness id resolves to a plain shell. Resolving through
-/// the harness profile (not just the legacy enum) ensures a node spawned via
-/// the **Terminal profile** still skips LLM attention signals (issue #535).
-pub(in crate::agent) fn provider_is_plain_terminal(provider: &str) -> bool {
-    crate::preferences::resolve_harness_provider(provider)
-        .adapter()
-        .is_plain_terminal()
-}
 
 #[command]
 pub async fn send_to_agent(
