@@ -217,6 +217,13 @@ floor for micro-labels.
   default to 150ms snappy. Entrance animations: `animate-fade-in`,
   `animate-scale-in`, `animate-slide-in-right`. Everything collapses under
   `prefers-reduced-motion`.
+- **Infinite animations** (status pulses, spinners, the Circuit comet, the
+  attention ring) animate only `opacity` and `transform`, which the compositor
+  applies without repainting. Any other property repaints the element on every
+  frame for as long as it runs: the NodeCard ring animated `border-color` and
+  cost about 30% of a core for four cards. To pulse a border, draw it on an
+  overlay and fade the overlay. `tests/unit/infinite-animation-properties.test.ts`
+  pins the rule for `App.css` and the mobile stylesheet.
 
 
 ## Component patterns
