@@ -640,6 +640,58 @@ fn circuit_run_pins_its_blueprint_before_later_edits() {
     );
 }
 
+/// The circuit worker counts retained agents twice per 2-second pass
+/// (`run_pass` and `admission::observe_capacity`). The review-source branch
+/// filters on a key inside `context_json`, which no index can serve, so a plan
+/// that starts from `autopilot_circuit_runs` parses each run's context. On a
+/// hub with 546 runs that was about 23 MB per count and kept the worker near
+/// half a core. Only a run whose source agent is still live can count, so the
+/// plan must start from the agents and reach runs through
+/// `idx_circuit_runs_source_agent`.
+#[test]
+fn retained_agent_count_reaches_runs_through_live_source_agents() {
+    let conn = isolated_test_conn();
+    conn.execute_batch("INSERT INTO meshes (id, name, path) VALUES (1, 'retained', '/repo');
+        INSERT INTO agent_nodes (id, mesh_id, name, path, status) VALUES
+            (1,1,'review-source','/repo','running'), (2,1,'archived-source','/repo','archived'),
+            (3,1,'step-agent','/repo','ready'), (4,1,'borrowed','/repo','ready');
+        INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json) VALUES (1,1,'retained','{}');
+        INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,trigger_identity,state,context_json,source_agent_node_id) VALUES
+            (1,1,1,'a','running','{\"review.source_was_circuit_owned\":\"1\"}',1),
+            (2,1,1,'b','failed','{\"review.source_was_circuit_owned\":\"1\"}',2),
+            (3,1,1,'c','completed','{}',NULL),
+            (4,1,1,'d','failed','{}',4),
+            (5,1,1,'e','failed','not json',4);
+        INSERT INTO autopilot_circuit_run_steps (run_id,node_id,agent_node_id,status) VALUES (3,'implementer',3,'completed');").unwrap();
+
+    let mut stmt = conn
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            super::circuit::leases::RETAINED_CIRCUIT_AGENT_NODES_SQL
+        ))
+        .unwrap();
+    let plan: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(
+        !plan.iter().any(|step| step.starts_with("SCAN r")),
+        "the retained-agent count must not scan every run's context, got: {plan:?}"
+    );
+    assert!(
+        plan.iter()
+            .any(|step| step.contains("idx_circuit_runs_source_agent")),
+        "the review-source branch must reach runs through their source agent, got: {plan:?}"
+    );
+
+    assert_eq!(
+        count_retained_circuit_agent_nodes_total_inner(&conn).unwrap(),
+        2,
+        "the live review source and the terminal run's step agent count; archived, unflagged and malformed sources do not"
+    );
+}
+
 #[test]
 fn circuit_cleanup_retry_is_durable_and_excludes_borrowed_and_live_owners() {
     let conn = Connection::open_in_memory().unwrap();
