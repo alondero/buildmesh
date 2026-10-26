@@ -1,8 +1,14 @@
 import { useId } from 'react';
 
-export function reviewRoundLabel(context: Record<string, string>): string {
+/** The current review round and its limit (`unlimited`, a count, or absent). */
+export function reviewRound(context: Record<string, string>): { attempt: string; limit: string | undefined } {
   const limit = context['review.round_limit'] === '0' ? 'unlimited' : context['review.round_limit'] ?? context['retry.max_retries'];
-  return `Round ${context['retry.attempt'] ?? '1'}${limit ? ` of ${limit}` : ''}`;
+  return { attempt: context['retry.attempt'] ?? '1', limit };
+}
+
+export function reviewRoundLabel(context: Record<string, string>): string {
+  const { attempt, limit } = reviewRound(context);
+  return `Round ${attempt}${limit ? ` of ${limit}` : ''}`;
 }
 
 export function ReviewRoundLimit({ value, busy, onChange }: {

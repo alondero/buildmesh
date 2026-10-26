@@ -1433,22 +1433,8 @@ fn watcher_drops_master_after_child_exit() {
     let _ = watcher.join();
 }
 
-// -----------------------------------------------------------------------
-// provider_is_plain_terminal attention-signal tests (issue #535 / #550)
-//
-// These pin the per-provider attention-cleared gating without driving
-// `write_to_agent`'s full PTY path. A plain terminal's Enter is just
-// shell input — flipping status to `Running` would render a spurious
-// cyan badge for a shell sitting at a prompt, so we skip the
-// `attention-cleared` emit (and the `Running` status flip) for
-// Terminal-typed nodes.
-// -----------------------------------------------------------------------
-
-#[test]
-fn plain_terminal_provider_skips_attention_signals() {
-    // The "terminal" harness id resolves to the plain-shell executor.
-    assert!(provider_is_plain_terminal("terminal"));
-}
+// The shell rule (issue #535 / #550) is pinned where it lives, in
+// `session_lifecycle::on_user_submitted`'s tests.
 
 /// Esc and Ctrl+C arrive from xterm as single-byte writes; an arrow key
 /// or any longer sequence starting with Esc is not an interrupt.
@@ -1905,26 +1891,13 @@ fn a_replayed_prompt_leaves_the_composer_empty() {
     );
 }
 
-#[test]
-fn llm_providers_do_emit_attention_signals() {
-    // Every non-terminal harness id resolves to an LLM executor, so none skip
-    // attention signals. "minimax"/"kimi" are legacy ids that now resolve to
-    // the Anthropic executor (still an LLM, still not plain-terminal).
-    for id in ["anthropic", "minimax", "kimi", "agy", "opencode", "codex"] {
-        assert!(
-            !provider_is_plain_terminal(id),
-            "LLM provider {id:?} should not skip attention signals"
-        );
-    }
-}
-
 /// Submitting a prompt must publish the stored `work_resumed` envelope.
 /// The legacy attention-clear event has no status, so a desktop that
 /// still shows "Starting…" never leaves it.
 #[test]
 fn submitted_input_publishes_the_running_lifecycle() {
     let blocking = crate::agent::session_lifecycle::testing::RecordingSink::new();
-    let payload = crate::agent::session_lifecycle::commit_user_resumed(&blocking, 7)
+    let payload = crate::agent::session_lifecycle::on_user_submitted(&blocking, 7)
         .unwrap()
         .expect("a live row accepts the resume");
     let desktop = crate::agent::session_lifecycle::testing::RecordingSink::new();
@@ -1944,17 +1917,16 @@ fn submitted_input_publishes_the_running_lifecycle() {
     assert_eq!(*desktop.attention_cleared(), vec![7]);
 }
 
-/// Regression test for the sync core: an unregistered session must short-
-/// circuit on the PTY write before the DB read. Without the `?` ordering
-/// the unit-test DB-not-initialised panic surfaces as a test failure.
-/// The full PTY-write + DB-update path needs a registered agent
-/// (real `portable_pty` handles) and is covered by integration tests.
+/// An unregistered session must fail on the PTY write, before any DB read
+/// could run (`write_to_agent` writes first and only then asks the
+/// lifecycle). The full PTY-write + DB-update path needs a registered
+/// agent (real `portable_pty` handles) and is covered by integration tests.
 #[test]
-fn write_to_agent_blocking_unknown_session_short_circuits_before_db() {
-    let result = write_to_agent_blocking(999_999_999, "x".to_string());
+fn writing_to_an_unknown_session_fails_on_the_pty_write() {
+    let result = PROCESS_REGISTRY.write_input(999_999_999, b"x");
     let err = result.expect_err("unknown session must surface an error");
     assert!(
         err.contains("Agent not running"),
-        "expected 'Agent not running' error, got {err:?}"
+        "expected 'Agent not running', got: {err}"
     );
 }

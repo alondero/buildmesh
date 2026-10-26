@@ -213,7 +213,7 @@ export function PrPill({ nodeId, meshId, gitPath, openPr, providers, compact = f
         title={openPr.draft ? `Draft · ${openPr.title}` : openPr.title}
         data-testid="pr-pill-trigger"
         className={compact
-          ? 'flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-accent-green/10 text-accent-green ring-1 ring-inset ring-accent-green/30 hover:brightness-125 transition-colors'
+          ? 'flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-accent-green/10 text-accent-green ring-1 ring-inset ring-accent-green/30 hover:brightness-125 transition-colors'
           : 'text-2xs font-mono px-1.5 py-0.5 rounded-full leading-none font-medium select-none cursor-pointer whitespace-nowrap bg-accent-green/10 text-accent-green ring-1 ring-inset ring-accent-green/30 drop-shadow-sm hover:brightness-125 transition-colors flex-shrink-0'}
       >
         {compact ? (

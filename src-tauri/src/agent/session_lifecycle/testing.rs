@@ -20,6 +20,7 @@ use crate::agent::session_lifecycle::{
 pub struct RecordingSink {
     status: RefCell<Option<SessionStatus>>,
     fail_writes: bool,
+    plain_terminal: bool,
     effects: RefCell<Vec<&'static str>>,
     writes: RefCell<Vec<(i64, SessionStatus)>>,
     writes_if: RefCell<Vec<(i64, SessionStatus, SessionStatus)>>,
@@ -54,6 +55,11 @@ impl RecordingSink {
             fail_writes: true,
             ..Self::default()
         }
+    }
+
+    /// A sink whose every node is a plain shell (no LLM turn to resume).
+    pub fn plain_terminal() -> Self {
+        Self { plain_terminal: true, ..Self::default() }
     }
 
     pub fn status(&self) -> Option<SessionStatus> {
@@ -208,6 +214,10 @@ impl SessionLifecycleSink for RecordingSink {
 
     fn disarm_attention_autoclear(&self, _node_id: i64) {
         self.effects.borrow_mut().push("autoclear-disarmed");
+    }
+
+    fn is_plain_terminal(&self, _node_id: i64) -> bool {
+        self.plain_terminal
     }
 
     fn emit_resume_failed(&self, node_id: i64, reason: &str) {

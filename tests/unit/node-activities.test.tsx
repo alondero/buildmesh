@@ -419,7 +419,7 @@ describe('node activities', () => {
     fireEvent.click(screen.getByRole('tab', { name: /^Review.*Reviewer/ }));
     act(() => useAgentNodeStore.setState({ nodeIds: [1, 3], nodesById: { 1: nodes[0], 3: nodes[2] }, activeNodeId: null }));
     expect(screen.getByLabelText('Agent 1')).toBeTruthy();
-    expect(screen.queryByRole('tab', { name: /Review/ })).toBeNull();
+    expect(screen.queryByRole('tab', { name: /^Review/ })).toBeNull();
     act(() => useAgentNodeStore.setState({ nodeIds: [1, 3, 4], nodesById: { 1: nodes[0], 3: nodes[2], 4: node(4) },
       circuitOwnerships: { ...ownerships, 4: ownership(4, 1) } }));
     fireEvent.click(screen.getByRole('tab', { name: /Review.*Agent 4/ }));

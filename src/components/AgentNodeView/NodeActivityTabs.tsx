@@ -8,6 +8,7 @@ import { useAriaMenu } from '../../hooks/useAriaMenu';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useAnchoredPosition } from '../../hooks/useAnchoredPosition';
 import { ProviderIcon } from '../Providers/ProviderIcon';
+import type { OverviewTabStatus } from './overviewTabStatus';
 
 interface NodeActivityTabsProps {
   rootId: number;
@@ -24,6 +25,8 @@ interface NodeActivityTabsProps {
     selected: boolean;
     /** The run is waiting on a person; the tab carries a badge. */
     needsYou: boolean;
+    /** Run state and round for the tab label; detail rides in the tooltip. */
+    status?: OverviewTabStatus | null;
     onSelect: () => void;
   };
 }
@@ -82,7 +85,7 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
     tabRefs.current[selectedIndex]?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
   }, [selectedIndex]);
   const fullLabel = (tab: ActivityTab) => tab.overview
-    ? `Circuit run overview${overview?.needsYou ? ' · needs you' : ''}`
+    ? `Circuit run overview${overview?.status ? ` · ${overview.status.detail}` : ''}${overview?.needsYou ? ' · needs you' : ''}`
     : tab.label === tab.member.name
     ? `${tab.label} · ${tab.member.status.replace(/_/g, ' ')}`
     : `${tab.label} · ${tab.member.name}${tab.utility ? '' : ` · ${tab.member.status.replace(/_/g, ' ')}`}`;
@@ -124,11 +127,13 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
                 activate(tabs[target], false);
                 tabRefs.current[target]?.focus({ preventScroll: true });
               }}
-              className={`flex h-8 shrink-0 max-w-48 items-center gap-1.5 border-b-2 px-2.5 text-xs transition-colors ${selected ? 'border-accent-cyan bg-accent-cyan/5 text-text-primary' : 'border-transparent text-text-muted hover:bg-bg-card hover:text-text-primary'}`}>
+              className={`flex h-6 shrink-0 max-w-48 items-center gap-1.5 border-b-2 px-2.5 text-xs transition-colors ${selected ? 'border-accent-cyan bg-accent-cyan/5 text-text-primary' : 'border-transparent text-text-muted hover:bg-bg-card hover:text-text-primary'}`}>
               {tab.overview
                 ? <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0"><circle cx="6" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" /><circle cx="18" cy="12" r="2.5" /><path d="M6 8.5v7M8.3 7.2l7.4 3.6M8.3 16.8l7.4-3.6" /></svg>
                 : !tab.utility && <ProviderIcon providerId={tab.member.provider} className="h-3 w-3 shrink-0" />}
-              <span className="truncate">{tab.label}</span>
+              {tab.overview && overview?.status
+                ? <span className={`truncate ${overview.status.className}`}>{overview.status.label}</span>
+                : <span className="truncate">{tab.label}</span>}
               {tab.overview
                 ? overview?.needsYou && <span aria-hidden="true" data-testid={`activity-overview-badge-${rootId}`} className="shrink-0 text-2xs font-semibold text-status-warning">!</span>
                 : !tab.utility && <span aria-hidden="true" className={`shrink-0 text-2xs ${getStatusConfig(tab.member.status).color}`}>{statusGlyph(tab.member.status)}</span>}
@@ -188,7 +193,7 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
               : 'text-text-secondary'
           }`}>
           <span aria-hidden="true" className={tab.utility || tab.overview ? 'text-text-muted' : getStatusConfig(tab.member.status).color}>{index === selectedIndex ? '✓' : tab.utility || tab.overview ? '›' : statusGlyph(tab.member.status)}</span>
-          <span className="min-w-0 flex-1"><span className="block font-medium text-text-primary">{tab.label}</span><span className="block truncate text-text-muted">{tab.overview ? 'Where the circuit run is' : tab.label === tab.member.name ? (tab.member.branch || tab.member.provider) : tab.member.name}</span></span>
+          <span className="min-w-0 flex-1"><span className="block font-medium text-text-primary">{tab.label}</span><span className="block truncate text-text-muted">{tab.overview ? overview?.status?.detail ?? 'Where the circuit run is' : tab.label === tab.member.name ? (tab.member.branch || tab.member.provider) : tab.member.name}</span></span>
           {tab.overview ? overview?.needsYou && <span className="text-2xs text-status-warning">needs you</span>
             : !tab.utility && <span className="text-2xs text-text-muted">{tab.member.status.replace(/_/g, ' ')}</span>}
         </button>)}

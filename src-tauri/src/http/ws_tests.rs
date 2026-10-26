@@ -1133,6 +1133,21 @@ fn an_accepted_mobile_write_still_clears_attention() {
     );
 }
 
+/// Issue #535 on the phone path: a shell's Enter is just shell input. The
+/// desktop path already skips it; the mobile WS/HTTP path used to flip a
+/// Terminal node to `Running` and emit `attention-cleared` anyway.
+#[test]
+fn a_mobile_submit_into_a_plain_terminal_does_not_resume_the_node() {
+    let mock = MockRegistry::submitted();
+    let sink = RecordingSink::plain_terminal();
+    let outcome = write_mobile_input_with_sink(&mock, &sink, 1, "ls\r").unwrap();
+    assert!(outcome.is_accepted(), "the keystrokes still reach the shell");
+    assert_eq!(*mock.last_write_data.lock().unwrap(), b"ls\r");
+    assert_eq!(sink.status(), None, "a shell has no turn to mark Running");
+    assert!(sink.lifecycle_changed().is_empty());
+    assert!(sink.attention_cleared().is_empty());
+}
+
 /// A backpressured WebSocket write announces the stall on the event
 /// broadcast, and says how deep the queue was.
 ///
