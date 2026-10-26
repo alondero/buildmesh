@@ -746,5 +746,3 @@ fn input_buffer_state_after(len: usize, bracketed_paste: bool, data: &[u8]) -> (
         input.bracketed_paste,
     )
 }
-
-

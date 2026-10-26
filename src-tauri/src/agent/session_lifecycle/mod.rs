@@ -2158,7 +2158,9 @@ mod tests {
     #[test]
     fn on_user_submitted_resumes_an_agent_and_returns_the_stored_envelope() {
         let sink = RecordingSink::new();
-        let payload = on_user_submitted(&sink, 7).unwrap().expect("a live row resumes");
+        let payload = on_user_submitted(&sink, 7)
+            .unwrap()
+            .expect("a live row resumes");
         assert_eq!(payload.kind, LifecycleKind::WorkResumed);
         assert_eq!(sink.status(), Some(SessionStatus::Running));
         assert_eq!(*sink.attention_cleared(), vec![7]);

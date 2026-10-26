@@ -59,7 +59,10 @@ impl RecordingSink {
 
     /// A sink whose every node is a plain shell (no LLM turn to resume).
     pub fn plain_terminal() -> Self {
-        Self { plain_terminal: true, ..Self::default() }
+        Self {
+            plain_terminal: true,
+            ..Self::default()
+        }
     }
 
     pub fn status(&self) -> Option<SessionStatus> {
