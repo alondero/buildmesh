@@ -1150,6 +1150,13 @@ paste the full pairing URL and the **Root CA SHA-256** fingerprint shown in
 the desktop's Certificate section. See
 [Android build and installation](development/android.md).
 
+In Android **New task**, tap the microphone in **What should the agent do?**
+to speak your task. Android's speech input dialog adds the transcript to your
+saved draft. You can edit it before choosing **Start agent**, and cancel speech
+input to keep the draft as it was. Availability and offline support depend on
+your phone's speech provider, which may use an online service. If speech input
+is unavailable, type your task or use your keyboard's microphone.
+
 Android provides native Overview/Work, agent replies, task capture, issues,
 archive resume, changes and diffs. Its terminal includes keyboard input,
 Esc/Tab/Ctrl+C and arrow keys, and reconnects when the app returns to the
