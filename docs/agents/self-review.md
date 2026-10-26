@@ -17,6 +17,8 @@ Independent reviewers spend most of their rounds on the same few defect classes.
 6. **Platform.** Compute platform-dependent test expectations (binary names, paths, shells, line endings) per platform; a green Windows run does not prove Linux CI.
 7. **One concern per commit.** Formatting-only hunks go in their own `style(...)` commit; the message and PR body must match the diff and say what was not run.
    A known defect you document but do not fix needs a tracked issue and a test that reproduces it.
+8. **Space.** A UI change that adds a persistent row, strip, panel or badge must show that no existing surface can carry it.
+   Above a node's terminal, compare the chrome height before and after against the budget in [Node card chrome](../../DESIGN.md#node-card-chrome), and look for the tab, tooltip, glyph or menu that already presents the same facts ([DESIGN.md principles 6 and 7](../../DESIGN.md#principles)).
 
 ## What the flags look for
 

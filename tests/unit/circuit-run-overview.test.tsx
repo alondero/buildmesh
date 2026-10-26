@@ -177,7 +177,7 @@ describe('Overview tab on a circuit card', () => {
     vi.mocked(circuitRunOverview).mockResolvedValue(overview());
     render(card());
     const tabs = screen.getAllByRole('tab');
-    expect(tabs[0].textContent).toContain('Overview');
+    expect(tabs[0].getAttribute('aria-label')).toContain('Circuit run overview');
     expect(tabs[0].getAttribute('aria-selected')).toBe('false');
     expect(screen.getByLabelText('Agent 1')).toBeTruthy();
 
@@ -191,16 +191,34 @@ describe('Overview tab on a circuit card', () => {
     expect(disposeUtility).not.toHaveBeenCalled();
   });
 
-  it('shows compact circuit status on arrival and opens the same run from View circuit', async () => {
-    vi.mocked(circuitRunOverview).mockResolvedValue(overview());
+  it('carries circuit status on the Overview tab instead of a strip above the terminal', async () => {
+    vi.mocked(circuitRunOverview).mockResolvedValue(overview({
+      review_round_limit: 5,
+      run: { ...overview().run, context_json: '{"retry.attempt":"2"}' },
+    }));
     render(card());
-    const summary = await screen.findByRole('region', { name: 'Node review circuit' });
-    expect(within(summary).getByText('Running')).toBeTruthy();
-    expect(screen.getByLabelText('Agent 1')).toBeTruthy();
-    fireEvent.click(within(summary).getByRole('button', { name: 'View circuit' }));
-    expect(await screen.findByTestId('run-overview-10')).toBeTruthy();
+    const tab = screen.getAllByRole('tab')[0];
+    await waitFor(() => expect(tab.textContent).toContain('Running · 2/5'));
+    expect(tab.getAttribute('title')).toContain('Fix loop');
+    expect(tab.getAttribute('title')).toContain('Round 2 of 5');
+    // Let the card's lazy chunks settle before asserting the strip is absent.
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 100)); });
     expect(screen.queryByRole('region', { name: 'Node review circuit' })).toBeNull();
+    expect(screen.queryByText('View circuit')).toBeNull();
+    expect(screen.getByLabelText('Agent 1')).toBeTruthy();
+    fireEvent.click(tab);
+    expect(await screen.findByTestId('run-overview-10')).toBeTruthy();
     expect(circuitRunOverview).toHaveBeenCalledTimes(1);
+  });
+
+  it('puts the terminal directly under the title bar when no circuit is attached', async () => {
+    useAgentNodeStore.setState({ circuitOwnerships: {} });
+    render(card());
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 100)); });
+    expect(screen.queryByRole('tablist')).toBeNull();
+    expect(screen.queryByText('No circuit attached')).toBeNull();
+    const panel = document.getElementById('activity-panel-1');
+    expect(panel?.previousElementSibling?.textContent).toBe('Title 1');
   });
 
   it('keeps showing the Overview when a click inside it activates the card', async () => {
@@ -260,6 +278,18 @@ describe('Overview panel', () => {
     error: null, onRefresh: vi.fn(), onChanged: vi.fn(), onOpenAgent: vi.fn(),
     agentName: (id: number) => `Agent ${id}`,
   };
+
+  it('offers Retry for a failed first read and for a failed refresh', () => {
+    const onRefresh = vi.fn();
+    const view = render(<CircuitRunOverview {...props} onRefresh={onRefresh} overview={null} error="Connection lost" />);
+    expect(screen.getByRole('alert').textContent).toContain('Connection lost');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(onRefresh).toHaveBeenCalledOnce();
+    view.rerender(<CircuitRunOverview {...props} onRefresh={onRefresh} overview={overview()} error="Connection lost" />);
+    expect(screen.getByRole('alert').textContent).toContain('Could not refresh: Connection lost');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(onRefresh).toHaveBeenCalledTimes(2);
+  });
 
   it('lays the graph out as a rail: done, current, then what is still ahead', () => {
     render(<CircuitRunOverview {...props} overview={overview()} />);

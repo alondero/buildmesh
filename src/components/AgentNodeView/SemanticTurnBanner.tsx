@@ -68,7 +68,7 @@ export function SemanticTurnBanner({ turn, isActive, onResolve, onFinish }: Sema
       tabIndex={0}
       onKeyDown={handleKeyDown}
       aria-live="polite"
-      className="flex min-h-9 shrink-0 items-center gap-2 border-b border-accent-amber/35 bg-accent-amber/15 px-2 py-1 text-xs text-text-primary"
+      className="flex min-h-9 shrink-0 items-center gap-2 border-b border-accent-amber/35 bg-accent-amber/15 px-2 py-0.5 text-xs text-text-primary"
     >
       <span className="min-w-0 flex-1 truncate font-medium" title={turn.description}>
         {turn.description}{diffCounts && ` (+${diffCounts.additions} -${diffCounts.deletions})`}
@@ -79,7 +79,7 @@ export function SemanticTurnBanner({ turn, isActive, onResolve, onFinish }: Sema
             type="button"
             onClick={() => submit(null)}
             disabled={submitting}
-            className="rounded-sm border border-accent-amber/50 bg-bg-card px-2 py-1 font-semibold text-accent-amber hover:bg-accent-amber/15 focus-visible:outline-2 focus-visible:outline-accent-cyan"
+            className="min-h-6 rounded-sm border border-accent-amber/50 bg-bg-card px-2 py-1 font-semibold text-accent-amber hover:bg-accent-amber/15 focus-visible:outline-2 focus-visible:outline-accent-cyan"
           >
             Continue (Enter)
           </button>
@@ -89,7 +89,7 @@ export function SemanticTurnBanner({ turn, isActive, onResolve, onFinish }: Sema
               type="button"
               onClick={() => submit('y\r')}
               disabled={submitting}
-              className="rounded-sm border border-accent-green/50 bg-bg-card px-2 py-1 font-semibold text-accent-green hover:bg-accent-green/10 focus-visible:outline-2 focus-visible:outline-accent-cyan"
+              className="min-h-6 rounded-sm border border-accent-green/50 bg-bg-card px-2 py-1 font-semibold text-accent-green hover:bg-accent-green/10 focus-visible:outline-2 focus-visible:outline-accent-cyan"
             >
               {approveLabel}
             </button>
@@ -97,7 +97,7 @@ export function SemanticTurnBanner({ turn, isActive, onResolve, onFinish }: Sema
               type="button"
               onClick={() => submit('n\r')}
               disabled={submitting}
-              className="rounded-sm border border-status-error/50 bg-bg-card px-2 py-1 font-semibold text-status-error hover:bg-status-error-bg focus-visible:outline-2 focus-visible:outline-accent-cyan"
+              className="min-h-6 rounded-sm border border-status-error/50 bg-bg-card px-2 py-1 font-semibold text-status-error hover:bg-status-error-bg focus-visible:outline-2 focus-visible:outline-accent-cyan"
             >
               {rejectLabel}
             </button>

@@ -121,10 +121,10 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
         title="Build / Run / Terminal"
         // Icon-only trigger — saves ~34 px vs the former "Build ▼" pill,
         // and reads as a peer of the close + expand buttons because all
-        // three share `h-7` + bg-bg-base/60 + border-border-default with no
+        // three share `h-6` + bg-bg-base/60 + border-border-default with no
         // shadow, so the trio looks like one control group against the
         // mesh-tinted header.
-        className="flex items-center gap-0.5 h-7 px-1.5 rounded-md bg-bg-base/60 border border-border-default text-accent-cyan hover:bg-accent-cyan/15 hover:border-accent-cyan/60 transition-colors"
+        className="flex items-center gap-0.5 h-6 px-1.5 rounded-md bg-bg-base/60 border border-border-default text-accent-cyan hover:bg-accent-cyan/15 hover:border-accent-cyan/60 transition-colors"
       >
         {/* Wrench — "build / tools" semantic, the common IDE shorthand for
             the "execute build or run" family. 12 px matches the close /

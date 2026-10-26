@@ -2,8 +2,9 @@
 
 Status: current
 
-Use **Add review** in the compact Review circuit panel above an Agent Node's
-terminal, or the Circuit icon beside Build/Run in its title bar. Choose
+Use the Circuit button beside Build/Run in an Agent Node's title bar. It reads
+**Review** beside the icon when the title bar is at least 500px wide
+(`HEADER_TIER_BREAKPOINTS.reviewLabel`) and is icon-only below that. Choose
 **Automated review loop** or a saved Circuit with a manual trigger on the same
 Mesh. Saved Circuits keep their configured timing and actions; the review
 preset waits for the source task to finish.
@@ -45,22 +46,26 @@ review or a saved manual Review Circuit from the same Mesh. See
 
 ## Overview tab
 
-On arrival, the compact panel keeps the terminal visible and shows the card's
-Circuit name, status, review round and limit, current steps, and **Needs
-attention** when a person must act. It shares the Overview's snapshot and live
-updates. **View circuit** opens that run's full Overview. While details load,
-the known ownership status remains visible; a failed refresh offers **Retry**.
-An active run replaces **Add review** with **View circuit**, preventing a
-competing launch. Finished runs keep their status and Overview link alongside
-**Add review**; use the Overview's recovery controls to continue a failed run.
-The compact panel is hidden while viewing Overview or a utility terminal.
-
 A desktop node card whose agents belong to a Circuit Run shows an **Overview**
-tab first in its activity tab strip, for live and finished runs alike. It never
-selects itself: the card keeps showing the terminal until the user picks it, and
-a warning badge on the tab marks a run that needs a person (an approval, an
-Unverified checkpoint, or an unacknowledged failure that can be recovered). A
-step that is merely waiting does not raise the badge.
+tab first in its activity tab strip, for live and finished runs alike. The tab
+is the card's only circuit status surface; the card adds no status row above
+the terminal ([DESIGN.md principle 6](../../DESIGN.md#principles)). Its label
+is the run state or review verdict, plus the review round when the run has one
+(for example `Running · 2/5`, or `2/∞` for unlimited rounds). Its tooltip and
+accessible name add the Circuit name, the full round, the current steps, and
+the loading or refresh-failure state. `overviewTabStatus` derives all of this
+from the card's shared run snapshot, so the known ownership state shows while
+details load. The tab never selects itself: the card keeps showing the
+terminal until the user picks it, and a warning badge on the tab marks a run
+that needs a person (an approval, an Unverified checkpoint, or an
+unacknowledged failure that can be recovered). A step that is merely waiting
+does not raise the badge. A failed read or refresh shows in the Overview with
+**Retry**.
+
+While a run is active, the title-bar Circuit button shows that run and offers
+Cancel instead of a competing launch. A finished run keeps its Overview tab,
+and the button starts a new review; use the Overview's recovery controls to
+continue a failed run.
 
 The tab reads one backend snapshot (`circuit_run_overview`): the run, its steps,
 the graph pinned for that run, and the same attention data the Probe uses. It
