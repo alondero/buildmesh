@@ -184,6 +184,8 @@ fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) 
     var attentionOnly by rememberSaveable { mutableStateOf(false) }
     val openNodes = state.nodes.filter { it.text("status") != "archived" }
     val nodesByMesh = openNodes.groupBy { it.number("mesh_id") }
+    // Match Sidebar.tsx: open nodes determine the band; both bands keep saved mesh order.
+    val (activeMeshes, inactiveMeshes) = state.meshes.partition { nodesByMesh.containsKey(it.number("id")) }
     val visible = openNodes.filter { node ->
         (meshId == 0L || node.number("mesh_id") == meshId) &&
             (!attentionOnly || circuitNeedsAttention(node, state.circuitRuns)) &&
@@ -201,11 +203,12 @@ fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) 
             OutlinedTextField(colors = buildmeshTextFieldColors(), value = query, onValueChange = { query = it }, label = { Text("Search agents or branches") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
             FilterChip(selected = attentionOnly, onClick = { attentionOnly = !attentionOnly }, label = { Text("Needs attention") })
         }
-        if (tab == "Overview") items(state.meshes, key = { "mesh-${it.number("id")}" }) { mesh ->
+        if (tab == "Overview") items(activeMeshes + inactiveMeshes, key = { "mesh-${it.number("id")}" }) { mesh ->
             val members = nodesByMesh[mesh.number("id")].orEmpty()
             Card(colors = CardDefaults.cardColors(containerColor = MeshColors.card)) {
-                Column(Modifier.fillMaxWidth().padding(14.dp)) {
-                    Column(Modifier.fillMaxWidth().clickable(role = Role.Button, onClickLabel = "View work in ${mesh.text("name")}") {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Column(Modifier.weight(1f).clickable(role = Role.Button, onClickLabel = "View work in ${mesh.text("name")}") {
                         query = ""
                         attentionOnly = false
                         openMesh(mesh.number("id"), "work")
@@ -215,28 +218,31 @@ fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) 
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                         MeshActivitySummary(members)
                     }
-                    Text(mesh.text("path"), style = MaterialTheme.typography.bodySmall,
-                        color = if (members.isEmpty()) MeshColors.muted else MeshColors.secondary,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
                     // Both halves open Capture pre-filled, where the first
                     // prompt is written; an empty prompt opens a plain session.
-                    Spacer(Modifier.height(8.dp))
                     SpawnSplitButton(meshDefaultName(mesh, state.providers), launchOptions(state.providers, needsPrompt = false),
                         "a task in ${mesh.text("name")}", true,
-                        { openCapture(mesh.number("id"), "") }, { openCapture(mesh.number("id"), it.text("id")) })
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = { openMesh(mesh.number("id"), "pulls") }) { Text("Pull requests") }
-                        TextButton(onClick = { openMesh(mesh.number("id"), "issues") }) { Text("Issues") }
-                        TextButton(onClick = { openMesh(mesh.number("id"), "archive") }) { Text("Archive") }
-                    }
+                        { openCapture(mesh.number("id"), "") }, { openCapture(mesh.number("id"), it.text("id")) }, compact = true)
                 }
             }
         }
         if (tab == "Work") {
             val byMesh = activities.groupBy { it.root.number("mesh_id") }
-            val meshOrder = state.meshes.map { it.number("id") }
-            byMesh.entries.sortedBy { meshOrder.indexOf(it.key).takeIf { index -> index >= 0 } ?: Int.MAX_VALUE }.forEach { (id, members) ->
-                item(key = "work-mesh-$id") { WorkMeshHeader(state.meshes.firstOrNull { it.number("id") == id }, members.sumOf { it.members.size }) }
+            // Keep resources reachable even when a mesh has no open or matching agents.
+            val meshOrder = state.meshes.filter { meshId == 0L || it.number("id") == meshId }.map { it.number("id") }
+            (meshOrder + byMesh.keys).distinct().forEach { id ->
+                val mesh = state.meshes.firstOrNull { it.number("id") == id }
+                val members = byMesh[id].orEmpty()
+                item(key = "work-mesh-$id") {
+                    Column {
+                        WorkMeshHeader(mesh, members.sumOf { it.members.size })
+                        if (mesh != null) FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            TextButton(onClick = { openMesh(id, "pulls") }) { Text("Pull requests") }
+                            TextButton(onClick = { openMesh(id, "issues") }) { Text("Issues") }
+                            TextButton(onClick = { openMesh(id, "archive") }) { Text("Archive") }
+                        }
+                    }
+                }
                 items(members, key = { "activity-${it.root.number("id")}" }) { WorkActivityRows(it, state, requireNotNull(glyphMotion), openNode) }
             }
         }

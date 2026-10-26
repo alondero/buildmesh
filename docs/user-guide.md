@@ -1168,8 +1168,12 @@ to remove its authorization. Certificate resets require fresh pairing.
 In Android **Overview**, tap a mesh name to open **Work** for that mesh. This
 clears the search and attention filter so you see all its open agents. Each
 mesh header shows a status dot per open agent and their count. Meshes without
-open agents have muted names and paths, with **No agents yet**; they remain
-tappable. Choose **All meshes** in Work's Mesh selector to widen the view.
+open agents have muted names, with **No agents yet**; they remain tappable.
+Meshes with open agents appear first, preserving your desktop mesh order within
+each group. The **+** beside the mesh name starts a task with its default agent;
+the adjacent arrow offers other launch configurations. In **Your work**, each
+mesh has **Pull requests**, **Issues**, and **Archive** links, even when it has
+no open agents. Choose **All meshes** in Work's Mesh selector to widen the view.
 
 The phone opens on **Overview**, with counts for agents needing attention,
 running agents, and all active agents. Errors and degraded status reporting

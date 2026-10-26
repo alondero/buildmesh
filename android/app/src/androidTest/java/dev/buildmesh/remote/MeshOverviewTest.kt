@@ -53,8 +53,69 @@ class MeshOverviewTest {
                 Dashboard(RemoteState(meshes = meshes, nodes = nodes), "Overview", 0, {}, {}, { _, _ -> }, { _, _ -> })
             }
         } }
-        compose.onNodeWithText("/src/empty").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Empty mesh").performScrollTo().assertIsDisplayed()
+        meshes.forEach { compose.onNodeWithText(it.text("path")).assertDoesNotExist() }
+        listOf("Issues", "Pull requests", "Archive").forEach { compose.onNodeWithText(it).assertDoesNotExist() }
+        val title = compose.onNodeWithText("Website with a long mesh name").fetchSemanticsNode().boundsInRoot
+        val spawn = compose.onNodeWithContentDescription("Start a task in Website with a long mesh name with Mesh default").fetchSemanticsNode().boundsInRoot
+        val menu = compose.onNodeWithContentDescription("Choose how to start a task in Website with a long mesh name").fetchSemanticsNode().boundsInRoot
+        assertTrue("Spawn sits beside the name", spawn.left >= title.right && spawn.top == title.top)
+        assertTrue("Menu fits beside Spawn", menu.left >= spawn.right && menu.right <= compose.onRoot().fetchSemanticsNode().boundsInRoot.right)
+        assertTrue("Spawn keeps a 48dp touch target", spawn.width >= 48 * compose.density.density && spawn.height >= 48 * compose.density.density)
+        assertTrue("Menu keeps a 48dp touch target", menu.width >= 48 * compose.density.density && menu.height >= 48 * compose.density.density)
         saveScreenshot("mesh-overview")
+    }
+
+    @Test fun workResourcesRemainAvailableForEmptyAndFilteredMeshes() {
+        val state = mutableStateOf(RemoteState(meshes = meshes, nodes = nodes))
+        val selected = mutableStateOf(0L)
+        val opened = mutableListOf<Pair<Long, String>>()
+        compose.setContent { BuildmeshTheme {
+            Surface(color = MeshColors.background) {
+                Dashboard(state.value, "Work", selected.value, { selected.value = it }, {},
+                    { id, target -> opened += id to target }, { _, _ -> })
+            }
+        } }
+        // All meshes includes resource links for the empty mesh, not just agent groups.
+        compose.onNodeWithText("Empty mesh", substring = false).performScrollTo().assertIsDisplayed()
+        compose.runOnIdle { selected.value = 3L }
+        compose.onNodeWithText("Pull requests").performScrollTo().performClick()
+        compose.onNodeWithText("Issues", substring = false).performClick()
+        compose.onNodeWithText("Archive").performClick()
+        compose.onNodeWithText("No agents match this view. Capture a task to start one.").assertIsDisplayed()
+        compose.runOnIdle { selected.value = 1L }
+        compose.onNodeWithText("Search agents or branches").performScrollTo().performTextInput("no matches")
+        closeSoftKeyboard()
+        compose.onNodeWithText("Pull requests").performScrollTo().performClick()
+        compose.onNodeWithText("Issues", substring = false).performClick()
+        compose.onNodeWithText("Archive").performClick()
+        compose.runOnIdle { assertEquals(listOf(3L to "pulls", 3L to "issues", 3L to "archive", 1L to "pulls", 1L to "issues", 1L to "archive"), opened) }
+        saveScreenshot("mesh-work-resources")
+    }
+
+    @Test fun overviewUsesDesktopBandsAndReordersAfterArchiveAndClose() {
+        // Non-alphabetical saved order; archived-only meshes belong in the quiet band.
+        val savedOrder = listOf(meshes[2], meshes[1], meshes[0])
+        val archived = Json.parseToJsonElement("""{"id":31,"mesh_id":3,"name":"Archived agent","status":"archived"}""").obj()
+        val state = mutableStateOf(RemoteState(meshes = savedOrder, nodes = nodes + archived))
+        compose.setContent { BuildmeshTheme {
+            Surface(color = MeshColors.background) {
+                Dashboard(state.value, "Overview", 3, {}, {}, { _, _ -> }, { _, _ -> })
+            }
+        } }
+        fun assertOrder(names: List<String>) {
+            compose.onNode(hasScrollToIndexAction()).performScrollToIndex(2)
+            val tops = names.map { compose.onNodeWithText(it, substring = false).fetchSemanticsNode().boundsInRoot.top }
+            assertTrue("Expected mesh order: $names", tops.zipWithNext().all { (a, b) -> a < b })
+        }
+        assertOrder(listOf("Website with a long mesh name", "Buildmesh", "Empty mesh"))
+        compose.runOnIdle {
+            state.value = state.value.copy(nodes = listOf(nodes[0], nodes[1], archived,
+                Json.parseToJsonElement("""{"id":21,"mesh_id":2,"name":"Website agent","status":"archived"}""").obj()))
+        }
+        assertOrder(listOf("Buildmesh", "Empty mesh", "Website with a long mesh name"))
+        compose.runOnIdle { state.value = state.value.copy(nodes = listOf(archived)) }
+        assertOrder(listOf("Empty mesh", "Website with a long mesh name", "Buildmesh"))
     }
 
     @Test fun meshNameOpensWorkByIdAndClearsStaleFilters() {
@@ -95,7 +156,8 @@ class MeshOverviewTest {
 
                 compose.onNodeWithText("Mesh: Buildmesh").performScrollTo().performClick()
                 compose.onNodeWithText("All meshes", substring = false).performClick()
-                compose.onNodeWithText("Website agent").performScrollTo().performClick()
+                compose.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("Website agent"))
+                compose.onNodeWithText("Website agent").performClick()
                 compose.onNodeWithText("Open terminal").assertIsDisplayed()
                 compose.onNodeWithContentDescription("Back").performClick()
                 compose.onNodeWithText("Overview", substring = false).performClick()
@@ -224,7 +286,8 @@ class MeshOverviewTest {
         assertTrue(summaryBounds.left >= titleBounds.left)
         assertTrue(summaryBounds.right <= titleBounds.right)
         compose.onNodeWithText("150", useUnmergedTree = true).assertIsDisplayed()
-        compose.onNodeWithText("Archive").performScrollTo().assertIsDisplayed()
+        val menu = compose.onNodeWithContentDescription("Choose how to start a task in Website with a long mesh name").assertIsDisplayed()
+        assertEquals("Spawn remains beside the name when dots wrap", titleBounds.top, menu.fetchSemanticsNode().boundsInRoot.top)
         saveScreenshot("mesh-many-dots")
     }
 }
