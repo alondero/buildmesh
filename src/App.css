@@ -488,7 +488,7 @@ html, body {
    `@theme` token or in a `@utility` at-rule. An unlisted one keeps the
    Compositor producing frames forever.
    `scripts/idle-animation-probe.mjs` measures the effect: the renderer's
-   compositor frames go from ~60 per second to none.
+   compositor's frame production goes from ~60 frames per second to none.
    --------------------------------------------------------------------------- */
 [data-window-idle='true'],
 [data-window-idle='true'] .animate-pulse-fast,

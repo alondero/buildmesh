@@ -11,8 +11,9 @@
  * never went idle, because an infinite animation never ends.
  *
  * `scripts/idle-animation-probe.mjs` measures the frame half of that claim on
- * the real frontend: with the animations running the trace records ~60
- * compositor frames per second; with the gate closed it records none. The
+ * the real frontend: with the animations running the compositor produces a
+ * frame every vsync and the trace records ~60 of them per second; with the
+ * gate closed the trace records none. The
  * CPU half depends on the machine — a shared, busy host attributes time to
  * the renderer that has nothing to do with it — so the frames are the
  * measurement, and the CPU is the corroboration.

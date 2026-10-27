@@ -13,7 +13,8 @@ import { applyWindowIdle, isWindowIdle } from '../lib/idleAnimationGate';
  * core. This hook marks the root element as idle when the OS window loses
  * focus or the document is hidden; `App.css` reads that marker and pauses the
  * animations. `scripts/idle-animation-probe.mjs` measures the effect: the
- * renderer's compositor frames go from ~60 per second to none.
+ * renderer's compositor frame production goes from ~60 frames per second to
+ * none.
  *
  * It writes the marker as a DOM side effect and holds NO React state, on
  * purpose: a focus change must not re-render the workspace. The grid holds
