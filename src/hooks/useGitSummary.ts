@@ -1,6 +1,7 @@
 import { createPathKeyedCache } from '../lib/pathInvalidatedCache';
 import { usePathInvalidatedQuery } from './usePathInvalidatedQuery';
 import { getGitSummary, type GitSummary } from '../lib/tauri';
+import { isMeshFolderMissing } from '../lib/meshFolder';
 
 // Module-level shared client — one process, one cache, one subscription map
 // per hook family. The `useGitSummary` consumer is a single component, but
@@ -16,6 +17,10 @@ const summaryClient = createPathKeyedCache<GitSummary>({
   // bounds the rate; the primitive's trailing refetch still lands the
   // settled state after a burst.
   minRefetchIntervalMs: 2_000,
+  // Issue #2602: a worktree whose folder was deleted fails the summary
+  // reads. The watcher keeps firing for its siblings, so without this the
+  // panel kept asking — and kept failing — for a folder that is not there.
+  stopOnError: isMeshFolderMissing,
 });
 
 /**

@@ -206,6 +206,10 @@ pub struct HoldingWorktree {
 ///   branch ref is the only handle to those commits.
 /// - `base_branch_holder` is `Some` when the Base Ref's branch is checked
 ///   out in any of the Mesh's worktrees (main or linked).
+/// - `pool_fill_failure` is `Some` when the Mesh's warm pool does not fill
+///   (issue #2602). The Git module leaves it unset — the pool is a service,
+///   not a repository fact — so `commands::git` fills it in from the pool's
+///   backoff record.
 ///
 /// Generated to src/types/generated/MeshHealth.ts (issue #404). `u32`
 /// counter carries `#[ts(as = "i32")]` so it emits `number`.
@@ -223,4 +227,6 @@ pub struct MeshHealth {
     pub has_upstream: bool,
     pub is_drifted: bool,
     pub base_branch_holder: Option<HoldingWorktree>,
+    /// The warm pool's fill failure, when the pool does not fill this Mesh.
+    pub pool_fill_failure: Option<crate::models::PoolFillFailure>,
 }

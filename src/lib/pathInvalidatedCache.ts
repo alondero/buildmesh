@@ -326,6 +326,22 @@ export interface PathInvalidatedCacheOptions<K, V> {
    * never come back. Defaults to 200.
    */
   maxInactiveEntries?: number;
+  /**
+   * Issue #2602: a fetcher can fail in a way that will not fix itself — the
+   * mesh's folder is gone. When this predicate matches the rejection, the
+   * client stops refetching the key on its own: bus events, window focus and
+   * remounts all stop, and the key only retries when it is explicitly
+   * invalidated (which is what a user-driven refresh does) or when the
+   * subscription's path changes (the mesh was re-pointed).
+   *
+   * Without this, a mesh whose folder was deleted failed the reads it was
+   * asked for — about 140 failures per mesh in five hours, each one a
+   * backend round-trip and a pair of log lines.
+   *
+   * A successful fetch clears the stop, so a folder that comes back
+   * resumes on the next read.
+   */
+  stopOnError?: (error: Error) => boolean;
 }
 
 // ------------------------------------------------------------------
@@ -571,6 +587,7 @@ function createInternalClient<K, V>(
   minRefetchIntervalMs = 0,
   inactiveEntryTtlMs = DEFAULT_INACTIVE_TTL_MS,
   maxInactiveEntries = DEFAULT_MAX_INACTIVE_ENTRIES,
+  stopOnError?: (error: Error) => boolean,
 ): InternalClient<K, V> {
   // Per-client state. A `Symbol` clientId is the load-bearing piece that
   // makes the cross-client dispatch scoping work — see module docstring.
@@ -608,6 +625,15 @@ function createInternalClient<K, V>(
   // and the TTL reads the stamp off the same entry.
   const activeCounts = new Map<K, number>();
   const inactiveSince = new Map<K, number>();
+  // Issue #2602: keys whose last fetch failed with a failure that will not
+  // fix itself (the `stopOnError` predicate). A stopped key is not refetched
+  // on the client's own initiative — not by a bus event, not by window focus,
+  // not by a remount.
+  const stopped = new Set<K>();
+  // The path each key is currently subscribed under. A key that
+  // re-subscribes under a different path was re-pointed (the mesh's folder
+  // moved), so a stop recorded against the old path no longer describes it.
+  const subscriptionPaths = new Map<K, string>();
 
   const cancelTrailing = (key: K) => {
     const timer = trailingTimers.get(key);
@@ -629,6 +655,11 @@ function createInternalClient<K, V>(
     pending.delete(key);
     cancelTrailing(key);
     inactiveSince.delete(key);
+    // Issue #2602: a retired key carries no stop either — the next visit
+    // starts from scratch, which is what a remount after the folder came
+    // back needs.
+    stopped.delete(key);
+    subscriptionPaths.delete(key);
   };
 
   const enforceInactiveCap = () => {
@@ -744,6 +775,10 @@ function createInternalClient<K, V>(
     trailingSubscribers.clear();
     activeCounts.clear();
     inactiveSince.clear();
+    // Issue #2602: the stop is per-key state like the rest — a test starts
+    // with no mesh stopped.
+    stopped.clear();
+    subscriptionPaths.clear();
   });
 
   // Matching subscribers share one eviction per dispatch. Events during a
@@ -798,6 +833,13 @@ function createInternalClient<K, V>(
     refresh(key) {
       const inFlight = pending.get(key);
       if (inFlight) return inFlight;
+      // Issue #2602: a key whose last fetch failed with a failure that will
+      // not fix itself is not refetched on the client's own initiative. The
+      // recorded error stays in place, so the consumer still sees *why* the
+      // value is missing; only the round-trip is skipped.
+      if (stopped.has(key)) {
+        return Promise.resolve(values.get(key) ?? null);
+      }
       // This request covers earlier deferred edits. Edits arriving while it
       // runs are recorded separately and must still get a trailing refresh.
       cancelTrailing(key);
@@ -823,6 +865,9 @@ function createInternalClient<K, V>(
           // A success erases the previous failure for this key — the hook
           // layer's `error` field will read `null` on the next state read.
           errors.delete(key);
+          // Issue #2602: the folder (or whatever the failure was about) is
+          // readable again, so the key resumes refetching on its own.
+          stopped.delete(key);
           // Issue #2017 — `refresh` is reachable without a subscriber
           // (imperative callers). A key nobody is watching is an inactive
           // entry from the moment it settles: record it in the LRU so the
@@ -842,10 +887,15 @@ function createInternalClient<K, V>(
           // left untouched (the success branch owns writes), so a
           // successful refresh is the only path that populates the cache.
           // Wrap non-Error throws so the contract is always `Error`.
-          errors.set(
-            key,
-            err instanceof Error ? err : new Error(String(err)),
-          );
+          const failure = err instanceof Error ? err : new Error(String(err));
+          errors.set(key, failure);
+          // Issue #2602: a failure that will not fix itself stops the key's
+          // own refetching. The key stays stopped until it is explicitly
+          // invalidated (a user-driven refresh) or its subscription path
+          // changes (the mesh was re-pointed).
+          if (stopOnError?.(failure)) {
+            stopped.add(key);
+          }
           // `console.warn` is in the eslint allow-list (see eslint.config.js);
           // the no-console rule only flags `console.log` / `console.info`.
           console.warn(`${name}: fetch failed for key`, key, err);
@@ -874,6 +924,10 @@ function createInternalClient<K, V>(
       known.delete(key);
       values.delete(key);
       pending.delete(key);
+      // Issue #2602: an explicit invalidation is a deliberate "try again" —
+      // it is what a user-driven refresh does. It lifts the stop so the key
+      // gets one more attempt.
+      stopped.delete(key);
       // An explicit invalidation says the value is no longer authoritative:
       // drop the freshness stamp so the `minRefetchIntervalMs` window can't
       // keep suppressing bus notifications while the cache sits empty, and
@@ -889,6 +943,14 @@ function createInternalClient<K, V>(
     },
 
     subscribeOn(key, path, onInvalidate, extraPaths?) {
+      // Issue #2602: a key that re-subscribes under a different path was
+      // re-pointed (the mesh's folder moved), so a stop recorded against the
+      // old path no longer describes it — lift the stop and let it refetch.
+      const previousPath = subscriptionPaths.get(key);
+      if (previousPath !== undefined && previousPath !== path) {
+        stopped.delete(key);
+      }
+      subscriptionPaths.set(key, path);
       // Re-register the handler (idempotent — see `registerKeyedBusHandler`)
       // and install the global listener. Then add the subscriber via the
       // shared helper. Issue #356.
@@ -976,8 +1038,8 @@ function createInternalClient<K, V>(
 export function createPathKeyedCache<V>(
   options: PathInvalidatedCacheOptions<string, V>,
 ): PathKeyedClient<V> {
-  const { fetcher, name = 'pathInvalidatedCache', minRefetchIntervalMs, inactiveEntryTtlMs, maxInactiveEntries } = options;
-  const internal = createInternalClient<string, V>(fetcher, name, minRefetchIntervalMs, inactiveEntryTtlMs, maxInactiveEntries);
+  const { fetcher, name = 'pathInvalidatedCache', minRefetchIntervalMs, inactiveEntryTtlMs, maxInactiveEntries, stopOnError } = options;
+  const internal = createInternalClient<string, V>(fetcher, name, minRefetchIntervalMs, inactiveEntryTtlMs, maxInactiveEntries, stopOnError);
 
   return {
     ...internal,
@@ -1005,8 +1067,8 @@ export function createPathKeyedCache<V>(
 export function createDualKeyCache<K, V>(
   options: PathInvalidatedCacheOptions<K, V>,
 ): DualKeyClient<K, V> {
-  const { fetcher, name = 'pathInvalidatedCache', minRefetchIntervalMs, inactiveEntryTtlMs, maxInactiveEntries } = options;
-  const internal = createInternalClient<K, V>(fetcher, name, minRefetchIntervalMs, inactiveEntryTtlMs, maxInactiveEntries);
+  const { fetcher, name = 'pathInvalidatedCache', minRefetchIntervalMs, inactiveEntryTtlMs, maxInactiveEntries, stopOnError } = options;
+  const internal = createInternalClient<K, V>(fetcher, name, minRefetchIntervalMs, inactiveEntryTtlMs, maxInactiveEntries, stopOnError);
 
   // The `subscribe` and `subscribeOn` members are intentionally NOT
   // exposed on the dual-key public type — `subscribeByPath` is the only

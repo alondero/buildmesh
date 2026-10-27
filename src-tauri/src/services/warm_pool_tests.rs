@@ -3,7 +3,9 @@
 // repo's rust-test-layout gate requires it.
 
 use super::*;
+use crate::services::warm_pool_backoff::FillBackoff;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 // ---- event name drift guard ----
 //
@@ -656,6 +658,28 @@ fn mesh_row(id: i64, target: i64) -> db::WarmPoolMeshRow {
     }
 }
 
+/// The probe a fill sees when the mesh's folder is a working repository.
+fn usable_probe() -> MeshRepoProbe {
+    MeshRepoProbe {
+        usable: true,
+        head: Some("test-head".to_string()),
+    }
+}
+
+/// The probe a fill sees when the mesh's folder cannot back a worktree.
+fn unusable_probe() -> MeshRepoProbe {
+    MeshRepoProbe {
+        usable: false,
+        head: None,
+    }
+}
+
+/// The retry policy a test drives: a fresh backoff and a clock the test
+/// owns (issue #2602).
+fn test_fill_policy() -> (FillBackoff, Instant) {
+    (FillBackoff::new(), Instant::now())
+}
+
 /// Happy path: drain runs once, then `warm_one` is called once per missing
 /// entry. The `available < target` bound stops it after exactly `target`
 /// calls for a mesh starting empty.
@@ -665,9 +689,13 @@ fn fill_mesh_to_target_with_warms_exactly_target_times() {
     let warm_calls = std::cell::RefCell::new(0);
     let drain_calls = std::cell::RefCell::new(0);
 
+    let (backoff, now) = test_fill_policy();
+
     let changes = fill_mesh_to_target_with(
         &mesh,
-        || true,
+        &backoff,
+        now,
+        usable_probe,
         || Ok(0),
         |_| {
             *drain_calls.borrow_mut() += 1;
@@ -697,9 +725,13 @@ fn fill_mesh_to_target_with_count_failure_aborts_before_warming() {
     let count_calls = std::cell::RefCell::new(0);
     let warm_calls = std::cell::RefCell::new(0);
 
+    let (backoff, now) = test_fill_policy();
+
     let changes = fill_mesh_to_target_with(
         &mesh,
-        || true,
+        &backoff,
+        now,
+        usable_probe,
         || {
             *count_calls.borrow_mut() += 1;
             Err("database is locked".into())
@@ -737,9 +769,13 @@ fn fill_mesh_to_target_with_prewarm_err_aborts_loop() {
     ]);
     let warm_calls = std::cell::RefCell::new(0);
 
+    let (backoff, now) = test_fill_policy();
+
     fill_mesh_to_target_with(
         &mesh,
-        || true,
+        &backoff,
+        now,
+        usable_probe,
         || Ok(0),
         |_| Ok(0),
         |_m| {
@@ -766,9 +802,13 @@ fn fill_mesh_to_target_with_zero_target_runs_only_drain() {
     let count_calls = std::cell::RefCell::new(0);
     let warm_calls = std::cell::RefCell::new(0);
 
+    let (backoff, now) = test_fill_policy();
+
     let changes = fill_mesh_to_target_with(
         &mesh,
-        || true,
+        &backoff,
+        now,
+        usable_probe,
         || {
             *count_calls.borrow_mut() += 1;
             Ok(0)
@@ -805,9 +845,13 @@ fn fill_mesh_to_target_with_warms_only_the_deficit() {
     let mesh = mesh_row(10, 3);
     let warm_calls = std::cell::RefCell::new(0);
 
+    let (backoff, now) = test_fill_policy();
+
     let changes = fill_mesh_to_target_with(
         &mesh,
-        || true,
+        &backoff,
+        now,
+        usable_probe,
         || Ok(1),
         |_| Ok(0),
         |_m| {
@@ -833,9 +877,13 @@ fn fill_mesh_to_target_with_drain_failure_still_attempts_fill() {
     let mesh = mesh_row(5, 2);
     let warm_calls = std::cell::RefCell::new(0);
 
+    let (backoff, now) = test_fill_policy();
+
     fill_mesh_to_target_with(
         &mesh,
-        || true,
+        &backoff,
+        now,
+        usable_probe,
         || Ok(0),
         |_| Err("drain DB error".into()),
         |_m| {
@@ -867,7 +915,17 @@ fn fill_mesh_to_target_with_drain_failure_still_attempts_fill() {
 fn fill_mesh_to_target_with_returns_count_of_warmed_entries() {
     let mesh = mesh_row(6, 3);
 
-    let changes = fill_mesh_to_target_with(&mesh, || true, || Ok(0), |_| Ok(0), |_m| Ok(()));
+    let (backoff, now) = test_fill_policy();
+
+    let changes = fill_mesh_to_target_with(
+        &mesh,
+        &backoff,
+        now,
+        usable_probe,
+        || Ok(0),
+        |_| Ok(0),
+        |_m| Ok(()),
+    );
     assert_eq!(changes, 3, "3 Warmed responses = 3 changes");
 }
 
@@ -877,9 +935,12 @@ fn fill_mesh_to_target_with_returns_count_of_warmed_entries() {
 #[test]
 fn fill_mesh_to_target_with_aggregates_drain_and_warm_changes() {
     let mesh = mesh_row(7, 1);
+    let (backoff, now) = test_fill_policy();
     let changes = fill_mesh_to_target_with(
         &mesh,
-        || true,
+        &backoff,
+        now,
+        usable_probe,
         || Ok(0),
         |_| Ok(2), // drain removed 2 excess rows
         |_m| Ok(()),
@@ -896,9 +957,13 @@ fn fill_mesh_to_target_with_returns_zero_when_at_target() {
     let mesh = mesh_row(8, 2);
     let warm_calls = std::cell::RefCell::new(0);
 
+    let (backoff, now) = test_fill_policy();
+
     let changes = fill_mesh_to_target_with(
         &mesh,
-        || true,
+        &backoff,
+        now,
+        usable_probe,
         || Ok(2),
         |_| Ok(0),
         |_m| {
@@ -920,7 +985,16 @@ fn fill_mesh_to_target_with_returns_zero_when_at_target() {
 #[test]
 fn fill_mesh_to_target_with_returns_zero_when_target_is_zero() {
     let mesh = mesh_row(9, 0);
-    let changes = fill_mesh_to_target_with(&mesh, || true, || Ok(0), |_| Ok(0), |_m| Ok(()));
+    let (backoff, now) = test_fill_policy();
+    let changes = fill_mesh_to_target_with(
+        &mesh,
+        &backoff,
+        now,
+        usable_probe,
+        || Ok(0),
+        |_| Ok(0),
+        |_m| Ok(()),
+    );
     assert_eq!(changes, 0);
 }
 
@@ -958,9 +1032,13 @@ fn fill_mesh_to_target_with_does_nothing_for_a_non_repository_mesh() {
     let drain_calls = std::cell::RefCell::new(0);
     let warm_calls = std::cell::RefCell::new(0);
 
+    let (backoff, now) = test_fill_policy();
+
     let changes = fill_mesh_to_target_with(
         &mesh,
-        || false,
+        &backoff,
+        now,
+        unusable_probe,
         || Ok(0),
         |_| {
             *drain_calls.borrow_mut() += 1;
@@ -998,11 +1076,15 @@ fn fill_mesh_to_target_with_skips_the_probe_when_there_is_nothing_to_fill() {
     let probe_calls = std::cell::RefCell::new(0);
     let warm_calls = std::cell::RefCell::new(0);
 
+    let (backoff, now) = test_fill_policy();
+
     let changes = fill_mesh_to_target_with(
         &mesh,
+        &backoff,
+        now,
         || {
             *probe_calls.borrow_mut() += 1;
-            false // would veto every fill if it were consulted
+            unusable_probe() // would veto every fill if it were consulted
         },
         || Ok(2), // already at target
         |_| Ok(0),
@@ -1019,6 +1101,254 @@ fn fill_mesh_to_target_with_skips_the_probe_when_there_is_nothing_to_fill() {
     );
     assert_eq!(*warm_calls.borrow(), 0);
     assert_eq!(changes, 0);
+}
+
+// ---- the fill-failure backoff (issue #2602) ----
+//
+// A mesh whose `git worktree add` fails deterministically — a tracked path
+// Windows refuses to check out (`playbook app icon.png:Zone.Identifier`) —
+// used to fail on each worker tick: a `git worktree add`, a
+// `warm_worktrees` row and a WARN line per 30-second tick for as long as the
+// app stayed open. The backoff makes the mesh wait longer and longer between
+// attempts, and a mesh that recovers is filled again at once.
+
+/// One worker pass over a mesh, the way the pool worker runs it.
+///
+/// `head` is the repository's HEAD at this pass and `warm` is what the
+/// `git worktree add` does.
+fn fill_pass(
+    mesh: &db::WarmPoolMeshRow,
+    backoff: &FillBackoff,
+    now: Instant,
+    head: &str,
+    warm: &dyn Fn() -> Result<(), String>,
+) -> usize {
+    fill_mesh_to_target_with(
+        mesh,
+        backoff,
+        now,
+        || MeshRepoProbe {
+            usable: true,
+            head: Some(head.to_string()),
+        },
+        || Ok(0),
+        |_| Ok(0),
+        |_m| warm(),
+    )
+}
+
+/// The attempt interval grows with each consecutive failure, and the fill
+/// is not even attempted inside the interval.
+#[test]
+fn a_failing_fill_waits_longer_between_attempts() {
+    let mesh = mesh_row(2602, 1);
+    let backoff = FillBackoff::new();
+    let start = Instant::now();
+    let attempts = std::cell::RefCell::new(0usize);
+    let always_fails = || {
+        *attempts.borrow_mut() += 1;
+        Err("invalid path 'playbook app icon.png:Zone.Identifier'".to_string())
+    };
+
+    // Pass 1 — the failure the user needs to hear about.
+    let changes = fill_pass(&mesh, &backoff, start, "head-1", &always_fails);
+    assert_eq!(changes, 0, "a failed fill changes nothing");
+    assert_eq!(*attempts.borrow(), 1);
+    let record = backoff.failure(mesh.id).expect("the failure is recorded");
+    assert_eq!(record.failures, 1);
+    assert_eq!(record.interval, Duration::from_secs(30));
+
+    // Pass 2, 29 s in: still inside the window, so the doomed attempt is
+    // skipped and the pass reports no changes.
+    let changes = fill_pass(
+        &mesh,
+        &backoff,
+        start + Duration::from_secs(29),
+        "head-1",
+        &always_fails,
+    );
+    assert_eq!(changes, 0);
+    assert_eq!(
+        *attempts.borrow(),
+        1,
+        "the fill must not be attempted inside its backoff window"
+    );
+
+    // Pass 3, 30 s in: the window has passed, so the fill runs again — and
+    // the interval it now waits grows.
+    let changes = fill_pass(
+        &mesh,
+        &backoff,
+        start + Duration::from_secs(30),
+        "head-1",
+        &always_fails,
+    );
+    assert_eq!(changes, 0);
+    assert_eq!(
+        *attempts.borrow(),
+        2,
+        "the fill retries once the backoff window has passed"
+    );
+    let record = backoff.failure(mesh.id).expect("the failure is recorded");
+    assert_eq!(record.failures, 2);
+    assert_eq!(
+        record.interval,
+        Duration::from_secs(60),
+        "the attempt interval doubles"
+    );
+}
+
+/// The interval keeps growing across passes until it reaches the cap, and
+/// the mesh is attempted less and less often.
+#[test]
+fn the_attempt_interval_grows_across_worker_passes() {
+    let mesh = mesh_row(2604, 1);
+    let backoff = FillBackoff::new();
+    let start = Instant::now();
+    let attempts = std::cell::RefCell::new(0usize);
+    let always_fails = || {
+        *attempts.borrow_mut() += 1;
+        Err("git worktree add failed".to_string())
+    };
+
+    // Each pass runs at the moment the previous failure's interval ends, so
+    // each pass is a real attempt.
+    let mut now = start;
+    let mut expected_interval = Duration::from_secs(30);
+    for _ in 0..4 {
+        fill_pass(&mesh, &backoff, now, "head-1", &always_fails);
+        let record = backoff.failure(mesh.id).expect("the failure is recorded");
+        assert_eq!(record.interval, expected_interval);
+        expected_interval *= 2;
+        now += expected_interval / 2;
+    }
+
+    assert_eq!(
+        *attempts.borrow(),
+        4,
+        "every pass that lands after the interval is an attempt"
+    );
+}
+
+/// A successful fill clears the backoff, so the next deficit is filled
+/// without waiting.
+#[test]
+fn a_successful_fill_clears_the_backoff() {
+    let mesh = mesh_row(2603, 1);
+    let backoff = FillBackoff::new();
+    let start = Instant::now();
+    let failing = std::cell::RefCell::new(true);
+
+    fill_pass(&mesh, &backoff, start, "head-1", &|| {
+        if *failing.borrow() {
+            Err("git worktree add failed".to_string())
+        } else {
+            Ok(())
+        }
+    });
+    assert!(
+        backoff.failure(mesh.id).is_some(),
+        "the failed fill is recorded"
+    );
+
+    // The mesh recovers: the next attempt succeeds.
+    *failing.borrow_mut() = false;
+    let changes = fill_pass(
+        &mesh,
+        &backoff,
+        start + Duration::from_secs(30),
+        "head-1",
+        &|| Ok(()),
+    );
+    assert_eq!(changes, 1, "the recovered mesh is filled");
+    assert!(
+        backoff.failure(mesh.id).is_none(),
+        "a successful fill clears the backoff"
+    );
+
+    // And the next failure starts a fresh streak rather than continuing the
+    // old one.
+    *failing.borrow_mut() = true;
+    fill_pass(
+        &mesh,
+        &backoff,
+        start + Duration::from_secs(31),
+        "head-1",
+        &|| Err("git worktree add failed".to_string()),
+    );
+    let record = backoff.failure(mesh.id).expect("the failure is recorded");
+    assert_eq!(record.failures, 1);
+    assert_eq!(record.interval, Duration::from_secs(30));
+}
+
+/// The user's fix is a commit, and a commit moves the HEAD. The recorded
+/// failure described a repository that no longer exists, so the fill is
+/// attempted at once instead of waiting out the interval.
+#[test]
+fn a_changed_head_retries_at_once() {
+    let mesh = mesh_row(2605, 1);
+    let backoff = FillBackoff::new();
+    let start = Instant::now();
+    let attempts = std::cell::RefCell::new(0usize);
+
+    fill_pass(&mesh, &backoff, start, "head-1", &|| {
+        *attempts.borrow_mut() += 1;
+        Err("invalid path 'a:Zone.Identifier'".to_string())
+    });
+    assert_eq!(*attempts.borrow(), 1);
+
+    // One second later the HEAD has moved: the fill is retried at once.
+    let changes = fill_pass(
+        &mesh,
+        &backoff,
+        start + Duration::from_secs(1),
+        "head-2",
+        &|| {
+            *attempts.borrow_mut() += 1;
+            Ok(())
+        },
+    );
+    assert_eq!(changes, 1, "the repaired mesh is filled at once");
+    assert_eq!(
+        *attempts.borrow(),
+        2,
+        "a moved HEAD lifts the backoff — the user must not wait 30 s for a fix"
+    );
+}
+
+/// The pool's fill failure rides on the mesh's health surface (issue #2602).
+/// The backoff stopped the retry storm, but a backoff is not something a
+/// user can see — this is.
+#[test]
+fn fill_failure_for_mesh_reports_the_recorded_failure() {
+    let mesh = mesh_row(2606, 1);
+    let now = Instant::now();
+
+    FILL_BACKOFF.record_failure(
+        mesh.id,
+        "fingerprint",
+        "invalid path 'playbook app icon.png:Zone.Identifier'",
+        now,
+    );
+
+    let failure = fill_failure_for_mesh(mesh.id).expect("the failure is reported");
+    assert_eq!(
+        failure.reason,
+        "invalid path 'playbook app icon.png:Zone.Identifier'"
+    );
+    assert_eq!(failure.attempts, 1);
+    assert!(
+        failure.retry_in_seconds <= 30,
+        "the next attempt is at most the first interval away, got {}",
+        failure.retry_in_seconds
+    );
+
+    // A healthy mesh reports nothing.
+    assert!(fill_failure_for_mesh(mesh.id + 100_000).is_none());
+
+    // And the record goes away once the mesh recovers.
+    FILL_BACKOFF.record_success(mesh.id);
+    assert!(fill_failure_for_mesh(mesh.id).is_none());
 }
 
 /// The probe is the real thing, not a stub: a plain folder reads as

@@ -30,6 +30,23 @@ pub(crate) fn open(selected: &str) -> Result<Repository, git2::Error> {
 }
 
 pub fn resolve(selected: &str) -> Result<ProjectRepository, String> {
+    resolve_with_head(selected).map(|(project, _head)| project)
+}
+
+/// The project facts **and** the repository's HEAD commit, from one open.
+///
+/// Issue #2602: the warm pool's fill fingerprint needs to know whether the
+/// repository's content changed since the last failed fill, and the pool
+/// already opens the repository to decide whether the folder can back a
+/// worktree at all. One open serves both, so the fingerprint costs no extra
+/// repository open.
+///
+/// The HEAD is `None` when the repository has no commit to point at (an empty
+/// repository) — the caller treats that as "the content is unknown" rather
+/// than as a failure: the project facts are still valid.
+pub(crate) fn resolve_with_head(
+    selected: &str,
+) -> Result<(ProjectRepository, Option<git2::Oid>), String> {
     let folder = std::fs::canonicalize(crate::env::to_host_path(selected)).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             format!(
@@ -45,6 +62,7 @@ pub fn resolve(selected: &str) -> Result<ProjectRepository, String> {
     }
     let repo =
         open(selected).map_err(|e| format!("No working Git repository for {selected}: {e}"))?;
+    let head = crate::git::sha::resolve_sha(&repo, &crate::git::sha::ShaSource::LocalHead).ok();
     let root = repo
         .workdir()
         .ok_or_else(|| no_working_directory_reason(selected, &repo))?;
@@ -63,11 +81,14 @@ pub fn resolve(selected: &str) -> Result<ProjectRepository, String> {
         .map_err(|_| format!("Project folder {selected} is outside its Git working root"))?;
     let relative_folder = relative.to_string_lossy().replace('\\', "/");
     crate::env::validate_project_scope(&relative_folder)?;
-    Ok(ProjectRepository {
-        working_root: crate::env::canonical_host_path_string(&root),
-        relative_folder,
-        identity: repository_identity(&repo)?,
-    })
+    Ok((
+        ProjectRepository {
+            working_root: crate::env::canonical_host_path_string(&root),
+            relative_folder,
+            identity: repository_identity(&repo)?,
+        },
+        head,
+    ))
 }
 
 /// Why this repository offers no working directory.

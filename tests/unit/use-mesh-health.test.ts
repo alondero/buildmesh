@@ -44,6 +44,7 @@ const HEALTH_A = {
   has_upstream: true,
   is_drifted: false,
   base_branch_holder: null,
+  pool_fill_failure: null,
 };
 
 const HEALTH_DRIFTED = {

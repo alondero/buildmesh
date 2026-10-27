@@ -135,6 +135,8 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/services/pool_worker_tests.rs': 'services::pool_worker::tests',
   'src-tauri/src/services/transcript_reader/report_snapshot_tests.rs': 'services::transcript_reader::report_snapshot::tests',
   'src-tauri/src/services/warm_pool_tests.rs': 'services::warm_pool::tests',
+  'src-tauri/src/services/warm_pool_backoff_tests.rs': 'services::warm_pool_backoff::tests',
+  'src-tauri/src/services/mesh_folder_tests.rs': 'services::mesh_folder::tests',
   'src-tauri/src/commands/usage_tests.rs': 'commands::usage::tests',
   'src-tauri/src/services/usage/adapter_tests.rs': 'services::usage::adapter::tests',
   'src-tauri/src/services/usage/outcome_tests.rs': 'services::usage::outcome::tests',

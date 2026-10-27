@@ -12,6 +12,7 @@ import type { GitSyncResult } from '../../types/generated/GitSyncResult';
 import type { HoldingWorktree } from '../../types/generated/HoldingWorktree';
 import type { MeshGitStatic } from '../../types/generated/MeshGitStatic';
 import type { MeshHealth } from '../../types/generated/MeshHealth';
+import type { PoolFillFailure } from '../../types/generated/PoolFillFailure';
 import type { PendingWorktreeRemoval } from '../../types/generated/PendingWorktreeRemoval';
 import type { BlockingProcess } from '../../types/generated/BlockingProcess';
 import type { WorktreeCleanupRetryResult } from '../../types/generated/WorktreeCleanupRetryResult';
@@ -137,7 +138,7 @@ export const gitSync = (path: string) =>
 // Generated from the Rust structs in `src-tauri/src/models/mod.rs` (issue #404).
 // Doc-comments from the hand-written interfaces now live on the Rust side and
 // are picked up by the generated `.ts` files.
-export type { HoldingWorktree, MeshHealth };
+export type { HoldingWorktree, MeshHealth, PoolFillFailure };
 
 export const getMeshHealth = (meshId: number) =>
   _invoke<MeshHealth>('get_mesh_health', { meshId });

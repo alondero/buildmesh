@@ -81,7 +81,10 @@ use rusqlite::Connection;
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::Instant;
 use tauri::Emitter;
+
+use super::warm_pool_backoff::FillBackoff;
 
 /// Event name broadcast on every state transition that changes a mesh's
 /// pre-spawn pool *ready* count. Frontend `usePoolChanged` listens for
@@ -895,6 +898,28 @@ pub fn drain_and_fill_for_mesh(app: &tauri::AppHandle, mesh_id: i64) -> bool {
     fill_mesh_to_target(app, &mesh) > 0
 }
 
+/// The mesh's current fill failure, if the pool does not fill it.
+///
+/// Issue #2602: the backoff that stopped the retry storm left the pool
+/// broken but invisible — the user saw a log line and no surface. This is
+/// what the mesh's health surface shows instead: the reason the fill
+/// failed, how many attempts have failed, and how long until the next one.
+///
+/// `None` whenever the pool is healthy. The record survives for as long as
+/// the failure does: the backoff is in force until the mesh's HEAD or
+/// settings change or a fill succeeds.
+pub(crate) fn fill_failure_for_mesh(mesh_id: i64) -> Option<crate::models::PoolFillFailure> {
+    let record = FILL_BACKOFF.failure(mesh_id)?;
+    let remaining = record
+        .next_attempt
+        .saturating_duration_since(Instant::now());
+    Some(crate::models::PoolFillFailure {
+        reason: record.reason,
+        attempts: record.failures,
+        retry_in_seconds: remaining.as_secs(),
+    })
+}
+
 /// Meshes already reported as "not a git working repository" this app run
 /// (issue #2348). Keyed by `(mesh_id, path)` — not id alone — so a mesh whose
 /// folder is re-pointed gets its own line instead of being silently deduped
@@ -945,20 +970,73 @@ fn claim_non_repo_report(mesh_id: i64, path: &str) -> bool {
 /// from `post_spawn_maintenance` after a spawn that already cut a worktree, and
 /// it reports once per spawn rather than once per tick.
 pub(crate) fn mesh_repo_unusable(mesh: &db::WarmPoolMeshRow) -> bool {
-    let Err(reason) = crate::git::project::resolve(&mesh.path) else {
-        return false;
-    };
-    if claim_non_repo_report(mesh.id, &mesh.path) {
-        tracing::warn!(
-            "warm_pool: mesh {} ({}) cannot be opened as a git working \
-             repository; skipping pool fill and background sync (reported once \
-             per app run): {}",
-            mesh.id,
-            mesh.path,
-            reason
-        );
+    !probe_mesh_repo(mesh).usable
+}
+
+/// What the probe learned about the mesh's folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MeshRepoProbe {
+    /// `false` when the folder cannot back a worktree at all.
+    usable: bool,
+    /// The repository's HEAD, when it could be read — the content half of the
+    /// fill fingerprint (issue #2602).
+    head: Option<String>,
+}
+
+/// Probe the mesh's folder once: can it back a worktree, and what is its HEAD?
+///
+/// The HEAD rides along on the open the probe already makes. Issue #2602
+/// needs it to tell "the mesh's content changed" from "the mesh is still in
+/// the state that broke the last fill", and a second repository open to ask
+/// that question would cost more than the answer is worth.
+fn probe_mesh_repo(mesh: &db::WarmPoolMeshRow) -> MeshRepoProbe {
+    match crate::git::project::resolve_with_head(&mesh.path) {
+        Ok((_project, head)) => MeshRepoProbe {
+            usable: true,
+            head: head.map(|oid| oid.to_string()),
+        },
+        Err(reason) => {
+            if claim_non_repo_report(mesh.id, &mesh.path) {
+                tracing::warn!(
+                    "warm_pool: mesh {} ({}) cannot be opened as a git working \
+                     repository; skipping pool fill and background sync (reported once \
+                     per app run): {}",
+                    mesh.id,
+                    mesh.path,
+                    reason
+                );
+            }
+            MeshRepoProbe {
+                usable: false,
+                head: None,
+            }
+        }
     }
-    true
+}
+
+/// The app run's per-mesh fill-failure backoff (issue #2602).
+///
+/// In memory on purpose: the pool's bookkeeping is durable, its *retry
+/// policy* is not — a restart is a natural reset, and it is the
+/// moment a user who fixed their repository expects the pool to try again.
+static FILL_BACKOFF: Lazy<FillBackoff> = Lazy::new(FillBackoff::new);
+
+/// The fill's fingerprint: the inputs a fill failure depended on.
+///
+/// A recorded failure only describes the situation while these are
+/// unchanged. The repository's HEAD stands in for "the content the fill
+/// would check out": the tracked path that broke the checkout is part of the
+/// tree HEAD points at, so a commit that repairs it moves the HEAD and
+/// resets the backoff (issue #2602).
+fn fill_fingerprint(mesh: &db::WarmPoolMeshRow, head: Option<&str>) -> String {
+    format!(
+        "{}|{}|{}|{}|{}",
+        mesh.path,
+        mesh.base_ref,
+        mesh.pre_spawn_pool_size,
+        mesh.worktree_directory.as_deref().unwrap_or_default(),
+        head.unwrap_or_default()
+    )
 }
 
 /// Drain any excess, then fill a single mesh up to its `pre_spawn_pool_size`
@@ -976,7 +1054,7 @@ pub(crate) fn mesh_repo_unusable(mesh: &db::WarmPoolMeshRow) -> bool {
 ///
 /// `count`, `drain` and `warm_one` are passed as closures so the orchestration
 /// can be unit-tested without `tauri::AppHandle` (which is hard to mock) — the
-/// production caller passes the real `mesh_repo_unusable` /
+/// production caller passes the real `probe_mesh_repo` /
 /// `count_available_warm_for_mesh` / `drain_excess_warm_entries` /
 /// `warm_one_body` (the last two close over `app`); tests pass stubs that
 /// drive the drain + warm loop with controlled responses. `count` is `FnOnce`
@@ -984,13 +1062,21 @@ pub(crate) fn mesh_repo_unusable(mesh: &db::WarmPoolMeshRow) -> bool {
 /// See the `fill_mesh_to_target_*` tests at the bottom of this module
 /// (issue #634).
 ///
-/// `repo_usable` is the issue #2348 precondition for the warm loop, and it is
+/// `probe` is the issue #2348 precondition for the warm loop, and it is
 /// consulted only when there is a deficit to fill: a mesh already at target (or
 /// with the pool off) has no `git worktree add` that could fail, so it must not
 /// pay for the probe — on an unreachable drive that open is the expensive call.
 /// When it does answer "not a repository", the drain's changes are still
 /// reported and no worktree is ever cut, which is what stops the retry-forever
 /// WARN flood #2348 was filed for.
+///
+/// `backoff` and `now` are the issue #2602 retry policy. A mesh whose
+/// `git worktree add` fails deterministically must not be retried on every
+/// worker tick: the backoff makes the next attempt wait 30 s, then 60 s, then
+/// 120 s, … up to 30 minutes, and the wait is lifted as soon as the mesh's
+/// HEAD or settings change (the fingerprint) or a fill succeeds. `now` is the
+/// clock the policy is measured against, so a test can drive several passes
+/// without waiting for real time.
 ///
 /// Trade-off of the single sample: the running total only knows about the cuts
 /// this call makes, so a concurrent `try_claim` that drains an `available` row
@@ -1002,7 +1088,9 @@ pub(crate) fn mesh_repo_unusable(mesh: &db::WarmPoolMeshRow) -> bool {
 /// nothing else touches the pool during a fill.
 fn fill_mesh_to_target_with(
     mesh: &db::WarmPoolMeshRow,
-    repo_usable: impl FnOnce() -> bool,
+    backoff: &FillBackoff,
+    now: Instant,
+    probe: impl FnOnce() -> MeshRepoProbe,
     count: impl FnOnce() -> Result<i64, String>,
     drain: impl FnOnce(&db::WarmPoolMeshRow) -> Result<usize, String>,
     warm_one: impl Fn(&db::WarmPoolMeshRow) -> Result<(), String>,
@@ -1055,9 +1143,29 @@ fn fill_mesh_to_target_with(
     // bookkeeping plus `git worktree remove` on rows this mesh already owns,
     // it drops the row first, and it converges in one pass, so it cannot
     // produce a repeating flood.
-    if available < target && !repo_usable() {
+    if available >= target {
+        // The pool is whole. Any recorded fill failure is stale — the mesh
+        // recovered without the fill — so the backoff is dropped and the
+        // next deficit is filled without waiting (issue #2602).
+        report_fill_recovered(mesh, backoff);
         return changes;
     }
+    let probe = probe();
+    if !probe.usable {
+        return changes;
+    }
+    // Issue #2602: the retry gate. The fingerprint names the inputs the
+    // failure depended on, so a mesh whose HEAD or settings changed is
+    // retried at once while a mesh whose fingerprint still matches waits
+    // out its interval.
+    let fingerprint = fill_fingerprint(mesh, probe.head.as_deref());
+    if !backoff.allows_attempt(mesh.id, &fingerprint, now) {
+        // Inside the backoff window: the attempt is skipped silently and
+        // the pass reports no changes, so the worker keeps its slow tick
+        // instead of paying for a doomed `git worktree add`.
+        return changes;
+    }
+    let mut failed = false;
     while available < target {
         match warm_one(mesh) {
             Ok(()) => {
@@ -1065,17 +1173,64 @@ fn fill_mesh_to_target_with(
                 changes += 1;
             }
             Err(e) => {
-                tracing::warn!(
-                    "warm_pool: fill failed for mesh {} ({}): {}",
-                    mesh.id,
-                    mesh.path,
-                    e
-                );
+                failed = true;
+                report_fill_failure(mesh, backoff, &fingerprint, &e, now);
                 break;
             }
         }
     }
+    if !failed {
+        report_fill_recovered(mesh, backoff);
+    }
     changes
+}
+
+/// Report a failed fill (issue #2602).
+///
+/// The first failure is a WARN — it is the line that tells the user their
+/// pool is broken. Later failures are only reported while the retry interval
+/// is still growing; once it reaches the cap it stops changing and the
+/// retries go quiet, so a mesh that stays broken produces a handful of lines
+/// instead of one per 30-second tick.
+fn report_fill_failure(
+    mesh: &db::WarmPoolMeshRow,
+    backoff: &FillBackoff,
+    fingerprint: &str,
+    reason: &str,
+    now: Instant,
+) {
+    let report = backoff.record_failure(mesh.id, fingerprint, reason, now);
+    if report.first {
+        tracing::warn!(
+            "warm_pool: fill failed for mesh {} ({}): {}; retrying in {}s",
+            mesh.id,
+            mesh.path,
+            reason,
+            report.interval.as_secs()
+        );
+    } else if report.interval_changed {
+        tracing::info!(
+            "warm_pool: fill still failing for mesh {} ({}): {}; attempt {} failed, \
+             retrying in {}s",
+            mesh.id,
+            mesh.path,
+            reason,
+            report.failures,
+            report.interval.as_secs()
+        );
+    }
+}
+
+/// Report that the mesh's fill recovered (issue #2602), dropping its
+/// backoff so the next deficit is filled without waiting.
+fn report_fill_recovered(mesh: &db::WarmPoolMeshRow, backoff: &FillBackoff) {
+    if backoff.record_success(mesh.id) {
+        tracing::info!(
+            "warm_pool: fill recovered for mesh {} ({}); the retry backoff is cleared",
+            mesh.id,
+            mesh.path
+        );
+    }
 }
 
 /// Fill a single mesh up to target. Returns the number of state-changing
@@ -1098,10 +1253,12 @@ fn fill_mesh_to_target(app: &tauri::AppHandle, mesh: &db::WarmPoolMeshRow) -> us
     }
     fill_mesh_to_target_with(
         mesh,
+        &FILL_BACKOFF,
+        Instant::now(),
         // Issue #2348: a folder that isn't a git working repository can never
         // be filled. Consulted lazily (only when a fill is due) — see
         // `fill_mesh_to_target_with`.
-        || !mesh_repo_unusable(mesh),
+        || probe_mesh_repo(mesh),
         // Sampled once per fill (issue #1752) — read after the drain so a
         // downsize is reflected.
         || {

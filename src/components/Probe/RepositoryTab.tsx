@@ -69,6 +69,7 @@ import {
   type GitRepoPruneInfo,
   type HoldingWorktree,
   type MeshHealth,
+  type PoolFillFailure,
   type WorktreeInfo,
 } from '../../lib/tauri';
 import { LoadingState, RefreshControl } from '../shared/Spinner';
@@ -411,7 +412,7 @@ function RepositoryContents() {
       <ProbeSection
         title="Health and recovery"
         testId="repository-health-section"
-        description="Drift, a held base branch, and unpushed commits in the project root."
+        description="Drift, a held base branch, unpushed commits in the project root, and a pre-spawn pool that cannot fill."
       >
         <ProbeScopeNote>
           Acts on the project root <code className="break-all">{activeMeshPath}</code>, not the
@@ -419,18 +420,29 @@ function RepositoryContents() {
         </ProbeScopeNote>
         {health === null ? (
           <LoadingState label="Checking repository health…" />
-        ) : hasHealthSignal ? (
-          <HealthBlock
-            health={health}
-            inFlight={recoveryInFlight}
-            onRestore={restore}
-            onFree={free}
-            message={recoveryMessage}
-          />
         ) : (
-          <p className="text-xs text-text-muted" data-testid="repository-healthy">
-            No drift, no held base branch, and nothing unpushed.
-          </p>
+          <>
+            {/* Issue #2602: the pool's fill failure lives on the mesh's health
+                surface, so a broken pool is something the user can see instead
+                of something they have to find in the log. One entry, not a
+                stream — the backoff is what stops the repeats. */}
+            {health.pool_fill_failure && (
+              <PoolFillFailureNotice failure={health.pool_fill_failure} />
+            )}
+            {hasHealthSignal ? (
+              <HealthBlock
+                health={health}
+                inFlight={recoveryInFlight}
+                onRestore={restore}
+                onFree={free}
+                message={recoveryMessage}
+              />
+            ) : (
+              <p className="text-xs text-text-muted" data-testid="repository-healthy">
+                No drift, no held base branch, and nothing unpushed.
+              </p>
+            )}
+          </>
         )}
       </ProbeSection>
 
@@ -650,6 +662,44 @@ interface HealthBlockProps {
   onRestore: () => void;
   onFree: (holder: HoldingWorktree) => void;
   message: string | null;
+}
+
+interface PoolFillFailureNoticeProps {
+  failure: PoolFillFailure;
+}
+
+/**
+ * The warm pool's fill failure, on the mesh's health surface (issue #2602).
+ *
+ * A mesh whose `git worktree add` fails deterministically — a tracked path
+ * Windows refuses to check out, for instance — does not fill its pre-spawn
+ * pool. The pool's backoff stops the retry storm, but a backoff is not
+ * something a user can see: this line is. It says what failed, how many
+ * attempts have failed, and when the next one is due, so the user knows
+ * their pool is broken before they wonder why spawns are slow.
+ *
+ * It is rendered once, next to the other health signals, and it disappears
+ * on its own once the mesh's HEAD or settings change or a fill succeeds.
+ */
+function PoolFillFailureNotice({ failure }: PoolFillFailureNoticeProps) {
+  const attempts = failure.attempts === 1 ? '1 attempt' : `${failure.attempts} attempts`;
+  const retry =
+    failure.retry_in_seconds > 0
+      ? `retrying in ${failure.retry_in_seconds}s`
+      : 'retrying shortly';
+  return (
+    <div
+      className="rounded-md border border-status-warning/40 bg-status-warning/5 p-2"
+      data-testid="repository-pool-fill-failure"
+    >
+      <p className="text-xs text-status-warning font-medium">
+        Pre-spawn pool cannot fill
+      </p>
+      <p className="text-xs text-text-secondary break-words">
+        {failure.reason} — {attempts} failed, {retry}.
+      </p>
+    </div>
+  );
 }
 
 /**

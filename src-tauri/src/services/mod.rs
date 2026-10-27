@@ -19,6 +19,9 @@ pub(crate) mod http_client;
 pub mod legacy_retirement;
 pub mod mcode_session;
 pub mod mesh;
+/// The "this mesh's folder is gone" marker shared by the Git commands and
+/// the frontend (issue #2602).
+pub(crate) mod mesh_folder;
 pub mod muse_sessions;
 pub mod muse_watcher;
 pub mod opencode_oauth;
@@ -33,6 +36,8 @@ pub mod transcript_paths;
 pub mod transcript_reader;
 pub mod usage;
 pub mod warm_pool;
+/// The warm pool's per-mesh fill-failure backoff (issue #2602).
+pub(crate) mod warm_pool_backoff;
 /// `advapi32!CredReadW` / `CredWriteW` / `CredDeleteW` FFI surface — only
 /// compiled on Windows; non-Windows callers see "not available" via the
 /// `NoCredential` return path inside `services::usage` and
