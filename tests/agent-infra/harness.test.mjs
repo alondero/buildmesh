@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { changedPaths, completion, fingerprint, identityMismatch, runGate, runIdentity, scopePaths, verify, waitForVerify } from '../../scripts/harness.mjs';
+import { changedPaths, completion, contentTree, fingerprint, identityMismatch, runGate, runIdentity, scopePaths, verify, waitForVerify } from '../../scripts/harness.mjs';
 import { AGENT_TEST_GATE_MINUTES, executedTests, formatDiffPaths, gateReads, planGates } from '../../scripts/harness-plan.mjs';
 import { acquireSlot, heavyGateEnv, heavyGateLimit, runPlan, slotHolders } from '../../scripts/harness-lanes.mjs';
 import { RUST_PATH_INCLUDES, fastGates, frontendInScope, lintablePaths, pathIncludeDrift, planChecks, rustModule, rustScope } from '../../scripts/harness-check.mjs';
@@ -830,6 +830,92 @@ test('a review round can read its findings from a file', t => {
   assert.deepEqual(JSON.parse(result.stdout).recorded.findings, ['Owner state is stale', 'Owner update is missing']);
 });
 
+// A verdict that reaches the task by any route belongs in the ledger. The
+// `update --spec` path existed before the ledger and still writes the task's
+// review field, so leaving it as a second writer is how a task ends up with a
+// recorded APPROVE and an empty ledger: a follow-up reviewer then reads
+// "no previous review" and repeats the whole change (issue #2630).
+test('a verdict recorded through update --spec appends a round to the ledger', t => {
+  const fixture = repo(t);
+  fixture.start();
+  fixture.put('.task.json', JSON.stringify({ review: { reviewer: 'independent fixture', verdict: 'REQUEST_CHANGES', findings: ['Owner state is stale'], summary: 'Repair required' } }));
+  const updated = fixture.cli('update', '--spec', '.task.json');
+  assert.equal(updated.status, 0, updated.stderr);
+  const shown = JSON.parse(fixture.cli('review', '--show').stdout);
+  assert.equal(shown.rounds, 1, 'the round is in the ledger, not only in the task');
+  assert.equal(shown.last.verdict, 'REQUEST_CHANGES');
+  assert.equal(shown.last.reviewer, 'independent fixture');
+  assert.deepEqual(shown.outstanding, ['Owner state is stale']);
+});
+
+// A read that reports success while the write it was combined with is
+// discarded loses the round without an error, and the loss surfaces much later
+// as an unexplained `finish` block.
+test('review --show refuses to be combined with a verdict', t => {
+  const fixture = repo(t);
+  fixture.start();
+  const combined = fixture.cli('review', '--show', '--verdict', 'APPROVE', '--reviewer', 'reviewer', '--summary', 'approved');
+  assert.notEqual(combined.status, 0, 'the combination is rejected, not silently read');
+  assert.match(combined.stderr, /--show only reads the ledger/);
+  assert.match(combined.stderr, /--verdict/);
+  const shown = JSON.parse(fixture.cli('review', '--show').stdout);
+  assert.equal(shown.rounds, 0);
+  assert.equal(shown.last, null);
+  assert.equal(JSON.parse(readFileSync(join(fixture.cwd, '.harness/active-task.json'))).review ?? null, null);
+});
+
+// The reviewer and the implementer are separate processes, and the repo
+// deliberately gives them different environments: `scripts/review-checkout.mjs`
+// sets its own CARGO_TARGET_DIR, and a task-local CARGO_TARGET_DIR is the
+// documented way to verify concurrent worktrees. An approval bound to the
+// environment-bound fingerprint could therefore not match a receipt
+// produced elsewhere: the task recorded an APPROVE and `finish` reported the
+// APPROVE missing. The approval is bound to the code it read.
+test('an approval recorded in another environment still covers the verified tree', t => {
+  const fixture = repo(t);
+  const task = fixture.start();
+  fixture.put('src/owner.ts', 'export const owner = 2;\n');
+  const gatePlan = taskPlan(fixture, task);
+  const tree = fingerprint(fixture.cwd, task.base);
+  fixture.put('.harness/receipt.json', JSON.stringify({ root: fixture.cwd, taskId: task.id, base: task.base, tree, contentTree: contentTree(fixture.cwd), full: false, gatePlan, gates: gatePlan.map(gate => ({ id: gate.id, outcome: 'PASS' })), outcome: 'PASS', runIdentity: runIdentity(fixture.cwd, task.base) }));
+  fixture.put('.harness/active-task.json', JSON.stringify({ ...task, evidence: ['Observed the owner state'], evidenceTree: tree }));
+  // The reviewer runs somewhere else: a different target directory is enough
+  // to move the environment-bound tree hash.
+  const recorded = fixture.run(['review', '--verdict', 'APPROVE', '--reviewer', 'independent reviewer', '--summary', 'Approved the current change'], { CARGO_TARGET_DIR: join(fixture.cwd, 'other-target') });
+  assert.equal(recorded.status, 0, recorded.stderr);
+  const state = JSON.parse(readFileSync(join(fixture.cwd, '.harness/active-task.json')));
+  assert.notEqual(state.reviewTree, tree, 'the two environments produce different tree hashes');
+  assert.equal(state.reviewContentTree, contentTree(fixture.cwd), 'the same code, bound by content');
+  assert.equal(completion(fixture.cwd).outcome, 'PASS');
+  // The difference is reported rather than hidden: "the approval is missing"
+  // and "the approval was recorded elsewhere" are different repairs.
+  const status = JSON.parse(fixture.cli('status').stdout);
+  assert.equal(status.review.verdict, 'APPROVE');
+  assert.equal(status.review.coversReceipt, true);
+  assert.ok(status.review.environment.some(entry => /CARGO_TARGET_DIR/.test(entry)), JSON.stringify(status.review.environment));
+});
+
+// The approval covers the code. An edit after the approval is a different
+// tree, and the reason says which precondition is missing.
+test('an approval does not cover code that changed after it was recorded', t => {
+  const fixture = repo(t);
+  const task = fixture.start();
+  fixture.put('src/owner.ts', 'export const owner = 2;\n');
+  const gatePlan = taskPlan(fixture, task);
+  const tree = fingerprint(fixture.cwd, task.base);
+  fixture.put('.harness/receipt.json', JSON.stringify({ root: fixture.cwd, taskId: task.id, base: task.base, tree, contentTree: contentTree(fixture.cwd), full: false, gatePlan, gates: gatePlan.map(gate => ({ id: gate.id, outcome: 'PASS' })), outcome: 'PASS', runIdentity: runIdentity(fixture.cwd, task.base) }));
+  fixture.put('.harness/active-task.json', JSON.stringify({ ...task, evidence: ['Observed the owner state'], evidenceTree: tree }));
+  assert.equal(fixture.cli('review', '--verdict', 'APPROVE', '--reviewer', 'independent fixture', '--summary', 'Approved the current change').status, 0);
+  assert.equal(completion(fixture.cwd).outcome, 'PASS');
+  fixture.put('src/owner.ts', 'export const owner = 3;\n');
+  const gatePlanAfter = taskPlan(fixture, task);
+  const treeAfter = fingerprint(fixture.cwd, task.base);
+  fixture.put('.harness/receipt.json', JSON.stringify({ root: fixture.cwd, taskId: task.id, base: task.base, tree: treeAfter, contentTree: contentTree(fixture.cwd), full: false, gatePlan: gatePlanAfter, gates: gatePlanAfter.map(gate => ({ id: gate.id, outcome: 'PASS' })), outcome: 'PASS', runIdentity: runIdentity(fixture.cwd, task.base) }));
+  fixture.put('.harness/active-task.json', JSON.stringify({ ...JSON.parse(readFileSync(join(fixture.cwd, '.harness/active-task.json'))), evidenceTree: treeAfter }));
+  assert.equal(completion(fixture.cwd).outcome, 'BLOCKED');
+  assert.match(completion(fixture.cwd).reason, /does not cover the verified code/);
+});
+
 test('a recorded verdict keeps the completion guards intact', t => {
   const fixture = repo(t);
   const task = fixture.start();
@@ -847,17 +933,16 @@ test('a recorded approval is bound to the tree it was recorded for', t => {
   const task = fixture.start();
   // A receipt for the current tree with acceptance evidence but no review, so
   // the only thing that can make the task completable is the recorded verdict.
-  const tree = fingerprint(fixture.cwd, task.base);
-  const writeReceipt = () => {
+  const recordReceipt = () => {
     const current = fingerprint(fixture.cwd, task.base);
     const plan = taskPlan(fixture, task);
-    fixture.put('.harness/receipt.json', JSON.stringify({ root: fixture.cwd, taskId: task.id, base: task.base, tree: current, full: false, gatePlan: plan, gates: plan.map(gate => ({ id: gate.id, outcome: 'PASS' })), outcome: 'PASS' }));
+    fixture.put('.harness/receipt.json', JSON.stringify({ root: fixture.cwd, taskId: task.id, base: task.base, tree: current, contentTree: contentTree(fixture.cwd), full: false, gatePlan: plan, gates: plan.map(gate => ({ id: gate.id, outcome: 'PASS' })), outcome: 'PASS' }));
     // Keep whatever the command recorded; only the evidence and the receipt
     // are refreshed for the new tree.
     const state = JSON.parse(readFileSync(join(fixture.cwd, '.harness/active-task.json')));
     fixture.put('.harness/active-task.json', JSON.stringify({ ...state, evidence: ['Observed the owner state'], evidenceTree: current }));
   };
-  writeReceipt();
+  recordReceipt();
   assert.equal(completion(fixture.cwd).outcome, 'BLOCKED');
   assert.match(completion(fixture.cwd).reason, /independent APPROVE/);
   assert.equal(fixture.cli('review', '--verdict', 'APPROVE', '--reviewer', 'independent fixture', '--summary', 'Approved the current change').status, 0);
@@ -867,7 +952,7 @@ test('a recorded approval is bound to the tree it was recorded for', t => {
   // A later edit is a different tree. With a fresh receipt and fresh
   // acceptance evidence for it, the old approval is what still fails.
   fixture.put('src/owner.ts', 'export const owner = 3;\n');
-  writeReceipt();
+  recordReceipt();
   assert.equal(completion(fixture.cwd).outcome, 'BLOCKED');
   assert.match(completion(fixture.cwd).reason, /independent APPROVE/);
 });

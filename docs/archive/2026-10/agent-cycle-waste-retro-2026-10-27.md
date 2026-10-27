@@ -168,6 +168,8 @@ refused.
 | [#2622](https://github.com/alondero/buildmesh/issues/2622) | A browser behaviour has no repo-owned scenario, so three separate review rounds each wrote their own throwaway harness. |
 | [#2623](https://github.com/alondero/buildmesh/issues/2623) | 3,621 one-call-at-a-time `gh` round trips cost 18 hours of agent wall-clock. |
 | [#2624](https://github.com/alondero/buildmesh/issues/2624) | A circuit spawn attempt that never writes its result file runs for hours while the gate waits. The gh2599 implementer attempt is one. |
+| [#2626](https://github.com/alondero/buildmesh/issues/2626) | A Windows rename race in `managed_config::tests::concurrent_writes_do_not_share_a_temp_name` fails intermittently. Filed while verifying the review-ledger change, not by this retro's analysis. |
+| [#2628](https://github.com/alondero/buildmesh/issues/2628) | The Rust wall-clock budget fails a verification on a machine running concurrent agents. The budget is the defect, not the symptom, so it was filed rather than suppressed. |
 
 ## Not covered
 

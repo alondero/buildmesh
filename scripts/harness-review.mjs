@@ -21,9 +21,12 @@
 //
 // Recording a round does not weaken the completion guards. The verdict is
 // written to the same `task.review` field `update --spec` writes, and the
-// reviewed tree is the same fingerprint `finish` compares against the receipt:
-// `completion()` refuses a task whose `reviewTree` is not the receipt's tree,
-// so an approval covers the tree it was recorded for.
+// reviewed code is bound by a content tree that `completion()` compares with
+// the receipt's, so an approval covers the code it was recorded for. The
+// binding is the code and not the environment: the reviewer and the
+// implementer do not share a machine, and an approval bound to an
+// environment-bound fingerprint would not match a receipt produced
+// elsewhere.
 //
 // Usage:
 //   npm run harness -- review --verdict <APPROVE|REQUEST_CHANGES|BLOCKED>
@@ -31,17 +34,14 @@
 //       [--findings-file <path>]
 //   npm run harness -- review --show
 
-import { execFileSync } from 'node:child_process';
-import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
+import { appendFileSync, existsSync, lstatSync, readFileSync, readlinkSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { event, git, readJson, saveJson, statePath, taskAt } from './harness-state.mjs';
 
 export const REVIEW_USAGE = 'review --verdict <APPROVE|REQUEST_CHANGES|BLOCKED> --reviewer <name> --summary <text> [--finding <text>]... [--findings-file <path>] | review --show';
 
 const VERDICTS = ['APPROVE', 'REQUEST_CHANGES', 'BLOCKED'];
-const statePath = (root, name) => join(root, '.harness', name);
-const git = (root, ...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
-const readJson = (path) => (existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : null);
 
 // A path's content at a point in time. The repair scope is a difference of
 // content, not of commits: a review usually lands on an uncommitted tree, so
@@ -57,24 +57,6 @@ function contentHash(root, path) {
   } catch {
     return 'absent';
   }
-}
-
-function saveJson(path, value) {
-  mkdirSync(dirname(path), { recursive: true });
-  const temporary = `${path}.${randomUUID()}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`);
-  renameSync(temporary, path);
-}
-
-function event(root, value) {
-  mkdirSync(statePath(root, ''), { recursive: true });
-  appendFileSync(statePath(root, 'events.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), ...value })}\n`);
-}
-
-function taskAt(root) {
-  const task = readJson(statePath(root, 'active-task.json'));
-  if (task && task.root !== root) throw new Error('BLOCKED: task belongs to a different worktree.');
-  return task;
 }
 
 // The ledger is append-only: a round is history, and rewriting history is how a
@@ -123,13 +105,14 @@ function repairScope(root, last, changedPaths, base) {
 // concluded, what is still outstanding, what changed since, and which command
 // to run. The scoped check is named here because the expensive default (the
 // full suite, run by hand) is what the gh2599 rounds actually did.
-export function reviewContext(root, { fingerprint, changedPaths } = {}) {
+export function reviewContext(root, { fingerprint, changedPaths, contentTree, runIdentity, identityMismatch } = {}) {
   const task = taskAt(root);
   // With no active task there is no ledger to show: a worktree's rounds
   // belong to the task that recorded them.
   const rounds = task ? readRounds(root, task.id) : [];
   const last = rounds.at(-1) ?? null;
   const base = task?.base ?? null;
+  const code = contentTree ? contentTree(root) : null;
   return {
     taskId: task?.id ?? null,
     base,
@@ -143,12 +126,18 @@ export function reviewContext(root, { fingerprint, changedPaths } = {}) {
           findings: last.findings ?? [],
           head: last.head,
           tree: last.tree,
+          contentTree: last.contentTree ?? null,
           scope: last.scope ?? [],
         }
       : null,
     outstanding: outstandingFindings(rounds),
     repairScope: repairScope(root, last, changedPaths, base),
     currentTree: task?.base && fingerprint ? fingerprint(root, task.base) : null,
+    // The code the last round read, and the code now. Equal means the
+    // approval still covers the tree; different means the round reviewed
+    // something else.
+    currentContentTree: code,
+    environment: last && last.identity && identityMismatch && runIdentity ? identityMismatch(last.identity, runIdentity(root, task?.base)) : [],
     commands: {
       scopedCheck: base ? `npm run harness -- check --base ${base}` : 'npm run harness -- check --base <base>',
       verify: 'npm run verify',
@@ -174,15 +163,16 @@ function readFindings(root, options) {
 }
 
 // Record one review round. The verdict lands in the same task field `update
-// --spec` writes, and the reviewed tree is the same fingerprint `finish`
-// compares against the receipt, so `completion()` still holds the guards it
-// held before this command existed.
-export function recordReview(root, options, { fingerprint, changedPaths } = {}) {
+// --spec` writes, and the reviewed code is bound by a content tree, so
+// `completion()` still holds the guards it held before this command existed:
+// the approval covers the code it was recorded for, whether or not the
+// reviewer shared the implementer's environment.
+export function recordReview(root, options, { fingerprint, changedPaths, contentTree, runIdentity, identityMismatch } = {}) {
   const task = taskAt(root);
   if (!task) throw new Error('BLOCKED: no active task. Start one with npm run harness -- start --spec <json>.');
   if (task.phase === 'complete') throw new Error('BLOCKED: the task is already complete.');
   if (!task.base) throw new Error('BLOCKED: the task has no base commit.');
-  const verdict = String(options.verdict ?? '').toUpperCase();
+  const verdict = String(options.verdict ?? '').trim().toUpperCase();
   if (!VERDICTS.includes(verdict)) throw new Error(`--verdict must be one of ${VERDICTS.join(', ')}.`);
   const reviewer = String(options.reviewer ?? '').trim();
   if (!reviewer) throw new Error('--reviewer is required.');
@@ -192,6 +182,8 @@ export function recordReview(root, options, { fingerprint, changedPaths } = {}) 
   if (verdict === 'APPROVE' && findings.length) throw new Error('An APPROVE cannot carry findings. Record REQUEST_CHANGES with the findings instead.');
 
   const tree = fingerprint(root, task.base);
+  const code = contentTree ? contentTree(root) : null;
+  const identity = runIdentity ? runIdentity(root, task.base) : null;
   const head = git(root, 'rev-parse', 'HEAD').trim();
   const scope = changedPaths ? changedPaths(root, task.base) : [];
   const round = {
@@ -205,15 +197,24 @@ export function recordReview(root, options, { fingerprint, changedPaths } = {}) 
     base: task.base,
     head,
     tree,
+    contentTree: code,
+    identity,
     scope,
     contents: Object.fromEntries(scope.map(path => [path, contentHash(root, path)])),
   };
 
+  // The round is appended before the verdict is written. The ledger is the
+  // record of what was reviewed, so it must not be the thing that is missing
+  // when the write is interrupted: a round without a task verdict blocks
+  // completion with a verdict-shaped reason, while a verdict without a round
+  // is the divergence this command exists to remove (issue #2630).
+  appendFileSync(statePath(root, 'reviews.jsonl'), `${JSON.stringify(round)}\n`);
   task.review = { reviewer, summary, verdict, findings };
   task.reviewTree = tree;
+  if (code) task.reviewContentTree = code;
+  if (identity) task.reviewIdentity = identity;
   saveJson(statePath(root, 'active-task.json'), task);
-  appendFileSync(statePath(root, 'reviews.jsonl'), `${JSON.stringify(round)}\n`);
   event(root, { type: 'review', taskId: task.id, round: round.round, reviewer, verdict, findings: findings.length, tree, head });
 
-  return { recorded: round, context: reviewContext(root, { fingerprint, changedPaths }) };
+  return { recorded: round, context: reviewContext(root, { fingerprint, changedPaths, contentTree, runIdentity, identityMismatch }) };
 }
