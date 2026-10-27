@@ -47,8 +47,9 @@ review result is recorded with `npm run harness -- review` (below), which
 carries the reviewer, findings, summary and an explicit
 APPROVE/REQUEST_CHANGES/BLOCKED verdict. Completion requires APPROVE with no
 unresolved findings.
-Acceptance evidence and the approval are bound to the tree when recorded;
-editing code requires recording them again.
+Acceptance evidence is bound to the environment-bound fingerprint when it is
+recorded; the approval is bound to the code it was recorded for. Editing code
+requires recording both again.
 
 ```json
 {

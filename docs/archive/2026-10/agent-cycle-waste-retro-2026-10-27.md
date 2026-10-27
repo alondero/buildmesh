@@ -154,9 +154,9 @@ state instead of re-reading the whole change. The review skill and the harness
 reference name the command and the scoped check.
 
 The completion guards are unchanged: the verdict lands in the same `task.review`
-field `update --spec` writes, the reviewed tree is the same fingerprint `finish`
-compares against the receipt, and an approval that still carries findings is
-refused.
+field `update --spec` writes, the reviewed code is bound by a content tree that
+`finish` compares against the receipt's, and an approval that still carries
+findings is refused.
 
 ## Filed
 

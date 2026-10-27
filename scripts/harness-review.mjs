@@ -162,6 +162,26 @@ function readFindings(root, options) {
   return [...new Set(findings)];
 }
 
+// The one rule for a review payload: the shape, and the verdict's own
+// constraint. Both writers of a verdict use it — the `review` command and the
+// `review` field of an `update --spec` — so a payload the update accepts is a
+// payload the ledger accepts, and a payload the ledger refuses is refused
+// before anything is written. Two copies of this rule are how a command ends
+// up accepting one payload and refusing another.
+export function validateReview({ verdict, reviewer, summary, findings } = {}) {
+  const normalized = String(verdict ?? '').trim().toUpperCase();
+  if (!VERDICTS.includes(normalized)) throw new Error(`--verdict must be one of ${VERDICTS.join(', ')}.`);
+  const who = String(reviewer ?? '').trim();
+  if (!who) throw new Error('--reviewer is required.');
+  const note = String(summary ?? '').trim();
+  if (!note) throw new Error('--summary is required.');
+  const found = findings === undefined ? [] : findings;
+  if (!Array.isArray(found)) throw new Error('Findings must be an array of strings.');
+  if (found.some(item => typeof item !== 'string')) throw new Error('Findings must be an array of strings.');
+  if (normalized === 'APPROVE' && found.length) throw new Error('An APPROVE cannot carry findings. Record REQUEST_CHANGES with the findings instead.');
+  return { verdict: normalized, reviewer: who, summary: note, findings: found };
+}
+
 // Record one review round. The verdict lands in the same task field `update
 // --spec` writes, and the reviewed code is bound by a content tree, so
 // `completion()` still holds the guards it held before this command existed:
@@ -172,14 +192,7 @@ export function recordReview(root, options, { fingerprint, changedPaths, content
   if (!task) throw new Error('BLOCKED: no active task. Start one with npm run harness -- start --spec <json>.');
   if (task.phase === 'complete') throw new Error('BLOCKED: the task is already complete.');
   if (!task.base) throw new Error('BLOCKED: the task has no base commit.');
-  const verdict = String(options.verdict ?? '').trim().toUpperCase();
-  if (!VERDICTS.includes(verdict)) throw new Error(`--verdict must be one of ${VERDICTS.join(', ')}.`);
-  const reviewer = String(options.reviewer ?? '').trim();
-  if (!reviewer) throw new Error('--reviewer is required.');
-  const summary = String(options.summary ?? '').trim();
-  if (!summary) throw new Error('--summary is required.');
-  const findings = readFindings(root, options);
-  if (verdict === 'APPROVE' && findings.length) throw new Error('An APPROVE cannot carry findings. Record REQUEST_CHANGES with the findings instead.');
+  const { verdict, reviewer, summary, findings } = validateReview({ verdict: options.verdict, reviewer: options.reviewer, summary: options.summary, findings: readFindings(root, options) });
 
   const tree = fingerprint(root, task.base);
   const code = contentTree ? contentTree(root) : null;

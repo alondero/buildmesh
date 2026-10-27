@@ -12,7 +12,7 @@ import { acquireSlot, agentTestLimit, agentTestSlotDirectory, heavyGateEnv, heav
 import { selfReviewReport } from './self-review.mjs';
 import { conptyPrerequisite, failureLines, gatePassed, isolatedCommand, isolateTests, knownFlakes, readTestReport, validateFlakeIssues } from './harness-test-failures.mjs';
 import { fastGates, pathIncludeDrift, planChecks } from './harness-check.mjs';
-import { recordReview, reviewContext, REVIEW_USAGE } from './harness-review.mjs';
+import { recordReview, reviewContext, validateReview, REVIEW_USAGE } from './harness-review.mjs';
 import { event, git, readJson, saveJson, statePath, taskAt } from './harness-state.mjs';
 import { runWorktreeDeps, WORKTREE_DEPS_USAGE } from './worktree-deps.mjs';
 
@@ -285,11 +285,14 @@ function update(root, spec) {
     if (spec[key] !== undefined && (!Array.isArray(spec[key]) || spec[key].some(item => typeof item !== 'string'))) throw new Error(`${key} must be an array of strings.`);
   }
   if (spec.nextAction !== undefined && (typeof spec.nextAction !== 'string' || !spec.nextAction.trim())) throw new Error('nextAction must be a nonempty string.');
-  if (spec.review !== undefined) {
-    const review = spec.review;
-    if (!review || typeof review.reviewer !== 'string' || !review.reviewer.trim() || typeof review.summary !== 'string' || !review.summary.trim() || !['APPROVE', 'REQUEST_CHANGES', 'BLOCKED'].includes(review.verdict) || !Array.isArray(review.findings) || review.findings.some(item => typeof item !== 'string')) throw new Error('review requires reviewer, summary, verdict (APPROVE/REQUEST_CHANGES/BLOCKED), and findings array.');
-  }
   const { review, ...progress } = spec;
+  // The whole spec is checked before anything is written. A payload the
+  // ledger would refuse — an APPROVE that carries findings — must not
+  // advance the task first and fail afterwards: `update` applies the spec or
+  // leaves the task untouched, so the task state and the event log agree
+  // about what happened (the test "an update with an invalid review leaves
+  // the task and the events untouched" covers it).
+  const recorded = review === undefined ? null : validateReview({ verdict: review.verdict, reviewer: review.reviewer, summary: review.summary, findings: review.findings });
   if (spec.phase) setPhase(task, spec.phase);
   Object.assign(task, progress);
   if (spec.evidence) task.evidenceTree = fingerprint(root, task.base);
@@ -300,7 +303,7 @@ function update(root, spec) {
   // #2630; the test "a verdict recorded through update --spec appends a round
   // to the ledger" covers it): a follow-up reviewer that reads the ledger then
   // sees the verdict instead of an empty history.
-  if (review) recordReview(root, { verdict: review.verdict, reviewer: review.reviewer, summary: review.summary, finding: review.findings ?? [] }, { fingerprint, changedPaths, contentTree, runIdentity, identityMismatch });
+  if (recorded) recordReview(root, { verdict: recorded.verdict, reviewer: recorded.reviewer, summary: recorded.summary, finding: recorded.findings }, { fingerprint, changedPaths, contentTree, runIdentity, identityMismatch });
   event(root, { type: 'progress', taskId: task.id, phase: task.phase, nextAction: task.nextAction });
   return taskAt(root) ?? task;
 }

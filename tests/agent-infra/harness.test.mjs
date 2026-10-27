@@ -848,6 +848,34 @@ test('a verdict recorded through update --spec appends a round to the ledger', t
   assert.deepEqual(shown.outstanding, ['Owner state is stale']);
 });
 
+// `update` applies a spec or leaves the task untouched. A verdict the ledger
+// refuses must not advance the task first and fail afterwards: the task state
+// and the event log would then disagree about what happened, which is the
+// same "a record and the state diverge" shape this ledger exists to remove.
+test('an update with an invalid review leaves the task and the events untouched', t => {
+  const fixture = repo(t);
+  fixture.start();
+  const before = JSON.parse(readFileSync(join(fixture.cwd, '.harness/active-task.json')));
+  const eventsBefore = readFileSync(join(fixture.cwd, '.harness/events.jsonl'), 'utf8');
+  fixture.put('.task.json', JSON.stringify({
+    phase: 'verify',
+    nextAction: 'progress that should not be applied',
+    evidence: ['observed the owner state'],
+    review: { reviewer: 'independent fixture', verdict: 'APPROVE', findings: ['an approval cannot carry these'], summary: 'Approved' },
+  }));
+  const refused = fixture.cli('update', '--spec', '.task.json');
+  assert.equal(refused.status, 2);
+  assert.match(refused.stderr, /APPROVE cannot carry findings/);
+  const after = JSON.parse(readFileSync(join(fixture.cwd, '.harness/active-task.json')));
+  assert.equal(after.phase, before.phase, 'the phase must not advance');
+  assert.equal(after.nextAction, before.nextAction, 'the next action must not be replaced');
+  assert.deepEqual(after.evidence, before.evidence, 'the acceptance evidence must not be recorded');
+  assert.equal(after.evidenceTree, before.evidenceTree, 'the evidence tree must not be set');
+  assert.equal(after.review, before.review, 'no verdict may be recorded');
+  assert.equal(readFileSync(join(fixture.cwd, '.harness/events.jsonl'), 'utf8'), eventsBefore, 'no event may be written');
+  assert.equal(existsSync(join(fixture.cwd, '.harness/reviews.jsonl')), false, 'no round may be appended');
+});
+
 // A read that reports success while the write it was combined with is
 // discarded loses the round without an error, and the loss surfaces much later
 // as an unexplained `finish` block.
