@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { changedPaths, completion, fingerprint, identityMismatch, runGate, runIdentity, scopePaths, verify, waitForVerify } from '../../scripts/harness.mjs';
 import { AGENT_TEST_GATE_MINUTES, executedTests, formatDiffPaths, gateReads, planGates } from '../../scripts/harness-plan.mjs';
@@ -549,6 +549,26 @@ function repo(t) {
   };
   return { cwd, git, put, commit, base, run, cli, hook, start };
 }
+// The harness CLI runs inside the fixture, so the fixture needs the modules the
+// CLI imports. Reading the imports keeps the fixture honest: a module the CLI
+// gains reaches the fixture without anyone remembering to add it, and an
+// omission shows up as a fixture whose CLI fails to start.
+function harnessModules(entry = 'scripts/harness.mjs') {
+  const seen = new Set();
+  const queue = [entry];
+  while (queue.length) {
+    const path = queue.pop();
+    if (seen.has(path)) continue;
+    seen.add(path);
+    const source = readFileSync(join(root, path), 'utf8');
+    const specifiers = [...source.matchAll(/from\s+'(\.[^']+)'/g), ...source.matchAll(/import\('(\.[^']+)'\)/g)];
+    for (const match of specifiers) queue.push(posix.normalize(posix.join(posix.dirname(path), match[1])));
+  }
+  return [...seen];
+}
+function installHarness(fixture, extra = []) {
+  for (const path of [...harnessModules(), ...extra]) fixture.put(path, readFileSync(join(root, path)));
+}
 // The identity belongs to the environment that writes the receipt, so the
 // recording process computes it: a copied-in fixture value would make the
 // staleness assertions below compare the test process with itself.
@@ -701,6 +721,157 @@ test('batched review repairs can proceed before full verification but cannot fin
   assert.equal(JSON.parse(fixture.cli('status').stdout).task.phase, 'review');
 });
 
+// The gh2599 review rounds had nowhere to land: four rounds over one change,
+// each re-reading the whole diff, and `review` still null after twelve
+// verification attempts, so the task had no verdict for `finish` to check. The
+// ledger is the durable record a follow-up reviewer picks up.
+test('the review ledger records a round that a follow-up reviewer can pick up', t => {
+  const fixture = repo(t);
+  const task = fixture.start();
+  fixture.put('src/owner.ts', 'export const owner = 2;\n');
+  const recorded = fixture.cli('review', '--verdict', 'REQUEST_CHANGES', '--reviewer', 'independent fixture', '--summary', 'Two findings', '--finding', 'Owner state is stale', '--finding', 'Owner update is missing');
+  assert.equal(recorded.status, 0, recorded.stderr);
+  const round = JSON.parse(recorded.stdout).recorded;
+  assert.equal(round.round, 1);
+  assert.equal(round.verdict, 'REQUEST_CHANGES');
+  assert.deepEqual(round.findings, ['Owner state is stale', 'Owner update is missing']);
+  assert.deepEqual(round.scope, ['src/owner.ts']);
+  assert.equal(round.tree, fingerprint(fixture.cwd, task.base));
+  const recordedTask = JSON.parse(readFileSync(join(fixture.cwd, '.harness/active-task.json')));
+  assert.equal(recordedTask.review.verdict, 'REQUEST_CHANGES');
+  assert.equal(recordedTask.reviewTree, round.tree);
+  const shown = JSON.parse(fixture.cli('review', '--show').stdout);
+  assert.equal(shown.rounds, 1);
+  assert.deepEqual(shown.outstanding, ['Owner state is stale', 'Owner update is missing']);
+  // The round covered the whole change, and the tree has not moved since it.
+  assert.deepEqual(shown.last.scope, ['src/owner.ts']);
+  assert.deepEqual(shown.repairScope, []);
+  assert.match(shown.commands.scopedCheck, /npm run harness -- check --base /);
+});
+
+test('the review ledger keeps findings outstanding until an approval clears them', t => {
+  const fixture = repo(t);
+  fixture.start();
+  fixture.cli('review', '--verdict', 'REQUEST_CHANGES', '--reviewer', 'first round', '--summary', 'one', '--finding', 'Owner state is stale');
+  fixture.cli('review', '--verdict', 'REQUEST_CHANGES', '--reviewer', 'second round', '--summary', 'two', '--finding', 'Owner update is missing');
+  const pending = JSON.parse(fixture.cli('review', '--show').stdout);
+  assert.deepEqual(pending.outstanding, ['Owner update is missing', 'Owner state is stale']);
+  fixture.cli('review', '--verdict', 'APPROVE', '--reviewer', 'third round', '--summary', 'Both repaired');
+  const cleared = JSON.parse(fixture.cli('review', '--show').stdout);
+  assert.deepEqual(cleared.outstanding, []);
+  assert.equal(cleared.rounds, 3);
+  assert.equal(cleared.last.verdict, 'APPROVE');
+});
+
+test('the review ledger counts a blocked round\'s findings as outstanding', t => {
+  const fixture = repo(t);
+  fixture.start();
+  fixture.cli('review', '--verdict', 'BLOCKED', '--reviewer', 'blocked round', '--summary', 'missing prerequisite', '--finding', 'The upstream schema is not available');
+  const shown = JSON.parse(fixture.cli('review', '--show').stdout);
+  assert.deepEqual(shown.outstanding, ['The upstream schema is not available']);
+  assert.equal(shown.last.verdict, 'BLOCKED');
+});
+
+test('the review ledger reports only the paths whose content changed since the round', t => {
+  const fixture = repo(t);
+  fixture.start();
+  fixture.put('src/owner.ts', 'export const owner = 2;\n');
+  fixture.put('src/other.ts', 'export const other = 2;\n');
+  fixture.cli('review', '--verdict', 'REQUEST_CHANGES', '--reviewer', 'first round', '--summary', 'one', '--finding', 'Owner state is stale');
+  const reviewed = JSON.parse(fixture.cli('review', '--show').stdout);
+  assert.deepEqual(reviewed.last.scope, ['src/other.ts', 'src/owner.ts']);
+  assert.deepEqual(reviewed.repairScope, []);
+  // Repairing one file narrows the scope to that file: the reviewer is told
+  // what moved, not what the whole change was.
+  fixture.put('src/owner.ts', 'export const owner = 3;\n');
+  const repaired = JSON.parse(fixture.cli('review', '--show').stdout);
+  assert.deepEqual(repaired.repairScope, ['src/owner.ts']);
+  fixture.put('src/other.ts', 'export const other = 2;\n');
+  assert.deepEqual(JSON.parse(fixture.cli('review', '--show').stdout).repairScope, ['src/owner.ts']);
+});
+
+test('the review ledger keeps one task\'s rounds out of the next task', t => {
+  const fixture = repo(t);
+  fixture.start();
+  fixture.cli('review', '--verdict', 'REQUEST_CHANGES', '--reviewer', 'first task', '--summary', 'one', '--finding', 'Owner state is stale');
+  const first = JSON.parse(fixture.cli('review', '--show').stdout);
+  assert.equal(first.rounds, 1);
+  assert.deepEqual(first.outstanding, ['Owner state is stale']);
+  // A new task in the same worktree starts with an empty ledger: the previous
+  // task's verdict and findings are not this task's evidence.
+  fixture.put('.harness/active-task.json', JSON.stringify({ ...JSON.parse(readFileSync(join(fixture.cwd, '.harness/active-task.json'))), id: 'a-different-task' }));
+  const second = JSON.parse(fixture.cli('review', '--show').stdout);
+  assert.equal(second.rounds, 0);
+  assert.equal(second.last, null);
+  assert.deepEqual(second.outstanding, []);
+});
+
+test('the review ledger refuses an approval that carries findings and a verdict it does not know', t => {
+  const fixture = repo(t);
+  fixture.start();
+  const withFindings = fixture.cli('review', '--verdict', 'APPROVE', '--reviewer', 'reviewer', '--summary', 'summary', '--finding', 'cannot ship');
+  assert.equal(withFindings.status, 2);
+  assert.match(withFindings.stderr, /APPROVE cannot carry findings/);
+  const unknown = fixture.cli('review', '--verdict', 'MAYBE', '--reviewer', 'reviewer', '--summary', 'summary');
+  assert.equal(unknown.status, 2);
+  assert.match(unknown.stderr, /--verdict must be one of/);
+  const untasked = repo(t);
+  const orphan = untasked.cli('review', '--verdict', 'APPROVE', '--reviewer', 'reviewer', '--summary', 'summary');
+  assert.equal(orphan.status, 2);
+  assert.match(orphan.stderr, /no active task/);
+});
+
+test('a review round can read its findings from a file', t => {
+  const fixture = repo(t);
+  fixture.start();
+  fixture.put('findings.txt', 'Owner state is stale\nOwner update is missing\n');
+  const result = fixture.cli('review', '--verdict', 'REQUEST_CHANGES', '--reviewer', 'reviewer', '--summary', 'from a file', '--findings-file', 'findings.txt');
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).recorded.findings, ['Owner state is stale', 'Owner update is missing']);
+});
+
+test('a recorded verdict keeps the completion guards intact', t => {
+  const fixture = repo(t);
+  const task = fixture.start();
+  passingReceipt(fixture, task);
+  const rejected = fixture.cli('review', '--verdict', 'REQUEST_CHANGES', '--reviewer', 'independent fixture', '--summary', 'still stale', '--finding', 'Owner state is stale');
+  assert.equal(rejected.status, 0, rejected.stderr);
+  assert.equal(fixture.cli('finish').status, 2);
+  assert.match(completion(fixture.cwd).reason, /APPROVE/);
+  assert.equal(fixture.cli('review', '--verdict', 'APPROVE', '--reviewer', 'independent fixture', '--summary', 'Repaired and approved').status, 0);
+  assert.equal(completion(fixture.cwd).outcome, 'PASS');
+});
+
+test('a recorded approval is bound to the tree it was recorded for', t => {
+  const fixture = repo(t);
+  const task = fixture.start();
+  // A receipt for the current tree with acceptance evidence but no review, so
+  // the only thing that can make the task completable is the recorded verdict.
+  const tree = fingerprint(fixture.cwd, task.base);
+  const writeReceipt = () => {
+    const current = fingerprint(fixture.cwd, task.base);
+    const plan = taskPlan(fixture, task);
+    fixture.put('.harness/receipt.json', JSON.stringify({ root: fixture.cwd, taskId: task.id, base: task.base, tree: current, full: false, gatePlan: plan, gates: plan.map(gate => ({ id: gate.id, outcome: 'PASS' })), outcome: 'PASS' }));
+    // Keep whatever the command recorded; only the evidence and the receipt
+    // are refreshed for the new tree.
+    const state = JSON.parse(readFileSync(join(fixture.cwd, '.harness/active-task.json')));
+    fixture.put('.harness/active-task.json', JSON.stringify({ ...state, evidence: ['Observed the owner state'], evidenceTree: current }));
+  };
+  writeReceipt();
+  assert.equal(completion(fixture.cwd).outcome, 'BLOCKED');
+  assert.match(completion(fixture.cwd).reason, /independent APPROVE/);
+  assert.equal(fixture.cli('review', '--verdict', 'APPROVE', '--reviewer', 'independent fixture', '--summary', 'Approved the current change').status, 0);
+  // The command binds the approval to the tree it was recorded for, so the
+  // task completes; without that binding the approval would not count.
+  assert.equal(completion(fixture.cwd).outcome, 'PASS');
+  // A later edit is a different tree. With a fresh receipt and fresh
+  // acceptance evidence for it, the old approval is what still fails.
+  fixture.put('src/owner.ts', 'export const owner = 3;\n');
+  writeReceipt();
+  assert.equal(completion(fixture.cwd).outcome, 'BLOCKED');
+  assert.match(completion(fixture.cwd).reason, /independent APPROVE/);
+});
+
 test('review repairs require final-tree verification, acceptance and renewed independent approval', t => {
   const fixture = repo(t);
   const task = fixture.start();
@@ -800,7 +971,7 @@ test('fingerprint ignores local logs but sees tests, lockfile, deletions and unt
 test('a short --base passes binding-drift, and a gate that rewrites the bindings still fails it (#2350)', async t => {
   const fixture = repo(t);
   // The gate is the real CLI in the fixture, so the harness it spawns must be there.
-  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-check.mjs', 'scripts/harness-test-failures.mjs', 'scripts/self-review.mjs', 'scripts/worktree-deps.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
+  installHarness(fixture);
   fixture.put('src/types/generated/Example.ts', 'export type Example = { id: number };\n');
   const base = fixture.commit();
   const short = base.slice(0, 8);
@@ -1165,7 +1336,7 @@ test('canonical verification rejects a source mutation even when every child che
   const fixture = repo(t);
   // Stand-in executables keep this a process/orchestration regression, without
   // coupling it to a full Tauri or frontend installation.
-  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-check.mjs', 'scripts/harness-test-failures.mjs', 'scripts/self-review.mjs', 'scripts/worktree-deps.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
+  installHarness(fixture);
   for (const path of ['scripts/check-agent-diff.mjs', 'scripts/check-docs.mjs', 'scripts/check-readme-drift.mjs', 'scripts/check-process-spawn-discipline.mjs']) fixture.put(path, 'process.exit(0);\n');
   fixture.put('.gitignore', '.harness/\n.task.json\nnode_modules/\n');
   fixture.put('node_modules/eslint/package.json', '{"version":"fixture"}');
@@ -1618,7 +1789,7 @@ test('wait never reports a stale or missing result as success', async t => {
 });
 test('verify queues a heavy gate behind held machine-wide slots and runs it once one frees', async t => {
   const fixture = repo(t);
-  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-check.mjs', 'scripts/harness-test-failures.mjs', 'scripts/self-review.mjs', 'scripts/worktree-deps.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
+  installHarness(fixture);
   for (const path of ['scripts/check-agent-diff.mjs', 'scripts/check-docs.mjs', 'scripts/check-readme-drift.mjs', 'scripts/check-process-spawn-discipline.mjs']) fixture.put(path, 'process.exit(0);\n');
   fixture.put('.gitignore', '.harness/\n.task.json\nnode_modules/\n');
   fixture.put('node_modules/eslint/package.json', '{"version":"fixture"}');
@@ -1656,7 +1827,7 @@ test('verify queues the infrastructure suite behind a held agent-test slot and r
   const fixture = repo(t);
   // The suite's scheduling owner has to be in the fixture: the harness only
   // takes the agent-test slot for a repository that can run the suite.
-  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-check.mjs', 'scripts/harness-test-failures.mjs', 'scripts/agent-tests.mjs', 'scripts/self-review.mjs', 'scripts/worktree-deps.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
+  installHarness(fixture, ['scripts/agent-tests.mjs']);
   for (const path of ['scripts/check-agent-diff.mjs', 'scripts/check-docs.mjs', 'scripts/check-readme-drift.mjs', 'scripts/check-process-spawn-discipline.mjs']) fixture.put(path, 'process.exit(0);\n');
   fixture.put('.gitignore', '.harness/\n.task.json\nnode_modules/\n');
   fixture.put('node_modules/eslint/package.json', '{"version":"fixture"}');

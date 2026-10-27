@@ -12,9 +12,10 @@ import { acquireSlot, agentTestLimit, agentTestSlotDirectory, heavyGateEnv, heav
 import { selfReviewReport } from './self-review.mjs';
 import { conptyPrerequisite, failureLines, gatePassed, isolatedCommand, isolateTests, knownFlakes, readTestReport, validateFlakeIssues } from './harness-test-failures.mjs';
 import { fastGates, pathIncludeDrift, planChecks } from './harness-check.mjs';
+import { recordReview, reviewContext, REVIEW_USAGE } from './harness-review.mjs';
 import { runWorktreeDeps, WORKTREE_DEPS_USAGE } from './worktree-deps.mjs';
 
-const USAGE = 'harness start --spec <json> | update --spec <json> | status | metrics | check [--base <commit>] | verify [--base <commit>] [--full] | wait [--max-seconds <n>] | finish | evaluate [--case <id>] | checkpoint | record-rollback --ref <commit> | ' + WORKTREE_DEPS_USAGE;
+const USAGE = 'harness start --spec <json> | update --spec <json> | status | metrics | ' + REVIEW_USAGE + ' | check [--base <commit>] | verify [--base <commit>] [--full] | wait [--max-seconds <n>] | finish | evaluate [--case <id>] | checkpoint | record-rollback --ref <commit> | ' + WORKTREE_DEPS_USAGE;
 const EXIT = { PASS: 0, FAIL: 1, FLAKY: 1, BLOCKED: 2, TIMEOUT: 124 };
 const statePath = (root, name) => join(root, '.harness', name);
 const git = (root, ...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -846,12 +847,15 @@ async function internalGate(root, name) {
   } else throw new Error('Unknown internal gate.');
 }
 function parse(argv) {
-  const options = { action: argv[0] };
+  const options = { action: argv[0], finding: [] };
   for (let i = 1; i < argv.length; i += 1) {
     const flag = argv[i];
     if (flag === '--full') options.full = true;
+    else if (flag === '--show') options.show = true;
     else if (flag === '--max-seconds' && Number(argv[i + 1]) > 0) options.maxSeconds = Number(argv[++i]);
-    else if (['--spec', '--base', '--case', '--ref'].includes(flag) && argv[i + 1]) options[flag.slice(2)] = argv[++i];
+    else if (flag === '--finding' && argv[i + 1]) options.finding.push(argv[++i]);
+    else if (flag === '--findings-file' && argv[i + 1]) options.findingsFile = argv[++i];
+    else if (['--spec', '--base', '--case', '--ref', '--verdict', '--reviewer', '--summary'].includes(flag) && argv[i + 1]) options[flag.slice(2)] = argv[++i];
     else throw new Error(USAGE);
   }
   return options;
@@ -874,6 +878,9 @@ async function main() {
     const options = parse(args);
     if (options.action === 'status') { console.log(JSON.stringify(status(root), null, 2)); return; }
     if (options.action === 'metrics') { console.log(JSON.stringify(metrics(root), null, 2)); return; }
+    // Reading the review ledger is advisory: a follow-up reviewer loads the last
+    // round without taking the lock, so it can run while a verify holds it.
+    if (options.action === 'review' && options.show) { console.log(JSON.stringify(reviewContext(root, { fingerprint, changedPaths }), null, 2)); return; }
     if (options.action === 'wait') {
       const result = await waitForVerify(root, { maxMs: (options.maxSeconds ?? 540) * 1000 });
       console.log(result.lines.join('\n'));
@@ -902,6 +909,8 @@ async function main() {
     if (options.action === 'start' || options.action === 'update') {
       if (!options.spec) throw new Error(USAGE);
       result = (options.action === 'start' ? start : update)(root, readJson(resolve(options.spec)));
+    } else if (options.action === 'review') {
+      result = recordReview(root, options, { fingerprint, changedPaths });
     } else if (options.action === 'verify') {
       if (!options.base && !taskAt(root)) throw new Error('BLOCKED: start a task or provide --base <commit>.');
       result = await verify(root, options);
