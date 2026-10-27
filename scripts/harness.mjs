@@ -95,8 +95,69 @@ export function scopePaths(root, base, paths) {
 // environment it ran in is hashed with it; the harness contract owns the
 // rationale for keeping CARGO_TARGET_DIR in the list.
 const RUN_ENVIRONMENT = ['NODE_OPTIONS', 'RUSTFLAGS', 'CARGO_TARGET_DIR', 'CC', 'CXX', 'TS_RS_EXPORT_DIR'];
+
+// A probe that did not answer records the absence of information rather than a
+// different toolchain. Under load `cargo --version` can miss its deadline, and
+// a probe that timed out is not evidence that the environment changed: it is
+// the absence of evidence, not evidence of a change (issue #2581).
+const UNDETERMINED_TOOLCHAIN = 'undetermined';
+const TOOLCHAIN_PROBE_TIMEOUT_MS = 5000;
+
+// The probe's bound. A toolchain too slow to answer is a property of the
+// machine, and the harness must not read it as a changed environment.
+function toolchainProbeTimeoutMs() {
+  const configured = Number(process.env.BUILDMESH_TOOLCHAIN_PROBE_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : TOOLCHAIN_PROBE_TIMEOUT_MS;
+}
+
+// The toolchain the run read, or the absence of information when the probe
+// could not answer. A tool that is slow is not a tool that is missing.
+function probeToolchain() {
+  const probe = spawnSync('cargo', ['--version'], { encoding: 'utf8', windowsHide: true, timeout: toolchainProbeTimeoutMs() });
+  return probe.status === 0 ? probe.stdout.trim() : UNDETERMINED_TOOLCHAIN;
+}
+
+// Whether a tool is installed. A probe that timed out means the tool is slow,
+// not absent: a slow toolchain is measured by the gate's own deadline, and a
+// preflight that calls it unavailable sends the reader after the wrong fix. A
+// tool that ran and failed is installed but unusable, which the preflight
+// reports as unavailable.
+function toolInstalled(probe) {
+  if (probe.error?.code === 'ETIMEDOUT') return true;
+  if (probe.error) return false;
+  return probe.status === 0;
+}
+
+// The tool versions that come from the filesystem. They are the same however
+// the machine is loaded, so a fingerprint can hash them.
+function diskToolIdentity(root) {
+  const versions = {};
+  for (const name of ['eslint', 'typescript', 'vite', 'vitest', '@playwright/test']) {
+    const path = join(root, 'node_modules', name, 'package.json');
+    versions[name] = existsSync(path) ? readJson(path).version : null;
+  }
+  try {
+    const require = createRequire(join(root, 'package.json'));
+    versions.chromiumAvailable = existsSync(require('@playwright/test').chromium.executablePath());
+  } catch { versions.chromiumAvailable = false; }
+  return versions;
+}
+
+// The toolchain one run read.
+function toolIdentity(root) {
+  return { ...diskToolIdentity(root), cargo: probeToolchain() };
+}
+
 export function runIdentity(root, base) {
   return JSON.stringify({ base, node: process.version, platform: process.platform, tools: toolIdentity(root), environment: RUN_ENVIRONMENT.map(key => [key, process.env[key] ?? null]) });
+}
+
+// The identity a fingerprint may hash. The probed toolchain version is not
+// part of it: it is the one identity value that can change without the
+// environment changing, and a fingerprint that moves with it can report a
+// tree that did not move as stale (issue #2581).
+function stableIdentity(root, base) {
+  return JSON.stringify({ base, node: process.version, platform: process.platform, tools: diskToolIdentity(root), environment: RUN_ENVIRONMENT.map(key => [key, process.env[key] ?? null]) });
 }
 const MAX_IDENTITY_DIFFERENCES = 4;
 // A receipt can go stale because the code moved or because the run that
@@ -119,6 +180,10 @@ export function identityMismatch(recorded, current) {
   const recordedTools = before.tools ?? {};
   const currentTools = after.tools ?? {};
   for (const key of new Set([...Object.keys(recordedTools), ...Object.keys(currentTools)])) {
+    // A probe that did not answer is the absence of information, so the
+    // comparison does not report it as a difference between two runs
+    // (issue #2581).
+    if (recordedTools[key] === UNDETERMINED_TOOLCHAIN || currentTools[key] === UNDETERMINED_TOOLCHAIN) continue;
     if (recordedTools[key] !== currentTools[key]) differences.push(difference(`tools.${key}`, recordedTools[key], currentTools[key]));
   }
   // A run that differs in everything (a different machine, a rewritten package
@@ -137,7 +202,7 @@ function treePaths(root) {
 }
 export function fingerprint(root, base, prefix = '') {
   const hash = createHash('sha256');
-  hash.update(runIdentity(root, base));
+  hash.update(stableIdentity(root, base));
   hash.update(git(root, 'rev-parse', 'HEAD'));
   hash.update(git(root, 'ls-files', '--stage', '-z', '--', prefix || '.'));
   for (const path of treePaths(root)) {
@@ -173,20 +238,6 @@ function gateInputs(gate, snapshot, identity, tree) {
     for (const entry of snapshot) if (gateReads(gate, entry.path)) hash.update(entry.line);
   }
   return hash.digest('hex');
-}
-function toolIdentity(root) {
-  const versions = {};
-  for (const name of ['eslint', 'typescript', 'vite', 'vitest', '@playwright/test']) {
-    const path = join(root, 'node_modules', name, 'package.json');
-    versions[name] = existsSync(path) ? readJson(path).version : null;
-  }
-  const cargo = spawnSync('cargo', ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
-  versions.cargo = cargo.status === 0 ? cargo.stdout.trim() : null;
-  try {
-    const require = createRequire(join(root, 'package.json'));
-    versions.chromiumAvailable = existsSync(require('@playwright/test').chromium.executablePath());
-  } catch { versions.chromiumAvailable = false; }
-  return versions;
 }
 function taskAt(root) {
   const task = readJson(statePath(root, 'active-task.json'));
@@ -256,17 +307,17 @@ function commandFor(root, gate, base) {
 async function preflight(root, gate, extraEnv) {
   if (gate.tests === 'vitest' || gate.tests === 'rust') {
     const probe = spawnSync('git', ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 5000, env: { ...process.env, ...extraEnv } });
-    if (probe.error || probe.status !== 0) return 'Git is unavailable on PATH; these tests spawn Git.';
+    if (!toolInstalled(probe)) return 'Git is unavailable on PATH; these tests spawn Git.';
   }
   if ((gate.command[0] === 'npm' || gate.browser || gate.command.some(arg => arg.startsWith('node_modules/'))) && !existsSync(join(root, 'node_modules/eslint/package.json'))) return 'node_modules is missing; run `npm run harness -- link-deps` in a secondary worktree, or npm ci.';
   if (gate.rust) {
-    const probe = spawnSync('cargo', ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
-    if (probe.error || probe.status !== 0) return 'Rust/Cargo is unavailable; install the Tauri platform prerequisites.';
+    const cargo = spawnSync('cargo', ['--version'], { encoding: 'utf8', windowsHide: true, timeout: toolchainProbeTimeoutMs() });
+    if (!toolInstalled(cargo)) return 'Rust/Cargo is unavailable; install the Tauri platform prerequisites.';
     const compiler = spawnSync('rustc', ['-vV'], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
-    if (compiler.status !== 0) return 'Rust compiler is unavailable.';
+    if (!toolInstalled(compiler)) return 'Rust compiler is unavailable.';
     if (gate.id === 'rust-format' || gate.id === 'rust-clippy') {
-      const component = spawnSync('cargo', [gate.id === 'rust-format' ? 'fmt' : 'clippy', '--version'], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
-      if (component.status !== 0) return `${gate.id === 'rust-format' ? 'rustfmt' : 'Clippy'} is unavailable; install the Rust toolchain component.`;
+      const component = spawnSync('cargo', [gate.id === 'rust-format' ? 'fmt' : 'clippy', '--version'], { encoding: 'utf8', windowsHide: true, timeout: toolchainProbeTimeoutMs() });
+      if (!toolInstalled(component)) return `${gate.id === 'rust-format' ? 'rustfmt' : 'Clippy'} is unavailable; install the Rust toolchain component.`;
     }
     if (gate.id !== 'rust-format') {
       if (process.platform === 'linux') {
@@ -416,8 +467,10 @@ export async function verify(root, { base: requestedBase, full = false, plan = p
   const gates = plan(scopePaths(root, base, paths), { full });
   const tree = fingerprint(root, base);
   const snapshot = treeSnapshot(root);
-  const identity = runIdentity(root, base);
-  const receipt = { taskId: task?.id ?? null, root, base, head: git(root, 'rev-parse', 'HEAD').trim(), tree, full, paths, gatePlan: gates, gates: [], outcome: 'BLOCKED', startedAt: new Date().toISOString(), runIdentity: identity };
+  // The gate cache is keyed on the stable identity: a probe that missed its
+  // deadline must not invalidate a PASS that still applies (issue #2581).
+  const identity = stableIdentity(root, base);
+  const receipt = { taskId: task?.id ?? null, root, base, head: git(root, 'rev-parse', 'HEAD').trim(), tree, full, paths, gatePlan: gates, gates: [], outcome: 'BLOCKED', startedAt: new Date().toISOString(), runIdentity: runIdentity(root, base) };
   // Advisory only, and printed first: a repair is cheapest before the slow gates have run against it.
   let selfReviewFlags = 0;
   if (selfReview) {
@@ -565,10 +618,12 @@ function checkpoint(root, rollbackRef) {
 // is not this run. When the recorded run identity explains the difference, say
 // so, because the repair differs — re-verify here, or finish under the
 // environment that verified. A source change keeps the original advice.
-function staleReason(root, receipt, base) {
-  const differences = identityMismatch(receipt.runIdentity, runIdentity(root, base));
+function notThisRun(differences) {
+  return `Verification is missing or stale: this is not the run that verified (${differences.join('; ')}). Re-run npm run verify in this environment, or run the harness in the one that verified.`;
+}
+function staleReason(differences) {
   return differences.length
-    ? `Verification is missing or stale: this is not the run that verified (${differences.join('; ')}). Re-run npm run verify in this environment, or run the harness in the one that verified.`
+    ? notThisRun(differences)
     : 'Verification is missing or stale. Run npm run verify.';
 }
 export function completion(root) {
@@ -576,7 +631,14 @@ export function completion(root) {
   const receipt = readJson(statePath(root, 'receipt.json'));
   if (!task) return { outcome: 'BLOCKED', reason: 'Start a task with npm run harness -- start --spec <json>.' };
   if (!receipt || receipt.taskId !== task.id || receipt.root !== root || receipt.base !== task.base) return { outcome: 'BLOCKED', reason: 'Verification is missing or stale. Run npm run verify.' };
-  if (receipt.tree !== fingerprint(root, task.base)) return { outcome: 'BLOCKED', reason: staleReason(root, receipt, task.base) };
+  // The fingerprint identifies the tree and the environment; the identity also
+  // carries the toolchain the run read. They are compared separately, because a
+  // fingerprint that carried the probed toolchain version could report a tree
+  // that did not move as stale whenever the probe missed its deadline
+  // (issue #2581).
+  const differences = identityMismatch(receipt.runIdentity, runIdentity(root, task.base));
+  if (receipt.tree !== fingerprint(root, task.base)) return { outcome: 'BLOCKED', reason: staleReason(differences) };
+  if (differences.length) return { outcome: 'BLOCKED', reason: notThisRun(differences) };
   const expected = planGates(scopePaths(root, task.base, changedPaths(root, task.base)), { full: receipt.full });
   if (JSON.stringify(expected) !== JSON.stringify(receipt.gatePlan)) return { outcome: 'BLOCKED', reason: 'Required gate plan changed. Run npm run verify.' };
   if (receipt.outcome !== 'PASS') return { outcome: receipt.outcome, reason: receipt.reason ?? receipt.gates.find(row => row.outcome !== 'PASS')?.reason ?? 'Incomplete verification.' };
@@ -642,12 +704,14 @@ export async function waitForVerify(root, { maxMs = 540000, graceMs = 2000, poll
 function status(root) {
   const task = taskAt(root);
   const receipt = readJson(statePath(root, 'receipt.json'));
-  const current = receipt ? receipt.tree === fingerprint(root, receipt.base) : null;
   // `current: false` reports that the receipt stopped matching, without saying
   // whether the code moved or the run changed, which is the question an
-  // operator asks of it. Only paid when the receipt is stale, so a current
-  // status stays cheap.
-  const differs = current === false ? identityMismatch(receipt.runIdentity, runIdentity(root, receipt.base)) : [];
+  // operator asks of it. The identity is compared as well, because the
+  // fingerprint does not carry the probed toolchain version (issue #2581): a
+  // receipt from another run reads as not current even when the tree did not
+  // move.
+  const differs = receipt ? identityMismatch(receipt.runIdentity, runIdentity(root, receipt.base)) : [];
+  const current = receipt ? receipt.tree === fingerprint(root, receipt.base) && differs.length === 0 : null;
   return { branch: git(root, 'branch', '--show-current').trim(), root, gitStatus: git(root, 'status', '--short').trim(), task, verification: receipt ? { outcome: receipt.outcome, current, differs, gates: receipt.gates.map(row => `${row.id}:${row.outcome}`) } : null };
 }
 function metrics(root) {
