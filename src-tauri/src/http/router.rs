@@ -210,6 +210,7 @@ enum Handler {
     CoordinatorPrompt,
     NodesCreate,
     NodesInput,
+    NodesClose,
     PrCreate,
     PrSource,
     PrMerge,
@@ -386,6 +387,16 @@ const ROUTES: &[Route] = &[
         scope: RouteScope::Admin,
         body: BodyPolicy::Cap(routes::nodes::INPUT_BODY_MAX_BYTES),
         handler: Handler::NodesInput,
+    },
+    Route {
+        method: "POST",
+        m: RouteMatch::OneId {
+            prefix: "/api/nodes/",
+            suffix: "/close",
+        },
+        scope: RouteScope::Admin,
+        body: BodyPolicy::None,
+        handler: Handler::NodesClose,
     },
     Route {
         method: "POST",
@@ -877,6 +888,7 @@ async fn run_handler(handler: Handler, req: &ParsedRequest) -> DispatchResult {
         Handler::CoordinatorPrompt => Http(routes::coordinator::prompt(req).await),
         Handler::NodesCreate => Http(routes::nodes::create(req).await),
         Handler::NodesInput => Http(routes::nodes::post_input(req).await),
+        Handler::NodesClose => Http(routes::nodes::close(req).await),
         Handler::PrCreate => Http(routes::pr::create(req).await),
         Handler::PrSource => Http(routes::pr::pr_source(req).await),
         Handler::PrMerge => Http(routes::pr::merge(req).await),

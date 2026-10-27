@@ -20,6 +20,28 @@ pub async fn list(_req: &ParsedRequest) -> Response {
     }
 }
 
+/// Mobile close preserves the checkout. Like desktop, stop the process before
+/// deleting its node; `delete(_, false)` alone does not stop a live process.
+pub async fn close(req: &ParsedRequest) -> Response {
+    let node_id = req.id0();
+    if node_id <= 0 {
+        return Response::json_error("400 Bad Request", "Invalid node id");
+    }
+    match crate::commands::run_blocking("http_close_node", move || {
+        crate::agent::process::kill_agent_blocking(node_id)?;
+        crate::services::agent_node::delete(node_id, false).map_err(|error| error.to_string())
+    })
+    .await
+    {
+        Ok(()) => Response::empty("204 No Content"),
+        Err(error) => Response::json_error("500 Internal Server Error", &error),
+    }
+}
+
+#[cfg(test)]
+#[path = "nodes_close_tests.rs"]
+mod close_tests;
+
 /// The authoritative agent-node inventory as a JSON body.
 ///
 /// Issue #2330: this ended in `Err(_) => "[]"`, and a failed query was

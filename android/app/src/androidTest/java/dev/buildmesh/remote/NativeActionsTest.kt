@@ -91,6 +91,33 @@ class NativeActionsTest {
         }
     }
 
+    @Test fun closeRetainsTheAgentOnFailureAndRemovesItOnlyAfterAcknowledgement() {
+        val node = MobileWireFixtures.obj("agent_node")
+        val id = node.number("id")
+        var attempts = 0
+        withDesktop({ request ->
+            assertEquals("/api/nodes/$id/close", request.path)
+            assertEquals("POST", request.method)
+            assertEquals("{}", request.body.readUtf8())
+            if (++attempts == 1) MockResponse().setResponseCode(503).setBody("""{"error":"Close unavailable"}""")
+            else MockResponse().setResponseCode(204)
+        }) { vm, requests ->
+            compose.runOnUiThread { vm.acceptNode(node) }
+            compose.runOnUiThread { vm.closeNode(id) }
+            compose.waitUntil(10000) { !vm.state.value.busy && vm.state.value.error == "Close unavailable" }
+            assertTrue(vm.state.value.nodes.any { it.number("id") == id })
+            compose.runOnUiThread {
+                vm.closeNode(id)
+                vm.closeNode(id)
+                assertTrue(vm.state.value.busy)
+                assertTrue(vm.state.value.nodes.any { it.number("id") == id })
+            }
+            compose.waitUntil(10000) { !vm.state.value.busy && vm.state.value.nodes.none { it.number("id") == id } }
+            assertEquals(2, requests.size)
+            assertEquals("Agent closed. Worktree and files kept.", vm.state.value.notice)
+        }
+    }
+
     @Test fun captureFiltersConfigurationsAndKeepsDraftUntilAnAcknowledgedSuccess() {
         var attempts = 0
         var opened = 0L

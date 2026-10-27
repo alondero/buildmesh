@@ -117,7 +117,7 @@ fun BuildmeshApp(vm: BuildmeshViewModel, invitation: String = "", requestedNodeI
                         { id, target ->
                             meshId = id
                             if (target == "work") tab = "Work" else screen = target
-                        }, { id, option -> meshId = id; launch = option; screen = "capture" })
+                        }, { id, option -> meshId = id; launch = option; screen = "capture" }, closeNode = vm::closeNode)
                     "node" -> if (selected != null) NodeScreen(selected, vm, { screen = "terminal" }, { screen = "changes" }, { screen = "pr" }, { id -> nodeId = id; screen = "terminal" })
                         else EmptyMessage("This node is no longer available.")
                     "terminal" -> vm.api?.let { TerminalPane(it, nodeId, vm) }
@@ -179,9 +179,21 @@ fun PairScreen(invitation: String, busy: Boolean, pair: (String, String) -> Unit
 
 @Composable
 fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) -> Unit, openNode: (Long) -> Unit, openMesh: (Long, String) -> Unit,
-    openCapture: (Long, String) -> Unit) {
+    openCapture: (Long, String) -> Unit, closeNode: ((Long) -> Unit)? = null) {
     var query by rememberSaveable { mutableStateOf("") }
     var attentionOnly by rememberSaveable { mutableStateOf(false) }
+    var closingId by rememberSaveable { mutableStateOf<Long?>(null) }
+    val closing = state.nodes.firstOrNull { it.number("id") == closingId && it.text("status") != "archived" }
+    if (tab == "Work" && closing != null && closeNode != null) AlertDialog(
+        onDismissRequest = { closingId = null },
+        title = { Text("Close ${closing.text("name")}?") },
+        text = { Text("Stop this agent and remove it from Work? Its worktree and files will be kept.") },
+        confirmButton = { TextButton(enabled = !state.busy, onClick = {
+            closingId = null
+            closeNode(closing.number("id"))
+        }) { Text("Close agent", color = MaterialTheme.colorScheme.error) } },
+        dismissButton = { TextButton(onClick = { closingId = null }) { Text("Cancel") } },
+    )
     val openNodes = state.nodes.filter { it.text("status") != "archived" }
     val nodesByMesh = openNodes.groupBy { it.number("mesh_id") }
     // Match Sidebar.tsx: open nodes determine the band; both bands keep saved mesh order.
@@ -243,7 +255,10 @@ fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) 
                         }
                     }
                 }
-                items(members, key = { "activity-${it.root.number("id")}" }) { WorkActivityRows(it, state, requireNotNull(glyphMotion), openNode) }
+                items(members, key = { "activity-${it.root.number("id")}" }) {
+                    WorkActivityRows(it, state, requireNotNull(glyphMotion), openNode,
+                        closeNode?.let { { id -> closingId = id } })
+                }
             }
         }
         if (if (tab == "Work") activities.isEmpty() else visible.isEmpty()) item { EmptyMessage(if (state.refreshing) "Loading agents…" else "No agents match this view. Capture a task to start one.") }
