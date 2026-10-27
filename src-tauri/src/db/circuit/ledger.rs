@@ -451,15 +451,25 @@ fn create_node_circuit_run_with_recovery_locked(
         context.set("recovery.from_run_id", recovery.run_id.to_string());
     }
     context.set("retry.max_retries", max_rounds.to_string());
+    // The bulky half of a trigger context lives in the side table (issue
+    // #2601), so the column starts small.
+    let split = super::artifacts::SplitContext::parse(&context.to_json()?);
     tx.execute(
         "INSERT INTO autopilot_circuit_runs
          (circuit_id, mesh_id, trigger_identity, context_json, queue_position, source_agent_node_id)
          VALUES (?1, ?2, ?3, ?4,
                  (SELECT COALESCE(MAX(queue_position),0)+1 FROM autopilot_circuit_runs WHERE mesh_id=?2),
                  ?5)",
-        params![circuit_id, node.mesh_id, format!("manual:agent:{node_id}:{}", uuid::Uuid::new_v4()), context.to_json()?, node_id],
+        params![circuit_id, node.mesh_id, format!("manual:agent:{node_id}:{}", uuid::Uuid::new_v4()), split.small_json(), node_id],
     )?;
     let run_id = tx.last_insert_rowid();
+    // The digest needs the run's id, so the column is written once more after
+    // the bulky values are stored.
+    let context_json = super::artifacts::persist_split(&tx, run_id, &split)?;
+    tx.execute(
+        "UPDATE autopilot_circuit_runs SET context_json = ?2 WHERE id = ?1",
+        params![run_id, context_json],
+    )?;
     super::evidence::pin_graph(&tx, run_id)?;
     // The lineage is also written to this run's own append-only history, so an
     // operator reading Circuit Run History sees which run this one follows
@@ -900,6 +910,21 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
         .flatten()
         .map(|run| run.id)
         .collect();
+    // The Probe reads the bulky half of a run's context out of its
+    // `context_json` — the issue body it searches by, the review report it
+    // shows — so the projection rejoins the two halves before the run leaves
+    // the database layer.
+    let stored = super::artifacts::load_values_for_runs(db, &run_ids)?;
+    if !stored.is_empty() {
+        for runs in runs_by_circuit.values_mut() {
+            for run in runs.iter_mut() {
+                if let Some(values) = stored.get(&run.id) {
+                    run.context_json =
+                        super::artifacts::join_context_json(&run.context_json, values);
+                }
+            }
+        }
+    }
     let mut steps_by_run: std::collections::HashMap<i64, Vec<AutopilotCircuitRunStep>> =
         std::collections::HashMap::new();
     if !run_ids.is_empty() {
@@ -1008,6 +1033,9 @@ pub(crate) fn delete_autopilot_circuit_locked(db: &mut Connection, id: i64) -> S
         "circuit_effects",
         "circuit_run_snapshot_history",
         "circuit_run_snapshots",
+        // The bulky half of a run's context (issue #2601). The schema declares
+        // `ON DELETE CASCADE` for it, and the same pragma caveat applies.
+        "circuit_run_artifacts",
     ] {
         tx.execute(&format!("DELETE FROM {table} WHERE run_id IN (SELECT id FROM autopilot_circuit_runs WHERE circuit_id=?1)"), [id])?;
     }
@@ -1038,6 +1066,9 @@ pub(crate) fn delete_circuits_for_mesh_inner(conn: &Connection, mesh_id: i64) ->
         "circuit_effects",
         "circuit_run_snapshot_history",
         "circuit_run_snapshots",
+        // The bulky half of a run's context (issue #2601). The schema declares
+        // `ON DELETE CASCADE` for it, and the same pragma caveat applies.
+        "circuit_run_artifacts",
     ] {
         conn.execute(&format!("DELETE FROM {table} WHERE run_id IN (SELECT id FROM autopilot_circuit_runs WHERE mesh_id=?1)"), [mesh_id])?;
     }
@@ -1170,15 +1201,19 @@ pub(crate) fn create_circuit_run_prepared_locked(
         &mut context,
     )
     .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
-    let context_json = context
-        .to_json()
-        .map_err(rusqlite::Error::InvalidParameterName)?;
+    // The bulky half of a trigger context — an issue or pull-request body —
+    // lives in the side table (issue #2601), so the column starts small.
+    let split = super::artifacts::SplitContext::parse(
+        &context
+            .to_json()
+            .map_err(rusqlite::Error::InvalidParameterName)?,
+    );
     let next_position: i64 = tx.query_row(
         "SELECT COALESCE(MAX(queue_position), 0) + 1 FROM autopilot_circuit_runs WHERE mesh_id = ?1",
         params![mesh_id],
         |row| row.get(0),
     )?;
-    tx.execute(
+    let inserted = tx.execute(
         "INSERT OR IGNORE INTO autopilot_circuit_runs \
              (circuit_id, mesh_id, trigger_identity, context_json, queue_position) \
          VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -1186,7 +1221,7 @@ pub(crate) fn create_circuit_run_prepared_locked(
             circuit_id,
             mesh_id,
             trigger_identity,
-            context_json,
+            split.small_json(),
             next_position
         ],
     )?;
@@ -1196,6 +1231,13 @@ pub(crate) fn create_circuit_run_prepared_locked(
         params![circuit_id, trigger_identity],
         |row| row.get(0),
     )?;
+    if inserted > 0 {
+        let context_json = super::artifacts::persist_split(&tx, id, &split)?;
+        tx.execute(
+            "UPDATE autopilot_circuit_runs SET context_json = ?2 WHERE id = ?1",
+            params![id, context_json],
+        )?;
+    }
     super::evidence::pin_graph(&tx, id)?;
     tx.commit()?;
     Ok(id)
@@ -1475,7 +1517,18 @@ pub(crate) fn list_circuit_runs_inner(
             attention_dismissed_at: row.get(9)?,
         })
     })?;
-    rows.collect()
+    let mut runs: Vec<AutopilotCircuitRun> = rows.collect::<SqlResult<_>>()?;
+    // The run card reads the bulky half of a run's context out of its
+    // `context_json` — the review report it shows — so the projection rejoins
+    // the two halves before the run leaves the database layer.
+    let ids: Vec<i64> = runs.iter().map(|run| run.id).collect();
+    let stored = super::artifacts::load_values_for_runs(db, &ids)?;
+    for run in runs.iter_mut() {
+        if let Some(values) = stored.get(&run.id) {
+            run.context_json = super::artifacts::join_context_json(&run.context_json, values);
+        }
+    }
+    Ok(runs)
 }
 
 /// Test helper for direct live-state setup. Production pause/resume uses the
@@ -1883,11 +1936,21 @@ pub(crate) fn commit_circuit_advance_inner(
             )?;
         }
     }
-    if let Some(context) = context_json {
-        super::evidence::record_wait_changes(tx, run_id, context)?;
+    // Split the context once: the decision-relevant values stay in
+    // `context_json`, the bulky ones move to the side table (issue #2601).
+    // The split happens here, inside the engine's single atomic commit point,
+    // so a crash can never leave a context half-split.
+    let split = context_json.map(super::artifacts::SplitContext::parse);
+    if let Some(split) = split.as_ref() {
+        super::evidence::record_wait_changes(tx, run_id, &split.small_json())?;
     }
+    let persisted_context = match split.as_ref() {
+        Some(split) => Some(super::artifacts::persist_split(tx, run_id, split)?),
+        None => None,
+    };
     match (run_state, context_json) {
-        (Some(state), ctx) => {
+        (Some(state), _) => {
+            let ctx = persisted_context.as_deref();
             let rows_updated = if is_terminal_run_state(state) {
                 tx.execute(
                     "UPDATE autopilot_circuit_runs \
@@ -1910,12 +1973,12 @@ pub(crate) fn commit_circuit_advance_inner(
             // doesn't wake the worker spuriously.
             terminal_woke = is_terminal_run_state(state) && rows_updated > 0;
         }
-        (None, Some(ctx)) => {
+        (None, Some(_)) => {
             tx.execute(
                 "UPDATE autopilot_circuit_runs \
                  SET context_json = json_remove(?2, '$.\"cleanup.pending\"'), updated_at = datetime('now') \
                  WHERE id = ?1",
-                params![run_id, ctx],
+                params![run_id, persisted_context.as_deref()],
             )?;
         }
         (None, None) => {}

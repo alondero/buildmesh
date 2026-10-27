@@ -710,6 +710,18 @@ const SWEEPABLE_RUNS: &str = "\
                                           THEN c.context_json ELSE '{}' END, \
                                           '$.\"recovery.from_run_id\"') = r.id)";
 
+/// The predicate the compaction sweep shares: a terminal run whose cleanup has
+/// not been claimed, older than the cutoff, that is not an interval or manual
+/// trigger. Both the context compaction and the side-table cleanup read it, so
+/// the two cannot drift apart.
+const COMPACTABLE_RUNS: &str = "state IN ('completed', 'failed') \
+    AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s \
+                    JOIN agent_node_lifecycle_leases l ON l.node_id = s.agent_node_id \
+                    WHERE s.run_id = autopilot_circuit_runs.id AND l.cleanup_requested = 1) \
+    AND updated_at < ?1 \
+    AND trigger_identity NOT LIKE 'interval:%' \
+    AND trigger_identity NOT LIKE 'manual:%'";
+
 /// Bound `autopilot_circuit_runs` to a retention window. Returns
 /// `(rows_deleted, rows_compacted)`.
 ///
@@ -781,6 +793,14 @@ pub(crate) fn prune_terminal_circuit_runs_before_inner(
         &format!("DELETE FROM autopilot_circuit_run_steps WHERE run_id IN ({SWEEPABLE_RUNS})"),
         params![cutoff],
     )?;
+    // The side table's rows ride with the run. The schema declares ON DELETE
+    // CASCADE, but enforcement rides on the connection's `foreign_keys` pragma
+    // — off by default for a system-libsqlite link — so the sweep deletes them
+    // explicitly, in the same defensive order the steps use.
+    conn.execute(
+        &format!("DELETE FROM circuit_run_artifacts WHERE run_id IN ({SWEEPABLE_RUNS})"),
+        params![cutoff],
+    )?;
     let deleted = conn.execute(
         &format!("DELETE FROM autopilot_circuit_runs WHERE id IN ({SWEEPABLE_RUNS})"),
         params![cutoff],
@@ -794,15 +814,21 @@ pub(crate) fn prune_terminal_circuit_runs_before_inner(
     // deliberately not bumped — compaction is not a state change — and the
     // `<> '{}'` guard keeps a steady-state sweep silent.
     let compacted = conn.execute(
-        "UPDATE autopilot_circuit_runs SET context_json = '{}' \
-          WHERE state IN ('completed', 'failed') \
-            AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s \
-                            JOIN agent_node_lifecycle_leases l ON l.node_id = s.agent_node_id \
-                            WHERE s.run_id = autopilot_circuit_runs.id AND l.cleanup_requested = 1) \
-            AND updated_at < ?1 \
-            AND trigger_identity NOT LIKE 'interval:%' \
-            AND trigger_identity NOT LIKE 'manual:%' \
-            AND context_json <> '{}'",
+        &format!(
+            "UPDATE autopilot_circuit_runs SET context_json = '{{}}' \
+              WHERE {COMPACTABLE_RUNS} AND context_json <> '{{}}'"
+        ),
+        params![cutoff],
+    )?;
+    // The compacted runs' bulky values live in the side table (issue #2601):
+    // emptying the column without them would keep the weight the compaction
+    // exists to drop. The delete is independent of the `context_json <> '{}'`
+    // guard, so a sweep that failed after the update still converges.
+    conn.execute(
+        &format!(
+            "DELETE FROM circuit_run_artifacts WHERE run_id IN \
+             (SELECT id FROM autopilot_circuit_runs WHERE {COMPACTABLE_RUNS})"
+        ),
         params![cutoff],
     )?;
 

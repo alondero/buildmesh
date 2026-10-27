@@ -310,8 +310,11 @@ pub(super) fn pin_graph(db: &Connection, run_id: i64) -> SqlResult<()> {
         return Ok(());
     }
     let (graph, context): (String, String) = db.query_row("SELECT s.graph_json,r.context_json FROM circuit_run_snapshots s JOIN autopilot_circuit_runs r ON r.id=s.run_id WHERE r.id=?1", [run_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
-    let context: std::collections::BTreeMap<String, String> =
-        serde_json::from_str(&context).unwrap_or_default();
+    // The launch plans live in the bulky half of the run's context, so the pin
+    // reads both halves: a plan that only exists in the side table would pin
+    // no reviewer at all.
+    let stored = super::artifacts::load_values(db, run_id)?;
+    let context = super::artifacts::merge_values(&context, &stored);
     let reviewers: Vec<serde_json::Value> = context.iter().filter_map(|(key, value)| {
         let node_id = key.strip_prefix("review.launch.")?;
         let plan: crate::preferences::spawn_configurations::SpawnConfiguration = serde_json::from_str(value).ok()?;

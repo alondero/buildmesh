@@ -220,7 +220,7 @@ pub(in crate::db::circuit) fn record_outcome_locked(
         if !(observed_recheck || (open_pr && has_open_pr_target)) {
             return Err(DbError::invalid("This action has no authoritative automatic evidence recheck. Inspect the external result."));
         }
-        let mut context = crate::circuit::context::CircuitContext::from_json(&run.context_json)?;
+        let mut context = super::super::artifacts::load_context(&tx, request.run_id)?;
         context.set(&format!("node.{}.wait.attempt", step.node_id), "");
         context.set(&format!("node.{}.evaluated_attempt", step.node_id), "");
         context.set(
@@ -275,7 +275,7 @@ pub(in crate::db::circuit) fn record_outcome_locked(
         )?;
         return Ok(tx.commit()?);
     }
-    let mut context = crate::circuit::context::CircuitContext::from_json(&run.context_json)?;
+    let mut context = super::super::artifacts::load_context(&tx, request.run_id)?;
     context.set(&format!("node.{}.recheck_only", request.node_id), "0");
     let effect_kind = match graph.node(&request.node_id).map(|n| &n.kind) {
         Some(CircuitNodeKind::GithubAction { .. }) => "github",

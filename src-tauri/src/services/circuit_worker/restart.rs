@@ -255,7 +255,7 @@ pub fn startup_reconcile_pass(app: &AppHandle) {
                 continue;
             }
         };
-        let context = match CircuitContext::from_json(&active.run.context_json) {
+        let context = match db::circuit::artifacts::load_run_context(active.run.id) {
             Ok(context) => context,
             Err(e) => {
                 let reason = format!("unreadable context_json, failing: {}", e);

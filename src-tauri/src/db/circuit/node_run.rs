@@ -124,6 +124,11 @@ pub(crate) fn list_node_circuit_runs_inner(
     // (steps and source, newest wins). Reuse that, and keep only the
     // implementation nodes: a reviewer helper is part of its source's run.
     let ownerships = super::leases::list_circuit_agent_ownerships_inner(db)?;
+    // One query for every run's bulky values, rather than one per run: the
+    // phone lists a handful of runs and each of them carries its report and
+    // its evidence.
+    let run_ids: Vec<i64> = ownerships.iter().map(|(_, run_id, ..)| *run_id).collect();
+    let stored = super::artifacts::load_values_for_runs(db, &run_ids)?;
     let mut listed = Vec::new();
     for (node_id, run_id, _circuit_id, blueprint_name, _state, parent_node_id) in ownerships {
         if parent_node_id.is_some() {
@@ -133,7 +138,7 @@ pub(crate) fn list_node_circuit_runs_inner(
             continue;
         };
         if is_listed(&run) {
-            listed.push(build(db, node_id, blueprint_name, run)?);
+            listed.push(build(db, node_id, blueprint_name, run, &stored)?);
         }
     }
     Ok(listed)
@@ -155,10 +160,17 @@ fn build(
     node_id: i64,
     blueprint_name: String,
     run: AutopilotCircuitRun,
+    stored: &std::collections::BTreeMap<i64, Vec<(String, String)>>,
 ) -> Result<NodeCircuitRun, DbError> {
     let graph = super::evidence::run_graph(db, run.id)?;
     let steps = super::ledger::list_circuit_run_steps_inner(db, run.id)?;
-    let context = CircuitContext::from_json(&run.context_json)?;
+    // The run's context is two halves: the column and the stored bulky
+    // values, which carry the review report and the evidence.
+    let values = stored
+        .get(&run.id)
+        .map(|values| values.as_slice())
+        .unwrap_or(&[]);
+    let context = super::artifacts::joined_context(&run.context_json, values)?;
     // Same function the desktop run card calls: the actions below are its
     // answer, not a recomputation.
     let attention = super::evidence::attention_inner(db, run.id)?;
