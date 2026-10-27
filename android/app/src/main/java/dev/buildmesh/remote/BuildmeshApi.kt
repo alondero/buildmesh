@@ -333,12 +333,9 @@ fun nodeLabel(node: JsonObject): String {
         "background_running" -> "Waiting for background work"
         "question_requested" -> "Needs an answer"
         "permission_requested" -> "Needs permission"
-        else -> when (status) {
-            "pending", "spawning" -> "Starting…"
-            "awaiting_input" -> "Needs attention"
-            "ready" -> "Ready"
-            "completed" -> "PR opened"
-            else -> status.replaceFirstChar { it.uppercase() }
-        }
+        // The status label comes from the generated table (STATUS_CONFIG), so a
+        // status this build does not know says so instead of echoing a
+        // capitalised guess that reads like a real state.
+        else -> MeshStatusTable.resolve(status).label
     }
 }

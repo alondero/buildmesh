@@ -15,7 +15,9 @@ The **source of truth lives in code**, not in this file:
   colour roles, with bundled Geist and generated Relay vectors. Its three status
   alphas — `attentionRing`, `approveBorder`, `rejectBorder` — mirror the mobile
   stylesheet's `--attention-ring` and the approve/deny borders both phone
-  surfaces draw. See
+  surfaces draw. Its type scale mirrors the mobile scale below through
+  `MeshTypeScale`, and its status vocabulary is generated from
+  `src/lib/status.ts` into `MeshStatusTable.kt`. See
   [Android styling](docs/development/android.md#screens-and-ownership).
 - Status vocabulary (labels, dot glyphs, colours): `src/lib/status.ts`.
 - Mesh accent palette (user-pickable): `src/lib/meshColors.ts`.
@@ -127,6 +129,12 @@ desktop rows (the mesh summary dots in the sidebar) still consume the
 `bgColor` class for a small coloured circle; the Agent History rows paint
 the label as text, not a dot.
 
+The native client reads the same table from a generated Kotlin mirror
+(`MeshStatusTable.kt`, written by `scripts/generate-android-status-table.mjs`).
+A status it does not know is an explicit gap there — a named marker, not a
+muted dot with a generic label — so a vocabulary the phone has not caught up
+with reads as unknown rather than as a healthy state.
+
 | Status | Colour | Circle (desktop) | Dot | Label |
 |---|---|---|---|---|
 | `pending`, `spawning` | muted (pulsing) | dashed ring | ◌ | Starting… |
@@ -201,6 +209,11 @@ floor** — badges, gutter labels, micro-captions. Nothing renders below 10px.
 **Mobile scale.** Slightly larger for touch: 13px body, 15px card titles,
 16px on text fields (prevents iOS focus auto-zoom), 11–12px metadata, 10px
 floor for micro-labels.
+
+The native Android client mirrors this scale in `MeshTypeScale`
+(`Theme.kt`); `tests/unit/android-token-mirror.test.ts` recomputes those
+numbers from this paragraph, so a retune here fails the phone's mirror until
+it is updated too.
 
 ## Spacing, radius, shadow, motion
 
@@ -416,6 +429,11 @@ specificity and import order; custom properties don't.
   test pins load-bearing text to `text-secondary`. The mobile mirror is
   checked by `tests/unit/mobile-tokens-contrast.test.ts` for AA on mobile
   surfaces; equality with desktop token values is a design convention.
+  The native client's mirror is recomputed the same way by
+  `tests/unit/android-token-mirror.test.ts`: the Material colour roles against
+  the dark tokens in `src/App.css`, the status alphas against
+  `src/mobile/styles.css`, the type scale against the mobile scale above, and
+  the status vocabulary against the table generated from `STATUS_CONFIG`.
 - `scripts/check-agent-diff.mjs` flags new bare radius classes in components;
   justified exceptions use an `allow-bare-rounded` marker.
 - Keyboard focus is always visible: 1.5px accent-cyan outline on button-like

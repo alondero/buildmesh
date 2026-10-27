@@ -365,6 +365,41 @@ Mutating HTTP requests and redirects are never automatically replayed.
 HTTP requests explicitly close their connection to match the embedded server's
 one-request transport; terminal WebSockets retain their separate live connection.
 
+### The token mirror is recomputed, not hand-copied
+
+The native client mirrors three things from the desktop and the shared
+vocabulary. Each of those three mirrors is recomputed from its source rather
+than copied by hand:
+
+- **The Material colour roles** live in `MeshColors` (`Theme.kt`) and answer to
+  the dark tokens in `src/App.css`. Its three status alphas —
+  `attentionRing`, `approveBorder`, `rejectBorder` — answer to the mobile
+  stylesheet's `--attention-ring` and to the approve/deny borders the deck
+  chips draw.
+- **The type scale** lives in `MeshTypeScale` (`Theme.kt`) and answers to the
+  mobile scale in [DESIGN.md](../../DESIGN.md#typography): 13px body, 15px card
+  titles, 16px on text fields, 11–12px metadata, and a 10px floor for
+  micro-labels. The Material roles read those steps; the display and headline
+  roles are page chrome above the scale.
+- **The status vocabulary** is generated into
+  `android/app/src/main/java/dev/buildmesh/remote/MeshStatusTable.kt` by
+  `scripts/generate-android-status-table.mjs`, which reads `STATUS_CONFIG`
+  from `src/lib/status.ts`. `MeshColors.status`, `workStatusShape` and
+  `nodeLabel` all resolve through that table, so a status the phone does not
+  know is an explicit gap — a named `Unknown status` marker with a red cross —
+  rather than a muted dot with a generic label.
+
+**Gate:** `tests/unit/android-token-mirror.test.ts` recomputes all three
+against their sources and fails when they drift. The Android build checks the
+generated status table against its source too
+(`scripts/generate-android-status-table.mjs --check`), so a status added to
+`src/lib/status.ts` without `npm run android:status-table` fails the build
+rather than shipping a vocabulary the phone has not caught up with.
+
+One caller is exempt: `workCircuitOrbit` names statuses directly because it
+says which orbit a node gets, not what the statuses are called or how they
+look. A status outside those rules keeps the default orbit.
+
 ## Background agent notices
 
 An agent can stop and wait: it asks a question, or it asks for permission to
