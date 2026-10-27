@@ -15,12 +15,20 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
  * grey from it (ADR-0036), and the idle animation gate pauses the decorative
  * infinite animations from it (issue #2599). Each consumer asks the OS for
  * itself — this module centralises the reading, not the state — but the
- * reading is the same one, written once. Two other hooks subscribe to the
- * same Tauri event for their own purposes — the global shortcut dispatcher
- * (it must not fire while the window is in the background) and the
- * path-invalidated query (it refreshes when the window comes back) — and they
- * keep their own subscription, because what they need is the TRANSITION, not
- * the answer this module owns.
+ * reading is the same one, written once.
+ *
+ * Two other hooks subscribe to the same Tauri event for their own purposes —
+ * the global shortcut dispatcher (it must not fire while the window is in the
+ * background) and the path-invalidated query (it refreshes when the window
+ * comes back) — and they keep their own subscription, for two reasons. Both
+ * need the TRANSITION, and this module deliberately does not separate the
+ * initial answer from a transition: it delivers both through one callback, so
+ * a consumer of `watchWindowFocus` cannot tell "the window was already
+ * unfocused" from "the window just lost focus". The path-invalidated query
+ * would refetch on mount if the initial answer reached it. And the shortcut
+ * dispatcher keeps the answer in a ref that its own OS-level handler checks,
+ * so the TOCTOU window between the focus event and the shortcut's
+ * registration stays closed.
  *
  * `onChange` is called with the initial state as soon as the query resolves
  * and again on every focus change. The consumer owns its own default for the

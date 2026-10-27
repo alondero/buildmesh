@@ -10,11 +10,12 @@
  * one core for hours while the JavaScript main thread sat at 3%. The page
  * never went idle, because an infinite animation never ends.
  *
- * `scripts/idle-animation-probe.mjs` measures both halves of that claim on
+ * `scripts/idle-animation-probe.mjs` measures the frame half of that claim on
  * the real frontend: with the animations running the trace records ~60
- * compositor frames per second and the renderer holds several percent of a
- * core; with the gate closed it records none, and the renderer falls to a
- * fraction of a percent.
+ * compositor frames per second; with the gate closed it records none. The
+ * CPU half depends on the machine — a shared, busy host attributes time to
+ * the renderer that has nothing to do with it — so the frames are the
+ * measurement, and the CPU is the corroboration.
  *
  * The fix is not to remove the animations — they carry the attention and
  * liveness vocabulary — but to stop *running* them while nobody is looking.

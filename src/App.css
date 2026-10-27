@@ -482,7 +482,8 @@ html, body {
    toast that fades in while the window is in the background would freeze at
    zero opacity and never be seen.
    `tests/unit/idle-animation-gate.test.ts` reads this block and fails if an
-   infinite animation exists that is not listed — an unlisted one keeps the
+   infinite animation exists that is not listed — in a flat rule, in a Tailwind
+   `@theme` token or in a `@utility` at-rule. An unlisted one keeps the
    Compositor producing frames forever.
    `scripts/idle-animation-probe.mjs` measures the effect: the renderer's
    compositor frames go from ~60 per second to none.

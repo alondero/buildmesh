@@ -240,7 +240,8 @@ floor for micro-labels.
   outside the gate: a toast that fades in while the window is in the
   background would otherwise freeze at zero opacity and never be seen.
   `tests/unit/idle-animation-gate.test.ts` fails if an infinite animation is
-  added that the gate does not cover, and
+  added that the gate does not cover — in a flat rule, in a Tailwind `@theme`
+  token or in a `@utility` at-rule — and
   `tests/integration/ui-shot-idle-animation.steps.mjs` checks in a real
   browser that the rule reaches the animated elements — the Tailwind
   utilities included, since they live in a cascade layer of their own — and

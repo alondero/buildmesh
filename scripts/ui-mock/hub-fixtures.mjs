@@ -3,10 +3,12 @@
  *
  * The issue's reproduction scenario is a long-running hub: sixteen agent nodes
  * in mixed states, each one carrying an infinite animation — the status pulse
- * of a node that needs attention, the attention ring around its card, the
- * Circuit comet of a node that is piloting. Those animations are what make
- * the renderer Compositor produce a frame every vsync, so the count of
- * animated elements is what the measurement turns on.
+ * of a node that needs attention and the attention ring around its card. (The
+ * scene carries no Circuit ownership, so the comet glyph does not appear in
+ * it; the comet is one of the gated animations, and the gate covers it in the
+ * app.) Those animations are what make the renderer Compositor produce a
+ * frame every vsync, so the count of animated elements is what the measurement
+ * turns on.
  *
  * The default fixtures carry three nodes, which is enough to show the gate
  * working but not enough to show the shape of the cost this issue is about.
