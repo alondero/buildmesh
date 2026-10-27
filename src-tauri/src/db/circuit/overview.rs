@@ -37,8 +37,15 @@ pub fn overview(run_id: i64) -> Result<CircuitRunOverview, DbError> {
 }
 
 pub(crate) fn overview_inner(db: &Connection, run_id: i64) -> Result<CircuitRunOverview, DbError> {
-    let run = super::ledger::get_circuit_run_inner(db, run_id)?
+    let mut run = super::ledger::get_circuit_run_inner(db, run_id)?
         .ok_or_else(|| DbError::not_found("Run no longer exists."))?;
+    // The Overview tab shows the reviewer's report, which lives in the bulky
+    // half of the run's context, so the projection rejoins the two halves
+    // before the run leaves the database layer.
+    let stored = super::artifacts::load_values(db, run.id)?;
+    if !stored.is_empty() {
+        run.context_json = super::artifacts::join_context_json(&run.context_json, &stored);
+    }
     let circuit_name: String = db.query_row(
         "SELECT name FROM autopilot_circuits WHERE id=?1",
         [run.circuit_id],

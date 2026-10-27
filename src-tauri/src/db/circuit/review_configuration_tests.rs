@@ -26,7 +26,7 @@ fn updates_unstarted_reviewers_and_rolls_back_entire_batch_on_started_reviewer()
             |r| r.get(0),
         )
         .unwrap();
-    let context = CircuitContext::from_json(&before).unwrap();
+    let context = crate::circuit::context::CircuitContext::from_json(&before).unwrap();
     assert_eq!(
         context.get("review.launch.reviewer"),
         Some("{\"id\":\"first\"}")

@@ -199,6 +199,14 @@ _Avoid_: Review Successor, Continued Review Circuit
 A revision identifying a change to the built-in Review Blueprint's behavior, such as its flow, instructions, approval, or recovery rules. Storage-format changes do not change the behavior revision.
 _Avoid_: Graph schema version
 
+**Circuit Run Context**:
+The state one Circuit Run carries from advance to advance. It has two halves. The decision-relevant half — the flags the stepper reads to decide — stays in the run's `context_json` column and is rewritten on every advance. The bulky half — an agent's report, a step's evidence, a trigger body — lives in the run's **Circuit Run Artifact** rows and is written once, read when something needs it. A run's context is not a log: it is the current state, so a cleared value leaves no copy behind. Reading a context means reading both halves; the projections an operator sees put them back together, because the review report and the trigger body are part of what the person is shown.
+_Avoid_: transcript, event log
+
+**Circuit Run Artifact**:
+One bulky value of a Circuit Run's context, held apart from the run row so that rewriting the run's small state does not rewrite the value. An artifact is keyed by its run, the circuit node it belongs to and the attempt it belongs to; clearing a node's working state clears its artifacts with it. An artifact the run's context stops mentioning is unchanged, not gone.
+_Avoid_: attachment, side-car file
+
 **Circuit Run History**:
 The continuous record of work and recovery decisions within one Circuit Run. Retrying a Circuit Step adds another attempt to that history rather than replacing what came before. Each entry names its source and disposition beside its step/attempt identity and time, so waits, capacity waits, pinned configuration and review extensions are diagnosable uniformly. The default view shows only the key events (state changes, steps needing a person, operator actions); the bookkeeping behind them is one toggle away. A run is named after its implementation agent and timed from when Autopilot started it, not from when it queued.
 _Avoid_: attempt snapshot, recovery session

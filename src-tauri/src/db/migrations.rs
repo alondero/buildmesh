@@ -162,7 +162,17 @@ use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
 /// suppresses the attention filter/count/sort while leaving run state, steps and
 /// verdicts as they were. NULL is the default and means "still outstanding";
 /// nothing writes it back.
-pub(crate) const SCHEMA_VERSION: u32 = 50;
+/// v51 — Bulky circuit-run context values move to their own table (issue
+/// #2601). `autopilot_circuit_runs.context_json` carried full agent outputs
+/// and evidence blobs (average 44 KB, largest 403 KB) and was rewritten as one
+/// blob on every advance, so the run row overflowed its page, every advance
+/// re-serialised tens to hundreds of kilobytes, and every query that inspected
+/// the context had to parse all of it. The new `circuit_run_artifacts` table
+/// holds the values above the split threshold, keyed by run, node and attempt;
+/// the column keeps the decision-relevant half plus a digest of the bulky set
+/// so the worker's freshness fence still sees a bulky change. Existing runs
+/// are migrated once by the `EnsureCircuitRunArtifacts` step.
+pub(crate) const SCHEMA_VERSION: u32 = 51;
 
 // ---------------------------------------------------------------------------
 // ColumnSpec — one column the runner knows how to add and read back.
@@ -331,6 +341,18 @@ pub(crate) enum AlwaysStep {
     /// `create_canonical_indexes_after_evolution` runs after this step and no
     /// longer declares either index, so nothing recreates them.
     DropSupersededSingleColumnIndexes,
+    /// Create the `circuit_run_artifacts` side table and move the bulky half
+    /// of every existing run's context into it (issue #2601).
+    ///
+    /// `autopilot_circuit_runs.context_json` carried full agent outputs and
+    /// evidence blobs, and was rewritten as one blob on every advance. The
+    /// side table holds the values above the split threshold; the column keeps
+    /// the decision-relevant half plus a digest of the bulky set.
+    ///
+    /// The table creation is idempotent and runs on every launch. The
+    /// backfill is guarded by an `app_settings` flag so a long-lived
+    /// database does not re-parse every run's context on every start.
+    EnsureCircuitRunArtifacts,
 }
 
 // `pub(crate)` so the migration tests reset the exact flag a migration reads: a
@@ -1215,6 +1237,7 @@ const ALWAYS_STEPS: &[AlwaysStep] = &[
     AlwaysStep::UpgradeMergeVerification,
     AlwaysStep::RepairReviewFeedbackRoute,
     AlwaysStep::DropSupersededSingleColumnIndexes,
+    AlwaysStep::EnsureCircuitRunArtifacts,
 ];
 
 // ---------------------------------------------------------------------------
@@ -1935,7 +1958,68 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                  DROP INDEX IF EXISTS idx_warm_worktrees_mesh;",
             )?;
         }
+        AlwaysStep::EnsureCircuitRunArtifacts => {
+            ensure_circuit_run_artifacts(conn)?;
+        }
     }
+    Ok(())
+}
+
+/// The `app_settings` flag that records the one-time bulky-context backfill
+/// (issue #2601). The table creation is idempotent and runs on every launch;
+/// the backfill is not, because it parses every run's context.
+pub(crate) const ARTIFACT_BACKFILL_FLAG: &str = "circuit_run_artifacts_backfill_v1";
+
+/// Create the `circuit_run_artifacts` side table and move the bulky half of
+/// every existing run's context into it (issue #2601).
+///
+/// The backfill runs once per database: it is guarded by an `app_settings`
+/// flag written only after the rows have moved, so a crash mid-backfill
+/// leaves the work repeatable. Each run is migrated on its own — the bulky
+/// values are inserted first and the column is rewritten afterwards, so an
+/// interrupted backfill never loses a value.
+fn ensure_circuit_run_artifacts(conn: &Connection) -> SqlResult<()> {
+    crate::db::circuit::artifacts::ensure_table(conn)?;
+    if !table_present(conn, "autopilot_circuit_runs")? {
+        return Ok(());
+    }
+    let already_done: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM app_settings WHERE key = ?1",
+        params![ARTIFACT_BACKFILL_FLAG],
+        |row| row.get(0),
+    )?;
+    if already_done {
+        return Ok(());
+    }
+    let runs: Vec<(i64, String)> = {
+        let mut stmt =
+            conn.prepare("SELECT id, context_json FROM autopilot_circuit_runs ORDER BY id")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<SqlResult<Vec<_>>>()?
+    };
+    let mut migrated = 0usize;
+    for (run_id, context_json) in runs {
+        let split = crate::db::circuit::artifacts::SplitContext::parse(&context_json);
+        if split.bulky.is_empty() {
+            continue;
+        }
+        let stored = crate::db::circuit::artifacts::persist_split(conn, run_id, &split)?;
+        conn.execute(
+            "UPDATE autopilot_circuit_runs SET context_json = ?2 WHERE id = ?1",
+            params![run_id, stored],
+        )?;
+        migrated += 1;
+    }
+    if migrated > 0 {
+        tracing::info!(
+            "evolve_to: moved the bulky context of {} run(s) into circuit_run_artifacts",
+            migrated
+        );
+    }
+    conn.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, '1')",
+        params![ARTIFACT_BACKFILL_FLAG],
+    )?;
     Ok(())
 }
 

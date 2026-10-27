@@ -244,7 +244,13 @@ impl CircuitContext {
     }
 }
 
-fn is_lifecycle_blocker_key(key: &str) -> bool {
+/// Whether a context path holds a lifecycle blocker.
+///
+/// The blocker is runtime state, not context: [`CircuitContext::from_json`]
+/// drops these keys so a persisted projection cannot keep a veto alive. The
+/// database layer needs the same rule when it joins a run's stored bulky
+/// values back into a context, or it would re-add what the filter removed.
+pub(crate) fn is_lifecycle_blocker_key(key: &str) -> bool {
     key.strip_prefix("node.")
         .and_then(|node_key| node_key.rsplit_once('.'))
         .is_some_and(|(_, suffix)| suffix == "lifecycle_blocker")

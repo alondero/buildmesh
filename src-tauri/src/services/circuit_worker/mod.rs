@@ -741,7 +741,7 @@ fn drive_run(app: &AppHandle, active: &db::ActiveCircuitRun) -> Result<(), Strin
             return Ok(());
         }
     };
-    let mut context = match CircuitContext::from_json(&active.run.context_json) {
+    let mut context = match db::circuit::artifacts::load_run_context(active.run.id) {
         Ok(context) => context,
         Err(error) => {
             let reason = format!("circuit context is unreadable: {}", error);
@@ -1913,7 +1913,7 @@ fn apply_quiet_classifier_failures(app: &AppHandle, failures: Vec<QuietClassifie
             };
             let (Ok(graph), Ok(mut context), Ok(steps)) = (
                 CircuitGraph::from_json(&failure.active.circuit_graph_json),
-                CircuitContext::from_json(&run.context_json),
+                db::circuit::artifacts::load_run_context(run.id),
                 load_steps(run.id),
             ) else {
                 return;

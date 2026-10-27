@@ -1894,10 +1894,7 @@ pub(crate) fn recover_circuit_agent_turn_inner(
     stamp: &str,
     payload: &mut crate::agent::session_lifecycle::LifecycleChangedPayload,
 ) -> SqlResult<bool> {
-    use crate::circuit::{
-        context::CircuitContext,
-        stepper::{RunState, RunView, StepStatus, StepView},
-    };
+    use crate::circuit::stepper::{RunState, RunView, StepStatus, StepView};
     use rusqlite::OptionalExtension;
     if payload.session_id != fence.agent_node_id {
         return Ok(false);
@@ -1908,11 +1905,11 @@ pub(crate) fn recover_circuit_agent_turn_inner(
     ) {
         return Ok(false);
     }
-    let Some((state, context)) = conn
+    let Some(state) = conn
         .query_row(
-            "SELECT state,context_json FROM autopilot_circuit_runs WHERE id=?1",
+            "SELECT state FROM autopilot_circuit_runs WHERE id=?1",
             [fence.run_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            |row| row.get::<_, String>(0),
         )
         .optional()?
     else {
@@ -1921,7 +1918,9 @@ pub(crate) fn recover_circuit_agent_turn_inner(
     if state != "running" {
         return Ok(false);
     }
-    let Ok(context) = CircuitContext::from_json(&context) else {
+    // The bulky half of the context lives in the side table (issue #2601);
+    // the view needs the whole of it to judge the step's evidence.
+    let Ok(context) = crate::db::circuit::artifacts::load_context(conn, fence.run_id) else {
         return Ok(false);
     };
     let mut statement = conn.prepare("SELECT node_id,status,attempt,agent_node_id FROM autopilot_circuit_run_steps WHERE run_id=?1")?;

@@ -321,7 +321,6 @@ pub(crate) fn receive_native_hook_locked(
     let mut targets = Vec::new();
     for run_id in run_ids {
         use crate::circuit::{
-            context::CircuitContext,
             model::StepOutcome,
             stepper::{RunState, RunView, StepStatus, StepView},
         };
@@ -332,7 +331,7 @@ pub(crate) fn receive_native_hook_locked(
             run_id,
             state: RunState::from_db_str(&run.state),
             graph: run_graph(&tx, run_id)?,
-            context: CircuitContext::from_json(&run.context_json)?,
+            context: super::super::artifacts::load_context(&tx, run_id)?,
             steps: rows
                 .into_iter()
                 .map(|s| StepView {

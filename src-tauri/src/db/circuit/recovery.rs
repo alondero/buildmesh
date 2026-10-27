@@ -103,7 +103,7 @@ pub(crate) fn review_recovery_inner(
             "Only failed reviews can be continued. Open the active run to resume or cancel it.",
         ));
     }
-    let context = CircuitContext::from_json(&run.context_json)?;
+    let context = super::artifacts::load_context(db, run_id)?;
     let original = super::evidence::run_graph(db, run_id)?;
     let steps = super::ledger::list_circuit_run_steps_inner(db, run_id)?;
     let (source_id, local) = review_source_id(&run, &original, &steps)?;
@@ -430,8 +430,7 @@ pub(crate) fn extend_failed_review_locked(
         [root_run.circuit_id],
         |row| row.get(0),
     )?;
-    let mut context: std::collections::BTreeMap<String, String> =
-        serde_json::from_str(&run.context_json)?;
+    let mut context = super::artifacts::load_context_map(&tx, target)?;
     context.retain(|key, _| {
         !key.starts_with("node.") && !key.starts_with("evidence.") && key != "cleanup.pending"
     });
@@ -479,10 +478,18 @@ pub(crate) fn extend_failed_review_locked(
     }
     tx.execute("INSERT INTO autopilot_circuit_run_steps (run_id,node_id,status,attempt) VALUES (?1,'reviewer','pending_slot',?2)",
         params![target, next_attempt])?;
+    // The extension keeps the run's trigger context but starts the reviewer's
+    // working state afresh, so the node-scoped bulky values go with it
+    // (issue #2601). The values the extension does keep — the source's report,
+    // the trigger body — stay in the side table and in the column.
+    super::artifacts::delete_values_with_prefix(&tx, target, "node")?;
+    super::artifacts::delete_values_with_prefix(&tx, target, "evidence")?;
+    let context_json =
+        super::artifacts::write_context(&tx, target, &serde_json::to_string(&context)?)?;
     tx.execute("UPDATE autopilot_circuit_runs SET circuit_id=?2, source_agent_node_id=?3, state='pending',
         context_json=?4, queue_position=(SELECT COALESCE(MAX(queue_position),0)+1 FROM autopilot_circuit_runs WHERE mesh_id=?5),
         updated_at=datetime('now') WHERE id=?1 AND state='failed'",
-        params![target, root_run.circuit_id, recovery.source_id, serde_json::to_string(&context)?, run.mesh_id])
+        params![target, root_run.circuit_id, recovery.source_id, context_json, run.mesh_id])
         ?;
     super::evidence::append_history(&tx, super::evidence::HistoryEvent {
         run_id: target,

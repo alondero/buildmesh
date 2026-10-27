@@ -2086,6 +2086,12 @@ test('a Rust file attached with #[path] selects the module that owns it', () => 
   assert.equal(rustModule('src-tauri/src/agent/spawn/reader.rs'), 'agent::spawn::reader_tests');
   assert.equal(rustModule('src-tauri/src/agent/spawn/streams.rs'), 'agent::spawn::streams_tests');
   assert.equal(rustModule('src-tauri/src/db/circuit/operator_push.rs'), 'db::circuit::operator_push_tests');
+  // Files whose tests live in a suite that covers a whole subtree: the suite
+  // is declared by an ancestor, so a path walk maps them to a module that
+  // holds no tests of its own.
+  assert.equal(rustModule('src-tauri/src/db/circuit/queue.rs'), 'db::circuit_tests');
+  assert.equal(rustModule('src-tauri/src/db/circuit/recovery.rs'), 'db::circuit_tests');
+  assert.equal(rustModule('src-tauri/src/services/circuit_worker/restart.rs'), 'services::circuit_worker::tests');
   assert.equal(rustModule('src-tauri/src/db/create_operation.rs'), 'db::create_operation_tests');
   assert.equal(rustModule('src-tauri/src/db/mesh.rs'), 'db::mesh_tests');
   assert.equal(rustModule('src-tauri/src/services/github/pagination.rs'), 'services::github::pagination_tests');
