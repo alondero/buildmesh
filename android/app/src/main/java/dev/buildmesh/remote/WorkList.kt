@@ -1,21 +1,38 @@
 package dev.buildmesh.remote
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.AnchoredDraggableState
+import androidx.compose.foundation.gestures.DraggableAnchors
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.anchoredDraggable
+import androidx.compose.foundation.gestures.animateTo
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.LayoutDirection
 import dev.buildmesh.remote.wire.CircuitAgentOwnership
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
+import kotlin.math.roundToInt
 
 data class WorkActivity(val root: JsonObject, val members: List<JsonObject>)
 
@@ -62,7 +79,8 @@ fun WorkMeshHeader(mesh: JsonObject?, count: Int) {
 }
 
 @Composable
-fun WorkActivityRows(activity: WorkActivity, state: RemoteState, motion: WorkGlyphMotion, openNode: (Long) -> Unit) {
+fun WorkActivityRows(activity: WorkActivity, state: RemoteState, motion: WorkGlyphMotion, openNode: (Long) -> Unit,
+    closeNode: ((Long) -> Unit)? = null) {
     val paired = activity.members.size > 1
     val tone = when {
         activity.members.any { it.text("status") in setOf("error", "lost") } -> MeshColors.red
@@ -70,12 +88,13 @@ fun WorkActivityRows(activity: WorkActivity, state: RemoteState, motion: WorkGly
         activity.members.any { it.text("status") in setOf("running", "pending", "spawning") } -> MeshColors.accent
         else -> MeshColors.accent.copy(alpha = 0.4f)
     }
+    val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
     val bracket = if (paired) Modifier.semantics {
         contentDescription = "Paired group of ${activity.members.size} agents"
     }.drawBehind {
-        val x = 4.dp.toPx()
+        val x = if (rtl) size.width - 4.dp.toPx() else 4.dp.toPx()
         val inset = 10.dp.toPx()
-        val cap = 4.dp.toPx()
+        val cap = 4.dp.toPx() * if (rtl) -1 else 1
         val stroke = 2.dp.toPx()
         drawLine(tone, Offset(x, inset), Offset(x, size.height - inset), stroke)
         drawLine(tone, Offset(x, inset), Offset(x + cap, inset), stroke)
@@ -83,24 +102,68 @@ fun WorkActivityRows(activity: WorkActivity, state: RemoteState, motion: WorkGly
     } else Modifier
     Column(Modifier.fillMaxWidth().then(bracket)) {
         activity.members.forEach { node ->
-            val id = node.number("id")
-            val owner = state.circuitOwnerships.firstOrNull { it.node_id == id }
-            Row(Modifier.fillMaxWidth().clickable(role = Role.Button, onClickLabel = "Open ${node.text("name")}") { openNode(id) }
-                .heightIn(min = 56.dp).padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
-                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                WorkStatusGlyph(node, owner, motion)
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(node.text("name"), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    val detail = listOf(nodeLabel(node), node.text("branch")).filter { it.isNotBlank() }.joinToString(" · ")
-                    Text(detail, style = MaterialTheme.typography.bodySmall, color = MeshColors.secondary,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    state.circuitRuns.firstOrNull { it.node_id == id }?.takeIf { it.needs_you.isNotEmpty() }?.let {
-                        Text(circuitStatus(it), style = MaterialTheme.typography.bodySmall, color = MeshColors.amber,
-                            maxLines = 2, overflow = TextOverflow.Ellipsis)
+            key(node.number("id")) {
+                val id = node.number("id")
+                val owner = state.circuitOwnerships.firstOrNull { it.node_id == id }
+                WorkAgentRow(node, state.busy, openNode, closeNode,
+                    modifier = if (paired) Modifier.padding(start = 10.dp) else Modifier) {
+                    WorkStatusGlyph(node, owner, motion)
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(node.text("name"), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        val detail = listOf(nodeLabel(node), node.text("branch")).filter { it.isNotBlank() }.joinToString(" · ")
+                        Text(detail, style = MaterialTheme.typography.bodySmall, color = MeshColors.secondary,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        state.circuitRuns.firstOrNull { it.node_id == id }?.takeIf { it.needs_you.isNotEmpty() }?.let {
+                            Text(circuitStatus(it), style = MaterialTheme.typography.bodySmall, color = MeshColors.amber,
+                                maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun WorkAgentRow(node: JsonObject, busy: Boolean, openNode: (Long) -> Unit,
+    closeNode: ((Long) -> Unit)?, modifier: Modifier = Modifier, content: @Composable RowScope.() -> Unit) {
+    val id = node.number("id")
+    val name = node.text("name")
+    val width = with(LocalDensity.current) { 88.dp.toPx() }
+    val revealOffset = if (LocalLayoutDirection.current == LayoutDirection.Rtl) width else -width
+    val swipe = remember(id, revealOffset) {
+        AnchoredDraggableState(false, DraggableAnchors { false at 0f; true at revealOffset })
+    }
+    val scope = rememberCoroutineScope()
+    Box(modifier.fillMaxWidth().clipToBounds()) {
+        // Only expose the action to touch and accessibility after revealing it.
+        if (swipe.offset != 0f && closeNode != null) {
+            Row(Modifier.matchParentSize(), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick = { closeNode(id) }, enabled = !busy && swipe.settledValue,
+                    modifier = Modifier.width(88.dp).fillMaxHeight().background(MaterialTheme.colorScheme.errorContainer),
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onErrorContainer)) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(Icons.Default.Close, null)
+                        Text("Close")
+                    }
+                }
+            }
+        }
+        Row(Modifier.absoluteOffset { IntOffset(swipe.requireOffset().roundToInt(), 0) }
+            .fillMaxWidth().background(MeshColors.background)
+            .anchoredDraggable(swipe, orientation = Orientation.Horizontal, enabled = !busy && closeNode != null,
+                reverseDirection = false)
+            .semantics {
+                if (!busy && closeNode != null) customActions = listOf(
+                    CustomAccessibilityAction("Close $name") { closeNode(id); true }
+                )
+            }
+            .clickable(role = Role.Button, onClickLabel = "Open $name") {
+                if (swipe.offset != 0f) scope.launch { swipe.animateTo(false) } else openNode(id)
+            }
+            .heightIn(min = 56.dp).padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
+            content = content)
     }
 }

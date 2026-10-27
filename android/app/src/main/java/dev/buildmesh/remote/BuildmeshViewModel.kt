@@ -198,6 +198,13 @@ class BuildmeshViewModel(application: Application) : AndroidViewModel(applicatio
         refresh()
     }
 
+    fun closeNode(nodeId: Long) = action { client ->
+        client.post("/api/nodes/$nodeId/close", JsonObject(emptyMap()))
+        refresher.invalidate()
+        mutableState.update { it.copy(nodes = it.nodes.filterNot { node -> node.number("id") == nodeId },
+            notice = "Agent closed. Worktree and files kept.") }
+    }
+
     fun action(block: suspend (BuildmeshApi) -> Unit) {
         val client = api ?: return
         if (state.value.busy) return

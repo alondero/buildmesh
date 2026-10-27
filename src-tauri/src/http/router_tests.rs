@@ -111,6 +111,7 @@ GET /nodes/{id}/log -> CoordinatorRead
 POST /nodes/{id}/prompt -> CoordinatorWrite
 POST /api/nodes/create -> Admin
 POST /api/nodes/{id}/input -> Admin
+POST /api/nodes/{id}/close -> Admin
 POST /api/meshes/{id}/pr -> Admin
 GET /api/meshes/{id}/pr/source -> Admin
 POST /api/meshes/{mesh_id}/pulls/{pr_number}/merge -> Admin

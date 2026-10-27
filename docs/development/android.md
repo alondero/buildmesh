@@ -190,6 +190,15 @@ the representative first; each row opens that agent. Search and Needs attention
 match individual agents and retain the matching activity's other members for
 context. Missing or archived parents, cross-mesh links and cycles leave agents
 accessible. Desktop manual groups remain local desktop view state.
+Swipe a Work row toward the start edge to reveal **Close**, then tap it and
+confirm to stop and remove that individual agent. Swipe back or tap the row to
+hide the action; swiping alone does not close anything. TalkBack exposes the
+same action without a swipe. Closing keeps the worktree and files, including
+uncommitted changes. The row stays until the desktop acknowledges the close;
+failures appear in the app's error banner and can be retried.
+`POST /api/nodes/{id}/close` requires a paired admin session, stops the process
+through the shared lifecycle and deletes the node without worktree removal.
+Closing an already removed node succeeds, so retrying a lost reply is safe.
 `GET /api/circuit-agent-ownerships` supplies the same ownership ledger as the
 desktop sidebar, using the generated `CircuitAgentOwnership` wire type. Older
 desktops without this route show standalone rows. A failed ownership refresh
