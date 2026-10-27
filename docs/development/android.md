@@ -207,6 +207,15 @@ user asked for — the five-second poll never pulses the chrome. Node details pu
 the reply composer directly under the request it answers, above the
 terminal/changes/PR sections, which on a phone can be screens deep.
 
+Issues, Archive, Changes, Pull requests and Usage refresh by pulling down,
+the gesture an Android user reaches for, and the pull re-reads that screen's
+own routes once. A listing screen offers no second, in-list refresh control:
+the app-bar action is the shared recovery affordance the error notice points
+at, and a failed read keeps its own **Retry** above the fold, so recovering
+does not depend on scrolling. One indicator belongs to one gesture — the pull
+owns the indicator it shows, and the app-bar action keeps the thin progress
+bar — so a single gesture does not drive two spinners at once.
+
 Pull requests, Issues and Archive live under each mesh header in Your work,
 including meshes without open agents or matches for the current filters.
 Work uses compact rows under mesh headers, with the desktop status-circle shapes
@@ -284,8 +293,9 @@ Node details also show the same-repository open PR for the live worktree
 branch, with checks, review decision and mergeability. **Squash and merge**
 requires confirmation, rechecks mergeability, and deletes the branch after
 merging. The mesh's **Pull requests** shortcut lists open PRs and discloses
-truncated results. Status refreshes while foregrounded; **Refresh PR status**
-retries a failed read. See [PR status and squash merge](mobile.md#pr-status-and-squash-merge)
+truncated results. Status refreshes while foregrounded, a pull re-reads it on
+demand, and a failed read keeps its own **Retry** at the top of the list. See
+[PR status and squash merge](mobile.md#pr-status-and-squash-merge)
 for gates and recovery after an interrupted merge.
 
 The client reads untyped JSON, so the resource screens (issues, archive,

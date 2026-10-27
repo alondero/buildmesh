@@ -1158,10 +1158,14 @@ your phone's speech provider, which may use an online service. If speech input
 is unavailable, type your task or use your keyboard's microphone.
 
 Android provides native Overview/Work, agent replies, task capture, issues,
-archive resume, changes and diffs. Its terminal includes keyboard input,
-Esc/Tab/Ctrl+C and arrow keys, and reconnects when the app returns to the
-foreground. In either phone client, tap a terminal URL or hyperlink to open it
-in your phone's browser; drag to scroll without opening links.
+archive resume, changes and diffs. Pull an Android list down to refresh it:
+Issues, Archive, Changes, Pull requests and Usage re-read on the gesture, and
+the refresh button in the app bar reloads the screen you are on. A failed read
+offers **Retry** at the top of the list, so recovering does not depend on
+scrolling. Its terminal includes keyboard input, Esc/Tab/Ctrl+C and arrow
+keys, and reconnects when the app returns to the foreground. In either phone
+client, tap a terminal URL or hyperlink to open it in your phone's browser;
+drag to scroll without opening links.
 **Create PR** on a mesh uses that mesh's current branch; ask an
 agent to open a worktree PR from its terminal. **Connection → Forget this
 desktop** removes this phone's saved session. Revoke the device on the desktop

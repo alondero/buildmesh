@@ -89,7 +89,9 @@ unrelated work. An incomplete feed states its returned count, reported total
 when available, and reason; absence from a truncated feed does not establish
 that a node has no PR.
 
-The clients poll while foregrounded and offer **Refresh PR status**. Unknown
+The clients poll while foregrounded. The browser offers **Refresh PR status**;
+the Android client refreshes by pulling down and keeps its own **Retry** on a
+failed read. Unknown
 mergeability, drafts, conflicts, policy blocks, behind-base branches, failing
 or pending checks, and required or changes-requested reviews disable merge.
 Missing check/review fields are shown as not reported, rather than passing or

@@ -95,7 +95,10 @@ fun BuildmeshApp(vm: BuildmeshViewModel, invitation: String = "", requestedNodeI
                     if (screen != "home") IconButton(onClick = ::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
                 }, actions = {
                     if (screen == "home") IconButton(onClick = { screen = "usage" }) { Icon(Icons.Default.BarChart, "Usage") }
-                    if (screen != "usage") IconButton(onClick = vm::retry) { Icon(Icons.Default.Refresh, "Refresh") }
+                    // The shared recovery affordance every screen offers: it
+                    // re-reads the screen's own route and keeps the thin
+                    // progress bar, so a pull never needs a second control.
+                    IconButton(onClick = vm::retry) { Icon(Icons.Default.Refresh, "Refresh") }
                     IconButton(onClick = { screen = "connection" }) { Icon(Icons.Default.Settings, "Connection settings") }
                 })
         },
