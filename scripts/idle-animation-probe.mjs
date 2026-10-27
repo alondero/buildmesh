@@ -19,9 +19,10 @@
  *             decorative infinite animations, and the compositor should stop.
  *
  * Measured on the hub-shaped scene (16 nodes, 34 animated elements): the
- * focused state records ~60 compositor frames per second and the renderer
- * holds several percent of a core; the idle state records none, and the
- * renderer falls to a fraction of a percent.
+ * focused state records ~60 compositor frames per second; the idle state
+ * records none. The frames are the measurement. The CPU share the probe also
+ * reports is the corroboration, and it depends on the machine — a shared,
+ * busy host attributes time to the renderer that has nothing to do with it.
  *
  * It prints the frame counts, the animation play states and the gate marker,
  * so the numbers can be compared before and after the change. It REPORTS; it
