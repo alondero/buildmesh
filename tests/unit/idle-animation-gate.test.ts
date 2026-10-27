@@ -160,7 +160,7 @@ function themeAnimationUtilities(css: string): InfiniteAnimation[] {
   // than one, and a token in the second one is as much an infinite animation
   // as a token in the first.
   for (const body of atRuleBodies(css, 'theme')) {
-    for (const match of body.matchAll(/--animate-([\w-]+)\s*:\s*([^;]+);/g)) {
+    for (const match of body.matchAll(/--animate-([\w-]+)\s*:\s*([^;}]+)/g)) {
       if (!/\binfinite\b/i.test(match[2])) continue;
       found.push({ classes: [`animate-${match[1]}`], selector: `.animate-${match[1]}` });
     }
@@ -220,6 +220,29 @@ function stylesheets(srcRoot: string): { path: string; css: string }[] {
 const VARIANT_PREFIX = /[\w:[\]./%#()!@&*>~=-]*/;
 
 /**
+ * Whether the apostrophe at `index` opens a string literal.
+ *
+ * Two rules, and both of them matter: an apostrophe that follows a word
+ * character is prose ("don't stop"), and an apostrophe whose string never
+ * closes on its own line is prose too ("'tis the season"). Treating either
+ * as a string opener would leave the rest of the file unstripped, and a
+ * comment inside that region would still reach the token scanner.
+ */
+function opensAString(source: string, index: number): boolean {
+  if (source[index] !== "'") return false;
+  if (/[\w$]/.test(source[index - 1] ?? '')) return false;
+  for (let scan = index + 1; scan < source.length; scan += 1) {
+    if (source[scan] === '\n') return false;
+    if (source[scan] === '\\') {
+      scan += 1;
+      continue;
+    }
+    if (source[scan] === "'") return true;
+  }
+  return false;
+}
+
+/**
  * The source without its comments.
  *
  * A comment may mention a class name — "the variant `hover:animate-pulse` is
@@ -245,10 +268,7 @@ function stripComments(source: string): string {
       index += 1;
       continue;
     }
-    // An apostrophe opens a string only when it does not follow a word
-    // character: in JSX text ("don't stop") it is prose, and treating it as a
-    // string opener would leave the rest of the region unstripped.
-    if (char === '"' || char === '`' || (char === "'" && !/[\w$]/.test(source[index - 1] ?? ''))) {
+    if (char === '"' || char === '`' || opensAString(source, index)) {
       quote = char;
       out += char;
       index += 1;
@@ -322,13 +342,15 @@ function gateCovers(selectors: string[], token: string): boolean {
     // A variant (`hover:animate-pulse`) or the important marker
     // (`animate-pulse!`) is a DIFFERENT class token, so a plain
     // `.animate-pulse` selector does NOT reach it — the gate has to name the
-    // token in full, as `[class~='hover:animate-pulse']`.
-    return gated.some((s) => s.includes(`[class~='${token}']`));
+    // token in full, as `[class~='hover:animate-pulse']`. The comparison is on
+    // the normalised selector, so a gate written with double quotes counts
+    // too: this repo's CSS uses both.
+    return gated.some((selector) => normaliseSelector(selector).includes(`[class~=${token}]`));
   }
   const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   // The trailing guard stops `.animate-pulse` from matching `.animate-pulse-fast`.
   const pattern = new RegExp(`\\.${escaped}(?![\\w-])`);
-  return gated.some((s) => pattern.test(s));
+  return gated.some((selector) => pattern.test(selector));
 }
 
 /** The classes a selector names, for the failure message. */
@@ -654,6 +676,34 @@ describe('the idle gate rule', () => {
     expect(stripped).not.toContain('hover:animate-pulse');
     // The class inside the string is still there.
     expect(stripped).toContain("'animate-pulse'");
+  });
+
+  it('strips a comment after an apostrophe that never closes', () => {
+    // "'tis the season" is prose. An apostrophe whose string never closes on
+    // its own line must not open one, or the rest of the file would go
+    // unstripped and a later comment would reach the token scanner.
+    const source = [
+      "      <p>'tis the season</p>",
+      '      // hover:animate-pulse is not the bare utility',
+      "      const label = 'animate-pulse';",
+    ].join('\n');
+    const stripped = stripComments(source);
+    expect(stripped).not.toContain('hover:animate-pulse');
+    expect(stripped).toContain("'animate-pulse'");
+  });
+
+  it('counts a gate selector written with double quotes', () => {
+    // This repo's CSS uses both quoting styles for attribute selectors, so a
+    // gate written with double quotes has to count as coverage.
+    expect(gateCovers(['[data-window-idle="true"] [class~="motion-safe:animate-pulse"]'], 'motion-safe:animate-pulse')).toBe(true);
+    expect(gateCovers(["[data-window-idle='true'] [class~='motion-safe:animate-pulse']"], 'motion-safe:animate-pulse')).toBe(true);
+  });
+
+  it('sees a theme token that has no trailing semicolon', () => {
+    // The semicolon is optional in CSS, and a token without one is still a
+    // token the gate has to cover.
+    const found = everyInfiniteAnimation('@theme { --animate-guard-probe: marquee 3s linear infinite }');
+    expect(found.map((animation) => animation.selector)).toContain('.animate-guard-probe');
   });
 
   it('keeps a regex literal with a slash in it intact', () => {
