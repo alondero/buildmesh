@@ -142,6 +142,18 @@ fun CircuitRunPanel(run: NodeCircuitRun, vm: BuildmeshViewModel, openTerminal: (
     )
 }
 
+fun reviewerLaunchOptions(providers: List<JsonObject>) = launchOptions(providers, needsPrompt = false).filter {
+    val capabilities = it.objectAt("capabilities")
+    it.text("harness_id") != "terminal" && (!it.flag("is_proxied") || it.objectAt("configuration") != null) &&
+        (capabilities?.flag("requires_attention_hook") == true || capabilities?.flag("supports_passive_turn_watcher") == true)
+}
+
+fun startReviewRequest(circuitId: Long?, rounds: Long, reviewer: String) = StartNodeReviewRequest(
+    circuit_id = circuitId,
+    max_rounds = if (circuitId == null) rounds else 3,
+    reviewer_provider = reviewer.takeIf { circuitId == null && it.isNotBlank() },
+)
+
 @Composable
 fun StartReviewButton(nodeId: Long, vm: BuildmeshViewModel) {
     val state by vm.state.collectAsState()
@@ -149,6 +161,9 @@ fun StartReviewButton(nodeId: Long, vm: BuildmeshViewModel) {
     var options by remember(nodeId) { mutableStateOf<List<NodeReviewOption>?>(null) }
     var selected by remember(nodeId) { mutableStateOf<Long?>(null) }
     var rounds by remember(nodeId) { mutableLongStateOf(3L) }
+    var reviewer by remember(nodeId) { mutableStateOf("") }
+    val reviewers = reviewerLaunchOptions(state.providers)
+    val reviewerAvailable = reviewer.isEmpty() || reviewers.any { (it.objectAt("configuration")?.text("id") ?: it.text("id")) == reviewer }
     var readError by remember(nodeId) { mutableStateOf("") }
     LaunchedEffect(open, nodeId, state.resourceRevision) {
         if (!open) return@LaunchedEffect
@@ -158,7 +173,7 @@ fun StartReviewButton(nodeId: Long, vm: BuildmeshViewModel) {
         catch (e: CancellationException) { throw e }
         catch (e: Exception) { readError = friendlyError(e); vm.report(e) }
     }
-    OutlinedButton(enabled = !state.busy, onClick = { vm.dismissError(); open = true }, modifier = Modifier.fillMaxWidth()) { Text("Start review…") }
+    OutlinedButton(enabled = !state.busy, onClick = { vm.dismissError(); reviewer = ""; open = true }, modifier = Modifier.fillMaxWidth()) { Text("Start review…") }
     if (open) AlertDialog(onDismissRequest = { if (!state.busy) open = false }, title = { Text("Start review") },
         text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (readError.isNotEmpty()) {
@@ -169,14 +184,21 @@ fun StartReviewButton(nodeId: Long, vm: BuildmeshViewModel) {
             else if (options!!.isEmpty()) Text("Update the desktop to start reviews from this phone.")
             else {
                 Selector("Review Circuit", options!!.map { it.circuit_id to it.name }, selected, { selected = it }, enabled = !state.busy)
-                if (selected == null) Selector("Review rounds", (1L..10L).map { it to "$it" }, rounds, { rounds = it }, enabled = !state.busy)
-                Text("Saved Circuits keep their configured reviewer and rounds. The built-in review uses your desktop reviewer settings.")
+                if (selected == null) {
+                    Selector("Reviewer launch configuration", listOf("" to "Default (desktop reviewer settings or this agent)") + reviewers.map {
+                        val configuration = it.objectAt("configuration")
+                        (configuration?.text("id") ?: it.text("id")) to (configuration?.text("name") ?: it.text("label"))
+                    }, reviewer, { reviewer = it }, enabled = !state.busy)
+                    Selector("Review rounds", (1L..10L).map { it to "$it" }, rounds, { rounds = it }, enabled = !state.busy)
+                    if (!reviewerAvailable) Text("This reviewer is no longer available. Choose another launch configuration or Default.", color = MeshColors.amber)
+                }
+                Text("Saved Circuits keep their configured reviewer and rounds. Default uses your desktop reviewer settings or this agent's provider.")
             }
             if (readError.isEmpty() && state.error.isNotEmpty()) Text(state.error, color = MeshColors.amber)
         } },
-        confirmButton = { TextButton(enabled = !state.busy && options?.any { it.circuit_id == selected } == true, onClick = {
+        confirmButton = { TextButton(enabled = !state.busy && (selected != null || reviewerAvailable) && options?.any { it.circuit_id == selected } == true, onClick = {
             vm.action { api ->
-                api.post("/api/nodes/$nodeId/reviews", StartNodeReviewRequest(selected, rounds).toJson())
+                api.post("/api/nodes/$nodeId/reviews", startReviewRequest(selected, rounds, reviewer).toJson())
                 open = false
                 vm.notice("Review started. An existing live run is kept.")
             }

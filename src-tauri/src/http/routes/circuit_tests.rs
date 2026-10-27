@@ -74,6 +74,7 @@ fn starting_a_review_parses_strictly_and_refuses_unavailable_sources() {
         br#"{}"#.as_slice(),
         br#"{"max_rounds":3,"extra":true}"#,
         b"bad",
+        br#"{"max_rounds":3,"reviewer_provider":42}"#,
     ] {
         assert_eq!(
             parse_body::<StartNodeReviewRequest>(&post("reviews", 1, body))
@@ -83,10 +84,18 @@ fn starting_a_review_parses_strictly_and_refuses_unavailable_sources() {
             "400 Bad Request"
         );
     }
+    let legacy = parse_body::<StartNodeReviewRequest>(&post(
+        "reviews",
+        1,
+        br#"{"circuit_id":null,"max_rounds":3}"#,
+    ))
+    .unwrap();
+    assert!(legacy.reviewer_provider.is_none());
     let (node, _) = review_run();
     let request = |id| StartNodeReviewRequest {
         circuit_id: id,
         max_rounds: 3,
+        reviewer_provider: None,
     };
     assert_eq!(
         start_review_core(node, request(Some(99999)))
@@ -105,6 +114,19 @@ fn starting_a_review_parses_strictly_and_refuses_unavailable_sources() {
 #[test]
 fn starting_a_review_uses_the_desktop_run_and_deduplicates_retries() {
     let _db = db::test_support::isolated();
+    let mut preferences = crate::preferences::load().unwrap();
+    preferences.spawn_configurations.push(
+        crate::preferences::spawn_configurations::SpawnConfiguration {
+            id: "launch/mobile-reviewer".into(),
+            name: "Careful reviewer".into(),
+            spawn_option_id: "codex".into(),
+            harness_id: Some("codex".into()),
+            model: Some("gpt-5.4".into()),
+            effort: Some("high".into()),
+            ..Default::default()
+        },
+    );
+    crate::preferences::save(preferences).unwrap();
     let unique = 89_000_000 + i64::from(std::process::id());
     db::write_conn()
         .execute(
@@ -127,6 +149,7 @@ fn starting_a_review_uses_the_desktop_run_and_deduplicates_retries() {
     let request = || StartNodeReviewRequest {
         circuit_id: None,
         max_rounds: 3,
+        reviewer_provider: Some("launch/mobile-reviewer".into()),
     };
     let run = start_review_core(node, request()).unwrap();
     assert_ne!(run, old_run);
@@ -134,8 +157,46 @@ fn starting_a_review_uses_the_desktop_run_and_deduplicates_retries() {
     let stored = db::get_circuit_run(run).unwrap().unwrap();
     assert_eq!(stored.source_agent_node_id, Some(node));
     assert_eq!(stored.state, "pending");
+    let context = crate::circuit::context::CircuitContext::from_json(&stored.context_json).unwrap();
+    assert_eq!(
+        context.get("review.provider"),
+        Some("launch/mobile-reviewer")
+    );
+    let launch: crate::preferences::spawn_configurations::SpawnConfiguration =
+        serde_json::from_str(context.get("review.launch.reviewer").unwrap()).unwrap();
+    assert_eq!(launch.id, "launch/mobile-reviewer");
+    assert_eq!(launch.model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(launch.effort.as_deref(), Some("high"));
     assert_eq!(reply(run, Ok(())).status, "200 OK");
     cancel_core(run).unwrap();
+    for reviewer in ["terminal", "freebuff", "launch/deleted"] {
+        let refusal = start_review_core(
+            node,
+            StartNodeReviewRequest {
+                reviewer_provider: Some(reviewer.into()),
+                ..request()
+            },
+        )
+        .unwrap_err()
+        .response();
+        assert_eq!(refusal.status, "409 Conflict");
+    }
+    let saved =
+        db::circuit::ledger::copy_review_blueprint(stored.circuit_id, "Team review").unwrap();
+    let saved_run = start_review_core(
+        node,
+        StartNodeReviewRequest {
+            circuit_id: Some(saved.id),
+            reviewer_provider: Some("launch/deleted".into()),
+            ..request()
+        },
+    )
+    .unwrap();
+    let saved_run = db::get_circuit_run(saved_run).unwrap().unwrap();
+    let saved_context =
+        crate::circuit::context::CircuitContext::from_json(&saved_run.context_json).unwrap();
+    assert_ne!(saved_context.get("review.provider"), Some("launch/deleted"));
+    cancel_core(saved_run.id).unwrap();
     for provider in ["dsh", "freebuff"] {
         db::set_agent_node_provider(node, provider).unwrap();
         let refusal = start_review_core(node, request()).unwrap_err().response();
