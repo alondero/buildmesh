@@ -45,12 +45,11 @@ fun NodeScreen(node: JsonObject, vm: BuildmeshViewModel, terminal: () -> Unit, c
         if (node.text("signal_health") == "unverified") Text("Session observation has not been verified yet.", color = MeshColors.secondary)
         lifecycle?.text("message")?.takeIf { it.isNotBlank() }?.let { Text(it) }
         lifecycle?.objectAt("semantic_turn")?.text("description")?.takeIf { it.isNotBlank() && it != lifecycle.text("message") }?.let { Text(it) }
-        Button(shape = MaterialTheme.shapes.small, onClick = terminal, modifier = Modifier.fillMaxWidth()) { Text("Open terminal") }
-        OutlinedButton(shape = MaterialTheme.shapes.small, onClick = changes, modifier = Modifier.fillMaxWidth()) { Text("Review changes") }
-        OutlinedButton(shape = MaterialTheme.shapes.small, onClick = createPr, modifier = Modifier.fillMaxWidth()) { Text("Create pull request") }
-        vm.api?.let { PullRequestsPanel(it, node.number("mesh_id"), vm, id) }
-        state.circuitRuns.firstOrNull { it.node_id == id }?.let { CircuitRunPanel(it, vm, circuitTerminal) }
-        if (node.text("provider") != "terminal") StartReviewButton(id, vm)
+        // The reply sits directly under the request it answers, above the
+        // terminal/changes/PR sections: on a phone those panels can be screens
+        // deep, and an agent that is waiting on you is the reason this screen
+        // was opened. Same order as the desktop's semantic-turn banner, which
+        // owns the top of the node card for exactly this case.
         if (canReply || draft.isNotEmpty()) {
             Text("Reply to agent", style = MaterialTheme.typography.titleMedium)
             choices.forEach { choice -> Text("• $choice", color = MeshColors.secondary) }
@@ -59,6 +58,12 @@ fun NodeScreen(node: JsonObject, vm: BuildmeshViewModel, terminal: () -> Unit, c
             if (!fits) Text("Reply is too long. Use the terminal for longer text.", color = MeshColors.amber)
             Button(shape = MaterialTheme.shapes.small, enabled = canReply && fits && draft.isNotBlank(), onClick = { send(draft.trim() + "\r") }, modifier = Modifier.fillMaxWidth()) { Text("Send reply") }
         }
+        Button(shape = MaterialTheme.shapes.small, onClick = terminal, modifier = Modifier.fillMaxWidth()) { Text("Open terminal") }
+        OutlinedButton(shape = MaterialTheme.shapes.small, onClick = changes, modifier = Modifier.fillMaxWidth()) { Text("Review changes") }
+        OutlinedButton(shape = MaterialTheme.shapes.small, onClick = createPr, modifier = Modifier.fillMaxWidth()) { Text("Create pull request") }
+        vm.api?.let { PullRequestsPanel(it, node.number("mesh_id"), vm, id) }
+        state.circuitRuns.firstOrNull { it.node_id == id }?.let { CircuitRunPanel(it, vm, circuitTerminal) }
+        if (node.text("provider") != "terminal") StartReviewButton(id, vm)
     }
 }
 

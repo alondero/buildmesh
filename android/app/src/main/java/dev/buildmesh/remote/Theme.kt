@@ -37,6 +37,16 @@ object MeshColors {
     val green = Color(0xff22c55e)
     val amber = Color(0xfff59e0b)
     val red = Color(0xffef4444)
+
+    // Status alphas the phone surfaces need, mirrored from the values already
+    // in `DESIGN.md`'s mobile token table rather than invented here: the
+    // needs-attention ring is `--attention-ring`, and the deck chips' borders
+    // are the `--green`/`--red` 50% borders the desktop semantic-turn banner
+    // draws on `Approve (Y)` / `Deny (N)`.
+    val attentionRing = amber.copy(alpha = 0.40f)
+    val approveBorder = green.copy(alpha = 0.50f)
+    val rejectBorder = red.copy(alpha = 0.50f)
+
     fun status(status: String) = when (status) {
         "awaiting_input" -> amber
         "ready", "completed" -> green

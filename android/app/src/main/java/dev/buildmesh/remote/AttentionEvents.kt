@@ -122,3 +122,78 @@ fun nodeAttention(node: JsonObject): FeedEvent.Lifecycle {
         message = lifecycle?.text("message").orEmpty(),
     )
 }
+
+/**
+ * What an Agent Node is blocked on, in the shape a reply control needs.
+ *
+ * Mirrors `nodeInputRequest` in `src/lib/status.ts`, the reader both desktop
+ * and the phone web client answer from, so the three surfaces agree on what a
+ * request *is*: the mode comes from the normalized lifecycle kind, choices
+ * come only from a request schema the harness actually sent, and the text is
+ * the semantic turn's description when there is one.
+ *
+ * One deliberate extension of the shared `permission | question | unknown`
+ * vocabulary: `confirmation`, for a `permission_requested` turn the desktop
+ * banner names `command_confirmation`. It only selects wording — the card
+ * still answers with the same `y\r` / `n\r` keystrokes, so nothing the shared
+ * reader would allow becomes newly allowed here.
+ *
+ * @param key identity of *this* request, not of the node. A node that answers
+ *   one question and immediately asks another never leaves `awaiting_input`, so
+ *   a control already used on the previous request has to be told that this is
+ *   a different one.
+ */
+data class NodeInputRequest(
+    val key: String,
+    val mode: String,
+    val message: String,
+    val choices: List<String>,
+) {
+    /** A tool-approval decision — the only request Buildmesh can answer with keys. */
+    val isPermission get() = mode == "permission" || mode == "confirmation"
+
+    /** A shell command the harness wants confirmed, rather than a tool permission. */
+    val isConfirmation get() = mode == "confirmation"
+
+    /** The words the desktop's semantic-turn banner uses for this request. */
+    val approveLabel get() = if (isConfirmation) "Approve (Y)" else "Allow (Y)"
+    val rejectLabel get() = if (isConfirmation) "Deny (N)" else "Reject (N)"
+    // The retired-state words the phone web deck already shows, so the two
+    // decks read the same once a decision has been made.
+    val approvedLabel get() = "Approved ✓"
+    val rejectedLabel get() = if (isConfirmation) "Denied ✗" else "Rejected ✗"
+}
+
+/**
+ * Describe the input a node is blocked on, or `null` when it is not blocked on
+ * user input at all.
+ *
+ * A snapshot only describes the current status revision, so a stale lifecycle
+ * never decides today's reply controls — the same rule `nodeLabel` and
+ * `nodeAttention` apply.
+ */
+fun nodeInputRequest(node: JsonObject): NodeInputRequest? {
+    if (node.text("status") != NEEDS_PERSON_STATUS) return null
+    val lifecycle = node.objectAt("lifecycle")?.takeIf { it.text("status") == node.text("status") }
+    val kind = lifecycle?.text("kind").orEmpty()
+    val turn = lifecycle?.objectAt("semantic_turn")
+    // A permission decision Buildmesh can type into the prompt is one the
+    // harness asked for; `command_confirmation` is the same yes/no prompt
+    // under the name the desktop banner gives it.
+    val mode = when {
+        kind == "permission_requested" && turn?.text("kind") == "command_confirmation" -> "confirmation"
+        kind == "permission_requested" -> "permission"
+        kind == "question_requested" -> "question"
+        else -> "unknown"
+    }
+    val choices = (lifecycle?.objectAt("request")?.get("choices") as? JsonArray)
+        ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }.orEmpty()
+    return NodeInputRequest(
+        key = if (lifecycle != null) "$kind@${lifecycle.text("timestamp")}" else "unobserved",
+        mode = mode,
+        message = turn?.text("description").orEmpty().ifEmpty { lifecycle?.text("message").orEmpty() },
+        // Only a question can carry a choice list; a permission decision that
+        // arrives with one is a yes/no prompt, not a menu.
+        choices = if (mode == "question") choices else emptyList(),
+    )
+}

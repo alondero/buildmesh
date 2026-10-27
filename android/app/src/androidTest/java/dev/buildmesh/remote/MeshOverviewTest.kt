@@ -268,6 +268,95 @@ class MeshOverviewTest {
         compose.onNodeWithContentDescription("2 agents: Running, Needs attention", useUnmergedTree = true).assertDoesNotExist()
     }
 
+    private val waitingPermission = Json.parseToJsonElement("""
+        {"id":12,"mesh_id":2,"name":"Waiting agent","branch":"task","status":"awaiting_input",
+         "lifecycle":{"kind":"permission_requested","status":"awaiting_input","timestamp":"2026-10-26T10:00:00Z",
+                      "message":"Run the failing test?",
+                      "semantic_turn":{"kind":"permission_request","description":"Run the failing test?"},
+                      "request":{"choices":[]}}}
+    """).obj()
+    private val waitingQuestion = Json.parseToJsonElement("""
+        {"id":13,"mesh_id":2,"name":"Asking agent","branch":"task","status":"awaiting_input",
+         "lifecycle":{"kind":"question_requested","status":"awaiting_input","timestamp":"2026-10-26T10:05:00Z",
+                      "message":"Deploy where?",
+                      "request":{"choices":["Staging","Production"]}}}
+    """).obj()
+
+    // The phone home pins whoever is blocked on you above the mesh list, and the
+    // approval pair sends the same keystrokes the desktop semantic-turn banner
+    // and the browser deck send. The pinned copy is the only copy: the same
+    // nodes are excluded from the Overview node cards below, or a waiting agent
+    // would render twice on the very screen this deck heads.
+    @Test fun waitingAgentsArePinnedWithOneTapApproval() {
+        var answered: Pair<Long, String>? = null
+        var opened = 0L
+        compose.setContent { BuildmeshTheme {
+            Surface(color = MeshColors.background) {
+                Dashboard(RemoteState(meshes = listOf(meshes[1]), nodes = listOf(waitingPermission)), "Overview", 0, {}, { opened = it }, { _, _ -> }, { _, _ -> })
+                { id, sequence, onDone -> answered = id to sequence; onDone(true); true }
+            }
+        } }
+        compose.onNodeWithText("Waiting for input").assertIsDisplayed()
+        compose.onAllNodesWithText("Run the failing test?").assertCountEquals(1)
+        compose.onAllNodesWithText("Waiting agent").assertCountEquals(1)
+        compose.onAllNodesWithText("Website with a long mesh name · task").assertCountEquals(1)
+        compose.onNodeWithText("Allow (Y)").performClick()
+        compose.runOnIdle { assertEquals(12L to "y\r", answered) }
+        compose.onNodeWithText("Approved ✓").assertIsDisplayed()
+        compose.onNodeWithText("Allow (Y)").assertDoesNotExist()
+        compose.onNodeWithText("Reject (N)").assertIsNotEnabled()
+        saveScreenshot("attention-deck")
+    }
+
+    // A reply the transport never took must hand the controls back: the deck's
+    // in-flight marker is cleared by the failure signal, not left showing
+    // "Sending…" until the desktop replaces the request.
+    @Test fun aReplyThatNeverReachedTheDesktopReEnablesTheApprovalPair() {
+        var answered: Pair<Long, String>? = null
+        compose.setContent { BuildmeshTheme {
+            Surface(color = MeshColors.background) {
+                Dashboard(RemoteState(meshes = listOf(meshes[1]), nodes = listOf(waitingPermission)), "Overview", 0, {}, {}, { _, _ -> }, { _, _ -> })
+                { id, sequence, onDone -> answered = id to sequence; onDone(false); true }
+            }
+        } }
+        compose.onNodeWithText("Allow (Y)").performClick()
+        compose.runOnIdle { assertEquals(12L to "y\r", answered) }
+        compose.onNodeWithText("Sending…").assertDoesNotExist()
+        compose.onNodeWithText("Allow (Y)").assertIsEnabled()
+        compose.onNodeWithText("Reject (N)").assertIsEnabled()
+    }
+
+    // A question has no keystroke answer, so the deck offers the terminal instead
+    // of guessing how the harness selects one of its own options — and the chip
+    // really opens the terminal, not the node detail behind its label.
+    @Test fun aQuestionOffersTheTerminalRatherThanAKeystroke() {
+        var opened = 0L
+        var terminal = 0L
+        compose.setContent { BuildmeshTheme {
+            Surface(color = MeshColors.background) {
+                Dashboard(RemoteState(meshes = listOf(meshes[1]), nodes = listOf(waitingQuestion)), "Overview", 0, {}, { opened = it }, { _, _ -> }, { _, _ -> },
+                    openTerminal = { terminal = it }) { _, _, _ -> true }
+            }
+        } }
+        compose.onNodeWithText("Deploy where?").assertIsDisplayed()
+        compose.onNodeWithText("• Staging").assertIsDisplayed()
+        compose.onNodeWithText("Allow (Y)").assertDoesNotExist()
+        compose.onNodeWithText("Answer in terminal").performClick()
+        compose.runOnIdle { assertEquals(13L, terminal); assertEquals(0L, opened) }
+    }
+
+    // The Work tab already renders these nodes under their mesh, so the deck is
+    // the Overview tab's surface rather than a second copy of the same row.
+    @Test fun theDeckDoesNotDuplicateTheWorkTabRows() {
+        compose.setContent { BuildmeshTheme {
+            Surface(color = MeshColors.background) {
+                Dashboard(RemoteState(meshes = listOf(meshes[1]), nodes = listOf(waitingPermission)), "Work", 0, {}, {}, { _, _ -> }, { _, _ -> }) { _, _, _ -> true }
+            }
+        } }
+        compose.onNodeWithText("Waiting for input").assertDoesNotExist()
+        compose.onNodeWithText("Waiting agent").performScrollTo().assertIsDisplayed()
+    }
+
     @Test fun manyDotsWrapInsideTheMeshCard() {
         val manyNodes = (1..150).map { id ->
             Json.parseToJsonElement("""{"id":$id,"mesh_id":2,"name":"Agent $id","status":"running"}""").obj()
