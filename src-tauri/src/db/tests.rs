@@ -2080,3 +2080,117 @@ async fn the_app_survives_a_saturated_pool_across_its_real_boundaries() {
         .expect("the pool must serve reads again once the readers are back");
     assert_eq!(meshes.len(), 1, "the seeded mesh must be visible again");
 }
+
+// ---------------------------------------------------------------------------
+// The write-ahead log is a bounded log (issue #2600)
+// ---------------------------------------------------------------------------
+
+/// The `-wal` sidecar next to a database file.
+fn wal_path(db_path: &std::path::Path) -> std::path::PathBuf {
+    let mut name = db_path.as_os_str().to_os_string();
+    name.push("-wal");
+    std::path::PathBuf::from(name)
+}
+
+/// The size of the write-ahead log, or zero when the file does not exist.
+fn wal_size(db_path: &std::path::Path) -> u64 {
+    std::fs::metadata(wal_path(db_path))
+        .map(|meta| meta.len())
+        .unwrap_or(0)
+}
+
+/// The writer bounds the log it leaves behind (issue #2600).
+///
+/// SQLite's default `journal_size_limit` is `-1` — no limit — so a single
+/// large transaction leaves a write-ahead log as big as everything it
+/// touched, and it stays that big until something forces a checkpoint. A hub
+/// that swept a multi-gigabyte ledger ended up with a 1.58 GB log that no
+/// later activity shrank.
+///
+/// The limit is set per connection and not persisted in the database file,
+/// so this pins the writer's own setting rather than the database's.
+#[test]
+fn the_writer_bounds_the_write_ahead_log() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let path = dir.path().join("wal.sqlite");
+    let conn = rusqlite::Connection::open(&path).expect("the scratch database");
+    super::apply_connection_pragmas(&conn, false).expect("the writer pragmas");
+
+    let limit: i64 = conn
+        .query_row("PRAGMA journal_size_limit", [], |row| row.get(0))
+        .expect("the writer reads its own limit back");
+    assert_eq!(
+        limit,
+        super::WAL_SIZE_LIMIT_BYTES,
+        "the writer must bound the write-ahead log"
+    );
+}
+
+/// A write larger than the limit leaves a log no larger than the limit, and a
+/// checkpoint gives the space back (issue #2600).
+///
+/// The write is one oversized row rather than many small ones so the test
+/// costs one big write instead of a long loop.
+///
+/// SQLite applies the limit when the *commit that follows a checkpoint*
+/// restarts the log, so the test walks that sequence: the oversized write
+/// grows the log past the limit, a passive checkpoint — the automatic kind —
+/// folds the pages back without shrinking the file, and the write after it
+/// restarts the log and truncates it back to the limit. The truncating
+/// checkpoint the retention sweep runs is the other half: it gives the space
+/// back immediately.
+#[test]
+fn a_large_write_leaves_a_bounded_log_and_a_checkpoint_truncates_it() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let path = dir.path().join("wal.sqlite");
+    let conn = rusqlite::Connection::open(&path).expect("the scratch database");
+    super::apply_connection_pragmas(&conn, false).expect("the writer pragmas");
+    conn.execute_batch("CREATE TABLE payloads (data BLOB)")
+        .expect("the scratch table");
+
+    // Larger than the limit: the log has to grow past it before a checkpoint
+    // can bring it back.
+    let oversized = super::WAL_SIZE_LIMIT_BYTES + 4096;
+    conn.execute(
+        "INSERT INTO payloads (data) VALUES (zeroblob(?1))",
+        [oversized],
+    )
+    .expect("the oversized write");
+    assert!(
+        wal_size(&path) > super::WAL_SIZE_LIMIT_BYTES as u64,
+        "the log grew past the limit, got {} bytes",
+        wal_size(&path)
+    );
+
+    // A passive checkpoint — the automatic kind — folds the pages back into
+    // the database without shrinking the file.
+    conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+        row.get::<_, i64>(0)
+    })
+    .expect("the passive checkpoint runs");
+    assert!(
+        wal_size(&path) > super::WAL_SIZE_LIMIT_BYTES as u64,
+        "a passive checkpoint does not shrink the file"
+    );
+
+    // The write that follows restarts the log, and its commit truncates the
+    // file back to the limit. That is what keeps the log bounded.
+    conn.execute("INSERT INTO payloads (data) VALUES (zeroblob(?1))", [4096])
+        .expect("the small write");
+    assert!(
+        wal_size(&path) <= super::WAL_SIZE_LIMIT_BYTES as u64,
+        "the log is bounded by the limit, got {} bytes",
+        wal_size(&path)
+    );
+
+    // The sweep's checkpoint: fold the log back and truncate the file.
+    let busy: i64 = conn
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
+        .expect("the checkpoint runs");
+    assert_eq!(busy, 0, "no other connection holds a read snapshot");
+    assert_eq!(
+        wal_size(&path),
+        0,
+        "a truncating checkpoint gives the space back"
+    );
+}

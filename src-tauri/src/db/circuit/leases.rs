@@ -2,6 +2,7 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 
+use crate::circuit::vocabulary::RunState;
 use crate::db::SqlResult;
 
 /// Reserve the number of agent slots a circuit blueprint may need while its
@@ -695,9 +696,16 @@ pub(crate) fn archive_circuit_agent_inner(
 ///
 /// `?1` is the cutoff timestamp: the sweep reads the clock once and every
 /// statement compares against that same value.
-const SWEEPABLE_RUNS: &str = "\
+///
+/// The terminal states come from the vocabulary owner
+/// ([`crate::circuit::vocabulary::RunState::SQL_IN_SWEEPABLE`]) so a change
+/// to what counts as terminal is one edit, not three literals spread across
+/// this file.
+fn sweepable_runs_sql() -> String {
+    format!(
+        "\
     SELECT id FROM autopilot_circuit_runs r \
-      WHERE r.state IN ('completed', 'failed') \
+      WHERE r.state IN ({}) \
         AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s \
                         JOIN agent_node_lifecycle_leases l ON l.node_id = s.agent_node_id \
                         WHERE s.run_id = r.id AND l.cleanup_requested = 1) \
@@ -707,20 +715,32 @@ const SWEEPABLE_RUNS: &str = "\
                              WHERE n.circuit_id = r.circuit_id) \
         AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_runs c \
                         WHERE json_extract(CASE WHEN json_valid(c.context_json) \
-                                          THEN c.context_json ELSE '{}' END, \
-                                          '$.\"recovery.from_run_id\"') = r.id)";
+                                          THEN c.context_json ELSE '{{}}' END, \
+                                          '$.\"recovery.from_run_id\"') = r.id)",
+        RunState::SQL_IN_SWEEPABLE
+    )
+}
 
 /// The predicate the compaction sweep shares: a terminal run whose cleanup has
 /// not been claimed, older than the cutoff, that is not an interval or manual
 /// trigger. Both the context compaction and the side-table cleanup read it, so
 /// the two cannot drift apart.
-const COMPACTABLE_RUNS: &str = "state IN ('completed', 'failed') \
+///
+/// The terminal states come from the vocabulary owner
+/// ([`crate::circuit::vocabulary::RunState::SQL_IN_SWEEPABLE`]) for the same
+/// reason [`sweepable_runs_sql`] does.
+fn compactable_runs_sql() -> String {
+    format!(
+        "state IN ({}) \
     AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s \
                     JOIN agent_node_lifecycle_leases l ON l.node_id = s.agent_node_id \
                     WHERE s.run_id = autopilot_circuit_runs.id AND l.cleanup_requested = 1) \
     AND updated_at < ?1 \
     AND trigger_identity NOT LIKE 'interval:%' \
-    AND trigger_identity NOT LIKE 'manual:%'";
+    AND trigger_identity NOT LIKE 'manual:%'",
+        RunState::SQL_IN_SWEEPABLE
+    )
+}
 
 /// Bound `autopilot_circuit_runs` to a retention window. Returns
 /// `(rows_deleted, rows_compacted)`.
@@ -761,6 +781,8 @@ pub(crate) fn prune_terminal_circuit_runs_before_inner(
     conn: &Connection,
     cutoff: &str,
 ) -> SqlResult<(usize, usize)> {
+    let sweepable = sweepable_runs_sql();
+    let compactable = compactable_runs_sql();
     for table in [
         "circuit_run_history",
         "circuit_effects",
@@ -768,18 +790,19 @@ pub(crate) fn prune_terminal_circuit_runs_before_inner(
         "circuit_run_snapshots",
     ] {
         conn.execute(
-            &format!("DELETE FROM {table} WHERE run_id IN ({SWEEPABLE_RUNS})"),
+            &format!("DELETE FROM {table} WHERE run_id IN ({sweepable})"),
             params![cutoff],
         )?;
         conn.execute(
             &format!(
                 "DELETE FROM {table} WHERE run_id IN (
-            SELECT id FROM autopilot_circuit_runs r WHERE r.state IN ('completed','failed')
+            SELECT id FROM autopilot_circuit_runs r WHERE r.state IN ({})
             AND r.updated_at < ?1
             AND r.trigger_identity NOT LIKE 'interval:%' AND r.trigger_identity NOT LIKE 'manual:%'
             AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s
                 JOIN agent_node_lifecycle_leases l ON l.node_id=s.agent_node_id
-                WHERE s.run_id=r.id AND l.cleanup_requested=1))"
+                WHERE s.run_id=r.id AND l.cleanup_requested=1))",
+                RunState::SQL_IN_SWEEPABLE
             ),
             params![cutoff],
         )?;
@@ -790,7 +813,7 @@ pub(crate) fn prune_terminal_circuit_runs_before_inner(
     // `delete_autopilot_circuit` documents. Without it the sweep would trade a
     // run leak for a step leak.
     conn.execute(
-        &format!("DELETE FROM autopilot_circuit_run_steps WHERE run_id IN ({SWEEPABLE_RUNS})"),
+        &format!("DELETE FROM autopilot_circuit_run_steps WHERE run_id IN ({sweepable})"),
         params![cutoff],
     )?;
     // The side table's rows ride with the run. The schema declares ON DELETE
@@ -798,11 +821,11 @@ pub(crate) fn prune_terminal_circuit_runs_before_inner(
     // — off by default for a system-libsqlite link — so the sweep deletes them
     // explicitly, in the same defensive order the steps use.
     conn.execute(
-        &format!("DELETE FROM circuit_run_artifacts WHERE run_id IN ({SWEEPABLE_RUNS})"),
+        &format!("DELETE FROM circuit_run_artifacts WHERE run_id IN ({sweepable})"),
         params![cutoff],
     )?;
     let deleted = conn.execute(
-        &format!("DELETE FROM autopilot_circuit_runs WHERE id IN ({SWEEPABLE_RUNS})"),
+        &format!("DELETE FROM autopilot_circuit_runs WHERE id IN ({sweepable})"),
         params![cutoff],
     )?;
 
@@ -816,7 +839,7 @@ pub(crate) fn prune_terminal_circuit_runs_before_inner(
     let compacted = conn.execute(
         &format!(
             "UPDATE autopilot_circuit_runs SET context_json = '{{}}' \
-              WHERE {COMPACTABLE_RUNS} AND context_json <> '{{}}'"
+              WHERE {compactable} AND context_json <> '{{}}'"
         ),
         params![cutoff],
     )?;
@@ -827,7 +850,7 @@ pub(crate) fn prune_terminal_circuit_runs_before_inner(
     conn.execute(
         &format!(
             "DELETE FROM circuit_run_artifacts WHERE run_id IN \
-             (SELECT id FROM autopilot_circuit_runs WHERE {COMPACTABLE_RUNS})"
+             (SELECT id FROM autopilot_circuit_runs WHERE {compactable})"
         ),
         params![cutoff],
     )?;

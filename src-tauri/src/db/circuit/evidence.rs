@@ -381,8 +381,34 @@ pub(super) struct HistoryEvent<'a> {
     pub(super) disposition: Option<&'a str>,
 }
 
+/// The `kind` value carried by an observation row.
+///
+/// Only observations are deduped. The other history kinds record a
+/// *transition* — a step moved, a wait was published, a configuration was
+/// pinned — and two transitions with the same words are two events in a
+/// timeline, not one fact recorded twice.
+const OBSERVATION_KIND: &str = "observation";
+
 /// Append one Circuit Run History event.
-pub(super) fn append_history(db: &Connection, event: HistoryEvent<'_>) -> SqlResult<()> {
+///
+/// An observation is a *fact*, and the same fact recorded twice is one fact.
+/// The worker already refuses to re-record an observation it has seen (the
+/// `WorkEvidence` projection carries the sources it has seen), but that
+/// bookkeeping lives in the run's context: it is rebuilt when a run is
+/// recovered, it is reset when a session is replaced, and it is per-process.
+/// The hub grew to 1.95M history rows (~1 GB) because an observation could
+/// still be appended verbatim whenever the in-memory bookkeeping lost track
+/// of it.
+///
+/// So the guard is enforced here, in the database, where it does not depend
+/// on that bookkeeping: before an observation is written, the row's identity
+/// — run, node, attempt, source and the hash of the detail — is checked
+/// against what the run has recorded. This path writes an observation with
+/// the same identity and the same payload once.
+///
+/// Returns whether a row was appended. `false` means the observation was
+/// already on record.
+pub(super) fn append_history(db: &Connection, event: HistoryEvent<'_>) -> SqlResult<bool> {
     let HistoryEvent {
         run_id,
         node_id,
@@ -392,9 +418,42 @@ pub(super) fn append_history(db: &Connection, event: HistoryEvent<'_>) -> SqlRes
         source,
         disposition,
     } = event;
-    db.execute("INSERT INTO circuit_run_history (run_id,node_id,attempt,kind,detail,source,disposition) VALUES (?1,?2,?3,?4,?5,?6,?7)",
-        params![run_id, node_id, attempt, kind, crate::secret_scrubber::SecretScrubber::scrub(detail), source, disposition])?;
-    Ok(())
+    let detail = crate::secret_scrubber::SecretScrubber::scrub(detail);
+    if kind != OBSERVATION_KIND {
+        db.execute("INSERT INTO circuit_run_history (run_id,node_id,attempt,kind,detail,source,disposition) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![run_id, node_id, attempt, kind, detail, source, disposition])?;
+        return Ok(true);
+    }
+    let hash = detail_hash(&detail);
+    // The hash covers the *scrubbed* detail, which is what the row stores:
+    // two observations that differ only in a secret are the same observation.
+    // The dedupe key is the observation's identity — one run, one node, one
+    // attempt, one source — plus that hash, so the same words recorded for a
+    // different node or a different attempt stay two observations.
+    let inserted = db.execute(
+        "INSERT INTO circuit_run_history (run_id,node_id,attempt,kind,detail,source,disposition,detail_sha256)
+         SELECT ?1,?2,?3,?4,?5,?6,?7,?8
+         WHERE NOT EXISTS (
+             SELECT 1 FROM circuit_run_history
+             WHERE run_id = ?1 AND kind = ?4
+               AND COALESCE(node_id, '') = COALESCE(?2, '')
+               AND COALESCE(attempt, -1) = COALESCE(?3, -1)
+               AND COALESCE(source, '') = COALESCE(?6, '')
+               AND detail_sha256 = ?8
+         )",
+        params![run_id, node_id, attempt, kind, detail, source, disposition, hash],
+    )?;
+    Ok(inserted > 0)
+}
+
+/// The hash an observation row is stored and deduped under.
+///
+/// SHA-256 over the row's `detail`, hex encoded — the same construction the
+/// Circuit graph and the observation conflict ids already use
+/// (`crate::circuit::observation`).
+pub(super) fn detail_hash(detail: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(detail.as_bytes()))
 }
 
 pub(super) fn revision_inner(db: &Connection, run_id: i64) -> SqlResult<i64> {

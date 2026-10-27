@@ -230,6 +230,11 @@ pub(crate) fn commit_transition_locked(
         let identity = &observation.observation.identity;
         let detail = serde_json::to_string(observation)
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        // The database also refuses to write an observation that is already
+        // on record (issue #2600). The projection above knows what *this*
+        // worker has seen; the row-level guard knows what the run has ever
+        // recorded, which survives a restart, a recovery, or a rebuilt
+        // projection. A repeated fact must not move the run revision.
         append_history(
             &tx,
             HistoryEvent {

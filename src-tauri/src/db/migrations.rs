@@ -172,7 +172,15 @@ use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
 /// the column keeps the decision-relevant half plus a digest of the bulky set
 /// so the worker's freshness fence still sees a bulky change. Existing runs
 /// are migrated once by the `EnsureCircuitRunArtifacts` step.
-pub(crate) const SCHEMA_VERSION: u32 = 51;
+///
+/// v52 — Circuit Run History observation dedupe (issue #2600): adds nullable
+/// `circuit_run_history.detail_sha256`, the SHA-256 of the row's `detail`.
+/// The same observation recorded twice is one fact, so the append path
+/// declines to write a second observation with the same payload for the same
+/// run/node/attempt/source. The hub had reached 1.95M history rows (~1 GB)
+/// and a 1.58 GB write-ahead log because repeated observations were
+/// appended verbatim.
+pub(crate) const SCHEMA_VERSION: u32 = 52;
 
 // ---------------------------------------------------------------------------
 // ColumnSpec — one column the runner knows how to add and read back.
@@ -1077,6 +1085,18 @@ const SPECS: &[ColumnSpec] = &[
         version: 45,
         table: "circuit_run_history",
         column: "disposition",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::Nullable,
+    },
+    // v52 - content hash of `detail` (issue #2600). The append path dedupes
+    // observations on this hash, so a repeated observation does not grow
+    // `circuit_run_history` (the hub reached 1.95M rows / ~1 GB that
+    // way). Nullable: pre-v52 rows carry no hash until the compaction sweep
+    // backfills one, and a row without a hash sits outside the dedupe.
+    ColumnSpec {
+        version: 52,
+        table: "circuit_run_history",
+        column: "detail_sha256",
         type_with_default: "TEXT",
         read_default: ReadDefault::Nullable,
     },

@@ -51,6 +51,24 @@
 //! the module-level doc on `db::migrations` for the full design and
 //! the bug class it closes (the v8→v9 `source_issue` regression is
 //! the canonical pin).
+//!
+//! ## The WAL is a bounded log, not a second database (issue #2600)
+//!
+//! WAL mode appends to `buildmesh.db-wal` until a checkpoint folds it back
+//! into the main database. SQLite's default `journal_size_limit` is `-1` —
+//! *no limit* — so a single large transaction (a retention sweep, a bulk
+//! delete) leaves a WAL the size of everything it touched, and the file
+//! stays that big until something forces a checkpoint. A hub that swept a
+//! multi-gigabyte ledger ended up with a 1.4 GB database and a 1.58 GB WAL
+//! that later activity did not shrink, because the limit that would have
+//! truncated it was not set on that database.
+//!
+//! [`WAL_SIZE_LIMIT_BYTES`] is that limit: the writer sets it wherever it
+//! opens a writer connection (`apply_connection_pragmas`), so the log is
+//! rewritten from its start and truncated back to at most that size at the
+//! commit that follows a checkpoint. [`checkpoint_wal_truncate`] forces one
+//! immediately, for the case where the caller wants the space back now rather
+//! than at the next automatic checkpoint.
 
 pub(crate) mod migrations;
 
@@ -683,6 +701,7 @@ static DB: OnceCell<Database> = OnceCell::new();
 /// - `busy_timeout=5000`: if any second connection ever touches the file
 ///   (e.g. a dev-profile instance pointed at the same dir by mistake), fail
 ///   after 5s of retrying instead of an instant `SQLITE_BUSY`.
+/// - `journal_size_limit`: the writer only. See [`WAL_SIZE_LIMIT_BYTES`].
 fn apply_connection_pragmas(conn: &Connection, reader: bool) -> SqlResult<()> {
     if !reader {
         // `journal_mode` returns the resulting mode as a row, so it needs
@@ -690,14 +709,77 @@ fn apply_connection_pragmas(conn: &Connection, reader: bool) -> SqlResult<()> {
         let _mode: String =
             conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        // Bound the WAL. The setting is per-connection and not persisted in
+        // the database file, so it has to be applied wherever the process
+        // opens a writer — a connection that missed it would checkpoint a WAL
+        // back to whatever size it liked. Only the writer checkpoints
+        // (readers are `query_only`), so only the writer needs the limit.
+        conn.pragma_update(None, "journal_size_limit", WAL_SIZE_LIMIT_BYTES)?;
     }
-    conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+    conn.busy_timeout(std::time::Duration::from_millis(WRITER_BUSY_TIMEOUT_MS))?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     if reader {
         conn.pragma_update(None, "query_only", "ON")?;
     }
     Ok(())
 }
+
+/// How large the write-ahead log may grow before a checkpoint truncates it
+/// (issue #2600).
+///
+/// SQLite's default is `-1` — *no limit* — which lets a single large
+/// transaction leave a WAL as big as everything it touched. 64 MiB is large
+/// enough that ordinary write traffic does not reach a checkpoint early, and
+/// small enough that the WAL is a bounded log rather than a second copy of
+/// the database.
+///
+/// SQLite applies the limit at the commit that *follows* a checkpoint: the
+/// log is rewritten from its start and truncated to the limit then, so the
+/// limit bounds the log between checkpoints rather than at the moment of a
+/// big write. [`checkpoint_wal_truncate`] covers that gap for a caller that
+/// wants the space back now.
+pub const WAL_SIZE_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
+
+/// Fold the write-ahead log back into the database and truncate the file.
+///
+/// Returns `Ok(false)` when SQLite could not complete the checkpoint because
+/// another connection still holds a read snapshot — the WAL stays as it is
+/// and the caller can try again later. Not an error: a busy checkpoint is a
+/// normal outcome when readers are mid-query.
+///
+/// The checkpoint waits for readers with a *short* busy timeout, not the
+/// connection's five-second one: the writer lock is held for the whole wait,
+/// and a stalled reader must not hold up the application's writes for five
+/// seconds. The write-ahead log is bounded by [`WAL_SIZE_LIMIT_BYTES`] in the
+/// meantime, so a checkpoint that loses the race leaves the log where it is
+/// until the next one.
+pub fn checkpoint_wal_truncate() -> SqlResult<bool> {
+    let db = write_conn();
+    db.busy_timeout(std::time::Duration::from_millis(
+        WAL_CHECKPOINT_BUSY_TIMEOUT_MS,
+    ))?;
+    // The writer's own busy timeout is a property of the connection, not of
+    // this call, so it is restored before the result is returned — on the
+    // error path as well as the success path. A writer left waiting 250 ms
+    // would fail far more requests than it should.
+    let checkpoint = db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+        row.get::<_, i64>(0)
+    });
+    db.busy_timeout(std::time::Duration::from_millis(WRITER_BUSY_TIMEOUT_MS))?;
+    // `PRAGMA wal_checkpoint` returns a row (busy, log pages, checkpointed
+    // pages), so it needs `query_row` rather than `execute`. It must also run
+    // outside a transaction — SQLite refuses to checkpoint from inside one.
+    Ok(checkpoint? == 0)
+}
+
+/// How long the writer waits for a locked database before giving up.
+const WRITER_BUSY_TIMEOUT_MS: u64 = 5_000;
+
+/// How long a write-ahead-log checkpoint waits for a reader to finish.
+///
+/// Deliberately short: the checkpoint holds the writer lock while it waits,
+/// so a reader that is slow must not hold up the application's writes.
+const WAL_CHECKPOINT_BUSY_TIMEOUT_MS: u64 = 250;
 
 fn open_writer(db_path: &Path) -> SqlResult<Connection> {
     if db_path.to_string_lossy().starts_with("file:") {
@@ -1085,6 +1167,11 @@ pub(crate) fn ensure_baseline_tables(conn: &Connection) -> SqlResult<()> {
             detail TEXT NOT NULL,
             source TEXT,
             disposition TEXT,
+            -- SHA-256 of `detail` (issue #2600). The same observation recorded
+            -- twice is one fact, and the append path dedupes on this hash so
+            -- a repeated observation cannot grow the table. NULL on pre-v52
+            -- rows: the compaction sweep fills them in.
+            detail_sha256 TEXT,
             observed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         );
         CREATE INDEX IF NOT EXISTS idx_circuit_history_run ON circuit_run_history(run_id, id);
@@ -1138,6 +1225,19 @@ pub(crate) fn create_canonical_indexes_after_evolution(conn: &Connection) -> Sql
             ON autopilot_circuit_runs(mesh_id, state, queue_position);
         CREATE INDEX IF NOT EXISTS idx_circuit_steps_run ON autopilot_circuit_run_steps(run_id);
         CREATE INDEX IF NOT EXISTS idx_circuit_runs_source_agent ON autopilot_circuit_runs(source_agent_node_id);
+        -- Observation dedupe lookup (issue #2600). The append path asks
+        -- whether this exact observation has already been recorded for this
+        -- run/node/attempt/source before writing, and this index answers
+        -- it without touching the `detail` payload -- indexing the detail
+        -- itself would duplicate ~1 GB of JSON into the index. Partial on
+        -- `kind = 'observation'`: only observations are deduped, and only
+        -- rows that carry a hash take part. Not UNIQUE: a database that
+        -- predates the dedupe still holds duplicate rows, and the
+        -- compaction sweep (not this index) removes them.
+        CREATE INDEX IF NOT EXISTS idx_circuit_history_observation_dedupe
+            ON circuit_run_history(run_id, COALESCE(node_id, ''), COALESCE(attempt, -1),
+                                  COALESCE(source, ''), detail_sha256)
+            WHERE kind = 'observation' AND detail_sha256 IS NOT NULL;
         -- Hot-filter indexes (issue #1747). Startup recovery
         -- (list_suspended_nodes_inner, recover_*_cli_session_id_inner) and the
         -- Autopilot poller (COUNT_ACTIVE_AUTOPILOT_SQL +/- mesh_id,

@@ -222,6 +222,71 @@ fn prune_drops_old_terminal_manual_runs() {
     assert_eq!(identities(&conn), vec!["interval:9000"]);
 }
 
+/// A cancelled run is a terminal run: its history is the same audit trail a
+/// failed run's is, so it is retained for the same window and swept on the
+/// same terms (issue #2600).
+///
+/// Cancelled runs used to be skipped by the sweep entirely, so their history
+/// accumulated without bound — the reported hub held a cancelled run with
+/// 306k history rows.
+#[test]
+fn prune_drops_old_cancelled_runs_like_failed_runs() {
+    let conn = prune_db();
+    let cancelled = insert_run(&conn, "manual:cancelled", "cancelled", 60, "{}");
+    insert_step(&conn, cancelled, "build");
+    // A failed run of the same age, for the comparison the change is about.
+    let failed = insert_run(&conn, "manual:failed", "failed", 60, "{}");
+    insert_step(&conn, failed, "build");
+    // Newest row — kept as the cadence anchor.
+    insert_run(&conn, "interval:newest", "completed", 1, "{}");
+
+    let (deleted, _) = prune_terminal_circuit_runs_older_than_inner(&conn, 30).unwrap();
+
+    assert_eq!(
+        deleted, 2,
+        "a cancelled run is swept exactly like a failed one"
+    );
+    assert_eq!(identities(&conn), vec!["interval:newest"]);
+}
+
+/// A cancelled run whose agent still owes a cleanup is kept.
+///
+/// Cancelling a run asks for its retirable agents to be cleaned up, and that
+/// request is anchored on the node-scoped lease rather than on the run. The
+/// sweep refuses to delete a run whose step still has a pending cleanup,
+/// whatever state the run is in — so the cleanup retry survives the change
+/// that puts cancelled runs on the sweep's terms.
+#[test]
+fn prune_keeps_a_cancelled_run_whose_cleanup_is_still_pending() {
+    let conn = prune_db();
+    let cancelled = insert_run(&conn, "manual:cancelled", "cancelled", 60, "{}");
+    insert_step(&conn, cancelled, "cleanup");
+    conn.execute(
+        "INSERT INTO agent_nodes (id, mesh_id, name, path) VALUES (1, 1, 'cleanup', '/tmp/cleanup')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE autopilot_circuit_run_steps SET agent_node_id = 1 WHERE run_id = ?1",
+        [cancelled],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO agent_node_lifecycle_leases (node_id, cleanup_requested) VALUES (1, 1)",
+        [],
+    )
+    .unwrap();
+    insert_run(&conn, "interval:newest", "completed", 1, "{}");
+
+    let (deleted, _) = prune_terminal_circuit_runs_older_than_inner(&conn, 30).unwrap();
+
+    assert_eq!(deleted, 0, "the run still owns a pending cleanup");
+    assert_eq!(
+        identities(&conn),
+        vec!["manual:cancelled", "interval:newest"]
+    );
+}
+
 /// In-flight work is never swept, however old. A run parked on an agent slot
 /// for weeks is live state, not garbage.
 #[test]

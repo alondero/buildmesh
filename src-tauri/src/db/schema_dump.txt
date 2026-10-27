@@ -30,6 +30,12 @@ CREATE INDEX idx_autopilot_runs_mesh_state
 index:idx_autopilot_runs_state
 CREATE INDEX idx_autopilot_runs_state ON autopilot_runs(state)
 
+index:idx_circuit_history_observation_dedupe
+CREATE INDEX idx_circuit_history_observation_dedupe
+            ON circuit_run_history(run_id, COALESCE(node_id, ''), COALESCE(attempt, -1),
+                                  COALESCE(source, ''), detail_sha256)
+            WHERE kind = 'observation' AND detail_sha256 IS NOT NULL
+
 index:idx_circuit_history_run
 CREATE INDEX idx_circuit_history_run ON circuit_run_history(run_id, id)
 
@@ -225,6 +231,11 @@ CREATE TABLE circuit_run_history (
             detail TEXT NOT NULL,
             source TEXT,
             disposition TEXT,
+            -- SHA-256 of `detail` (issue #2600). The same observation recorded
+            -- twice is one fact, and the append path dedupes on this hash so
+            -- a repeated observation cannot grow the table. NULL on pre-v52
+            -- rows: the compaction sweep fills them in.
+            detail_sha256 TEXT,
             observed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         )
 
