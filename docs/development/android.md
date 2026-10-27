@@ -193,10 +193,15 @@ keystrokes, while a question or an unclassified request opens the terminal
 instead. The answers a harness enumerated are shown as text, because a tap
 cannot be verified to select one in the agent's own prompt. Both controls
 disable while a reply is in flight and retire only once the desktop accepted
-it, keyed by the request rather than the node, so a node that asks again arrives
-with live controls. The deck belongs to the Overview tab: the Work tab already
-renders those nodes under their mesh and would otherwise show each of them
-twice. The dashboard refreshes by pull-to-refresh as well as through the app-bar
+it; a send that fails signals the card, which clears the in-flight marker and
+hands the controls back instead of showing "Sending…" until the desktop
+replaces the request. State is keyed by the request rather than the node, so a
+node that asks again arrives with live controls. The deck keeps the screen's
+mesh scope but ignores the search query and the attention filter: who is
+blocked on you is not something a search box should hide. It belongs to the
+Overview tab, whose node cards exclude these same agents — the rule the phone
+web list applies — so a waiting agent renders exactly once; the Work tab has
+no deck and keeps these nodes as rows under their mesh. The dashboard refreshes by pull-to-refresh as well as through the app-bar
 action, and the app-bar progress bar belongs to the first load and to a read the
 user asked for — the five-second poll never pulses the chrome. Node details put
 the reply composer directly under the request it answers, above the

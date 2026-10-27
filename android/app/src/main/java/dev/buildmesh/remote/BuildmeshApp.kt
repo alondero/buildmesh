@@ -136,7 +136,14 @@ fun BuildmeshApp(vm: BuildmeshViewModel, invitation: String = "", requestedNodeI
                                 meshId = id
                                 if (target == "work") tab = "Work" else screen = target
                             }, { id, option -> meshId = id; launch = option; screen = "capture" },
-                            { id, sequence, onAccepted -> vm.action { api -> api.sendKeys(id, sequence); onAccepted() } })
+                            closeNode = vm::closeNode,
+                            openTerminal = { id -> nodeId = id; screen = "terminal" },
+                            // `onDone(true)` is the desktop accepting the keys;
+                            // `onDone(false)` is the send failing, which releases
+                            // the chip's in-flight marker.
+                            answer = { id, sequence, onDone ->
+                                vm.action(onFailed = { onDone(false) }) { api -> api.sendKeys(id, sequence); onDone(true) }
+                            })
                     }
                     "node" -> if (selected != null) NodeScreen(selected, vm, { screen = "terminal" }, { screen = "changes" }, { screen = "pr" }, { id -> nodeId = id; screen = "terminal" })
                         else EmptyMessage("This node is no longer available.")
@@ -200,11 +207,27 @@ fun PairScreen(invitation: String, busy: Boolean, pair: (String, String) -> Unit
 @Composable
 fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) -> Unit, openNode: (Long) -> Unit, openMesh: (Long, String) -> Unit,
     openCapture: (Long, String) -> Unit,
-    // `answer` returns false when the reply never reached the transport, so a
-    // tapped chip only retires once the desktop took the keys.
-    answer: (nodeId: Long, sequence: String, onAccepted: () -> Unit) -> Boolean = { _, _, _ -> false }) {
+    closeNode: ((Long) -> Unit)? = null,
+    openTerminal: (Long) -> Unit = {},
+    // `answer` returns false when the reply never reached the transport, and
+    // completes with `true` only once the desktop accepted it — or `false`
+    // when the send failed, so a tapped chip retires only on an acceptance
+    // and re-enables itself on a failure (issue #1966 review).
+    answer: (nodeId: Long, sequence: String, onDone: (accepted: Boolean) -> Unit) -> Boolean = { _, _, _ -> false }) {
     var query by rememberSaveable { mutableStateOf("") }
     var attentionOnly by rememberSaveable { mutableStateOf(false) }
+    var closingId by rememberSaveable { mutableStateOf<Long?>(null) }
+    val closing = state.nodes.firstOrNull { it.number("id") == closingId && it.text("status") != "archived" }
+    if (tab == "Work" && closing != null && closeNode != null) AlertDialog(
+        onDismissRequest = { closingId = null },
+        title = { Text("Close ${closing.text("name")}?") },
+        text = { Text("Stop this agent and remove it from Work? Its worktree and files will be kept.") },
+        confirmButton = { TextButton(enabled = !state.busy, onClick = {
+            closingId = null
+            closeNode(closing.number("id"))
+        }) { Text("Close agent", color = MaterialTheme.colorScheme.error) } },
+        dismissButton = { TextButton(onClick = { closingId = null }) { Text("Cancel") } },
+    )
     val openNodes = state.nodes.filter { it.text("status") != "archived" }
     val nodesByMesh = openNodes.groupBy { it.number("mesh_id") }
     // Match Sidebar.tsx: open nodes determine the band; both bands keep saved mesh order.
@@ -227,11 +250,19 @@ fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) 
             FilterChip(selected = attentionOnly, onClick = { attentionOnly = !attentionOnly }, label = { Text("Needs attention") })
         }
         // The home screen's first surface: whoever is blocked on you, above the
-        // mesh list. The Overview tab only, because the Work tab already renders
-        // these nodes as rows under their mesh and would otherwise show each of
-        // them twice.
+        // mesh list. The deck keeps the screen's mesh scope but ignores the
+        // search query and the attention chip — who is blocked on you is not
+        // something a search box should hide — the same stance the phone web
+        // deck takes by drawing from its unfiltered node list.
+        val deckScope = openNodes.filter { node -> meshId == 0L || node.number("mesh_id") == meshId }
+        val deckWaiting = if (tab == "Overview") waitingForInput(deckScope) else emptyList()
+        // …and those same nodes are excluded from the node cards below, or the
+        // Overview would render every waiting agent twice (once pinned, once
+        // as a card) — the rule src/mobile's NodeList applies. The Work tab is
+        // untouched: it has no deck and keeps these nodes as rows.
+        val cards = if (tab == "Overview") visible.filter { nodeInputRequest(it) == null } else visible
         if (tab == "Overview") item(key = "waiting-for-input") {
-            AttentionDeck(visible, state.meshes, state.busy, openNode, answer)
+            AttentionDeck(deckScope, state.meshes, state.busy, openNode, openTerminal, answer)
         }
         if (tab == "Overview") items(activeMeshes + inactiveMeshes, key = { "mesh-${it.number("id")}" }) { mesh ->
             val members = nodesByMesh[mesh.number("id")].orEmpty()
@@ -273,11 +304,14 @@ fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) 
                         }
                     }
                 }
-                items(members, key = { "activity-${it.root.number("id")}" }) { WorkActivityRows(it, state, requireNotNull(glyphMotion), openNode) }
+                items(members, key = { "activity-${it.root.number("id")}" }) {
+                    WorkActivityRows(it, state, requireNotNull(glyphMotion), openNode,
+                        closeNode?.let { { id -> closingId = id } })
+                }
             }
         }
-        if (if (tab == "Work") activities.isEmpty() else visible.isEmpty()) item { EmptyMessage(if (state.refreshing) "Loading agents…" else "No agents match this view. Capture a task to start one.") }
-        if (tab != "Work") items(visible.sortedByDescending { circuitNeedsAttention(it, state.circuitRuns) }, key = { "node-${it.number("id")}" }) { node ->
+        if (if (tab == "Work") activities.isEmpty() else cards.isEmpty() && deckWaiting.isEmpty()) item { EmptyMessage(if (state.refreshing) "Loading agents…" else "No agents match this view. Capture a task to start one.") }
+        if (tab != "Work") items(cards.sortedByDescending { circuitNeedsAttention(it, state.circuitRuns) }, key = { "node-${it.number("id")}" }) { node ->
             Card(onClick = { openNode(node.number("id")) }, colors = CardDefaults.cardColors(containerColor = MeshColors.card)) {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(node.text("name"), style = MaterialTheme.typography.titleMedium)

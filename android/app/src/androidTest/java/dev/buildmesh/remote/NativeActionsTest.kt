@@ -222,6 +222,26 @@ class NativeActionsTest {
         }
     }
 
+    // The deck's reply chips disable while a send is in flight and retire only
+    // on an acceptance, so a transport failure has to reach the card as a
+    // failure signal — otherwise it shows "Sending…" with both chips dead
+    // until the desktop replaces the request.
+    @Test fun aFailedReplySignalsFailureSoTheControlsAreNeverLeftDead() {
+        withDesktop({ request ->
+            assertEquals("/api/nodes/9/input", request.path)
+            assertEquals("POST", request.method)
+            MockResponse().setResponseCode(503).setBody("""{"error":"Reply not confirmed"}""")
+        }) { vm, requests ->
+            var failed = 0
+            compose.runOnUiThread {
+                assertTrue(vm.action(onFailed = { failed++ }) { api -> api.sendKeys(9, "y\r") })
+            }
+            compose.waitUntil(10000) { !vm.state.value.busy && failed == 1 }
+            assertEquals("Reply not confirmed", vm.state.value.error)
+            assertEquals(1, requests.size)
+        }
+    }
+
     // Like the desktop Issues probe: the main half starts with the mesh
     // default, the menu lists prompt-capable rows including saved
     // configurations, and either choice starts the agent at once.

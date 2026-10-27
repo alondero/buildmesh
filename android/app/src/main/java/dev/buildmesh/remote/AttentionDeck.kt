@@ -30,8 +30,10 @@ fun waitingForInput(nodes: List<JsonObject>): List<JsonObject> =
  *
  * Presentational: the screen owns the reply transport, so the deck is testable
  * without a ViewModel. `answer` reports whether the request reached the
- * transport and calls back once it was accepted, so a card is retired only by a
- * reply the desktop took.
+ * transport and completes with `true` once the desktop accepted it, or `false`
+ * when the send failed — so a card is retired only by a reply the desktop
+ * took, and a failed reply hands the controls back instead of leaving them
+ * disabled.
  */
 @Composable
 fun AttentionDeck(
@@ -39,14 +41,15 @@ fun AttentionDeck(
     meshes: List<JsonObject>,
     busy: Boolean,
     openNode: (Long) -> Unit,
-    answer: (nodeId: Long, sequence: String, onAccepted: () -> Unit) -> Boolean,
+    openTerminal: (Long) -> Unit,
+    answer: (nodeId: Long, sequence: String, onDone: (accepted: Boolean) -> Unit) -> Boolean,
 ) {
     val waiting = waitingForInput(nodes)
     if (waiting.isEmpty()) return
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Waiting for input", style = MaterialTheme.typography.titleSmall,
             fontWeight = FontWeight.Medium, color = MeshColors.amber)
-        waiting.forEach { node -> AttentionCard(node, meshes, busy, openNode, answer) }
+        waiting.forEach { node -> AttentionCard(node, meshes, busy, openNode, openTerminal, answer) }
     }
 }
 
@@ -56,7 +59,8 @@ private fun AttentionCard(
     meshes: List<JsonObject>,
     busy: Boolean,
     openNode: (Long) -> Unit,
-    answer: (nodeId: Long, sequence: String, onAccepted: () -> Unit) -> Boolean,
+    openTerminal: (Long) -> Unit,
+    answer: (nodeId: Long, sequence: String, onDone: (accepted: Boolean) -> Unit) -> Boolean,
 ) {
     val request = nodeInputRequest(node) ?: return
     val id = node.number("id")
@@ -70,7 +74,11 @@ private fun AttentionCard(
     // `answer` refuses a second one anyway.
     val blocked = busy || pending.isNotEmpty() || accepted.isNotEmpty()
     fun reply(sequence: String, action: String) {
-        if (answer(id, sequence) { accepted = action }) pending = action
+        // Mark in flight *before* asking the transport, so a failure signal
+        // that lands immediately cannot be overwritten by the marker; the
+        // refusal path below clears it again.
+        pending = action
+        if (!answer(id, sequence, { ok -> if (ok) accepted = action else pending = "" })) pending = ""
     }
     Card(
         onClick = { openNode(id) },
@@ -127,7 +135,7 @@ private fun AttentionCard(
                         label = if (request.mode == "question") "Answer in terminal" else "Open terminal to respond",
                         content = MeshColors.secondary, border = MeshColors.borderStrong,
                         enabled = true, modifier = Modifier.weight(1f),
-                    ) { openNode(id) }
+                    ) { openTerminal(id) }
                 }
             }
         }

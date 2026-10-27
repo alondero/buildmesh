@@ -132,6 +132,12 @@ fun nodeAttention(node: JsonObject): FeedEvent.Lifecycle {
  * come only from a request schema the harness actually sent, and the text is
  * the semantic turn's description when there is one.
  *
+ * One deliberate extension of the shared `permission | question | unknown`
+ * vocabulary: `confirmation`, for a `permission_requested` turn the desktop
+ * banner names `command_confirmation`. It only selects wording — the card
+ * still answers with the same `y\r` / `n\r` keystrokes, so nothing the shared
+ * reader would allow becomes newly allowed here.
+ *
  * @param key identity of *this* request, not of the node. A node that answers
  *   one question and immediately asks another never leaves `awaiting_input`, so
  *   a control already used on the previous request has to be told that this is
@@ -152,7 +158,9 @@ data class NodeInputRequest(
     /** The words the desktop's semantic-turn banner uses for this request. */
     val approveLabel get() = if (isConfirmation) "Approve (Y)" else "Allow (Y)"
     val rejectLabel get() = if (isConfirmation) "Deny (N)" else "Reject (N)"
-    val approvedLabel get() = if (isConfirmation) "Approved ✓" else "Allowed ✓"
+    // The retired-state words the phone web deck already shows, so the two
+    // decks read the same once a decision has been made.
+    val approvedLabel get() = "Approved ✓"
     val rejectedLabel get() = if (isConfirmation) "Denied ✗" else "Rejected ✗"
 }
 

@@ -216,6 +216,15 @@ class BuildmeshViewModel(application: Application) : AndroidViewModel(applicatio
         refresh()
     }
 
+    fun closeNode(nodeId: Long) {
+        action { client ->
+            client.post("/api/nodes/$nodeId/close", JsonObject(emptyMap()))
+            refresher.invalidate()
+            mutableState.update { it.copy(nodes = it.nodes.filterNot { node -> node.number("id") == nodeId },
+                notice = "Agent closed. Worktree and files kept.") }
+        }
+    }
+
     /**
      * Run one mutating request, reporting whether it was queued.
      *
@@ -223,19 +232,32 @@ class BuildmeshViewModel(application: Application) : AndroidViewModel(applicatio
      * optimistically needs to know the difference between "sending" and "this
      * request was dropped" — otherwise a declined tap leaves a permanently
      * dead control behind.
+     *
+     * `onFailed` is the other half of that contract: it fires when the block
+     * did not finish, so a caller waiting for an acceptance callback (the
+     * attention deck's reply chips) can release its in-flight marker instead
+     * of showing "Sending…" forever. The desktop's own acceptance still
+     * arrives through the block itself.
      */
-    fun action(block: suspend (BuildmeshApi) -> Unit): Boolean {
+    fun action(onFailed: (() -> Unit)? = null, block: suspend (BuildmeshApi) -> Unit): Boolean {
         val client = api ?: return false
         if (state.value.busy) return false
         val owner = generation
         mutableState.update { it.copy(busy = true, error = "", notice = "") }
         refresher.invalidate()
         actionJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            // Only a block that ran to completion has reported its own outcome;
+            // anything else is a failure the caller still believes is in flight.
+            var delivered = false
             try {
                 block(client)
+                delivered = true
                 if (owner == generation) { refresher.invalidate(); refresh() }
-            } catch (e: CancellationException) { throw e
+            } catch (e: CancellationException) {
+                if (!delivered) onFailed?.invoke()
+                throw e
             } catch (e: Exception) {
+                if (!delivered) onFailed?.invoke()
                 if (owner == generation) {
                     // A data route that answers 403 refused this request; the
                     // device is still paired (issue #2317).
