@@ -189,11 +189,13 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
     }
   };
 
+  // `animate-border-pulse` draws its ring in the padding, where the border
+  // would be, and animates only the ring's opacity, not the card's paint.
   const borderClass = members.some(n => n.status === 'awaiting_input')
-    ? 'border-status-warning animate-border-pulse'
+    ? 'p-[2px] animate-border-pulse'
     : cardActive
-      ? 'border-accent-cyan/70'
-      : 'border-border-default hover:border-accent-cyan/50';
+      ? 'border-2 border-accent-cyan/70'
+      : 'border-2 border-border-default hover:border-accent-cyan/50';
 
   return (
     <div
@@ -207,7 +209,7 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
         else choose(selectedId, showingUtility);
       }}
       onKeyDown={handleNodeKeyDown}
-      className={`relative flex-1 flex flex-col bg-bg-card border-2 rounded-sm overflow-hidden group transition-[color,background-color,border-color,opacity] ${borderClass} ${isDragging ? 'opacity-40' : ''}`}
+      className={`relative flex-1 flex flex-col bg-bg-card rounded-sm overflow-hidden group transition-[color,background-color,border-color,opacity] ${borderClass} ${isDragging ? 'opacity-40' : ''}`}
     >
       <GridNodeHeader
         nodeId={selectedId}

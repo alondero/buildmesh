@@ -41,6 +41,10 @@ pub struct StartNodeReviewRequest {
     #[ts(as = "Option<i32>")]
     pub circuit_id: Option<i64>,
     pub max_rounds: i32,
+    /// Spawn Option or saved Launch Configuration for the built-in review only.
+    #[serde(default)]
+    #[ts(optional)]
+    pub reviewer_provider: Option<String>,
 }
 
 fn review_options_core(node_id: i64) -> Result<Vec<NodeReviewOption>, ActError> {
@@ -110,7 +114,7 @@ fn start_review_core(node_id: i64, request: StartNodeReviewRequest) -> Result<i6
         node_id,
         request.circuit_id,
         request.max_rounds,
-        None,
+        request.reviewer_provider,
     )
     .map_err(ActError::Refused)
 }

@@ -1,0 +1,45 @@
+<!doctype html>
+<html>
+  <head><meta name="viewport" content="width=device-width, initial-scale=1" /></head>
+  <body>
+    <div id="root"></div>
+    <div id="terminal" style="height: 600px"></div>
+    <script type="module">
+      const output = 'https://example.com/plain\r\n\x1b]8;;https://example.com/hyper\x07Open browser\x1b]8;;\x07\r\n\x1b[?1003h\x1b[?1006h';
+      window.openedLinks = [];
+      window.ptyInput = [];
+      if (!new URLSearchParams(location.search).has('realBrowser')) {
+        window.open = (uri) => { window.openedLinks.push(uri); return null; };
+      }
+      if (new URLSearchParams(location.search).get('surface') === 'android') {
+        window.BuildmeshTerminal = {
+          resize() {}, scrollState() {},
+          openUrl(uri) { window.openedLinks.push(uri); },
+          ready() { window.buildmeshOutput(btoa(output)); },
+        };
+        await import('/android/terminal/terminal.js');
+      } else {
+        await import('/src/mobile/styles.css');
+        const [{ default: React }, { createRoot }, { default: TerminalScreen }] = await Promise.all([
+          import('react'), import('react-dom/client'), import('/src/mobile/screens/TerminalScreen.tsx'),
+        ]);
+        window.WebSocket = class {
+          static OPEN = 1;
+          readyState = 1;
+          constructor() {
+            setTimeout(() => {
+              this.onopen?.();
+              this.onmessage?.({ data: output });
+            });
+          }
+          send(data) { window.ptyInput.push(data); }
+          close() {}
+        };
+        createRoot(document.getElementById('root')).render(React.createElement(TerminalScreen, {
+          node: { id: 1, name: 'Link test', provider: 'terminal', status: 'running' },
+          onBack() {},
+        }));
+      }
+    </script>
+  </body>
+</html>

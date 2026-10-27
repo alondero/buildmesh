@@ -172,8 +172,18 @@ Back, cancellation and backdrop dismissal are held while a decision is sending.
 
 **Start review…** on the node screen offers the built-in Review Blueprint or a
 saved Circuit with a manual root and a Review step in the same Mesh. The built-in
-choice accepts one to ten rounds (default three) and inherits desktop reviewer
-settings; a saved choice keeps its graph's reviewer and round limit. The source
+choice accepts one to ten rounds (default three). Its **Reviewer launch
+configuration** picker offers the backend Spawn Menu's harnesses and saved
+configurations, with Terminal excluded. The browser disables unavailable reviewers;
+Android omits them and harnesses without turn-completion support. Default
+inherits the desktop reviewer settings, then the source agent's provider. A chosen
+configuration carries its model and effort into the review. The optional
+`reviewer_provider` in `StartNodeReviewRequest` carries the Spawn Option or Launch
+Configuration id through the shared desktop start command; older clients may omit
+it. A saved Circuit keeps its graph's reviewer and round limit, so the override
+controls are hidden and no override is sent. In the browser, a failed launch-menu
+read offers Retry and leaves Default available; Android uses the dashboard's
+provider snapshot. The source
 must have a live process and a supported turn-completion hook or transcript
 watcher. This is enforced by the shared desktop/phone start command. A repeated start returns the existing
 live run rather than creating another one. A refusal stays in the sheet; resume

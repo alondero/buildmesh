@@ -1160,7 +1160,9 @@ is unavailable, type your task or use your keyboard's microphone.
 Android provides native Overview/Work, agent replies, task capture, issues,
 archive resume, changes and diffs. Its terminal includes keyboard input,
 Esc/Tab/Ctrl+C and arrow keys, and reconnects when the app returns to the
-foreground. **Create PR** on a mesh uses that mesh's current branch; ask an
+foreground. In either phone client, tap a terminal URL or hyperlink to open it
+in your phone's browser; drag to scroll without opening links.
+**Create PR** on a mesh uses that mesh's current branch; ask an
 agent to open a worktree PR from its terminal. **Connection → Forget this
 desktop** removes this phone's saved session. Revoke the device on the desktop
 to remove its authorization. Certificate resets require fresh pairing.

@@ -20,6 +20,18 @@ Use `_inner` helper functions that accept `&Connection` so compound operations k
 - **Absence is only absence.** `rusqlite::Error::QueryReturnedNoRows` — or an `Option` that is genuinely `None` — is the only evidence that a row is gone. A read that *failed* says nothing about the row: it defers the decision, and it never cancels a run, fails a dispatch or rejects a request. Where a caller needs the two apart, `read_outcome::ReadOutcome::absent_or_unavailable` is the seam, and `db::error::is_busy_error` names the transient case.
 - **A fence is claimed only when both halves are known.** A wake-up is fenced to the turn that was observed: the lifecycle stamp and the report revision. The dispatch side re-reads both halves and rejects a claim that does not match, so a claim carrying an unknown half spends the attempt's wake budget on a wake that can only ever be judged obsolete — and the finished background task goes unannounced until the wait times out. An unknown half is unknown, not empty: the observation resolves the fence before it claims the wake-up, and the claim itself refuses an empty half.
 
+### Pin the plan of a query a worker runs on every pass
+
+A worker that ticks every few seconds multiplies a query's cost by the life of
+the install. A predicate inside a JSON column (`context_json`, history `detail`)
+cannot use a plain index, and without `ANALYZE` statistics the planner may start
+from the large table and parse every row. The retained-agent count did exactly
+that twice per 2-second Circuit pass: about 23 MB of run context parsed per
+pass, roughly half a core on a long-lived install. Start such a query from the
+small, indexed set that bounds it (`CROSS JOIN` fixes SQLite's join order), keep
+the SQL in a constant, and pin its `EXPLAIN QUERY PLAN` in a test: see
+`RETAINED_CIRCUIT_AGENT_NODES_SQL` and `NEWEST_SUBMISSION_SEQ_SQL`.
+
 ### Per-test database isolation (issue #2048)
 Production opens exactly one database: `db::init` populates a process-global `OnceCell<Database>` once and later calls are a no-op. Under `cfg(test)` a thread may instead install its **own** database, and `db::get()` prefers it, so `read_conn()` / `write_conn()` / every `db::*` query in that test resolve to that test's rows and `cargo test` runs multi-threaded with no `--test-threads=1`. A test opts in with `let _db = db::test_support::isolated();` as its first statement and holds the guard for the whole body; `isolated()` is depth-counted, so a shared helper may call it again without replacing the caller's rows. This is the same shape `preferences::storage` already uses for its per-thread `APP_DATA_DIR` / `CACHE` (issue #1386), and `db::circuit_tests` already proved the per-test-database approach works (#1691). Variants and their reasons:
 
