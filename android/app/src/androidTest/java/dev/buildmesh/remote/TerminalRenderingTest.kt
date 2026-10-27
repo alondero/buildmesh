@@ -1,6 +1,12 @@
 package dev.buildmesh.remote
 
 import android.app.Application
+import android.app.Activity
+import android.app.Instrumentation
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.SystemClock
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebView
@@ -11,6 +17,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.jsonArray
 import okhttp3.*
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -37,6 +44,77 @@ class TerminalRenderingTest {
         val result = ArrayBlockingQueue<String>(1)
         compose.runOnUiThread { view.evaluateJavascript(script) { result.offer(it) } }
         return result.poll(5, TimeUnit.SECONDS) ?: error("WebView did not evaluate terminal state")
+    }
+
+    @Test fun terminalLinkTapsDispatchBrowserIntentsWithoutNavigatingTheWebView() {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        SessionStore(app).clear()
+        MockWebServer().use { server ->
+            server.start(java.net.InetAddress.getByName("127.0.0.1"), 0)
+            server.enqueue(MockResponse().setBody("{\"ticket\":\"link-test\"}"))
+            server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    webSocket.send("https://example.com/plain\r\n\u001b]8;;https://example.com/hyper\u0007Open browser\u001b]8;;\u0007\r\n")
+                }
+            }))
+            val api = BuildmeshApi(server.url("/").toString())
+            val vm = BuildmeshViewModel(app)
+            try {
+                compose.setContent { BuildmeshTheme { TerminalPane(api, 7, vm) } }
+                compose.waitUntil(10000) { compose.onAllNodesWithText("Connected").fetchSemanticsNodes().isNotEmpty() }
+                lateinit var view: WebView
+                compose.runOnUiThread { view = webView(compose.activity.window.decorView) ?: error("Native terminal missing") }
+                // Block the browser activity while checking the real WebView
+                // touch -> JS bridge -> ACTION_VIEW handoff on this device.
+                val instrumentation = InstrumentationRegistry.getInstrumentation()
+                val browserFilter = IntentFilter(Intent.ACTION_VIEW).apply {
+                    addCategory(Intent.CATEGORY_BROWSABLE)
+                    addDataScheme("https")
+                    addDataScheme("javascript")
+                }
+                val browser = instrumentation.addMonitor(browserFilter,
+                    Instrumentation.ActivityResult(Activity.RESULT_OK, null), true)
+                try {
+                    compose.waitUntil(10000) {
+                        evaluate(view, "document.querySelector('.xterm-rows').innerText")
+                            .replace('\u00a0', ' ').contains("Open browser")
+                    }
+                    listOf("https://example.com/plain", "Open browser").forEachIndexed { index, label ->
+                        val coordinates = Json.parseToJsonElement(Json.parseToJsonElement(evaluate(view, """
+                            JSON.stringify((() => {
+                              const row = [...document.querySelectorAll('.xterm-rows > div')].find(el => el.textContent.replace(/\s/g, ' ').includes('$label'));
+                              const box = row.getBoundingClientRect();
+                              return [box.x + 5, box.y + box.height / 2];
+                            })())
+                        """)).jsonPrimitive.content).jsonArray.map { it.jsonPrimitive.content.toFloat() }
+                        compose.runOnUiThread {
+                            val now = SystemClock.uptimeMillis()
+                            listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP).forEachIndexed { offset, action ->
+                                val event = MotionEvent.obtain(now, now + offset * 50, action,
+                                    coordinates[0] * view.resources.displayMetrics.density,
+                                    coordinates[1] * view.resources.displayMetrics.density, 0)
+                                view.dispatchTouchEvent(event)
+                                event.recycle()
+                            }
+                        }
+                        compose.waitUntil(5000) { browser.hits == index + 1 }
+                    }
+                    assertEquals("https://appassets.androidplatform.net/assets/index.html",
+                        Json.parseToJsonElement(evaluate(view, "location.href")).jsonPrimitive.content)
+                    evaluate(view, "window.BuildmeshTerminal.openUrl('HTTPS://example.com/upper')")
+                    compose.waitUntil(5000) { browser.hits == 3 }
+                    evaluate(view, "window.BuildmeshTerminal.openUrl('javascript:alert(1)')")
+                    compose.waitForIdle()
+                    assertEquals("Non-HTTP links cannot launch an activity", 3, browser.hits)
+                } finally {
+                    instrumentation.removeMonitor(browser)
+                }
+
+            } finally {
+                compose.runOnUiThread { vm.forget() }
+                api.close()
+            }
+        }
     }
 
     @Test fun realTerminalRendersSnapshotAndBinaryOutputWithUsableGeometryAndInput() {

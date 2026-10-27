@@ -111,6 +111,14 @@ describe('NodeCard closing overlay', () => {
 
     expect(screen.queryByRole('status')).toBeNull();
     expect(container.firstElementChild?.className).toContain('animate-border-pulse');
+    // The pulse ring is drawn in padding equal to the border it replaces, so
+    // entering and leaving attention keeps the content box in place.
+    expect(container.firstElementChild?.className.split(' ')).toContain('p-[2px]');
+    expect(container.firstElementChild?.className.split(' ')).not.toContain('border-2');
+
+    act(() => useAgentNodeStore.setState({ nodesById: { 5: makeNode({ id: 5, status: 'running' }) } }));
+    expect(container.firstElementChild?.className).not.toContain('animate-border-pulse');
+    expect(container.firstElementChild?.className.split(' ')).toContain('border-2');
   });
 
   it('writes the banner response directly to the node PTY', async () => {

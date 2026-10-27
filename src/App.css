@@ -438,12 +438,22 @@ html, body {
   }
 }
 
-/* Border pulse for terminal cards needing attention */
-.animate-border-pulse {
+/* Border pulse for terminal cards needing attention. The ring is an overlay
+   in the 2px the card otherwise gives its border (the card swaps that border
+   for equal padding, so nothing moves), and only its opacity animates: the
+   compositor runs it without repainting the card. Animating `border-color`
+   repainted the whole card on every frame. */
+.animate-border-pulse::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 2px solid var(--color-status-warning);
+  border-radius: inherit;
+  pointer-events: none;
   animation: border-pulse 1.5s ease-in-out infinite;
 }
 
 @keyframes border-pulse {
-  0%, 100% { border-color: var(--color-status-warning); }
-  50% { border-color: transparent; }
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
 }

@@ -4,6 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { AgentNode, isAuthError, isRateLimited, terminalWsUrl } from "../api";
 import { attachTouchPan } from "../../components/Terminal/attachTouchPan";
+import { attachMobileTerminalLinks } from "../../components/Terminal/attachMobileTerminalLinks";
 import { QUICK_KEYS } from "./quickKeys";
 import { AppBar } from "../ui";
 import { loadUnicode11Widths } from "../../components/Terminal/loadUnicode11Widths";
@@ -233,6 +234,7 @@ export default function TerminalScreen({
     fitRef.current = fit;
 
     let detachTouchPan: (() => void) | undefined;
+    let detachLinks: (() => void) | undefined;
     let detachScroll: (() => void) | null = null;
     let resizeObserver: ResizeObserver | null = null;
 
@@ -240,6 +242,7 @@ export default function TerminalScreen({
       term.open(termHostRef.current);
       fit.fit();
       detachTouchPan = attachTouchPan(termHostRef.current, term);
+      detachLinks = attachMobileTerminalLinks(term, uri => window.open(uri, "_blank", "noopener,noreferrer"));
 
       // Drive the "jump to latest" pill off xterm's public scroll event and
       // buffer coordinates. In v6 the DOM `.xterm-viewport` is not the real
@@ -301,6 +304,7 @@ export default function TerminalScreen({
       window.removeEventListener("online", resumeConnection);
       resizeObserver?.disconnect();
       detachTouchPan?.();
+      detachLinks?.();
       detachScroll?.();
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);

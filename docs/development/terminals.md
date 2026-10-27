@@ -31,6 +31,17 @@ Both mobile terminal surfaces use that one module: the browser mobile client (`s
 
 Touch scrolling is what makes a phone's terminal usable, and the soft keyboard is why: it shrinks the visible pane, so a shorter view has to be scrollable to stay worth reading. Each client therefore also reports when the viewport leaves or returns to the live tail, and offers a way back to it — the browser client's "Jump to latest output" pill, and the native pane's **Latest** app-bar control, which the WebView drives over the `BuildmeshTerminal` bridge (`scrollState(atBottom)` in, `buildmeshScrollToBottom()` out). Without that way back, a phone that panned into the history could only return to the tail by dragging the whole history forward again.
 
+Both clients also use `attachMobileTerminalLinks` for plain HTTP(S) URLs and
+OSC 8 hyperlinks. A short tap resolves the link through xterm's public hover
+callbacks; non-bubbling mousemove probes on `.xterm-screen` keep that lookup
+away from the parent's PTY mouse reporting. Drags, multi-touch and cancelled
+touches do not activate links. The browser client opens a separate tab with
+`noopener,noreferrer`; Android hands the URL to its HTTP(S)-only
+`BuildmeshTerminal.openUrl` bridge and launches a browsable `ACTION_VIEW`
+intent. The terminal WebView continues to block navigation. Regression coverage
+lives in `tests/e2e/mobile-terminal-links.spec.ts` and the Android
+`TerminalRenderingTest` instrumentation test.
+
 ## Command Code keyboard (Ink 7)
 Command Code's Ink TUI can swallow keys when xterm.js leaves an unmatched bracketed-paste wrapper, or when the CLI's kitty-keyboard probe races ConPTY. Agent terminals for the `commandcode` harness set xterm.js `ignoreBracketedPasteMode`; other harnesses keep bracketed paste so a multi-line paste stays one prompt. Spawn sets `TERM_PROGRAM=vscode` so Command Code skips the probe. Every agent PTY is a real terminal: `wrap()` drops inherited `NO_COLOR` / `TERM=dumb` / `FORCE_COLOR=0` and sets `TERM=xterm-256color`, `COLORTERM=truecolor`, and `FORCE_COLOR=3` (and puts those keys on `WSLENV`).
 
