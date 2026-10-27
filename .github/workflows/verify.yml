@@ -609,7 +609,7 @@ jobs:
       # env blocks above are now identical across the three jobs and
       # `tests/agent-infra/rust-cache-key.test.mjs` fails the build if they drift.
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: "src-tauri -> target"
           shared-key: linux-rust-target
@@ -857,7 +857,7 @@ jobs:
       # seven shards do not each keep a private copy of the same artifacts
       # (issue #2046).
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: src-tauri -> target
           shared-key: linux-rust-target
@@ -952,7 +952,7 @@ jobs:
         uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: src-tauri -> target
           shared-key: linux-rust-target
@@ -1238,7 +1238,7 @@ jobs:
       # budget is better spent on the leg that was 535s. The `false` is
       # deliberate rather than an oversight.
       - name: Cache Cargo registry (and the Windows target)
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: "src-tauri -> target"
           cache-targets: ${{ matrix.os == 'windows-latest' }}
