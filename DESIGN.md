@@ -12,7 +12,10 @@ The **source of truth lives in code**, not in this file:
   the `[data-theme="light"]` override in the same file.
 - Mobile tokens: the `:root` block in `src/mobile/styles.css`.
 - Native Android: `Theme.kt` mirrors the desktop dark palette across Material
-  colour roles, with bundled Geist and generated Relay vectors. See
+  colour roles, with bundled Geist and generated Relay vectors. Its three status
+  alphas — `attentionRing`, `approveBorder`, `rejectBorder` — mirror the mobile
+  stylesheet's `--attention-ring` and the approve/deny borders both phone
+  surfaces draw. See
   [Android styling](docs/development/android.md#screens-and-ownership).
 - Status vocabulary (labels, dot glyphs, colours): `src/lib/status.ts`.
 - Mesh accent palette (user-pickable): `src/lib/meshColors.ts`.

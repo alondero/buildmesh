@@ -16,6 +16,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
@@ -69,6 +70,12 @@ fun BuildmeshApp(vm: BuildmeshViewModel, invitation: String = "", requestedNodeI
     LaunchedEffect(state.notice) {
         if (state.notice.isNotEmpty()) { snackbar.showSnackbar(state.notice); vm.dismissError() }
     }
+    // The five-second poll is not an event the user asked for, so it must not
+    // drive the chrome: the bar belongs to the first load and to a read the
+    // user requested (`vm.retry()`), not to every idle snapshot.
+    val showProgress = state.busy || state.manualRefresh || (state.refreshing && !state.loaded)
+    var pulling by remember { mutableStateOf(false) }
+    LaunchedEffect(state.refreshing) { if (pulling && !state.refreshing) pulling = false }
     Scaffold(
         topBar = {
             if (state.paired) TopAppBar(title = {
@@ -108,16 +115,29 @@ fun BuildmeshApp(vm: BuildmeshViewModel, invitation: String = "", requestedNodeI
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             if (state.error.isNotEmpty()) ErrorBanner(state.error, vm::dismissError)
-            if (state.busy || state.refreshing) LinearProgressIndicator(Modifier.fillMaxWidth())
+            if (showProgress) LinearProgressIndicator(Modifier.fillMaxWidth())
             if (state.restoring) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
             else if (!state.paired) PairScreen(invitation, state.busy, vm::pair)
             else DesktopStateBoundary(state.draftNamespace) {
                 when (screen) {
-                    "home" -> Dashboard(state, tab, meshId, { meshId = it }, { nodeId = it; screen = "node" },
-                        { id, target ->
-                            meshId = id
-                            if (target == "work") tab = "Work" else screen = target
-                        }, { id, option -> meshId = id; launch = option; screen = "capture" }, closeNode = vm::closeNode)
+                    // Pull-to-refresh is the phone's own gesture for a list the
+                    // user is staring at; the app-bar action stays as the
+                    // recovery affordance the error notice points at.
+                    "home" -> PullToRefreshBox(
+                        isRefreshing = pulling,
+                        // The gesture owns its own indicator, so this read is not
+                        // marked manual: only a started read spins, and only
+                        // until it lands.
+                        onRefresh = { if (vm.refresh()) pulling = true },
+                        modifier = Modifier.fillMaxSize(),
+                    ) {
+                        Dashboard(state, tab, meshId, { meshId = it }, { nodeId = it; screen = "node" },
+                            { id, target ->
+                                meshId = id
+                                if (target == "work") tab = "Work" else screen = target
+                            }, { id, option -> meshId = id; launch = option; screen = "capture" },
+                            { id, sequence, onAccepted -> vm.action { api -> api.sendKeys(id, sequence); onAccepted() } })
+                    }
                     "node" -> if (selected != null) NodeScreen(selected, vm, { screen = "terminal" }, { screen = "changes" }, { screen = "pr" }, { id -> nodeId = id; screen = "terminal" })
                         else EmptyMessage("This node is no longer available.")
                     "terminal" -> vm.api?.let { TerminalPane(it, nodeId, vm) }
@@ -179,21 +199,12 @@ fun PairScreen(invitation: String, busy: Boolean, pair: (String, String) -> Unit
 
 @Composable
 fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) -> Unit, openNode: (Long) -> Unit, openMesh: (Long, String) -> Unit,
-    openCapture: (Long, String) -> Unit, closeNode: ((Long) -> Unit)? = null) {
+    openCapture: (Long, String) -> Unit,
+    // `answer` returns false when the reply never reached the transport, so a
+    // tapped chip only retires once the desktop took the keys.
+    answer: (nodeId: Long, sequence: String, onAccepted: () -> Unit) -> Boolean = { _, _, _ -> false }) {
     var query by rememberSaveable { mutableStateOf("") }
     var attentionOnly by rememberSaveable { mutableStateOf(false) }
-    var closingId by rememberSaveable { mutableStateOf<Long?>(null) }
-    val closing = state.nodes.firstOrNull { it.number("id") == closingId && it.text("status") != "archived" }
-    if (tab == "Work" && closing != null && closeNode != null) AlertDialog(
-        onDismissRequest = { closingId = null },
-        title = { Text("Close ${closing.text("name")}?") },
-        text = { Text("Stop this agent and remove it from Work? Its worktree and files will be kept.") },
-        confirmButton = { TextButton(enabled = !state.busy, onClick = {
-            closingId = null
-            closeNode(closing.number("id"))
-        }) { Text("Close agent", color = MaterialTheme.colorScheme.error) } },
-        dismissButton = { TextButton(onClick = { closingId = null }) { Text("Cancel") } },
-    )
     val openNodes = state.nodes.filter { it.text("status") != "archived" }
     val nodesByMesh = openNodes.groupBy { it.number("mesh_id") }
     // Match Sidebar.tsx: open nodes determine the band; both bands keep saved mesh order.
@@ -214,6 +225,13 @@ fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) 
             Selector("Mesh", listOf(0L to "All meshes") + state.meshes.map { it.number("id") to it.text("name") }, meshId, selectMesh)
             OutlinedTextField(colors = buildmeshTextFieldColors(), value = query, onValueChange = { query = it }, label = { Text("Search agents or branches") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
             FilterChip(selected = attentionOnly, onClick = { attentionOnly = !attentionOnly }, label = { Text("Needs attention") })
+        }
+        // The home screen's first surface: whoever is blocked on you, above the
+        // mesh list. The Overview tab only, because the Work tab already renders
+        // these nodes as rows under their mesh and would otherwise show each of
+        // them twice.
+        if (tab == "Overview") item(key = "waiting-for-input") {
+            AttentionDeck(visible, state.meshes, state.busy, openNode, answer)
         }
         if (tab == "Overview") items(activeMeshes + inactiveMeshes, key = { "mesh-${it.number("id")}" }) { mesh ->
             val members = nodesByMesh[mesh.number("id")].orEmpty()
@@ -255,10 +273,7 @@ fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) 
                         }
                     }
                 }
-                items(members, key = { "activity-${it.root.number("id")}" }) {
-                    WorkActivityRows(it, state, requireNotNull(glyphMotion), openNode,
-                        closeNode?.let { { id -> closingId = id } })
-                }
+                items(members, key = { "activity-${it.root.number("id")}" }) { WorkActivityRows(it, state, requireNotNull(glyphMotion), openNode) }
             }
         }
         if (if (tab == "Work") activities.isEmpty() else visible.isEmpty()) item { EmptyMessage(if (state.refreshing) "Loading agents…" else "No agents match this view. Capture a task to start one.") }

@@ -23,6 +23,15 @@ data class RemoteState(
     val busy: Boolean = false,
     val refreshing: Boolean = false,
     /**
+     * Whether the in-flight snapshot read is one the user asked for.
+     *
+     * The dashboard polls every five seconds; a read the user did not request
+     * must not pulse the chrome, or every screen twitches while nothing is
+     * happening. The first load still shows its own progress, which is what
+     * `loaded` is for.
+     */
+    val manualRefresh: Boolean = false,
+    /**
      * Whether a snapshot has been read at least once.
      *
      * `restoring` covers the credential; this covers the inventory. A screen
@@ -102,7 +111,7 @@ class BuildmeshViewModel(application: Application) : AndroidViewModel(applicatio
         }, publish = { snapshot ->
             mutableState.update { it.copy(meshes = snapshot.meshes, nodes = snapshot.nodes, providers = snapshot.providers, circuitRuns = snapshot.runs ?: it.circuitRuns, circuitOwnerships = snapshot.ownerships ?: it.circuitOwnerships, error = "", loaded = true) }
         }, onError = ::report,
-        onBusy = { busy -> mutableState.update { it.copy(refreshing = busy) } },
+        onBusy = { busy -> mutableState.update { it.copy(refreshing = busy, manualRefresh = busy && it.manualRefresh) } },
     )
 
     init {
@@ -183,8 +192,11 @@ class BuildmeshViewModel(application: Application) : AndroidViewModel(applicatio
         mutableState.update { it.copy(refreshing = false) }
     }
 
-    fun refresh() {
-        if (api != null && foreground && !state.value.restoring) refresher.refresh()
+    /** Re-read the dashboard snapshot, reporting whether a read actually started. */
+    fun refresh(): Boolean {
+        if (api == null || !foreground || state.value.restoring) return false
+        refresher.refresh()
+        return true
     }
 
     fun acceptNode(node: JsonObject) {
@@ -193,21 +205,28 @@ class BuildmeshViewModel(application: Application) : AndroidViewModel(applicatio
         refresh()
     }
 
+    /**
+     * A user-initiated refresh: the resource screens reload, the snapshot is
+     * re-read, and because the user asked, the progress bar may say so.
+     */
     fun retry() {
-        mutableState.update { it.copy(resourceRevision = it.resourceRevision + 1) }
+        mutableState.update {
+            it.copy(resourceRevision = it.resourceRevision + 1, manualRefresh = api != null && foreground && !it.restoring)
+        }
         refresh()
     }
 
-    fun closeNode(nodeId: Long) = action { client ->
-        client.post("/api/nodes/$nodeId/close", JsonObject(emptyMap()))
-        refresher.invalidate()
-        mutableState.update { it.copy(nodes = it.nodes.filterNot { node -> node.number("id") == nodeId },
-            notice = "Agent closed. Worktree and files kept.") }
-    }
-
-    fun action(block: suspend (BuildmeshApi) -> Unit) {
-        val client = api ?: return
-        if (state.value.busy) return
+    /**
+     * Run one mutating request, reporting whether it was queued.
+     *
+     * A refused action never runs its block, so a caller that disables controls
+     * optimistically needs to know the difference between "sending" and "this
+     * request was dropped" — otherwise a declined tap leaves a permanently
+     * dead control behind.
+     */
+    fun action(block: suspend (BuildmeshApi) -> Unit): Boolean {
+        val client = api ?: return false
+        if (state.value.busy) return false
         val owner = generation
         mutableState.update { it.copy(busy = true, error = "", notice = "") }
         refresher.invalidate()
@@ -229,6 +248,7 @@ class BuildmeshViewModel(application: Application) : AndroidViewModel(applicatio
             } }
         }
         actionJob?.start()
+        return true
     }
 
     fun notice(message: String) { mutableState.update { it.copy(notice = message) } }

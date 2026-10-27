@@ -182,6 +182,26 @@ mesh names use the muted text token; their actions remain available. Overview
 cards omit filesystem paths and put the compact Spawn split button beside the
 name. Like the desktop sidebar, meshes with non-archived nodes come first;
 both groups preserve saved mesh order, regardless of search or attention filters.
+The home screen's first surface is whoever is waiting on a person: every
+`awaiting_input` node is pinned above the mesh list with what it asked, its mesh
+and branch, and the one action its request supports. That action is read from
+the observation, never from the bare status (issue #1966): a
+`permission_requested` request is answered with the desktop semantic-turn
+banner's own `Allow (Y)` / `Deny (N)` pair — `Approve (Y)` / `Deny (N)` when
+the turn is a `command_confirmation` — sending the same `y\r` / `n\r`
+keystrokes, while a question or an unclassified request opens the terminal
+instead. The answers a harness enumerated are shown as text, because a tap
+cannot be verified to select one in the agent's own prompt. Both controls
+disable while a reply is in flight and retire only once the desktop accepted
+it, keyed by the request rather than the node, so a node that asks again arrives
+with live controls. The deck belongs to the Overview tab: the Work tab already
+renders those nodes under their mesh and would otherwise show each of them
+twice. The dashboard refreshes by pull-to-refresh as well as through the app-bar
+action, and the app-bar progress bar belongs to the first load and to a read the
+user asked for — the five-second poll never pulses the chrome. Node details put
+the reply composer directly under the request it answers, above the
+terminal/changes/PR sections, which on a phone can be screens deep.
+
 Pull requests, Issues and Archive live under each mesh header in Your work,
 including meshes without open agents or matches for the current filters.
 Work uses compact rows under mesh headers, with the desktop status-circle shapes
