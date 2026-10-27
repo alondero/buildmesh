@@ -207,11 +207,30 @@ async function readAnimationState(page) {
     const root = document.documentElement;
     const animated = [...document.querySelectorAll('.animate-pulse-fast, .animate-pulse, .animate-spin, .node-glyph-comet, .animate-border-pulse')];
     const sample = animated[0] || null;
+    // The animation may sit on a pseudo-element (`.animate-border-pulse::after`),
+    // and the element's own play state would then read "running" while the
+    // pseudo-element is paused — so the state is read from whichever of the
+    // two actually carries an animation.
+    const own = sample ? getComputedStyle(sample) : null;
+    const after = sample ? getComputedStyle(sample, '::after') : null;
+    const carriesOwn = Boolean(own && own.animationName && own.animationName !== 'none');
+    const carriesAfter = Boolean(after && after.animationName && after.animationName !== 'none');
+    const samplePlayState = !sample
+      ? null
+      : carriesOwn
+        ? own.animationPlayState
+        : carriesAfter
+          ? after.animationPlayState
+          : own.animationPlayState;
     return {
       idleMarker: root.getAttribute('data-window-idle'),
       animatedElementCount: animated.length,
       sampleSelector: sample ? sample.className.toString() : null,
-      samplePlayState: sample ? getComputedStyle(sample).animationPlayState : null,
+      samplePlayState,
+      // Only reported when the pseudo-element carries an animation of its
+      // own: otherwise its computed play state is the initial "running",
+      // which would read as "not gated" next to a paused sample.
+      sampleAfterPlayState: carriesAfter ? after.animationPlayState : null,
       animations: document.getAnimations().map((animation) => ({
         name: animation.animationName ?? '(none)',
         playState: animation.playState,

@@ -245,10 +245,21 @@ function stripComments(source: string): string {
       index += 1;
       continue;
     }
-    if (char === '"' || char === "'" || char === '`') {
+    // An apostrophe opens a string only when it does not follow a word
+    // character: in JSX text ("don't stop") it is prose, and treating it as a
+    // string opener would leave the rest of the region unstripped.
+    if (char === '"' || char === '`' || (char === "'" && !/[\w$]/.test(source[index - 1] ?? ''))) {
       quote = char;
       out += char;
       index += 1;
+      continue;
+    }
+    // An escaped character outside a string — a regex literal's `\/`, say —
+    // is copied with the character it escapes, so the `//` inside it is not
+    // mistaken for the start of a comment.
+    if (char === '\\') {
+      out += char + (next ?? '');
+      index += 2;
       continue;
     }
     if (char === '/' && next === '/') {
@@ -304,23 +315,35 @@ function isBareUtility(token: string): boolean {
 
 /** Whether one gate selector reaches the element carrying `token`. */
 function gateCovers(selectors: string[], token: string): boolean {
+  // Only the selectors that carry the marker are the gate: a selector without
+  // it would pause its animations in the foreground too.
+  const gated = selectors.filter((selector) => normaliseSelector(selector).startsWith(ROOT_SELECTOR));
   if (!isBareUtility(token)) {
     // A variant (`hover:animate-pulse`) or the important marker
     // (`animate-pulse!`) is a DIFFERENT class token, so a plain
     // `.animate-pulse` selector does NOT reach it — the gate has to name the
     // token in full, as `[class~='hover:animate-pulse']`.
-    return selectors.some((s) => s.includes(`[class~='${token}']`));
+    return gated.some((s) => s.includes(`[class~='${token}']`));
   }
   const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   // The trailing guard stops `.animate-pulse` from matching `.animate-pulse-fast`.
   const pattern = new RegExp(`\\.${escaped}(?![\\w-])`);
-  return selectors.some((s) => pattern.test(s));
+  return gated.some((s) => pattern.test(s));
 }
 
 /** The classes a selector names, for the failure message. */
 function selectorClasses(selector: string): string[] {
   return [...selector.matchAll(/\.([A-Za-z0-9_-]+)/g)].map((match) => match[1]);
 }
+
+/**
+ * The idle marker every gate selector has to carry.
+ *
+ * A selector without it would pause its animations in the FOREGROUND too —
+ * the gate would stop being a gate — so the guard has to insist on it. The
+ * marker is on the root element, so it always comes first.
+ */
+const ROOT_SELECTOR = normaliseSelector(`[${IDLE_ROOT_ATTRIBUTE}='true']`);
 
 /**
  * Whether one gate selector reaches the element the animation runs on.
@@ -339,11 +362,12 @@ function selectorClasses(selector: string): string[] {
  */
 function gateCoversAnimation(selectors: string[], animation: InfiniteAnimation): boolean {
   const target = normaliseSelector(animation.selector);
-  const rootSelector = normaliseSelector(`[${IDLE_ROOT_ATTRIBUTE}='true']`);
   return selectors.some((selector) => {
     const normalised = normaliseSelector(selector);
+    // The marker comes first: a selector without it is not the gate.
+    if (!normalised.startsWith(ROOT_SELECTOR)) return false;
     if (normalised === target || normalised.endsWith(` ${target}`)) return true;
-    return target === 'html' && normalised === rootSelector;
+    return target === 'html' && normalised === ROOT_SELECTOR;
   });
 }
 
@@ -617,6 +641,41 @@ describe('the idle gate rule', () => {
     expect(stripComments(source)).toContain('"animate-pulse"');
   });
 
+  it('strips a comment that follows JSX prose', () => {
+    // An apostrophe in JSX text is prose, not a string opener. Treating it as
+    // one would leave the rest of the region unstripped, and a comment inside
+    // it would still reach the token scanner.
+    const source = [
+      "      <p>Don't stop the animation</p>",
+      '      // hover:animate-pulse is not the bare utility',
+      "      const label = 'animate-pulse';",
+    ].join('\n');
+    const stripped = stripComments(source);
+    expect(stripped).not.toContain('hover:animate-pulse');
+    // The class inside the string is still there.
+    expect(stripped).toContain("'animate-pulse'");
+  });
+
+  it('keeps a regex literal with a slash in it intact', () => {
+    // `/a\/\//` contains a `//`, which must not be read as the start of a
+    // comment — that would swallow the rest of the line, including a real
+    // class name.
+    const source = ['const pattern = /a\\/\\//;', "const label = 'animate-pulse';"].join('\n');
+    const stripped = stripComments(source);
+    expect(stripped).toContain("'animate-pulse'");
+  });
+
+  it('requires the gate selector to carry the idle marker', () => {
+    // A selector without the marker would pause its animations in the
+    // foreground too — the gate would stop being a gate — so the guard must
+    // not count it as coverage.
+    const animation = { classes: ['animate-pulse'], selector: '.animate-pulse' };
+    expect(gateCoversAnimation(gateSelectors(CSS), animation)).toBe(true);
+    expect(gateCoversAnimation(['.animate-pulse'], animation)).toBe(false);
+    expect(gateCovers(['.animate-pulse'], 'animate-pulse')).toBe(false);
+    expect(gateCovers(["[class~='motion-safe:animate-pulse']"], 'motion-safe:animate-pulse')).toBe(false);
+  });
+
   it('requires the gate to select the element the animation runs on', () => {
     // `animation-play-state` is not inherited, so pausing a parent does not
     // pause a child's animation, and a state pseudo-class carries its own
@@ -651,6 +710,12 @@ describe('the idle gate rule', () => {
     const selectors = gateSelectors(CSS);
     const used = tailwindInfiniteClasses(resolve(__dirname, '../../src'));
     expect(used.length).toBeGreaterThan(0);
+
+    // The scanner must not MISS a real token: a token it fails to see is a
+    // hole no assertion above would catch, because the loop only sees what
+    // the scanner found. These three are the utilities the desktop app
+    // renders today.
+    expect(used).toEqual(expect.arrayContaining(['animate-pulse', 'animate-spin', 'motion-safe:animate-pulse']));
 
     for (const token of used) {
       expect(gateCovers(selectors, token), `${token} must be inside the idle gate`).toBe(true);
