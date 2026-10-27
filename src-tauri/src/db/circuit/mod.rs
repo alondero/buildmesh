@@ -17,6 +17,7 @@
 
 pub mod artifacts;
 pub mod evidence;
+pub mod history_compaction;
 pub mod leases;
 pub mod ledger;
 pub mod node_run;

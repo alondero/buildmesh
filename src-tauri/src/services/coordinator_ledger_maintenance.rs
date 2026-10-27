@@ -20,8 +20,24 @@
 //!
 //! That sweep is not a plain age DELETE — a circuit run's row doubles as the
 //! memory that stops a circuit reprocessing a GitHub issue, so stable-identity
-//! rows are compacted rather than deleted. `db::circuit::SWEEPABLE_RUNS` and
+//! rows are compacted rather than deleted. `db::circuit::leases` and
 //! [`CIRCUIT_RUN_RETENTION_DAYS`] carry the reasoning.
+//!
+//! ## Third tenant: duplicate observations (issue #2600)
+//!
+//! The same worker runs [`compact_circuit_history_once`], the one-shot sweep
+//! that collapses the duplicate Circuit Run History observations a hub
+//! accumulated before the append path declined to write the same observation
+//! twice. It lives here for the same reason the other two do: the same
+//! cadence, the same failure handling, one bounded unit of work each.
+//!
+//! ## The write-ahead log
+//!
+//! A sweep that deletes a lot leaves a lot behind in the write-ahead log.
+//! [`prune_circuit_runs_once`] therefore checkpoints the log when it is
+//! done, so the space comes back now rather than at the next automatic
+//! checkpoint — and the log stays within
+//! [`crate::db::WAL_SIZE_LIMIT_BYTES`] in the first place.
 //!
 //! ## Why a 7-day window
 //!
@@ -129,6 +145,15 @@ pub fn start_worker() {
                         );
                     }
                 });
+                // Independent of the other sweeps on purpose: one of them
+                // erroring must not skip the others for a full tick.
+                run_worker_pass("coordinator-ledger-gc:circuit-history", || {
+                    if let Err(e) = compact_circuit_history_once() {
+                        tracing::warn!(
+                            "circuit_history_gc: compaction sweep failed (next tick will retry): {e}"
+                        );
+                    }
+                });
                 std::thread::sleep(PRUNE_INTERVAL);
             }
         })
@@ -168,6 +193,11 @@ pub fn prune_circuit_runs_once() -> Result<(usize, usize), String> {
              {compacted} trigger tombstone(s) older than {CIRCUIT_RUN_RETENTION_DAYS} days"
         );
     }
+    // A sweep that deletes a lot leaves a lot behind in the write-ahead log.
+    // Checkpoint it so the space comes back now (issue #2600): the log is
+    // truncated to the configured limit instead of staying the size of
+    // everything the sweep touched.
+    checkpoint_wal();
     // Runs removed by any path (delete circuit, delete mesh, or the prune above)
     // leave their handoff folder behind. One sweep here catches all of them,
     // and runs after the prune so the DB lock is already released.
@@ -183,6 +213,39 @@ pub fn prune_circuit_runs_once() -> Result<(usize, usize), String> {
         ),
     }
     Ok((deleted, compacted))
+}
+
+/// One history-compaction sweep: collapse the duplicate Circuit Run History
+/// observations a hub accumulated before the append path declined to write
+/// the same observation twice (issue #2600).
+///
+/// The sweep runs once. The rows it deletes are byte-for-byte copies of rows
+/// that stay, so the history a person reads stays the same; what changes is
+/// that the table stops carrying the same fact thousands of times.
+pub fn compact_circuit_history_once() -> Result<usize, String> {
+    let deleted = crate::db::circuit::history_compaction::compact_duplicate_observations_once()
+        .map_err(|e| e.to_string())?;
+    if deleted > 0 {
+        tracing::info!(
+            "circuit_history_gc: collapsed {deleted} duplicate Circuit Run History observation(s)"
+        );
+        checkpoint_wal();
+    }
+    Ok(deleted)
+}
+
+/// Fold the write-ahead log back into the database and truncate the file.
+///
+/// A checkpoint that does not complete — because another connection still holds
+/// a read snapshot — is normal, not an error: the next tick tries again.
+fn checkpoint_wal() {
+    match crate::db::checkpoint_wal_truncate() {
+        Ok(true) => {}
+        Ok(false) => tracing::debug!(
+            "circuit_run_gc: WAL checkpoint was busy — the log keeps its size until the next tick"
+        ),
+        Err(error) => tracing::warn!("circuit_run_gc: WAL checkpoint failed: {error}"),
+    }
 }
 
 #[cfg(test)]

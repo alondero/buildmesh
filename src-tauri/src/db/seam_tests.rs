@@ -14,6 +14,10 @@ const ALLOWED_PUB_FNS: &[&str] = &[
     // pool's own counters, so it belongs to the connection surface this
     // allowlist guards rather than to a domain module.
     "reader_pool_stats",
+    // Issue #2600 — a write-ahead-log checkpoint. It touches no table: the
+    // log belongs to the connection, not to a domain module, so it belongs
+    // to the same connection surface this allowlist guards.
+    "checkpoint_wal_truncate",
 ];
 
 /// Baseline-DDL helpers — the `pub(crate)` API `mod.rs` owns so

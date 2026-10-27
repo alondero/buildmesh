@@ -98,6 +98,181 @@ fn legacy_projection_conflicts_restore_only_from_matching_history_and_attempt() 
     );
 }
 
+/// The same observation recorded twice is one fact (issue #2600).
+///
+/// The worker knows what *it* has seen, but that bookkeeping lives in the
+/// run's context: it is rebuilt when a run is recovered, it is reset when a
+/// session is replaced, and it is per-process. A hub that ran before the
+/// row-level guard held the same observation tens of thousands of times —
+/// one run alone carried 132k copies of a single rollout completion.
+///
+/// So the append path declines to write the same observation twice, and
+/// this pins that: the second copy is not written.
+#[test]
+fn an_identical_observation_is_recorded_once() {
+    let db = Connection::open_in_memory().unwrap();
+    crate::db::init_schema(&db).unwrap();
+    db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');")
+        .unwrap();
+    let detail =
+        r#"{"observation":{"source":"codex_rollout_task_complete"},"disposition":"accepted"}"#;
+    let event = || HistoryEvent {
+        run_id: 1,
+        node_id: Some("build"),
+        attempt: Some(1),
+        kind: "observation",
+        detail,
+        source: Some("codex_rollout_task_complete"),
+        disposition: Some("accepted"),
+    };
+
+    assert!(
+        append_history(&db, event()).unwrap(),
+        "the first copy is recorded"
+    );
+    assert!(
+        !append_history(&db, event()).unwrap(),
+        "the second copy is the same fact and is not recorded again"
+    );
+
+    let rows: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM circuit_run_history WHERE kind='observation'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 1);
+}
+
+/// The same words for a different node, attempt or source are different
+/// observations.
+///
+/// The identity of an observation is its run, node, attempt and source, so
+/// the guard must not collapse two observations that differ in any of those.
+#[test]
+fn observations_with_a_different_identity_are_both_recorded() {
+    let db = Connection::open_in_memory().unwrap();
+    crate::db::init_schema(&db).unwrap();
+    db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');")
+        .unwrap();
+    let detail =
+        r#"{"observation":{"source":"codex_rollout_task_complete"},"disposition":"accepted"}"#;
+    let event = |node: &'static str, attempt: i32, source: &'static str| HistoryEvent {
+        run_id: 1,
+        node_id: Some(node),
+        attempt: Some(attempt),
+        kind: "observation",
+        detail,
+        source: Some(source),
+        disposition: Some("accepted"),
+    };
+
+    for (node, attempt, source) in [
+        ("build", 1, "codex_rollout_task_complete"),
+        ("test", 1, "codex_rollout_task_complete"),
+        ("build", 2, "codex_rollout_task_complete"),
+        ("build", 1, "agent_status_projection"),
+    ] {
+        assert!(
+            append_history(&db, event(node, attempt, source)).unwrap(),
+            "{node}/{attempt}/{source} is its own observation"
+        );
+    }
+
+    let rows: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM circuit_run_history WHERE kind='observation'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 4);
+}
+
+/// A transition is a timeline, not a fact.
+///
+/// Only observations are deduped. Two rows of any other kind with the same
+/// words are two moments in the run's story, and the guard must leave them
+/// both.
+#[test]
+fn a_repeated_transition_is_still_recorded_twice() {
+    let db = Connection::open_in_memory().unwrap();
+    crate::db::init_schema(&db).unwrap();
+    db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');")
+        .unwrap();
+    let event = || HistoryEvent {
+        run_id: 1,
+        node_id: Some("build"),
+        attempt: Some(1),
+        kind: "step_transition",
+        detail: "unverified",
+        source: Some("circuit_worker"),
+        disposition: Some("applied"),
+    };
+
+    assert!(append_history(&db, event()).unwrap());
+    assert!(
+        append_history(&db, event()).unwrap(),
+        "the same transition twice is two moments in the timeline"
+    );
+
+    let rows: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM circuit_run_history WHERE kind='step_transition'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 2);
+}
+
+/// A repeated observation does not move the run's revision.
+///
+/// The revision is what refuses an operator action the person has not seen
+/// yet. A repeated fact is not a new fact, so it must not make a poll lose
+/// the race against the person's click.
+#[test]
+fn a_repeated_observation_does_not_move_the_run_revision() {
+    let db = Connection::open_in_memory().unwrap();
+    crate::db::init_schema(&db).unwrap();
+    db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');")
+        .unwrap();
+    let detail =
+        r#"{"observation":{"source":"codex_rollout_task_complete"},"disposition":"accepted"}"#;
+    let event = || HistoryEvent {
+        run_id: 1,
+        node_id: Some("build"),
+        attempt: Some(1),
+        kind: "observation",
+        detail,
+        source: Some("codex_rollout_task_complete"),
+        disposition: Some("accepted"),
+    };
+
+    append_history(&db, event()).unwrap();
+    let revision = revision_inner(&db, 1).unwrap();
+    append_history(&db, event()).unwrap();
+
+    assert_eq!(
+        revision_inner(&db, 1).unwrap(),
+        revision,
+        "the same fact recorded again does not advance the run"
+    );
+    assert!(
+        !revision_moved(&db, 1, revision).unwrap(),
+        "and it does not refuse the person's action"
+    );
+}
+
 /// The persisted native receipt carrying this exact `source_id`.
 ///
 /// Addressing receipts by identity rather than by row position matters

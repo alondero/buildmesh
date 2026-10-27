@@ -5,6 +5,16 @@ Status: current
 ## Database Pattern
 Use `_inner` helper functions that accept `&Connection` so compound operations keep one connection and writer transactions never re-lock. Public read functions check out `read_conn()` from the eight-connection read-only pool; public mutations lock the dedicated `write_conn()`. SQLite WAL lets those readers run concurrently with the serialized writer. See `src-tauri/src/db/mod.rs`.
 
+### The write-ahead log is a bounded log, not a second database (issue #2600)
+
+SQLite's `journal_size_limit` defaults to `-1` — *no limit*. WAL mode appends to `buildmesh.db-wal` until a checkpoint folds it back into the database, so a single large transaction (a retention sweep, a bulk delete) leaves a log as big as everything it touched, and the file stays that big until something forces a checkpoint. A hub that swept a multi-gigabyte ledger ended up with a 1.4 GB database and a 1.58 GB WAL that no later activity shrank.
+
+- **The writer sets the limit.** `db::WAL_SIZE_LIMIT_BYTES` (64 MiB) is applied as `journal_size_limit` wherever the process opens a writer connection. The setting is per-connection and is **not** persisted in the database file, so a connection that missed it would checkpoint a log back to whatever size it liked — set it at the writer, not once at init.
+- **SQLite applies the limit at the commit that follows a checkpoint.** The log is rewritten from its start and truncated to the limit when the next write transaction commits, so the limit bounds the log *between* checkpoints rather than at the moment of a big write. A write that is itself larger than the limit leaves the log larger for the length of that transaction — which is what the explicit checkpoint below is for.
+- **A checkpoint gives the space back now.** `db::checkpoint_wal_truncate()` runs `PRAGMA wal_checkpoint(TRUNCATE)` and reports whether it completed. It returns `Ok(false)` when another connection still holds a read snapshot: that is a normal outcome, not an error, and the next tick tries again. It must run outside a transaction — SQLite refuses to checkpoint from inside one.
+- **A sweep that deletes a lot checkpoints when it is done.** `services::coordinator_ledger_maintenance` runs the checkpoint after the retention prune, so the space comes back in the same tick rather than at the next automatic checkpoint.
+- **Bound the work per transaction.** A delete that frees a gigabyte of pages writes that gigabyte into the log. The history compaction sweep deletes in small batches, each its own transaction, so the automatic checkpoint keeps the log bounded between them.
+
 ### A reader-pool exhaustion is an error, never a panic (issue #1533)
 
 `db::read_conn()` returns `SqlResult<ReadConnection<'static>>`. There is **no infallible accessor**: the old one `expect`ed the checkout, and a release build panics with `panic = "abort"`, so a momentarily busy pool killed the whole application instead of failing one request. That is how a macOS laptop waking from sleep could take Buildmesh down with it.
