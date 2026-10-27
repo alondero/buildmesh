@@ -15,10 +15,17 @@
 import { createDualKeyCache } from '../lib/pathInvalidatedCache';
 import { usePathInvalidatedQuery } from './usePathInvalidatedQuery';
 import { getGitHubUrlForMesh } from '../lib/tauri';
+import { isMeshFolderMissing } from '../lib/meshFolder';
 
 const urlClient = createDualKeyCache<number, string | null>({
   fetcher: getGitHubUrlForMesh,
   name: 'useMeshGitHubUrl',
+  // Issue #2602: a mesh whose folder was deleted fails the origin reads.
+  // The mesh's worktree container usually survives, so its sibling
+  // worktrees keep firing GIT_CHANGED — each one used to be a fresh
+  // failing IPC call. Stop refetching until the mesh is re-pointed or the
+  // user asks for a refresh.
+  stopOnError: isMeshFolderMissing,
 });
 
 /**

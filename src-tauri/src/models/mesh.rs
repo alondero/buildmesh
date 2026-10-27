@@ -118,6 +118,31 @@ pub struct PickedFolder {
     pub path: String,
     pub name: String,
 }
+
+/// The warm pool's fill failure for a mesh, when the pool does not fill it.
+///
+/// Issue #2602: a mesh whose `git worktree add` fails deterministically used
+/// to fail silently between log lines. The backoff that fixed the retry
+/// storm left the pool broken but invisible, so the failure is reported on
+/// the mesh's health surface — the place the user already looks to find out
+/// that something about their mesh needs attention.
+///
+/// It is `None` whenever the pool is healthy, and it survives for as long as
+/// the failure does: the backoff is in force until the mesh's HEAD or
+/// settings change or a fill succeeds.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "PoolFillFailure.ts")]
+pub struct PoolFillFailure {
+    /// The Git failure that stopped the fill, verbatim.
+    pub reason: String,
+    /// How many consecutive attempts have failed.
+    #[ts(as = "i32")]
+    pub attempts: u32,
+    /// Seconds until the next attempt.
+    #[ts(as = "i32")]
+    pub retry_in_seconds: u64,
+}
+
 /// App settings stored in SQLite
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {

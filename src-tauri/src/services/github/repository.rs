@@ -106,5 +106,8 @@ pub(crate) fn github_url_for_path(path: &str) -> Result<Option<String>, String> 
 
 pub(crate) fn get_github_url_for_mesh(mesh_id: i64) -> Result<Option<String>, String> {
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+    // Issue #2602: a mesh whose folder is gone fails this read forever. The
+    // marker tells the frontend to stop asking.
     github_url_for_path(&mesh.path)
+        .map_err(|e| crate::services::mesh_folder::mark_if_missing(&mesh.path, e))
 }

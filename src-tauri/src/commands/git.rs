@@ -155,7 +155,10 @@ pub async fn get_git_summary(path: String) -> Result<GitSummary, String> {
 
 /// Sync core for [`get_git_summary`].
 pub(crate) fn get_git_summary_blocking(path: String) -> Result<GitSummary, String> {
-    let summary = state::summary_at(&path).map_err(|e| e.to_string())?;
+    // Issue #2602: a folder that is gone fails this read forever. The
+    // marker tells the frontend to stop asking.
+    let summary = state::summary_at(&path)
+        .map_err(|e| crate::services::mesh_folder::mark_if_missing(&path, e.to_string()))?;
     Ok(GitSummary {
         total: summary.total,
         added: summary.added,
@@ -630,7 +633,13 @@ pub(crate) fn get_mesh_health_blocking(mesh_id: i64) -> Result<MeshHealth, Strin
         None => Vec::new(),
     };
 
-    health::mesh_health_at(&host_path, &mesh.base_ref, &active_paths)
+    let mut snapshot = health::mesh_health_at(&host_path, &mesh.base_ref, &active_paths)
+        .map_err(|e| crate::services::mesh_folder::mark_if_missing(&mesh.path, e))?;
+    // Issue #2602: the pool's fill failure rides on the mesh's health
+    // surface, so a broken pool is something the user can see instead of
+    // something they have to find in the log.
+    snapshot.pool_fill_failure = crate::services::warm_pool::fill_failure_for_mesh(mesh_id);
+    Ok(snapshot)
 }
 
 /// Restore the Mesh root to its Base Ref. Guarded by the same

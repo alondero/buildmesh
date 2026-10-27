@@ -2,6 +2,7 @@ import { createDualKeyCache } from '../lib/pathInvalidatedCache';
 import { usePathInvalidatedQuery } from './usePathInvalidatedQuery';
 import { useWorktreeEffectiveDir } from './useWorktreeEffectiveDir';
 import { getMeshHealth, type MeshHealth } from '../lib/tauri';
+import { isMeshFolderMissing } from '../lib/meshFolder';
 
 // Module-level shared client (keyed by meshId, with a separate git path
 // the GIT_CHANGED subscription matches). The sidebar `!` badge and the
@@ -16,6 +17,12 @@ const healthClient = createDualKeyCache<number, MeshHealth>({
   // 5s caps it; the trailing refetch keeps the badge converging on the
   // settled state after an edit burst.
   minRefetchIntervalMs: 5_000,
+  // Issue #2602: a mesh whose folder was deleted fails the health reads.
+  // The mesh's worktree container usually survives, so its sibling
+  // worktrees keep firing GIT_CHANGED — each one used to be a fresh
+  // failing IPC call. Stop refetching until the mesh is re-pointed or the
+  // user asks for a refresh.
+  stopOnError: isMeshFolderMissing,
 });
 
 /**

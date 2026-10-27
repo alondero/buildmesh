@@ -588,6 +588,29 @@ fast-forward would overwrite.
 
 Do not reset or delete a worktree as a first response to a sync warning.
 
+## "Pre-spawn pool cannot fill" in the Repository probe
+
+The pre-spawn pool cuts a spare worktree so the next agent starts without
+waiting for Git. When that cut fails for a reason that does not fix itself on
+its own — most often a tracked path the operating system refuses to check out,
+such as a Windows "alternate data stream" name like
+`playbook app icon.png:Zone.Identifier` — the Repository probe's **Health and
+recovery** section says so, names the reason, and shows when the next attempt
+is due.
+
+- Read the reason first: it is Git's own message, and it names the file or
+  path that stopped the checkout.
+- Fix the cause in the repository — remove the offending tracked file and
+  commit it, or rename it to something the operating system accepts — and
+  commit. A commit moves the project's HEAD, which ends the wait immediately;
+  you do not have to wait for the next attempt.
+- Retry the failing action once the fix is committed. The message disappears on
+  its own when the pool fills again.
+
+Buildmesh retries with a growing wait (30 seconds, then 1, 2, 4 minutes, up
+to 30 minutes) rather than on every 30-second tick, so a project that stays
+broken costs a handful of attempts instead of a continuous stream.
+
 ## Closing a node leaves "Worktree cleanup blocked"
 
 Closing a node removes it from the UI immediately; its worktree folder is then

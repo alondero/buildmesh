@@ -164,6 +164,9 @@ pub(crate) fn compute_mesh_health(repo: &Repository, base_ref: &str) -> Result<M
         has_upstream,
         is_drifted,
         base_branch_holder: None,
+        // The pool is a service, not a repository fact: the Git module leaves
+        // this unset. `commands::git` fills it in (issue #2602).
+        pool_fill_failure: None,
     })
 }
 

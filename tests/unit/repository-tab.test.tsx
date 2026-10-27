@@ -63,6 +63,7 @@ const HEALTHY: Record<string, unknown> = {
   has_upstream: true,
   is_drifted: false,
   base_branch_holder: null,
+  pool_fill_failure: null,
 };
 
 const PRUNE_INFO = [
@@ -131,6 +132,7 @@ const DRIFTED_HEALTH: Record<string, unknown> = {
     name: 'holder',
     is_active: true,
   },
+  pool_fill_failure: null,
 };
 
 /**
@@ -349,6 +351,40 @@ describe('RepositoryTab (issue #1460)', () => {
     // Still no repair buttons when there is nothing to repair.
     expect(screen.queryByRole('button', { name: /Restore root to/i })).toBeNull();
     expect(screen.queryByRole('button', { name: /Free main/i })).toBeNull();
+  });
+
+  // Issue #2602: a pool that does not fill is broken the user has to hear
+  // about. The backoff that stopped the retry storm is invisible by nature,
+  // so the failure rides on the mesh's health surface.
+  it('surfaces a pool fill failure on the health surface', async () => {
+    mockBackend({
+      health: {
+        ...HEALTHY,
+        pool_fill_failure: {
+          reason: "invalid path 'playbook app icon.png:Zone.Identifier'",
+          attempts: 3,
+          retry_in_seconds: 120,
+        },
+      },
+    });
+    openProbeDestination('worktrees');
+
+    expect(await screen.findByText('main')).toBeTruthy();
+
+    const notice = await screen.findByTestId('repository-pool-fill-failure');
+    expect(notice.textContent).toMatch(/pre-spawn pool cannot fill/i);
+    // The reason is Git's own message, verbatim — it names the file.
+    expect(notice.textContent).toMatch(/Zone\.Identifier/);
+    expect(notice.textContent).toMatch(/3 attempts/);
+    expect(notice.textContent).toMatch(/120s/);
+  });
+
+  it('does not show the pool fill failure when the pool is healthy', async () => {
+    mockBackend({ health: HEALTHY });
+    openProbeDestination('worktrees');
+
+    expect(await screen.findByText('main')).toBeTruthy();
+    expect(screen.queryByTestId('repository-pool-fill-failure')).toBeNull();
   });
 
   it('lists local branches and worktrees returned by get_git_prune_info', async () => {
