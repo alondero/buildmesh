@@ -107,5 +107,52 @@ Two bounds, and neither is a blanket retry.
   verdict it asserts on, because it changes the plan's gate definitions. It
   passes unloaded and at the calibrated load, and it is tracked separately in
   [#2581](https://github.com/alondero/buildmesh/issues/2581) rather than fixed here.
+  The residual was later measured and fixed there; see
+  [The residual, resolved](#the-residual-resolved).
 - The reproduction scripts were run from the worktree's `.tmp/` directory and
   are not committed; the measurements above are what they produced.
+
+## The residual, resolved
+
+[#2581](https://github.com/alondero/buildmesh/issues/2581) picked the residual
+up. The cause was the one this note named, and it was measured rather than
+assumed.
+
+| Measurement | Result |
+|---|---|
+| `cargo --version` probes under 24 CPU + 24 spawn workers | 5 of 960 failed (0.52 %); median of medians 1958 ms, slowest 39109 ms against the 5000 ms bound |
+| The complete suite at HEAD before the fix, 24 CPU + 24 spawn workers | 422 tests, 414 passed, 1 failed, 7 skipped, 1011 s; the same suite unloaded: 422 tests, 415 passed, 0 failed, 166 s |
+| `tests/agent-infra/harness.test.mjs` alone at HEAD before the fix, 24 CPU + 24 spawn workers | 93 tests, 92 passed, 1 failed, 1460 s |
+| The complete suite at the base commit `4e79ddd3`, 24 CPU + 24 spawn workers | 415 tests, 407 passed, 1 failed, 7 skipped, 1279 s |
+| The complete suite at HEAD after the fix, 24 CPU + 24 spawn workers | 423 tests, 416 passed, 0 failed, 7 skipped, 2542 s |
+| The named fixture at HEAD after the fix, 24 CPU + 24 spawn workers | 20 runs, 20 passed |
+
+The third row is the same defect as the residual the issue names, seen from the
+other side. The failure was `a failed gate keeps blocking Stop, names the way
+out, and releases once update records a blocked handoff`, and its assertion was
+`a blocked handoff still fails finish on the failing receipt - 2 !== 1`: the
+receipt's tree was written by one process and read by another, the fingerprint
+moved between them because the cargo probe expired in one and not the other,
+and the verdict became "stale receipt" where it should have named the failing
+gate. The residual the issue names loses the review verdict the same way.
+
+The fourth row settles whether the instability was pre-existing: it was. The
+base commit's suite is not green under this load either. What the base
+commit's run does not show is the residual's own symptom, because its fixture
+still carries the thirty-second budget that the later change replaced, and the
+child is killed before the verdict is read — the failure there was `null !== 1`
+where the test expected 1, a killed child rather than a stale verdict. The
+budget change removed that mask and left the residual visible; it did not
+create it. The mechanism reads the same in both commits: the `git diff
+4e79ddd3 HEAD -- scripts/harness.mjs` output touches only the agent-test slot,
+and the fingerprint, the run identity and the cargo probe are the same in both.
+
+The fix separates the two questions the harness was asking at once. The
+fingerprint identifies the tree and the environment; the run identity adds the
+toolchain the run read, and the verdict compares them separately. The probed
+toolchain version is not in the fingerprint, a probe that did not answer
+records the absence of information rather than a different toolchain, and an
+absence is not reported as a difference between two runs. The probe's bound is
+configurable through `BUILDMESH_TOOLCHAIN_PROBE_TIMEOUT_MS`, and a preflight
+that finds the toolchain too slow to answer lets the gate run instead of
+reporting an installed toolchain as missing.

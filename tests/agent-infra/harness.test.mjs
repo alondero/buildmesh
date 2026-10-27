@@ -647,6 +647,35 @@ test('a rejected independent review cannot complete a green task', t => {
   assert.equal(fixture.cli('finish').status, 2);
   assert.match(completion(fixture.cwd).reason, /APPROVE/);
 });
+test('the run fingerprint does not change when the toolchain probe expires (#2581)', t => {
+  const fixture = repo(t);
+  const task = fixture.start();
+  const tree = fingerprint(fixture.cwd, task.base);
+  // The probe is bounded, so a toolchain too slow to answer under load records
+  // the absence of information rather than a different toolchain.
+  process.env.BUILDMESH_TOOLCHAIN_PROBE_TIMEOUT_MS = '1';
+  t.after(() => { delete process.env.BUILDMESH_TOOLCHAIN_PROBE_TIMEOUT_MS; });
+  const undetermined = runIdentity(fixture.cwd, task.base);
+  assert.equal(JSON.parse(undetermined).tools.cargo, 'undetermined', 'a probe that did not answer records no toolchain');
+  assert.equal(fingerprint(fixture.cwd, task.base), tree, 'the fingerprint does not move with the probe');
+  // The identity still records what the run read, and an undetermined probe is
+  // not reported as a difference between two runs. The recorded toolchain is
+  // written here rather than read from the machine, so the case does not
+  // depend on which toolchain this host has.
+  delete process.env.BUILDMESH_TOOLCHAIN_PROBE_TIMEOUT_MS;
+  const at = version => JSON.stringify({ ...JSON.parse(undetermined), tools: { ...JSON.parse(undetermined).tools, cargo: version } });
+  const recorded = at('cargo 1.0.0 (probe 1970-01-01)');
+  assert.deepEqual(identityMismatch(undetermined, recorded), [], 'an undetermined probe is not a difference between two runs');
+  // A toolchain that really changed is still a difference between two runs.
+  assert.deepEqual(identityMismatch(recorded, at('cargo 2.0.0 (probe 1970-01-01)')), ['tools.cargo: recorded cargo 1.0.0 (probe 1970-01-01), now cargo 2.0.0 (probe 1970-01-01)']);
+  // A receipt written while the probe did not answer is not a receipt from
+  // another run: the verdict still reads the tree it certified.
+  passingReceipt(fixture, task);
+  const receipt = JSON.parse(readFileSync(join(fixture.cwd, '.harness/receipt.json')));
+  receipt.runIdentity = undetermined;
+  fixture.put('.harness/receipt.json', JSON.stringify(receipt));
+  assert.equal(completion(fixture.cwd).outcome, 'PASS', 'a receipt whose probe did not answer is still current');
+});
 test('batched review repairs can proceed before full verification but cannot finish', t => {
   const fixture = repo(t);
   const task = fixture.start();

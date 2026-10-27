@@ -432,6 +432,27 @@ the environment that verified. A stale receipt caused by a source change, and a
 receipt written before this field existed, keep the plain `Run npm run verify`
 advice.
 
+The fingerprint and the identity answer different questions, and the
+separation is load-bearing. The fingerprint identifies the tree: the base, the
+node, the platform, the environment above and the tool versions on disk. The
+identity adds the toolchain the run read, and the verdict compares the two
+separately — a tree that did not move is current, and a receipt from another
+run is named as such rather than folded into the tree.
+
+The probed toolchain version is deliberately not in the fingerprint.
+`cargo --version` runs under a five-second bound, and under load that bound
+expires: measured on a 24-core host at 24 CPU plus 24 spawn workers, 5 of 960
+probes failed and the slowest took 39 seconds. A probe that missed its
+deadline recorded a different toolchain, so the fingerprint moved, so a receipt
+written by one process could be stale in the next one even though the tree had
+not moved (issue #2581). A probe that did not answer now records the absence
+of information, and an absence is not reported as a difference between two
+runs, so a slow machine does not fail a verdict by itself. The probe's bound is
+configurable through `BUILDMESH_TOOLCHAIN_PROBE_TIMEOUT_MS`, and a preflight
+that finds the toolchain too slow to answer lets the gate run and lets the
+gate's own deadline measure it, rather than reporting a toolchain that is
+installed as missing.
+
 Committed, staged, unstaged, deleted and untracked paths determine scope.
 Unknown paths select both product layers; generated wire types always select
 both. Executable hooks and harness tests still run infrastructure gates.
