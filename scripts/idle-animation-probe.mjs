@@ -20,9 +20,10 @@
  *
  * Measured on the hub-shaped scene (16 nodes, 34 animated elements): the
  * focused state records ~60 compositor frames per second (the trace's
- * BeginFrame events); the idle state records none. The frames are the measurement. The CPU share the probe also
- * reports is the corroboration, and it depends on the machine — a shared,
- * busy host attributes time to the renderer that has nothing to do with it.
+ * BeginFrame events); the idle state records none. The frames are the
+ * measurement. The CPU share the probe also reports is the corroboration, and
+ * it depends on the machine — a shared, busy host attributes time to the
+ * renderer that has nothing to do with it.
  *
  * It prints the frame counts, the animation play states and the gate marker,
  * so the numbers can be compared before and after the change. It REPORTS; it

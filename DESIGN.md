@@ -240,13 +240,16 @@ floor for micro-labels.
   outside the gate: a toast that fades in while the window is in the
   background would otherwise freeze at zero opacity and never be seen.
   `tests/unit/idle-animation-gate.test.ts` fails if an infinite animation is
-  added that the gate does not cover — in a flat rule, in a Tailwind `@theme`
-  token or in a `@utility` at-rule — and
+  added to the app's own stylesheets that the gate does not cover — in a flat
+  rule, in a Tailwind `@theme` token or in a `@utility` at-rule — and
   `tests/integration/ui-shot-idle-animation.steps.mjs` checks in a real
   browser that the rule reaches the animated elements — the Tailwind
   utilities included, since they live in a cascade layer of their own — and
-  `scripts/idle-animation-probe.mjs` measures the effect (the renderer's
-  compositor frames go from ~60 per second to none). The **mobile SPA is
+  `scripts/idle-animation-probe.mjs` measures the effect (the compositor's
+  frame production goes from ~60 frames per second to none). Third-party
+  stylesheets are outside the gate's reach: `@xyflow/react` declares an
+  infinite dash animation for an animating edge, and the app never gives an
+  edge that class. The **mobile SPA is
   exempt**: it is a separate application served to a phone browser, with its
   own stylesheet and its own lifecycle, and the gate's root attribute belongs
   to the desktop WebView this issue is about.

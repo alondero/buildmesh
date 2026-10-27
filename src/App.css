@@ -476,8 +476,12 @@ html, body {
    the window comes back and the state cue — shape, colour, label — is
    unchanged either way.
 
-   The selectors below are the COMPLETE list of the desktop app's decorative
-   infinite animations. The bare `[data-window-idle='true']` selector covers
+   The selectors below are the COMPLETE list of the decorative infinite
+   animations in the desktop app's OWN stylesheets. Third-party stylesheets
+   are outside the gate's reach: `@xyflow/react` declares an infinite dash
+   animation for an animating edge, and the app never gives an edge that
+   class, so it cannot run.
+   The bare `[data-window-idle='true']` selector covers
    the root element itself, so an animation declared on the root is gated
    too. The one-shot entrance animations (`animate-fade-in`,
    `animate-scale-in`, `animate-slide-in-right`) are deliberately NOT here: a
@@ -487,8 +491,8 @@ html, body {
    infinite animation exists that is not listed — in a flat rule, in a Tailwind
    `@theme` token or in a `@utility` at-rule. An unlisted one keeps the
    Compositor producing frames forever.
-   `scripts/idle-animation-probe.mjs` measures the effect: the renderer's
-   compositor's frame production goes from ~60 frames per second to none.
+   `scripts/idle-animation-probe.mjs` measures the effect: the compositor's
+   frame production goes from ~60 frames per second to none.
    --------------------------------------------------------------------------- */
 [data-window-idle='true'],
 [data-window-idle='true'] .animate-pulse-fast,
