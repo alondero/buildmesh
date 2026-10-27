@@ -44,6 +44,7 @@ const nodeHeaderFixtures = resolve(repoRoot, 'tests', 'integration', 'ui-shot-no
 const hangingSteps = resolve(repoRoot, 'tests', 'integration', 'ui-shot-hanging.steps.mjs');
 const hangingImportSteps = resolve(repoRoot, 'tests', 'integration', 'ui-shot-hanging-import.steps.mjs');
 const recordingSteps = resolve(repoRoot, 'tests', 'integration', 'ui-shot-recording.steps.mjs');
+const idleAnimationSteps = resolve(repoRoot, 'tests', 'integration', 'ui-shot-idle-animation.steps.mjs');
 
 async function freePort() {
   const server = createTcpServer();
@@ -159,6 +160,28 @@ describe('ui-shot mock mode', () => {
       expect(result.code, result.stderr).toBe(0);
       expect(result.stdout).toContain('Saved');
       expect((await stat(output)).size).toBeGreaterThan(0);
+    } finally {
+      await rm(folder, { recursive: true, force: true });
+    }
+  }, TEST_DEADLINE_MS);
+
+  it('pauses the infinite animations while the window is unfocused', async () => {
+    // Issue #2599 — the gate is only worth anything if the CSS actually
+    // reaches the animated elements. Tailwind's `animate-pulse` / `animate-spin`
+    // utilities sit in the `utilities` cascade layer, and jsdom never applies
+    // Tailwind, so this has to be observed in a real browser.
+    const folder = await mkdtemp(join(tmpdir(), 'buildmesh-ui-shot-idle-'));
+    try {
+      const port = await freePort();
+      const result = await runUiShot([
+        '--out', join(folder, 'idle.png'),
+        '--mock',
+        '--serve',
+        '--mock-url', `http://127.0.0.1:${port}`,
+        '--steps', idleAnimationSteps,
+      ]);
+
+      expect(result.code, result.stderr).toBe(0);
     } finally {
       await rm(folder, { recursive: true, force: true });
     }

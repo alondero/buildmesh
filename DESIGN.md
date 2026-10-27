@@ -227,6 +227,32 @@ floor for micro-labels.
   cost about 30% of a core for four cards. To pulse a border, draw it on an
   overlay and fade the overlay. `tests/unit/infinite-animation-properties.test.ts`
   pins the rule for `App.css` and the mobile stylesheet.
+- **Infinite animations stop when nobody is looking.** An infinite animation
+  makes the renderer Compositor produce a frame every vsync even when the
+  window is visible but unfocused and nothing on the page changed; on a
+  long-running hub that pinned the compositor thread near one core for hours
+  while the JavaScript main thread sat at 3% (issue #2599). While the app is
+  not the foreground surface — the OS window unfocused, or the document
+  hidden — `useIdleAnimationGate` puts `data-window-idle="true"` on the root
+  element and one rule in `App.css` pauses them. Pausing keeps the current
+  phase, so the state cue (shape, colour, label) is unchanged and nothing
+  jumps when the window comes back. The one-shot entrance animations stay
+  outside the gate: a toast that fades in while the window is in the
+  background would otherwise freeze at zero opacity and never be seen.
+  `tests/unit/idle-animation-gate.test.ts` fails if an infinite animation is
+  added to the app's own stylesheets that the gate does not cover — in a flat
+  rule, in a Tailwind `@theme` token or in a `@utility` at-rule — and
+  `tests/integration/ui-shot-idle-animation.steps.mjs` checks in a real
+  browser that the rule reaches the animated elements — the Tailwind
+  utilities included, since they live in a cascade layer of their own — and
+  `scripts/idle-animation-probe.mjs` measures the effect (the compositor's
+  frame production goes from ~60 frames per second to none). Third-party
+  stylesheets are outside the gate's reach: `@xyflow/react` declares an
+  infinite dash animation for an animating edge, and the app never gives an
+  edge that class. The **mobile SPA is
+  exempt**: it is a separate application served to a phone browser, with its
+  own stylesheet and its own lifecycle, and the gate's root attribute belongs
+  to the desktop WebView this issue is about.
 
 
 ## Component patterns

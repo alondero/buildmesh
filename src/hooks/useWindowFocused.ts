@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { watchWindowFocus } from '../lib/windowFocus';
 
 /** Whether the app window currently holds focus.
  *
@@ -12,47 +12,17 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
  *
  *  `isFocused` is part of `core:window:default`, so this needs no extra
  *  capability. Defaults to focused: an unlit caption strip on a focused window
- *  is a worse lie than a missed dim. */
+ *  is a worse lie than a missed dim.
+ *
+ *  The OS focus fact is read through one implementation, in
+ *  `lib/windowFocus`, so the consumers of that fact answer "does the window
+ *  have focus" the same way: this hook feeds the caption buttons' dimming
+ *  (ADR-0035) and the macOS traffic lights (ADR-0036), and the idle animation
+ *  gate reads the same module (issue #2599). */
 export function useWindowFocused(): boolean {
   const [focused, setFocused] = useState(true);
 
-  useEffect(() => {
-    let disposed = false;
-    let unlisten: (() => void) | null = null;
-
-    const setup = async () => {
-      try {
-        const win = getCurrentWindow();
-        const initial = await win.isFocused();
-        if (disposed) return;
-        setFocused(initial);
-        const stop = await win.onFocusChanged(({ payload }) => {
-          // A late event after unmount must be a no-op; the handler outlives
-          // this effect's scope, so it re-checks `disposed`.
-          if (!disposed) setFocused(payload);
-        });
-        // Subscribing is awaited too, so unmount can land between the call and
-        // its resolution — by which point the cleanup has already run with
-        // nothing to tear down. Without this the listener would outlive the
-        // component; React 19 StrictMode's mount → cleanup → mount makes that
-        // interleaving routine rather than exotic.
-        if (disposed) {
-          stop();
-          return;
-        }
-        unlisten = stop;
-      } catch (e) {
-        console.warn('Failed to track window focus:', e);
-      }
-    };
-
-    void setup();
-
-    return () => {
-      disposed = true;
-      if (unlisten) unlisten();
-    };
-  }, []);
+  useEffect(() => watchWindowFocus(setFocused), []);
 
   return focused;
 }

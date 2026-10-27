@@ -29,6 +29,7 @@ import { dispatchShortcut, shortcutBindings } from './lib/shortcutDispatch';
 import { isMac } from './lib/platform';
 import { useFileDropToTerminal } from './hooks/useFileDropToTerminal';
 import { useNamingBackendFailureToast } from './hooks/useNamingBackendFailureToast';
+import { useIdleAnimationGate } from './hooks/useIdleAnimationGate';
 import * as api from './lib/tauri';
 import { addToast, dismissToast, useToastStore } from './stores/toastStore';
 import type { CircuitNotificationPayload } from './types/generated/CircuitEvents';
@@ -82,6 +83,14 @@ function App() {
   const canvasSpawnMenuMeshId = useUIStore((s) => s.canvasSpawnMenuMeshId);
   // Paste absolute file paths into the hovered agent terminal on OS file drop.
   useFileDropToTerminal();
+
+  // Issue #2599 — pause the decorative infinite CSS animations while the app
+  // is not the foreground surface. An infinite animation makes the renderer
+  // Compositor produce a frame every vsync even when nothing on the page
+  // changed, which pinned the compositor thread near one core on a
+  // long-running hub. The gate writes a root attribute and holds no React
+  // state, so a focus change never re-renders the workspace.
+  useIdleAnimationGate();
 
   // Keyboard shortcuts — Tauri's globalShortcut plugin, so they work even
   // when an xterm.js terminal has keyboard focus (xterm intercepts window

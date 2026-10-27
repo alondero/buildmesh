@@ -457,3 +457,49 @@ html, body {
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }
 }
+
+/* ---------------------------------------------------------------------------
+   Idle animation gate (issue #2599)
+
+   An infinite CSS animation makes the renderer Compositor produce a frame
+   every vsync, so the page never goes idle: on the hub in issue #2599 the
+   compositor thread measured ~16 ms per frame at 4K and stayed pinned near
+   one core for hours while the JavaScript main thread sat at 3%. It burned
+   that core while the window was visible but unfocused and nothing on the
+   page had changed.
+
+   `useIdleAnimationGate` puts `data-window-idle="true"` on the root element
+   while the app is not the foreground surface (the OS window unfocused, or
+   the document hidden). The rule below pauses the decorative infinite
+   animations so the compositor has nothing to redraw and the page can go
+   idle. Pausing keeps the animation's current phase, so nothing jumps when
+   the window comes back and the state cue — shape, colour, label — is
+   unchanged either way.
+
+   The selectors below are the COMPLETE list of the decorative infinite
+   animations in the desktop app's OWN stylesheets. Third-party stylesheets
+   are outside the gate's reach: `@xyflow/react` declares an infinite dash
+   animation for an animating edge, and the app never gives an edge that
+   class, so it cannot run.
+   The bare `[data-window-idle='true']` selector covers
+   the root element itself, so an animation declared on the root is gated
+   too. The one-shot entrance animations (`animate-fade-in`,
+   `animate-scale-in`, `animate-slide-in-right`) are deliberately NOT here: a
+   toast that fades in while the window is in the background would freeze at
+   zero opacity and never be seen.
+   `tests/unit/idle-animation-gate.test.ts` reads this block and fails if an
+   infinite animation exists that is not listed — in a flat rule, in a Tailwind
+   `@theme` token or in a `@utility` at-rule. An unlisted one keeps the
+   Compositor producing frames forever.
+   `scripts/idle-animation-probe.mjs` measures the effect: the compositor's
+   frame production goes from ~60 frames per second to none.
+   --------------------------------------------------------------------------- */
+[data-window-idle='true'],
+[data-window-idle='true'] .animate-pulse-fast,
+[data-window-idle='true'] .node-glyph-comet,
+[data-window-idle='true'] .animate-border-pulse::after,
+[data-window-idle='true'] .animate-pulse,
+[data-window-idle='true'] .animate-spin,
+[data-window-idle='true'] [class~='motion-safe:animate-pulse'] {
+  animation-play-state: paused;
+}
