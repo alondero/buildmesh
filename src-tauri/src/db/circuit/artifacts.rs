@@ -58,6 +58,15 @@
 //! "this value is gone". The two paths that really clear a node's working
 //! state — the operator's step recovery and a review extension — delete the
 //! stored values explicitly before they write, so nothing is resurrected.
+//!
+//! The rule has a consequence worth knowing before a stepper change leans on
+//! it: [`CircuitContext::remove`] does not clear a bulky value. A removed key
+//! is absent from the context the writer submits, and an absent key means
+//! "unchanged", so the stored copy stays and comes back on the next read.
+//! Removing a key therefore works for the small values in the column — a
+//! counter, a flag, a stamp — and a bulky value has to be cleared with
+//! [`delete_node_values`] or [`delete_values_with_prefix`]. As the stepper
+//! evolves, a removal of a bulky key needs one of those calls beside it.
 
 use std::collections::BTreeMap;
 
@@ -186,6 +195,12 @@ pub fn write_context(tx: &Connection, run_id: i64, context_json: &str) -> SqlRes
 
 /// The part of [`write_context`] that assumes the run row already exists, so
 /// the stored bulky set can be read back to fingerprint it.
+///
+/// A stored value the new context does not mention stays stored: the context
+/// a writer submits is the whole context, so an omission means "unchanged".
+/// A value that is small again supersedes the stored copy and is deleted. See
+/// the module's "A stored value the column does not mention" for what that
+/// means for a caller that removes a key.
 pub fn persist_split(tx: &Connection, run_id: i64, split: &SplitContext) -> SqlResult<String> {
     if split.verbatim.is_some() {
         return Ok(split.small_json());

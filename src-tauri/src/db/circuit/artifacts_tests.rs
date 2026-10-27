@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 
 use rusqlite::{params, Connection};
 
+use crate::env::test_helpers::TestDir;
+
 use super::*;
 
 /// A review run's context as the worker holds it: the small decision flags
@@ -466,6 +468,38 @@ fn a_stored_lifecycle_blocker_does_not_come_back_into_the_context() {
 }
 
 #[test]
+fn removing_a_bulky_key_from_the_context_does_not_clear_it() {
+    // The constraint a stepper change has to know: a removed key is absent
+    // from the context the writer submits, and an absent key means
+    // "unchanged", so the stored copy stays and comes back on the next read.
+    // A bulky value has to be cleared with `delete_node_values`.
+    let conn = schema();
+    seed(&conn);
+    let context = review_context();
+    let tx = conn.unchecked_transaction().unwrap();
+    write_context(&tx, 1, &serde_json::to_string(&context).unwrap()).unwrap();
+    tx.commit().unwrap();
+
+    let mut trimmed = context.clone();
+    trimmed.remove("node.reviewer.output");
+    let tx = conn.unchecked_transaction().unwrap();
+    write_context(&tx, 1, &serde_json::to_string(&trimmed).unwrap()).unwrap();
+    tx.commit().unwrap();
+
+    let joined = load_context(&conn, 1).unwrap();
+    assert_eq!(
+        joined.get("node.reviewer.output").map(str::len),
+        Some(4_400),
+        "a removed bulky key came back, so the rule changed"
+    );
+
+    // The explicit path clears it.
+    delete_node_values(&conn, 1, "reviewer").unwrap();
+    let joined = load_context(&conn, 1).unwrap();
+    assert_eq!(joined.get("node.reviewer.output"), None);
+}
+
+#[test]
 fn deleting_a_circuit_takes_its_artifacts_with_it() {
     let mut conn = schema();
     seed(&conn);
@@ -682,23 +716,27 @@ fn the_migration_moves_an_existing_run_s_bulky_context() {
 #[test]
 fn an_advance_writes_the_small_context_instead_of_the_whole_blob() {
     let full = serde_json::to_string(&review_context()).unwrap();
+    // One claimed scratch directory for the whole measurement: it is removed
+    // when this test ends, so nothing is left behind in `%TEMP%`.
+    let dir = TestDir::new("circuit-artifacts-bytes");
 
     // Baseline: the pre-change shape — the whole context rewritten as one
     // blob, through the same statement the engine's commit uses.
-    let baseline = measure_on_a_fresh_database("baseline", advancing_context, |conn, json| {
-        let tx = conn.transaction().unwrap();
-        tx.execute(
-            "UPDATE autopilot_circuit_runs \
+    let baseline =
+        measure_on_a_fresh_database("baseline", &dir, advancing_context, |conn, json| {
+            let tx = conn.transaction().unwrap();
+            tx.execute(
+                "UPDATE autopilot_circuit_runs \
              SET state = 'running', context_json = ?2, updated_at = datetime('now') \
              WHERE id = ?1",
-            params![1, json],
-        )
-        .unwrap();
-        tx.commit().unwrap();
-    });
+                params![1, json],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        });
 
     // The new shape: the same advance through the engine's commit point.
-    let split = measure_on_a_fresh_database("split", advancing_context, |conn, json| {
+    let split = measure_on_a_fresh_database("split", &dir, advancing_context, |conn, json| {
         super::super::ledger::commit_circuit_advance_locked(
             conn,
             1,
@@ -713,6 +751,7 @@ fn an_advance_writes_the_small_context_instead_of_the_whole_blob() {
     // reviewer's output is replaced, so the bulky half changes too.
     let baseline_with_report = measure_on_a_fresh_database(
         "baseline-report",
+        &dir,
         advancing_context_with_report,
         |conn, json| {
             let tx = conn.transaction().unwrap();
@@ -728,6 +767,7 @@ fn an_advance_writes_the_small_context_instead_of_the_whole_blob() {
     );
     let split_with_report = measure_on_a_fresh_database(
         "split-report",
+        &dir,
         advancing_context_with_report,
         |conn, json| {
             super::super::ledger::commit_circuit_advance_locked(
@@ -741,7 +781,7 @@ fn an_advance_writes_the_small_context_instead_of_the_whole_blob() {
         },
     );
 
-    let conn = fresh_database("column");
+    let conn = fresh_database("column", &dir);
     let tx = conn.unchecked_transaction().unwrap();
     let stored = write_context(&tx, 1, &full).unwrap();
     tx.execute(
@@ -799,7 +839,7 @@ fn an_advance_writes_the_small_context_instead_of_the_whole_blob() {
 
     // Which pages are these? A run with nothing bulky in it writes the same
     // column, so it isolates what the side table costs.
-    let small_only = measure_on_a_fresh_database("small", small_context, |conn, json| {
+    let small_only = measure_on_a_fresh_database("small", &dir, small_context, |conn, json| {
         super::super::ledger::commit_circuit_advance_locked(
             conn,
             1,
@@ -816,7 +856,7 @@ fn an_advance_writes_the_small_context_instead_of_the_whole_blob() {
 
     // The side table's own pages. A repeat advance must not touch them: the
     // bulky values are written once, when they change.
-    let artifact_pages: Vec<i64> = table_roots(&fresh_database("roots"))
+    let artifact_pages: Vec<i64> = table_roots(&fresh_database("roots", &dir))
         .into_iter()
         .filter(|(name, _)| name.contains("circuit_run_artifacts"))
         .map(|(_, page)| page)
@@ -923,15 +963,13 @@ struct AdvanceCost {
 
 /// A fresh file-backed database, so one measurement cannot inherit another's
 /// pages.
-fn fresh_database(tag: &str) -> Connection {
-    let dir = std::env::temp_dir().join(format!(
-        "buildmesh-circuit-artifacts-bytes-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(format!("{tag}.db"));
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(dir.join(format!("{tag}.db-wal")));
+///
+/// The directory comes from a [`TestDir`], which claims it and removes it on
+/// drop. A hand-built `%TEMP%` directory leaks: Windows recycles process ids,
+/// so the next run finds the last run's files and the accumulation is
+/// unbounded.
+fn fresh_database(tag: &str, dir: &TestDir) -> Connection {
+    let path = dir.path().join(format!("{tag}.db"));
     let conn = Connection::open(&path).unwrap();
     conn.pragma_update(None, "journal_mode", "WAL").unwrap();
     conn.pragma_update(None, "synchronous", "NORMAL").unwrap();
@@ -955,11 +993,12 @@ fn table_roots(conn: &Connection) -> Vec<(String, i64)> {
 
 fn measure_on_a_fresh_database(
     tag: &str,
+    dir: &TestDir,
     build: impl Fn(usize) -> String,
     advance: impl Fn(&mut Connection, &str),
 ) -> AdvanceCost {
     let advances = 10usize;
-    let mut conn = fresh_database(tag);
+    let mut conn = fresh_database(tag, dir);
     let wal = wal_path(&conn);
     // Start from a known state so the delta is the advances' own writes.
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")

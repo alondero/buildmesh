@@ -168,6 +168,12 @@ export const RUST_PATH_INCLUDES = {
 // and the production file is that module's same-stem submodule". A production
 // file that carries test items of its own needs no entry: a filter on its own
 // module already selects them, and redirecting it would skip them.
+//
+// A file whose tests live in a suite that covers a whole subtree takes the
+// same shape with a wider target: the parent declares one `mod <area>_tests;`
+// for the area, and the production files under it share that suite. The entry
+// names the suite, so a scoped filter still selects the tests that cover the
+// file.
 export const RUST_SIBLING_TESTS = {
   'src-tauri/src/agent/spawn/command.rs': 'agent::spawn::command_tests',
   'src-tauri/src/agent/spawn/orchestrator.rs': 'agent::spawn::orchestrator_tests',
@@ -177,9 +183,16 @@ export const RUST_SIBLING_TESTS = {
   'src-tauri/src/agent/spawn/reader.rs': 'agent::spawn::reader_tests',
   'src-tauri/src/agent/spawn/streams.rs': 'agent::spawn::streams_tests',
   'src-tauri/src/db/circuit/operator_push.rs': 'db::circuit::operator_push_tests',
+  // The queue and the recovery path carry no tests of their own: the circuit
+  // suite the crate root declares covers them.
+  'src-tauri/src/db/circuit/queue.rs': 'db::circuit_tests',
+  'src-tauri/src/db/circuit/recovery.rs': 'db::circuit_tests',
   'src-tauri/src/db/create_operation.rs': 'db::create_operation_tests',
   'src-tauri/src/db/mesh.rs': 'db::mesh_tests',
   'src-tauri/src/db/warm_pool.rs': 'db::warm_pool_tests',
+  // The startup reconcile pass is covered by the worker test suite the parent
+  // declares (`tests/lineage_recovery.rs`).
+  'src-tauri/src/services/circuit_worker/restart.rs': 'services::circuit_worker::tests',
   'src-tauri/src/services/github/pagination.rs': 'services::github::pagination_tests',
 };
 
@@ -213,6 +226,10 @@ export const RUST_IMPLEMENTATION_TESTS = {
   'src-tauri/src/services/github/feeds.rs': 'commands::pr',
   'src-tauri/src/services/github/pr_workflow.rs': 'commands::pr',
   'src-tauri/src/services/github/repository.rs': 'commands::pr',
+  // The committed schema snapshot. It is not Rust, so the path filter cannot
+  // scope it, and without an entry the scoped check falls back to the whole
+  // lib suite. The test that owns it is the seam test.
+  'src-tauri/src/db/schema_dump.txt': 'db::seam_tests',
 };
 
 // Every `#[path = "..."]` module in the crate, as repo-relative paths. Entries
