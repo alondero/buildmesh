@@ -95,9 +95,7 @@ function gateBody(css: string): string {
 interface InfiniteAnimation {
   /** Every class the selector names — a rule may name more than one. */
   classes: string[];
-  /** The pseudo-element it targets, when it targets one. */
-  pseudo: string | null;
-  /** The raw selector, for the failure message. */
+  /** The full selector the animation runs on, for the coverage check. */
   selector: string;
 }
 
@@ -123,12 +121,7 @@ function infiniteAnimations(css: string): InfiniteAnimation[] {
     for (const selector of rule.selectors) {
       // Any pseudo-element, not only ::before/::after: `.foo::marker` is just
       // as capable of keeping the Compositor busy as `.foo::after`.
-      const pseudo = /::([a-z-]+)\s*$/i.exec(selector)?.[1] ?? null;
-      const base = pseudo ? selector.slice(0, selector.indexOf('::')) : selector;
-      const classes = [...base.matchAll(/\.([A-Za-z0-9_-]+)/g)].map((match) => match[1]);
-      // A selector that names no class is reported too: the gate's class list
-      // cannot reach it, so it must not pass in silence.
-      found.push({ classes, pseudo, selector });
+      found.push({ classes: selectorClasses(selector), selector });
     }
   }
   return found;
@@ -169,7 +162,7 @@ function themeAnimationUtilities(css: string): InfiniteAnimation[] {
   for (const body of atRuleBodies(css, 'theme')) {
     for (const match of body.matchAll(/--animate-([\w-]+)\s*:\s*([^;]+);/g)) {
       if (!/\binfinite\b/i.test(match[2])) continue;
-      found.push({ classes: [`animate-${match[1]}`], pseudo: null, selector: `--animate-${match[1]}` });
+      found.push({ classes: [`animate-${match[1]}`], selector: `.animate-${match[1]}` });
     }
   }
   return found;
@@ -187,7 +180,7 @@ function utilityAnimations(css: string): InfiniteAnimation[] {
   const found: InfiniteAnimation[] = [];
   for (const match of css.matchAll(/@utility\s+([^\s{]+)\s*\{([^{}]*)\}/g)) {
     if (!declaresInfiniteAnimation(match[2])) continue;
-    found.push({ classes: [match[1]], pseudo: null, selector: `@utility ${match[1]}` });
+    found.push({ classes: [match[1]], selector: `.${match[1]}` });
   }
   return found;
 }
@@ -227,6 +220,54 @@ function stylesheets(srcRoot: string): { path: string; css: string }[] {
 const VARIANT_PREFIX = /[\w:[\]./%#()!@&*>~=-]*/;
 
 /**
+ * The source without its comments.
+ *
+ * A comment may mention a class name — "the variant `hover:animate-pulse` is
+ * not the bare utility" — and the token scanner reads raw text, so a comment
+ * that merely names a variant would otherwise turn into a token the gate has
+ * to cover. Strings are left alone, so a class inside one still counts.
+ */
+function stripComments(source: string): string {
+  let out = '';
+  let index = 0;
+  let quote: string | null = null;
+  while (index < source.length) {
+    const char = source[index];
+    const next = source[index + 1];
+    if (quote) {
+      out += char;
+      if (char === '\\') {
+        out += next ?? '';
+        index += 2;
+        continue;
+      }
+      if (char === quote) quote = null;
+      index += 1;
+      continue;
+    }
+    if (char === '"' || char === "'" || char === '`') {
+      quote = char;
+      out += char;
+      index += 1;
+      continue;
+    }
+    if (char === '/' && next === '/') {
+      while (index < source.length && source[index] !== '\n') index += 1;
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      index += 2;
+      while (index < source.length && !(source[index] === '*' && source[index + 1] === '/')) index += 1;
+      index += 2;
+      continue;
+    }
+    out += char;
+    index += 1;
+  }
+  return out;
+}
+
+/**
  * Every infinite Tailwind animation class the desktop app renders.
  *
  * The token is captured IN FULL — variant prefix and important marker
@@ -249,7 +290,7 @@ function tailwindInfiniteClasses(srcRoot: string): string[] {
         continue;
       }
       if (!/\.tsx?$/.test(entry)) continue;
-      for (const match of readFileSync(full, 'utf8').matchAll(pattern)) tokens.add(match[0]);
+      for (const match of stripComments(readFileSync(full, 'utf8')).matchAll(pattern)) tokens.add(match[0]);
     }
   };
   walk(srcRoot);
@@ -276,24 +317,39 @@ function gateCovers(selectors: string[], token: string): boolean {
   return selectors.some((s) => pattern.test(s));
 }
 
-/** Whether one gate selector names `className` as a class of its own. */
-function selectorNamesClass(selector: string, className: string): boolean {
-  const escaped = className.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`\\.${escaped}(?![\\w-])`).test(selector);
+/** The classes a selector names, for the failure message. */
+function selectorClasses(selector: string): string[] {
+  return [...selector.matchAll(/\.([A-Za-z0-9_-]+)/g)].map((match) => match[1]);
 }
 
-/** Whether the gate reaches one infinite animation, pseudo-element included. */
+/**
+ * Whether one gate selector reaches the element the animation runs on.
+ *
+ * The gate has to select the SAME element, not merely mention the same class.
+ * `animation-play-state` is not inherited, so pausing a parent does not pause
+ * a child's animation — the child's own `animation` shorthand resets the play
+ * state — and a state pseudo-class (`.foo:hover`) carries its own animation
+ * while the state lasts. A gate naming `.pulse-dots` therefore does NOT cover
+ * `.pulse-dots > span`, and the guard must not report that it does.
+ *
+ * So the gate selector has to END with the animation's own selector, which
+ * makes the requirement satisfiable: the gate can name the same target. The
+ * root element is the one exception — it carries the marker itself, so the
+ * bare `[data-window-idle='true']` selector reaches it.
+ */
 function gateCoversAnimation(selectors: string[], animation: InfiniteAnimation): boolean {
-  if (animation.classes.length === 0) return false;
+  const target = normaliseSelector(animation.selector);
+  const rootSelector = normaliseSelector(`[${IDLE_ROOT_ATTRIBUTE}='true']`);
   return selectors.some((selector) => {
-    // Every class of the rule has to be named: a rule on `.a.b` is not paused
-    // by a gate that names only `.a`.
-    if (!animation.classes.every((className) => selectorNamesClass(selector, className))) return false;
-    if (!animation.pseudo) return true;
-    // `.foo` does not pause `.foo::after` — the gate has to name the
-    // pseudo-element too. Pseudo-element names are case-insensitive in CSS.
-    return selector.toLowerCase().includes(`::${animation.pseudo.toLowerCase()}`);
+    const normalised = normaliseSelector(selector);
+    if (normalised === target || normalised.endsWith(` ${target}`)) return true;
+    return target === 'html' && normalised === rootSelector;
   });
+}
+
+/** A selector with its whitespace and quotes normalised, for comparison. */
+function normaliseSelector(selector: string): string {
+  return selector.replace(/\s+/g, ' ').trim().replace(/['"]/g, '');
 }
 
 // ---------------------------------------------------------------------------
@@ -545,6 +601,50 @@ describe('the idle gate rule', () => {
     for (const variant of ['hover:animate-pulse', 'data-[state=open]:animate-pulse', 'animate-pulse!']) {
       expect(gateCovers(selectors, variant), `${variant} must be gated in full`).toBe(false);
     }
+  });
+
+  it('does not let a comment name a class the app never renders', () => {
+    // The token scanner reads source text, and a comment may mention a class
+    // name. A comment that merely says "hover:animate-pulse is not the bare
+    // utility" must not turn into a token the gate has to cover.
+    const source = [
+      '// the variant hover:animate-pulse is not the bare utility',
+      '/* and neither is data-[state=open]:animate-pulse */',
+      'const label = "animate-pulse";',
+    ].join('\n');
+    expect(stripComments(source)).not.toContain('hover:animate-pulse');
+    // A class inside a string is code, not prose, so it survives.
+    expect(stripComments(source)).toContain('"animate-pulse"');
+  });
+
+  it('requires the gate to select the element the animation runs on', () => {
+    // `animation-play-state` is not inherited, so pausing a parent does not
+    // pause a child's animation, and a state pseudo-class carries its own
+    // animation while the state lasts. A gate naming the parent is not a
+    // cover for the child.
+    const selectors = gateSelectors(CSS);
+    for (const selector of ['.pulse-dots > span', '.foo:hover', '.foo .bar']) {
+      const animation = { classes: selectorClasses(selector), selector };
+      expect(gateCoversAnimation(selectors, animation), `${selector} must be gated on its own element`).toBe(false);
+    }
+
+    // And the requirement is satisfiable: the gate can name the same target.
+    const animation = { classes: ['pulse-dots'], selector: '.pulse-dots > span' };
+    expect(
+      gateCoversAnimation([...selectors, "[data-window-idle='true'] .pulse-dots > span"], animation),
+    ).toBe(true);
+  });
+
+  it('lets the root element be gated by the marker alone', () => {
+    // The marker lives on the root element, so the bare attribute selector
+    // reaches it — a classless rule on the root is satisfiable, and one on
+    // another element is not.
+    const selectors = gateSelectors(CSS);
+    expect(gateCoversAnimation(selectors, { classes: [], selector: 'html' })).toBe(true);
+    expect(gateCoversAnimation(selectors, { classes: [], selector: 'body' })).toBe(false);
+    expect(
+      gateCoversAnimation([...selectors, "[data-window-idle='true'] body"], { classes: [], selector: 'body' }),
+    ).toBe(true);
   });
 
   it('gates every infinite Tailwind animation the desktop app renders', () => {

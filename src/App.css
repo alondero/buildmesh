@@ -477,7 +477,9 @@ html, body {
    unchanged either way.
 
    The selectors below are the COMPLETE list of the desktop app's decorative
-   infinite animations. The one-shot entrance animations (`animate-fade-in`,
+   infinite animations. The bare `[data-window-idle='true']` selector covers
+   the root element itself, so an animation declared on the root is gated
+   too. The one-shot entrance animations (`animate-fade-in`,
    `animate-scale-in`, `animate-slide-in-right`) are deliberately NOT here: a
    toast that fades in while the window is in the background would freeze at
    zero opacity and never be seen.
@@ -488,6 +490,7 @@ html, body {
    `scripts/idle-animation-probe.mjs` measures the effect: the renderer's
    compositor frames go from ~60 per second to none.
    --------------------------------------------------------------------------- */
+[data-window-idle='true'],
 [data-window-idle='true'] .animate-pulse-fast,
 [data-window-idle='true'] .node-glyph-comet,
 [data-window-idle='true'] .animate-border-pulse::after,
