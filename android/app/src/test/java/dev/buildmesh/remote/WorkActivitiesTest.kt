@@ -1,6 +1,7 @@
 package dev.buildmesh.remote
 
 import dev.buildmesh.remote.wire.CircuitAgentOwnership
+import dev.buildmesh.remote.wire.NodeCircuitRun
 import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Test
@@ -12,6 +13,8 @@ class WorkActivitiesTest {
         }
     private fun owner(id: Long, parent: Long?, state: String = "running") =
         CircuitAgentOwnership(id, 7, 3, "Review", state, parent)
+    private fun circuitRun(nodeId: Long) = NodeCircuitRun.fromJson(Json.parseToJsonElement(
+        """{"node_id":$nodeId,"run_id":7,"blueprint_name":"Review","state":"running","step":null,"review":null,"needs_you":[{"kind":"approval","step":{"node_id":"gate","role":"Approval gate","attempt":1,"status":"blocked"},"detail":null,"actions":[],"starts_next_review":false,"ends_review":false,"review_again":false,"agent_node_id":null}],"revision":1}"""))
 
     @Test fun reviewersFollowTheirRepresentativeEvenWhenTheirPositionIsEarlier() {
         val nodes = listOf(node(12, 1), node(11, 3), node(20, 2), node(13, 4))
@@ -35,6 +38,47 @@ class WorkActivitiesTest {
         assertTrue(matchingWorkActivities(state, 2, "Reviewer", false).isEmpty())
         assertTrue(matchingWorkActivities(state, 0, "Agent 1", true).isEmpty())
         assertEquals(2, matchingWorkActivities(state, 0, "", false).size)
+    }
+
+    @Test fun aWaitingAgentIsTheFirstActivityOfItsMeshGroup() {
+        val state = RemoteState(nodes = listOf(
+            node(1, position = 1, status = "running"),
+            node(2, position = 2, status = "running"),
+            node(3, position = 3, status = "awaiting_input")))
+        assertEquals(listOf(3L, 1L, 2L), matchingWorkActivities(state, 0, "", false).map { it.root.number("id") })
+    }
+
+    @Test fun aFailedAgentOutranksACircuitGateAndBothOutrankAwaitingInput() {
+        val state = RemoteState(nodes = listOf(
+            node(1, position = 1, status = "running"),
+            node(2, position = 2, status = "awaiting_input"),
+            node(3, position = 3, status = "running"),
+            node(4, position = 4, status = "error"),
+            node(5, position = 5, status = "lost")),
+            circuitRuns = listOf(circuitRun(3)))
+        // Error and lost tie, so they keep the desktop's saved order between them.
+        assertEquals(listOf(4L, 5L, 3L, 2L, 1L), matchingWorkActivities(state, 0, "", false).map { it.root.number("id") })
+    }
+
+    @Test fun aCircuitBracketMovesAsAUnitAndKeepsItsRepresentativeFirst() {
+        val state = RemoteState(nodes = listOf(
+            node(20, position = 1, status = "running"),
+            node(11, position = 2, status = "running"),
+            node(12, position = 3, status = "running"),
+            node(13, position = 4, status = "awaiting_input")),
+            circuitOwnerships = listOf(owner(12, 11), owner(13, 11)))
+        val activities = matchingWorkActivities(state, 0, "", false)
+        assertEquals(listOf(11L, 20L), activities.map { it.root.number("id") })
+        assertEquals(listOf(11L, 12L, 13L), activities.first().members.map { it.number("id") })
+    }
+
+    @Test fun anActivityNeverLeavesItsMeshGroupToJumpAheadOfAnotherMesh() {
+        val state = RemoteState(nodes = listOf(
+            node(1, position = 1, mesh = 1, status = "running"),
+            node(2, position = 2, mesh = 1, status = "running"),
+            node(3, position = 3, mesh = 2, status = "awaiting_input")))
+        assertEquals(listOf(1L, 2L, 3L), matchingWorkActivities(state, 0, "", false).map { it.root.number("id") })
+        assertEquals(listOf(3L), matchingWorkActivities(state, 2, "", false).map { it.root.number("id") })
     }
 
     @Test fun statusShapesAndCircuitOrbitsDistinguishTheDesktopStates() {

@@ -30,11 +30,25 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.LayoutDirection
 import dev.buildmesh.remote.wire.CircuitAgentOwnership
+import dev.buildmesh.remote.wire.NodeCircuitRun
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
 import kotlin.math.roundToInt
 
 data class WorkActivity(val root: JsonObject, val members: List<JsonObject>)
+
+// Who needs a person, most urgent first: a failed agent, then a Circuit run
+// waiting on you, then an agent blocked on its own input. The order is
+// deliberate — a failed agent needs a retry, a Circuit gate needs a decision,
+// and an awaiting agent needs an answer.
+private enum class WorkNeed { Failed, Circuit, Input, None }
+
+private fun workNeed(node: JsonObject, runs: List<NodeCircuitRun>): WorkNeed = when {
+    node.text("status") in setOf("error", "lost") -> WorkNeed.Failed
+    runs.any { it.node_id == node.number("id") && it.needs_you.isNotEmpty() } -> WorkNeed.Circuit
+    node.text("status") == "awaiting_input" -> WorkNeed.Input
+    else -> WorkNeed.None
+}
 
 // Follow the sidebar's Circuit lineage, stopping at missing/archived parents,
 // mesh boundaries and cycles so an invalid relationship cannot hide an agent.
@@ -60,11 +74,23 @@ fun workActivities(nodes: List<JsonObject>, ownerships: List<CircuitAgentOwnersh
 }
 
 fun matchingWorkActivities(state: RemoteState, meshId: Long, query: String, attentionOnly: Boolean): List<WorkActivity> =
-    workActivities(state.nodes, state.circuitOwnerships).filter { activity ->
-        (meshId == 0L || activity.root.number("mesh_id") == meshId) && activity.members.any { node ->
-            (!attentionOnly || circuitNeedsAttention(node, state.circuitRuns)) &&
-                (query.isBlank() || node.text("name").contains(query, true) || node.text("branch").contains(query, true))
-        }
+    workActivitiesByNeed(
+        workActivities(state.nodes, state.circuitOwnerships).filter { activity ->
+            (meshId == 0L || activity.root.number("mesh_id") == meshId) && activity.members.any { node ->
+                (!attentionOnly || circuitNeedsAttention(node, state.circuitRuns)) &&
+                    (query.isBlank() || node.text("name").contains(query, true) || node.text("branch").contains(query, true))
+            }
+        },
+        state.circuitRuns)
+
+// The Work tab lists a mesh's activities with whoever needs a person first
+// (issue #2613), so an agent blocked on a decision no longer sits below the
+// running ones. The bracket moves as a unit: its representative stays first
+// and its members keep their order, and no activity leaves its mesh group.
+// Everything that needs nobody keeps the desktop's saved order.
+fun workActivitiesByNeed(activities: List<WorkActivity>, runs: List<NodeCircuitRun>): List<WorkActivity> =
+    activities.groupBy { it.root.number("mesh_id") }.values.flatMap { mesh ->
+        mesh.sortedBy { activity -> activity.members.minOfOrNull { workNeed(it, runs) } ?: WorkNeed.None }
     }
 
 @Composable

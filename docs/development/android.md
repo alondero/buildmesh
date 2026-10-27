@@ -211,10 +211,15 @@ Pull requests, Issues and Archive live under each mesh header in Your work,
 including meshes without open agents or matches for the current filters.
 Work uses compact rows under mesh headers, with the desktop status-circle shapes
 and Circuit orbit glyphs. Circuit-linked agents share one bracket, ordered with
-the representative first; each row opens that agent. Search and Needs attention
-match individual agents and retain the matching activity's other members for
-context. Missing or archived parents, cross-mesh links and cycles leave agents
-accessible. Desktop manual groups remain local desktop view state.
+the representative first; each row opens that agent. Within a mesh group the
+activities that need a person come first — a failed or lost agent, then a
+Circuit run waiting on you, then an agent blocked on its own input — and
+everything else keeps the desktop's saved order. A bracket moves as a unit: its
+representative stays first, its members keep their order, and no activity
+leaves its mesh group. Search and Needs attention match individual agents and
+retain the matching activity's other members for context. Missing or archived
+parents, cross-mesh links and cycles leave agents accessible. Desktop manual
+groups remain local desktop view state.
 Swipe a Work row toward the start edge to reveal **Close**, then tap it and
 confirm to stop and remove that individual agent. Swipe back or tap the row to
 hide the action; swiping alone does not close anything. TalkBack exposes the
