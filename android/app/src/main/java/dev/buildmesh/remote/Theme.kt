@@ -47,14 +47,33 @@ object MeshColors {
     val approveBorder = green.copy(alpha = 0.50f)
     val rejectBorder = red.copy(alpha = 0.50f)
 
-    fun status(status: String) = when (status) {
-        "awaiting_input" -> amber
-        "ready", "completed" -> green
-        "error", "lost" -> red
-        "suspended" -> violet
-        "running", "idle" -> accent
-        else -> muted
-    }
+    /**
+     * The colour for [status].
+     *
+     * The vocabulary itself is generated from `STATUS_CONFIG` (see
+     * `MeshStatusTable`), so a status this build does not know resolves to the
+     * `Unknown` marker — a red cross — instead of the muted grey a hand-written
+     * `else ->` branch used to answer.
+     */
+    fun status(status: String) = Color(MeshStatusTable.resolve(status).hex)
+}
+
+/**
+ * The Android client's copy of DESIGN.md's mobile type scale.
+ *
+ * The mobile scale is the touch adaptation of the desktop steps: 13px body,
+ * 15px card titles, 16px on text fields, 11–12px metadata, and a 10px floor
+ * for micro-labels. `tests/unit/android-token-mirror.test.ts` recomputes
+ * these numbers from DESIGN.md, so a retune there fails here rather than
+ * drifting silently.
+ */
+object MeshTypeScale {
+    val body = 13
+    val cardTitle = 15
+    val textField = 16
+    val metadata = 12
+    val metadataSmall = 11
+    val microLabel = 10
 }
 
 @OptIn(ExperimentalTextApi::class)
@@ -67,6 +86,11 @@ val Geist = FontFamily(
 private fun textStyle(size: Int, lineHeight: Int, weight: FontWeight = FontWeight.Normal) =
     TextStyle(fontFamily = Geist, fontWeight = weight, fontSize = size.sp, lineHeight = lineHeight.sp)
 
+// The Material roles below are the phone's reading of DESIGN.md's mobile
+// scale: the scaled roles point at `MeshTypeScale`, and the display/headline
+// roles are page chrome above that scale. `bodyLarge` is Material's default
+// text-field text, so it takes the text-field step; `titleLarge` takes the
+// same step because 16px is the largest size the mobile scale allows.
 private val BuildmeshTypography = Typography(
     displayLarge = textStyle(40, 48, FontWeight.SemiBold),
     displayMedium = textStyle(32, 40, FontWeight.SemiBold),
@@ -74,15 +98,15 @@ private val BuildmeshTypography = Typography(
     headlineLarge = textStyle(28, 36, FontWeight.SemiBold),
     headlineMedium = textStyle(24, 32, FontWeight.SemiBold),
     headlineSmall = textStyle(22, 28, FontWeight.SemiBold),
-    titleLarge = textStyle(20, 28, FontWeight.SemiBold),
-    titleMedium = textStyle(16, 24, FontWeight.SemiBold),
-    titleSmall = textStyle(14, 20, FontWeight.Medium),
-    bodyLarge = textStyle(16, 24),
-    bodyMedium = textStyle(14, 20),
-    bodySmall = textStyle(12, 18),
-    labelLarge = textStyle(14, 20, FontWeight.Medium),
-    labelMedium = textStyle(12, 16, FontWeight.Medium),
-    labelSmall = textStyle(11, 16, FontWeight.Medium),
+    titleLarge = textStyle(MeshTypeScale.textField, 22, FontWeight.SemiBold),
+    titleMedium = textStyle(MeshTypeScale.cardTitle, 20, FontWeight.SemiBold),
+    titleSmall = textStyle(MeshTypeScale.cardTitle, 20, FontWeight.Medium),
+    bodyLarge = textStyle(MeshTypeScale.textField, 22),
+    bodyMedium = textStyle(MeshTypeScale.body, 18),
+    bodySmall = textStyle(MeshTypeScale.metadata, 16),
+    labelLarge = textStyle(MeshTypeScale.cardTitle, 20, FontWeight.Medium),
+    labelMedium = textStyle(MeshTypeScale.metadataSmall, 16, FontWeight.Medium),
+    labelSmall = textStyle(MeshTypeScale.microLabel, 14, FontWeight.Medium),
 )
 
 @Composable

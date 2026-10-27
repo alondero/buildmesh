@@ -31,18 +31,16 @@ fun rememberWorkGlyphMotion(): WorkGlyphMotion {
     return remember(alpha, angle) { WorkGlyphMotion(alpha, angle) }
 }
 
-// Mirrors STATUS_CONFIG.glyph and NodeStatusGlyph's 24-unit drawing on desktop.
-internal fun workStatusShape(status: String): String = when (status) {
-    "running" -> "solid"
-    "pending", "spawning" -> "dashed"
-    "awaiting_input", "ready", "completed" -> "target"
-    "error" -> "cross"
-    "lost" -> "slash"
-    "suspended" -> "half"
-    "archived" -> "thin"
-    else -> "ring"
-}
+// The shape comes from the generated status table — STATUS_CONFIG's `glyph`,
+// drawn on NodeStatusGlyph's 24-unit grid — so a status this build does not
+// know draws the explicit `Unknown` cross rather than the idle ring a
+// hand-written `else ->` branch used to answer.
+internal fun workStatusShape(status: String): String = MeshStatusTable.resolve(status).glyph
 
+// The orbit says which animation a node gets, not what the statuses are
+// called or how they look, so it names the statuses it reacts to directly
+// rather than reading the generated vocabulary. A status outside these rules
+// keeps the default orbit.
 internal fun workCircuitOrbit(node: JsonObject, owner: CircuitAgentOwnership?): String? {
     if (owner == null || owner.state == "cancelled" || node.text("status") == "archived") return null
     return when {
@@ -75,7 +73,7 @@ fun WorkStatusGlyph(node: JsonObject, owner: CircuitAgentOwnership?, motion: Wor
     Canvas(Modifier.size(24.dp).semantics {
         contentDescription = listOfNotNull(nodeLabel(node), circuitLabel).joinToString(". ")
     }) {
-        val color = MeshColors.status(status).copy(alpha = if (status in setOf("pending", "spawning", "awaiting_input")) motion.alpha.value else 1f)
+        val color = MeshColors.status(status).copy(alpha = if (status in MeshStatusTable.pulsing) motion.alpha.value else 1f)
         scale(size.width / 24f, size.height / 24f, pivot = Offset.Zero) {
             val center = Offset(12f, 12f)
             fun ring(radius: Float, width: Float, dashed: Boolean = false) = drawCircle(color, radius, center,

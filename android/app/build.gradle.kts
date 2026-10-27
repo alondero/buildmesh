@@ -113,6 +113,17 @@ val circuitWire by tasks.registering(Exec::class) {
 }
 tasks.named("preBuild") { dependsOn(circuitWire) }
 
+// The Android client's status vocabulary is generated from `STATUS_CONFIG`
+// (src/lib/status.ts) and committed, so the build checks the committed table
+// against its source instead of regenerating into the tree. A stale table
+// fails here; `npm run android:status-table` writes the fix.
+val statusTable by tasks.registering(Exec::class) {
+    workingDir(rootProject.projectDir.parentFile)
+    commandLine("node", "scripts/generate-android-status-table.mjs", "--check")
+    inputs.files(fileTree(rootProject.file("../src/lib")), rootProject.file("../scripts/generate-android-status-table.mjs"))
+}
+tasks.named("preBuild") { dependsOn(statusTable) }
+
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2025.05.01")
     implementation(composeBom)

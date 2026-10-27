@@ -2,10 +2,10 @@ name: Android
 
 on:
   pull_request:
-    paths: ['android/**', 'scripts/check-android*.mjs', 'package.json', 'package-lock.json', '.github/workflows/android.yml']
+    paths: ['android/**', 'scripts/check-android*.mjs', 'scripts/generate-android-status-table.mjs', 'src/lib/status.ts', 'package.json', 'package-lock.json', '.github/workflows/android.yml']
   push:
     branches: [main]
-    paths: ['android/**', 'scripts/check-android*.mjs', 'package.json', 'package-lock.json', '.github/workflows/android.yml']
+    paths: ['android/**', 'scripts/check-android*.mjs', 'scripts/generate-android-status-table.mjs', 'src/lib/status.ts', 'package.json', 'package-lock.json', '.github/workflows/android.yml']
   workflow_dispatch:
 
 permissions:

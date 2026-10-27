@@ -18,6 +18,7 @@
     "version:set": "node scripts/set-version.mjs",
     "release:notes": "node scripts/release-notes.mjs",
     "brand:build": "node scripts/generate-brand-assets.mjs",
+    "android:status-table": "node scripts/generate-android-status-table.mjs",
     "tauri:build:dev": "tauri build --config src-tauri/tauri.dev.conf.json --features dev-tools",
     "tauri:build:dev:codex-hook-smoke": "tauri build --config src-tauri/tauri.dev.conf.json --config scripts/tauri.codex-hook-smoke.conf.json --no-bundle --features dev-tools",
     "smoke:codex-hook-recovery": "node scripts/codex-hook-recovery-smoke.mjs",

@@ -93,4 +93,22 @@ class WorkActivitiesTest {
         assertNull(workCircuitOrbit(node(1), owner(1, null, "cancelled")))
         assertNull(workCircuitOrbit(node(1), null))
     }
+
+    @Test fun aStatusThisBuildDoesNotKnowIsAnExplicitGapRatherThanAMutedDot() {
+        // The vocabulary is generated from STATUS_CONFIG (src/lib/status.ts),
+        // so a status the desktop adds that this build has not caught up with
+        // is named and marked — it does not fall back to a grey circle with a
+        // generic label that reads like a healthy state.
+        assertNull(MeshStatusTable.find("brand_new_status"))
+        assertEquals("Unknown status", MeshStatusTable.resolve("brand_new_status").label)
+        assertEquals(MeshStatusTable.Unknown.hex, MeshStatusTable.resolve("brand_new_status").hex)
+        assertEquals("cross", workStatusShape("brand_new_status"))
+        // A status the vocabulary does know keeps its own label, colour and shape.
+        assertEquals("Running", MeshStatusTable.resolve("running").label)
+        assertEquals("solid", workStatusShape("running"))
+        assertEquals("Needs attention", MeshStatusTable.resolve("awaiting_input").label)
+        assertEquals("target", workStatusShape("awaiting_input"))
+        // The pulsing set is the one STATUS_CONFIG marks, not a hand-written list.
+        assertEquals(setOf("pending", "spawning", "awaiting_input"), MeshStatusTable.pulsing)
+    }
 }
