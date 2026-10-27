@@ -168,16 +168,22 @@ function readFindings(root, options) {
 // payload the ledger accepts, and a payload the ledger refuses is refused
 // before anything is written. Two copies of this rule are how a command ends
 // up accepting one payload and refusing another.
-export function validateReview({ verdict, reviewer, summary, findings } = {}) {
+//
+// The rule owns the whole payload, including its absence: a caller passes what
+// it has, and a payload that is null is a malformed payload rather than a
+// crash. `prefix` names the field in the caller's own vocabulary, so the
+// `review` command says `--verdict` and an update spec says `review.verdict`.
+export function validateReview(payload = {}, { prefix = '' } = {}) {
+  const { verdict, reviewer, summary, findings } = payload ?? {};
+  const field = key => `${prefix}${key}`;
   const normalized = String(verdict ?? '').trim().toUpperCase();
-  if (!VERDICTS.includes(normalized)) throw new Error(`--verdict must be one of ${VERDICTS.join(', ')}.`);
+  if (!VERDICTS.includes(normalized)) throw new Error(`${field('verdict')} must be one of ${VERDICTS.join(', ')}.`);
   const who = String(reviewer ?? '').trim();
-  if (!who) throw new Error('--reviewer is required.');
+  if (!who) throw new Error(`${field('reviewer')} is required.`);
   const note = String(summary ?? '').trim();
-  if (!note) throw new Error('--summary is required.');
+  if (!note) throw new Error(`${field('summary')} is required.`);
   const found = findings === undefined ? [] : findings;
-  if (!Array.isArray(found)) throw new Error('Findings must be an array of strings.');
-  if (found.some(item => typeof item !== 'string')) throw new Error('Findings must be an array of strings.');
+  if (!Array.isArray(found) || found.some(item => typeof item !== 'string')) throw new Error(`${field('findings')} must be an array of strings.`);
   if (normalized === 'APPROVE' && found.length) throw new Error('An APPROVE cannot carry findings. Record REQUEST_CHANGES with the findings instead.');
   return { verdict: normalized, reviewer: who, summary: note, findings: found };
 }
@@ -192,7 +198,7 @@ export function recordReview(root, options, { fingerprint, changedPaths, content
   if (!task) throw new Error('BLOCKED: no active task. Start one with npm run harness -- start --spec <json>.');
   if (task.phase === 'complete') throw new Error('BLOCKED: the task is already complete.');
   if (!task.base) throw new Error('BLOCKED: the task has no base commit.');
-  const { verdict, reviewer, summary, findings } = validateReview({ verdict: options.verdict, reviewer: options.reviewer, summary: options.summary, findings: readFindings(root, options) });
+  const { verdict, reviewer, summary, findings } = validateReview({ verdict: options.verdict, reviewer: options.reviewer, summary: options.summary, findings: readFindings(root, options) }, { prefix: '--' });
 
   const tree = fingerprint(root, task.base);
   const code = contentTree ? contentTree(root) : null;

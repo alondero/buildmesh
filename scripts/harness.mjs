@@ -287,12 +287,15 @@ function update(root, spec) {
   if (spec.nextAction !== undefined && (typeof spec.nextAction !== 'string' || !spec.nextAction.trim())) throw new Error('nextAction must be a nonempty string.');
   const { review, ...progress } = spec;
   // The whole spec is checked before anything is written. A payload the
-  // ledger would refuse — an APPROVE that carries findings — must not
-  // advance the task first and fail afterwards: `update` applies the spec or
-  // leaves the task untouched, so the task state and the event log agree
-  // about what happened (the test "an update with an invalid review leaves
-  // the task and the events untouched" covers it).
-  const recorded = review === undefined ? null : validateReview({ verdict: review.verdict, reviewer: review.reviewer, summary: review.summary, findings: review.findings });
+  // ledger would refuse — an APPROVE that carries findings, a verdict the
+  // ledger does not know, a payload that is null — must not advance the task
+  // first and fail afterwards: `update` applies the spec or leaves the task
+  // untouched, so the task state and the event log agree about what happened
+  // (the test "an update with an invalid review leaves the task and the events
+  // untouched" covers it). The payload goes to the rule whole: the rule owns
+  // its shape, so a caller does not read fields off a payload that may be
+  // null.
+  const recorded = review === undefined ? null : validateReview(review, { prefix: 'review.' });
   if (spec.phase) setPhase(task, spec.phase);
   Object.assign(task, progress);
   if (spec.evidence) task.evidenceTree = fingerprint(root, task.base);

@@ -857,23 +857,37 @@ test('an update with an invalid review leaves the task and the events untouched'
   fixture.start();
   const before = JSON.parse(readFileSync(join(fixture.cwd, '.harness/active-task.json')));
   const eventsBefore = readFileSync(join(fixture.cwd, '.harness/events.jsonl'), 'utf8');
-  fixture.put('.task.json', JSON.stringify({
-    phase: 'verify',
-    nextAction: 'progress that should not be applied',
-    evidence: ['observed the owner state'],
-    review: { reviewer: 'independent fixture', verdict: 'APPROVE', findings: ['an approval cannot carry these'], summary: 'Approved' },
-  }));
-  const refused = fixture.cli('update', '--spec', '.task.json');
-  assert.equal(refused.status, 2);
-  assert.match(refused.stderr, /APPROVE cannot carry findings/);
-  const after = JSON.parse(readFileSync(join(fixture.cwd, '.harness/active-task.json')));
-  assert.equal(after.phase, before.phase, 'the phase must not advance');
-  assert.equal(after.nextAction, before.nextAction, 'the next action must not be replaced');
-  assert.deepEqual(after.evidence, before.evidence, 'the acceptance evidence must not be recorded');
-  assert.equal(after.evidenceTree, before.evidenceTree, 'the evidence tree must not be set');
-  assert.equal(after.review, before.review, 'no verdict may be recorded');
-  assert.equal(readFileSync(join(fixture.cwd, '.harness/events.jsonl'), 'utf8'), eventsBefore, 'no event may be written');
-  assert.equal(existsSync(join(fixture.cwd, '.harness/reviews.jsonl')), false, 'no round may be appended');
+  // The ways a review payload can be malformed, including one that is
+  // present but null: the rule owns the payload, so each of these is refused
+  // with the rule's message and leaves the task as it was.
+  const malformed = [
+    { review: { reviewer: 'independent fixture', verdict: 'APPROVE', findings: ['an approval cannot carry these'], summary: 'Approved' }, message: /APPROVE cannot carry findings/ },
+    { review: { reviewer: 'independent fixture', verdict: 'MAYBE', findings: [], summary: 'Unknown verdict' }, message: /review\.verdict must be one of/ },
+    { review: { reviewer: '  ', verdict: 'APPROVE', findings: [], summary: 'Approved' }, message: /review\.reviewer is required/ },
+    { review: { reviewer: 'independent fixture', verdict: 'APPROVE', findings: [], summary: '  ' }, message: /review\.summary is required/ },
+    { review: { reviewer: 'independent fixture', verdict: 'APPROVE', findings: [42], summary: 'Approved' }, message: /review\.findings must be an array of strings/ },
+    { review: null, message: /review\.verdict must be one of/ },
+  ];
+  for (const { review, message } of malformed) {
+    fixture.put('.task.json', JSON.stringify({
+      phase: 'verify',
+      nextAction: 'progress that should not be applied',
+      evidence: ['observed the owner state'],
+      review,
+    }));
+    const refused = fixture.cli('update', '--spec', '.task.json');
+    assert.equal(refused.status, 2, JSON.stringify(review));
+    assert.match(refused.stderr, message, JSON.stringify(review));
+    assert.doesNotMatch(refused.stderr, /Cannot read properties of/, `a malformed payload must not reach a property access: ${JSON.stringify(review)}`);
+    const after = JSON.parse(readFileSync(join(fixture.cwd, '.harness/active-task.json')));
+    assert.equal(after.phase, before.phase, 'the phase must not advance');
+    assert.equal(after.nextAction, before.nextAction, 'the next action must not be replaced');
+    assert.deepEqual(after.evidence, before.evidence, 'the acceptance evidence must not be recorded');
+    assert.equal(after.evidenceTree, before.evidenceTree, 'the evidence tree must not be set');
+    assert.equal(after.review, before.review, 'no verdict may be recorded');
+    assert.equal(readFileSync(join(fixture.cwd, '.harness/events.jsonl'), 'utf8'), eventsBefore, 'no event may be written');
+    assert.equal(existsSync(join(fixture.cwd, '.harness/reviews.jsonl')), false, 'no round may be appended');
+  }
 });
 
 // A read that reports success while the write it was combined with is

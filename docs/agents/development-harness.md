@@ -44,9 +44,11 @@ fixed. Phases are understand, plan, implement, verify, review and blocked;
 `finish` alone sets complete. Each criterion needs one evidence string, in
 criterion order, describing the command/artifact and observed outcome. The
 review result is recorded with `npm run harness -- review` (below), which
-carries the reviewer, findings, summary and an explicit
-APPROVE/REQUEST_CHANGES/BLOCKED verdict. Completion requires APPROVE with no
-unresolved findings.
+carries the reviewer, summary and an explicit
+APPROVE/REQUEST_CHANGES/BLOCKED verdict, plus findings when there are any.
+An `update --spec` review field takes the same shape, and the same rule
+refuses a malformed one before anything is written. Completion requires
+APPROVE with no unresolved findings.
 Acceptance evidence is bound to the environment-bound fingerprint when it is
 recorded; the approval is bound to the code it was recorded for. Editing code
 requires recording both again.
