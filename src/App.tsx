@@ -87,9 +87,9 @@ function App() {
   // Issue #2599 — pause the decorative infinite CSS animations while the app
   // is not the foreground surface. An infinite animation makes the renderer
   // Compositor produce a frame every vsync even when nothing on the page
-  // changed, which pinned the compositor thread near one core on a long
-  // running hub. The gate writes a root attribute and holds no React state,
-  // so a focus change never re-renders the workspace.
+  // changed, which pinned the compositor thread near one core on a
+  // long-running hub. The gate writes a root attribute and holds no React
+  // state, so a focus change never re-renders the workspace.
   useIdleAnimationGate();
 
   // Keyboard shortcuts — Tauri's globalShortcut plugin, so they work even
