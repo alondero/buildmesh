@@ -27,6 +27,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { resolve, join } from 'node:path';
+import { StrictMode } from 'react';
 import { renderHook, act } from '@testing-library/react';
 
 const windowApi = vi.hoisted(() => ({
@@ -69,8 +70,10 @@ function rules(css: string): Rule[] {
 
 /** The selectors of the idle gate rule — the one keyed off the root marker. */
 function gateSelectors(css: string): string[] {
-  // Found by scanning rather than by position: a second gate rule earlier in
-  // the file must not make this helper read the wrong one.
+  // Found by scanning rather than by position, so the helper cannot read the
+  // wrong rule if the block is ever moved. The assertion below then pins that
+  // there is exactly ONE gate rule: a second one would be a second place to
+  // forget an animation, so it is a failure rather than a silent choice.
   const matches = [...css.matchAll(/([^{}]*data-window-idle[^{}]*)\{([^{}]*)\}/g)];
   expect(matches.length, 'App.css must contain exactly one idle gate rule').toBe(1);
   return matches[0][1].split(',').map((s) => s.trim()).filter(Boolean);
@@ -98,16 +101,25 @@ interface InfiniteAnimation {
   selector: string;
 }
 
-/** Every infinite animation a stylesheet declares. */
+/** Whether a declaration body declares an infinite animation. */
+function declaresInfiniteAnimation(body: string): boolean {
+  const shorthand = body.match(/(?:^|;|\s)animation\s*:\s*([^;]+)/);
+  // CSS keywords are case-insensitive, so `INFINITE` counts too.
+  return Boolean(
+    (shorthand && /\binfinite\b/i.test(shorthand[1])) ||
+    /animation-iteration-count\s*:\s*infinite/i.test(body),
+  );
+}
+
+/** Every infinite animation a stylesheet declares in a flat rule. */
 function infiniteAnimations(css: string): InfiniteAnimation[] {
   const found: InfiniteAnimation[] = [];
   for (const rule of rules(css)) {
-    const shorthand = rule.body.match(/(?:^|;|\s)animation\s*:\s*([^;]+)/);
-    // CSS keywords are case-insensitive, so `INFINITE` counts too.
-    const infinite =
-      (shorthand && /\binfinite\b/i.test(shorthand[1])) ||
-      /animation-iteration-count\s*:\s*infinite/i.test(rule.body);
-    if (!infinite) continue;
+    // An at-rule is not a class selector: `@utility animate-marquee { … }`
+    // names its utility in the at-rule's own prelude, and the dedicated
+    // scanners below read it from there.
+    if (rule.selectors.some((selector) => selector.trim().startsWith('@'))) continue;
+    if (!declaresInfiniteAnimation(rule.body)) continue;
     for (const selector of rule.selectors) {
       // Any pseudo-element, not only ::before/::after: `.foo::marker` is just
       // as capable of keeping the Compositor busy as `.foo::after`.
@@ -120,6 +132,70 @@ function infiniteAnimations(css: string): InfiniteAnimation[] {
     }
   }
   return found;
+}
+
+/** The body of every `@name { ... }` at-rule, brace-matched. */
+function atRuleBodies(css: string, name: string): string[] {
+  const bodies: string[] = [];
+  for (const match of css.matchAll(new RegExp(`@${name}\\b`, 'g'))) {
+    const open = css.indexOf('{', match.index);
+    if (open < 0) break;
+    let depth = 0;
+    for (let index = open; index < css.length; index += 1) {
+      if (css[index] === '{') depth += 1;
+      else if (css[index] === '}' && --depth === 0) {
+        bodies.push(css.slice(open + 1, index));
+        break;
+      }
+    }
+  }
+  return bodies;
+}
+
+/**
+ * The infinite Tailwind utilities a stylesheet's `@theme` block declares.
+ *
+ * Tailwind v4 turns a `--animate-<name>: <value>` token into the
+ * `animate-<name>` utility, so an infinite token is an infinite animation the
+ * gate has to cover. The flat-rule scanner above cannot see it: `@theme { … }`
+ * nests its declarations, and the token's value never appears as an
+ * `animation:` shorthand.
+ */
+function themeAnimationUtilities(css: string): InfiniteAnimation[] {
+  const found: InfiniteAnimation[] = [];
+  // Every `@theme` block, not only the first: a stylesheet may declare more
+  // than one, and a token in the second one is as much an infinite animation
+  // as a token in the first.
+  for (const body of atRuleBodies(css, 'theme')) {
+    for (const match of body.matchAll(/--animate-([\w-]+)\s*:\s*([^;]+);/g)) {
+      if (!/\binfinite\b/i.test(match[2])) continue;
+      found.push({ classes: [`animate-${match[1]}`], pseudo: null, selector: `--animate-${match[1]}` });
+    }
+  }
+  return found;
+}
+
+/**
+ * The infinite animations a stylesheet's `@utility` at-rules declare.
+ *
+ * `@utility animate-marquee { animation: marquee 3s linear infinite; }` is a
+ * Tailwind utility like any other, and the utility's NAME is the class the app
+ * renders — so the gate has to name that name, and the guard has to read it
+ * from the at-rule rather than report a rule with no class at all.
+ */
+function utilityAnimations(css: string): InfiniteAnimation[] {
+  const found: InfiniteAnimation[] = [];
+  for (const match of css.matchAll(/@utility\s+([^\s{]+)\s*\{([^{}]*)\}/g)) {
+    if (!declaresInfiniteAnimation(match[2])) continue;
+    found.push({ classes: [match[1]], pseudo: null, selector: `@utility ${match[1]}` });
+  }
+  return found;
+}
+
+/** Every infinite animation a stylesheet declares, in any of Tailwind's forms. */
+function everyInfiniteAnimation(css: string): InfiniteAnimation[] {
+  const source = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  return [...infiniteAnimations(source), ...themeAnimationUtilities(source), ...utilityAnimations(source)];
 }
 
 /** Tailwind's infinite `animate-*` utilities. `animate-none` is not one. */
@@ -143,13 +219,26 @@ function stylesheets(srcRoot: string): { path: string; css: string }[] {
   return found;
 }
 
-/** Every infinite Tailwind animation class the desktop app renders. */
+/**
+ * The characters a class token can carry in front of the utility name: a
+ * variant prefix (`hover:`, `data-[state=open]:`, `[&>*]:`) or the important
+ * marker (`!`). The prefix is part of the token the DOM holds.
+ */
+const VARIANT_PREFIX = /[\w:[\]./%#()!@&*>~=-]*/;
+
+/**
+ * Every infinite Tailwind animation class the desktop app renders.
+ *
+ * The token is captured IN FULL — variant prefix and important marker
+ * included. A variant is a different class token: the DOM holds
+ * "hover:animate-pulse", which a plain `.animate-pulse` selector does not
+ * match. Capturing the bare utility instead would let the guard report a
+ * coverage the gate does not have, so the variant is recorded as itself.
+ */
 function tailwindInfiniteClasses(srcRoot: string): string[] {
   const tokens = new Set<string>();
-  const pattern = new RegExp(
-    `(?<![\\w-])(?:[a-z0-9-]+:)*animate-(?:${TAILWIND_INFINITE_UTILITIES.join('|')})(?![\\w-])`,
-    'g',
-  );
+  const utility = `animate-(?:${TAILWIND_INFINITE_UTILITIES.join('|')})`;
+  const pattern = new RegExp(`(?<![\\w-])${VARIANT_PREFIX.source}${utility}(?![\\w-])!?`, 'g');
   const walk = (dir: string) => {
     for (const entry of readdirSync(dir)) {
       const full = join(dir, entry);
@@ -167,12 +256,18 @@ function tailwindInfiniteClasses(srcRoot: string): string[] {
   return [...tokens];
 }
 
+/** Whether a token is a bare Tailwind utility — no variant, no important marker. */
+function isBareUtility(token: string): boolean {
+  return new RegExp(`^animate-(?:${TAILWIND_INFINITE_UTILITIES.join('|')})$`).test(token);
+}
+
 /** Whether one gate selector reaches the element carrying `token`. */
 function gateCovers(selectors: string[], token: string): boolean {
-  if (token.includes(':')) {
-    // A Tailwind variant is a literal class token ("motion-safe:animate-pulse"),
-    // so a plain `.animate-pulse` selector does NOT reach it — the gate has to
-    // name the variant explicitly.
+  if (!isBareUtility(token)) {
+    // A variant (`hover:animate-pulse`) or the important marker
+    // (`animate-pulse!`) is a DIFFERENT class token, so a plain
+    // `.animate-pulse` selector does NOT reach it — the gate has to name the
+    // token in full, as `[class~='hover:animate-pulse']`.
     return selectors.some((s) => s.includes(`[class~='${token}']`));
   }
   const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -341,6 +436,35 @@ describe('useIdleAnimationGate', () => {
     unmount();
     expect(idleMarker()).toBeNull();
   });
+
+  it('keeps one live subscription after a StrictMode double mount', async () => {
+    // `src/main.tsx` mounts the app under React's StrictMode, which mounts
+    // every effect, tears it down and mounts it again. The first subscription
+    // must not outlive its effect: a listener that survives would deliver
+    // every focus change a second time, and the marker would follow a
+    // teardown that already ran.
+    const live = new Set<() => void>();
+    windowApi.onFocusChanged.mockImplementation((cb: (event: { payload: boolean }) => void) => {
+      focusHandler = cb;
+      const stop = vi.fn();
+      live.add(stop);
+      return Promise.resolve(() => {
+        live.delete(stop);
+        stop();
+      });
+    });
+
+    const { unmount } = renderHook(() => useIdleAnimationGate(), { wrapper: StrictMode });
+    await act(async () => {});
+
+    expect(live.size).toBe(1);
+    emitFocus(false);
+    expect(idleMarker()).toBe('true');
+
+    unmount();
+    expect(live.size).toBe(0);
+    expect(idleMarker()).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -368,7 +492,7 @@ describe('the idle gate rule', () => {
 
     const gated = new Set<string>();
     for (const sheet of sheets) {
-      for (const animation of infiniteAnimations(sheet.css.replace(/\/\*[\s\S]*?\*\//g, ''))) {
+      for (const animation of everyInfiniteAnimation(sheet.css)) {
         expect(
           gateCoversAnimation(selectors, animation),
           `${animation.selector} (${sheet.path}) must be inside the idle gate`,
@@ -377,6 +501,50 @@ describe('the idle gate rule', () => {
       }
     }
     expect(gated.size).toBeGreaterThan(0);
+  });
+
+  it('sees an infinite animation declared as a Tailwind theme token', () => {
+    // Tailwind v4 turns `--animate-<name>` into the `animate-<name>` utility.
+    // An infinite token is an infinite animation, and `@theme { … }` nests its
+    // declarations where the flat-rule scanner cannot reach them — so the
+    // guard reads the token block itself.
+    const css = '@theme { --animate-guard-probe: marquee 3s linear infinite; }';
+    const found = everyInfiniteAnimation(css);
+    expect(found.map((animation) => animation.classes[0])).toContain('animate-guard-probe');
+
+    // And the guard has teeth: the current gate does not name it, so the
+    // failure is reported rather than passed in silence.
+    expect(gateCoversAnimation(gateSelectors(CSS), found[0])).toBe(false);
+  });
+
+  it('sees an infinite animation declared as a Tailwind utility', () => {
+    // `@utility animate-marquee { … }` is a utility whose NAME is the class the
+    // app renders. The guard reads the name out of the at-rule, so adding the
+    // utility to the gate can satisfy it.
+    const css = '@utility animate-guard-probe { animation: marquee 3s linear infinite; }';
+    const found = everyInfiniteAnimation(css);
+    expect(found).toHaveLength(1);
+    expect(found[0].classes).toEqual(['animate-guard-probe']);
+
+    // The gate can satisfy it by naming the class.
+    expect(
+      gateCoversAnimation(
+        [...gateSelectors(CSS), "[data-window-idle='true'] .animate-guard-probe"],
+        found[0],
+      ),
+    ).toBe(true);
+  });
+
+  it('does not mistake a Tailwind variant for the bare utility', () => {
+    // `hover:animate-pulse` and `animate-pulse!` are DIFFERENT class tokens
+    // from `animate-pulse`, and a plain `.animate-pulse` selector does not
+    // reach them. The guard has to name the token in full, or it would report
+    // a coverage the gate does not have.
+    const selectors = gateSelectors(CSS);
+    expect(gateCovers(selectors, 'animate-pulse')).toBe(true);
+    for (const variant of ['hover:animate-pulse', 'data-[state=open]:animate-pulse', 'animate-pulse!']) {
+      expect(gateCovers(selectors, variant), `${variant} must be gated in full`).toBe(false);
+    }
   });
 
   it('gates every infinite Tailwind animation the desktop app renders', () => {
