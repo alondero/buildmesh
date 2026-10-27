@@ -35,15 +35,23 @@ Exhaustiveness is best effort, since subsequent repairs may introduce defects.
 
 ## Follow-up pass
 
-Use the previous reviewed revision or captured diff, prior findings and repair
-diff to retain context. Check every required finding's resolution through code
-and evidence, then inspect the repairs for new defects and interactions with
-the rest of the change. Identify whether a new finding was introduced by the
-repair or missed in the earlier pass. Expand to a complete review when history
-is unavailable or scope changes. Report all remaining findings together.
+Load the previous round with `npm run harness -- review --show`. It returns the
+last verdict, the findings still outstanding, and the paths whose content
+changed since the last round reviewed, so the round starts from the recorded
+state instead of re-reading the whole change. It reads the ledger and records
+no round: it refuses a verdict in the same command, and it reports a snapshot
+of the tree rather than a consistent view of it.
 
-Fast checks plus relevant behavioral regressions are sufficient to begin a
-follow-up review. Require broader checks during repair when the affected
+Check the resolution of each required finding
+through code and evidence, then inspect the repairs for new defects and
+interactions with the rest of the change. Identify whether a new finding was
+introduced by the repair or missed in the earlier pass. Expand to a complete
+review when history is unavailable or scope changes. Report all remaining
+findings together.
+
+Run the scoped check for the change under review
+(`npm run harness -- check --base <base>`); it selects the checks the changed
+paths actually reach. Require broader checks during repair when the affected
 boundary warrants them; full verification is required for final handoff.
 Keep unresolved failures and evidence gaps visible until they are resolved.
 
@@ -55,10 +63,18 @@ REQUEST_CHANGES lists required corrections; optional suggestions are separate.
 BLOCKED names the missing prerequisite. APPROVE explicitly endorses the
 complete current change and has no unresolved required findings.
 
+Record the verdict with `npm run harness -- review --verdict <verdict>
+--reviewer <name> --summary <text> [--finding <text>]...`. It stores the
+reviewer, verdict, findings and the reviewed code in the task, appends the
+round to the review ledger, and leaves the completion guards as they were: the
+approval covers the code it was recorded for, and an approval that still
+carries findings is refused. The binding is the code, not the machine: a
+reviewer working in another environment still covers the tree it reviewed, and
+`npm run harness -- status` names the differing environment fields.
+
 Semantic approval can precede final verification, but completion requires a
 PASS from scope-complete `npm run verify`, acceptance evidence and independent
 APPROVE recorded for that same final tree. Preserve those completion guards.
 Any later source edit requires refreshed evidence and approval; approval of an
-older diff does not cover later unreviewed edits. The implementer records the
-reviewer's verdict with `harness update` and calls `harness finish` only when
-all completion evidence is current. Reviewers do not finish the author's task.
+older diff does not cover later unreviewed edits. `npm run harness -- finish`
+stays with the implementer; reviewers do not finish the author's task.
