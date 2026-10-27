@@ -303,7 +303,7 @@ impl RecoveryTarget {
                     run_id: run.id,
                     state: RunState::from_db_str(&run.state),
                     graph: super::CircuitGraph::from_json(&active.circuit_graph_json).ok()?,
-                    context: super::CircuitContext::from_json(&run.context_json).ok()?,
+                    context: crate::db::circuit::artifacts::load_run_context(run.id).ok()?,
                     steps: super::load_steps(self.run).ok()?,
                 })
             },

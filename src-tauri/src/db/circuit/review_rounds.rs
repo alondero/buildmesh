@@ -76,7 +76,7 @@ pub fn set_review_round_limit(run_id: i64, max_rounds: i32) -> Result<String, Db
     {
         return Err(DbError::invalid("This run has no review retry loop."));
     }
-    let mut context = CircuitContext::from_json(&run.context_json)?;
+    let mut context = super::artifacts::load_context(&tx, run_id)?;
     context.set("review.round_limit", limit.to_string());
     context.set(
         "retry.max_retries",
@@ -86,9 +86,10 @@ pub fn set_review_round_limit(run_id: i64, max_rounds: i32) -> Result<String, Db
             limit.to_string()
         },
     );
+    let context_json = super::artifacts::write_context(&tx, run_id, &context.to_json()?)?;
     tx.execute(
         "UPDATE autopilot_circuit_runs SET context_json=?2, updated_at=datetime('now') WHERE id=?1",
-        params![run_id, context.to_json()?],
+        params![run_id, context_json],
     )?;
     // Advancing history invalidates any worker decision loaded before this edit.
     super::evidence::append_history(

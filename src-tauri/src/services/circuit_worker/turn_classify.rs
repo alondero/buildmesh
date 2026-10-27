@@ -852,7 +852,7 @@ pub(super) fn lost_turn_watchdog_pass(app: &AppHandle) -> Vec<QuietClassifierFai
         };
         let (Ok(graph), Ok(context)) = (
             CircuitGraph::from_json(&active.circuit_graph_json),
-            CircuitContext::from_json(&active.run.context_json),
+            crate::db::circuit::artifacts::load_run_context(active.run.id),
         ) else {
             continue;
         };

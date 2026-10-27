@@ -42,7 +42,19 @@ pub(crate) fn list_queued_circuit_runs_inner(
             row.get(9)?,
         ))
     })?;
-    rows.collect()
+    let mut queued: Vec<(AutopilotCircuitRun, String)> = rows.collect::<SqlResult<_>>()?;
+    // The Probe reads the bulky half of a run's context out of its
+    // `context_json` — the issue body it searches by, the review report it
+    // shows — so the projection rejoins the two halves before the run leaves
+    // the database layer.
+    let ids: Vec<i64> = queued.iter().map(|(run, _)| run.id).collect();
+    let stored = super::artifacts::load_values_for_runs(db, &ids)?;
+    for (run, _) in queued.iter_mut() {
+        if let Some(values) = stored.get(&run.id) {
+            run.context_json = super::artifacts::join_context_json(&run.context_json, values);
+        }
+    }
+    Ok(queued)
 }
 /// Swap one pending run with its adjacent queue neighbour. Returns false at
 /// the front/back boundary. Running and terminal rows cannot be reordered.
