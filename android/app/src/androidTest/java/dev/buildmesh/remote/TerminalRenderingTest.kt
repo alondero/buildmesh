@@ -176,12 +176,20 @@ class TerminalRenderingTest {
                 compose.onNode(hasSetTextAction()).performTextInput("pwd")
                 compose.onNodeWithText("Send").performClick()
                 assertTrue(input.await(5, TimeUnit.SECONDS))
-                listOf("Shift+Tab", "←", "→", "y", "n", "Enter").forEach {
+                listOf("Shift+Tab", "←", "→", "Enter").forEach {
                     compose.onNodeWithText(it).performScrollTo().performClick()
                 }
-                compose.waitUntil(5000) { frames.count { !it.startsWith('{') } >= 7 }
-                assertEquals("Only explicit native input reaches the PTY", listOf("pwd\r", "\u001b[Z", "\u001b[D", "\u001b[C", "y", "n", "\r"),
+                compose.waitUntil(5000) { frames.count { !it.startsWith('{') } >= 5 }
+                assertEquals("Only explicit native input reaches the PTY", listOf("pwd\r", "\u001b[Z", "\u001b[D", "\u001b[C", "\r"),
                     frames.filter { !it.startsWith('{') })
+                // The approval keys live in the band above the terminal now,
+                // where the request they answer is named. A bare `y` in the
+                // quick-key row would approve whichever prompt the agent
+                // happens to show next.
+                listOf("y", "n").forEach {
+                    assertTrue("The $it quick key must not be offered",
+                        compose.onAllNodesWithText(it).fetchSemanticsNodes().isEmpty())
+                }
 
                 // Touch scrolling (the phone has no wheel, so the xterm scrollback
                 // is only reachable through the shared touch-pan bridge). Fill the

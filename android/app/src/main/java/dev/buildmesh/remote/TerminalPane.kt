@@ -24,6 +24,7 @@ import androidx.core.net.toUri
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.webkit.WebViewAssetLoader
 import java.util.Base64
 import kotlinx.coroutines.Dispatchers
@@ -31,6 +32,28 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
+/**
+ * The quick keys the terminal's own row offers.
+ *
+ * The approval keys are deliberately absent: a pending request is answered from
+ * the band above the terminal, which names the request it answers. A bare `y`
+ * in a quick-key row cannot say which request it would approve, so it would
+ * approve whichever prompt the agent happens to show next.
+ */
+val terminalQuickKeys = listOf(
+    "Esc" to "\u001b", "Tab" to "\t", "Shift+Tab" to "\u001b[Z", "Ctrl+C" to "\u0003", "Enter" to "\r",
+    "↑" to "\u001b[A", "↓" to "\u001b[B", "←" to "\u001b[D", "→" to "\u001b[C",
+)
+
+/**
+ * One node's terminal.
+ *
+ * The pane draws the desktop's semantic-turn banner directly above the
+ * terminal surface, where the request is read, so a harness blocked on a
+ * person is answered from the screen that shows its prompt (issue #2609).
+ * The band is read from the node row's own lifecycle and answers through the
+ * desktop's `y\r` / `n\r` keystrokes.
+ */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun TerminalPane(api: BuildmeshApi, nodeId: Long, vm: BuildmeshViewModel) {
@@ -62,6 +85,21 @@ fun TerminalPane(api: BuildmeshApi, nodeId: Long, vm: BuildmeshViewModel) {
             }, onUnauthorized = vm::unauthorized)
     }
     fun resize() { socket.send(buildJsonObject { put("type", "resize"); put("cols", cols); put("rows", rows) }.toString()) }
+
+    // The node's own row is the source of the request: the desktop's
+    // semantic-turn banner reads the same lifecycle, so the phone shows the
+    // request the desktop shows, in the desktop's own words.
+    val state by vm.state.collectAsStateWithLifecycle()
+    val request = state.nodes.firstOrNull { it.number("id") == nodeId }?.let { nodeInputRequest(it) }
+    // The same reply state the waiting deck uses, so the two surfaces cannot
+    // drift apart on the labels, the keystrokes or the moment a control
+    // retires.
+    val reply = rememberInputReply(request, nodeId, state.busy) { id, sequence, onDone ->
+        vm.action(onFailed = { onDone(false) }) { client ->
+            client.sendKeys(id, sequence)
+            onDone(true)
+        }
+    }
 
     DisposableEffect(view, socket, lifecycle) {
         val loader = WebViewAssetLoader.Builder().addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context)).build()
@@ -130,10 +168,10 @@ fun TerminalPane(api: BuildmeshApi, nodeId: Long, vm: BuildmeshViewModel) {
                 TextButton(onClick = { socket.stop(); socket.start() }) { Text("Reconnect") }
             }
         }
+        SemanticTurnBand(request, reply)
         AndroidView(factory = { view }, modifier = Modifier.fillMaxWidth().weight(1f).onSizeChanged { viewport = it })
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 6.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            listOf("Esc" to "\u001b", "Tab" to "\t", "Shift+Tab" to "\u001b[Z", "Ctrl+C" to "\u0003", "Enter" to "\r",
-                "↑" to "\u001b[A", "↓" to "\u001b[B", "←" to "\u001b[D", "→" to "\u001b[C", "y" to "y", "n" to "n").forEach { (label, sequence) ->
+            terminalQuickKeys.forEach { (label, sequence) ->
                 TextButton(enabled = status == "Connected", onClick = {
                     if (!socket.send(sequence)) vm.notice("Input was not sent. Reconnect the terminal.")
                 }) { Text(label) }

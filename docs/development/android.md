@@ -314,6 +314,22 @@ responses into the current desktop prompt. Input controls report disconnection i
 queueing keystrokes. HTTP replies enforce the server's 1024-byte encoded-body
 limit. Enumerated answers are shown as guidance rather than guessed PTY keys.
 
+The terminal screen draws the desktop's semantic-turn banner directly above the
+terminal surface, where the request is read (issue #2609). The band is read
+from the node row's own lifecycle, through the same `nodeInputRequest` reader
+the waiting deck uses, so both surfaces show the request the desktop shows and
+in the desktop's own words. A `permission_requested` request gets the desktop's
+`Allow (Y)` / `Reject (N)` pair — `Approve (Y)` / `Deny (N)` when the turn is a
+`command_confirmation` — sending the same `y\r` / `n\r` keystrokes; a question
+or an unclassified request shows its text and its enumerated answers as
+guidance and no pair, because the band posts only the approval keystrokes and
+a tap on a choice would be a guess at what the agent's own prompt selects.
+The pair disables while a reply is in flight and retires only once the desktop
+accepted it; a send that fails hands the controls back instead of leaving them
+dead. The quick-key row below the terminal offers no bare `y` or `n`: a key
+without a request in view would approve whichever prompt the agent happened to
+show next.
+
 The terminal scrolls by touch. xterm's own scroller answers the mouse wheel
 only, so the bundled WebView wires the shared touch-pan bridge described in
 [Terminals](terminals.md#mobile-terminals-scroll-by-touch-through-one-shared-bridge):
@@ -430,6 +446,9 @@ reaches the same conclusion, and that each node owns its own notification id),
 and one that drives the feed against MockWebServer to prove two owners share a
 single socket, that the socket closes with its last owner, and that a revoked
 device stops the feed instead of minting tickets forever.
+The terminal's quick-key row has its own suite: the approval keys are not
+duplicated there, and the approval sequences the band sends are the desktop's
+`y\r` / `n\r`.
 
 ```powershell
 android\gradlew.bat -p android connectedDebugAndroidTest
@@ -441,6 +460,11 @@ forgetting, Main-thread network discipline, cancelled mutation callbacks,
 snapshot ownership, diff retry and the real bundled WebView's snapshot/binary
 rendering, visible pixels in the native window, viewport geometry, resize and
 input, including replayed queries that must not become keystrokes.
+The semantic-turn band above the terminal is covered on the device too: it
+shows a permission request's own words and the desktop's `Allow (Y)` /
+`Reject (N)` pair above the terminal surface, posts `y\r` to the desktop,
+hands the pair back when the desktop refuses that reply and retires it once
+the desktop accepted it.
 Native form tests also exercise capture, replies, issue launch, archive partial
 failure and PR authentication through real OkHttp requests to MockWebServer.
 Session lifecycle tests read the encrypted store back in each case: a 403 from a
