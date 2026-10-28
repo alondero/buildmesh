@@ -103,14 +103,6 @@ statistics do not supply this daily percentage. Neither is projected as a cash
 balance or additional quota. The former Codebuff `/api/usage` route and
 `windows`/`earnedSessions` response assumption have been replaced.
 
-**Freebuff SDK runs.** The interactive CLI and the public SDK are different
-paths. The CLI launcher does not bundle `@codebuff/sdk`, and the SDK client
-does not accept the CLI bearer as its API key. A controlled SDK run persists
-`RunState` under `<app data>/freebuff-sdk-runs/` and maps print-mode events,
-including child-agent ids, as described in the
-[Freebuff SDK surface](../learning/freebuff-sdk-surface.md). That store is not
-the Usage Meter credential, and it does not change the interactive adapter.
-
 **Perch subscription usage.** Perch owns its sign-in. The session file is
 `~/.perch/cli-auth-session.json`, or `$PERCH_CLI_AUTH_DIR/cli-auth-session.json`.
 On macOS the session lives in the login keychain (service `app.perchai.cli-auth`,
