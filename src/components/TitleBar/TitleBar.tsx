@@ -14,8 +14,13 @@ import { CompanionPill } from './CompanionPill';
 import { TitleBarOverflow } from './TitleBarOverflow';
 import { ViewSelector } from './ViewSelector';
 import { MobileIcon, SettingsIcon } from './utilityIcons';
-import { LABELLED_SWITCHER_MIN_WIDTH, UTILITIES_IN_BAR_MIN_WIDTH } from './titleBarTiers';
+import {
+  LABELLED_SWITCHER_MIN_WIDTH,
+  UTILITIES_IN_BAR_MIN_WIDTH,
+  tierWidthAtTextScale,
+} from './titleBarTiers';
 import { useMinWidth } from '../../hooks/useMinWidth';
+import { useTextScale } from '../../hooks/useTextScale';
 import { AppSettingsModal } from '../AppSettings/AppSettingsModal';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
 import { useUIStore } from '../../stores/uiStore';
@@ -156,7 +161,7 @@ function NavigationControls() {
             earlier 240px threshold compared against the field's outer width
             and hid the chip at every 1440-1719px window (#2421 review). */}
         {SEARCH_SHORTCUT_LABEL !== '' && (
-          <kbd className="shrink-0 rounded-md border border-border-default bg-bg-card px-1.5 py-0.5 font-mono text-[11px] text-text-muted max-[1439px]:hidden @max-[216px]:hidden">
+          <kbd className="shrink-0 rounded-md border border-border-default bg-bg-card px-1.5 py-0.5 font-mono text-sm text-text-muted max-[1439px]:hidden @max-[216px]:hidden">
             {SEARCH_SHORTCUT_LABEL}
           </kbd>
         )}
@@ -412,9 +417,14 @@ export function TitleBar() {
   // uiStore so Omnibar view commands ("Switch view: Filtered") slide the
   // bar in through the same state the switcher writes.
   const viewMode = useUIStore((s) => s.viewMode);
-  // #2421 — which controls each width tier mounts (see `titleBarTiers`).
-  const labelledSwitcher = useMinWidth(LABELLED_SWITCHER_MIN_WIDTH);
-  const utilitiesInBar = useMinWidth(UTILITIES_IN_BAR_MIN_WIDTH);
+  // #2421 — which controls each width tier mounts (see `titleBarTiers`). The
+  // thresholds are 100%-text measurements, so a larger interface text size
+  // folds controls earlier: at 150% the bar needs half again the width before
+  // the labelled segments and the utility pills stop crowding the command
+  // field. At the default scale the numbers are unchanged.
+  const textScale = useTextScale();
+  const labelledSwitcher = useMinWidth(tierWidthAtTextScale(LABELLED_SWITCHER_MIN_WIDTH, textScale));
+  const utilitiesInBar = useMinWidth(tierWidthAtTextScale(UTILITIES_IN_BAR_MIN_WIDTH, textScale));
   const [isMaximized, setIsMaximized] = useState(false);
   // The snap overlay is positioned onto this button's measured box, so the ref
   // has to reach the real DOM node (ADR-0035).
