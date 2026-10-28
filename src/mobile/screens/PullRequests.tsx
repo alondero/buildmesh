@@ -8,7 +8,7 @@ import { AppBar, Sheet } from '../ui';
 import { SpawnSplitButton } from '../components/SpawnSplitButton';
 import { SpawnMenuSheet } from '../components/SpawnMenuSheet';
 import { useSpawnMenu } from '../useSpawnMenu';
-import { meshDefaultLabel, type LaunchChoice } from '../spawnMenu';
+import { meshDefaultLabel, meshDefaultProvider, type LaunchChoice } from '../spawnMenu';
 
 function canMerge(pr: GitHubPullRequest) {
   return pr.state === 'open' && !pr.draft && pr.mergeable === true &&
@@ -178,6 +178,7 @@ function PullRequestList({ meshId, mesh, nodeId, onAuthFailed, menuPr, onMenuPrC
     pr.head_repo_clone_url === `${pr.url.split('/pull/')[0]}.git`)) ?? [];
   // The main half of the split button starts the mesh's own default.
   const defaultLabel = meshDefaultLabel(mesh, providers);
+  const defaultProvider = meshDefaultProvider(mesh, providers);
   return <section className="mobile-pulls" aria-label="Pull requests">
     <div className="pulls-heading"><h2>{nodeId === undefined ? 'Open pull requests' : "This node’s pull request"}</h2>
       <button className="chip-btn" disabled={busy} onClick={() => void refresh()}>Refresh PR status</button></div>
@@ -196,6 +197,7 @@ function PullRequestList({ meshId, mesh, nodeId, onAuthFailed, menuPr, onMenuPrC
       {nodeId === undefined && <SpawnSplitButton
         label={defaultLabel}
         busyLabel="Starting…"
+        provider={defaultProvider}
         testId={`pr-spawn-${pr.number}`}
         ariaLabel={`Start agent on pull request #${pr.number} with ${defaultLabel}`}
         busy={spawningPr === pr.number}

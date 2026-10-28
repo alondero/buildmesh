@@ -16,7 +16,7 @@ import { IssueTags } from "./IssueTags";
 import { SpawnSplitButton } from "../components/SpawnSplitButton";
 import { SpawnMenuSheet } from "../components/SpawnMenuSheet";
 import { useSpawnMenu } from "../useSpawnMenu";
-import { meshDefaultLabel, type LaunchChoice } from "../spawnMenu";
+import { meshDefaultLabel, meshDefaultProvider, type LaunchChoice } from "../spawnMenu";
 
 type Props = {
   mesh: Mesh;
@@ -141,6 +141,7 @@ export default function IssuesScreen({
   const openNumbers = new Set(issues?.map(issue => issue.number));
   // The main half of every split button starts the mesh's own default.
   const defaultLabel = meshDefaultLabel(mesh, providers);
+  const defaultProvider = meshDefaultProvider(mesh, providers);
 
   return (
     <div data-testid="issues-screen" className="screen">
@@ -277,6 +278,7 @@ export default function IssuesScreen({
                     <SpawnSplitButton
                       label={defaultLabel}
                       busyLabel="Spawning agent…"
+                      provider={defaultProvider}
                       testId={`issue-spawn-${issue.number}`}
                       ariaLabel={`Start agent on this issue with ${defaultLabel}`}
                       busy={busy}
