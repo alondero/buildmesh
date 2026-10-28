@@ -24,6 +24,11 @@
 //! **Prefill**: Freebuff takes its initial prompt as trailing positional
 //! text (`[prompt]`). `prefill_args()` formats the string as a single
 //! positional argument (no `--prefill` flag).
+//!
+//! **SDK runs**: The interactive CLI does not emit lifecycle events.
+//! A controlled SDK run is a separate path in `agent::freebuff_sdk`.
+//! This adapter stays unwired so a terminal session is not treated as
+//! that SDK stream.
 
 use crate::agent::provider::{shell_for, AgentProvider, Platform, SpawnRecipe, UiMeta};
 // The recipe tests assert the shell each platform produces; nothing outside

@@ -177,7 +177,8 @@ in `src-tauri/src/agent/provider/adapters/` remain the source of truth.
 | MiniMax Code | Plugin completion hook plus transcript evidence | Turn completion, `ask_user` questions, background work and interrupts; no permission signal under its pinned Full Access launch |
 | Cline | Native completion hook | Turn completion only is advertised; do not extrapolate request support |
 | Command Code / Meta Muse | Passive session-log watchers | Supported terminal-turn evidence; watcher activation is not proof that a record arrived |
-| DeepSeek Harness / Freebuff / Terminal | No supported lifecycle observer declared | Process lifecycle only; signal health remains unavailable |
+| DeepSeek Harness / Terminal | No supported lifecycle observer declared | Process lifecycle only; signal health remains unavailable |
+| Freebuff | Interactive CLI has no lifecycle observer. A controlled SDK run maps print-mode events | Terminal signal health stays unavailable. SDK child agents are tracked, or marked unavailable when the stream has no usable child registry. See the [Freebuff SDK surface](../learning/freebuff-sdk-surface.md) |
 
 Regression tests exercise route normalization and request/child ordering, lifecycle
 transition effects, production SQLite writes and reads, schema upgrades, client
@@ -187,8 +188,11 @@ terminal-state regressions were observed failing before their fixes.
 This work does not establish measured delivery reliability for every installed
 CLI/version/platform. Existing adapters vary: Claude and Codex have native hooks;
 OpenCode has a plugin stream; Muse and Command Code use passive logs; several
-others expose only completion. Terminal, Freebuff, and unvalidated DeepSeek
-profiles cannot report all four AI states. Their capability gaps must remain
+others expose only completion. Terminal and unvalidated DeepSeek
+profiles have no supported lifecycle observer, so signal health stays
+unavailable. Freebuff's interactive CLI is in that group:
+`circuit_observation` stays unwired. A controlled SDK run is a separate path
+and does not observe the terminal. Those capability gaps must remain
 visible. Older callbacks without optional identity fields remain best-effort;
 an explicit mismatch is rejected, but missing identity is not fabricated.
 
