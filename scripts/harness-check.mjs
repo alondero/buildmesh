@@ -84,7 +84,6 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/agent/provider_menu_tests.rs': 'agent::provider_menu::tests',
   'src-tauri/src/agent/spawn_environment_tests.rs': 'agent::spawn_environment::tests',
   'src-tauri/src/agent/attention_hooks_tests.rs': 'agent::attention_hooks::tests',
-  'src-tauri/src/agent/freebuff_sdk_tests.rs': 'agent::freebuff_sdk::tests',
   'src-tauri/src/agent/harness_catalog_tests.rs': 'agent::harness_catalog::tests',
   'src-tauri/src/agent/provider/adapters/codex_tests.rs': 'agent::provider::adapters::codex::tests',
   'src-tauri/src/agent/provider/adapters/grok_tests.rs': 'agent::provider::adapters::grok::provisioning_tests',
@@ -240,10 +239,7 @@ export const RUST_IMPLEMENTATION_TESTS = {
 // a file that stops being included.
 export function pathIncludeDrift(root) {
   const declared = new Set();
-  // Untracked sources count: a new `#[path]` file is invisible to `git ls-files`
-  // until it is committed, and the include for it would look stale.
-  const listed = args => execFileSync('git', args, { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).split('\n');
-  for (const file of [...listed(['ls-files', '--', RUST_SRC]), ...listed(['ls-files', '--others', '--exclude-standard', '--', RUST_SRC])]) {
+  for (const file of execFileSync('git', ['ls-files', RUST_SRC], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).split('\n')) {
     if (!file.endsWith('.rs')) continue;
     const source = readFileSync(join(root, file), 'utf8');
     for (const match of source.matchAll(/#\[path\s*=\s*"([^"]+)"\]/g)) {

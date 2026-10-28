@@ -28,7 +28,6 @@ pub(crate) mod attention_hooks;
 pub mod background;
 pub mod capabilities;
 pub mod detection;
-pub mod freebuff_sdk;
 pub(crate) mod handover;
 pub mod harness_catalog;
 pub(crate) mod hook_state;
