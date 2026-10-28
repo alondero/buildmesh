@@ -32,6 +32,7 @@ import {
   launchChoices,
   launchFields,
   meshDefaultLabel,
+  meshDefaultProvider,
   MESH_DEFAULT_LABEL,
 } from "../../src/mobile/spawnMenu";
 
@@ -279,6 +280,41 @@ describe("the phone's Spawn Menu (issue #2385)", () => {
           plainOption,
         ] as Provider[]),
       ).toBe(MESH_DEFAULT_LABEL);
+    });
+  });
+
+  describe("the mesh default provider", () => {
+    // The mark beside the split button's label is drawn from this row, so it
+    // must be the *pinned* Spawn Option.
+    it("resolves the mesh's pinned default Spawn Option", () => {
+      expect(
+        meshDefaultProvider({ default_provider: "claude" } as Mesh, [
+          plainOption,
+        ] as Provider[]),
+      ).toBe(plainOption);
+    });
+
+    it("resolves no row when the mesh pins no default the phone can see", () => {
+      // An app-wide default is invisible to the phone, so there is no row to
+      // draw a mark from: the label alone is the honest answer.
+      expect(
+        meshDefaultProvider({ default_provider: null } as Mesh, [
+          plainOption,
+        ] as Provider[]),
+      ).toBeNull();
+      expect(
+        meshDefaultProvider(null, [plainOption] as Provider[]),
+      ).toBeNull();
+    });
+
+    it("ignores a saved Launch Configuration row that carries the pinned id", () => {
+      // A saved configuration is a recipe, not a Spawn Option; the mark must
+      // not come from one.
+      expect(
+        meshDefaultProvider({ default_provider: "launch/saved-review" } as Mesh, [
+          savedConfiguration,
+        ] as Provider[]),
+      ).toBeNull();
     });
   });
 });

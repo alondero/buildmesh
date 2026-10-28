@@ -457,6 +457,15 @@ The menu reaches the phone through three surfaces, each a split button
   launch already selected, because Capture is where the first prompt is
   written.
 
+The main half carries the **default provider's brand mark** beside its label,
+the same mark the desktop's quick-spawn half shows (issue #2040): the mark is
+how the user tells *which* provider the default half will run before they tap
+it. The mark comes from the mesh's **pinned** default Spawn Option only. An
+app-wide default is invisible to the phone, so an unpinned mesh keeps the
+**Mesh default** label with no mark rather than a wrong one, and a saved
+Launch Configuration is a recipe rather than a Spawn Option, so its row is not
+the mesh's default either.
+
 Capture offers **Mesh default** as its own choice, and a create request for
 it carries neither `provider` nor `configuration_id`.
 
