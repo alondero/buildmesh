@@ -1002,13 +1002,22 @@ answer there too.
 
 | Settings area | Use it for |
 |---|---|
-| General | Appearance, quit confirmation, and the default worktree directory |
+| General | Appearance (including interface text size), quit confirmation, and the default worktree directory |
 | Providers | Routing defaults, plus a compact expandable row per provider account for its API key and billing mode |
 | Launch Configurations | Spawn menu order, per-harness model, effort and permission defaults, advanced provider routes, and (behind a **Show launch configurations** toggle) named recipes |
 | Autopilot | The global Circuit agent pool size |
 | Prompts | The Probe spawn prompts for Issues and Pull Requests |
 | Remote Access | LAN/VPN exposure, the Coordinator Read API, certificate management, and paired-device revocation |
 | Data & Diagnostics | Snapshots, integrity checks, export and restore, and the data folder location |
+
+**Interface text size** (Settings → General → Appearance) enlarges the text
+Buildmesh draws outside a terminal — the sidebar, the Probe, the title bar and
+dialogs — without the rest of the layout growing with it. 100% is the size the
+app ships with; drag the slider right in 5% steps to read the app at up to
+150%, and **Reset** returns to 100%. The choice is saved per machine and is
+already applied on the next launch, without a flash of the smaller size.
+Terminals keep their own size: use the title bar's **Zoom** control or
+`Ctrl + +` / `Ctrl + -`.
 
 **Probe spawn prompts** (Settings → Prompts) customise the initial prompt
 for agents spawned from the Probe's GitHub Issues and Pull Requests tabs.

@@ -112,13 +112,35 @@
      base body rule reads --font-sans directly. */
   --font-sans: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
-  /* `--text-2xs` is the one step below Tailwind's default scale (text-xs =
-     12px). It's the smallest legible size in the app — badges, gutter
-     labels, micro-captions. Nothing may go below it. (Tailwind v4 only
-     recognises the `--text-*` namespace for font-size utilities; the old
-     `--font-size-*` names were invisible to it.) */
-  --text-2xs: 10px;
+  /* Interface text scale — Settings → General → Appearance writes this on
+     <html>; every type step below is multiplied by it. It is a TEXT-ONLY
+     lever: the root font-size stays 13px so `rem` — and therefore every
+     spacing, control height and title-bar width tier measured in 13px units
+     (docs/development/windows.md) — keeps its geometry. At the default 1 the
+     app renders exactly the sizes it always has. Terminals are outside the
+     scale: xterm.js takes its own 8–18px size from the Zoom control. */
+  --ui-text-scale: 1;
+
+  /* `--text-2xs` is the one step below Tailwind's scale. It's the smallest
+     legible size in the app — badges, gutter labels, micro-captions. Nothing
+     may go below it. (Tailwind v4 only recognises the `--text-*` namespace
+     for font-size utilities; the old `--font-size-*` names were invisible to
+     it.) Tailwind's own steps are rem-based, so at the 13px root the scale
+     runs 9.75px (`text-xs`) / 11.375px (`text-sm`) / 13px (`text-base`) —
+     the rem multipliers below preserve exactly those sizes.
+
+     Each step is multiplied by `--ui-text-scale` instead of being written
+     out, so one custom property moves the whole scale and a step can never
+     be added without it. The line-heights stay Tailwind's unitless ratios,
+     which follow the font size on their own. */
+  --text-2xs: calc(10px * var(--ui-text-scale));
   --text-2xs--line-height: 1.4;
+  --text-xs: calc(0.75rem * var(--ui-text-scale));
+  --text-sm: calc(0.875rem * var(--ui-text-scale));
+  --text-base: calc(1rem * var(--ui-text-scale));
+  --text-lg: calc(1.125rem * var(--ui-text-scale));
+  --text-xl: calc(1.25rem * var(--ui-text-scale));
+  --text-2xl: calc(1.5rem * var(--ui-text-scale));
   --font-size-base: 13px; /* html/body base below; not a Tailwind namespace */
 
   /* Spacing (4px base) */
@@ -340,7 +362,6 @@ html, body {
   margin: 0;
   padding: 0;
   font-family: var(--font-sans);
-  font-size: var(--font-size-base);
   font-weight: 400;
   line-height: 1.5;
   color: var(--color-text-primary);
@@ -350,6 +371,18 @@ html, body {
   text-rendering: optimizeLegibility;
   overflow: hidden;
   height: 100vh;
+}
+
+/* The rem anchor. `html` keeps the 13px base so 1rem never moves — spacing,
+   widths and heights stay on the geometry the design system measured. Only
+   the inherited body size follows the user's interface text scale, so text
+   without a `text-*` utility grows with the text that has one. */
+html {
+  font-size: var(--font-size-base);
+}
+
+body {
+  font-size: calc(var(--font-size-base) * var(--ui-text-scale));
 }
 
 /* Status indicator utilities */

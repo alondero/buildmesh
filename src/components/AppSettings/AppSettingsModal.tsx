@@ -176,11 +176,16 @@ function SettingsShell({
       </div>
 
       <div className="flex-1 flex min-h-0">
+        {/* The rail is a column of labels, so it widens with the interface
+            text setting (Settings → General → Appearance): 11rem is the 143px
+            measured at the shipped 13px type scale, and at 150% "Launch
+            Configurations" no longer fits that column. Panes are flexible, so
+            the modal's own width does not change. */}
         <nav
           role="tablist"
           aria-orientation="vertical"
           aria-label="Settings sections"
-          className="w-44 shrink-0 border-r border-border-subtle py-5 px-3 space-y-1 overflow-y-auto"
+          className="w-[calc(11rem_*_var(--ui-text-scale,1))] shrink-0 border-r border-border-subtle py-5 px-3 space-y-1 overflow-y-auto"
         >
           {SETTINGS_TABS.map(tab => (
             <button
