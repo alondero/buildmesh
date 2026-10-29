@@ -46,14 +46,34 @@ fn launch_targets_offer_unattached_keyed_providers_without_mutating_routes() {
     let targets = targets_for(&prefs, profiles.to_vec());
     let claude = targets.iter().find(|t| t.id == "claude:minimax").unwrap();
     assert!(!claude.route_attached);
-    assert_eq!(claude.default_model.as_deref(), Some("MiniMax-M3[1m]"));
+    assert_eq!(
+        claude.default_model.as_deref(),
+        Some("MiniMax-M3.1-Flash[1m]")
+    );
     assert!(claude
         .models
         .iter()
         .any(|m| m.id == "MiniMax-M2.7-highspeed"));
+    assert!(claude.models.iter().any(|m| m.id == "MiniMax-M3.1-Flash"));
     let codex = targets.iter().find(|t| t.id == "codex:minimax").unwrap();
-    assert_eq!(codex.models.len(), 1);
-    assert_eq!(codex.models[0].efforts.as_ref().unwrap(), &["none", "high"]);
+    assert_eq!(codex.default_model.as_deref(), Some("MiniMax-M3.1-Flash"));
+    let effort_of = |id: &str| {
+        codex
+            .models
+            .iter()
+            .find(|m| m.id == id)
+            .unwrap_or_else(|| panic!("codex offers {id}"))
+            .efforts
+            .clone()
+            .unwrap()
+    };
+    assert_eq!(codex.models.len(), 2);
+    assert_eq!(effort_of("MiniMax-M3"), ["none", "high"]);
+    // M3.1 Flash always reasons: `none` is a 400 there, so it must not be offered.
+    assert_eq!(
+        effort_of("MiniMax-M3.1-Flash"),
+        ["low", "medium", "high", "xhigh"]
+    );
     assert!(targets
         .iter()
         .any(|t| t.id == "codex:custom" && t.route.as_ref().unwrap().base_url.is_none()));
