@@ -5999,6 +5999,11 @@ fn issue_review_approval_closes_reviewer_asks_implementer_to_merge_and_waits_for
                 && prompt.contains("gh pr merge 314 --squash") && prompt.contains("gh pr ready 314")
                 && prompt.contains("git rebase origin/<base-branch>")
                 && prompt.contains("authorised to rebase the branch, to resolve the merge conflicts"))));
+    let prompt = merge_prompt_from(&merge);
+    assert!(prompt.contains("Approved. No remaining findings."));
+    assert!(prompt.contains("Approval source: independent reviewer"));
+    assert!(prompt.contains("Review step: review_classifier; attempt: 1"));
+    assert!(prompt.contains("Required checks and repository branch protections still apply"));
     let delivered = acknowledge_prompt(&mut run, "merge");
     assert!(
         delivered
@@ -6017,6 +6022,267 @@ fn issue_review_approval_closes_reviewer_asks_implementer_to_merge_and_waits_for
     assert_eq!(status_of(&run, "merge_wait"), StepStatus::Running);
     assert!(run.step("close_implementer").is_none());
     assert_eq!(run.step("implementer").unwrap().agent_node_id, Some(700));
+}
+
+fn merge_prompt_from(transition: &Transition) -> &str {
+    transition
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::InjectPty {
+                node_id, prompt, ..
+            } if node_id == "merge" => Some(prompt.as_str()),
+            _ => None,
+        })
+        .expect("the approved merge must deliver a prompt")
+}
+
+fn deliver_approved_merge(run: &mut RunView) -> Transition {
+    advance(run, &tick(8));
+    advance(
+        run,
+        &CircuitEvent::AgentReady {
+            node_id: "merge".into(),
+        },
+    )
+}
+
+fn approved_issue_merge() -> RunView {
+    let mut run = issue_review_run();
+    issue_review_to_first_verdict(&mut run, 701);
+    advance_with_report_evidence(
+        &mut run,
+        &classified_with_output(
+            "review_classifier",
+            Some(Classification::Completed),
+            Some("Reviewed abc123. Approved, no remaining findings."),
+        ),
+    );
+    run
+}
+
+#[test]
+fn merge_handoff_contains_final_approval_after_an_earlier_rejection() {
+    let mut run = issue_review_run();
+    issue_review_to_first_verdict(&mut run, 701);
+    request_changes_and_fix(&mut run, "Changes requested: fix the original race.");
+    advance(&mut run, &tick(8));
+    advance(
+        &mut run,
+        &CircuitEvent::AgentReady {
+            node_id: "re_review".into(),
+        },
+    );
+    acknowledge_prompt(&mut run, "re_review");
+    advance(&mut run, &tick(8));
+    advance_with_report_evidence(
+        &mut run,
+        &classified_with_output(
+            "review_classifier",
+            Some(Classification::Completed),
+            Some("Reviewed def456. The race is fixed. Approved, no remaining findings."),
+        ),
+    );
+    // Unrelated later output must not replace the report the gate approved.
+    run.context
+        .set("node.reviewer.output", "Unrelated later reviewer output.");
+    let delivery = deliver_approved_merge(&mut run);
+    let prompt = merge_prompt_from(&delivery);
+    assert!(prompt.contains("Reviewed def456. The race is fixed. Approved, no remaining findings."));
+    assert!(prompt.contains("Review step: review_classifier; attempt: 2"));
+    assert!(!prompt.contains("Changes requested: fix the original race."));
+    assert!(!prompt.contains("Unrelated later reviewer output."));
+}
+
+#[test]
+fn merge_handoff_uses_human_approval_note_instead_of_agent_report() {
+    let mut run = approved_issue_merge();
+    run.context
+        .set("node.review_classifier.review_verdict_source", "operator");
+    run.context.set(
+        "node.review_classifier.operator_review_note",
+        "I reviewed abc123 and approve this change.",
+    );
+    run.context.set(
+        "node.review_classifier.evaluated_output",
+        "Changes requested by the earlier agent.",
+    );
+    let delivery = deliver_approved_merge(&mut run);
+    let prompt = merge_prompt_from(&delivery);
+    assert!(prompt.contains("Approval source: human reviewer (operator)"));
+    assert!(prompt.contains("I reviewed abc123 and approve this change."));
+    assert!(!prompt.contains("Changes requested by the earlier agent."));
+    assert!(prompt.contains("The human reviewer approved"));
+}
+
+#[test]
+fn merge_handoff_rejects_human_approval_without_a_note() {
+    let mut run = approved_issue_merge();
+    run.context
+        .set("node.review_classifier.review_verdict_source", "operator");
+    run.context
+        .set("node.review_classifier.operator_review_note", "  ");
+    let delivery = deliver_approved_merge(&mut run);
+    assert!(!delivery
+        .effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::InjectPty { .. })));
+    assert_eq!(status_of(&run, "merge"), StepStatus::Unverified);
+}
+
+#[test]
+fn merge_handoff_ignores_an_unrelated_human_approval_and_rejects_ambiguous_routes() {
+    let mut run = approved_issue_merge();
+    run.graph.nodes.push(CircuitNode {
+        id: "other_review".into(),
+        kind: CircuitNodeKind::ReviewVerdict {
+            target_node_id: Some("reviewer".into()),
+        },
+    });
+    let mut other_review = StepView::new("other_review", StepStatus::Completed);
+    other_review.outcome = Some(StepOutcome::Completed);
+    run.steps.push(other_review);
+    for (field, value) in [
+        ("review_verdict_source", "operator"),
+        ("review_verdict_attempt", "1"),
+        ("review_verdict", "approved"),
+        ("operator_review_note", "An unrelated human approval."),
+    ] {
+        run.context
+            .set(&format!("node.other_review.{field}"), value);
+    }
+    let mut ambiguous = run.clone();
+    let delivery = deliver_approved_merge(&mut run);
+    let prompt = merge_prompt_from(&delivery);
+    assert!(prompt.contains("Approval source: independent reviewer"));
+    assert!(prompt.contains("The independent reviewer approved"));
+    assert!(!prompt.contains("An unrelated human approval."));
+
+    ambiguous.graph.edges.push(CircuitEdge {
+        from: "other_review".into(),
+        to: "merge".into(),
+        condition: EdgeCondition::OnOutcome(StepOutcome::Completed),
+    });
+    let delivery = deliver_approved_merge(&mut ambiguous);
+    assert!(!delivery
+        .effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::InjectPty { .. })));
+    assert_eq!(status_of(&ambiguous, "merge"), StepStatus::Unverified);
+}
+
+#[test]
+fn merge_handoff_delivers_the_local_source_approval() {
+    let mut context = CircuitContext::new();
+    context.set("source.agent_id", "42");
+    let mut run = RunView {
+        run_id: 748,
+        graph: CircuitGraph::agent_review(None, None, 3),
+        state: RunState::Pending,
+        context,
+        steps: vec![],
+    };
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(8));
+    advance_with_report_evidence(
+        &mut run,
+        &classified("await_source", Some(Classification::Completed)),
+    );
+    advance(&mut run, &tick(8));
+    advance(
+        &mut run,
+        &CircuitEvent::AgentReady {
+            node_id: "publish".into(),
+        },
+    );
+    acknowledge_prompt(&mut run, "publish");
+    advance_with_report_evidence(
+        &mut run,
+        &classified("await_publish", Some(Classification::Completed)),
+    );
+    advance(&mut run, &tick(8));
+    run.attach_agent_node("reviewer", 701);
+    advance_with_completion_evidence(&mut run, &agent_finished(701, true));
+    advance(&mut run, &tick(8));
+    advance_with_report_evidence(
+        &mut run,
+        &classified_with_output(
+            "verdict",
+            Some(Classification::Completed),
+            Some("Reviewed abc123. Approved. Literal {{pr.number}} remains report data."),
+        ),
+    );
+    let delivery = deliver_approved_merge(&mut run);
+    let prompt = merge_prompt_from(&delivery);
+    assert!(prompt.contains("Circuit run: 748"));
+    assert!(prompt.contains("Review step: verdict; attempt: 1"));
+    assert!(
+        prompt.contains("> Reviewed abc123. Approved. Literal {{pr.number}} remains report data.")
+    );
+    assert!(prompt.contains("Report revision:"));
+    assert!(prompt.contains("gh pr merge --squash"));
+    assert_eq!(run.resolve_target_agent("merge"), Some(42));
+}
+
+#[test]
+fn merge_handoff_parks_when_approval_evidence_is_missing_or_stale() {
+    for (key, value) in [
+        ("node.review_classifier.evaluated_output", ""),
+        ("node.review_classifier.review_verdict_attempt", "0"),
+        (
+            "node.review_classifier.evaluated_report_revision",
+            "another-report",
+        ),
+        (
+            "node.review_classifier.classified_evidence_owner",
+            "another-owner",
+        ),
+        ("node.review_classifier.evaluated_attempt", "0"),
+        ("node.review_classifier.review_verdict_source", ""),
+    ] {
+        let mut run = approved_issue_merge();
+        run.context.set(key, value);
+        let delivery = deliver_approved_merge(&mut run);
+        assert!(
+            !delivery
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::InjectPty { .. })),
+            "{key}"
+        );
+        assert_eq!(status_of(&run, "merge"), StepStatus::Unverified, "{key}");
+        assert!(run
+            .step("merge")
+            .unwrap()
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("approval evidence"));
+        assert!(run.context.get("node.merge.prompt_delivery.1").is_none());
+    }
+}
+
+#[test]
+fn merge_handoff_adds_evidence_to_a_pinned_legacy_prompt_after_context_reload() {
+    let mut run = approved_issue_merge();
+    let CircuitNodeKind::InjectPty { prompt, .. } = &mut run
+        .graph
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "merge")
+        .unwrap()
+        .kind
+    else {
+        panic!("merge injection")
+    };
+    *prompt = crate::review_contract::legacy_merge_prompt("PR #{{pr.number}}", " {{pr.number}}");
+    run.context = CircuitContext::from_json(&run.context.to_json().unwrap()).unwrap();
+    let delivery = deliver_approved_merge(&mut run);
+    let prompt = merge_prompt_from(&delivery);
+    assert!(prompt.contains("Reviewed abc123. Approved, no remaining findings."));
+    assert!(prompt.contains("gh pr merge 314 --squash"));
+    assert!(prompt.contains("Do not ask for another approval"));
+    assert!(prompt.contains("GitHub has no formal approving review"));
 }
 
 #[test]

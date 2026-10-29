@@ -41,12 +41,28 @@ fn builtin_minimax_pairing_reproduces_claude_code_model_routing() {
         .find(|s| s.surface == ApiSurface::Anthropic)
         .expect("anthropic surface for minimax");
     let tiers = &anthropic.model_tiers;
-    assert_eq!(tiers.default.as_deref(), Some("MiniMax-M3[1m]"));
-    assert_eq!(tiers.opus.as_deref(), Some("MiniMax-M3[1m]"));
-    assert_eq!(tiers.sonnet.as_deref(), Some("MiniMax-M3[1m]"));
+    assert_eq!(tiers.default.as_deref(), Some("MiniMax-M3.1-Flash[1m]"));
+    assert_eq!(tiers.opus.as_deref(), Some("MiniMax-M3.1-Flash[1m]"));
+    assert_eq!(tiers.sonnet.as_deref(), Some("MiniMax-M3.1-Flash[1m]"));
+    assert_eq!(tiers.fable.as_deref(), Some("MiniMax-M3.1-Flash[1m]"));
+    // Background slots stay on the cheap model: M3.1 Flash always reasons
+    // (default effort `max`), which is wasteful for session naming.
     assert_eq!(tiers.haiku.as_deref(), Some("MiniMax-M2.7"));
     assert_eq!(tiers.small_fast.as_deref(), Some("MiniMax-M2.7"));
     assert_eq!(anthropic.base_url, "https://api.minimax.io/anthropic");
+}
+
+#[test]
+fn builtin_minimax_codex_surface_defaults_to_m3_1_flash() {
+    let surfaces = first_class_surfaces("minimax");
+    let openai = surfaces
+        .iter()
+        .find(|s| s.surface == ApiSurface::OpenAI)
+        .expect("openai surface for minimax");
+    assert_eq!(
+        openai.model_tiers.default.as_deref(),
+        Some("MiniMax-M3.1-Flash")
+    );
 }
 
 #[test]

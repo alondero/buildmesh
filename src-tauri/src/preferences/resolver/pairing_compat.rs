@@ -7,6 +7,15 @@ use crate::agent::provider::compatibility::{
     self, CompatibilityDecision, EndpointModelDescriptor, ProviderAuthMode, WireApi,
 };
 
+/// MiniMax model IDs its Responses API documents as Codex-usable
+/// (platform.minimax.io/docs/api-reference/responses-create). Anything else,
+/// including the retired `MiniMax-M3[1m]` alias, stays capability-incomplete.
+const MINIMAX_RESPONSES_MODELS: &[&str] = &["MiniMax-M3.1-Flash", "MiniMax-M3"];
+
+fn is_minimax_responses_model(model_id: &str) -> bool {
+    MINIMAX_RESPONSES_MODELS.contains(&model_id)
+}
+
 /// Reconstruct the exact endpoint/model descriptor from persisted pairing
 /// state. `ApiSurface::OpenAI` is deliberately not proof of Responses
 /// compatibility: known Kimi rows are classified as Chat Completions, and
@@ -29,7 +38,9 @@ pub fn endpoint_model_descriptor(pairing: &ProviderPairing) -> EndpointModelDesc
             WireApi::ChatCompletions,
             compatibility::complete_agent_capabilities(),
         ),
-        ApiSurface::OpenAI if pairing.provider_id == "minimax" && model_id != "MiniMax-M3" => {
+        ApiSurface::OpenAI
+            if pairing.provider_id == "minimax" && !is_minimax_responses_model(&model_id) =>
+        {
             (WireApi::Responses, Default::default())
         }
         ApiSurface::OpenAI => (
@@ -39,8 +50,8 @@ pub fn endpoint_model_descriptor(pairing: &ProviderPairing) -> EndpointModelDesc
     };
     let reasoning_effort = (pairing.provider_id == "minimax"
         && pairing.surface == ApiSurface::OpenAI
-        && model_id == "MiniMax-M3")
-        .then_some(true);
+        && is_minimax_responses_model(&model_id))
+    .then_some(true);
     EndpointModelDescriptor {
         provider_id: pairing.provider_id.clone(),
         endpoint,
@@ -72,11 +83,13 @@ pub fn pairing_compatibility(pairing: &ProviderPairing) -> CompatibilityDecision
     }
     if pairing.provider_id == "minimax"
         && pairing.surface == ApiSurface::OpenAI
-        && descriptor.model_id != "MiniMax-M3"
+        && !is_minimax_responses_model(&descriptor.model_id)
     {
         decision.compatible = false;
         decision.reason = Some(
-            "MiniMax Codex pairings require the current Responses model ID 'MiniMax-M3'".into(),
+            "MiniMax Codex pairings require a current Responses model ID: \
+             'MiniMax-M3.1-Flash' or 'MiniMax-M3'"
+                .into(),
         );
     }
     decision
