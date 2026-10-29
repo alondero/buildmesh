@@ -278,7 +278,13 @@ fun JsonObjectBuilder.putLaunch(option: JsonObject?) {
 // a saved configuration.
 fun launchableWithoutConfiguration(option: JsonObject) = option.objectAt("configuration") == null
 
-fun supportsPrompt(option: JsonObject) = option.objectAt("capabilities")?.flag("supports_prefill") == true
+// A harness without startup prefill can still take a prompt: the desktop types
+// it into the terminal once the agent has started. Desktops older than
+// `accepts_initial_prompt` only report `supports_prefill`.
+fun supportsPrompt(option: JsonObject): Boolean {
+    val capabilities = option.objectAt("capabilities") ?: return false
+    return capabilities.flag("accepts_initial_prompt") || capabilities.flag("supports_prefill")
+}
 
 // The backend menu in its own order (ADR-0016: no client re-sorts it), minus
 // rows that cannot launch now. Issue and PR spawns always carry a prompt.

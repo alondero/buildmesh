@@ -115,9 +115,9 @@ pub(super) fn prepare_initial_prompt(
     let Some(prompt) = intent.initial_prompt() else {
         return Ok(None);
     };
-    if !provider.adapter().supports_prefill() {
+    if !provider.adapter().accepts_initial_prompt() {
         tracing::warn!(
-            "spawn_with_intent: provider '{}' does not support prefill; skipping {} bytes",
+            "spawn_with_intent: provider '{}' does not accept an initial prompt; skipping {} bytes",
             node.provider,
             prompt.as_str().len()
         );
@@ -349,6 +349,9 @@ pub(crate) async fn spawn_with_intent(
             return Err(error);
         }
     };
+    // A harness without CLI prefill launches plain and has the prompt typed
+    // into its PTY once the TUI has booted.
+    let (prefill, typed_prompt) = split_initial_prompt(adapter.supports_prefill(), prefill);
 
     if let Some(plan) = node
         .launch_configuration
@@ -383,6 +386,9 @@ pub(crate) async fn spawn_with_intent(
         db::clear_cli_session_id(node_id).map_err(|e| e.to_string())?;
     }
 
+    if typed_prompt.is_some() {
+        super::startup_prompt::arm(node_id);
+    }
     let result = spawn_agent_inner(
         app,
         &claim,
@@ -433,6 +439,9 @@ pub(crate) async fn spawn_with_intent(
             if let Some(claim) = durable_claim.as_mut() {
                 claim.mark_succeeded();
             }
+            if let Some(prompt) = typed_prompt {
+                super::startup_prompt::deliver_after_boot(app.clone(), node_id, prompt);
+            }
             let refreshed = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
             let _ = app.emit(
                 "node-spawn-completed",
@@ -441,6 +450,7 @@ pub(crate) async fn spawn_with_intent(
             Ok(SpawnOutcome::Started(refreshed))
         }
         Err(error) => {
+            super::startup_prompt::disarm(node_id);
             report_spawn_failure(app, node_id, is_resume_intent, &error);
             Err(error)
         }
@@ -485,6 +495,19 @@ fn report_spawn_failure(app: &tauri::AppHandle, node_id: i64, is_resume_intent: 
             node_failed: true,
         },
     );
+}
+
+/// Route an accepted initial prompt: onto the launch argv when the harness
+/// has CLI prefill, otherwise to typed delivery after startup. Returns
+/// `(argv prefill, typed prompt)`; at most one is `Some`.
+pub(super) fn split_initial_prompt(
+    supports_prefill: bool,
+    prompt: Option<String>,
+) -> (Option<String>, Option<String>) {
+    match prompt {
+        Some(text) if !text.trim().is_empty() && !supports_prefill => (None, Some(text)),
+        prompt => (prompt, None),
+    }
 }
 
 /// Whether this request intentionally discards the node's prior conversation.

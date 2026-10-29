@@ -61,7 +61,7 @@ export function launchChoices(providers: Provider[]): LaunchChoice[] {
     .filter((row) => !row.unavailable_reason)
     .filter(
       (row) =>
-        row.capabilities?.supports_prefill &&
+        row.capabilities?.accepts_initial_prompt &&
         (!row.is_proxied || row.configuration),
     )
     .map((row) => {

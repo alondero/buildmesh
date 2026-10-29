@@ -630,6 +630,15 @@ pub trait AgentProvider: Send + Sync {
     /// (free-form selected text from a parent terminal, often multi-line).
     fn supports_prefill(&self) -> bool;
 
+    /// Whether a user-facing spawn (issue, pull request, prompt or handover)
+    /// may carry an initial prompt. A harness with CLI prefill takes it on
+    /// argv; any other interactive harness receives it through the live PTY
+    /// once its TUI has booted (`agent::spawn::startup_prompt`). A plain shell
+    /// declines: typed text would run as a command.
+    fn accepts_initial_prompt(&self) -> bool {
+        self.supports_prefill() || !self.is_plain_terminal()
+    }
+
     /// Whether the CLI submits the prompt from `prefill_args` on launch.
     /// Circuit launches must not send another Enter for an already submitted turn.
     fn prefill_auto_submits(&self) -> bool {
@@ -1001,6 +1010,7 @@ pub trait AgentProvider: Send + Sync {
             supports_effort_override: !matches!(effort_control, EffortControlKind::None),
             supports_extra_args: self.supports_extra_args(),
             supports_prefill: self.supports_prefill(),
+            accepts_initial_prompt: self.accepts_initial_prompt(),
             is_plain_terminal: self.is_plain_terminal(),
             effort_control,
             permission_modes: self.permission_modes(),

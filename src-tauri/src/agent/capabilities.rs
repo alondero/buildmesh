@@ -293,6 +293,10 @@ pub struct HarnessCapabilities {
     pub supports_extra_args: bool,
     /// Whether `--prefill <text>` (or equivalent positional) is accepted.
     pub supports_prefill: bool,
+    /// Whether user-facing spawns may carry an initial prompt: on argv when
+    /// `supports_prefill`, otherwise typed into the PTY after startup. False
+    /// only for plain shells.
+    pub accepts_initial_prompt: bool,
     /// True for plain shell providers — LLM-specific paths (naming, the
     /// 3-second early-exit heuristic, etc.) all skip.
     pub is_plain_terminal: bool,
@@ -1058,7 +1062,8 @@ mod tests {
         assert!(!freebuff.supports_model_override);
         assert!(!freebuff.supports_effort_override);
         assert!(freebuff.supports_extra_args);
-        assert!(freebuff.supports_prefill);
+        assert!(!freebuff.supports_prefill);
+        assert!(freebuff.accepts_initial_prompt);
         assert!(!freebuff.is_plain_terminal);
         assert_eq!(freebuff.effort_control, EffortControlKind::None);
         assert_eq!(

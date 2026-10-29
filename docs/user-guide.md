@@ -1037,9 +1037,13 @@ Terminals keep their own size: use the title bar's **Zoom** control or
 
 **Probe spawn prompts** (Settings → Prompts) customise the initial prompt
 for agents spawned from the Probe's GitHub Issues and Pull Requests tabs.
-The node is created only when that harness can take an initial prompt.
-If the Mesh default cannot, the Issues tab shows an error toast; pick
-another harness from the spawn menu.
+Every agent harness can take one; only a plain Terminal cannot. A harness
+without a startup prompt option (Freebuff, Kimi Code, Perch, DeepSeek Harness)
+starts normally, and Buildmesh types the prompt into its terminal and presses
+Enter once its screen has finished drawing. If you start typing in that
+terminal first, Buildmesh leaves the prompt to you. If the Mesh default is a
+Terminal, the Issues tab shows an error toast; pick another harness from the
+spawn menu.
 The built-in templates appear as editable text, so you can adjust their wording
 directly. Changes save when you leave the editor. Click a placeholder button to
 insert it at the cursor or replace selected text; each button explains its value

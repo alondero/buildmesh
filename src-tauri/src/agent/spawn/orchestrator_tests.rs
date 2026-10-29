@@ -1,6 +1,7 @@
 use super::intent;
 use super::orchestrator::{
-    decide_startup_resume, intent_replaces_conversation, ResumeSkipDecision,
+    decide_startup_resume, intent_replaces_conversation, prepare_initial_prompt,
+    split_initial_prompt, ResumeSkipDecision,
 };
 use super::{
     ExplicitSpawnOverrides, IssueContext, ResumeCause, SpawnIntent, SpawnRequest, TerminalSize,
@@ -72,6 +73,47 @@ fn issue_intent_builds_its_prefill_at_the_spawn_seam() {
 https://github.com/alondero/buildmesh/issues/247"
         )
     );
+}
+
+/// A harness with CLI prefill carries the prompt on argv; any other harness
+/// launches plain and has the same prompt typed after startup.
+#[test]
+fn initial_prompt_rides_argv_with_prefill_and_is_typed_without_it() {
+    let prompt = || Some("Please work on GitHub issue #7".to_string());
+    assert_eq!(split_initial_prompt(true, prompt()), (prompt(), None));
+    assert_eq!(split_initial_prompt(false, prompt()), (None, prompt()));
+    assert_eq!(split_initial_prompt(false, None), (None, None));
+    assert_eq!(
+        split_initial_prompt(false, Some("  ".into())).1,
+        None,
+        "a blank prompt is never typed"
+    );
+}
+
+/// An issue spawn on Freebuff (no CLI prefill) keeps its prompt for typed
+/// delivery; a plain terminal still drops it.
+#[test]
+fn issue_prompt_is_kept_for_interactive_harnesses_without_prefill() {
+    let intent = SpawnIntent::Issue(IssueContext {
+        owner: "alondero".into(),
+        repo: "buildmesh".into(),
+        number: 7,
+        title: "Typed prompt".into(),
+        template: None,
+    });
+    let node = crate::models::AgentNode::default();
+    let freebuff = prepare_initial_prompt(&node, &intent, crate::models::Provider::Freebuff, None)
+        .expect("issue prompt needs no staging");
+    assert_eq!(
+        freebuff.as_deref(),
+        intent
+            .initial_prompt()
+            .as_ref()
+            .map(intent::InitialPrompt::as_str)
+    );
+    let terminal = prepare_initial_prompt(&node, &intent, crate::models::Provider::Terminal, None)
+        .expect("issue prompt needs no staging");
+    assert_eq!(terminal, None);
 }
 
 #[test]

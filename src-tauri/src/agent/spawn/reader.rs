@@ -454,6 +454,8 @@ pub(super) fn start_reader(
                     // Stale-attention safety net (issue #878) — one map lookup for
                     // unarmed nodes.
                     crate::attention_autoclear::on_output(session_id, data.len());
+                    // Boot tracking for a prompt typed after startup.
+                    super::startup_prompt::on_output(session_id);
 
                     if let Some(uuid) = uuid {
                         // The structured hook and Codex rollout fallback can
