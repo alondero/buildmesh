@@ -88,6 +88,7 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/agent/provider/adapters/codex_tests.rs': 'agent::provider::adapters::codex::tests',
   'src-tauri/src/agent/provider/adapters/grok_tests.rs': 'agent::provider::adapters::grok::provisioning_tests',
   'src-tauri/src/agent/provider/adapters/mcode_tests.rs': 'agent::provider::adapters::mcode::tests',
+  'src-tauri/src/agent/provider/adapters/opencode_tests.rs': 'agent::provider::adapters::opencode::child_session_tests',
   'src-tauri/src/agent/provider/adapters/perch_tests.rs': 'agent::provider::adapters::perch::tests',
   'src-tauri/src/circuit/delivery_tests.rs': 'circuit::delivery::tests',
   'src-tauri/src/circuit/vocabulary_tests.rs': 'circuit::vocabulary::tests',

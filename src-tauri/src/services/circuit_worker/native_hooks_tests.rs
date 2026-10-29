@@ -1649,7 +1649,7 @@ fn replay_reads_a_receipt_with_the_strategy_that_parsed_it() {
 #[test]
 fn replay_of_a_receipt_from_an_unwired_or_unrecorded_harness_borrows_no_strategy() {
     use crate::circuit::observation::ObservedWorkFact as Fact;
-    for provider in [Some("opencode"), Some("future-harness"), None] {
+    for provider in [Some("grok"), Some("future-harness"), None] {
         let observations = replayed(&persisted_stop(provider));
         assert!(
             observations
@@ -1665,6 +1665,108 @@ fn replay_of_a_receipt_from_an_unwired_or_unrecorded_harness_borrows_no_strategy
             "{provider:?} must not inherit another harness's ownership statement"
         );
     }
+}
+
+/// Issue #2636. OpenCode names no turn, so a native subagent's start and end
+/// are recorded and associated with the parent session, but they are reduced
+/// confidence: they can neither register a child that blocks the step nor
+/// settle it. The blocking effect of a live child comes from the node's
+/// lifecycle (`BackgroundRunning`), not from these receipts.
+#[test]
+fn opencode_child_receipts_are_recorded_evidence_that_cannot_settle_or_block_a_step() {
+    use crate::circuit::observation::{
+        ObservationDisposition, ObservedWorkFact as Fact, WorkEvidence,
+    };
+    use crate::circuit::stepper::CircuitEvent;
+    const PARENT: &str = "ses_e77a04977ffea25PMbbvyAZJYU";
+    const CHILD: &str = "ses_e77a02cc6ffeHjnk2f6NIW0LE8";
+
+    let mut evidence = WorkEvidence::default();
+    for (wire, fact) in [
+        (
+            "subagent_start",
+            Fact::OwnedStarted {
+                work_id: format!("task:{CHILD}"),
+            },
+        ),
+        (
+            "subagent_stop",
+            Fact::OwnedTerminated {
+                work_id: format!("task:{CHILD}"),
+            },
+        ),
+    ] {
+        let hook = NativeHook::parse(
+            "opencode",
+            serde_json::json!({"hook_event_name": wire, "sessionID": PARENT, "agent_id": CHILD})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap_or_else(|| panic!("{wire} parses"));
+        let receipt = NativeReceipt {
+            agent_node_id: 9,
+            input_stamp: Some("1:2".into()),
+            session_incarnation: Some("1000".into()),
+            source_id: format!("opencode-{wire}"),
+            received_at_ms: 5,
+            turn_fenced: false,
+            explicit_turn_mismatch: false,
+            submission_correlated: false,
+            submission_seq: None,
+            hook,
+        };
+        let entry = crate::db::circuit::evidence::CircuitHistoryEntry {
+            id: 10,
+            node_id: Some("work".into()),
+            attempt: Some(1),
+            kind: "native_hook_received".into(),
+            detail: String::new(),
+            source: None,
+            disposition: None,
+            observed_at: String::new(),
+        };
+        let CircuitEvent::ObservationBatch {
+            expected,
+            observations,
+            stale,
+            ..
+        } = normalize(
+            42,
+            entry,
+            receipt,
+            Some(PARENT.into()),
+            Some("1000".into()),
+            Some("1:2".into()),
+        )
+        else {
+            panic!("native batch expected")
+        };
+        assert!(!stale, "{wire}: the parent session is the node's session");
+        assert_eq!(observations.len(), 1, "{wire}: one fact, nothing inferred");
+        let observation = &observations[0];
+        assert_eq!(observation.source, "opencode_native_hook", "{wire}");
+        assert_eq!(observation.fact, fact, "{wire}");
+        assert_eq!(
+            observation.identity.session_id.as_deref(),
+            Some(PARENT),
+            "{wire}: associated with the parent session"
+        );
+        assert_eq!(
+            evidence.observe(&expected, observation),
+            ObservationDisposition::ReducedConfidence,
+            "{wire}: no turn token, so the receipt is presented but not applied"
+        );
+    }
+    // Recorded as the latest observation, applied to nothing.
+    assert_eq!(
+        evidence.latest.as_ref().map(|o| o.source.as_str()),
+        Some("opencode_native_hook")
+    );
+    assert!(evidence.children.is_empty());
+    assert!(!evidence.foreground_terminated);
+    assert!(!evidence.ownership_covered);
+    assert!(!evidence.lifecycle_verified());
+    assert!(!evidence.completion_verified());
 }
 
 #[test]
