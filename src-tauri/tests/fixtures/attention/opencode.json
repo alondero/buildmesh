@@ -123,5 +123,51 @@
     "decision": "MarkInput",
     "kind": "signal_unavailable",
     "health": "degraded"
+  },
+  {
+    "name": "subagent_start-child-session",
+    "payload": {
+      "hook_event_name": "subagent_start",
+      "sessionID": "ses_e77a04977ffea25PMbbvyAZJYU",
+      "agent_id": "ses_e77a02cc6ffeHjnk2f6NIW0LE8"
+    },
+    "pending": 0,
+    "decision": "ChildStarted",
+    "kind": null,
+    "health": "ok"
+  },
+  {
+    "name": "subagent_stop-child-session",
+    "payload": {
+      "hook_event_name": "subagent_stop",
+      "sessionID": "ses_e77a04977ffea25PMbbvyAZJYU",
+      "agent_id": "ses_e77a02cc6ffeHjnk2f6NIW0LE8"
+    },
+    "pending": 0,
+    "decision": "BackgroundTaskCompleted",
+    "kind": null,
+    "health": "ok"
+  },
+  {
+    "name": "subagent_start-without-child-id",
+    "payload": {
+      "hook_event_name": "subagent_start",
+      "sessionID": "ses_e77a04977ffea25PMbbvyAZJYU"
+    },
+    "pending": 0,
+    "decision": "Ignore",
+    "kind": null,
+    "health": "ok"
+  },
+  {
+    "name": "subagent_stop-without-child-id",
+    "payload": {
+      "hook_event_name": "subagent_stop",
+      "sessionID": "ses_e77a04977ffea25PMbbvyAZJYU"
+    },
+    "pending": 0,
+    "decision": "Ignore",
+    "kind": null,
+    "health": "ok"
   }
 ]

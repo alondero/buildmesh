@@ -179,9 +179,23 @@ Circuit policy, and an adapter cannot authorize progression. There is no
 | Passive watcher | The transcript watcher a recovered node must reattach | `restart` |
 
 Today Claude Code and Antigravity declare hooks, Codex declares hooks and a
-rollout pull, Command Code and Muse declare a passive watcher, and every other
-harness (including MiniMax Code, OpenCode, Grok and Cline) is unwired, so its
-missing evidence stays explicit and Circuit execution stays Unverified.
+rollout pull, Command Code and Muse declare a passive watcher, OpenCode declares
+hooks for its native subagent (child) sessions only, and every other harness
+(including MiniMax Code, Grok and Cline) is unwired, so its missing evidence
+stays explicit and Circuit execution stays Unverified.
+
+Declaring hooks does not by itself declare a foreground source. `HookPush`
+carries a `foreground` flag naming whether its parser reports the foreground
+turn, and only a parser that does makes the diagnostics read the foreground as
+available. OpenCode's parser reads `subagent_start` / `subagent_stop` and
+nothing else, so its foreground stays Unavailable. Those receipts name no turn,
+which makes them reduced-confidence evidence: they are recorded with the
+parent's evidence and neither register a blocking child nor settle a step. A
+live subagent still blocks a handoff through the node's lifecycle, because the
+attention route tracks the child and publishes `BackgroundRunning` instead of
+`Ready` (see the
+[OpenCode research](../learning/opencode-harness-capabilities.md#native-subagent-sessions-issue-2636)
+for what was observed and what is unvalidated).
 
 Unwired is about lifecycle and ownership authority, not about whether a finished
 report can be read. Grok's `chat_history.jsonl` records carry no timestamp, so

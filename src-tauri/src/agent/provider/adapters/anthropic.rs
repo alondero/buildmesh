@@ -109,6 +109,7 @@ impl AgentProvider for AnthropicAdapter {
                 source: "claude_native_hook",
                 request_source: "anthropic_request_hook",
                 ownership_gap: None,
+                foreground: true,
             }),
             pull: PullSource::None,
             turn_identity: TurnIdentity::SubmissionEcho,

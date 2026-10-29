@@ -23,7 +23,7 @@ They establish parsing/mapping parity, not installed CLI delivery reliability.
 | Grok | Stop, idle/permission Notifications, question tool, cancellation | Runtime token validation remains in the HTTP gate |
 | Antigravity | Settled/background Stop, neutral PreToolUse | No permission/question observer is provisioned |
 | Cursor | Stop with and without pending transcript work | No permission/question observer is provisioned |
-| OpenCode | Creation, idle/busy, permission, question/reply | Plugin fields are already projected from native events |
+| OpenCode | Creation, idle/busy, permission, question/reply, subagent (child session) start/stop | Plugin fields are already projected from native events. `subagent_*` are Buildmesh-synthesized from a child session's lifecycle (recorded run: `tests/fixtures/opencode`), not native OpenCode event names |
 
 Unwired harnesses (including passive watcher integrations) do not acquire a
 pushed hook strategy through another harness's payload shape. Isolation tests

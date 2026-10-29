@@ -1,0 +1,876 @@
+{
+ "source": "Recorded from OpenCode 1.18.3 (`opencode run`, a `task` tool call to the general subagent) by a plugin that logged every bus event; the session.deleted event was recorded from `DELETE /session/:id` on `opencode serve` for the same child. Paths are scrubbed.",
+ "root": "ses_e77a122bdffetzq9KVOjtixc3T",
+ "child": "ses_e77a10c02ffePVmQyCQrjpEp5a",
+ "run": [
+  {
+   "id": "evt_1885edd44001mYhlhosnJIcNi5",
+   "type": "session.created",
+   "properties": {
+    "sessionID": "ses_e77a122bdffetzq9KVOjtixc3T",
+    "info": {
+     "id": "ses_e77a122bdffetzq9KVOjtixc3T",
+     "slug": "mighty-moon",
+     "version": "1.18.3",
+     "projectID": "global",
+     "directory": "C:\\work\\opencode-probe",
+     "path": "work/opencode-probe",
+     "title": "New session - 2026-10-29T15:54:40.835Z",
+     "permission": [
+      {
+       "permission": "question",
+       "pattern": "*",
+       "action": "deny"
+      },
+      {
+       "permission": "plan_enter",
+       "pattern": "*",
+       "action": "deny"
+      },
+      {
+       "permission": "plan_exit",
+       "pattern": "*",
+       "action": "deny"
+      }
+     ],
+     "cost": 0,
+     "tokens": {
+      "input": 0,
+      "output": 0,
+      "reasoning": 0,
+      "cache": {
+       "read": 0,
+       "write": 0
+      }
+     },
+     "time": {
+      "created": 1793289280835,
+      "updated": 1793289280835
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_1885ede1b001XDMzCpi6zgEYg1",
+   "type": "session.updated",
+   "properties": {
+    "sessionID": "ses_e77a122bdffetzq9KVOjtixc3T",
+    "info": {
+     "id": "ses_e77a122bdffetzq9KVOjtixc3T",
+     "slug": "mighty-moon",
+     "projectID": "global",
+     "directory": "C:\\work\\opencode-probe",
+     "path": "work/opencode-probe",
+     "title": "New session - 2026-10-29T15:54:40.835Z",
+     "agent": "build",
+     "model": {
+      "id": "big-pickle",
+      "providerID": "opencode",
+      "variant": "default"
+     },
+     "version": "1.18.3",
+     "cost": 0,
+     "tokens": {
+      "input": 0,
+      "output": 0,
+      "reasoning": 0,
+      "cache": {
+       "read": 0,
+       "write": 0
+      }
+     },
+     "permission": [
+      {
+       "permission": "question",
+       "pattern": "*",
+       "action": "deny"
+      },
+      {
+       "permission": "plan_enter",
+       "pattern": "*",
+       "action": "deny"
+      },
+      {
+       "permission": "plan_exit",
+       "pattern": "*",
+       "action": "deny"
+      }
+     ],
+     "time": {
+      "created": 1793289280835,
+      "updated": 1793289281048
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_1885ede260011AtUJUGyjoQWph",
+   "type": "message.updated",
+   "properties": {
+    "sessionID": "ses_e77a122bdffetzq9KVOjtixc3T",
+    "info": {
+     "id": "msg_1885ede18001hOR2bRiVBSMdWv",
+     "role": "user",
+     "sessionID": "ses_e77a122bdffetzq9KVOjtixc3T",
+     "time": {
+      "created": 1793289281048
+     },
+     "agent": "build",
+     "model": {
+      "providerID": "opencode",
+      "modelID": "big-pickle"
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_1885ee107001GqHTdAmF7mYnN2",
+   "type": "session.updated",
+   "properties": {
+    "sessionID": "ses_e77a122bdffetzq9KVOjtixc3T",
+    "info": {
+     "id": "ses_e77a122bdffetzq9KVOjtixc3T",
+     "slug": "mighty-moon",
+     "projectID": "global",
+     "directory": "C:\\work\\opencode-probe",
+     "path": "work/opencode-probe",
+     "title": "New session - 2026-10-29T15:54:40.835Z",
+     "agent": "build",
+     "model": {
+      "id": "big-pickle",
+      "providerID": "opencode",
+      "variant": "default"
+     },
+     "version": "1.18.3",
+     "cost": 0,
+     "tokens": {
+      "input": 0,
+      "output": 0,
+      "reasoning": 0,
+      "cache": {
+       "read": 0,
+       "write": 0
+      }
+     },
+     "permission": [
+      {
+       "permission": "question",
+       "pattern": "*",
+       "action": "deny"
+      },
+      {
+       "permission": "plan_enter",
+       "pattern": "*",
+       "action": "deny"
+      },
+      {
+       "permission": "plan_exit",
+       "pattern": "*",
+       "action": "deny"
+      }
+     ],
+     "time": {
+      "created": 1793289280835,
+      "updated": 1793289281798
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_1885ee111001Fflc2IA8yeVdxA",
+   "type": "session.status",
+   "properties": {
+    "sessionID": "ses_e77a122bdffetzq9KVOjtixc3T",
+    "status": {
+     "type": "busy"
+    }
+   }
+  },
+  {
+   "id": "evt_1885ee1170011WiJVS7FWK6Zeb",
+   "type": "message.updated",
+   "properties": {
+    "sessionID": "ses_e77a122bdffetzq9KVOjtixc3T",
+    "info": {
+     "id": "msg_1885ee117001SW1dZ3T3I2kNCL",
+     "parentID": "msg_1885ede18001hOR2bRiVBSMdWv",
+     "role": "assistant",
+     "mode": "build",
+     "agent": "build",
+     "path": {
+      "cwd": "C:\\work\\opencode-probe",
+      "root": "/"
+     },
+     "cost": 0,
+     "tokens": {
+      "input": 0,
+      "output": 0,
+      "reasoning": 0,
+      "cache": {
+       "read": 0,
+       "write": 0
+      }
+     },
+     "modelID": "big-pickle",
+     "providerID": "opencode",
+     "time": {
+      "created": 1793289281815
+     },
+     "sessionID": "ses_e77a122bdffetzq9KVOjtixc3T"
+    }
+   }
+  },
+  {
+   "id": "evt_1885ee171001VkKngz8q20EE1R",
+   "type": "session.updated",
+   "properties": {
+    "sessionID": "ses_e77a122bdffetzq9KVOjtixc3T",
+    "info": {
+     "id": "ses_e77a122bdffetzq9KVOjtixc3T",
+     "slug": "mighty-moon",
+     "projectID": "global",
+     "directory": "C:\\work\\opencode-probe",
+     "path": "work/opencode-probe",
+     "title": "New session - 2026-10-29T15:54:40.835Z",
+     "agent": "build",
+     "model": {
+      "id": "big-pickle",
+      "providerID": "opencode",
+      "variant": "default"
+     },
+     "version": "1.18.3",
+     "summary": {
+      "additions": 0,
+      "deletions": 0,
+      "files": 0
+     },
+     "cost": 0,
+     "tokens": {
+      "input": 0,
+      "output": 0,
+      "reasoning": 0,
+      "cache": {
+       "read": 0,
+       "write": 0
+      }
+     },
+     "permission": [
+      {
+       "permission": "question",
+       "pattern": "*",
+       "action": "deny"
+      },
+      {
+       "permission": "plan_enter",
+       "pattern": "*",
+       "action": "deny"
+      },
+      {
+       "permission": "plan_exit",
+       "pattern": "*",
+       "action": "deny"
+      }
+     ],
+     "time": {
+      "created": 1793289280835,
+      "updated": 1793289281903
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_1885ee4a8001cbp0MyX3kZ4MLH",
+   "type": "catalog.updated",
+   "properties": {}
+  },
+  {
+   "id": "evt_1885ee5df0016kAw0zMFLSrMlE",
+   "type": "catalog.updated",
+   "properties": {}
+  },
+  {
+   "id": "evt_1885ee606001EOQGD7975ryXq4",
+   "type": "session.status",
+   "properties": {
+    "sessionID": "ses_e77a122bdffetzq9KVOjtixc3T",
+    "status": {
+     "type": "busy"
+    }
+   }
+  },
+  {
+   "id": "evt_1885eef520010ja3Bkht8WRcze",
+   "type": "session.updated",
+   "properties": {
+    "sessionID": "ses_e77a122bdffetzq9KVOjtixc3T",
+    "info": {
+     "id": "ses_e77a122bdffetzq9KVOjtixc3T",
+     "slug": "mighty-moon",
+     "projectID": "global",
+     "directory": "C:\\work\\opencode-probe",
+     "path": "work/opencode-probe",
+     "title": "Single subagent PONG check, then DONE",
+     "agent": "build",
+     "model": {
+      "id": "big-pickle",
+      "providerID": "opencode",
+      "variant": "default"
+     },
+     "version": "1.18.3",
+     "summary": {
+      "additions": 0,
+      "deletions": 0,
+      "files": 0
+     },
+     "cost": 0,
+     "tokens": {
+      "input": 0,
+      "output": 0,
+      "reasoning": 0,
+      "cache": {
+       "read": 0,
+       "write": 0
+      }
+     },
+     "permission": [
+      {
+       "permission": "question",
+       "pattern": "*",
+       "action": "deny"
+      },
+      {
+       "permission": "plan_enter",
+       "pattern": "*",
+       "action": "deny"
+      },
+      {
+       "permission": "plan_exit",
+       "pattern": "*",
+       "action": "deny"
+      }
+     ],
+     "time": {
+      "created": 1793289280835,
+      "updated": 1793289281903
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_1885ef3fd002zoT4pe7y9jaXVG",
+   "type": "session.created",
+   "properties": {
+    "sessionID": "ses_e77a10c02ffePVmQyCQrjpEp5a",
+    "info": {
+     "id": "ses_e77a10c02ffePVmQyCQrjpEp5a",
+     "slug": "kind-garden",
+     "version": "1.18.3",
+     "projectID": "global",
+     "directory": "C:\\work\\opencode-probe",
+     "path": "work/opencode-probe",
+     "parentID": "ses_e77a122bdffetzq9KVOjtixc3T",
+     "title": "Reply PONG (@general subagent)",
+     "agent": "general",
+     "permission": [
+      {
+       "permission": "question",
+       "pattern": "*",
+       "action": "deny"
+      },
+      {
+       "permission": "plan_enter",
+       "pattern": "*",
+       "action": "deny"
+      },
+      {
+       "permission": "plan_exit",
+       "pattern": "*",
+       "action": "deny"
+      },
+      {
+       "permission": "task",
+       "pattern": "*",
+       "action": "deny"
+      }
+     ],
+     "cost": 0,
+     "tokens": {
+      "input": 0,
+      "output": 0,
+      "reasoning": 0,
+      "cache": {
+       "read": 0,
+       "write": 0
+      }
+     },
+     "time": {
+      "created": 1793289286653,
+      "updated": 1793289286653
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_1885ef40b001oq922y0EynszkM",
+   "type": "session.updated",
+   "properties": {
+    "sessionID": "ses_e77a10c02ffePVmQyCQrjpEp5a",
+    "info": {
+     "id": "ses_e77a10c02ffePVmQyCQrjpEp5a",
+     "slug": "kind-garden",
+     "projectID": "global",
+     "directory": "C:\\work\\opencode-probe",
+     "path": "work/opencode-probe",
+     "parentID": "ses_e77a122bdffetzq9KVOjtixc3T",
+     "title": "Reply PONG (@general subagent)",
+     "agent": "general",
+     "model": {
+      "id": "big-pickle",
+      "providerID": "opencode",
+      "variant": "default"
+     },
+     "version": "1.18.3",
+     "cost": 0,
+     "tokens": {
+      "input": 0,
+      "output": 0,
+      "reasoning": 0,
+      "cache": {
+       "read": 0,
+       "write": 0
+      }
+     },
+     "permission": [
+      {
+       "permission": "question",
+       "pattern": "*",
+       "action": "deny"
+      },
+      {
+       "permission": "plan_enter",
+       "pattern": "*",
+       "action": "deny"
+      },
+      {
+       "permission": "plan_exit",
+       "pattern": "*",
+       "action": "deny"
+      },
+      {
+       "permission": "task",
+       "pattern": "*",
+       "action": "deny"
+      }
+     ],
+     "time": {
+      "created": 1793289286653,
+      "updated": 1793289286666
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_1885ef416001DIWmm1GdjYYBUb",
+   "type": "session.updated",
+   "properties": {
+    "sessionID": "ses_e77a10c02ffePVmQyCQrjpEp5a",
+    "info": {
+     "id": "ses_e77a10c02ffePVmQyCQrjpEp5a",
+     "slug": "kind-garden",
+     "projectID": "global",
+     "directory": "C:\\work\\opencode-probe",
+     "path": "work/opencode-probe",
+     "parentID": "ses_e77a122bdffetzq9KVOjtixc3T",
+     "title": "Reply PONG (@general subagent)",
+     "agent": "general",
+     "model": {
+      "id": "big-pickle",
+      "providerID": "opencode",
+      "variant": "default"
+     },
+     "version": "1.18.3",
+     "cost": 0,
+     "tokens": {
+      "input": 0,
+      "output": 0,
+      "reasoning": 0,
+      "cache": {
+       "read": 0,
+       "write": 0
+      }
+     },
+     "permission": [
+      {
+       "permission": "question",
+       "pattern": "*",
+       "action": "deny"
+      },
+      {
+       "permission": "plan_enter",
+       "pattern": "*",
+       "action": "deny"
+      },
+      {
+       "permission": "plan_exit",
+       "pattern": "*",
+       "action": "deny"
+      },
+      {
+       "permission": "task",
+       "pattern": "*",
+       "action": "deny"
+      }
+     ],
+     "time": {
+      "created": 1793289286653,
+      "updated": 1793289286677
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_1885ef423001CTV63U4TnUOp1Y",
+   "type": "session.status",
+   "properties": {
+    "sessionID": "ses_e77a10c02ffePVmQyCQrjpEp5a",
+    "status": {
+     "type": "busy"
+    }
+   }
+  },
+  {
+   "id": "evt_1885ef446001GQzwFnFS0letae",
+   "type": "session.updated",
+   "properties": {
+    "sessionID": "ses_e77a10c02ffePVmQyCQrjpEp5a",
+    "info": {
+     "id": "ses_e77a10c02ffePVmQyCQrjpEp5a",
+     "slug": "kind-garden",
+     "projectID": "global",
+     "directory": "C:\\work\\opencode-probe",
+     "path": "work/opencode-probe",
+     "parentID": "ses_e77a122bdffetzq9KVOjtixc3T",
+     "title": "Reply PONG (@general subagent)",
+     "agent": "general",
+     "model": {
+      "id": "big-pickle",
+      "providerID": "opencode",
+      "variant": "default"
+     },
+     "version": "1.18.3",
+     "summary": {
+      "additions": 0,
+      "deletions": 0,
+      "files": 0
+     },
+     "cost": 0,
+     "tokens": {
+      "input": 0,
+      "output": 0,
+      "reasoning": 0,
+      "cache": {
+       "read": 0,
+       "write": 0
+      }
+     },
+     "permission": [
+      {
+       "permission": "question",
+       "pattern": "*",
+       "action": "deny"
+      },
+      {
+       "permission": "plan_enter",
+       "pattern": "*",
+       "action": "deny"
+      },
+      {
+       "permission": "plan_exit",
+       "pattern": "*",
+       "action": "deny"
+      },
+      {
+       "permission": "task",
+       "pattern": "*",
+       "action": "deny"
+      }
+     ],
+     "time": {
+      "created": 1793289286653,
+      "updated": 1793289286725
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_1885ef46c001FciWop3FUua3c8",
+   "type": "session.status",
+   "properties": {
+    "sessionID": "ses_e77a10c02ffePVmQyCQrjpEp5a",
+    "status": {
+     "type": "busy"
+    }
+   }
+  },
+  {
+   "id": "evt_1885f0175001FEedL89KEp6XL1",
+   "type": "session.status",
+   "properties": {
+    "sessionID": "ses_e77a10c02ffePVmQyCQrjpEp5a",
+    "status": {
+     "type": "busy"
+    }
+   }
+  },
+  {
+   "id": "evt_1885f0177001DlwXrw7pne3ZgA",
+   "type": "session.status",
+   "properties": {
+    "sessionID": "ses_e77a10c02ffePVmQyCQrjpEp5a",
+    "status": {
+     "type": "idle"
+    }
+   }
+  },
+  {
+   "id": "evt_1885f0178001Xll6ngZnzg5fe3",
+   "type": "session.idle",
+   "properties": {
+    "sessionID": "ses_e77a10c02ffePVmQyCQrjpEp5a"
+   }
+  },
+  {
+   "id": "evt_1885f018b001Pc1jN0EfXqr5I7",
+   "type": "session.status",
+   "properties": {
+    "sessionID": "ses_e77a122bdffetzq9KVOjtixc3T",
+    "status": {
+     "type": "busy"
+    }
+   }
+  },
+  {
+   "id": "evt_1885f0198001mGKTmof05wuyRW",
+   "type": "session.updated",
+   "properties": {
+    "sessionID": "ses_e77a10c02ffePVmQyCQrjpEp5a",
+    "info": {
+     "id": "ses_e77a10c02ffePVmQyCQrjpEp5a",
+     "slug": "kind-garden",
+     "projectID": "global",
+     "directory": "C:\\work\\opencode-probe",
+     "path": "work/opencode-probe",
+     "parentID": "ses_e77a122bdffetzq9KVOjtixc3T",
+     "title": "Reply PONG (@general subagent)",
+     "agent": "general",
+     "model": {
+      "id": "big-pickle",
+      "providerID": "opencode",
+      "variant": "default"
+     },
+     "version": "1.18.3",
+     "summary": {
+      "additions": 0,
+      "deletions": 0,
+      "files": 0
+     },
+     "cost": 0,
+     "tokens": {
+      "input": 11511,
+      "output": 3,
+      "reasoning": 0,
+      "cache": {
+       "read": 1944,
+       "write": 0
+      }
+     },
+     "permission": [
+      {
+       "permission": "question",
+       "pattern": "*",
+       "action": "deny"
+      },
+      {
+       "permission": "plan_enter",
+       "pattern": "*",
+       "action": "deny"
+      },
+      {
+       "permission": "plan_exit",
+       "pattern": "*",
+       "action": "deny"
+      },
+      {
+       "permission": "task",
+       "pattern": "*",
+       "action": "deny"
+      }
+     ],
+     "time": {
+      "created": 1793289286653,
+      "updated": 1793289290135
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_1885f01a0001GSspi4cgk020dr",
+   "type": "session.updated",
+   "properties": {
+    "sessionID": "ses_e77a122bdffetzq9KVOjtixc3T",
+    "info": {
+     "id": "ses_e77a122bdffetzq9KVOjtixc3T",
+     "slug": "mighty-moon",
+     "projectID": "global",
+     "directory": "C:\\work\\opencode-probe",
+     "path": "work/opencode-probe",
+     "title": "Single subagent PONG check, then DONE",
+     "agent": "build",
+     "model": {
+      "id": "big-pickle",
+      "providerID": "opencode",
+      "variant": "default"
+     },
+     "version": "1.18.3",
+     "summary": {
+      "additions": 0,
+      "deletions": 0,
+      "files": 0
+     },
+     "cost": 0,
+     "tokens": {
+      "input": 13190,
+      "output": 84,
+      "reasoning": 0,
+      "cache": {
+       "read": 1944,
+       "write": 0
+      }
+     },
+     "permission": [
+      {
+       "permission": "question",
+       "pattern": "*",
+       "action": "deny"
+      },
+      {
+       "permission": "plan_enter",
+       "pattern": "*",
+       "action": "deny"
+      },
+      {
+       "permission": "plan_exit",
+       "pattern": "*",
+       "action": "deny"
+      }
+     ],
+     "time": {
+      "created": 1793289280835,
+      "updated": 1793289290143
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_1885f01be001P9lHyqca74vuBR",
+   "type": "session.status",
+   "properties": {
+    "sessionID": "ses_e77a122bdffetzq9KVOjtixc3T",
+    "status": {
+     "type": "busy"
+    }
+   }
+  },
+  {
+   "id": "evt_1885f0f14001qkB3zjSwt5AWts",
+   "type": "session.status",
+   "properties": {
+    "sessionID": "ses_e77a122bdffetzq9KVOjtixc3T",
+    "status": {
+     "type": "busy"
+    }
+   }
+  },
+  {
+   "id": "evt_1885f0f18001nJXJuohecVXomH",
+   "type": "session.status",
+   "properties": {
+    "sessionID": "ses_e77a122bdffetzq9KVOjtixc3T",
+    "status": {
+     "type": "idle"
+    }
+   }
+  },
+  {
+   "id": "evt_1885f0f19001o0qJRvs8lHVEDw",
+   "type": "session.idle",
+   "properties": {
+    "sessionID": "ses_e77a122bdffetzq9KVOjtixc3T"
+   }
+  }
+ ],
+ "deleted": {
+  "id": "evt_18869564f001bLkRnvi9QikF5F",
+  "type": "session.deleted",
+  "properties": {
+   "sessionID": "ses_e77a10c02ffePVmQyCQrjpEp5a",
+   "info": {
+    "id": "ses_e77a10c02ffePVmQyCQrjpEp5a",
+    "slug": "kind-garden",
+    "projectID": "global",
+    "directory": "C:\\work\\opencode-probe",
+    "path": "work/opencode-probe",
+    "parentID": "ses_e77a122bdffetzq9KVOjtixc3T",
+    "title": "Reply PONG (@general subagent)",
+    "agent": "general",
+    "model": {
+     "id": "big-pickle",
+     "providerID": "opencode",
+     "variant": "default"
+    },
+    "version": "1.18.3",
+    "summary": {
+     "additions": 0,
+     "deletions": 0,
+     "files": 0
+    },
+    "cost": 0,
+    "tokens": {
+     "input": 11511,
+     "output": 3,
+     "reasoning": 0,
+     "cache": {
+      "read": 1944,
+      "write": 0
+     }
+    },
+    "permission": [
+     {
+      "permission": "question",
+      "pattern": "*",
+      "action": "deny"
+     },
+     {
+      "permission": "plan_enter",
+      "pattern": "*",
+      "action": "deny"
+     },
+     {
+      "permission": "plan_exit",
+      "pattern": "*",
+      "action": "deny"
+     },
+     {
+      "permission": "task",
+      "pattern": "*",
+      "action": "deny"
+     }
+    ],
+    "time": {
+     "created": 1793289286653,
+     "updated": 1793289290135
+    }
+   }
+  }
+ }
+}

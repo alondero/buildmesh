@@ -128,7 +128,11 @@ middle of a live turn. This matters for Kimi Code: a background
 only; a later `Notification` with `source_kind=background_task` and a terminal
 `task.*` type resolves it after the foreground `Stop`. OpenCode question and
 permission events are tracked by request id (with a conservative single-
-request fallback), and child sessions cannot overwrite their parent. Codex has
+request fallback), and child sessions cannot overwrite their parent. A native
+OpenCode subagent is a child session: the plugin reports it as `subagent_start`
+and `subagent_stop` under the parent's session id, which the route tracks like a
+Claude Code subagent, so a parent `session.idle` while a child is alive publishes
+`BackgroundRunning` rather than `ready`. Codex has
 no permission-result hook, so its tool result or identified terminal `Stop`
 resolves the attention route's approval marker. Circuit evidence applies a
 stricter request identity contract: a permission callback without a request ID

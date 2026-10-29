@@ -136,6 +136,58 @@ fn inject_opencode_attention_plugin(project_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Parse the plugin's native-subagent events (issue #2636) into owned-work
+/// receipts. The plugin synthesizes `subagent_start` / `subagent_stop` from a
+/// child session's `session.created` (which carries `info.parentID`), its
+/// `session.idle` and its `session.deleted`; OpenCode has no such event of its
+/// own. `sessionID` is the *parent* (root) session and `agent_id` the child's,
+/// both OpenCode `ses_` ids, so the receipt is fenced to the node's own session
+/// and the child identity is stable across both events.
+///
+/// This parser reports child work only. It never yields a foreground turn
+/// (`Stop`, `UserPromptSubmit`), a turn token or a registry snapshot, which is
+/// why the strategy declares `foreground: false`. Event names are read the way
+/// the attention route reads them (lowercased, `_` dropped) so the route can
+/// never track a child for a spelling this parser would refuse.
+fn parse_circuit_hook(value: &serde_json::Value) -> Option<crate::circuit::strategy::NativeHook> {
+    use crate::circuit::strategy::NativeHook;
+    use crate::http::request::parse_opencode_session_id;
+    let named = ["hook_event_name", "hookEventName", "hookName"]
+        .iter()
+        .find_map(|key| value.get(*key)?.as_str())?;
+    let event = match named.to_ascii_lowercase().replace('_', "").as_str() {
+        "subagentstart" => "SubagentStart",
+        "subagentstop" => "SubagentStop",
+        _ => return None,
+    };
+    let id = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|key| value.get(*key)?.as_str())
+            .and_then(parse_opencode_session_id)
+    };
+    let parent = id(&["sessionID", "sessionId", "session_id"])?;
+    let child = id(&["agent_id"])?;
+    // A session cannot own itself; that would let the root's own events
+    // masquerade as owned work.
+    if parent == child {
+        return None;
+    }
+    Some(NativeHook {
+        session_id: Some(parent),
+        turn_id: None,
+        event: event.into(),
+        child_id: Some(child),
+        active_work: None,
+        final_report: None,
+        background_busy: false,
+        execution_num: None,
+        termination_reason: None,
+        human_fact: None,
+        provider: Some("opencode".into()),
+        prompt_digest: None,
+    })
+}
+
 impl AgentProvider for OpenCodeAdapter {
     fn id(&self) -> &'static str {
         "opencode"
@@ -146,16 +198,34 @@ impl AgentProvider for OpenCodeAdapter {
     /// plugin forwards `session.idle` / `question.asked` / `permission.asked`
     /// (plus capture-only `session.created`) and its `opencode.db` SQLite
     /// store yields a readable transcript/report — but no event carries a
-    /// turn/input fence and no pull source exposes a turn completion or a
-    /// complete child/background registry. It therefore declares no Circuit
-    /// push or pull source, and Circuit execution stays visibly Unverified
-    /// until a controlled live run exists.
+    /// turn/input fence and no pull source exposes a turn completion. The
+    /// foreground therefore stays unavailable and Circuit execution visibly
+    /// Unverified.
+    ///
+    /// Issue #2636: a native subagent (the `task` tool) runs as a child
+    /// session, and the plugin reports its start and end under the parent's
+    /// session id. That is the one thing declared here: child work is
+    /// recorded as owned-work evidence tied to the parent. With no turn token
+    /// those receipts are reduced confidence, so they never settle a step;
+    /// what blocks a Ready is the node's own lifecycle (`BackgroundRunning`).
     fn circuit_observation(&self) -> crate::circuit::strategy::ObservationStrategy {
-        use crate::circuit::strategy::{ObservationStrategy, StrategyNotes};
+        use crate::circuit::strategy::{
+            HookPush, ObservationStrategy, OwnedWorkCoverage, PushSource, StrategyNotes,
+        };
         ObservationStrategy {
+            push: PushSource::Hooks(HookPush {
+                parse: parse_circuit_hook,
+                source: "opencode_native_hook",
+                request_source: "opencode_request_hook",
+                // Child events name owned work, so a turn without a registry
+                // is unknown rather than a validated gap.
+                ownership_gap: None,
+                foreground: false,
+            }),
+            owned_work: OwnedWorkCoverage::HookRegistry,
             notes: StrategyNotes {
                 foreground: "OpenCode 1.18.3 (Windows .cmd via cmd.exe /c; Linux/macOS direct) has no validated Circuit lifecycle adapter; the session.idle plugin hook carries no turn/input fence and cannot establish foreground termination",
-                owned_work: "OpenCode exposes no complete child/background registry to Buildmesh; unknown child/background work never establishes completion",
+                owned_work: "OpenCode 1.18.3 native subagents (the task tool) run as child sessions, and the plugin reports each child session's start and end with its session id under the parent; with no turn token these receipts are reduced confidence and never settle a step. There is no registry snapshot, so a settled turn leaves other ownership unknown. Subagents that run in the background (the v2 subagent tool) and resumed child sessions are not validated",
                 final_report: "Transcript (opencode.db SQLite) or PTY text may inform interpretation; complete native report unavailable",
                 ..ObservationStrategy::UNWIRED.notes
             },
@@ -977,3 +1047,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "opencode_tests.rs"]
+mod child_session_tests;
