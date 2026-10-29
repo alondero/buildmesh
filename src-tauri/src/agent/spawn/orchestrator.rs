@@ -440,7 +440,7 @@ pub(crate) async fn spawn_with_intent(
                 claim.mark_succeeded();
             }
             if let Some(prompt) = typed_prompt {
-                super::startup_prompt::deliver_after_boot(app.clone(), node_id, prompt);
+                super::startup_prompt::deliver_after_boot(app.clone(), node_id, provider, prompt);
             }
             let refreshed = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
             let _ = app.emit(
@@ -504,9 +504,10 @@ pub(super) fn split_initial_prompt(
     supports_prefill: bool,
     prompt: Option<String>,
 ) -> (Option<String>, Option<String>) {
-    match prompt {
-        Some(text) if !text.trim().is_empty() && !supports_prefill => (None, Some(text)),
-        prompt => (prompt, None),
+    if supports_prefill {
+        (prompt, None)
+    } else {
+        (None, prompt.filter(|text| !text.trim().is_empty()))
     }
 }
 

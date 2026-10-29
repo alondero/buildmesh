@@ -84,9 +84,9 @@ fn initial_prompt_rides_argv_with_prefill_and_is_typed_without_it() {
     assert_eq!(split_initial_prompt(false, prompt()), (None, prompt()));
     assert_eq!(split_initial_prompt(false, None), (None, None));
     assert_eq!(
-        split_initial_prompt(false, Some("  ".into())).1,
-        None,
-        "a blank prompt is never typed"
+        split_initial_prompt(false, Some("  ".into())),
+        (None, None),
+        "a blank prompt is neither typed nor put on argv"
     );
 }
 

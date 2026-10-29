@@ -455,7 +455,7 @@ pub(super) fn start_reader(
                     // unarmed nodes.
                     crate::attention_autoclear::on_output(session_id, data.len());
                     // Boot tracking for a prompt typed after startup.
-                    super::startup_prompt::on_output(session_id);
+                    super::startup_prompt::on_output(session_id, &text);
 
                     if let Some(uuid) = uuid {
                         // The structured hook and Codex rollout fallback can
