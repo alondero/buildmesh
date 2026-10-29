@@ -202,6 +202,8 @@ pub fn provider_catalogue() -> Vec<ProviderCatalogueEntry> {
                 // Model availability is independent of the Claude alias map. Sources:
                 // platform.minimax.io/docs/api-reference/text-anthropic-api and /docs/token-plan/codex.
                 models = [
+                    "MiniMax-M3.1-Flash[1m]",
+                    "MiniMax-M3.1-Flash",
                     "MiniMax-M3[1m]",
                     "MiniMax-M3",
                     "MiniMax-M2.7",
@@ -220,6 +222,20 @@ pub fn provider_catalogue() -> Vec<ProviderCatalogueEntry> {
                     efforts: Some(Vec::new()),
                 })
                 .collect();
+                // Responses-API models. Source: platform.minimax.io/docs/api-reference/responses-create.
+                // M3.1 Flash always reasons (`none` returns HTTP 400); M3 reasons only when an
+                // effort other than `none` is set. `allowed_efforts` intersects these with
+                // Codex's own vocabulary, so `max` is dropped for Codex.
+                models.push(CatalogueModel {
+                    id: "MiniMax-M3.1-Flash".into(),
+                    name: "MiniMax M3.1 Flash".into(),
+                    surface: ApiSurface::OpenAI,
+                    efforts: Some(
+                        ["low", "medium", "high", "xhigh", "max"]
+                            .map(String::from)
+                            .to_vec(),
+                    ),
+                });
                 models.push(CatalogueModel {
                     id: "MiniMax-M3".into(),
                     name: "MiniMax M3".into(),
