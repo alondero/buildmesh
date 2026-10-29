@@ -84,8 +84,9 @@ state, review decision and mergeability. The browser and native Android client
 read the live worktree branch from the git branch route and match it to the
 same-repository PR's `head_ref`; the node's stored base reference is not the
 source branch. Fork PRs with a coincidentally matching branch are excluded.
-The mesh's **Pull requests** shortcut lists open PRs without merge controls for
-unrelated work. An incomplete feed states its returned count, reported total
+The mesh's **Pull requests** shortcut switches between open and closed PRs
+without merge controls for unrelated work. Closed PRs are read-only and offer
+no spawn control. An incomplete feed states its returned count, reported total
 when available, and reason; absence from a truncated feed does not establish
 that a node has no PR.
 

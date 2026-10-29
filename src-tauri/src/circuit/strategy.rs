@@ -91,6 +91,12 @@ pub struct HookPush {
     /// the operator. `None`: the harness may report a registry, and a turn
     /// without one leaves ownership merely unknown.
     pub ownership_gap: Option<&'static str>,
+    /// Whether the parser reports the foreground turn (`Stop`,
+    /// `UserPromptSubmit`). `false`: it reports child or background work only
+    /// (OpenCode's native subagent sessions, issue #2636), so the foreground
+    /// stays explicitly unavailable even though hooks are declared. Declaring
+    /// hooks alone never implies a foreground source.
+    pub foreground: bool,
 }
 
 /// A validated native pull the worker re-reads while a step is unsettled.
@@ -269,9 +275,11 @@ impl ObservationStrategy {
         }
     }
 
-    /// Whether any Circuit-native foreground evidence is wired.
+    /// Whether any Circuit-native foreground evidence is wired. Hooks count
+    /// only when their parser reports the foreground turn: a child-work-only
+    /// parser leaves the foreground unavailable.
     pub fn has_foreground_source(&self) -> bool {
-        self.hooks().is_some() || self.native_pull().is_some()
+        self.hooks().is_some_and(|hooks| hooks.foreground) || self.native_pull().is_some()
     }
 
     pub fn coverage(&self) -> ObservationCoverage {
@@ -425,6 +433,7 @@ pub fn native_pull_for_source(source: &str) -> Option<NativePull> {
 }
 
 #[cfg(test)]
+// allow-test-in-production: this suite predates the sibling-test-file rule. Issue #2636 only revises the OpenCode guard assertions; moving the suite is out of scope.
 mod tests {
     use super::*;
     use crate::models::Provider;
@@ -494,11 +503,13 @@ mod tests {
     }
 
     #[test]
-    fn only_claude_antigravity_and_codex_wire_a_circuit_native_source_today() {
-        // Guards against silently widening authority: exactly these harnesses
-        // declare a Circuit-native source. Missing evidence for the rest
-        // (MiniMax Code, OpenCode, Grok, ...) stays explicit rather than
-        // inherited from a neighbour.
+    fn only_claude_antigravity_and_codex_wire_a_circuit_foreground_source_today() {
+        // Guards against silently widening authority. Exactly these harnesses
+        // report the foreground turn. OpenCode declares hooks too, but its
+        // parser reports child sessions only (issue #2636), so it must not
+        // read as a foreground source. Missing evidence for the rest (MiniMax
+        // Code, Grok, ...) stays explicit rather than inherited from a
+        // neighbour.
         let wired: Vec<(&str, PushKind, PullKind)> = Provider::all()
             .iter()
             .map(|p| {
@@ -515,18 +526,31 @@ mod tests {
             vec![
                 ("anthropic", PushKind::Hooks, PullKind::None),
                 ("agy", PushKind::Hooks, PullKind::None),
+                ("opencode", PushKind::Hooks, PullKind::None),
                 ("codex", PushKind::Hooks, PullKind::NativeTurnCompletion),
             ]
         );
+        let foreground: Vec<&str> = Provider::all()
+            .iter()
+            .filter(|p| p.adapter().circuit_observation().has_foreground_source())
+            .map(|p| p.adapter().id())
+            .collect();
+        assert_eq!(foreground, vec!["anthropic", "agy", "codex"]);
         for id in ["opencode", "grok", "mcode", "cline"] {
-            let strategy = for_stored(id);
-            assert!(!strategy.has_foreground_source(), "{id}");
+            assert!(!for_stored(id).has_foreground_source(), "{id}");
+        }
+        for id in ["grok", "mcode", "cline"] {
             assert_eq!(
-                strategy.coverage().owned_work,
+                for_stored(id).coverage().owned_work,
                 OwnedWorkKind::Unavailable,
                 "{id}"
             );
         }
+        assert_eq!(
+            for_stored("opencode").coverage().owned_work,
+            OwnedWorkKind::HookRegistry,
+            "OpenCode reports child sessions as owned work"
+        );
     }
 
     #[test]

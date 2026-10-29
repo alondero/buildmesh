@@ -432,6 +432,111 @@ fn old_child_completion_does_not_end_a_new_foreground_turn() {
     );
 }
 
+const OPENCODE_PARENT: &str = "ses_e77a04977ffea25PMbbvyAZJYU";
+const OPENCODE_CHILD: &str = "ses_e77a02cc6ffeHjnk2f6NIW0LE8";
+
+fn apply_opencode_fixture(
+    state: &mut crate::agent::hook_state::HookState,
+    value: serde_json::Value,
+) -> Decision {
+    let body = value.to_string();
+    let payload = HookPayload::parse(body.as_bytes()).unwrap();
+    let classified = classify(body.as_bytes(), "opencode", |_| Some(0));
+    let accept = accept_hook(state, &payload, &classified);
+    if accept.accepted {
+        lifecycle_decision(classified.decision, state, false, accept)
+    } else {
+        Decision::Ignore
+    }
+}
+
+fn opencode_child(event: &str) -> serde_json::Value {
+    serde_json::json!({
+        "hook_event_name": event,
+        "sessionID": OPENCODE_PARENT,
+        "agent_id": OPENCODE_CHILD,
+    })
+}
+
+#[test]
+fn opencode_node_waits_for_a_child_session_after_the_parent_goes_idle() {
+    let mut state = crate::agent::hook_state::HookState::default();
+    let parent =
+        |event: &str| serde_json::json!({"hook_event_name": event, "sessionID": OPENCODE_PARENT});
+    assert_eq!(
+        apply_opencode_fixture(&mut state, parent("session.busy")),
+        Decision::Running
+    );
+    apply_opencode_fixture(&mut state, opencode_child("subagent_start"));
+    // The parent turn ended but the child session is still alive: not Ready.
+    assert_eq!(
+        apply_opencode_fixture(&mut state, parent("session.idle")),
+        Decision::SuppressPendingBackground
+    );
+    assert_eq!(
+        apply_opencode_fixture(&mut state, opencode_child("subagent_stop")),
+        Decision::Ready
+    );
+}
+
+#[test]
+fn opencode_child_start_without_an_id_never_suppresses_ready() {
+    let mut state = crate::agent::hook_state::HookState::default();
+    let parent =
+        |event: &str| serde_json::json!({"hook_event_name": event, "sessionID": OPENCODE_PARENT});
+    apply_opencode_fixture(&mut state, parent("session.busy"));
+    apply_opencode_fixture(
+        &mut state,
+        serde_json::json!({"hook_event_name":"subagent_start","sessionID":OPENCODE_PARENT}),
+    );
+    assert_eq!(
+        apply_opencode_fixture(&mut state, parent("session.idle")),
+        Decision::Ready
+    );
+}
+
+#[test]
+fn opencode_stop_of_a_child_never_started_neither_ends_the_turn_nor_invents_a_child() {
+    let mut state = crate::agent::hook_state::HookState::default();
+    let parent =
+        |event: &str| serde_json::json!({"hook_event_name": event, "sessionID": OPENCODE_PARENT});
+    apply_opencode_fixture(&mut state, parent("session.busy"));
+    assert_eq!(
+        apply_opencode_fixture(&mut state, opencode_child("subagent_stop")),
+        Decision::Ignore
+    );
+    assert_eq!(
+        apply_opencode_fixture(&mut state, parent("session.idle")),
+        Decision::Ready
+    );
+}
+
+#[test]
+fn opencode_child_events_reach_the_circuit_as_owned_work_receipts() {
+    for (wire, native) in [
+        ("subagent_start", "SubagentStart"),
+        ("subagent_stop", "SubagentStop"),
+    ] {
+        let hook = normalizers::normalize(Some(&opencode_child(wire)), "opencode", |_| Some(0))
+            .native_hook
+            .unwrap_or_else(|| panic!("{wire} yields a native receipt"));
+        assert_eq!(hook.event, native);
+        assert_eq!(hook.child_id.as_deref(), Some(OPENCODE_CHILD));
+        assert_eq!(hook.session_id.as_deref(), Some(OPENCODE_PARENT));
+    }
+    // The same payload is not a receipt for another harness.
+    for provider in ["anthropic", "codex", "agy", "grok", "cline"] {
+        assert!(
+            normalizers::normalize(Some(&opencode_child("subagent_start")), provider, |_| Some(
+                0
+            ))
+            .native_hook
+            .is_none(),
+            "{provider} must not read an OpenCode child event"
+        );
+    }
+}
+
 #[test]
 fn codex_answer_resumes_after_question_tool_result() {
     let mut state = crate::agent::hook_state::HookState::default();

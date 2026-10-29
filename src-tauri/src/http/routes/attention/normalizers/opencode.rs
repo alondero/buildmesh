@@ -5,7 +5,11 @@ use serde_json::Value;
 use std::path::Path;
 
 pub(super) fn parse(value: &Value) -> Option<HookPayload> {
-    let fields = [COMPATIBLE_FIELDS, &["notification_type", "error"]].concat();
+    let fields = [
+        COMPATIBLE_FIELDS,
+        &["notification_type", "error", "agent_id"],
+    ]
+    .concat();
     HookPayload::parse_for(value, &fields)
 }
 
@@ -14,8 +18,22 @@ pub(super) fn classify(
     detail: HookSignalDetail,
     count_pending: &mut dyn FnMut(&Path) -> Option<usize>,
 ) -> Classified {
+    let child = payload.agent_id.as_deref().is_some_and(|id| !id.is_empty());
     match payload.event().as_str() {
         "session.created" => ignore(detail),
+        // A native subagent is a child session (issue #2636). Mapped like
+        // Claude's subagent events so the node is not Ready while one is alive.
+        "subagentstart" if child => Classified {
+            decision: Decision::ChildStarted,
+            validated: true,
+            detail,
+        },
+        "subagentstop" if child => Classified {
+            decision: Decision::BackgroundTaskCompleted,
+            validated: true,
+            detail,
+        },
+        "subagentstart" | "subagentstop" => ignore(detail),
         "session.idle" => Classified::ready(detail),
         "session.busy" | "userpromptsubmit" | "permission.replied" | "question.replied"
         | "question.rejected" => running(detail),

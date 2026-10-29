@@ -287,6 +287,7 @@ impl AgentProvider for AgyAdapter {
                 source: "agy_native_hook",
                 request_source: "agy_request_hook",
                 ownership_gap: Some(AGY_OWNERSHIP_GAP),
+                foreground: true,
             }),
             pull: PullSource::None,
             turn_identity: TurnIdentity::None,
