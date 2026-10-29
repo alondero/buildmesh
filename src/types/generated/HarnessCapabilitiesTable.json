@@ -90,6 +90,7 @@
       "supports_model_override": true,
       "supports_passive_turn_watcher": false,
       "supports_prefill": true,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "anthropic": {
@@ -152,6 +153,7 @@
       "supports_model_override": true,
       "supports_passive_turn_watcher": false,
       "supports_prefill": true,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "cline": {
@@ -192,6 +194,7 @@
       "supports_model_override": true,
       "supports_passive_turn_watcher": false,
       "supports_prefill": true,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "codex": {
@@ -255,6 +258,7 @@
       "supports_model_override": true,
       "supports_passive_turn_watcher": false,
       "supports_prefill": true,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "commandcode": {
@@ -305,6 +309,7 @@
       "supports_model_override": true,
       "supports_passive_turn_watcher": true,
       "supports_prefill": true,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "cursor": {
@@ -350,6 +355,7 @@
       "supports_model_override": true,
       "supports_passive_turn_watcher": false,
       "supports_prefill": true,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "dsh": {
@@ -377,6 +383,7 @@
       "supports_model_override": false,
       "supports_passive_turn_watcher": false,
       "supports_prefill": false,
+      "supports_result_file_handoff": true,
       "supports_resume": false
     },
     "freebuff": {
@@ -404,6 +411,7 @@
       "supports_model_override": false,
       "supports_passive_turn_watcher": false,
       "supports_prefill": true,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "grok": {
@@ -457,6 +465,7 @@
       "supports_model_override": true,
       "supports_passive_turn_watcher": false,
       "supports_prefill": true,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "kimi": {
@@ -501,6 +510,7 @@
       "supports_model_override": true,
       "supports_passive_turn_watcher": false,
       "supports_prefill": false,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "mcode": {
@@ -547,6 +557,7 @@
       "supports_model_override": true,
       "supports_passive_turn_watcher": false,
       "supports_prefill": true,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "muse": {
@@ -595,6 +606,7 @@
       "supports_model_override": true,
       "supports_passive_turn_watcher": true,
       "supports_prefill": true,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "opencode": {
@@ -648,6 +660,7 @@
       "supports_model_override": true,
       "supports_passive_turn_watcher": false,
       "supports_prefill": true,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "perch": {
@@ -695,6 +708,7 @@
       "supports_model_override": true,
       "supports_passive_turn_watcher": false,
       "supports_prefill": false,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "terminal": {
@@ -722,6 +736,7 @@
       "supports_model_override": false,
       "supports_passive_turn_watcher": false,
       "supports_prefill": false,
+      "supports_result_file_handoff": false,
       "supports_resume": false
     }
   },

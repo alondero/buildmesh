@@ -4,7 +4,7 @@
  * The sidebar Attention view used to own the cross-repository triage surface:
  * a failed agent could be retried from a list of agents drawn from every
  * repository, a duplicate retry was refused, and a refused recovery was
- * reported rather than swallowed. That view is retired (ADR-0048), and Agent
+ * reported rather than swallowed. That view is retired (ADR-0049), and Agent
  * History's Lifecycle list is the surface that took over the job — so the
  * behaviour is pinned here, on the surface that now carries it.
  *

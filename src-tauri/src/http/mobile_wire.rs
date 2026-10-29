@@ -114,6 +114,7 @@ fn harness_capabilities(
         requires_attention_hook: false,
         attention_capability: crate::agent::capabilities::AttentionCapability::None,
         supports_passive_turn_watcher: false,
+        supports_result_file_handoff: !plain_terminal,
         produces_readable_transcript: true,
         supports_model_override: true,
         supports_effort_override: false,

@@ -235,14 +235,21 @@ executor at the spawn seam.
 | Cline | Attn hook | ✅ |
 | Command Code | Watcher | ✅ |
 | Meta Muse | Watcher | ✅ |
-| DeepSeek Harness | None | ❌ |
-| Freebuff | None | ❌ |
-| Perch | None | ❌ |
+| DeepSeek Harness | Result file | ✅ |
+| Freebuff | Result file | ✅ |
+| Perch | Result file | ✅ |
 | Terminal | None (plain shell) | ❌ |
 
-Eligibility is necessary, not sufficient, and two of the ✅ rows are weaker than
+Eligibility is necessary, not sufficient, and several ✅ rows are weaker than
 the rest:
 
+- **DeepSeek Harness, Freebuff and Perch** have no hook or watcher. Every Circuit
+  prompt asks them to write a result file when they finish, and that settled
+  file is their only turn signal (see
+  [result-file turn completion](../development/circuit-session-observation.md#result-file-turn-completion)).
+  It cannot report a question, a permission or background work, and a review
+  started on one of them as the source has to be moved past its first wait by
+  hand, because that turn was not prompted by the Circuit.
 - **Kimi Code** advertises a hook, but its CLI hook contract validation is still
   open (#1554, blocking #1369). Until that lands the gate admits Kimi on an
   unvalidated signal.

@@ -381,6 +381,7 @@ fn caps_all_false(id: &str) -> crate::agent::capabilities::HarnessCapabilities {
         attention_capability: crate::agent::capabilities::AttentionCapability::None,
         background_inference: None,
         supports_passive_turn_watcher: false,
+        supports_result_file_handoff: false,
         produces_readable_transcript: false,
         supports_model_override: false,
         supports_effort_override: false,

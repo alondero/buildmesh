@@ -742,30 +742,6 @@ pub(super) fn spawn_step_agent(
         .get("issue.number")
         .and_then(|number| number.parse::<i64>().ok());
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
-    // Staging happens before the delivery decision so every later use sees the
-    // text the agent will actually receive. The turn it opens is recorded
-    // against the agent id once that id is known.
-    let (resolved_prompt, handoff_turn) = if resolved_prompt.trim().is_empty() {
-        (resolved_prompt, None)
-    } else {
-        let attempt = view.step(node_id).map_or(1, |s| s.attempt);
-        // A retry or respawn reuses the step's existing agent node, so its stored env wins.
-        let existing_env = view
-            .step(node_id)
-            .and_then(|s| s.agent_node_id)
-            .and_then(|id| db::get_agent_node_by_id(id).ok())
-            .map(|node| node.env);
-        let env = staging_env(existing_env, &mesh.path);
-        let staged = crate::circuit::handoff::stage_prompt(
-            run_id,
-            node_id,
-            attempt,
-            env,
-            &resolved_prompt,
-            requests_result,
-        );
-        (staged.delivered, staged.turn)
-    };
     let provider = provider_str
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| {
@@ -792,6 +768,33 @@ pub(super) fn spawn_step_agent(
         .as_ref()
         .and_then(|c| c.resolved.as_ref())
         .map_or(provider.as_str(), |plan| plan.harness.harness.as_str());
+    // Staging happens before the delivery decision so every later use sees the
+    // text the agent will actually receive. The turn it opens is recorded
+    // against the agent id once that id is known. A harness with no lifecycle
+    // of its own can only end this turn by writing its result file, so it
+    // owes one whether or not the step carries a result contract.
+    let (resolved_prompt, handoff_turn) = if resolved_prompt.trim().is_empty() {
+        (resolved_prompt, None)
+    } else {
+        let attempt = view.step(node_id).map_or(1, |s| s.attempt);
+        // A retry or respawn reuses the step's existing agent node, so its stored env wins.
+        let existing_env = view
+            .step(node_id)
+            .and_then(|s| s.agent_node_id)
+            .and_then(|id| db::get_agent_node_by_id(id).ok())
+            .map(|node| node.env);
+        let env = staging_env(existing_env, &mesh.path);
+        let staged = crate::circuit::handoff::stage_prompt(
+            run_id,
+            node_id,
+            attempt,
+            env,
+            &resolved_prompt,
+            requests_result
+                || super::result_handoff::selection_completes_by_result_file_only(launch_harness),
+        );
+        (staged.delivered, staged.turn)
+    };
     let prompt_delivery =
         crate::agent::launch::initial_prompt_delivery(launch_harness, &resolved_prompt);
     let worktree_policy =

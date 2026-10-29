@@ -517,6 +517,14 @@ pub trait AgentProvider: Send + Sync {
         self.circuit_observation().passive_watcher.is_some()
     }
 
+    /// Whether a Circuit can take this harness's result file as its turn
+    /// completion (see `HarnessCapabilities::supports_result_file_handoff`).
+    /// Every agent harness can write one; only the plain shell cannot be
+    /// asked to.
+    fn supports_result_file_handoff(&self) -> bool {
+        !self.is_plain_terminal()
+    }
+
     /// Ensure the workspace is trusted for this harness before its process is
     /// created. Trust is a launch prerequisite, independent of attention-hook
     /// installation. Providers with vendor-specific trust stores opt in by
@@ -987,6 +995,7 @@ pub trait AgentProvider: Send + Sync {
             requires_attention_hook: self.requires_attention_hook(),
             attention_capability: self.attention_capability(),
             supports_passive_turn_watcher: self.supports_passive_turn_watcher(),
+            supports_result_file_handoff: self.supports_result_file_handoff(),
             produces_readable_transcript: self.produces_readable_transcript(),
             supports_model_override: self.supports_model_override(),
             supports_effort_override: !matches!(effort_control, EffortControlKind::None),

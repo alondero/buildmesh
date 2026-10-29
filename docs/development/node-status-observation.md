@@ -177,7 +177,7 @@ in `src-tauri/src/agent/provider/adapters/` remain the source of truth.
 | MiniMax Code | Plugin completion hook plus transcript evidence | Turn completion, `ask_user` questions, background work and interrupts; no permission signal under its pinned Full Access launch |
 | Cline | Native completion hook | Turn completion only is advertised; do not extrapolate request support |
 | Command Code / Meta Muse | Passive session-log watchers | Supported terminal-turn evidence; watcher activation is not proof that a record arrived |
-| DeepSeek Harness / Freebuff / Terminal | No supported lifecycle observer declared | Process lifecycle only; signal health remains unavailable |
+| DeepSeek Harness / Freebuff / Perch / Terminal | No supported lifecycle observer declared | Process lifecycle only; signal health remains unavailable. Inside a Circuit, an agent harness reaches Ready when its owed [result file](circuit-session-observation.md#result-file-turn-completion) settles |
 
 Regression tests exercise route normalization and request/child ordering, lifecycle
 transition effects, production SQLite writes and reads, schema upgrades, client

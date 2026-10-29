@@ -2,7 +2,7 @@
  * The desktop sidebar has one view: the mesh list.
  *
  * The Workspace / Attention toggle and the grouped attention view it opened
- * are gone (see ADR-0048). This file pins the removal so neither can creep
+ * are gone (see ADR-0049). This file pins the removal so neither can creep
  * back: the toggle would again cost a chrome row above the list, and the
  * attention view would again duplicate what the mesh rows, the node status
  * marks and Agent History already report.
@@ -51,7 +51,7 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); });
 
-describe('Sidebar single view (ADR-0048)', () => {
+describe('Sidebar single view (ADR-0049)', () => {
   it('offers no view toggle above the mesh list', () => {
     render(<Sidebar />);
 

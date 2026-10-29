@@ -1,4 +1,4 @@
-# 48. Retire the sidebar Attention view and the Active band label
+# 49. Retire the sidebar Attention view and the Active band label
 
 Status: accepted (partially supersedes [ADR-0039](0039-desktop-audit-navigation-and-readiness.md)'s sidebar Attention view mandate)
 

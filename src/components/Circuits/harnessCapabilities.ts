@@ -104,13 +104,12 @@ function harnessIdForProvider(
  * reviewed source agent or as the reviewer.
  *
  * `true` only for a harness Buildmesh can *prove* cannot yield a turn: the
- * ones carrying neither a native attention hook nor a passive turn watcher,
- * plus the plain shell. This is the harness half of the backend's Circuit
- * compatibility gate (`circuit::compatibility::evaluate`). A circuit gate
- * that waits on an agent (`AwaitAgentTurn`, `ReviewVerdict`) only advances
- * once that agent's status reaches `AwaitingInput`/`Ready`/`Completed`, and
- * those statuses arrive only from the attention/lifecycle path — so such a run
- * does not fail, it parks until the watchdog budget expires.
+ * plain shell, and a harness carrying no native attention hook, no passive
+ * turn watcher and no result-file handoff. Every shipped agent harness can
+ * write the result file a circuit prompt asks for, so a harness without a
+ * lifecycle of its own (Freebuff, Perch, DeepSeek Harness) still completes
+ * through that file. This is the harness half of the backend's Circuit
+ * compatibility gate (`circuit::compatibility::harness_has_turn_signal`).
  *
  * An id that resolves to nothing returns `false`. `AgentNode.provider` holds
  * user-defined harness profile ids, which the spawn seam resolves to a real
@@ -125,6 +124,8 @@ export function blocksReviewCircuit(
   const caps = HARNESS_CAPABILITIES[harnessId];
   return (
     caps.is_plain_terminal
-    || (!caps.requires_attention_hook && !caps.supports_passive_turn_watcher)
+    || (!caps.requires_attention_hook
+      && !caps.supports_passive_turn_watcher
+      && !caps.supports_result_file_handoff)
   );
 }
