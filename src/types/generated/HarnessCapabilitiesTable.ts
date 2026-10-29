@@ -122,6 +122,7 @@ export const HARNESS_CATALOG = {
       "supports_model_override": true,
       "supports_passive_turn_watcher": false,
       "supports_prefill": true,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "anthropic": {
@@ -184,6 +185,7 @@ export const HARNESS_CATALOG = {
       "supports_model_override": true,
       "supports_passive_turn_watcher": false,
       "supports_prefill": true,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "cline": {
@@ -224,6 +226,7 @@ export const HARNESS_CATALOG = {
       "supports_model_override": true,
       "supports_passive_turn_watcher": false,
       "supports_prefill": true,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "codex": {
@@ -287,6 +290,7 @@ export const HARNESS_CATALOG = {
       "supports_model_override": true,
       "supports_passive_turn_watcher": false,
       "supports_prefill": true,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "commandcode": {
@@ -337,6 +341,7 @@ export const HARNESS_CATALOG = {
       "supports_model_override": true,
       "supports_passive_turn_watcher": true,
       "supports_prefill": true,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "cursor": {
@@ -382,6 +387,7 @@ export const HARNESS_CATALOG = {
       "supports_model_override": true,
       "supports_passive_turn_watcher": false,
       "supports_prefill": true,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "dsh": {
@@ -409,6 +415,7 @@ export const HARNESS_CATALOG = {
       "supports_model_override": false,
       "supports_passive_turn_watcher": false,
       "supports_prefill": false,
+      "supports_result_file_handoff": true,
       "supports_resume": false
     },
     "freebuff": {
@@ -436,6 +443,7 @@ export const HARNESS_CATALOG = {
       "supports_model_override": false,
       "supports_passive_turn_watcher": false,
       "supports_prefill": true,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "grok": {
@@ -489,6 +497,7 @@ export const HARNESS_CATALOG = {
       "supports_model_override": true,
       "supports_passive_turn_watcher": false,
       "supports_prefill": true,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "kimi": {
@@ -533,6 +542,7 @@ export const HARNESS_CATALOG = {
       "supports_model_override": true,
       "supports_passive_turn_watcher": false,
       "supports_prefill": false,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "mcode": {
@@ -579,6 +589,7 @@ export const HARNESS_CATALOG = {
       "supports_model_override": true,
       "supports_passive_turn_watcher": false,
       "supports_prefill": true,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "muse": {
@@ -627,6 +638,7 @@ export const HARNESS_CATALOG = {
       "supports_model_override": true,
       "supports_passive_turn_watcher": true,
       "supports_prefill": true,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "opencode": {
@@ -680,6 +692,7 @@ export const HARNESS_CATALOG = {
       "supports_model_override": true,
       "supports_passive_turn_watcher": false,
       "supports_prefill": true,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "perch": {
@@ -727,6 +740,7 @@ export const HARNESS_CATALOG = {
       "supports_model_override": true,
       "supports_passive_turn_watcher": false,
       "supports_prefill": false,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "terminal": {
@@ -754,6 +768,7 @@ export const HARNESS_CATALOG = {
       "supports_model_override": false,
       "supports_passive_turn_watcher": false,
       "supports_prefill": false,
+      "supports_result_file_handoff": false,
       "supports_resume": false
     }
   },

@@ -225,6 +225,7 @@ _Avoid_: verified outcome, skip
 
 **Handoff file**:
 The file through which a Circuit gives an agent its full prompt, and the file the agent writes its final result to when it has finished. The terminal receives only a short pointer to the prompt file when the prompt is long, so the full text never depends on a terminal paste.
+A harness with no hook or watcher is asked for a result file on every Circuit prompt, and the settled file is its **Result-file Turn Completion**: the only way such a harness tells a Circuit its turn ended. It proves a finished report, never a question, a permission or owned background work. For a harness that does report its lifecycle, the same file can recover a turn whose signal was lost.
 _Avoid_: prompt file, result file, attachment
 
 **Node Digest**:

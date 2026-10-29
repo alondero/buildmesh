@@ -617,13 +617,25 @@ The current built-in catalog is:
 | Cursor | Yes | Hook | Effort control is not available through Buildmesh |
 | Kimi Code | Yes | Hook | Needs Kimi Code 0.27.0 or newer; has no transcript reader |
 | MiniMax Code | Yes | Hook | Reports completed turns and clears attention when another prompt starts; supports session model selection, no effort override; launched in Full Access |
-| DeepSeek Harness | Yes | None | Use the terminal for progress when no signal is available |
+| DeepSeek Harness | Yes | None | Use the terminal for progress when no signal is available. Circuits use its result file (below) |
 | Command Code | Yes | Passive watcher | Transcript-based lifecycle support is available. If typing does nothing, see [Command Code does not accept typing](troubleshooting.md#command-code-does-not-accept-typing) |
-| Freebuff | Yes | None | Model and effort overrides are not available |
+| Freebuff | Yes | None | Model and effort overrides are not available. Circuits use its result file (below) |
 | Cline | Yes | Hook | Needs Cline 3.0.62 or newer. Manage providers with `cline auth`; Buildmesh injects account credentials at spawn |
 | Meta Muse | Yes | Passive watcher | Native on Windows since v1.3.0; WSL guest otherwise. Reasoning effort is available as `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra` |
-| Perch | Yes | None | Interactive CLI. Model and effort overrides are available; there is no transcript reader. |
+| Perch | Yes | None | Interactive CLI. Model and effort overrides are available; there is no transcript reader. Circuits use its result file (below) |
 | Terminal | No | None | A plain shell; closing the app loses its live process |
+
+A harness with no attention signal can still run Autopilot Circuits, as the
+implementer or the reviewer. Every Circuit prompt sent to it ends by asking the
+agent to write its final report to a result file once it has finished, and
+Buildmesh treats that file, once it has stopped changing for a few seconds, as
+the end of the turn. The node then shows Ready. This is a lower-fidelity
+signal: Buildmesh cannot see a question, a permission prompt or background work
+from such a harness, so answer those in its terminal. If the agent finishes
+without writing the file, the Circuit waits; open its terminal and ask it to
+write the file named in its prompt. A review you start on one of these agents
+cannot tell when its current turn ends, so its first step waits until you move
+it on from the Overview tab.
 
 Capabilities can change with the installed CLI and runtime. Buildmesh hides
 controls that a harness cannot safely honor. After installing or removing a

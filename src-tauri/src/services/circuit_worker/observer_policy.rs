@@ -76,7 +76,7 @@ fn render(harness: &str, strategy: &ObservationStrategy) -> CircuitObserverCapab
         foreground,
         owned_work,
         final_report: notes.final_report.into(),
-        reconciliation: format!("{}. Stable yielded transcript reports can advance after input/session freshness checks and known-work checks; this does not establish complete native ownership coverage.", notes.reconciliation),
+        reconciliation: format!("{}. Stable yielded transcript reports can advance after input/session freshness checks and known-work checks; this does not establish complete native ownership coverage. A settled Circuit result file also ends a turn: it is the only turn signal of a harness without hooks or watchers, and recovers a lost signal after a quiet terminal otherwise.", notes.reconciliation),
         yielded_budget_ms: strategy.reconciliation.yielded_budget_ms,
         active_budget_ms: super::observation::ACTIVE_WAIT_MS as u32,
         coverage: strategy.coverage(),

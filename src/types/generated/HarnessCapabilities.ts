@@ -64,6 +64,14 @@ attention_capability: AttentionCapability,
  */
 supports_passive_turn_watcher: boolean, 
 /**
+ * Whether a Circuit can learn that this harness finished a turn from the
+ * result file its prompt asks for (issue #2134's handoff file). Every
+ * agent harness can write a file, so this is the turn signal of last
+ * resort: it carries no question, permission, progress or owned-work
+ * evidence, and a harness with a hook or watcher still uses those first.
+ */
+supports_result_file_handoff: boolean, 
+/**
  * Whether the harness writes a transcript the coordinator read API
  * can parse into a Node Digest's rich layer (ADR-0008).
  */

@@ -98,8 +98,9 @@ it('keeps unavailable reviewers visible, excludes terminals and bare routes, and
   expect(options.map((option) => option.value)).toEqual(['', 'codex', 'launch/missing', 'freebuff']);
   expect(options[2].disabled).toBe(true);
   expect(options[2].text).toContain('Route is disabled');
-  expect(options[3].disabled).toBe(true);
-  expect(options[3].text).toContain('No turn-completion signal');
+  // Freebuff has no hook or watcher but hands off through its result file.
+  expect(options[3].disabled).toBe(false);
+  expect(options[3].text).not.toContain('No turn-completion signal');
 });
 
 it('offers a retry for a failed launch menu while default review remains available', async () => {
