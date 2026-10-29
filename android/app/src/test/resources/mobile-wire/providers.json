@@ -1,6 +1,7 @@
 [
   {
     "capabilities": {
+      "accepts_initial_prompt": false,
       "attention_capability": {
         "kind": "none"
       },
@@ -38,6 +39,7 @@
   },
   {
     "capabilities": {
+      "accepts_initial_prompt": true,
       "attention_capability": {
         "kind": "none"
       },
@@ -84,6 +86,7 @@
   },
   {
     "capabilities": {
+      "accepts_initial_prompt": true,
       "attention_capability": {
         "kind": "none"
       },
@@ -121,6 +124,7 @@
   },
   {
     "capabilities": {
+      "accepts_initial_prompt": true,
       "attention_capability": {
         "kind": "none"
       },

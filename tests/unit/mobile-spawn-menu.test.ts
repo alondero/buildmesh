@@ -82,7 +82,7 @@ const plainOption = {
   id: "claude",
   label: "Claude Code",
   is_proxied: false,
-  capabilities: { supports_prefill: true },
+  capabilities: { supports_prefill: true, accepts_initial_prompt: true },
 } as Provider;
 
 /** A saved Launch Configuration: the row launches its own spawn option. */
@@ -230,11 +230,19 @@ describe("the phone's Spawn Menu (issue #2385)", () => {
     it("keeps the backend's order and drops the rows that cannot take a prompt", () => {
       const choices = launchChoices([
         plainOption,
-        { ...plainOption, id: "terminal", label: "Terminal", capabilities: { supports_prefill: false } },
+        { ...plainOption, id: "terminal", label: "Terminal", capabilities: { supports_prefill: false, accepts_initial_prompt: false } },
         { ...plainOption, id: "agy", label: "AGY" },
       ] as Provider[]);
 
       expect(choices.map((choice) => choice.id)).toEqual(["claude", "agy"]);
+    });
+
+    it("keeps a harness without startup prefill that takes a typed prompt", () => {
+      const choices = launchChoices([
+        { ...plainOption, id: "freebuff", label: "Freebuff", capabilities: { supports_prefill: false, accepts_initial_prompt: true } },
+      ] as Provider[]);
+
+      expect(choices.map((choice) => choice.id)).toEqual(["freebuff"]);
     });
 
     it("drops an unavailable row", () => {

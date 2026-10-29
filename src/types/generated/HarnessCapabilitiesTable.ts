@@ -67,6 +67,7 @@ export const HARNESS_CATALOG = {
   },
   "capabilities": {
     "agy": {
+      "accepts_initial_prompt": true,
       "attention_capability": {
         "events": [
           "turn_completed",
@@ -126,6 +127,7 @@ export const HARNESS_CATALOG = {
       "supports_resume": true
     },
     "anthropic": {
+      "accepts_initial_prompt": true,
       "attention_capability": {
         "events": [
           "turn_completed",
@@ -189,6 +191,7 @@ export const HARNESS_CATALOG = {
       "supports_resume": true
     },
     "cline": {
+      "accepts_initial_prompt": true,
       "attention_capability": {
         "events": [
           "turn_completed"
@@ -230,6 +233,7 @@ export const HARNESS_CATALOG = {
       "supports_resume": true
     },
     "codex": {
+      "accepts_initial_prompt": true,
       "attention_capability": {
         "events": [
           "turn_completed",
@@ -294,6 +298,7 @@ export const HARNESS_CATALOG = {
       "supports_resume": true
     },
     "commandcode": {
+      "accepts_initial_prompt": true,
       "attention_capability": {
         "kind": "none"
       },
@@ -345,6 +350,7 @@ export const HARNESS_CATALOG = {
       "supports_resume": true
     },
     "cursor": {
+      "accepts_initial_prompt": true,
       "attention_capability": {
         "events": [
           "turn_completed",
@@ -391,6 +397,7 @@ export const HARNESS_CATALOG = {
       "supports_resume": true
     },
     "dsh": {
+      "accepts_initial_prompt": true,
       "attention_capability": {
         "kind": "none"
       },
@@ -419,6 +426,7 @@ export const HARNESS_CATALOG = {
       "supports_resume": false
     },
     "freebuff": {
+      "accepts_initial_prompt": true,
       "attention_capability": {
         "kind": "none"
       },
@@ -442,11 +450,12 @@ export const HARNESS_CATALOG = {
       "supports_extra_args": true,
       "supports_model_override": false,
       "supports_passive_turn_watcher": false,
-      "supports_prefill": true,
+      "supports_prefill": false,
       "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "grok": {
+      "accepts_initial_prompt": true,
       "attention_capability": {
         "events": [
           "turn_completed",
@@ -501,6 +510,7 @@ export const HARNESS_CATALOG = {
       "supports_resume": true
     },
     "kimi": {
+      "accepts_initial_prompt": true,
       "attention_capability": {
         "events": [
           "turn_completed",
@@ -546,6 +556,7 @@ export const HARNESS_CATALOG = {
       "supports_resume": true
     },
     "mcode": {
+      "accepts_initial_prompt": true,
       "attention_capability": {
         "events": [
           "turn_completed"
@@ -593,6 +604,7 @@ export const HARNESS_CATALOG = {
       "supports_resume": true
     },
     "muse": {
+      "accepts_initial_prompt": true,
       "attention_capability": {
         "kind": "none"
       },
@@ -642,6 +654,7 @@ export const HARNESS_CATALOG = {
       "supports_resume": true
     },
     "opencode": {
+      "accepts_initial_prompt": true,
       "attention_capability": {
         "events": [
           "turn_completed",
@@ -696,6 +709,7 @@ export const HARNESS_CATALOG = {
       "supports_resume": true
     },
     "perch": {
+      "accepts_initial_prompt": true,
       "attention_capability": {
         "kind": "none"
       },
@@ -744,6 +758,7 @@ export const HARNESS_CATALOG = {
       "supports_resume": true
     },
     "terminal": {
+      "accepts_initial_prompt": false,
       "attention_capability": {
         "kind": "none"
       },

@@ -27,6 +27,7 @@ mod prepare;
 mod provision;
 mod reader;
 pub(crate) mod resume_guard;
+mod startup_prompt;
 mod streams;
 mod wire;
 

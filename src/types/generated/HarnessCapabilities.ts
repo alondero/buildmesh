@@ -104,6 +104,12 @@ supports_extra_args: boolean,
  */
 supports_prefill: boolean, 
 /**
+ * Whether user-facing spawns may carry an initial prompt: on argv when
+ * `supports_prefill`, otherwise typed into the PTY after startup. False
+ * only for plain shells.
+ */
+accepts_initial_prompt: boolean, 
+/**
  * True for plain shell providers — LLM-specific paths (naming, the
  * 3-second early-exit heuristic, etc.) all skip.
  */

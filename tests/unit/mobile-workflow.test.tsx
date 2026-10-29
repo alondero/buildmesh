@@ -17,7 +17,7 @@ const mesh = { id: 1, name: "Buildmesh" } as Mesh;
 const provider = {
   id: "anthropic",
   label: "Claude Code",
-  capabilities: { supports_prefill: true },
+  capabilities: { supports_prefill: true, accepts_initial_prompt: true },
 } as Provider;
 const node = {
   id: 7,
@@ -259,7 +259,7 @@ describe("mobile idea capture", () => {
             ...provider,
             id: "terminal",
             label: "Terminal",
-            capabilities: { supports_prefill: false },
+            capabilities: { supports_prefill: false, accepts_initial_prompt: false },
           } as Provider,
         ]}
         {...cb}

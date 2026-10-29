@@ -99,7 +99,7 @@ fn agent_node() -> crate::models::AgentNode {
 }
 
 /// The capability descriptor every Spawn Menu row carries. The phone reads
-/// `supports_prefill` to decide whether a row can take a backend-built
+/// `accepts_initial_prompt` to decide whether a row can take a backend-built
 /// prompt.
 fn harness_capabilities(
     harness_id: &str,
@@ -120,6 +120,7 @@ fn harness_capabilities(
         supports_effort_override: false,
         supports_extra_args: true,
         supports_prefill,
+        accepts_initial_prompt: supports_prefill || !plain_terminal,
         is_plain_terminal: plain_terminal,
         effort_control: crate::agent::capabilities::EffortControlKind::None,
         permission_modes: Vec::new(),

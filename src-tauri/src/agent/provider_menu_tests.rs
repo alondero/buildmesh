@@ -386,6 +386,7 @@ fn caps_all_false(id: &str) -> crate::agent::capabilities::HarnessCapabilities {
         supports_model_override: false,
         supports_effort_override: false,
         supports_prefill: false,
+        accepts_initial_prompt: true,
         is_plain_terminal: false,
         effort_control: crate::agent::capabilities::EffortControlKind::None,
         permission_modes: Vec::new(),

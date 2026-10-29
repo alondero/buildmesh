@@ -89,7 +89,7 @@ Legend: ✅ advertised, ❌ not advertised. Column shorthand:
 - **Model** — `supports_model_override` (`--model` or equivalent).
 - **Effort** — `supports_effort_override` (see [Effort control vocabulary](#effort-control-vocabulary)).
 - **Extra args** — `supports_extra_args`; verbatim CLI flags from configuration are forwarded.
-- **Prefill** — `supports_prefill`; a seed prompt is delivered at spawn.
+- **Prefill** — `supports_prefill`; a seed prompt is delivered on the launch command line. Every other harness except Terminal still takes issue, PR and prompt spawns (`accepts_initial_prompt`): it launches plain and the prompt is typed into its terminal once the TUI has booted.
 - **Plain shell** — `is_plain_terminal`; all LLM paths are skipped.
 
 | Harness | Resume | Auto-resume | Attn hook | Watcher | Transcript | Archive | Model | Effort | Extra args | Prefill | Plain shell | Notes |
@@ -104,7 +104,7 @@ Legend: ✅ advertised, ❌ not advertised. Column shorthand:
 | MiniMax Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Session-only `--model` verified in native Windows help; `UserPromptSubmit` resumes work using the 0.6.13 hook contract; see the [capability review](mcode-harness-capabilities.md) for delivery evidence and platform limits |
 | DeepSeek Harness | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | Capabilities deliberately gated (no validated profile) |
 | Command Code | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Passive watcher replaces a native hook |
-| Freebuff | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | No model or effort override |
+| Freebuff | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | No model or effort override; initial prompts are typed after startup |
 | Meta Muse | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Native on Windows since Muse 1.3.0; workspace trust pre-provisioned (#1706); `--reasoning-effort` closed vocabulary (#1704) |
 | Cline | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Native Provider; hook delivers turn completion only (no clean-exit dispatch); reader over `<id>.messages.json` (#1776) |
 | Perch | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ | Resume via `--thread`; closed `--effort`; [deep dive](perch-harness-capabilities.md) |

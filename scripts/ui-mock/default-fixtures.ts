@@ -142,7 +142,7 @@ export function buildDefaultFixtures() {
       supports_passive_turn_watcher: false, supports_result_file_handoff: true,
       produces_readable_transcript: true,
       supports_model_override: true, supports_effort_override: true,
-      supports_extra_args: true, supports_prefill: true, is_plain_terminal: false,
+      supports_extra_args: true, supports_prefill: true, accepts_initial_prompt: true, is_plain_terminal: false,
       effort_control: { kind: 'closed', allowed: ['low', 'medium', 'high'] },
       permission_modes: [], default_permission_mode: null,
       available_on: ['windows', 'macos', 'linux'],
