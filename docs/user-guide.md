@@ -1169,9 +1169,10 @@ is unavailable, type your task or use your keyboard's microphone.
 Android provides native Overview/Work, agent replies, task capture, issues,
 archive resume, changes and diffs. Pull an Android list down to refresh it:
 Issues, Archive, Changes, Pull requests and Usage re-read on the gesture, and
-the refresh button in the app bar reloads the screen you are on. A failed read
-offers **Retry** at the top of the list, so recovering does not depend on
-scrolling. Its terminal includes keyboard input, Esc/Tab/Ctrl+C and arrow
+the refresh button in the app bar reloads the screen you are on. The mesh
+**Pull requests** screen switches between open and closed pull requests; closed
+ones are read-only. A failed read offers **Retry** at the top of the list, so
+recovering does not depend on scrolling. Its terminal includes keyboard input, Esc/Tab/Ctrl+C and arrow
 keys, and reconnects when the app returns to the foreground. In either phone
 client, tap a terminal URL or hyperlink to open it in your phone's browser;
 drag to scroll without opening links.
