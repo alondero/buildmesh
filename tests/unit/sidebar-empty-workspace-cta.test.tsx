@@ -6,10 +6,9 @@
  *
  * The Sidebar now offers one mesh-creation CTA at a time: the inline
  * button while the workspace is empty, the persistent sticky footer once it
- * holds a mesh (and in the Attention view, which has no inline CTA of its
- * own). The cases below pin that count in each state.
+ * holds a mesh. The cases below pin that count in each state.
  *
- * Mock shape follows `sidebar-views-toggle-a11y.test.tsx`: the per-mesh
+ * Mock shape follows `sidebar-mesh-bands.test.tsx`: the per-mesh
  * async hooks are pinned so no background fetch can move a row while the
  * assertions run.
  */
@@ -104,31 +103,6 @@ describe('Sidebar empty-workspace CTA (issue #2468)', () => {
     act(() => {
       seedMeshes([mesh]);
     });
-
-    const ctas = meshCtas();
-    expect(ctas).toHaveLength(1);
-    expect(ctas[0].textContent).toBe('New mesh');
-
-    fireEvent.click(ctas[0]);
-    expect(useUIStore.getState().createMeshOpen).toBe(true);
-  });
-
-  it('keeps the footer CTA in the Attention view, which has no inline CTA', () => {
-    render(<Sidebar />);
-    fireEvent.click(screen.getByRole('button', { name: /^Attention/ }));
-
-    const ctas = meshCtas();
-    expect(ctas).toHaveLength(1);
-    expect(ctas[0].textContent).toBe('New mesh');
-
-    fireEvent.click(ctas[0]);
-    expect(useUIStore.getState().createMeshOpen).toBe(true);
-  });
-
-  it('keeps the footer CTA in the Attention view with a populated workspace', () => {
-    seedMeshes([mesh]);
-    render(<Sidebar />);
-    fireEvent.click(screen.getByRole('button', { name: /^Attention/ }));
 
     const ctas = meshCtas();
     expect(ctas).toHaveLength(1);
