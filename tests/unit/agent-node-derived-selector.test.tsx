@@ -1,9 +1,9 @@
 /**
  * Issue #2021 — derived node-array selector: unrelated-node work.
  *
- * `useAllAgentNodes` is subscribed by seven components in the real app
- * (Sidebar, AttentionList, AgentHistoryTab, CommandOmnibar, ScopeIndicator,
- * GridFilterPopover, AgentNodeView). Before #2021 every subscriber re-derived
+ * `useAllAgentNodes` is subscribed by six components in the real app
+ * (Sidebar, AgentHistoryTab, CommandOmnibar, ScopeIndicator, GridFilterPopover,
+ * AgentNodeView). Before #2021 every subscriber re-derived
  * the full array (`nodeIds.map(...).filter(...)`) on every store notification,
  * allocating O(N) per subscriber; profiling at 100/500/1000 nodes measured
  * 700 / 3500 / 7000 `nodesById` dereferences for a single write that changed

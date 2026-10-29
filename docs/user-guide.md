@@ -258,14 +258,18 @@ changes.
 
 ## Find agents that need attention
 
-Choose **Attention** in the sidebar to see nodes across repositories, grouped
-into **Failed sessions**, **Needs input**, and **Paused sessions**, in that
-order. Each heading shows its count; empty groups disappear. Cards name the
-repository and show the current question or permission request when the
-harness supplied one. **Open terminal** takes you to that
-session. Failed sessions also offer **Retry**; paused sessions offer **Resume**
-when a saved session identity is available. Return to **Workspace** to use the
-existing repository and drag order.
+An agent that needs you is marked where it lives. In the sidebar, a mesh whose
+agent is waiting on input, has failed, was lost, or is paused opens itself, so
+that agent is on screen without a click, and its status mark says which state
+it is in. The agent's row offers **Restart** for a failed session and **Resume**
+for a paused one that has a saved session identity.
+
+To work through them across repositories, open **Agent History** in the Probe
+panel. Its **Lifecycle** view lists agents from every repository; in the
+**All lifecycle states** dropdown, choose **Needs attention**, **Error**,
+**Lost** or **Suspended** to list exactly those. Each of those rows opens that
+agent's terminal, and offers **Retry** for a failed or lost one and **Resume**
+for a paused one.
 
 In **Filtered** view, use the header's **Filters** button for provider, status,
 sort and direction. The count shows matching nodes out of all loaded nodes.
@@ -547,15 +551,15 @@ count is whatever it was last known to be, so the two can disagree: the icon
 says the last sync did not finish, while `↓N` reports the last confirmed count.
 
 Meshes that currently have at least one open agent node sit at the top of
-the sidebar under an **Active** label, in your own drag order; every other
-mesh follows below, dimmed, in the same manual order. Nothing is hidden — all
-meshes stay visible and every row keeps its spawn control, so a mesh with
-nothing open is still a working row you can spawn from.
+the sidebar, in your own drag order; every other mesh follows below, dimmed,
+in the same manual order. The order is the signal — there is no heading above
+the top group. Nothing is hidden — all meshes stay visible and every row keeps
+its spawn control, so a mesh with nothing open is still a working row you can
+spawn from.
 
-Opening the first node in a mesh moves it into the top band; closing or
-archiving its last node returns it to its manual position. Dragging a mesh
-only changes your manual arrangement — it never changes which band the mesh
-is in.
+Opening the first node in a mesh moves it to the top; closing or archiving its
+last node returns it to its manual position. Dragging a mesh only changes your
+manual arrangement — it never changes whether the mesh sits at the top.
 
 ## Paste into a terminal
 

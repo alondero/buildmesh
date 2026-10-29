@@ -3,7 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { AppSettingsModal } from '../../src/components/AppSettings/AppSettingsModal';
 import { GridControls } from '../../src/components/TitleBar/GridControls';
-import { AttentionList } from '../../src/components/Sidebar/AttentionList';
 import { AgentHistoryTab } from '../../src/components/Probe/AgentHistoryTab';
 import { ReadinessSteps } from '../../src/components/AgentNodeView/ReadinessSteps';
 import { CanvasEmptyStateContainer } from '../../src/components/AgentNodeView/CanvasEmptyStateContainer';
@@ -307,30 +306,6 @@ describe('October desktop audit follow-up', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Clear all filters and sorting' }));
     expect(screen.getByRole('status').textContent).toBe('2 of 2 nodes');
     expect(JSON.parse(localStorage.getItem('buildmesh.grid-controls')!)).toEqual({ searchQuery: '', provider: null, status: null, sortBy: 'custom', sortDirection: 'asc' });
-  });
-
-  it('triage finds failed and waiting agents across repositories and keeps recovery failures visible', async () => {
-    seedAgentNodes([node(1, 'Needs-answer', 'awaiting_input'), node(2, 'Failed-build', 'error', 2), node(3, 'Healthy', 'running'), node(4, 'Lost-report', 'lost', 2)]);
-    const recovery = vi.spyOn(useAgentNodeStore.getState(), 'spawnAgent').mockRejectedValue(new Error('Login required'));
-    render(<AttentionList />);
-    expect(screen.getAllByText('Web repository')).toHaveLength(2);
-    expect(screen.queryByText('Healthy')).toBeNull();
-    expect(screen.getByRole('button', { name: 'Retry Lost-report' })).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Retry Failed-build' }));
-    await waitFor(() => expect(recovery).toHaveBeenCalledWith(2, 'claude'));
-    const { useToastStore } = await import('../../src/stores/toastStore');
-    await waitFor(() => expect(useToastStore.getState().toasts.some(t => t.message === 'Login required')).toBe(true));
-  });
-
-  it.each(['mesh', 'pinned', 'filtered'] as const)('Attention reveals a cross-repository terminal from %s mode', mode => {
-    seedAgentNodes([node(1, 'API waiting', 'awaiting_input'), node(2, 'Web failure', 'error', 2)]);
-    useMeshStore.setState({ selectedMeshId: 1 }); useUIStore.getState().setViewMode(mode);
-    useUIStore.getState().setGridSearchQuery('unmatched');
-    render(<AttentionList />);
-    fireEvent.click(screen.getByRole('button', { name: 'Open terminal for Web failure' }));
-    expect(useMeshStore.getState().selectedMeshId).toBe(2);
-    expect(useAgentNodeStore.getState().activeNodeId).toBe(2);
-    expect(useUIStore.getState().viewMode).toBe('single');
   });
 
   it('the readiness guide can be skipped and restored, and Terminal stays actionable without a harness', async () => {

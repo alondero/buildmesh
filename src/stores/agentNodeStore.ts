@@ -81,8 +81,9 @@ export function resetAgentNodeListenersForTests(): void {
 /// Before this, `useAllAgentNodes` ran `nodeIds.map(...).filter(...)` inside
 /// every subscriber's selector, so one store notification allocated and
 /// scanned the full array *once per mounted consumer* — seven times in the
-/// real app (Sidebar, AttentionList, AgentHistoryTab, CommandOmnibar,
-/// ScopeIndicator, GridFilterPopover, AgentNodeView). Profiling at 100/500/
+/// real app before the sidebar Attention view was retired, six now
+/// (Sidebar, AgentHistoryTab, CommandOmnibar, ScopeIndicator, GridFilterPopover,
+/// AgentNodeView). Profiling at 100/500/
 /// 1000 nodes showed the per-notification allocation growing linearly with
 /// node count for every subscriber, and each consumer's O(N) grouping memo
 /// re-running on every unrelated single-node write.

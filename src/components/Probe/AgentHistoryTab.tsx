@@ -120,10 +120,9 @@ export function AgentHistoryTab() {
       <div className="flex gap-2">
         {/* Issue #2461 — the mode pair is one segmented group: `role="group"`
             carries the name to assistive technology (a generic div's
-            `aria-label` is ignored — the same fix the Sidebar view switcher
-            took in #2467), and the selected mode owns a background and text
-            colour so the current view is visible rather than inferred from
-            `aria-pressed`. Same active/inactive tokens as Sidebar. */}
+            `aria-label` is ignored), and the selected mode owns a background
+            and text colour so the current view is visible rather than
+            inferred from `aria-pressed`. */}
         <div role="group" aria-label="Agent history view" className="flex gap-1">
           <button type="button" aria-pressed={!discovered} onClick={() => setDiscovered(false)} className={`min-h-[24px] rounded-md px-2 text-xs ${!discovered ? 'bg-bg-card text-text-primary font-medium' : 'text-text-secondary hover:bg-bg-card-hover'}`}>Lifecycle</button>
           <button type="button" aria-pressed={discovered} onClick={() => setDiscovered(true)} className={`min-h-[24px] rounded-md px-2 text-xs ${discovered ? 'bg-bg-card text-text-primary font-medium' : 'text-text-secondary hover:bg-bg-card-hover'}`}>Discovered sessions</button>
