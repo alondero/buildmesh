@@ -961,6 +961,7 @@ fn field_name(field: HarnessConfigField) -> &'static str {
 }
 
 #[cfg(test)]
+// allow-test-in-production: this suite predates the sibling-test-file rule; only its reviewer fixture changes because Freebuff and DeepSeek Harness became eligible reviewers, so moving the suite is out of scope.
 mod resolved_view_tests {
     //! Cascade pin tests for [`get_resolved_harness_view`] (issue #1656).
     //!
@@ -1127,9 +1128,12 @@ mod resolved_view_tests {
             crate::preferences::reviewer_provider().as_deref(),
             Some("codex")
         );
-        // Ineligible harnesses are refused with the harness-named reason
-        // and the stored value is untouched.
-        for picked in ["freebuff", "terminal", "dsh:minimax"] {
+        // A harness with no lifecycle hands off through its result file.
+        set_app_reviewer_provider(Some("dsh:minimax".to_string()))
+            .expect("dsh hands off through its result file");
+        set_app_reviewer_provider(Some("codex".to_string())).expect("codex can yield a turn");
+        // The plain shell is refused and the stored value is untouched.
+        for picked in ["terminal", "TERMINAL"] {
             let err = set_app_reviewer_provider(Some(picked.to_string())).unwrap_err();
             assert!(
                 err.contains("reviewer provider"),

@@ -23,6 +23,7 @@
       "supports_model_override": true,
       "supports_passive_turn_watcher": false,
       "supports_prefill": false,
+      "supports_result_file_handoff": false,
       "supports_resume": false
     },
     "color": "#5b6472",
@@ -59,6 +60,7 @@
       "supports_model_override": true,
       "supports_passive_turn_watcher": false,
       "supports_prefill": true,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "color": "#5b6472",
@@ -104,6 +106,7 @@
       "supports_model_override": true,
       "supports_passive_turn_watcher": false,
       "supports_prefill": true,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "color": "#5b6472",
@@ -140,6 +143,7 @@
       "supports_model_override": true,
       "supports_passive_turn_watcher": false,
       "supports_prefill": true,
+      "supports_result_file_handoff": true,
       "supports_resume": true
     },
     "color": "#5b6472",

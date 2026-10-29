@@ -14,13 +14,21 @@ pub enum CircuitObservationBlocker {
     InputDraft,
     InputUncertain,
     InputPaste,
-    ReportUnavailable { reason: String },
-    ResultFileUnavailable { path: String, reason: String },
+    ReportUnavailable {
+        reason: String,
+    },
+    ResultFileUnavailable {
+        path: String,
+        reason: String,
+    },
     ReportSuperseded,
     KnownWorkOutstanding,
     HumanResponseRequired,
     LifecycleEvidenceUnavailable,
     EvidenceConflict,
+    /// The harness reports no turn lifecycle and this step did not ask it for
+    /// a result file, so nothing can ever end its turn.
+    TurnCompletionUnobservable,
 }
 
 impl CircuitObservationBlocker {
@@ -38,6 +46,7 @@ impl CircuitObservationBlocker {
             Self::HumanResponseRequired => "The harness has an unresolved question or permission request. Respond in the agent session; a completion report cannot answer it.".into(),
             Self::LifecycleEvidenceUnavailable => "The agent's lifecycle evidence is unavailable or inconsistent, so Buildmesh cannot verify this step. Inspect or repair the agent record and lifecycle report; if the record was removed, pause or cancel the Circuit before recording completion.".into(),
             Self::EvidenceConflict => "Session observations conflict or cannot be read. Inspect the evidence and recheck; interpretation cannot resolve an identity conflict.".into(),
+            Self::TurnCompletionUnobservable => "This harness reports no turn lifecycle, and this step did not ask it for a result file, so Buildmesh cannot tell when its turn ends. Move the step on from the Overview tab once the agent has finished, or cancel the run.".into(),
         }
     }
 }

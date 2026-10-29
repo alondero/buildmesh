@@ -47,6 +47,7 @@ function fixtureCaps(overrides: Partial<HarnessCapabilities> & Pick<HarnessCapab
     requires_attention_hook: false,
     attention_capability: { kind: 'none' },
     supports_passive_turn_watcher: false,
+    supports_result_file_handoff: false,
     produces_readable_transcript: false,
     supports_model_override: false,
     supports_effort_override: overrides.effort_control.kind !== 'none',
@@ -112,14 +113,12 @@ describe('effortAllowedFor', () => {
 });
 
 describe('blocksReviewCircuit', () => {
-  it('blocks the harnesses with no turn signal, and the plain shell', () => {
-    for (const id of ['dsh', 'freebuff', 'perch', 'terminal']) {
-      expect(blocksReviewCircuit(id), id).toBe(true);
-    }
+  it('blocks only the plain shell among shipped harnesses', () => {
+    expect(blocksReviewCircuit('terminal')).toBe(true);
   });
 
-  it('allows a harness with either a native hook or a passive turn watcher', () => {
-    for (const id of ['anthropic', 'codex', 'commandcode', 'muse', 'cline']) {
+  it('allows a harness with a native hook, a passive turn watcher or a result-file handoff', () => {
+    for (const id of ['anthropic', 'codex', 'commandcode', 'muse', 'cline', 'dsh', 'freebuff', 'perch']) {
       expect(blocksReviewCircuit(id), id).toBe(false);
     }
   });
@@ -135,19 +134,22 @@ describe('blocksReviewCircuit', () => {
     expect(blocksReviewCircuit('minimax-code')).toBe(false);
     expect(blocksReviewCircuit('command-code')).toBe(false);
     expect(blocksReviewCircuit('cmdc')).toBe(false);
-    expect(blocksReviewCircuit('deepseek')).toBe(true);
-    expect(blocksReviewCircuit('deepseek-harness')).toBe(true);
+    expect(blocksReviewCircuit('deepseek')).toBe(false);
+    expect(blocksReviewCircuit('deepseek-harness')).toBe(false);
   });
 
   it('resolves a Proxied Spawn Option id under its harness half', () => {
     expect(blocksReviewCircuit('claude:minimax')).toBe(false);
     // Issue #1775: Cline now provisions a native hook, so it is eligible.
     expect(blocksReviewCircuit('cline:some-account')).toBe(false);
-    expect(blocksReviewCircuit('freebuff:some-account')).toBe(true);
+    // Freebuff has no lifecycle of its own; it completes through its result file.
+    expect(blocksReviewCircuit('freebuff:some-account')).toBe(false);
+    expect(blocksReviewCircuit('terminal:some-account')).toBe(true);
   });
 
   it('normalises case and whitespace', () => {
-    expect(blocksReviewCircuit('  DeepSeek  ')).toBe(true);
+    expect(blocksReviewCircuit('  Terminal  ')).toBe(true);
+    expect(blocksReviewCircuit('  DeepSeek  ')).toBe(false);
     expect(blocksReviewCircuit('CLINE')).toBe(false);
     expect(blocksReviewCircuit('  Codex ')).toBe(false);
   });
@@ -172,15 +174,22 @@ describe('blocksReviewCircuit', () => {
 describe('review-circuit eligibility across the shipped catalog', () => {
   it('admits every harness that can yield a turn', () => {
     expect(HARNESS_IDS.filter(id => !blocksReviewCircuit(id)))
-      .toEqual([
-        'anthropic', 'agy', 'opencode', 'codex', 'cursor', 'grok',
-        'kimi', 'mcode', 'commandcode', 'muse', 'cline',
-      ]);
+      .toEqual(HARNESS_IDS.filter(id => id !== 'terminal'));
   });
 
-  it('excludes the harnesses with no turn signal, plus the plain shell', () => {
-    expect(HARNESS_IDS.filter(id => blocksReviewCircuit(id)))
-      .toEqual(['dsh', 'freebuff', 'perch', 'terminal']);
+  it('admits the harnesses with no lifecycle only through their result file', () => {
+    const fileOnly = HARNESS_IDS.filter(id => {
+      const caps = HARNESS_CAPABILITIES[id];
+      return !caps.requires_attention_hook && !caps.supports_passive_turn_watcher && !caps.is_plain_terminal;
+    });
+    expect(fileOnly).toEqual(['dsh', 'freebuff', 'perch']);
+    for (const id of fileOnly) {
+      expect(HARNESS_CAPABILITIES[id].supports_result_file_handoff, id).toBe(true);
+    }
+  });
+
+  it('excludes only the plain shell', () => {
+    expect(HARNESS_IDS.filter(id => blocksReviewCircuit(id))).toEqual(['terminal']);
   });
 });
 

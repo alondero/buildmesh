@@ -90,6 +90,7 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/agent/provider/adapters/mcode_tests.rs': 'agent::provider::adapters::mcode::tests',
   'src-tauri/src/agent/provider/adapters/opencode_tests.rs': 'agent::provider::adapters::opencode::child_session_tests',
   'src-tauri/src/agent/provider/adapters/perch_tests.rs': 'agent::provider::adapters::perch::tests',
+  'src-tauri/src/circuit/compatibility_tests.rs': 'circuit::compatibility::tests',
   'src-tauri/src/circuit/delivery_tests.rs': 'circuit::delivery::tests',
   'src-tauri/src/circuit/vocabulary_tests.rs': 'circuit::vocabulary::tests',
   'src-tauri/src/commands/git_status_bench.rs': 'commands::git_tests',
@@ -135,6 +136,7 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/services/agent_node_discovery_tests.rs': 'services::agent_node_discovery::tests',
   'src-tauri/src/services/circuit_worker/dispatch_tests.rs': 'services::circuit_worker::dispatch::tests',
   'src-tauri/src/services/circuit_worker/native_hooks_tests.rs': 'services::circuit_worker::native_hooks::tests',
+  'src-tauri/src/services/circuit_worker/result_handoff_tests.rs': 'services::circuit_worker::result_handoff::tests',
   'src-tauri/src/services/legacy_retirement/retirement_crash_tests.rs': 'services::legacy_retirement::retirement_crash_tests',
   'src-tauri/src/services/pool_worker_tests.rs': 'services::pool_worker::tests',
   'src-tauri/src/services/transcript_reader/report_snapshot_tests.rs': 'services::transcript_reader::report_snapshot::tests',
@@ -196,6 +198,9 @@ export const RUST_SIBLING_TESTS = {
   // The startup reconcile pass is covered by the worker test suite the parent
   // declares (`tests/lineage_recovery.rs`).
   'src-tauri/src/services/circuit_worker/restart.rs': 'services::circuit_worker::tests',
+  // Report admission is covered by the worker suite (`tests/review_reports.rs`,
+  // `tests/result_handoff.rs`) the parent declares.
+  'src-tauri/src/services/circuit_worker/readiness.rs': 'services::circuit_worker::tests',
   'src-tauri/src/services/github/pagination.rs': 'services::github::pagination_tests',
 };
 

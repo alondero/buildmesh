@@ -196,7 +196,7 @@ describe('AppSettingsModal reviewer provider', () => {
     expect(await screen.findByText('settings write failed')).toBeTruthy();
   });
 
-  it('offers a harness with no turn signal, but not as a pickable reviewer', async () => {
+  it('offers a result-file harness as a pickable reviewer and hides the plain shell', async () => {
     tauriMocks.listProviders.mockResolvedValue([
       provider('anthropic', 'Anthropic'),
       provider('cline', 'Cline'),
@@ -208,10 +208,9 @@ describe('AppSettingsModal reviewer provider', () => {
     await user.click(trigger);
 
     const freebuff = await screen.findByRole('menuitem', { name: 'Freebuff' });
-    // Greying out (not hiding) keeps the limitation discoverable — the same
-    // reason the node title-bar picker renders these rows disabled.
-    expect(freebuff.getAttribute('aria-disabled')).toBe('true');
-    expect(freebuff.textContent).toContain('no review support');
+    // Freebuff has no hook or watcher; it hands off through its result file.
+    expect(freebuff.getAttribute('aria-disabled')).toBe('false');
+    expect(freebuff.textContent).not.toContain('no review support');
     expect(screen.getByRole('menuitem', { name: 'Anthropic' }).getAttribute('aria-disabled')).toBe('false');
     // Issue #1775: Cline carries a native attention hook now and is pickable.
     expect(screen.getByRole('menuitem', { name: 'Cline' }).getAttribute('aria-disabled')).toBe('false');

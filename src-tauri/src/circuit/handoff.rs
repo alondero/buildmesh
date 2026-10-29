@@ -73,9 +73,9 @@ pub(crate) fn pointer_line(prompt_path: &str) -> String {
 pub(crate) fn result_instruction(result_path: &str) -> String {
     format!(
         "When, and only when, you have completely finished this task (including any delegated or \
-         background work), write your final report, ending with the required result line, to the \
-         file {result_path} using UTF-8, overwriting it if it exists. In Windows PowerShell, use \
-         Set-Content -Encoding UTF8 rather than the default encoding. Do not create that file before you are done."
+         background work), write your final report, ending with the required result line if this \
+         task specifies one, to the file {result_path} using UTF-8, overwriting it if it exists. In \
+         Windows PowerShell, use Set-Content -Encoding UTF8 rather than the default encoding. Do not create that file before you are done."
     )
 }
 
@@ -479,6 +479,7 @@ fn superseded_result_path(result: &Path, k: u32) -> PathBuf {
 }
 
 #[cfg(test)]
+// allow-test-in-production: this suite predates the sibling-test-file rule; only the result-instruction wording assertion changes here, so moving the suite is out of scope.
 mod tests {
     use super::*;
     use std::ffi::OsStr;
@@ -870,7 +871,7 @@ mod tests {
         assert_eq!(
             staged.delivered,
             format!(
-                "Do it.\n\nWhen, and only when, you have completely finished this task (including any delegated or background work), write your final report, ending with the required result line, to the file {result_path} using UTF-8, overwriting it if it exists. In Windows PowerShell, use Set-Content -Encoding UTF8 rather than the default encoding. Do not create that file before you are done."
+                "Do it.\n\nWhen, and only when, you have completely finished this task (including any delegated or background work), write your final report, ending with the required result line if this task specifies one, to the file {result_path} using UTF-8, overwriting it if it exists. In Windows PowerShell, use Set-Content -Encoding UTF8 rather than the default encoding. Do not create that file before you are done."
             )
         );
         // Nothing was written, so no turn can be checked against a file.
