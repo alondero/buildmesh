@@ -109,6 +109,29 @@ it('discloses incomplete mesh results without offering merge on unrelated PRs', 
   expect(screen.queryByRole('button', { name: 'Squash and merge' })).toBeNull();
 });
 
+it('switches the mesh-level list between open and closed pull requests', async () => {
+  const closed = { ...pr, number: 77, title: 'Old work', state: 'closed' };
+  fetcher.mockImplementation((url: string) => Promise.resolve(response(
+    url.includes('/git/branch') ? { branch: 'feature/search' } : url.includes('/mergeability') ? detail :
+      url.includes('state=closed') ? feed([closed]) : current,
+  )));
+  render(<PullRequestsScreen mesh={{ id: 3, name: 'Repository' } as Mesh} onBack={vi.fn()} onAuthFailed={vi.fn()} />);
+  expect(await screen.findByText('PR #42: Fix search')).toBeTruthy();
+  expect(screen.getByRole('button', { name: /Start agent on pull request #42/ })).toBeTruthy();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Closed' }));
+
+  expect(await screen.findByText('PR #77: Old work')).toBeTruthy();
+  expect(screen.queryByText('PR #42: Fix search')).toBeNull();
+  expect(fetcher.mock.calls.some(([url]) => url === '/api/meshes/3/pulls?state=closed')).toBe(true);
+  // Closed pull requests are read-only, matching the desktop panel.
+  expect(screen.queryByRole('button', { name: /Start agent on pull request/ })).toBeNull();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+  expect(await screen.findByText('PR #42: Fix search')).toBeTruthy();
+  expect(fetcher.mock.calls.some(([url]) => url === '/api/meshes/3/pulls?state=open')).toBe(true);
+});
+
 it('keeps the newer poll result when an earlier request resolves later', async () => {
   let old!: (response: Response) => void;
   fetcher.mockImplementationOnce(() => new Promise<Response>(r => { old = r; }));
