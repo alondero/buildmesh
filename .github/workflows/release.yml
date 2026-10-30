@@ -85,7 +85,7 @@ jobs:
       # This is the only persistent Windows target cache: PR smoke builds keep
       # only Cargo downloads, so three large per-OS target caches do not grow.
       - name: Cache Rust release build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: "src-tauri -> target"
 
