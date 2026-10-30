@@ -498,11 +498,17 @@ mod tests {
         use std::io::{Read, Seek, Write};
         use std::time::{Duration, Instant};
 
+        // PowerShell startup can be slow under concurrent verification. The
+        // outer budget must also cover Invoke-WebRequest's own timeout.
+        let request_timeout = Duration::from_secs(10);
+        assert!(HOOK_COMMAND_WINDOWS.contains("-TimeoutSec 10 -Uri"));
+        let hook_budget = super::super::hook_test_support::budget(request_timeout);
+
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         listener.set_nonblocking(true).unwrap();
         let server = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(20);
+            let deadline = Instant::now() + hook_budget;
             let mut stream = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,
@@ -557,6 +563,7 @@ mod tests {
         } else {
             "/bin/sh"
         });
+        let _cache_dir = super::super::hook_test_support::isolate_cache(&mut shell);
         if cfg!(windows) {
             shell.args(["-NoProfile", "-NonInteractive", "-Command", command]);
         } else {
@@ -572,7 +579,7 @@ mod tests {
         let output = crate::process_util::run_command_with_timeout(
             shell,
             "Grok attention command",
-            Duration::from_secs(20),
+            hook_budget,
         )
         .unwrap();
         assert!(
