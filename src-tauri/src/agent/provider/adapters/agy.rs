@@ -558,7 +558,7 @@ impl AgentProvider for AgyAdapter {
 }
 
 #[cfg(test)]
-// allow-test-in-production: existing inline adapter tests; timeout repair only.
+// allow-test-in-production: moving the pre-existing adapter suite is outside this timeout repair.
 mod tests {
     use super::*;
     use crate::agent::capabilities::{EffortControlKind, ResolvedAgentConfig};
@@ -923,6 +923,11 @@ mod tests {
         } else {
             "/bin/sh"
         });
+        let cache_dir = tempfile::tempdir().unwrap();
+        shell.env(
+            "PSModuleAnalysisCachePath",
+            cache_dir.path().join("module-cache"),
+        );
         shell.args([if cfg!(windows) { "/c" } else { "-c" }, command]);
         shell
             .env("BUILDMESH_PORT", port.to_string())

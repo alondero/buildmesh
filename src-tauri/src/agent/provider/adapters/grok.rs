@@ -563,6 +563,11 @@ mod tests {
         } else {
             "/bin/sh"
         });
+        let cache_dir = tempfile::tempdir().unwrap();
+        shell.env(
+            "PSModuleAnalysisCachePath",
+            cache_dir.path().join("module-cache"),
+        );
         if cfg!(windows) {
             shell.args(["-NoProfile", "-NonInteractive", "-Command", command]);
         } else {
