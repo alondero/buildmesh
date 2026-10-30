@@ -21,7 +21,7 @@ const FRONTEND_BUILD_IGNORES = [DOCS, '^src-tauri/'];
 // (the drift guard in tests/agent-infra/harness.test.mjs flags new references).
 // `src/(?:$|…)` — the bare `src/` alternative is the dead-code policy test,
 // which walks the whole Rust tree rather than one named file.
-export const VITEST_READS_FROM_SRC_TAURI = ['capabilities/', 'Cargo\\.', 'tauri[^/]*\\.json$', 'src/(?:$|commands/|services/mod\\.rs$|startup/mod\\.rs$|http/routes/|lib\\.rs$|agent/provider/adapters/opencode_attention_plugin\\.js$)'];
+export const VITEST_READS_FROM_SRC_TAURI = ['capabilities/', 'Cargo\\.', 'tauri[^/]*\\.json$', 'src/(?:$|commands/|services/mod\\.rs$|startup/mod\\.rs$|http/routes/|lib\\.rs$|agent/provider/adapters/opencode(?:2)?_attention_plugin\\.(?:js|ts)$)'];
 const FRONTEND_TEST_IGNORES = ['^docs/(?!brand/)', `^src-tauri/(?!(?:${VITEST_READS_FROM_SRC_TAURI.join('|')}))`];
 const RUST_IGNORES = [DOCS, '^android/', '^tests/'];
 

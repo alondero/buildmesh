@@ -15,6 +15,8 @@ pub struct BackgroundRecipe {
     pub capability: BackgroundInferenceCapability,
     pub env: Vec<(String, String)>,
     pub env_remove: Vec<String>,
+    /// Adapter-owned files in this invocation's private scratch directory.
+    pub project_files: Vec<(PathBuf, String)>,
 }
 
 impl BackgroundRecipe {
@@ -35,6 +37,7 @@ impl BackgroundRecipe {
             },
             env: Vec::new(),
             env_remove: Vec::new(),
+            project_files: Vec::new(),
         }
     }
 }
@@ -44,6 +47,7 @@ pub(crate) struct BackgroundLaunch {
     pub args: Vec<String>,
     executable: Option<PathBuf>,
     recipe: BackgroundRecipe,
+    adapter: &'static dyn super::provider::AgentProvider,
 }
 
 /// Own descendants as well as the CLI across timeout, cancellation, and exit.
@@ -127,7 +131,7 @@ pub(crate) fn resolve_plan(
     let mut args = Vec::new();
     if let Some(model) = &plan.model {
         adapter.validate_model_override(model)?;
-        args.extend(adapter.model_args(model));
+        args.extend(adapter.background_model_args(model));
     }
     if let Some(effort) = &plan.effort {
         args.extend(adapter.effort_args(effort));
@@ -137,6 +141,7 @@ pub(crate) fn resolve_plan(
         args,
         executable: plan.harness.executable,
         recipe,
+        adapter,
     })
 }
 
@@ -172,6 +177,10 @@ impl BackgroundLaunch {
         {
             return Err("Background prompt exceeds the argument transport limit of 16000 bytes; select a stdin or file-backed harness".into());
         }
+        for (path, content) in &self.recipe.project_files {
+            crate::agent::managed_config::atomic_write(&directory.join(path), content)
+                .map_err(|e| format!("failed to write background harness config: {e}"))?;
+        }
         let mut recipe = self.recipe.spawn.clone();
         recipe.base_args.extend(self.args.clone());
         if self.recipe.capability.result_output == BackgroundResultOutput::LastMessageFile {
@@ -201,6 +210,7 @@ impl BackgroundLaunch {
                 .or_else(|| which::which(recipe.binary).ok())
                 .ok_or_else(|| format!("{} binary not found; install the selected harness or set its executable in Settings", recipe.binary))?,
         };
+        self.adapter.validate_executable(&executable)?;
         let mut cmd = super::spawn_environment::background_command(&recipe, Some(&executable))?;
         cmd.current_dir(directory);
         // Background inference must not signal turns on the calling agent node.

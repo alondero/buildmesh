@@ -308,7 +308,7 @@ pub fn default_prepare(
     // smuggle a model arg into a harness that advertised no support.
     // The capability and the recipe come from the same adapter — they
     // cannot disagree by construction.
-    if capabilities.supports_model_override {
+    if capabilities.supports_model_override && !adapter.model_override_via_session_api() {
         if let Some(model) = input.config.model.as_deref().filter(|s| !s.is_empty()) {
             recipe.base_args.extend(adapter.model_args(model));
         }

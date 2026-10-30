@@ -2443,6 +2443,7 @@ test('a Rust file attached with #[path] selects the module that owns it', () => 
 
 test('extracted Rust implementations and included worker tests select their contract suites', () => {
   const owners = [
+    ['agent/provider/adapters/opencode2/config.rs', 'agent::provider::adapters::opencode2'],
     ['agent/process/registry.rs', 'agent::process'],
     ['agent/provider/adapters/codex/install_probe.rs', 'agent::provider::adapters::codex'],
     ['services/agent_node/cleanup.rs', 'services::agent_node'],
@@ -2538,6 +2539,7 @@ test('new Vitest references to src-tauri are audited against the frontend-tests 
     "tests/unit/ipc-contract.test.ts: const services = normalize(readFileSync(join(REPO_ROOT, 'src-tauri', 'src', 'services', 'mod.rs'), 'utf8'));",
     "tests/unit/ipc-contract.test.ts: const startup = normalize(readFileSync(join(REPO_ROOT, 'src-tauri', 'src', 'startup', 'mod.rs'), 'utf8'));",
     'tests/unit/opencode-attention-plugin.test.ts: const source = readFileSync(resolve("src-tauri/src/agent/provider/adapters/opencode_attention_plugin.js"), "utf8");',
+    'tests/unit/opencode2-attention-plugin.test.ts: const source = readFileSync("src-tauri/src/agent/provider/adapters/opencode2_attention_plugin.ts", "utf8");',
     "tests/unit/tauri-capabilities.test.ts: describe('src-tauri/capabilities/default.json', () => {",
     "tests/unit/tauri-capabilities.test.ts: readFileSync(resolve(process.cwd(), 'src-tauri/capabilities/default.json'), 'utf8'),",
     "tests/unit/tauri-dev-config.test.ts: readFileSync(resolve(process.cwd(), 'src-tauri/tauri.conf.json'), 'utf8'),",
@@ -2562,6 +2564,7 @@ test('new Vitest references to src-tauri are audited against the frontend-tests 
     'src-tauri/src/startup/mod.rs',
     'src-tauri/src/http/routes/issues.rs',
     'src-tauri/src/agent/provider/adapters/opencode_attention_plugin.js',
+    'src-tauri/src/agent/provider/adapters/opencode2_attention_plugin.ts',
   ]) {
     assert.ok(gateReads(frontendGate, readPath), `frontend-tests must read ${readPath}`);
   }

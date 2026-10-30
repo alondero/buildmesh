@@ -101,6 +101,11 @@ pub(crate) trait UsageAdapter: Send + Sync {
     fn native_harness(&self) -> Option<&'static str> {
         None
     }
+
+    /// Multiple harness majors may share one credential and billing identity.
+    fn additional_native_harnesses(&self) -> &'static [&'static str] {
+        &[]
+    }
     /// Identify the account and authentication source used by `fetch`.
     /// Keyed adapters get account-aware caching automatically. Native adapters
     /// may override this when they can select between OAuth, cloud, workspace,

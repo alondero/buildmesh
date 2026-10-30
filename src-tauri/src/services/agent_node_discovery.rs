@@ -357,6 +357,21 @@ pub fn discover(
         Some(&effective),
     ));
 
+    // Discover V2 storage separately while preserving recorded V1 identities.
+    if let Some(path) =
+        crate::services::transcript_reader::readers::opencode::opencode_db_path(env_type)
+    {
+        sessions.extend(
+            crate::services::transcript_reader::readers::opencode2::discover(
+                &path,
+                &normalized_mesh,
+                &normalized_effective,
+                &opencode2_excluded_sessions(&mesh_nodes, &tracked_ids),
+            )
+            .map_err(crate::read_outcome::Unavailable::Read)?,
+        );
+    }
+
     // Durable archived rows the disk scan found nothing for. Sorting below
     // interleaves them with the discovered sessions by timestamp.
     //
@@ -375,6 +390,24 @@ pub fn discover(
     });
 
     Ok(sessions)
+}
+
+/// A V2 migration can retain a copy of a V1 conversation with the same id.
+/// Existing node provenance wins until an explicit major-version migration.
+fn opencode2_excluded_sessions(
+    nodes: &[crate::models::AgentNode],
+    tracked: &std::collections::HashSet<String>,
+) -> std::collections::HashSet<String> {
+    let mut excluded = tracked.clone();
+    excluded.extend(
+        nodes
+            .iter()
+            .filter(|node| {
+                crate::agent::provider::resolve_node_provider(node) == Provider::OpenCode
+            })
+            .filter_map(|node| node.cli_session_id.clone()),
+    );
+    excluded
 }
 
 /// Archived rows the Archive list must keep showing even though no transcript

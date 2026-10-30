@@ -33,7 +33,12 @@ fn harness_detected(harness_id: &str, profiles: &[HarnessProfile]) -> bool {
 /// (no disk/network) so it's the unit-test seam.
 fn account_visible(account: &ProviderAccount, profiles: &[HarnessProfile]) -> bool {
     match usage::catalog::native_harness(&account.id) {
-        Some(harness) => harness_detected(harness, profiles),
+        Some(harness) => {
+            harness_detected(harness, profiles)
+                || usage::catalog::additional_native_harnesses(&account.id)
+                    .iter()
+                    .any(|id| harness_detected(id, profiles))
+        }
         None => true,
     }
 }

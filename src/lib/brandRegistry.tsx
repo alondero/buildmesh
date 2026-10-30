@@ -167,6 +167,7 @@ const BRANDS: readonly BrandRegistration[] = [
   { id: 'cursor', icon: { kind: 'inline', component: CursorIcon }, chipHex: '#1B1913', chipClass: 'bg-neutral-900' },
   { id: 'agy', icon: { kind: 'image', src: antigravityLogo }, chipHex: '#10b981', chipClass: 'bg-emerald-500' },
   { id: 'opencode', icon: { kind: 'inline', component: OpenCodeIcon }, chipHex: '#f59e0b', chipClass: 'bg-amber-500' },
+  { id: 'opencode2', icon: { kind: 'inline', component: OpenCodeIcon }, chipHex: '#f59e0b', chipClass: 'bg-amber-500' },
   // DeepSeek brand identity (issue #1127). The harness (`dsh`) and the
   // First-class Model Provider (`deepseek`) share one brand record; the
   // primary id is `deepseek` so `brandFor('deepseek')` resolves to its own

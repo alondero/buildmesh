@@ -44,6 +44,18 @@ pub struct LaunchRuntime {
     pub wsl_distro: Option<String>,
 }
 
+/// Blocking, adapter-owned session preparation before the PTY can receive input.
+/// An API-backed harness may create a session, set its model or fork a parent.
+/// Returning an identity replaces the launch target before command composition.
+pub struct SessionPreparation<'a> {
+    pub resolved: &'a ResolvedPath,
+    pub executable: Option<&'a std::path::Path>,
+    pub node_id: i64,
+    pub session: crate::agent::launch::SessionIdModeRef<'a>,
+    pub config: &'a crate::agent::capabilities::ResolvedAgentConfig,
+    pub sandbox: bool,
+}
+
 /// Built-in **Harness Profile** ids that detection populates (`claude`,
 /// `codex`, `cursor`, `agy`, `opencode`, `grok`, `kimi`) plus the code-defined
 /// `terminal` default (issue #536) and the legacy `anthropic` executor id.
@@ -71,6 +83,7 @@ pub const BUILTIN_HARNESS_IDS: &[&str] = &[
     "mcode",
     "dsh",
     "opencode",
+    "opencode2",
     "commandcode",
     "freebuff",
     "muse",
@@ -576,6 +589,11 @@ pub trait AgentProvider: Send + Sync {
         Vec::new()
     }
 
+    /// Per-node environment selected by the adapter after config provisioning.
+    fn launch_environment(&self, _resolved: &ResolvedPath, _node_id: i64) -> Vec<(String, String)> {
+        vec![]
+    }
+
     /// Environment variables this harness needs carried from the Windows host
     /// into a WSL child. The OS wrapper owns the WSLENV mechanics; adapters
     /// only declare their runtime-specific variables here.
@@ -729,6 +747,20 @@ pub trait AgentProvider: Send + Sync {
         false
     }
 
+    /// Identity vocabulary is owned by the harness, including non-UUID ids.
+    fn new_session_id(&self) -> String {
+        uuid::Uuid::new_v4().to_string()
+    }
+
+    fn prepare_session(&self, _input: SessionPreparation<'_>) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+
+    /// Validate a resolved CLI before either interactive or background execution.
+    fn validate_executable(&self, _executable: &std::path::Path) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Whether the PTY reader thread should sniff a session ID from live
     /// output (the labeled-UUID regex in `session_capture`). Defaults to
     /// [`Self::self_assigns_session_id`]. Harnesses that self-assign but
@@ -834,6 +866,15 @@ pub trait AgentProvider: Send + Sync {
     /// Args for model override.
     fn model_args(&self, model: &str) -> Vec<String> {
         vec!["--model".into(), model.into()]
+    }
+
+    /// Some TUIs apply a model to durable session state before launch.
+    fn model_override_via_session_api(&self) -> bool {
+        false
+    }
+
+    fn background_model_args(&self, model: &str) -> Vec<String> {
+        self.model_args(model)
     }
 
     /// A pure, adapter-owned recipe for one-shot background inference.

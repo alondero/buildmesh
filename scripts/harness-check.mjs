@@ -76,6 +76,10 @@ export function frontendInScope(paths) {
 // `pathIncludeDrift` below, so a new `#[path]` fails the gate that runs on the
 // Rust diff itself, not only the one CI happens to run (review of PR #2232).
 export const RUST_PATH_INCLUDES = {
+  'src-tauri/src/agent/opencode_detection_tests.rs': 'agent::detection::opencode_detection_tests',
+  'src-tauri/src/agent/provider/adapters/opencode2_tests.rs': 'agent::provider::adapters::opencode2::tests',
+  'src-tauri/src/agent/provider/adapters/opencode_version_tests.rs': 'agent::provider::adapters::opencode_version::tests',
+  'src-tauri/src/services/transcript_reader/readers/opencode2_tests.rs': 'services::transcript_reader::readers::opencode2::tests',
   'src-tauri/src/git/trust_tests.rs': 'git::trust::tests',
   'src-tauri/src/db/circuit/review_configuration_tests.rs': 'db::circuit::review_configuration::tests',
   'src-tauri/src/db/circuit/artifacts_tests.rs': 'db::circuit::artifacts::tests',
@@ -210,6 +214,7 @@ export const RUST_SIBLING_TESTS = {
 // Private implementations keep their contract tests at the owning facade.
 // Map them explicitly so editing an extracted child still executes that suite.
 export const RUST_IMPLEMENTATION_TESTS = {
+  'src-tauri/src/agent/provider/adapters/opencode2/config.rs': 'agent::provider::adapters::opencode2',
   'src-tauri/src/agent/process/input.rs': 'agent::process',
   'src-tauri/src/agent/process/registry.rs': 'agent::process',
   'src-tauri/src/agent/process/commands.rs': 'agent::process',

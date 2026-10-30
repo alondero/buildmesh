@@ -659,6 +659,24 @@ use crate::agent::session_lifecycle::LifecycleKind;
 use std::path::Path;
 
 #[test]
+fn opencode2_plugin_callbacks_reach_the_normalizer_with_session_fences() {
+    for (event, decision) in [
+        ("session.idle", Decision::Ready),
+        ("session.busy", Decision::Running),
+        ("permission.asked", Decision::MarkInput),
+        ("session.error", Decision::MarkInput),
+    ] {
+        let body=serde_json::json!({"hook_event_name":event,"sessionID":"ses_mintedNode","request_id":"perm_1"}).to_string().into_bytes();
+        let classified = classify(&body, "opencode2", |_| Some(0));
+        assert_eq!(classified.decision, decision, "{event}");
+        assert_eq!(
+            classified.detail.provider_session_id.as_deref(),
+            Some("ses_mintedNode")
+        );
+    }
+}
+
+#[test]
 fn stale_and_current_native_stops_follow_the_turn_fence() {
     use crate::services::circuit_worker::native_hooks::{NativeHook, NativeReceipt};
 

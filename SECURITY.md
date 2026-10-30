@@ -150,3 +150,16 @@ Use the in-app export instead.
 Researchers who report valid, in-scope issues are credited in the
 release notes and the GitHub Security Advisory unless they prefer
 anonymity.
+
+## OpenCode 2 permission boundary
+
+The OpenCode 2 harness starts a private server per node. Its managed project
+override configures an explicit `external_directory` deny because V2 otherwise
+allows it by default. Background inference also configures tool deny rules in
+its scratch project. Blocking an actual out-of-project read or write has not
+been verified with the production interactive or background argv, including
+interactive `--auto` mode. These are OpenCode permission rules, not OS
+confinement; the Mesh sandbox remains an independent control. User or
+organization policies and the CLI implementation remain part of that trust
+boundary. See [the decision](docs/adr/0050-opencode-major-version-isolation.md)
+and [recovery steps](docs/troubleshooting.md#opencode-2-does-not-start-or-report-attention).

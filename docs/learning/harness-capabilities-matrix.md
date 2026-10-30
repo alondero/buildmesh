@@ -49,7 +49,8 @@ Run `cargo test -p buildmesh agent::capabilities` after an adapter edit, then
 
 ## Harness catalog
 
-Fourteen detected harnesses plus the always-present Terminal give fifteen rows.
+Fifteen detectable harness ids plus the always-present Terminal give sixteen rows.
+The OpenCode majors share a binary; a deferred version probe selects the matching id.
 "Adapter id" is the stable id matching the database `provider` column.
 
 | Harness | Adapter id | Detection binary | Config dir(s) |
@@ -58,7 +59,8 @@ Fourteen detected harnesses plus the always-present Terminal give fifteen rows.
 | Codex | `codex` | `codex` | `.codex` |
 | Cursor | `cursor` | `cursor-agent` | `.cursor` |
 | Antigravity | `agy` | `agy` | `.gemini/antigravity-cli`, `.antigravity`, `.antigravitycli` |
-| OpenCode | `opencode` | `opencode` | — |
+| OpenCode | `opencode` | `opencode` (major 1) | — |
+| OpenCode 2 | `opencode2` | `opencode` (major 2) | Native runtime; per-node managed override |
 | Kimi Code | `kimi` | `kimi` | `.kimi` |
 | Grok Code | `grok` | `grok` | `.grok` |
 | MiniMax Code | `mcode` | `mcode` | `.mcode`, `.minimax-code` |
@@ -99,6 +101,7 @@ Legend: ✅ advertised, ❌ not advertised. Column shorthand:
 | Cursor | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Completion and background signals only |
 | Antigravity | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Hook needs CLI 1.0.0+; workspace trust |
 | OpenCode | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Attention arrives through the project plugin |
+| OpenCode 2 | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | Session API model/fork; private server; native runtime only |
 | Kimi Code | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ | ❌ | ❌ | Hook needs 0.27.0+; no transcript reader |
 | Grok Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Hook validated against 1.0.5 |
 | MiniMax Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Session-only `--model` verified in native Windows help; `UserPromptSubmit` resumes work using the 0.6.13 hook contract; see the [capability review](mcode-harness-capabilities.md) for delivery evidence and platform limits |
@@ -138,6 +141,7 @@ the node being named still needs a turn signal to trigger naming.
 | Claude Code | stdin (`--print`) | text stdout | Native or configured route |
 | Codex | stdin (`exec -`) | `--output-last-message` file | Native only |
 | OpenCode | stdin (`run --format json`) | final text event | Native only |
+| OpenCode 2 | stdin (`run --standalone --format json`) | final text event | Native only; project deny rules |
 | Kimi Code | `--prompt` argument | final assistant JSON message | Native only |
 | Grok Code | `--prompt-file` | plain stdout | Native only |
 | Antigravity | `--print` argument | text stdout | Native only |
@@ -176,6 +180,7 @@ Non-boolean detail for the nine harnesses with a native attention hook
 | Cursor | Skip permissions | Turn completed, background | 1.0.0 | — |
 | Antigravity | Skip permissions | Turn completed, background | 1.0.0 | Workspace trust |
 | OpenCode | Permission ask | Turn completed, question, permission | — | — |
+| OpenCode 2 | Permission ask | Turn completed, permission; busy clears attention | 2.2.3 | Native runtime; question/child contracts unverified |
 | Kimi Code | Permission ask | Turn completed, input required, question, permission | 0.27.0 | — |
 | Grok Code | Permission ask | Turn completed, input required, question, permission | 1.0.5 | Global hook directory |
 | MiniMax Code | Skip permissions (pinned: `permissionMode: bypassPermissions`) | Turn completed | 0.4.12 | — |
@@ -229,6 +234,7 @@ executor at the spawn seam.
 | Cursor | Attn hook | ✅ |
 | Antigravity | Attn hook | ✅ |
 | OpenCode | Attn hook | ✅ |
+| OpenCode 2 | Attn hook | ✅ |
 | Kimi Code | Attn hook | ✅ |
 | Grok Code | Attn hook | ✅ |
 | MiniMax Code | Attn hook | ✅ |
@@ -296,6 +302,7 @@ chooses its own and Buildmesh recovers it.
 | Cursor | Self-assigns | Yes |
 | Antigravity | Self-assigns | No (brain-directory poll) |
 | OpenCode | Self-assigns | No (SQLite poll) |
+| OpenCode 2 | Assigns `ses_` id before spawn | No capture required |
 | Kimi Code | Self-assigns | Yes |
 | Grok Code | Buildmesh mints | No |
 | MiniMax Code | Self-assigns | Yes |
@@ -331,6 +338,7 @@ differences are runtime-level, not capability-level:
 
 - Native Windows and WSL installations are detected separately and appear as
   distinct entries.
+- OpenCode majors are excluded from WSL cross-runtime probing until a guest-side version gate is validated. OpenCode 2 launch preparation requires a native runtime.
 - Cline is excluded from WSL cross-runtime probing: it is a native
   Windows/macOS/Linux target and its WSL behaviour is undocumented.
 

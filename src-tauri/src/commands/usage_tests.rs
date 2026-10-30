@@ -28,6 +28,19 @@ fn profile(id: &str, harness: &str) -> HarnessProfile {
     }
 }
 
+#[test]
+fn opencode_subscription_card_is_shared_by_both_harness_majors() {
+    let account = account("opencode", true);
+    for harness in ["opencode", "opencode2"] {
+        assert!(account_visible(&account, &[profile(harness, harness)]));
+        assert_eq!(
+            poll_ids(std::slice::from_ref(&account), &[profile(harness, harness)]),
+            ["opencode"]
+        );
+    }
+    assert!(!account_visible(&account, &[]));
+}
+
 fn usage(provider: &str) -> ProviderUsage {
     ProviderUsage {
         provider: provider.to_string(),

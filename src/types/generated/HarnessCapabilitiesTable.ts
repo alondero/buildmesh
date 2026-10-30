@@ -10,6 +10,7 @@ export type InspectorHarnessId =
   | "anthropic"
   | "agy"
   | "opencode"
+  | "opencode2"
   | "codex"
   | "cursor"
   | "grok"
@@ -35,6 +36,7 @@ export const HARNESS_CATALOG = {
     "anthropic",
     "agy",
     "opencode",
+    "opencode2",
     "codex",
     "cursor",
     "grok",
@@ -62,6 +64,7 @@ export const HARNESS_CATALOG = {
     "mcode": "MiniMax Code",
     "muse": "Meta Muse",
     "opencode": "OpenCode",
+    "opencode2": "OpenCode 2",
     "perch": "Perch",
     "terminal": "Terminal"
   },
@@ -702,6 +705,60 @@ export const HARNESS_CATALOG = {
       "requires_attention_hook": true,
       "supports_effort_override": false,
       "supports_extra_args": true,
+      "supports_model_override": true,
+      "supports_passive_turn_watcher": false,
+      "supports_prefill": true,
+      "supports_result_file_handoff": true,
+      "supports_resume": true
+    },
+    "opencode2": {
+      "accepts_initial_prompt": true,
+      "attention_capability": {
+        "events": [
+          "turn_completed",
+          "permission_requested"
+        ],
+        "kind": "hook",
+        "launch_mode": "permission_ask",
+        "min_version": "2.2.3",
+        "trust": null
+      },
+      "auto_resume_on_startup": true,
+      "available_on": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "background_inference": {
+        "max_prompt_bytes": null,
+        "prompt_input": {
+          "kind": "stdin"
+        },
+        "result_output": "open_code_json_lines",
+        "supports_provider_routing": false
+      },
+      "default_permission_mode": "unattended",
+      "effort_control": {
+        "kind": "none"
+      },
+      "harness_id": "opencode2",
+      "is_plain_terminal": false,
+      "permission_modes": [
+        {
+          "description": "Use OpenCode's auto-approve mode with managed project permission rules.",
+          "id": "unattended",
+          "label": "--auto"
+        },
+        {
+          "description": "OpenCode asks before permission-gated tools.",
+          "id": "prompt",
+          "label": "Prompts on (no flag)"
+        }
+      ],
+      "produces_readable_transcript": true,
+      "requires_attention_hook": true,
+      "supports_effort_override": false,
+      "supports_extra_args": false,
       "supports_model_override": true,
       "supports_passive_turn_watcher": false,
       "supports_prefill": true,

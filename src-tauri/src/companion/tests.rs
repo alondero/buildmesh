@@ -218,6 +218,7 @@ async fn assistant_inference_uses_adapter_transports_and_decodes_large_replies()
 const fs = require('fs');
 const args = process.argv.slice(2);
 const value = flag => args[args.indexOf(flag) + 1];
+if (args.includes('--version')) { console.log('1.18.3'); process.exit(0); }
 if (args.includes('--safe-mode') || args.includes('auth')) process.exit(21);
 let prompt;
 if (args.includes('--prompt-file')) prompt = fs.readFileSync(value('--prompt-file'), 'utf8');

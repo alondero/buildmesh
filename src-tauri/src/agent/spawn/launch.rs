@@ -104,7 +104,7 @@ pub(super) async fn launch_process(
         explicit_timeout_seconds,
         spawn_option_id,
         registry_mesh_id,
-        session_id_mode,
+        mut session_id_mode,
         resume_cause,
         sandbox,
     } = launch;
@@ -185,6 +185,43 @@ pub(super) async fn launch_process(
         explicit_extra_args.as_deref(),
         frozen_application_default(app_default.as_ref(), frozen).as_ref(),
     );
+    let preparation_path = resolved.clone();
+    let preparation_executable = routing
+        .executable_override()
+        .map(std::path::Path::to_path_buf);
+    let preparation_session = session_id_mode.clone();
+    let preparation_config = resolved_config.clone();
+    let prepared_id = crate::blocking::run_blocking("prepare_harness_session", move || {
+        use crate::agent::launch::SessionIdModeRef;
+        let session = match &preparation_session {
+            SessionIdMode::Assign(id) => SessionIdModeRef::Assign(id),
+            SessionIdMode::Resume(id) => SessionIdModeRef::Resume {
+                id,
+                cause: resume_cause,
+            },
+            SessionIdMode::None => SessionIdModeRef::None,
+        };
+        let prepared_id = adapter.prepare_session(crate::agent::provider::SessionPreparation {
+            resolved: &preparation_path,
+            executable: preparation_executable.as_deref(),
+            node_id: session_id,
+            session,
+            config: &preparation_config,
+            sandbox,
+        })?;
+        if let Some(id) = prepared_id.as_deref() {
+            crate::db::update_cli_session_id(session_id, id).map_err(|e| e.to_string())?;
+        }
+        Ok(prepared_id)
+    })
+    .await
+    .inspect_err(|error| {
+        adapter.on_process_terminated(session_id);
+        emit_provider_error(app, session_id, provider, error);
+    })?;
+    if let Some(id) = prepared_id {
+        session_id_mode = SessionIdMode::Resume(id);
+    }
     timer.checkpoint("before_command_build");
     // A sandbox-setup failure must not reach the PTY at all, so the error is
     // raised here rather than carried as a poisoned command (#2034).

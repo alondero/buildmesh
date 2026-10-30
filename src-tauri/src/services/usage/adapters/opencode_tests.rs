@@ -7,6 +7,38 @@ use crate::services::usage::adapter::spawn_loopback;
 use crate::services::usage::cache::invalidate_cache;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+
+#[test]
+fn local_cost_rollup_includes_v2_once_alongside_v1() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE session(id TEXT,cost REAL,time_created INTEGER); CREATE TABLE session_v2(id TEXT,cost REAL,time_created INTEGER);").unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+    conn.execute("INSERT INTO session VALUES('ses_v1',1,?1)", [now])
+        .unwrap();
+    conn.execute("INSERT INTO session_v2 VALUES('ses_v2',2,?1)", [now])
+        .unwrap();
+    let windows = calculate_opencode_windows_impl(&conn).unwrap();
+    assert_eq!(windows[0].used_percent, Some(25.0));
+    assert_eq!(windows[1].used_percent, Some(10.0));
+    // The V2 migration copied V1's identity and counters. Neither an equal
+    // copy nor an older, cheaper one can double-count this conversation.
+    conn.execute("INSERT INTO session_v2 VALUES('ses_v1',1,?1)", [now])
+        .unwrap();
+    assert_eq!(
+        calculate_opencode_windows_impl(&conn).unwrap()[0].used_percent,
+        Some(25.0)
+    );
+    conn.execute("UPDATE session SET cost=2 WHERE id='ses_v1'", [])
+        .unwrap();
+    assert!(
+        (calculate_opencode_windows_impl(&conn).unwrap()[0]
+            .used_percent
+            .unwrap()
+            - 100.0 / 3.0)
+            .abs()
+            < 1e-9
+    );
+}
 // ─── OpenCode ─────────────────────────────────────────────────────────
 
 #[test]

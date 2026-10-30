@@ -16,6 +16,7 @@ pub mod grok;
 pub mod mcode;
 pub mod muse;
 pub mod opencode;
+pub mod opencode2;
 
 pub(crate) use agy::AgyAdapter;
 pub(crate) use claude_code::ClaudeCodeAdapter;
@@ -27,3 +28,4 @@ pub(crate) use grok::GrokAdapter;
 pub(crate) use mcode::McodeAdapter;
 pub(crate) use muse::MuseAdapter;
 pub(crate) use opencode::OpenCodeAdapter;
+pub(crate) use opencode2::OpenCode2Adapter;

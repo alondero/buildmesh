@@ -49,6 +49,10 @@ impl UsageAdapter for OpencodeAdapter {
         Some("opencode")
     }
 
+    fn additional_native_harnesses(&self) -> &'static [&'static str] {
+        &["opencode2"]
+    }
+
     // Issue #1745 phase 2 step 18: opencode migrated to the outcome
     // seam. The retry-on-401 gate matches on the `Rejected` outcome
     // (strictly stronger than the old wire-error substring match), and
@@ -86,8 +90,22 @@ fn calculate_opencode_windows_impl(
 ) -> Result<Vec<UsageWindow>, String> {
     let now_ms = chrono::Utc::now().timestamp_millis();
 
+    let has_v2: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_v2')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
     let sum_cost_since = |since_ms: i64| -> Result<f64, rusqlite::Error> {
-        let mut stmt = conn.prepare("SELECT SUM(cost) FROM session WHERE time_created >= ?")?;
+        // Migration keeps the same identity in both stores. Count the larger
+        // cumulative cost once, including a conversation later continued in V1.
+        let sql = if has_v2 {
+            "SELECT SUM(cost) FROM (SELECT id,MAX(cost) AS cost FROM (SELECT id,cost FROM session WHERE time_created>=?1 UNION ALL SELECT id,cost FROM session_v2 WHERE time_created>=?1) GROUP BY id)"
+        } else {
+            "SELECT SUM(cost) FROM session WHERE time_created>=?1"
+        };
+        let mut stmt = conn.prepare(sql)?;
         let cost: Option<f64> = stmt.query_row([since_ms], |row| row.get(0))?;
         Ok(cost.unwrap_or(0.0))
     };
