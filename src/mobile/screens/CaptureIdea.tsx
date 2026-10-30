@@ -169,7 +169,7 @@ export default function CaptureIdea({
   }, [text, meshId, providerId]);
   const choices = providers.filter(
     (p) =>
-      p.capabilities?.supports_prefill &&
+      p.capabilities?.accepts_initial_prompt &&
       !p.unavailable_reason &&
       (!p.is_proxied || p.configuration),
   );

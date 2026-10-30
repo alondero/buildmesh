@@ -28,6 +28,7 @@ include!("tests/parked_evidence.rs");
 include!("tests/result_support.rs");
 include!("tests/result_delivery.rs");
 include!("tests/result_repair.rs");
+include!("tests/result_handoff.rs");
 include!("tests/admission.rs");
 include!("tests/capacity.rs");
 include!("tests/lineage_recovery.rs");

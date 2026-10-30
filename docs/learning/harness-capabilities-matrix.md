@@ -89,7 +89,7 @@ Legend: ✅ advertised, ❌ not advertised. Column shorthand:
 - **Model** — `supports_model_override` (`--model` or equivalent).
 - **Effort** — `supports_effort_override` (see [Effort control vocabulary](#effort-control-vocabulary)).
 - **Extra args** — `supports_extra_args`; verbatim CLI flags from configuration are forwarded.
-- **Prefill** — `supports_prefill`; a seed prompt is delivered at spawn.
+- **Prefill** — `supports_prefill`; a seed prompt is delivered on the launch command line. Every other harness except Terminal still takes issue, PR and prompt spawns (`accepts_initial_prompt`): it launches plain and the prompt is typed into its terminal once the TUI has booted.
 - **Plain shell** — `is_plain_terminal`; all LLM paths are skipped.
 
 | Harness | Resume | Auto-resume | Attn hook | Watcher | Transcript | Archive | Model | Effort | Extra args | Prefill | Plain shell | Notes |
@@ -104,7 +104,7 @@ Legend: ✅ advertised, ❌ not advertised. Column shorthand:
 | MiniMax Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Session-only `--model` verified in native Windows help; `UserPromptSubmit` resumes work using the 0.6.13 hook contract; see the [capability review](mcode-harness-capabilities.md) for delivery evidence and platform limits |
 | DeepSeek Harness | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | Capabilities deliberately gated (no validated profile) |
 | Command Code | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Passive watcher replaces a native hook |
-| Freebuff | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | No model or effort override |
+| Freebuff | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | No model or effort override; initial prompts are typed after startup |
 | Meta Muse | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Native on Windows since Muse 1.3.0; workspace trust pre-provisioned (#1706); `--reasoning-effort` closed vocabulary (#1704) |
 | Cline | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Native Provider; hook delivers turn completion only (no clean-exit dispatch); reader over `<id>.messages.json` (#1776) |
 | Perch | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ | Resume via `--thread`; closed `--effort`; [deep dive](perch-harness-capabilities.md) |
@@ -235,14 +235,21 @@ executor at the spawn seam.
 | Cline | Attn hook | ✅ |
 | Command Code | Watcher | ✅ |
 | Meta Muse | Watcher | ✅ |
-| DeepSeek Harness | None | ❌ |
-| Freebuff | None | ❌ |
-| Perch | None | ❌ |
+| DeepSeek Harness | Result file | ✅ |
+| Freebuff | Result file | ✅ |
+| Perch | Result file | ✅ |
 | Terminal | None (plain shell) | ❌ |
 
-Eligibility is necessary, not sufficient, and two of the ✅ rows are weaker than
+Eligibility is necessary, not sufficient, and several ✅ rows are weaker than
 the rest:
 
+- **DeepSeek Harness, Freebuff and Perch** have no hook or watcher. Every Circuit
+  prompt asks them to write a result file when they finish, and that settled
+  file is their only turn signal (see
+  [result-file turn completion](../development/circuit-session-observation.md#result-file-turn-completion)).
+  It cannot report a question, a permission or background work, and a review
+  started on one of them as the source has to be moved past its first wait by
+  hand, because that turn was not prompted by the Circuit.
 - **Kimi Code** advertises a hook, but its CLI hook contract validation is still
   open (#1554, blocking #1369). Until that lands the gate admits Kimi on an
   unvalidated signal.

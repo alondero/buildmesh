@@ -69,7 +69,7 @@ const provider = {
   harness_id: "claude",
   provider_id: null,
   icon: "A",
-  capabilities: { supports_prefill: true },
+  capabilities: { supports_prefill: true, accepts_initial_prompt: true },
 } as Provider;
 
 const savedConfiguration = {

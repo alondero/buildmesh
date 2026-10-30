@@ -2406,31 +2406,10 @@ fn node_review_rejects_terminal_reviewer_and_collapses_blank() {
             "{picked:?} must be rejected, got {err:?}"
         );
     }
-    // Issue #1816: the gate is attention compatibility, not a
-    // Terminal-only denylist — `dsh` and `freebuff` have
-    // neither an attention hook nor a passive turn watcher, so they are
-    // rejected with the Inspector/docs label naming the harness and the
-    // missing turn-completion signal. (Issue #1775 gave `cline` a file hook,
-    // so it is no longer ineligible.) Rejections happen before any DB
-    // work, so the same source row is reusable across picks here.
-    for (picked, name) in [
-        ("dsh", "DeepSeek Harness"),
-        ("freebuff", "Freebuff"),
-        ("freebuff:minimax", "Freebuff"),
-    ] {
-        let err =
-            create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some(picked.into()))
-                .unwrap_err()
-                .to_string();
-        assert!(
-            err.contains(name),
-            "{picked:?} must name the harness ({name}), got {err:?}"
-        );
-        assert!(
-            err.contains("turn-completion"),
-            "{picked:?} must name the missing capability, got {err:?}"
-        );
-    }
+    // Issue #1816 also refused `dsh` and `freebuff` here for lacking a hook
+    // or watcher. They now hand off through their result file and pass the
+    // same gate as any eligible harness (`ledger::reviewer_tests`), so only
+    // the plain shell is refused.
     // A blank pick is not an error — it means "inherit", so the run keeps the
     // app-wide Reviewer provider snapshot it would have had anyway.
     let run =
@@ -2531,7 +2510,7 @@ fn node_review_refuses_stale_ineligible_app_wide_reviewer_on_inherit() {
     // Store the stale value directly, bypassing the now-validating
     // settings command — that is exactly the pre-gate state under test.
     crate::preferences::save(crate::preferences::AppPreferences {
-        reviewer_provider: Some("freebuff".to_string()),
+        reviewer_provider: Some("terminal".to_string()),
         ..Default::default()
     })
     .expect("store stale app-wide reviewer");
@@ -2563,16 +2542,12 @@ fn node_review_refuses_stale_ineligible_app_wide_reviewer_on_inherit() {
         .unwrap_err()
         .to_string();
     assert!(
-        err.contains("Freebuff"),
+        err.contains("Terminal"),
         "stale value must name the harness, got {err:?}"
     );
     assert!(
         err.contains("Settings"),
         "stale value must point at Settings, got {err:?}"
-    );
-    assert!(
-        err.contains("turn-completion"),
-        "stale value must name the missing capability, got {err:?}"
     );
     // An eligible stored value still inherits silently.
     crate::preferences::save(crate::preferences::AppPreferences {

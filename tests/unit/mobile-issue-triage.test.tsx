@@ -32,10 +32,10 @@ beforeEach(() => {
     if (path.endsWith('/issues')) return response(feed);
     if (path.endsWith('/issue-labels')) return catalog();
     if (path === '/api/providers') return response([
-      { id: 'claude', label: 'Claude Code', capabilities: { supports_prefill: true }, configuration: null },
-      { id: 'terminal', label: 'Terminal', capabilities: { supports_prefill: false } },
-      { id: 'missing', label: 'Missing', capabilities: { supports_prefill: true }, unavailable_reason: 'Not installed' },
-      { id: 'saved', label: 'Saved recipe', capabilities: { supports_prefill: true }, configuration: { id: 'saved', name: 'Saved recipe', spawn_option_id: 'claude' } },
+      { id: 'claude', label: 'Claude Code', capabilities: { supports_prefill: true, accepts_initial_prompt: true }, configuration: null },
+      { id: 'terminal', label: 'Terminal', capabilities: { supports_prefill: false, accepts_initial_prompt: false } },
+      { id: 'missing', label: 'Missing', capabilities: { supports_prefill: true, accepts_initial_prompt: true }, unavailable_reason: 'Not installed' },
+      { id: 'saved', label: 'Saved recipe', capabilities: { supports_prefill: true, accepts_initial_prompt: true }, configuration: { id: 'saved', name: 'Saved recipe', spawn_option_id: 'claude' } },
     ]);
     throw new Error(`Unexpected request: ${path}`);
   }));

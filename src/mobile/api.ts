@@ -377,8 +377,8 @@ export async function ghAuthOk(): Promise<boolean> {
   return j.ok;
 }
 
-export async function listPulls(meshId: number, signal?: AbortSignal): Promise<import('../types/generated/GitHubPullRequestFeed').GitHubPullRequestFeed> {
-  const feed = await (await apiFetch(`/api/meshes/${meshId}/pulls?state=open`, { signal })).json() as import('../types/generated/GitHubPullRequestFeed').GitHubPullRequestFeed;
+export async function listPulls(meshId: number, state: 'open' | 'closed' = 'open', signal?: AbortSignal): Promise<import('../types/generated/GitHubPullRequestFeed').GitHubPullRequestFeed> {
+  const feed = await (await apiFetch(`/api/meshes/${meshId}/pulls?state=${state}`, { signal })).json() as import('../types/generated/GitHubPullRequestFeed').GitHubPullRequestFeed;
   if (!Array.isArray(feed?.items) || typeof feed.completeness?.complete !== 'boolean') {
     throw new Error('The desktop sent an unexpected pull requests response. Update Buildmesh or refresh to retry.');
   }

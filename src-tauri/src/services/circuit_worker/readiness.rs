@@ -106,24 +106,7 @@ pub(crate) fn prepare_with_lifecycle_veto(
     if !finished && !declared && !yielded && step.status != StepStatus::Unverified {
         return Ok(None);
     }
-    let session_id = agent
-        .cli_session_id
-        .as_deref()
-        .filter(|id| !id.is_empty())
-        .ok_or(Blocker::SessionIdentityUnavailable)?;
-    let incarnation = stamp
-        .and_then(|stamp| stamp.split_once(':'))
-        .map(|(incarnation, _)| incarnation)
-        .ok_or(Blocker::SessionIdentityUnavailable)?;
-    let incarnation_ms = incarnation
-        .parse::<i64>()
-        .map_err(|_| Blocker::SessionIdentityUnavailable)?;
-    let input = input.map_err(|reason| match reason {
-        InputUnavailable::MissingProcess => Blocker::ProcessUnavailable,
-        InputUnavailable::Draft => Blocker::InputDraft,
-        InputUnavailable::UnknownInput => Blocker::InputUncertain,
-        InputUnavailable::Paste => Blocker::InputPaste,
-    })?;
+    let (session_id, incarnation, incarnation_ms, input) = bound_identity(agent, stamp, input)?;
     // Explicit handoff is report readiness, not native lifecycle verification.
     let status = if finished || declared {
         SessionStatus::Ready
@@ -218,4 +201,95 @@ pub(crate) fn prepare_with_lifecycle_veto(
             .reason()
             .into(),
     })
+}
+
+/// The session, incarnation and input ownership a report binding is fenced to.
+fn bound_identity<'a>(
+    agent: &'a crate::models::AgentNode,
+    stamp: Option<&'a str>,
+    input: Result<String, InputUnavailable>,
+) -> Result<(&'a str, &'a str, i64, String), Blocker> {
+    let session_id = agent
+        .cli_session_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .ok_or(Blocker::SessionIdentityUnavailable)?;
+    let incarnation = stamp
+        .and_then(|stamp| stamp.split_once(':'))
+        .map(|(incarnation, _)| incarnation)
+        .ok_or(Blocker::SessionIdentityUnavailable)?;
+    let incarnation_ms = incarnation
+        .parse::<i64>()
+        .map_err(|_| Blocker::SessionIdentityUnavailable)?;
+    let input = input.map_err(|reason| match reason {
+        InputUnavailable::MissingProcess => Blocker::ProcessUnavailable,
+        InputUnavailable::Draft => Blocker::InputDraft,
+        InputUnavailable::UnknownInput => Blocker::InputUncertain,
+        InputUnavailable::Paste => Blocker::InputPaste,
+    })?;
+    Ok((session_id, incarnation, incarnation_ms, input))
+}
+
+/// Admit a yielded agent whose harness has no readable report, but which owes
+/// this run a result file, with that file as its report.
+///
+/// Only called after [`prepare_with_lifecycle_veto`] found no report it could
+/// bind, so the report and lifecycle blockers it checks first have already
+/// passed. The candidate carries no output: the caller binds the result file
+/// through `with_result_file`, which reads it, checks the gate's result-line
+/// contract and fences the binding to the file's exact contents. A missing,
+/// blank or contract-violating file therefore takes the ordinary bounded
+/// reminder path, exactly as it would for a harness with a transcript.
+///
+/// The agent must already read Ready or Completed. A harness with no lifecycle
+/// of its own reaches Ready through the result-file turn recovery in the
+/// lost-turn watchdog, once the file has settled.
+pub(crate) fn prepare_result_handoff(
+    view: &RunView,
+    node_id: &str,
+    agent: &crate::models::AgentNode,
+    stamp: Option<&str>,
+    input: Result<String, InputUnavailable>,
+    result: &std::path::Path,
+    now_ms: i64,
+) -> Result<Option<Candidate>, Blocker> {
+    let Some(step) = view.step(node_id) else {
+        return Ok(None);
+    };
+    if !matches!(
+        agent.status,
+        SessionStatus::Ready | SessionStatus::Completed
+    ) {
+        return Ok(None);
+    }
+    let (session_id, incarnation, _, input) = bound_identity(agent, stamp, input)?;
+    let observed_at_ms = super::result_handoff::written_at_ms(result).unwrap_or(now_ms);
+    let turn_revision = super::result_handoff::turn_revision(result);
+    Ok(Some(Candidate {
+        output: String::new(),
+        status: SessionStatus::Ready,
+        turn_revision: turn_revision.clone(),
+        binding: ClassificationBinding {
+            owner: ObservationIdentity {
+                run_id: view.run_id,
+                step_id: node_id.into(),
+                attempt: step.attempt,
+                agent_node_id: agent.id,
+                session_incarnation: Some(incarnation.into()),
+                session_id: Some(session_id.into()),
+                turn_id: None,
+                report_revision: Some(turn_revision.clone()),
+            },
+            report_revision: turn_revision,
+            input_guard: ObservationInputFence {
+                transcript_guard: None,
+                report_guard: None,
+                agent_node_id: agent.id,
+                input_stamp: input,
+                observed_at_ms,
+                session_id: session_id.into(),
+                session_incarnation: incarnation.into(),
+            },
+        },
+    }))
 }

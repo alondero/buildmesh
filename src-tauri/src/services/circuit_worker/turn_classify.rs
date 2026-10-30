@@ -197,22 +197,58 @@ pub(super) fn classify_step_turn(
     let lifecycle_blocker = db::agent_node::circuit_lifecycle_blocker(agent_node_id).unwrap_or(
         Some(crate::circuit::observation::CircuitObservationBlocker::LifecycleEvidenceUnavailable),
     );
+    let result_path = crate::circuit::handoff::expected_result(active.run.id, agent_node_id);
     let candidate = match readiness::prepare_with_lifecycle_veto(
         view,
         node_id,
         &agent,
         stamp.as_deref(),
-        input,
+        input.clone(),
         snapshot,
         lifecycle_blocker,
     ) {
         Ok(Some(candidate)) => candidate,
+        // A yielded harness without a readable report can still hand off
+        // through the result file this turn owes.
+        Err(crate::circuit::observation::CircuitObservationBlocker::ReportUnavailable {
+            reason,
+        }) if result_path.is_some() => match readiness::prepare_result_handoff(
+            view,
+            node_id,
+            &agent,
+            stamp.as_deref(),
+            input,
+            result_path.as_deref().expect("checked result path"),
+            chrono::Utc::now().timestamp_millis(),
+        ) {
+            Ok(Some(candidate)) => candidate,
+            Ok(None) => {
+                return Some(ClassifiedTurn::deferred(
+                    agent_node_id,
+                    crate::circuit::observation::CircuitObservationBlocker::ReportUnavailable {
+                        reason,
+                    },
+                ))
+            }
+            Err(blocker) => return Some(ClassifiedTurn::deferred(agent_node_id, blocker)),
+        },
+        // Nothing will ever end this turn: the harness reports no lifecycle
+        // and this step did not ask it for a result file. Say so now rather
+        // than waiting out the active budget.
+        Ok(None)
+            if result_path.is_none()
+                && agent.status == SessionStatus::Running
+                && super::result_handoff::completes_by_result_file_only(&agent) =>
+        {
+            return Some(ClassifiedTurn::deferred(
+                agent_node_id,
+                crate::circuit::observation::CircuitObservationBlocker::TurnCompletionUnobservable,
+            ))
+        }
         Ok(None) => return None,
         Err(blocker) => return Some(ClassifiedTurn::deferred(agent_node_id, blocker)),
     };
-    let (candidate, missing_path) = if let Some(path) =
-        crate::circuit::handoff::expected_result(active.run.id, agent_node_id)
-    {
+    let (candidate, missing_path) = if let Some(path) = result_path {
         let (candidate, missing) = match candidate.with_result_file(&path, view, step) {
             Ok(Some(result)) => result,
             Ok(None) => return None,
@@ -315,8 +351,7 @@ pub(super) fn classify_step_turn(
     let mut classified =
         candidate.into_classified_turn(view, node_id, classification, readiness, stamp, || {
             (
-                crate::coordinator::enrichment::assistant_report(&agent)
-                    .map(|report| report.revision),
+                super::result_handoff::current_turn_revision(active.run.id, &agent),
                 crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id),
             )
         });
@@ -890,6 +925,27 @@ pub(super) fn lost_turn_watchdog_pass(app: &AppHandle) -> Vec<QuietClassifierFai
                 continue;
             };
             use crate::circuit::evaluator;
+            // A settled result file ends a turn whose completion was never
+            // signalled: the only signal a harness without hooks or watchers
+            // has, and a fallback for one whose signal was lost.
+            let result_key = format!("result-turn:{}", active.run.id);
+            if let Some(generation) = (node.status == SessionStatus::Running
+                && crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id))
+            .then(|| evaluator::begin_circuit_wait_probe(agent_node_id, &result_key))
+            .flatten()
+            {
+                evaluator::note_circuit_probe(agent_node_id, &result_key, generation);
+                if recover_result_turn(
+                    app,
+                    &active,
+                    &node,
+                    &recovery_target,
+                    &recovery_fence,
+                    &recovery_permit,
+                ) {
+                    continue;
+                }
+            }
             // Native completion is independent of PTY animation/quietness and
             // classifier availability. Probe it even when a Stop hook was lost.
             let native_key = format!("native-turn:{}", active.run.id);
@@ -1080,6 +1136,93 @@ pub(super) fn lost_turn_watchdog_pass(app: &AppHandle) -> Vec<QuietClassifierFai
         }
     }
     failures
+}
+
+/// Publish Ready for a Running agent whose owed result file finishes its turn
+/// (see `result_handoff::finishes_turn`). Fenced like native recovery: the
+/// lifecycle stamp, input ownership and file must be unchanged when the
+/// recovered turn commits, and a cancelled run publishes nothing.
+fn recover_result_turn(
+    app: &AppHandle,
+    active: &db::ActiveCircuitRun,
+    node: &crate::models::AgentNode,
+    target: &jobs::RecoveryTarget,
+    fence: &db::agent_node::CircuitRecoveryFence,
+    permit: &CircuitEffectBatchPermit,
+) -> bool {
+    use super::result_handoff::{self, ResultTurn, TranscriptActivity};
+    let agent_node_id = node.id;
+    let Some(path) = crate::circuit::handoff::expected_result(active.run.id, agent_node_id) else {
+        return false;
+    };
+    let Some(written_at_ms) = result_handoff::written_at_ms(&path) else {
+        return false;
+    };
+    let stamp = db::agent_turn_stamp(agent_node_id).ok().flatten();
+    let input = crate::agent::process::PROCESS_REGISTRY.input_stamp(agent_node_id);
+    let (Some(stamp), Some(input)) = (stamp, input) else {
+        return false;
+    };
+    let file_only = result_handoff::completes_by_result_file_only(node);
+    let transcript = if file_only {
+        TranscriptActivity::Unavailable
+    } else {
+        TranscriptActivity::of(&crate::coordinator::enrichment::circuit_report_snapshot(
+            node,
+        ))
+    };
+    if !result_handoff::finishes_turn(&ResultTurn {
+        file_only,
+        written_at_ms,
+        now_ms: chrono::Utc::now().timestamp_millis(),
+        quiet_ms: crate::circuit::evaluator::millis_since_last_output(agent_node_id),
+        transcript,
+        stamp: &stamp,
+    }) {
+        return false;
+    }
+    let still_current = || {
+        if permit.is_cancelled() {
+            return false;
+        }
+        let Ok(current) = db::get_agent_node_by_id(agent_node_id) else {
+            return false;
+        };
+        current.status == SessionStatus::Running
+            && current.cli_session_id == node.cli_session_id
+            && crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id)
+            && result_handoff::written_at_ms(&path) == Some(written_at_ms)
+    };
+    if !still_current() {
+        return false;
+    }
+    tracing::info!(
+        "circuits: run {} agent {} finished its turn with result file {}",
+        active.run.id,
+        agent_node_id,
+        path.display()
+    );
+    // `publish` re-checks the run under its own fences; the Ready write itself
+    // commits only if the stamp and input are still the ones read above.
+    target.publish(permit, active, || {
+        crate::node_turn::recover_ready(
+            agent_node_id,
+            app,
+            crate::agent::session_lifecycle::HookSignalDetail {
+                provider: Some(node.provider.clone()),
+                provider_event: Some("circuit:result_file".into()),
+                provider_session_id: node.cli_session_id.clone(),
+                ..Default::default()
+            },
+            &crate::agent::session_lifecycle::CircuitTurnRecovery {
+                stamp: &stamp,
+                input: &input,
+                observed_at_ms: written_at_ms,
+                fence,
+                cancelled: &permit.cancelled,
+            },
+        );
+    })
 }
 
 pub(super) fn classifier_provider(preferences: &crate::preferences::AppPreferences) -> &str {

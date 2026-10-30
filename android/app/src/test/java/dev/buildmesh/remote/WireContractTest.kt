@@ -95,6 +95,15 @@ class WireContractTest {
         assertEquals(listOf("terminal", "launch/405f11ec", "claude:minimax"), launchOptions(menu, needsPrompt = false).map { it.text("id") })
     }
 
+    // A harness without startup prefill still takes a prompt (the desktop types
+    // it after startup); a desktop that predates the flag reports only prefill.
+    @Test fun promptSupportReadsTypedPromptCapabilityWithPrefillFallback() {
+        fun row(capabilities: String) = Json.parseToJsonElement("""{"capabilities":$capabilities}""").jsonObject
+        assertTrue(supportsPrompt(row("""{"supports_prefill":false,"accepts_initial_prompt":true}""")))
+        assertTrue(supportsPrompt(row("""{"supports_prefill":true}""")))
+        assertFalse(supportsPrompt(row("""{"supports_prefill":false,"accepts_initial_prompt":false}""")))
+    }
+
     // Mesh default sends no launch fields: the desktop resolves its own
     // explicit > mesh > app-wide chain, exactly as for a desktop spawn.
     @Test fun meshDefaultLeavesTheLaunchChoiceToTheDesktop() {

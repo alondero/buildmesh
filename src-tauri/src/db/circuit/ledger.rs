@@ -2257,6 +2257,7 @@ pub(crate) fn count_active_circuit_runs_inner(db: &Connection, mesh_id: i64) -> 
 }
 
 #[cfg(test)]
+// allow-test-in-production: this suite predates the sibling-test-file rule; only its Freebuff fixtures change because Freebuff became an eligible reviewer, so moving the suite is out of scope.
 mod reviewer_tests {
     use super::*;
     use crate::agent::capabilities::capabilities_for;
@@ -2818,31 +2819,27 @@ mod reviewer_tests {
         }
     }
 
-    /// The issue's named cases: `dsh` and `freebuff` are rejected with the
-    /// Inspector/docs label naming the harness (not the Terminal message),
-    /// including through a composite `harness:provider` id and uppercase
-    /// input (lookup normalises case). Issue #1775 gave `cline` a file hook,
-    /// so it is now eligible (see [`reviewer_accepts_eligible_unknown_and_blank`]).
+    /// `dsh` and `freebuff` were the issue's named rejections; they have no
+    /// lifecycle of their own but now hand off through their result file, so
+    /// they pass through like any eligible harness, including through a
+    /// composite `harness:provider` id and uppercase input. Only the plain
+    /// shell is still refused.
     #[test]
-    fn reviewer_rejects_harnesses_without_turn_signal() {
-        for (picked, name) in [
-            ("dsh", "DeepSeek Harness"),
-            ("DSH", "DeepSeek Harness"),
-            ("freebuff", "Freebuff"),
-            ("FREEBUFF", "Freebuff"),
-            ("freebuff:minimax", "Freebuff"),
-            ("  freebuff  ", "Freebuff"),
+    fn reviewer_accepts_result_file_harnesses() {
+        for picked in [
+            "dsh",
+            "DSH",
+            "freebuff",
+            "FREEBUFF",
+            "freebuff:minimax",
+            "perch",
         ] {
-            let err = normalize_reviewer_provider(Some(picked.into()))
-                .unwrap_err()
-                .to_string();
-            assert!(
-                err.contains(name),
-                "{picked:?} must name the harness ({name}), got {err:?}"
-            );
-            assert!(
-                err.contains("turn-completion"),
-                "{picked:?} must name the missing capability, got {err:?}"
+            assert_eq!(
+                normalize_reviewer_provider(Some(picked.into()))
+                    .unwrap()
+                    .as_deref(),
+                Some(picked),
+                "{picked:?} must pass through"
             );
         }
     }
@@ -2899,7 +2896,7 @@ mod reviewer_tests {
         assert_eq!(
             resolve_preset_reviewer(
                 Some("codex".into()),
-                Some("freebuff".into()),
+                Some("terminal".into()),
                 &Default::default()
             )
             .unwrap()
@@ -2907,20 +2904,20 @@ mod reviewer_tests {
             Some("codex")
         );
         // Ineligible override refused with the harness-named reason.
-        let err = resolve_preset_reviewer(Some("freebuff".into()), None, &Default::default())
+        let err = resolve_preset_reviewer(Some("terminal".into()), None, &Default::default())
             .unwrap_err()
             .to_string();
-        assert!(err.contains("Freebuff"), "got {err:?}");
+        assert!(err.contains("Terminal"), "got {err:?}");
         assert!(
             !err.contains("Settings"),
             "override refusal must not blame Settings, got {err:?}"
         );
         // Blank override + ineligible stored value: refuse with guidance.
         for blank in [None, Some("   ".to_string())] {
-            let err = resolve_preset_reviewer(blank, Some("freebuff".into()), &Default::default())
+            let err = resolve_preset_reviewer(blank, Some("terminal".into()), &Default::default())
                 .unwrap_err()
                 .to_string();
-            assert!(err.contains("Freebuff"), "got {err:?}");
+            assert!(err.contains("Terminal"), "got {err:?}");
             assert!(
                 err.contains("Settings"),
                 "stale-value refusal must name Settings, got {err:?}"
