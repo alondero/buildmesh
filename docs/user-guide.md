@@ -1120,7 +1120,7 @@ auto mode because there is nobody to answer a prompt.
 | Codex | `--ask-for-approval never` | CLI default (asks); sandbox and hook trust unchanged |
 | Cursor | `--force` | Asks |
 | OpenCode | `--auto` | Asks (V1) |
-| OpenCode 2 | `--auto`; explicit deny rules still apply | Asks; external directories remain denied |
+| OpenCode 2 | `--auto` | Asks; an external-directory deny is configured, with enforcement still unverified in either mode |
 | Command Code | `--yolo` | Asks |
 | Meta Muse | `--disable-approval --disable-sandbox` | Asks (its own OS sandbox stays on) |
 | Perch | `--permission take_the_wheel` | Asks |

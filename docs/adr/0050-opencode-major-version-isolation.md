@@ -15,10 +15,13 @@ project config, so installing a V2 plugin in that file would break coexistence.
 
 Keep distinct `opencode` and `opencode2` identities. The initial detection
 sweep performs no version subprocess. A deferred native worker probes each
-resolved executable once per sweep with a five-second deadline, including
-saved executable pins, and publishes only matching major versions. Unknown
+resolved executable with a thirty-second deadline, including saved executable
+pins, and publishes only matching major versions. Results are cached by path,
+modification time and size; unknown results expire after five seconds. Unknown
 versions are withheld. Cross-runtime detection is withheld until its version
-gate is validated. Interactive and background preparation both check the executable again.
+gate is validated. Interactive and background preparation both use this cache.
+V1 rejects only a positively identified mismatch, preserving launches when a
+probe times out or returns unknown output. V2 requires a known matching major.
 The deferred worker merges only profile entries unchanged since its observation;
 a user pin edited during a probe wins over that stale result.
 After publishing the detection epoch, completion notifies open provider menus;
@@ -29,6 +32,9 @@ it before launch. A bounded `api --standalone` invocation prepares the session
 model or forks the parent; the returned fork identity is persisted before
 command construction. The full TUI receives neither `--model` nor `--fork`.
 Background `run` retains its own model flag and JSON-lines decoder.
+Ordinary resume looks up the persisted identity first. Only a structured
+`SessionNotFoundError` triggers creation with that same id; other failures
+remain errors. Regenerate never creates a missing parent to conceal a failed fork.
 
 Select `.opencode/buildmesh2/<node-id>/opencode.json` through the child process's
 `OPENCODE_CONFIG`. Its plugin entry names the managed package directory and
@@ -36,10 +42,13 @@ maps the assigned CLI session to the Buildmesh node and port. These V2-only
 keys are never written into a shared project config. Existing project
 JSON/JSONC and plugin arrays remain under OpenCode's own merge rules.
 
-Explicitly deny `external_directory` in the V2 managed override. V2's allow
+Configure an explicit `external_directory` deny in the V2 managed override. V2's allow
 default otherwise widens filesystem access on upgrade. Background inference
-also denies tools through project permissions and a `tool.use` policy. These
-are CLI rules; they do not replace the Mesh OS sandbox.
+also configures tool denies through project permissions and a `tool.use` policy.
+Actual out-of-project reads or writes have not been tested against these rules
+with the production interactive or background argv, including interactive
+`--auto`. That enforcement remains an acceptance gate. These are CLI rules;
+they do not replace the Mesh OS sandbox.
 
 ## Alternatives
 

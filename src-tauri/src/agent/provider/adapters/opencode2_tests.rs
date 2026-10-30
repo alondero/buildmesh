@@ -81,7 +81,7 @@ fn api_preparation_creates_with_model_and_updates_a_distinct_regenerate_fork() {
     let id = prepare_identity(
         SessionIdModeRef::Assign("ses_assigned"),
         Some("anthropic/sonnet"),
-        &mut |path, body| {
+        &mut |_, path, body| {
             calls.push((path.to_string(), body));
             Ok(json!({"data":{"id":"ses_assigned"}}))
         },
@@ -102,7 +102,7 @@ fn api_preparation_creates_with_model_and_updates_a_distinct_regenerate_fork() {
             cause: ResumeCause::Regenerate,
         },
         Some("openai/gpt"),
-        &mut |path, body| {
+        &mut |_, path, body| {
             calls.push((path.to_string(), body));
             Ok(json!({"data":{"id":"ses_sibling"}}))
         },
@@ -127,14 +127,19 @@ fn api_preparation_creates_with_model_and_updates_a_distinct_regenerate_fork() {
                 cause,
             },
             Some("openai/gpt"),
-            &mut |path, body| {
+            &mut |method, path, body| {
                 calls.push((path.to_string(), body));
-                Ok(json!(null))
+                Ok(if method == "GET" {
+                    json!({"data":{"id":"ses_parent"}})
+                } else {
+                    json!(null)
+                })
             },
         )
         .unwrap();
         assert_eq!(id, "ses_parent");
-        assert_eq!(calls[0].0, "/api/session/ses_parent/model");
+        assert_eq!(calls[0].0, "/api/session/ses_parent");
+        assert_eq!(calls[1].0, "/api/session/ses_parent/model");
     }
     assert!(prepare_identity(
         SessionIdModeRef::Resume {
@@ -142,15 +147,149 @@ fn api_preparation_creates_with_model_and_updates_a_distinct_regenerate_fork() {
             cause: ResumeCause::Regenerate
         },
         None,
-        &mut |_, _| Ok(json!({"data":{"id":"ses_parent"}}))
+        &mut |_, _, _| Ok(json!({"data":{"id":"ses_parent"}}))
     )
     .is_err());
     assert!(prepare_identity(
         SessionIdModeRef::Assign("ses_assigned"),
         None,
-        &mut |_, _| Err("API unavailable".into())
+        &mut |_, _, _| Err(SessionApiError::Failed("API unavailable".into()))
     )
     .is_err());
+}
+
+#[test]
+fn resume_recovers_a_persisted_identity_after_a_failed_first_create() {
+    use serde_json::json;
+    for model in [None, Some("openai/gpt")] {
+        assert!(prepare_identity(
+            SessionIdModeRef::Assign("ses_retry"),
+            model,
+            &mut |_, _, _| Err(SessionApiError::Failed("temporary failure".into()))
+        )
+        .is_err());
+        let mut calls = Vec::new();
+        let id = prepare_identity(
+            SessionIdModeRef::Resume {
+                id: "ses_retry",
+                cause: ResumeCause::Startup,
+            },
+            model,
+            &mut |method, path, body| {
+                calls.push((method.to_string(), path.to_string(), body));
+                if method == "GET" {
+                    Err(SessionApiError::MissingSession)
+                } else {
+                    Ok(json!({"data":{"id":"ses_retry"}}))
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(id, "ses_retry");
+        let mut create = json!({"id":"ses_retry"});
+        if model.is_some() {
+            create["model"] = json!({"providerID":"openai","id":"gpt"});
+        }
+        assert_eq!(
+            calls,
+            [
+                ("GET".into(), "/api/session/ses_retry".into(), json!(null)),
+                ("POST".into(), "/api/session".into(), create)
+            ]
+        );
+    }
+    let mut calls = 0;
+    let error = prepare_identity(
+        SessionIdModeRef::Resume {
+            id: "ses_retry",
+            cause: ResumeCause::Explicit,
+        },
+        None,
+        &mut |_, _, _| {
+            calls += 1;
+            Err(SessionApiError::Failed("server unavailable".into()))
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error, "server unavailable");
+    assert_eq!(
+        calls, 1,
+        "an arbitrary lookup failure must not create a replacement session"
+    );
+    assert!(prepare_identity(
+        SessionIdModeRef::Resume {
+            id: "ses_retry",
+            cause: ResumeCause::Regenerate
+        },
+        None,
+        &mut |_, _, _| Err(SessionApiError::MissingSession)
+    )
+    .is_err());
+}
+
+#[test]
+fn only_a_structured_missing_session_error_allows_recovery() {
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt;
+    #[cfg(windows)]
+    use std::os::windows::process::ExitStatusExt;
+    let response = |stdout: &str| std::process::Output {
+        status: std::process::ExitStatus::from_raw(256),
+        stdout: stdout.as_bytes().to_vec(),
+        stderr: b"HTTP 404 Not Found".to_vec(),
+    };
+    assert!(matches!(
+        decode_api_output(response(
+            r#"{"_tag":"SessionNotFoundError","sessionID":"ses_retry"}"#
+        )),
+        Err(SessionApiError::MissingSession)
+    ));
+    for body in [
+        "Session not found",
+        r#"{"_tag":"ServerError","message":"Session not found"}"#,
+        "{broken",
+    ] {
+        assert!(matches!(
+            decode_api_output(response(body)),
+            Err(SessionApiError::Failed(_))
+        ));
+    }
+}
+
+#[test]
+fn v2_prefill_trims_lines_and_drops_blank_segments() {
+    assert_eq!(
+        OPENCODE2.prefill_args(" first \r\n\r\n second \n "),
+        ["--prompt", "first second"]
+    );
+}
+
+#[test]
+fn provisioning_keeps_one_external_deny_when_rules_follow_it() {
+    let dir = tempfile::tempdir().unwrap();
+    config::provision(dir.path(), 3, None).unwrap();
+    let path = config::config_path(dir.path(), 3);
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    doc["permissions"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"action":"shell","resource":"*","effect":"ask"}));
+    std::fs::write(&path, doc.to_string()).unwrap();
+    config::provision(dir.path(), 3, None).unwrap();
+    let first = std::fs::read_to_string(&path).unwrap();
+    config::provision(dir.path(), 3, None).unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
+    let doc: serde_json::Value = serde_json::from_str(&first).unwrap();
+    let rules = doc["permissions"].as_array().unwrap();
+    assert_eq!(
+        rules
+            .iter()
+            .filter(|r| r["action"] == "external_directory")
+            .count(),
+        1
+    );
+    assert_eq!(rules.last().unwrap()["action"], "external_directory");
 }
 
 #[test]

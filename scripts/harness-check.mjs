@@ -214,6 +214,7 @@ export const RUST_SIBLING_TESTS = {
 // Private implementations keep their contract tests at the owning facade.
 // Map them explicitly so editing an extracted child still executes that suite.
 export const RUST_IMPLEMENTATION_TESTS = {
+  'src-tauri/src/agent/provider/adapters/opencode2/config.rs': 'agent::provider::adapters::opencode2',
   'src-tauri/src/agent/process/input.rs': 'agent::process',
   'src-tauri/src/agent/process/registry.rs': 'agent::process',
   'src-tauri/src/agent/process/commands.rs': 'agent::process',

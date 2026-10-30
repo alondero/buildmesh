@@ -745,7 +745,7 @@ export const HARNESS_CATALOG = {
       "is_plain_terminal": false,
       "permission_modes": [
         {
-          "description": "Auto-approve permissions except explicit deny rules.",
+          "description": "Use OpenCode's auto-approve mode with managed project permission rules.",
           "id": "unattended",
           "label": "--auto"
         },

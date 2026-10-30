@@ -2443,6 +2443,7 @@ test('a Rust file attached with #[path] selects the module that owns it', () => 
 
 test('extracted Rust implementations and included worker tests select their contract suites', () => {
   const owners = [
+    ['agent/provider/adapters/opencode2/config.rs', 'agent::provider::adapters::opencode2'],
     ['agent/process/registry.rs', 'agent::process'],
     ['agent/provider/adapters/codex/install_probe.rs', 'agent::provider::adapters::codex'],
     ['services/agent_node/cleanup.rs', 'services::agent_node'],

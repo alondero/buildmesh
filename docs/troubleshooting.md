@@ -209,10 +209,12 @@ Restart the node after correcting the config. Malformed managed config is
 reported rather than overwritten.
 
 V2 normally permits paths outside the project. Buildmesh adds an explicit
-`external_directory` **deny** rule to each managed node config; `--auto` does
-not bypass an explicit deny. This is a CLI permission rule, separate from the
-Mesh's OS sandbox. Background inference additionally denies tools in its own
-scratch project config. WSL and Windows Interop V2 launches are not yet supported.
+`external_directory` **deny** rule to each managed node config. Enforcement
+against an actual out-of-project read or write remains unverified for the
+production interactive and background argv, including interactive `--auto`.
+This is a configured CLI rule, separate from the Mesh's OS sandbox. Background
+inference additionally configures tool deny rules in its own scratch project.
+WSL and Windows Interop V2 launches are not yet supported.
 
 ## A prompt typed into a new OpenCode 1 node comes back on its own
 

@@ -84,7 +84,7 @@ impl AgentProvider for OpenCode2Adapter {
         vec![
             PermissionModeOption::unattended(
                 "--auto",
-                "Auto-approve permissions except explicit deny rules.",
+                "Use OpenCode's auto-approve mode with managed project permission rules.",
             ),
             PermissionModeOption::prompt(
                 "Prompts on (no flag)",
@@ -121,7 +121,10 @@ impl AgentProvider for OpenCode2Adapter {
         model_ref(model).map(|_| ())
     }
     fn prefill_args(&self, text: &str) -> Vec<String> {
-        vec!["--prompt".into(), text.replace(['\r', '\n'], " ")]
+        vec![
+            "--prompt".into(),
+            super::opencode::flatten_cmd_prefill(text),
+        ]
     }
     fn provision_attention_hooks(
         &self,
@@ -160,7 +163,7 @@ impl AgentProvider for OpenCode2Adapter {
         let target = prepare_identity(
             input.session,
             input.config.model.as_deref(),
-            &mut |path, body| api(executable, directory, &config_path, path, body),
+            &mut |method, path, body| api(executable, directory, &config_path, method, path, body),
         )?;
         let id = match input.session {
             SessionIdModeRef::Assign(id) | SessionIdModeRef::Resume { id, .. } => id,
@@ -203,10 +206,29 @@ impl AgentProvider for OpenCode2Adapter {
     }
 }
 
+#[derive(Debug)]
+enum SessionApiError {
+    MissingSession,
+    Failed(String),
+}
+
+impl From<SessionApiError> for String {
+    fn from(error: SessionApiError) -> Self {
+        match error {
+            SessionApiError::MissingSession => "OpenCode 2 session was not found".into(),
+            SessionApiError::Failed(message) => message,
+        }
+    }
+}
+
 fn prepare_identity(
     session: SessionIdModeRef<'_>,
     model: Option<&str>,
-    request: &mut dyn FnMut(&str, serde_json::Value) -> Result<serde_json::Value, String>,
+    request: &mut dyn FnMut(
+        &str,
+        &str,
+        serde_json::Value,
+    ) -> Result<serde_json::Value, SessionApiError>,
 ) -> Result<String, String> {
     let (id, fresh, fork) = match session {
         SessionIdModeRef::Assign(id) => (id, true, false),
@@ -223,7 +245,11 @@ fn prepare_identity(
         return Err("Invalid OpenCode 2 session identity".into());
     }
     let target = if fork {
-        let response = request(&format!("/api/session/{id}/fork"), serde_json::json!({}))?;
+        let response = request(
+            "POST",
+            &format!("/api/session/{id}/fork"),
+            serde_json::json!({}),
+        )?;
         response["data"]["id"]
             .as_str()
             .and_then(crate::http::request::parse_opencode_session_id)
@@ -232,17 +258,34 @@ fn prepare_identity(
     } else {
         id.to_string()
     };
-    if fresh {
+    let create = fresh
+        || (!fork
+            && match request(
+                "GET",
+                &format!("/api/session/{target}"),
+                serde_json::Value::Null,
+            ) {
+                Ok(response) if response["data"]["id"].as_str() == Some(&target) => false,
+                Ok(_) => {
+                    return Err("OpenCode 2 lookup returned a different session identity".into())
+                }
+                // A failed initial create can leave only Buildmesh's persisted id.
+                // Recover this explicit server result; do not mask transient failures.
+                Err(SessionApiError::MissingSession) => true,
+                Err(error) => return Err(error.into()),
+            });
+    if create {
         let mut body = serde_json::json!({"id": target});
         if let Some(model) = model {
             body["model"] = model_ref(model)?;
         }
-        let response = request("/api/session", body)?;
+        let response = request("POST", "/api/session", body)?;
         if response["data"]["id"].as_str() != Some(&target) {
             return Err("OpenCode 2 created a different session identity".into());
         }
     } else if let Some(model) = model {
         request(
+            "POST",
             &format!("/api/session/{target}/model"),
             serde_json::json!({"model":model_ref(model)?}),
         )?;
@@ -262,42 +305,58 @@ fn api(
     executable: &Path,
     directory: &Path,
     config_path: &Path,
+    method: &str,
     path: &str,
     body: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    let recipe = SpawnRecipe {
+) -> Result<serde_json::Value, SessionApiError> {
+    let mut recipe = SpawnRecipe {
         binary: "opencode",
         base_args: vec![
             "api".into(),
             "--standalone".into(),
-            "POST".into(),
+            method.into(),
             path.into(),
-            "--data".into(),
-            body.to_string(),
         ],
         trailing_args: vec![],
         windows_shell: crate::agent::provider::WindowsShell::PowerShell,
     };
+    if method == "POST" {
+        recipe.base_args.extend(["--data".into(), body.to_string()]);
+    }
     let mut command =
-        crate::agent::spawn_environment::background_command(&recipe, Some(executable))?;
+        crate::agent::spawn_environment::background_command(&recipe, Some(executable))
+            .map_err(SessionApiError::Failed)?;
     command.current_dir(directory);
     command.env("OPENCODE_CONFIG", config_path);
     let output = super::opencode_version::run_private_command(
         command,
         "OpenCode 2 session API",
         Duration::from_secs(30),
-    )?;
+    )
+    .map_err(SessionApiError::Failed)?;
+    decode_api_output(output)
+}
+
+fn decode_api_output(output: std::process::Output) -> Result<serde_json::Value, SessionApiError> {
     if !output.status.success() {
-        return Err(format!(
+        if serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .is_ok_and(|body| body["_tag"] == "SessionNotFoundError")
+        {
+            return Err(SessionApiError::MissingSession);
+        }
+        return Err(SessionApiError::Failed(format!(
             "OpenCode 2 session API failed: {}",
             String::from_utf8_lossy(&output.stderr)
-        ));
+        )));
     }
     if output.stdout.iter().all(u8::is_ascii_whitespace) {
         return Ok(serde_json::Value::Null);
     }
-    serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("OpenCode 2 session API returned malformed JSON: {e}"))
+    serde_json::from_slice(&output.stdout).map_err(|e| {
+        SessionApiError::Failed(format!(
+            "OpenCode 2 session API returned malformed JSON: {e}"
+        ))
+    })
 }
 
 #[cfg(test)]

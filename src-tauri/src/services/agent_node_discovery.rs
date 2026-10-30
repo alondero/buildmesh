@@ -357,7 +357,7 @@ pub fn discover(
         Some(&effective),
     ));
 
-    // Durable archived rows the disk scan found nothing for. Sorting below
+    // Discover V2 storage separately while preserving recorded V1 identities.
     if let Some(path) =
         crate::services::transcript_reader::readers::opencode::opencode_db_path(env_type)
     {

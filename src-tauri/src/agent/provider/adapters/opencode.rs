@@ -475,7 +475,7 @@ impl AgentProvider for OpenCodeAdapter {
 }
 
 /// Collapse CR/LF so `--prompt` stays a single `cmd.exe /c` argument.
-fn flatten_cmd_prefill(text: &str) -> String {
+pub(super) fn flatten_cmd_prefill(text: &str) -> String {
     text.split(['\n', '\r'])
         .map(str::trim)
         .filter(|s| !s.is_empty())

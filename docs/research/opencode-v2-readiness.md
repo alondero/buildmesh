@@ -19,6 +19,13 @@ not the bare reference. Success has an empty response body. The model is stored
 in `session_v2.model`. An unavailable model produced `provider.no-route`, a
 failed idle outcome and the plugin's failure callback.
 
+A missing session returns a nonzero CLI exit, HTTP 404 on stderr and a
+`SessionNotFoundError` JSON object on stdout for both lookup and model update.
+Creating that exact id then makes `GET /api/session/<id>` return `data.id`.
+Ordinary resume now uses this lookup to recover an initial create failure,
+with or without a configured model; other errors and missing fork parents
+remain errors. Regression fixtures cover those outcomes.
+
 A real standalone turn returned `BUILDMESH_SMOKE_OK`. Forking that session
 returned a distinct `ses_` id and a fork boundary referencing the parent's
 message. Forking an empty session returns HTTP 400; Buildmesh preserves that
@@ -43,12 +50,16 @@ keys. V2 honors an `OPENCODE_CONFIG` file; `OPENCODE_CONFIG_CONTENT` is not used
 by this adapter. Each node therefore receives a separate managed override and
 the plugin gets identity through its options, not server environment identity.
 
-A real background turn used the exact project deny rules embedded by the
-adapter, with `--auto`, and was asked to run `echo BUILDMESH_DENY_PROBE`. It
+A real background turn used the project deny rules embedded by the
+adapter, with an additional `--auto`, and was asked to run `echo BUILDMESH_DENY_PROBE`. It
 reported that no shell/execute tool was available and returned `DENIED`; no
 shell tool call appeared in the JSON stream. The override also contains an
 explicit `external_directory` deny. This is a tool availability check under
-the current CLI, not proof of OS containment.
+the current CLI, not proof of OS containment or external-directory enforcement.
+Production background argv is `run --standalone --format json` without
+`--auto`, so that probe did not execute the exact shipped command. Actual
+out-of-project reads or writes remain unverified for both production launch
+paths and interactive permission modes.
 
 ## Storage and automated evidence
 
@@ -71,6 +82,12 @@ request correlation, session routing, failures and cleanup.
 Sandbox-enabled V2 launches are refused before API preparation; background
 launches check the same executable major as interactive launches. Deferred
 detection cannot overwrite a pin edited while its probe was pending.
+
+Review regressions cover ANSI-coloured version output, concurrent pipe draining
+with a 1 MiB payload on each stream, executable-cache invalidation, and V1
+interactive/background launch compatibility on unknown or timed-out probes.
+The ANSI case failed before its parser fix. The old poll-before-read helper
+timed out at 1 MiB per stream on this machine; 64 KiB per stream did not stall.
 
 ## Remaining acceptance gates
 

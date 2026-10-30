@@ -67,11 +67,10 @@ pub(super) fn provision(
         .or_insert_with(|| serde_json::json!([]))
         .as_array_mut()
         .ok_or("OpenCode 2 permissions must be an array")?;
-    // A hard deny remains denied under --auto. Do not widen external access on upgrade.
+    // Keep one configured deny last; actual path enforcement still needs acceptance.
     let rule = serde_json::json!({"action":"external_directory","resource":"*","effect":"deny"});
-    if rules.last() != Some(&rule) {
-        rules.push(rule);
-    }
+    rules.retain(|existing| existing != &rule);
+    rules.push(rule);
     if std::fs::read_to_string(&plugin_path).ok().as_deref() != Some(PLUGIN) {
         managed_config::atomic_write(&plugin_path, PLUGIN).map_err(|e| e.to_string())?;
     }
