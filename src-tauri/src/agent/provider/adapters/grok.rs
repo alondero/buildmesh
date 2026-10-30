@@ -501,7 +501,7 @@ mod tests {
         // PowerShell startup can be slow under concurrent verification. The
         // outer budget must also cover Invoke-WebRequest's own timeout.
         let request_timeout = Duration::from_secs(10);
-        assert!(HOOK_COMMAND_WINDOWS.contains("-TimeoutSec 10"));
+        assert!(HOOK_COMMAND_WINDOWS.contains("-TimeoutSec 10 -Uri"));
         let hook_budget = request_timeout + Duration::from_secs(120);
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

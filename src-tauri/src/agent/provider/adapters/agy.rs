@@ -558,7 +558,7 @@ impl AgentProvider for AgyAdapter {
 }
 
 #[cfg(test)]
-mod tests {
+mod tests { // allow-test-in-production: existing inline adapter tests; timeout repair only
     use super::*;
     use crate::agent::capabilities::{EffortControlKind, ResolvedAgentConfig};
     use crate::agent::launch::{
@@ -865,11 +865,16 @@ mod tests {
         use std::io::{Read, Seek, Write};
         use std::time::{Duration, Instant};
 
+        // Allow for shell and PowerShell startup under concurrent verification,
+        // in addition to curl's own two-second request timeout.
+        assert!(command.contains("--max-time 2 "));
+        let hook_budget = Duration::from_secs(2) + Duration::from_secs(120);
+
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         listener.set_nonblocking(true).unwrap();
         let server = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(15);
+            let deadline = Instant::now() + hook_budget;
             let mut stream = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,
@@ -927,7 +932,7 @@ mod tests {
         let output = crate::process_util::run_command_with_timeout(
             shell,
             "AGY attention command",
-            Duration::from_secs(15),
+            hook_budget,
         )
         .unwrap();
         let (headers, body) = server.join().unwrap();
