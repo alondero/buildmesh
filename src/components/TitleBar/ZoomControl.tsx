@@ -80,13 +80,13 @@ export function TerminalTextSize({ title = 'Text size' }: { title?: string }) {
       <div className="mt-2 flex items-center justify-between">
         {/* Decorative size swatches — the slider carries the value for
             assistive tech, so these are hidden from the a11y tree. */}
-        <span aria-hidden="true" className="text-[10px] leading-none text-text-muted">A</span>
+        <span aria-hidden="true" className="text-2xs leading-none text-text-muted">A</span>
         <button
           type="button"
           onClick={() => setTerminalFontSize(TERMINAL_FONT_SIZE_DEFAULT)}
           disabled={size === TERMINAL_FONT_SIZE_DEFAULT}
           data-testid="zoom-reset"
-          className="rounded-md px-1 text-[11px] text-text-muted transition-colors hover:text-accent-cyan disabled:cursor-default disabled:text-text-muted disabled:hover:text-text-muted"
+          className="rounded-md px-1 text-sm text-text-muted transition-colors hover:text-accent-cyan disabled:cursor-default disabled:text-text-muted disabled:hover:text-text-muted"
         >
           Reset
         </button>

@@ -579,7 +579,9 @@ class NativeActionsTest {
             compose.waitUntil(10000) { compose.onAllNodesWithText("Squash and merge").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithText("Squash and merge").assertIsEnabled()
             blocked = true
-            compose.onNodeWithText("Refresh PR status").performClick()
+            // The app-bar action is the shared recovery affordance: it
+            // re-reads the panel's own route.
+            compose.runOnUiThread { vm.retry() }
             compose.waitUntil(10000) { compose.onAllNodesWithText("feature/search · open · Blocked by required checks or reviews").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithText("Squash and merge").assertIsNotEnabled()
             assertFalse(requests.any { it.method == "POST" })

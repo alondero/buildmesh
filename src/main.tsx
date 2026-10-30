@@ -4,6 +4,7 @@ import App from "./App";
 import { installFrontendLogBridge } from "./lib/frontendLog";
 import { ErrorBoundary } from "./components/ErrorBoundary/ErrorBoundary";
 import { applyTheme } from "./lib/theme";
+import { applyTextScale } from "./lib/textScale";
 
 // Forward console.error/warn, window.error, and unhandledrejection to the
 // Rust log file. Must run before any other code so we don't miss early
@@ -15,6 +16,11 @@ installFrontendLogBridge();
 // where the user picked light. theme.ts reads localStorage at module load, so
 // the attribute is set synchronously here (issue #734).
 applyTheme();
+
+// The interface text scale is read synchronously too (textScale.ts), so the
+// first paint is already at the size the user chose — otherwise every launch
+// would flash the default size and then reflow once React mounted.
+applyTextScale();
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

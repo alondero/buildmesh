@@ -185,7 +185,7 @@ pub fn first_class_surfaces(provider_id: &str) -> Vec<SurfaceEndpoint> {
             SurfaceEndpoint {
                 surface: ApiSurface::OpenAI,
                 base_url: "https://api.minimax.io/v1".to_string(),
-                model_tiers: openai_tiers("MiniMax-M3"),
+                model_tiers: openai_tiers("MiniMax-M3.1-Flash"),
             },
         ],
         // Direct Kimi Open Platform is Chat Completions-only, so only its
@@ -322,11 +322,11 @@ pub(crate) fn keyed_first_class_template(id: &str) -> Option<ProviderAccount> {
 /// - attach-time pairing defaults via [`super::pairings::resolve_pairing`]
 pub(crate) fn minimax_default_tiers() -> ModelTiers {
     ModelTiers {
-        default: Some("MiniMax-M3[1m]".to_string()),
+        default: Some("MiniMax-M3.1-Flash[1m]".to_string()),
         small_fast: Some("MiniMax-M2.7".to_string()),
-        sonnet: Some("MiniMax-M3[1m]".to_string()),
-        opus: Some("MiniMax-M3[1m]".to_string()),
-        fable: Some("MiniMax-M3[1m]".to_string()),
+        sonnet: Some("MiniMax-M3.1-Flash[1m]".to_string()),
+        opus: Some("MiniMax-M3.1-Flash[1m]".to_string()),
+        fable: Some("MiniMax-M3.1-Flash[1m]".to_string()),
         haiku: Some("MiniMax-M2.7".to_string()),
     }
 }

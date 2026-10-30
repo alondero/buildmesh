@@ -253,6 +253,7 @@ impl AgentProvider for CodexAdapter {
                 source: "codex_native_hook",
                 request_source: "codex_request_hook",
                 ownership_gap: None,
+                foreground: true,
             }),
             pull: PullSource::NativeTurnCompletion(NativePull {
                 source: "codex_rollout_task_complete",

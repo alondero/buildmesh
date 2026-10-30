@@ -45,7 +45,7 @@ export function SaveIndicator({
               type="button"
               onClick={onDismiss}
               aria-label="Dismiss save error"
-              className="ml-2 text-status-error/70 hover:text-status-error text-[11px]"
+              className="ml-2 text-status-error/70 hover:text-status-error text-sm"
             >
               ✕
             </button>

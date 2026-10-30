@@ -15,10 +15,11 @@ class CircuitRunsTest {
             {"id":"launch/reviewer","harness_id":"claude","is_proxied":true,"configuration":{"id":"launch/reviewer","name":"Careful reviewer"},"capabilities":{"requires_attention_hook":true}},
             {"id":"claude:proxy","harness_id":"claude","is_proxied":true,"capabilities":{"requires_attention_hook":true}},
             {"id":"launch/offline","harness_id":"codex","unavailable_reason":"Route disabled","capabilities":{"supports_passive_turn_watcher":true}},
-            {"id":"freebuff","harness_id":"freebuff","capabilities":{"requires_attention_hook":false,"supports_passive_turn_watcher":false}},
+            {"id":"freebuff","harness_id":"freebuff","capabilities":{"requires_attention_hook":false,"supports_passive_turn_watcher":false,"supports_result_file_handoff":true}},
+            {"id":"older-desktop","harness_id":"perch","capabilities":{"requires_attention_hook":false,"supports_passive_turn_watcher":false}},
             {"id":"terminal","harness_id":"terminal","capabilities":{"supports_passive_turn_watcher":true}}
         ]""").objects()
-        assertEquals(listOf("codex", "launch/reviewer"), reviewerLaunchOptions(providers).map { it.text("id") })
+        assertEquals(listOf("codex", "launch/reviewer", "freebuff"), reviewerLaunchOptions(providers).map { it.text("id") })
     }
 
     @Test fun builtInReviewSendsTheLaunchIdentityAndSavedCircuitsKeepTheirOwnReviewer() {

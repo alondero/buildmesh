@@ -23,8 +23,11 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 
 // `decode` runs inside the guard so a response shape this build does not
 // understand becomes an error notice instead of a throw during composition.
+//
+// `onRead` fires when a read lands, so a pull that asked for it can retire
+// its own indicator — including when the answer is identical to the last one.
 @Composable
-internal fun <T> rememberRemote(api: BuildmeshApi, path: String, vm: BuildmeshViewModel, reload: Int = 0, decode: (JsonElement) -> T): State<RemoteLoad<T>> {
+internal fun <T> rememberRemote(api: BuildmeshApi, path: String, vm: BuildmeshViewModel, reload: Int = 0, onRead: (() -> Unit)? = null, decode: (JsonElement) -> T): State<RemoteLoad<T>> {
     val state by vm.state.collectAsState()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     return produceState(RemoteLoad(), api, path, reload, state.resourceRevision, lifecycle) {
@@ -33,6 +36,7 @@ internal fun <T> rememberRemote(api: BuildmeshApi, path: String, vm: BuildmeshVi
             try { value = RemoteLoad(loading = false, data = decode(api.get(path))) }
             catch (e: CancellationException) { throw e }
             catch (e: Exception) { value = RemoteLoad(loading = false, error = friendlyError(e)); vm.report(e) }
+            onRead?.invoke()
             awaitCancellation()
         }
     }
@@ -55,28 +59,38 @@ fun ResourceScreen(api: BuildmeshApi, meshId: Long, screen: String, state: Remot
         IssuesResourceScreen(api, meshId, state, vm, openNode)
         return
     }
-    var reload by remember(state.draftNamespace, meshId, screen) { mutableIntStateOf(0) }
-    val path = "/api/meshes/$meshId/" + if (screen == "issues") "issues" else "agent-nodes/discover"
-    val load by rememberRemote(api, path, vm, reload) { if (screen == "issues") issueItems(it) else it.objects() }
+    ArchiveResourceScreen(api, meshId, state, vm, openNode)
+}
+
+/**
+ * The mesh's archived sessions.
+ *
+ * The list refreshes by pulling down, and the app-bar action stays the
+ * shared recovery affordance; a failed read keeps its own Retry, above the
+ * fold, so the screen never needs a scroll to recover.
+ */
+@Composable
+private fun ArchiveResourceScreen(api: BuildmeshApi, meshId: Long, state: RemoteState, vm: BuildmeshViewModel, openNode: (Long) -> Unit) {
+    val refresh = remember { ListingRefresh() }
+    val load by rememberRemote(api, "/api/meshes/$meshId/agent-nodes/discover", vm, refresh.reload, onRead = { refresh.settle() }) { it.objects() }
     val resources = load.data
-    var selected by remember(state.draftNamespace, meshId, screen) { mutableStateOf<JsonObject?>(null) }
-    var provider by rememberSaveable(state.draftNamespace, meshId, screen) { mutableStateOf("") }
+    var selected by remember(state.draftNamespace, meshId) { mutableStateOf<JsonObject?>(null) }
+    var provider by rememberSaveable(state.draftNamespace, meshId) { mutableStateOf("") }
     val options = state.providers.filter {
-        it.text("unavailable_reason").isEmpty() && launchableWithoutConfiguration(it) &&
-            if (screen == "archive") it.flag("resumable") else it.objectAt("capabilities")?.flag("supports_prefill") == true
+        it.text("unavailable_reason").isEmpty() && launchableWithoutConfiguration(it) && it.flag("resumable")
     }
     LaunchedEffect(options) { if (options.none { it.text("id") == provider }) provider = options.firstOrNull()?.text("id").orEmpty() }
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        item { TextButton(onClick = { reload++ }) { Text("Reload ${if (screen == "issues") "issues" else "archive"}") } }
-        item { LoadNotice(load) { reload++ } }
-        if (resources != null && resources.isEmpty()) item { EmptyMessage("No ${if (screen == "issues") "open issues" else "archived sessions"} found.") }
-        items(resources.orEmpty()) { item ->
-            Card(colors = CardDefaults.cardColors(containerColor = MeshColors.card)) {
-                Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(if (screen == "issues") "#${item.number("number")} ${item.text("title")}" else item.text("first_message").ifEmpty { "Archived session" }, style = MaterialTheme.typography.titleMedium)
-                    Text(if (screen == "issues") item.text("body").take(500) else "${item.text("branch")} · ${item.text("timestamp")}", color = MeshColors.secondary)
-                    Button(shape = MaterialTheme.shapes.small, enabled = !state.busy && options.isNotEmpty(), onClick = { selected = item }) { Text(if (screen == "issues") "Start agent" else "Import and resume") }
-                    if (screen == "issues" && item.text("url").startsWith("https://")) ExternalLink(item.text("url"), "View issue")
+    PullToRefreshList(refresh, Modifier.fillMaxSize()) {
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            item { LoadNotice(load) { refresh.request() } }
+            if (resources != null && resources.isEmpty()) item { EmptyMessage("No archived sessions found.") }
+            items(resources.orEmpty()) { item ->
+                Card(colors = CardDefaults.cardColors(containerColor = MeshColors.card)) {
+                    Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(item.text("first_message").ifEmpty { "Archived session" }, style = MaterialTheme.typography.titleMedium)
+                        Text("${item.text("branch")} · ${item.text("timestamp")}", color = MeshColors.secondary)
+                        Button(shape = MaterialTheme.shapes.small, enabled = !state.busy && options.isNotEmpty(), onClick = { selected = item }) { Text("Import and resume") }
+                    }
                 }
             }
         }
@@ -86,9 +100,7 @@ fun ResourceScreen(api: BuildmeshApi, meshId: Long, screen: String, state: Remot
             text = { Selector("Launch configuration", options.map { it.text("id") to it.text("label") }, provider, { provider = it }, enabled = !state.busy) },
             confirmButton = { TextButton(enabled = !state.busy && provider.isNotEmpty(), onClick = {
                 vm.action { client ->
-                    val node = try { if (screen == "issues") client.post("/api/meshes/$meshId/issues/${item.number("number")}/spawn", buildJsonObject {
-                        put("title", item.text("title")); put("provider", provider)
-                    }) else client.post("/api/meshes/$meshId/agent-nodes/import-and-resume", buildJsonObject {
+                    val node = try { client.post("/api/meshes/$meshId/agent-nodes/import-and-resume", buildJsonObject {
                         put("cli_session_id", item.text("session_id")); put("branch", item.text("branch").ifEmpty { "main" }); put("provider", provider)
                         item.text("worktree_name").takeIf { it.isNotEmpty() }?.let { put("worktree_name", it) }
                     }) } catch (e: ApiException) {
@@ -105,19 +117,21 @@ fun ResourceScreen(api: BuildmeshApi, meshId: Long, screen: String, state: Remot
 
 @Composable
 fun ChangesScreen(api: BuildmeshApi, id: Long, vm: BuildmeshViewModel, openFile: (String) -> Unit) {
-    var reload by remember { mutableIntStateOf(0) }
-    val changesLoad by rememberRemote(api, "/api/agents/$id/git/status", vm, reload) { it.objects() }
-    val branchLoad by rememberRemote(api, "/api/agents/$id/git/branch", vm, reload) { it.obj().text("branch") }
+    val refresh = remember { ListingRefresh() }
+    val changesLoad by rememberRemote(api, "/api/agents/$id/git/status", vm, refresh.reload, onRead = { refresh.settle() }) { it.objects() }
+    val branchLoad by rememberRemote(api, "/api/agents/$id/git/branch", vm, refresh.reload, onRead = { refresh.settle() }) { it.obj().text("branch") }
     val changes = changesLoad.data
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        item { Text("Branch: ${branchLoad.data.orEmpty()}", color = MeshColors.secondary); TextButton(onClick = { reload++ }) { Text("Refresh changes") } }
-        item { LoadNotice(changesLoad) { reload++ }; LoadNotice(branchLoad) { reload++ } }
-        if (changes != null && changes.isEmpty()) item { EmptyMessage("Working tree is clean.") }
-        items(changes.orEmpty()) { entry ->
-            Card(onClick = { openFile(entry.text("path")) }, colors = CardDefaults.cardColors(containerColor = MeshColors.card)) {
-                Column(Modifier.fillMaxWidth().padding(16.dp)) {
-                    Text(entry.text("path"), fontFamily = FontFamily.Monospace)
-                    Text("${entry.text("status")} · +${entry.number("additions")} −${entry.number("deletions")}", color = MeshColors.secondary)
+    PullToRefreshList(refresh, Modifier.fillMaxSize(), reads = 2) {
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            item { Text("Branch: ${branchLoad.data.orEmpty()}", color = MeshColors.secondary) }
+            item { LoadNotice(changesLoad) { refresh.request() }; LoadNotice(branchLoad) { refresh.request() } }
+            if (changes != null && changes.isEmpty()) item { EmptyMessage("Working tree is clean.") }
+            items(changes.orEmpty()) { entry ->
+                Card(onClick = { openFile(entry.text("path")) }, colors = CardDefaults.cardColors(containerColor = MeshColors.card)) {
+                    Column(Modifier.fillMaxWidth().padding(16.dp)) {
+                        Text(entry.text("path"), fontFamily = FontFamily.Monospace)
+                        Text("${entry.text("status")} · +${entry.number("additions")} −${entry.number("deletions")}", color = MeshColors.secondary)
+                    }
                 }
             }
         }
@@ -152,7 +166,7 @@ fun DiffScreen(api: BuildmeshApi, id: Long, file: String, vm: BuildmeshViewModel
 fun CreatePrScreen(api: BuildmeshApi, meshId: Long, nodeId: Long, vm: BuildmeshViewModel) {
     val state by vm.state.collectAsState()
     var reload by remember { mutableIntStateOf(0) }
-    val sourceLoad by rememberRemote(api, "/api/meshes/$meshId/pr/source?node_id=$nodeId", vm, reload, ::prSource)
+    val sourceLoad by rememberRemote(api, "/api/meshes/$meshId/pr/source?node_id=$nodeId", vm, reload, decode = ::prSource)
     val source = sourceLoad.data
     var title by rememberSaveable(state.draftNamespace, nodeId) { mutableStateOf(vm.draft("pr-title-$nodeId")) }
     var body by rememberSaveable(state.draftNamespace, nodeId) { mutableStateOf(vm.draft("pr-body-$nodeId")) }

@@ -61,7 +61,7 @@ export function launchChoices(providers: Provider[]): LaunchChoice[] {
     .filter((row) => !row.unavailable_reason)
     .filter(
       (row) =>
-        row.capabilities?.supports_prefill &&
+        row.capabilities?.accepts_initial_prompt &&
         (!row.is_proxied || row.configuration),
     )
     .map((row) => {
@@ -93,6 +93,32 @@ export function launchFields(choice: LaunchChoice | null | undefined): {
 }
 
 /**
+ * The mesh's pinned default Spawn Option, when the phone can resolve one.
+ *
+ * The desktop's spawn cluster draws the resolved default harness's brand mark
+ * on its quick-spawn half (issue #2040). The phone can only resolve a
+ * *pinned* mesh default: an app-wide default is invisible to the phone, so an
+ * unpinned mesh has no row to draw a mark from and keeps the **Mesh default**
+ * label alone.
+ *
+ * A saved-configuration row is not a default: `mesh.default_provider` names
+ * a Spawn Option, and a saved row carries its configuration's own id, so it
+ * does not match. The `!candidate.configuration` guard is the second net.
+ */
+export function meshDefaultProvider(
+  mesh: Mesh | null | undefined,
+  providers: Provider[],
+): Provider | null {
+  const pinned = mesh?.default_provider;
+  if (!pinned) return null;
+  return (
+    providers.find(
+      (candidate) => candidate.id === pinned && !candidate.configuration,
+    ) ?? null
+  );
+}
+
+/**
  * The label for a mesh's default launch.
  *
  * A mesh may pin its own default Spawn Option; the phone names it so the
@@ -104,10 +130,5 @@ export function meshDefaultLabel(
   mesh: Mesh | null | undefined,
   providers: Provider[],
 ): string {
-  const pinned = mesh?.default_provider;
-  if (!pinned) return MESH_DEFAULT_LABEL;
-  const row = providers.find(
-    (candidate) => candidate.id === pinned && !candidate.configuration,
-  );
-  return row?.label ?? MESH_DEFAULT_LABEL;
+  return meshDefaultProvider(mesh, providers)?.label ?? MESH_DEFAULT_LABEL;
 }

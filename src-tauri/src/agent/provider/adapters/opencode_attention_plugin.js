@@ -11,6 +11,12 @@
 //   - `permission.asked`   — agent is blocked on a tool approval decision.
 //   - `question.asked`     — agent is waiting for an answer.
 //   - resolution / busy   — clear attention when work resumes.
+//   - `subagent_start` / `subagent_stop` — a native subagent (a child
+//                            session) began or finished. Synthesized here
+//                            from the child's `session.created` (carries
+//                            `info.parentID`) and its `session.idle` /
+//                            `session.deleted`; OpenCode has no event of
+//                            that name (issue #2636).
 //
 // Every callback includes `sessionID` so the route's ordering-token
 // fence (`attention.rs:690-702`) can compare against the stored id and
@@ -306,10 +312,75 @@ async function postAttention(body) {
 // cancel the post.
 const PERMISSION_ASK_HOLD_MS = 750;
 
+// Closed children stay registered so their late events are still recognised as
+// a child's and never read as the node's own lifecycle. The cap only bounds a
+// long-lived TUI; it drops the oldest closed entries first.
+const MAX_TRACKED_CHILDREN = 512;
+
 export const BuildmeshAttention = async () => {
   let cachedSessionId = null;
   /** @type {Map<string, ReturnType<typeof setTimeout>>} */
   const pendingPermissionAsks = new Map();
+  /**
+   * Native subagent sessions seen on the bus (issue #2636). `root` is the
+   * top-level session the work belongs to (a nested child belongs to the root,
+   * not to its direct parent); `reported` is false for a child of a different
+   * root, which is tracked only so its events stay out of this node's
+   * lifecycle.
+   * @type {Map<string, {root: string, open: boolean, reported: boolean}>}
+   */
+  const children = new Map();
+
+  // A stop that reached Buildmesh before its start would be ignored as an
+  // unknown child and the later start would leave it open forever, so child
+  // posts go out strictly in order whether or not the dispatcher waits for us.
+  // `postAttention` never rejects, so the chain cannot wedge.
+  let childPosts = Promise.resolve();
+  function postChild(body) {
+    childPosts = childPosts.then(() => postAttention(body));
+    return childPosts;
+  }
+
+  function trimChildren() {
+    for (const [id, child] of children) {
+      if (children.size <= MAX_TRACKED_CHILDREN) return;
+      if (!child.open) children.delete(id);
+    }
+  }
+
+  // A child session's `session.created` is the only start signal OpenCode
+  // gives; its `parentID` names the owner. Identity is validated like the
+  // root's so a malformed payload never reaches Buildmesh.
+  async function startChild(event) {
+    const parentId = event.properties?.info?.parentID ?? event.info?.parentID;
+    const childId = pickSessionId(event);
+    if (!isValidSessionId(parentId) || !isValidSessionId(childId) || parentId === childId) {
+      await appendLog("child session.created missing or malformed id\n");
+      return;
+    }
+    if (children.has(childId)) return;
+    const root = children.get(parentId)?.root ?? parentId;
+    // Same fence as the root's own events: when this node's session is known,
+    // another top-level session's children are not its work.
+    const reported = !cachedSessionId || root === cachedSessionId;
+    children.set(childId, { root, open: true, reported });
+    trimChildren();
+    if (reported) {
+      await postChild({ hook_event_name: "subagent_start", sessionID: root, agent_id: childId });
+    }
+  }
+
+  // `session.idle` ends a child's turn and `session.deleted` removes it. A
+  // `session.error` is deliberately not terminal: OpenCode 1.18.3 always goes
+  // idle after one, and ending early could report still-running work as done.
+  async function finishChild(childId) {
+    const child = children.get(childId);
+    if (!child?.open) return;
+    child.open = false;
+    if (child.reported) {
+      await postChild({ hook_event_name: "subagent_stop", sessionID: child.root, agent_id: childId });
+    }
+  }
 
   function armPermissionAsk(requestId, body) {
     if (!requestId) {
@@ -358,8 +429,12 @@ export const BuildmeshAttention = async () => {
       // documented shape via `pickSessionId` so a future upstream
       // rename doesn't drop captures.
       if (event.type === "session.created") {
-        // Child sessions share the plugin bus but must not claim the node.
-        if (event.properties?.info?.parentID || event.info?.parentID) return;
+        // Child sessions share the plugin bus but must not claim the node;
+        // they are reported as the node's owned work instead (issue #2636).
+        if (event.properties?.info?.parentID || event.info?.parentID) {
+          await startChild(event);
+          return;
+        }
         const id = pickSessionId(event);
         if (!isValidSessionId(id)) {
           await appendLog("session.created missing or malformed id\n");
@@ -375,6 +450,14 @@ export const BuildmeshAttention = async () => {
       }
 
       const suppliedId = pickSessionId(event);
+      // A known child's events are never this node's lifecycle, even when no
+      // root is cached (a resumed session fires no `session.created`).
+      if (children.has(suppliedId)) {
+        if (event.type === "session.idle" || event.type === "session.deleted") {
+          await finishChild(suppliedId);
+        }
+        return;
+      }
       if (cachedSessionId && isValidSessionId(suppliedId) && suppliedId !== cachedSessionId) return;
 
       if (event.type === "session.status" && event.properties?.status?.type === "busy") {

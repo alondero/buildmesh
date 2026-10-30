@@ -68,6 +68,7 @@ import {
   setTerminalFontSize,
   terminalFontSize,
 } from '../../src/components/Terminal/terminalConfig';
+import { TEXT_SCALE_DEFAULT, setTextScale } from '../../src/lib/textScale';
 
 const MESH_1: Mesh = {
   id: 1, name: 'demo-1', path: '/repo/1', branch: 'main', position: 0,
@@ -150,6 +151,9 @@ beforeEach(() => {
   });
   useToastStore.setState({ toasts: [], notifications: [] });
   setTerminalFontSize(TERMINAL_FONT_SIZE_DEFAULT);
+  // The tier thresholds multiply by the interface text scale, and the store is
+  // a module singleton — start every tier test at the shipped size.
+  setTextScale(TEXT_SCALE_DEFAULT);
 });
 
 afterEach(() => {
@@ -450,6 +454,31 @@ describe('scope picker and tier edges (#2421 round 3)', () => {
     expect(within(openMore()).getByTestId('titlebar-overflow-usage')).toBeTruthy();
     cleanup();
     await renderAt(1700);
+    expect(screen.getByTestId('titlebar-usage')).toBeTruthy();
+  });
+});
+
+describe('a larger interface text size folds the tiers earlier', () => {
+  it('at 150% a 1440px bar takes the compact View selector, as 960px would at 100%', async () => {
+    setTextScale(1.5);
+    await renderAt(1440);
+    expect(screen.getByTestId('view-selector')).toBeTruthy();
+    expect(screen.queryByRole('group', { name: /view mode/i })).toBeNull();
+    // The labelled segments' ~774px at 100% is ~1161px at 150%; the bar needs
+    // 2160px before it can show them again.
+    cleanup();
+    await renderAt(2160);
+    expect(screen.getByRole('group', { name: /view mode/i })).toBeTruthy();
+    expect(screen.queryByTestId('view-selector')).toBeNull();
+  });
+
+  it('at 150% the utilities stay folded until the bar can afford them', async () => {
+    setTextScale(1.5);
+    await renderAt(1920);
+    expect(screen.queryByTestId('titlebar-usage')).toBeNull();
+    expect(within(openMore()).getByTestId('titlebar-overflow-usage')).toBeTruthy();
+    cleanup();
+    await renderAt(2550);
     expect(screen.getByTestId('titlebar-usage')).toBeTruthy();
   });
 });

@@ -39,25 +39,49 @@ decisions, blockers, next action and check status. Do not load the entire
 architecture primer: follow the relevant section to its owning module.
 
 Use `update --spec .tmp/progress.json` for phase, next action, decisions,
-blockers, acceptance evidence and review result. Goal, identity and base stay
+blockers and acceptance evidence. Goal, identity and base stay
 fixed. Phases are understand, plan, implement, verify, review and blocked;
 `finish` alone sets complete. Each criterion needs one evidence string, in
-criterion order, describing the command/artifact and observed outcome. A review
-entry identifies reviewer, findings, summary and an explicit
-APPROVE/REQUEST_CHANGES/BLOCKED verdict. Completion requires APPROVE with no
-unresolved findings.
-Both evidence and review are bound to the tree when recorded; editing code
-requires recording them again.
+criterion order, describing the command/artifact and observed outcome. The
+review result is recorded with `npm run harness -- review` (below), which
+carries the reviewer, summary and an explicit
+APPROVE/REQUEST_CHANGES/BLOCKED verdict, plus findings when there are any.
+An `update --spec` review field takes the same shape, and the same rule
+refuses a malformed one before anything is written. Completion requires
+APPROVE with no unresolved findings.
+Acceptance evidence is bound to the environment-bound fingerprint when it is
+recorded; the approval is bound to the code it was recorded for. Editing code
+requires recording both again.
 
 ```json
 {
   "phase": "review",
   "nextAction": "Finish after independent review",
   "evidence": ["terminal-container-reuse regression passed; real PTY check recorded separately"],
-  "review": { "reviewer": "independent reviewer", "verdict": "APPROVE", "findings": [], "summary": "Approved current revision" },
   "blockers": []
 }
 ```
+
+Record the reviewer's verdict with `npm run harness -- review --verdict <verdict>
+--reviewer <name> --summary <text> [--finding <text>]...`. That command is the
+only writer of a verdict: it appends the round to the review ledger and records
+the reviewer, verdict and findings in the task. A verdict in an `update --spec`
+file is recorded through the same path, so the ledger and the task record the
+same round.
+
+The approval is bound to the **code** the reviewer read, not to the environment
+the reviewer ran in. The reviewer and the implementer are separate processes and
+are not required to share a target directory, so an approval recorded elsewhere
+still covers the verified tree; `npm run harness -- status` names the differing
+environment fields under `review.environment` when it does. A later edit is a
+different code tree and needs a new approval.
+
+`npm run harness -- review --show` reads the ledger and records no round. It
+takes no lock, so it can run while a verify holds one, and it reports a
+snapshot of the tree rather than a consistent view of it. It refuses to be
+combined with `--verdict`, `--reviewer`, `--summary`, `--finding` or
+`--findings-file`, because a read that silently discards the write it was
+given loses the round without an error.
 
 ## Review and repair
 
@@ -77,9 +101,13 @@ a complete best-effort pass; repairs can still introduce new defects.
 
 After REQUEST_CHANGES:
 
-1. Record the verdict and findings with `harness update`, and keep the task
-   active while repairing the batch. Review updates do not require a fresh
-   full verification receipt.
+1. Record the verdict and findings with `npm run harness -- review --verdict
+   <verdict> --reviewer <name> --summary <text> [--finding <text>]...`, and
+   keep the task active while repairing the batch. The command writes the
+   reviewer, verdict, findings and the reviewed code into the task and appends
+   the round to `.harness/reviews.jsonl`. An approval that still carries
+   findings is refused, and the approval covers the code it was recorded for.
+   Review updates do not require a fresh full verification receipt.
 2. Run fast checks and the regression tests that exercise each affected
    production boundary. Claude's advisory `.harness/fast.json` covers agent
    rules, changed-file lint and TypeScript checking; it runs no behavioral or
@@ -97,9 +125,12 @@ After REQUEST_CHANGES:
    repair that adds explanation or tests adds claims the next round audits, so
    delete or soften a disputed claim rather than defending it at length.
 5. Give the reviewer the repair diff, previous findings and executed checks.
-   Follow-up review checks every finding's resolution, new defects and the
-   repair's interactions with the whole change. A reviewer without that
-   history, or a change that expands scope, needs a complete pass.
+   `npm run harness -- review --show` carries the first two: it reports the
+   last verdict, the findings still outstanding and the paths whose content
+   changed since the last round reviewed. Follow-up review checks the
+   resolution of each finding, new defects and the repair's interactions with the
+   whole change. A reviewer without that history, or a change that expands
+   scope, needs a complete pass.
 
 Once the reviewer has no outstanding corrections, run `npm run verify` for
 all applicable gates, reusing PASS results only while their declared inputs

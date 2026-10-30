@@ -56,7 +56,9 @@ pub(super) trait EffectHost {
     fn agent_alive(&self, agent_id: i64) -> bool;
     fn millis_since_last_output(&self, agent_id: i64) -> Option<u128>;
     fn stalled_background_task(&self, node: &AgentNode) -> Option<String>;
-    fn assistant_revision(&self, node: &AgentNode) -> Option<String>;
+    /// The revision of the agent's current turn in this run (see
+    /// `result_handoff::current_turn_revision`).
+    fn assistant_revision(&self, run_id: i64, node: &AgentNode) -> Option<String>;
 }
 
 pub(super) struct AppEffectHost<'a> {
@@ -125,8 +127,8 @@ impl EffectHost for AppEffectHost<'_> {
         super::observation::stalled_background_task(node)
     }
 
-    fn assistant_revision(&self, node: &AgentNode) -> Option<String> {
-        crate::coordinator::enrichment::assistant_report(node).map(|report| report.revision)
+    fn assistant_revision(&self, run_id: i64, node: &AgentNode) -> Option<String> {
+        super::result_handoff::current_turn_revision(run_id, node)
     }
 }
 
@@ -322,7 +324,7 @@ pub(super) fn dispatch_effects(
             Effect::InjectPty {
                 node_id, prompt, ..
             } => {
-                let requests_result =
+                let contract_result =
                     super::report_contract::requests_result(view, node_id, prompt);
                 let prompt = super::report_contract::prompt(view, node_id, prompt);
                 let attempt = view.step(node_id).map_or(1, |step| step.attempt);
@@ -392,6 +394,14 @@ pub(super) fn dispatch_effects(
                         else {
                             continue;
                         };
+                        // A harness with no lifecycle of its own can only end
+                        // this turn by writing its result file, so it owes one
+                        // for every prompt, contract or not.
+                        let requests_result = contract_result
+                            || (!prompt.trim().is_empty()
+                                && super::result_handoff::completes_by_result_file_only(
+                                    &target_node,
+                                ));
                         // The full prompt goes to its handoff file; the terminal
                         // receives either the same text or a pointer to it. The
                         // digest and the PTY write both use what is delivered.
@@ -544,7 +554,7 @@ pub(super) fn dispatch_effects(
                         continue;
                     }
                 };
-                let revision = host.assistant_revision(&node);
+                let revision = host.assistant_revision(active.run.id, &node);
                 let valid = continuation_is_current(
                     view,
                     node_id,
@@ -712,7 +722,7 @@ pub(super) fn dispatch_effects(
                         continue;
                     }
                 };
-                let revision = host.assistant_revision(&node);
+                let revision = host.assistant_revision(active.run.id, &node);
                 // The lifecycle check is a read too, and a failed read is
                 // unknown — not "the agent may be woken". Reading it as "not
                 // allowed" recorded a *terminal* obsolete verdict about a

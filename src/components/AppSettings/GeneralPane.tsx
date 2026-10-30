@@ -21,6 +21,14 @@ import * as api from '../../lib/tauri';
 import type { AppPreferences } from '../../types/generated/AppPreferences';
 import { formatError } from '../../lib/errorUtils';
 import { currentTheme, setTheme, type ThemeName } from '../../lib/theme';
+import {
+  TEXT_SCALE_DEFAULT,
+  TEXT_SCALE_MAX,
+  TEXT_SCALE_MIN,
+  TEXT_SCALE_STEP,
+  setTextScale,
+} from '../../lib/textScale';
+import { useTextScale } from '../../hooks/useTextScale';
 import { useExitPromptStore } from '../../stores/exitPromptStore';
 import { optimisticToggle } from '../../lib/optimisticToggle';
 import { useBlurCommit } from '../../hooks/useBlurCommit';
@@ -29,6 +37,73 @@ import { ResourceLoadStatus } from './ResourceLoadStatus';
 import { UpdateAboutSection } from './UpdateAboutSection';
 import { CompanionSettingsSection } from './CompanionSettingsSection';
 import { useSettingsData } from './SettingsDataContext';
+
+/**
+ * Interface text size — the accessibility size slider for everything the app
+ * draws outside a terminal.
+ *
+ * No new store: `textScale.ts` owns the value and writes `--ui-text-scale` on
+ * <html>, where every `text-*` step in App.css multiplies by it. The slider is
+ * a view of that one number — the same arrangement the title bar's terminal
+ * Zoom control has with `terminalConfig`, so the two sliders behave
+ * identically to the user.
+ *
+ * Commits per input event rather than on release: a text-size slider is
+ * useless if the text does not resize while you drag it. Like the theme radio, it
+ * is not a dirty draft — the write is synchronous localStorage plus a custom
+ * property, so there is no half-saved state for a "Discard changes?" prompt to
+ * protect.
+ */
+function InterfaceTextSizeControl() {
+  // One subscription to the store the whole app reads, so the slider and its
+  // readout track the value wherever it changes from.
+  const percent = Math.round(useTextScale() * 100);
+
+  const commit = (nextPercent: number) => setTextScale(nextPercent / 100);
+  const defaultPercent = TEXT_SCALE_DEFAULT * 100;
+
+  return (
+    <>
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-xs text-text-secondary">Text size</span>
+        <span
+          className="font-mono text-xs text-text-primary"
+          data-testid="interface-text-scale-value"
+        >
+          {percent}%
+        </span>
+      </div>
+      <input
+        type="range"
+        min={TEXT_SCALE_MIN * 100}
+        max={TEXT_SCALE_MAX * 100}
+        step={Math.round(TEXT_SCALE_STEP * 100)}
+        value={percent}
+        onChange={(e) => commit(Number(e.target.value))}
+        aria-label="Interface text size"
+        // The slider's own value is a bare number; the readout says percent.
+        aria-valuetext={`${percent}%`}
+        data-testid="interface-text-scale-slider"
+        className="w-full cursor-pointer accent-accent-cyan"
+      />
+      <div className="mt-2 flex items-center justify-between">
+        {/* Decorative size swatches — the slider carries the value for
+            assistive tech, so these are hidden from the a11y tree. */}
+        <span aria-hidden="true" className="text-2xs leading-none text-text-muted">A</span>
+        <button
+          type="button"
+          onClick={() => commit(defaultPercent)}
+          disabled={percent === defaultPercent}
+          data-testid="interface-text-scale-reset"
+          className="rounded-md px-1 text-sm text-text-muted transition-colors hover:text-accent-cyan disabled:cursor-default disabled:text-text-muted disabled:hover:text-text-muted"
+        >
+          Reset
+        </button>
+        <span aria-hidden="true" className="text-base leading-none text-text-muted">A</span>
+      </div>
+    </>
+  );
+}
 
 export function GeneralPane() {
   const {
@@ -273,6 +348,24 @@ export function GeneralPane() {
               </label>
             ))}
           </fieldset>
+        </SettingsRow>
+
+        {/* Interface text size sits beside Theme because both are per-machine
+            presentation choices with no backend half. */}
+        <SettingsRow
+          label="Interface text size"
+          summary="Size of the app's text. Terminals keep their own Zoom size."
+          layout="stacked"
+          details={
+            <>
+              100% is the size Buildmesh ships with. Raising it enlarges text in
+              the sidebar, the Probe, the title bar and every dialog at once — the
+              layout, control sizes and terminals stay put. Terminals are sized
+              separately by the title bar's Zoom control.
+            </>
+          }
+        >
+          <InterfaceTextSizeControl />
         </SettingsRow>
       </SettingsSection>
 

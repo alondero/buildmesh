@@ -242,17 +242,74 @@ through to the generic fallback.
 | Fact | Verdict |
 |---|---|
 | Supported version / platform | 1.18.3, Windows native; Linux/macOS direct spawn unexercised for Circuits |
-| Hook source | Project plugin (`session.idle`, `question.asked`, `permission.asked`, reply/busy/error events, capture-only `session.created`). No event carries a turn id, input stamp, or submission correlation |
+| Hook source | Project plugin (`session.idle`, `question.asked`, `permission.asked`, reply/busy/error events, capture-only `session.created`, and the synthesized `subagent_start` / `subagent_stop` for native subagents — see below). No event carries a turn id, input stamp, or submission correlation |
 | Pull source | `opencode.db` SQLite transcript/report only (`TranscriptFormat::OpenCode`); there is no native turn-completion pull (`completed_turn` is unimplemented, the file locator returns `None`) |
 | Freshness / recheck bounds | Yielded 30 s via the observer policy; active 2 h. No adapter-owned recheck is wired — a missing hook parks Unverified until the watchdog budget expires |
 | Foreground lifecycle | No validated adapter: `session.idle` is attention-route input (UI `Ready`), never an authoritative `ForegroundTerminated` Circuit observation |
-| Child / background coverage | None: OpenCode exposes no complete child/background registry to Buildmesh. Unknown child/background work never becomes completion (`WorkEvidence` requires `ownership_covered`, which no OpenCode source sets) |
+| Child / background coverage | Partial (issue #2636): native subagent *child sessions* are reported with a stable id, tied to the parent, but as reduced-confidence evidence. There is still no registry snapshot, and background subagents and resumed child sessions are unvalidated. Unknown child/background work never becomes completion (`WorkEvidence` requires `ownership_covered`, which no OpenCode source sets) |
 | Final report | Assistant text from `opencode.db` may inform interpretation (scrubbed, partial/unavailable labelled); it cannot prove lifecycle termination or ownership |
 
-Malformed OpenCode payloads (including every plugin event name above)
-never parse as native Circuit hook receipts under any provider id
-(`NativeHook::parse` gate + regression test), so they cannot alter
-another harness's lifecycle.
+Only the synthesized `subagent_start` / `subagent_stop` events, read by the
+OpenCode adapter, parse as native Circuit hook receipts. Every other OpenCode
+plugin event name, and every OpenCode payload under another provider id,
+never parses as one (`NativeHook::parse` gate + regression tests), so they
+cannot alter another harness's lifecycle.
+
+### Native subagent sessions (issue #2636)
+
+A subagent started by the `task` tool is an ordinary OpenCode **child session**.
+Recorded from OpenCode 1.18.3 (`opencode run`, a `task` call to the `general`
+subagent, with a plugin that logged every bus event; the sanitized stream is
+`tests/fixtures/opencode/subagent-session-run.json`):
+
+| Observed | Detail |
+|---|---|
+| Identity | The child gets its own `ses_<…>` id. `session.created` carries it in `properties.info.id` with the parent in `properties.info.parentID`. The `task` tool result repeats both (`metadata.sessionId`, `metadata.parentSessionId`), so the id is stable across the whole child lifetime |
+| Start | `session.created` for the child, before any of its other events |
+| End | `session.status` `busy` → `idle`, then `session.idle`, all under the child's id. A `session.error` is always followed by `session.status` idle and `session.idle` (checked with a failing model), so an error alone is not treated as the end |
+| Removal | `DELETE /session/:id` emits `session.deleted` (`properties.sessionID`, `properties.info` with `parentID`) |
+| Nesting | The child's permissions deny `task`, so the default depth is one. The plugin still attributes a deeper child to the root session |
+
+The plugin turns these into two Buildmesh-owned events, posted under the
+**parent's** `sessionID` so the route's session fence applies, with the child
+in `agent_id`: `subagent_start` from the child's `session.created`, and
+`subagent_stop` from its `session.idle` or `session.deleted` (once each). The
+child's own status, idle and error events never reach the node as its
+lifecycle, including in a resumed session where no root `session.created` was
+seen.
+
+What Buildmesh does with them:
+
+- **Node status:** the attention route tracks the child like a Claude Code
+  subagent. A parent `session.idle` while a child is alive is
+  `SuppressPendingBackground` (published as `BackgroundRunning`) instead of
+  `Ready`; the child's stop releases it. The Circuit's report-admission policy
+  already treats `BackgroundRunning` as known outstanding work, so this is
+  what stops a handoff while a subagent is still running.
+- **Circuit evidence:** the adapter parses the pair into `SubagentStart` /
+  `SubagentStop` receipts (`task:<child id>`, parent session). OpenCode names
+  no turn, so the observation is **reduced confidence**: it is recorded and
+  shown with the parent's evidence, but it neither registers a blocking child
+  nor settles a step. The strategy declares `OwnedWorkCoverage::HookRegistry`
+  and `foreground: false`, so the foreground stays *Unavailable*.
+
+Not validated, and therefore not claimed:
+
+- **Background subagents.** The v2 docs describe a `subagent` tool with
+  `background: true` that returns a session id. The installed 1.18.3 has no such
+  tool: its `task` tool dropped a `background` argument and ran in the
+  foreground. The child-session events above do not depend on the mode, but
+  that background children emit the same events, and when a background child's
+  completion arrives relative to its parent's `session.idle`, has not been observed.
+- **Resumed child sessions.** Passing a returned session id to continue a child
+  would make an already-ended child busy again with no new `session.created`.
+  It is not tracked as new work.
+- **Child permission and question prompts.** They carry the child's id and are
+  dropped by the existing root-session fence, as before.
+- **A live Buildmesh-launched run.** The production plugin file was exercised
+  against the recorded event stream and unit tests; loading it into a running
+  OpenCode and watching the posts arrive was not completed (OpenCode stalled
+  at startup in the investigation environment).
 
 ### SQLite report contract
 

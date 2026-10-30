@@ -22,3 +22,17 @@
  */
 export const LABELLED_SWITCHER_MIN_WIDTH = 1440;
 export const UTILITIES_IN_BAR_MIN_WIDTH = 1700;
+
+/**
+ * A tier threshold at the active interface text size.
+ *
+ * Both numbers above were measured at the shipped 13px type scale — "the
+ * labelled segments plus the Filtered search bar take ~774px" is a 100%
+ * measurement. A user reading the app at 150% needs about 150% of that width
+ * for the same controls to fit, so the thresholds move with the setting
+ * (Settings → General → Appearance). At the default scale this returns the
+ * measured numbers unchanged — the tiers existing screenshots and tests pin.
+ */
+export function tierWidthAtTextScale(px: number, textScale: number): number {
+  return Math.round(px * textScale);
+}

@@ -20,8 +20,6 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { NodeActivityCluster, clusterActivityNodes } from '../../lib/nodeActivities';
-import { AttentionList } from './AttentionList';
-import { needsAgentAttention } from '../../lib/status';
 import { MeshItem } from './MeshItem';
 import { dropdownId } from '../../lib/dropdownId';
 import { useSidebarResize } from './useSidebarResize';
@@ -82,8 +80,6 @@ export function Sidebar() {
   // interpretation participates — so it holds for both the close path
   // (row deleted) and the archive path (status set, excluded above).
   const agentNodes = useAllAgentNodes();
-  const [attentionView, setAttentionView] = useState(false);
-  const attentionCount = useMemo(() => agentNodes.reduce((count, node) => count + Number(needsAgentAttention(node.status)), 0), [agentNodes]);
   const circuitOwnerships = useAgentNodeStore(state => state.circuitOwnerships);
   const manualGroups = useNodeActivityStore(state => state.groups);
   // Paired agents share one Node Activity card in the grid. The same pass that
@@ -143,10 +139,8 @@ export function Sidebar() {
   // footer rendered a second mesh-creation button in the same 256px
   // column, so an empty workspace showed two CTAs in one place (issue
   // #2468). The footer stands down while the inline CTA is showing, and
-  // returns once the workspace holds a mesh. The Attention view has no
-  // inline CTA of its own, so the footer stays there and both views
-  // keep a mesh-creation CTA.
-  const inlineEmptyCtaVisible = !attentionView && meshes.length === 0;
+  // returns once the workspace holds a mesh.
+  const inlineEmptyCtaVisible = meshes.length === 0;
   // Per-mesh "spawn in flight" set so the mesh row's `+ ▾` cluster shows
   // "Spawning…" and disables while `selectProviderForMesh` runs (an IPC
   // round-trip that includes worktree setup — seconds on a large repo).
@@ -344,16 +338,9 @@ export function Sidebar() {
             CTA (inline here when the workspace is empty, otherwise the
             sticky footer) and the canvas empty state's "New mesh" CTA hit
             the same `openCreateMesh` action. */}
-        {/* Issue #2467 — `aria-label` is ignored on a generic unroled
-            <div>; the toggle pair needs `role="group"` for the name to reach
-            assistive technology. */}
-        <div role="group" className="flex shrink-0 gap-1 border-b border-border-subtle p-2" aria-label="Sidebar views">
-          <button type="button" aria-pressed={!attentionView} onClick={() => setAttentionView(false)} className={`min-h-[24px] flex-1 rounded-md px-2 text-xs ${!attentionView ? 'bg-bg-card text-text-primary' : 'text-text-secondary hover:bg-bg-card-hover'}`}>Workspace</button>
-          <button type="button" aria-pressed={attentionView} onClick={() => setAttentionView(true)} className={`min-h-[24px] flex-1 rounded-md px-2 text-xs ${attentionView ? 'bg-bg-card text-text-primary' : 'text-text-secondary hover:bg-bg-card-hover'}`}>Attention ({attentionCount})</button>
-        </div>
         <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
           <div className="p-2">
-            {attentionView ? <AttentionList /> : meshes.length === 0 ? (
+            {meshes.length === 0 ? (
               <div className="flex flex-col items-center gap-3 px-2 py-8 text-center">
                 <p className="text-xs text-text-muted font-sans">
                   No meshes yet. Add a repository to start orchestrating agents.
@@ -373,16 +360,12 @@ export function Sidebar() {
               <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
                 <SortableContext items={sortableMeshIds} strategy={verticalListSortingStrategy}>
                   {/* Issue #1939 — meshes with at least one open node form
-                      the top band under a single label; every other mesh
-                      follows below, dimmed, in manual drag order. With no
-                      open node anywhere there is no band and no label —
-                      just the manual list. One scroll container throughout;
-                      the label is a static (non-sticky) row in the same flow. */}
-                  {activeMeshes.length > 0 && (
-                    <p className="px-2 pt-1 pb-1 text-2xs uppercase tracking-wide text-text-muted">
-                      Active
-                    </p>
-                  )}
+                      the top band; every other mesh follows below, dimmed,
+                      in manual drag order. The band carries no label: a
+                      mesh's position in the list is the affordance, so the
+                      list spends no vertical space on a heading that names
+                      what the ordering already shows. One scroll container
+                      throughout. */}
                   {activeMeshes.length > 0
                     ? (
                       <>
@@ -401,8 +384,7 @@ export function Sidebar() {
             "+ New mesh" button inline, right under the "No meshes yet"
             message, so the sticky footer stands down there instead of
             stacking a second mesh-creation CTA in the same column. The
-            footer returns as soon as the workspace holds a mesh, and
-            stays for the Attention view, which has no inline CTA. */}
+            footer returns as soon as the workspace holds a mesh. */}
         {!inlineEmptyCtaVisible && (
           <button
             onClick={openCreateMesh}

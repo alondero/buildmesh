@@ -5,6 +5,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -79,31 +80,45 @@ suspend fun BuildmeshApi.squashNodePull(meshId: Long, pr: PhonePullRequest) {
     post("/api/meshes/$meshId/pulls/${pr.number}/merge", buildJsonObject { put("url", pr.url) })
 }
 
+/**
+ * The mesh's open pull requests.
+ *
+ * The list refreshes by pulling down, and the app-bar action stays the
+ * shared recovery affordance; a failed read keeps its own Retry, above the
+ * fold, so the screen never needs a scroll to recover.
+ */
 @Composable
 fun PullRequestsScreen(api: BuildmeshApi, meshId: Long, vm: BuildmeshViewModel, openNode: (Long) -> Unit) {
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
-        PullRequestsPanel(api, meshId, vm, openNode = openNode)
+    val refresh = remember { ListingRefresh() }
+    PullToRefreshList(refresh, Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
+            PullRequestsPanel(api, meshId, vm, openNode = openNode, refresh = refresh)
+        }
     }
 }
 
 // `openNode` enables spawning from the mesh-wide list; a node's own panel
 // shows that node's PR and offers merging instead.
+//
+// `refresh` is the panel's own reload state. The full-screen list owns it so
+// its pull gesture can move it; a panel embedded in the node detail keeps
+// its own and is refreshed by the app-bar action.
 @Composable
-fun PullRequestsPanel(api: BuildmeshApi, meshId: Long, vm: BuildmeshViewModel, nodeId: Long? = null, openNode: ((Long) -> Unit)? = null) {
-    key(api, meshId, nodeId) { OwnedPullRequestsPanel(api, meshId, vm, nodeId, openNode) }
+fun PullRequestsPanel(api: BuildmeshApi, meshId: Long, vm: BuildmeshViewModel, nodeId: Long? = null, openNode: ((Long) -> Unit)? = null, refresh: ListingRefresh? = null) {
+    val own = remember(refresh) { refresh ?: ListingRefresh() }
+    key(api, meshId, nodeId) { OwnedPullRequestsPanel(api, meshId, vm, nodeId, own, openNode) }
 }
 
 @Composable
-private fun OwnedPullRequestsPanel(api: BuildmeshApi, meshId: Long, vm: BuildmeshViewModel, nodeId: Long?, openNode: ((Long) -> Unit)?) {
+private fun OwnedPullRequestsPanel(api: BuildmeshApi, meshId: Long, vm: BuildmeshViewModel, nodeId: Long?, refresh: ListingRefresh, openNode: ((Long) -> Unit)?) {
     val state by vm.state.collectAsState()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
-    var reload by remember { mutableIntStateOf(0) }
     var feed by remember { mutableStateOf<PhonePullFeed?>(null) }
     var branch by remember { mutableStateOf("") }
     var error by remember { mutableStateOf("") }
     var confirming by remember { mutableStateOf<PhonePullRequest?>(null) }
     var merging by remember { mutableStateOf(false) }
-    LaunchedEffect(api, reload, state.resourceRevision, lifecycle, merging) {
+    LaunchedEffect(api, refresh.reload, state.resourceRevision, lifecycle, merging) {
         if (merging) return@LaunchedEffect
         lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             while (true) {
@@ -116,6 +131,9 @@ private fun OwnedPullRequestsPanel(api: BuildmeshApi, meshId: Long, vm: Buildmes
                     feed = next; branch = currentBranch; error = ""
                 } catch (e: CancellationException) { throw e }
                 catch (e: Exception) { feed = null; confirming = null; error = friendlyError(e); vm.report(e) }
+                // The read landed, so a pull that asked for it can retire its
+                // own indicator.
+                refresh.settle()
                 delay(10_000)
             }
         }
@@ -131,8 +149,12 @@ private fun OwnedPullRequestsPanel(api: BuildmeshApi, meshId: Long, vm: Buildmes
     }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(if (nodeId == null) "Open pull requests" else "This node’s pull request", style = MaterialTheme.typography.titleMedium)
-        TextButton(enabled = !merging, onClick = { reload++; confirming = null }) { Text("Refresh PR status") }
-        if (error.isNotEmpty()) Text(error, color = MeshColors.amber)
+        // The failed read's Retry stays at the top of the list, so recovering
+        // never depends on scrolling to find a control.
+        if (error.isNotEmpty()) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(error, color = MeshColors.amber, modifier = Modifier.weight(1f))
+            TextButton(enabled = !merging, onClick = { refresh.request() }) { Text("Retry") }
+        }
         if (feed == null && error.isEmpty()) Text("Loading pull requests…")
         feed?.let { current ->
             if (!current.complete) Text("Showing first ${current.returned}${current.total?.let { " of $it" }.orEmpty()} pull requests. Results are incomplete (${current.reason})." +
@@ -164,7 +186,7 @@ private fun OwnedPullRequestsPanel(api: BuildmeshApi, meshId: Long, vm: Buildmes
                         client.squashNodePull(meshId, pr)
                         feed = feed?.let { it.copy(items = it.items.filterNot { item -> item.number == pr.number }) }
                         vm.notice("PR #${pr.number} squash-merged. Branch deleted.")
-                    } finally { merging = false; confirming = null; reload++ }
+                    } finally { merging = false; confirming = null; refresh.request() }
                 }
             }) { Text("Confirm squash merge") } },
             dismissButton = { TextButton(enabled = !merging, onClick = { confirming = null }) { Text("Cancel") } })

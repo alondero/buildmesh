@@ -286,11 +286,16 @@ within 15 minutes — inspect the agent terminal" instead of holding the run for
 the full active-wait budget, as in the [Muse Index review](../archive/2026-09/circuit-run-183-muse-index.md).
 
 The title-bar control is stricter than the backend on one axis: it disables
-itself when the *source* harness cannot yield a turn (for example, a plain
-Terminal, or a harness with neither a native attention hook nor a passive turn
-watcher), because `await_source` and `verdict` would otherwise park forever
+itself when the *source* harness cannot yield a turn (a plain Terminal, or a
+harness with no attention hook, no passive turn watcher and no result-file
+handoff), because `await_source` and `verdict` would otherwise park forever
 waiting for a status the harness never reports. The reviewer must likewise be an
-eligible harness. The first-writer-wins dedupe (issue #1660) still hands back the
+eligible harness. A harness whose only signal is its
+[result file](circuit-session-observation.md#result-file-turn-completion)
+(DeepSeek Harness, Freebuff, Perch) is eligible on both sides: every prompt the
+review sends it owes a result file. Its current turn at `await_source` was not
+prompted by the review, so that step reports `TurnCompletionUnobservable` at
+once and the person moves it on from the Overview tab when the agent is done. The first-writer-wins dedupe (issue #1660) still hands back the
 original run id on a retry.
 
 ## Unverified checkpoints and evidence history

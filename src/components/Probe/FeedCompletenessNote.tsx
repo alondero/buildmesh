@@ -37,7 +37,8 @@ export function FeedCompletenessNote({
         borderRadius: 6,
         background: "var(--surface-2)",
         color: "var(--text-dim)",
-        fontSize: 12,
+        // Literal size, so it carries the interface text scale by hand.
+        fontSize: "calc(12px * var(--ui-text-scale, 1))",
         lineHeight: 1.4,
       }}
     >

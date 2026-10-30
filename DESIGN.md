@@ -201,10 +201,34 @@ for Android; otherwise identical.
 Weight 800 exists for the wordmark only. UI text runs 400/500/600; 700 for
 small solid badges.
 
-**Desktop scale.** Base body is 13px (`--font-size-base`). Use the Tailwind
-steps: `text-xs` (12px) for secondary content, `text-sm` (14px) for emphasis,
-`text-base`/`text-lg` for headings. `--text-2xs` (10px) is the **absolute
-floor** — badges, gutter labels, micro-captions. Nothing renders below 10px.
+**Desktop scale.** Base body is 13px (`--font-size-base`), and `1rem` is that
+13px, so the rem-based Tailwind steps land where 13px arithmetic puts them:
+`text-xs` 9.75px for secondary content, `text-sm` 11.375px for emphasis,
+`text-base` 13px and `text-lg` 14.625px for headings, `text-xl` 16.25px and
+`text-2xl` 19.5px. `--text-2xs` is 10px — badges, gutter labels,
+micro-captions. Interface text renders no smaller than `text-xs`'s 9.75px;
+terminal text is the one scale outside this (8–18px, chosen by the user). Do
+type and spacing arithmetic in 13px units, never 16px ones (`h-9` ≈ 29px, not
+36px).
+
+**The scale is a user setting.** Every `--text-*` step multiplies by
+`--ui-text-scale` (default `1`), which **Settings → General → Appearance**
+writes on `<html>` from 100% to 150%: the shipped size is the floor, so text
+can be enlarged but nothing in the scale drops below the floor above. The
+lever is **text-only** — `html` keeps the 13px font-size, so `rem`, spacing,
+control heights and the title bar's width tiers (measured in 13px units, see
+`docs/development/windows.md`) do not move. Terminals are outside it (their
+own 8–18px Zoom size in the title bar), as are the mobile SPA and the Android
+client, which have their own scales. Rules for contributors:
+
+- A type step goes in the `@theme` block as
+  `calc(<size> * var(--ui-text-scale))`, never as a bare size. A
+  `text-[13px]`-style literal in a component or stylesheet must carry the same
+  `calc()` by hand to scale with the rest.
+- `tests/unit/text-scale.test.ts` parses `App.css` and fails when a step loses
+  the multiplier or the root font-size starts moving.
+- The brand lockup (`Wordmark`) and icon glyphs sized from their box are
+  pictures, not body text: they keep fixed pixel sizes.
 
 **Mobile scale.** Slightly larger for touch: 13px body, 15px card titles,
 16px on text fields (prevents iOS focus auto-zoom), 11–12px metadata, 10px
@@ -423,6 +447,9 @@ specificity and import order; custom properties don't.
 
 - WCAG AA (4.5:1) is the floor for body text; 3:1 for non-text UI
   (focus rings, borders that carry meaning).
+- Text can be enlarged by the user without breaking the layout: the interface
+  text setting scales the type tokens from 100% to 150% while `rem`, spacing
+  and control sizes stay put (see [Typography](#typography)).
 - The contract is executable: `tests/unit/theme-tokens-contrast.test.ts` and
   `tests/unit/theme-tokens-light-contrast.test.ts` recompute contrast from
   the CSS and fail the build if a token regresses; a static list in the same

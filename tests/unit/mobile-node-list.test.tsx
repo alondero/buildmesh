@@ -162,7 +162,7 @@ const QUICK_PROVIDER = {
   label: "Claude Code",
   provider_id: "anthropic",
   is_proxied: false,
-  capabilities: { supports_prefill: true },
+  capabilities: { supports_prefill: true, accepts_initial_prompt: true },
 } as unknown as Provider;
 
 describe("NodeList", () => {
