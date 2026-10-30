@@ -240,6 +240,36 @@ button {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  /* The default provider's brand mark sits beside the label, the way the
+     desktop's quick-spawn half shows it (issue #2040). */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+/* The label carries the ellipsis: the button is a flex row now, so the text
+   item owns the truncation rather than the button. */
+.spawn-split-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The provider brand mark. The phone's stylesheet carries no Tailwind
+   utilities, so the size is set here rather than with a `h-4 w-4` class. The
+   slot is a fixed box so the registered mark and the wire glyph occupy the
+   same space beside the label. */
+.spawn-split-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+.spawn-split-brand {
+  width: 16px;
+  height: 16px;
 }
 .spawn-split-main:active:not(:disabled) {
   background: var(--accent-dim);

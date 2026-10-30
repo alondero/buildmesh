@@ -6,7 +6,7 @@ import { PulseDots } from '../../ui';
 import { nodeInputContext } from '../../../lib/status';
 import { NodeRow } from './NodeRow';
 import { SpawnSplitButton } from '../SpawnSplitButton';
-import { meshDefaultLabel } from '../../spawnMenu';
+import { meshDefaultLabel, meshDefaultProvider } from '../../spawnMenu';
 
 export function MeshNodeSection({ mesh, meshNodes, creating, providers, circuitRuns, setPickerMeshId, setMeshActions, onOpenNode, onOpenIssues, onOpenAgentNodes, onOpenPulls, onStartAgent, onOpenSpawnMenu, spawnMenuOpen }: {
   mesh: Mesh; meshNodes: AgentNode[]; creating: number | null; providers: Provider[]; circuitRuns: Map<number, NodeCircuitRun>;
@@ -85,6 +85,7 @@ export function MeshNodeSection({ mesh, meshNodes, creating, providers, circuitR
                       <SpawnSplitButton
                         label="New agent"
                         compact
+                        provider={meshDefaultProvider(mesh, providers)}
                         testId={`mesh-spawn-${mesh.id}`}
                         ariaLabel={`Start a new agent in ${mesh.name} with ${meshDefaultLabel(mesh, providers)}`}
                         menuOpen={spawnMenuOpen}

@@ -51,10 +51,17 @@ fun issueCompletenessNote(feed: JsonObject): String? {
     return "$count $reason"
 }
 
+/**
+ * The mesh's open issues.
+ *
+ * The list refreshes by pulling down, and the app-bar action stays the
+ * shared recovery affordance; a failed read keeps its own Retry, above the
+ * fold, so the screen never needs a scroll to recover.
+ */
 @Composable
 fun IssuesResourceScreen(api: BuildmeshApi, meshId: Long, state: RemoteState, vm: BuildmeshViewModel, openNode: (Long) -> Unit) {
-    var reload by remember(state.draftNamespace, meshId) { mutableIntStateOf(0) }
-    val load by rememberRemote(api, "/api/meshes/$meshId/issues", vm, reload, ::issueFeed)
+    val refresh = remember { ListingRefresh() }
+    val load by rememberRemote(api, "/api/meshes/$meshId/issues", vm, refresh.reload, onRead = { refresh.settle() }, decode = ::issueFeed)
     val issues = load.data?.arrayAt("items").orEmpty()
     var filter by rememberSaveable(state.draftNamespace, meshId) { mutableStateOf("") }
     var expanded by rememberSaveable(state.draftNamespace, meshId) { mutableStateOf<Long?>(null) }
@@ -68,27 +75,29 @@ fun IssuesResourceScreen(api: BuildmeshApi, meshId: Long, state: RemoteState, vm
         vm.acceptNode(node); openNode(node.number("id"))
     }
     val filtered = filterIssues(issues, filter)
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        item { OutlinedTextField(colors = buildmeshTextFieldColors(), value = filter, onValueChange = { filter = it }, label = { Text("Filter issues") }, singleLine = true, modifier = Modifier.fillMaxWidth()) }
-        item { TextButton(onClick = { reload++ }) { Text("Reload issues") }; LoadNotice(load) { reload++ } }
-        load.data?.let { feed -> issueCompletenessNote(feed)?.let { note -> item { Text(note, color = MeshColors.secondary) } } }
-        if (load.data != null && filtered.isEmpty()) item { EmptyMessage(if (issues.isEmpty()) "No open issues found." else "No matches.") }
-        items(filtered, key = { it.number("number") }) { issue ->
-            val number = issue.number("number")
-            val open = expanded == number
-            Card(onClick = { expanded = if (open) null else number }, colors = CardDefaults.cardColors(containerColor = MeshColors.card)) {
-                Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("#$number ${issue.text("title")}", style = MaterialTheme.typography.titleMedium, maxLines = if (open) Int.MAX_VALUE else 2, overflow = TextOverflow.Ellipsis)
-                    if (issue.text("author").isNotEmpty()) Text("@${issue.text("author")}", color = MeshColors.secondary)
-                    val blockers = issueBlockers(issue, issues)
-                    if (blockers.isNotEmpty()) Text("Blocked by " + blockers.joinToString(", ") { "#$it" }, color = MeshColors.red)
-                    if (issueLabels(issue).isNotEmpty()) Text(issueLabels(issue).joinToString(" · "), color = MeshColors.accent)
-                    SpawnSplitButton(defaultName, options, "issue #$number", !state.busy, { start(issue, null) }, { start(issue, it) })
-                    TextButton(enabled = !state.busy, onClick = { editing = issue }) { Text("Edit tags for issue #$number") }
-                    if (open) {
-                        val body = issue.text("body").trim()
-                        if (body.isNotEmpty()) Text(body.take(600) + if (body.length > 600) "…" else "", color = MeshColors.secondary, modifier = Modifier.heightIn(max = 180.dp).verticalScroll(rememberScrollState()))
-                        if (issue.text("url").startsWith("https://")) ExternalLink(issue.text("url"), "View issue")
+    PullToRefreshList(refresh, Modifier.fillMaxSize()) {
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            item { OutlinedTextField(colors = buildmeshTextFieldColors(), value = filter, onValueChange = { filter = it }, label = { Text("Filter issues") }, singleLine = true, modifier = Modifier.fillMaxWidth()) }
+            item { LoadNotice(load) { refresh.request() } }
+            load.data?.let { feed -> issueCompletenessNote(feed)?.let { note -> item { Text(note, color = MeshColors.secondary) } } }
+            if (load.data != null && filtered.isEmpty()) item { EmptyMessage(if (issues.isEmpty()) "No open issues found." else "No matches.") }
+            items(filtered, key = { it.number("number") }) { issue ->
+                val number = issue.number("number")
+                val open = expanded == number
+                Card(onClick = { expanded = if (open) null else number }, colors = CardDefaults.cardColors(containerColor = MeshColors.card)) {
+                    Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("#$number ${issue.text("title")}", style = MaterialTheme.typography.titleMedium, maxLines = if (open) Int.MAX_VALUE else 2, overflow = TextOverflow.Ellipsis)
+                        if (issue.text("author").isNotEmpty()) Text("@${issue.text("author")}", color = MeshColors.secondary)
+                        val blockers = issueBlockers(issue, issues)
+                        if (blockers.isNotEmpty()) Text("Blocked by " + blockers.joinToString(", ") { "#$it" }, color = MeshColors.red)
+                        if (issueLabels(issue).isNotEmpty()) Text(issueLabels(issue).joinToString(" · "), color = MeshColors.accent)
+                        SpawnSplitButton(defaultName, options, "issue #$number", !state.busy, { start(issue, null) }, { start(issue, it) })
+                        TextButton(enabled = !state.busy, onClick = { editing = issue }) { Text("Edit tags for issue #$number") }
+                        if (open) {
+                            val body = issue.text("body").trim()
+                            if (body.isNotEmpty()) Text(body.take(600) + if (body.length > 600) "…" else "", color = MeshColors.secondary, modifier = Modifier.heightIn(max = 180.dp).verticalScroll(rememberScrollState()))
+                            if (issue.text("url").startsWith("https://")) ExternalLink(issue.text("url"), "View issue")
+                        }
                     }
                 }
             }
@@ -97,7 +106,7 @@ fun IssuesResourceScreen(api: BuildmeshApi, meshId: Long, state: RemoteState, vm
     editing?.let { issue ->
         IssueTagDialog(api, meshId, issue, state.busy, vm, onClose = { editing = null }, onChanged = { label, present ->
             editing = JsonObject(issue + ("labels" to JsonArray((issueLabels(issue).filterNot { it.equals(label, ignoreCase = true) } + if (present) listOf(label) else emptyList()).map(::JsonPrimitive))))
-            reload++
+            refresh.request()
         })
     }
 }

@@ -517,6 +517,14 @@ pub trait AgentProvider: Send + Sync {
         self.circuit_observation().passive_watcher.is_some()
     }
 
+    /// Whether a Circuit can take this harness's result file as its turn
+    /// completion (see `HarnessCapabilities::supports_result_file_handoff`).
+    /// Every agent harness can write one; only the plain shell cannot be
+    /// asked to.
+    fn supports_result_file_handoff(&self) -> bool {
+        !self.is_plain_terminal()
+    }
+
     /// Ensure the workspace is trusted for this harness before its process is
     /// created. Trust is a launch prerequisite, independent of attention-hook
     /// installation. Providers with vendor-specific trust stores opt in by
@@ -621,6 +629,15 @@ pub trait AgentProvider: Send + Sync {
     /// see memory: buildmesh-issue-spawn-url-only) and `spawn_handover_agent`
     /// (free-form selected text from a parent terminal, often multi-line).
     fn supports_prefill(&self) -> bool;
+
+    /// Whether a user-facing spawn (issue, pull request, prompt or handover)
+    /// may carry an initial prompt. A harness with CLI prefill takes it on
+    /// argv; any other interactive harness receives it through the live PTY
+    /// once its TUI has booted (`agent::spawn::startup_prompt`). A plain shell
+    /// declines: typed text would run as a command.
+    fn accepts_initial_prompt(&self) -> bool {
+        self.supports_prefill() || !self.is_plain_terminal()
+    }
 
     /// Whether the CLI submits the prompt from `prefill_args` on launch.
     /// Circuit launches must not send another Enter for an already submitted turn.
@@ -987,11 +1004,13 @@ pub trait AgentProvider: Send + Sync {
             requires_attention_hook: self.requires_attention_hook(),
             attention_capability: self.attention_capability(),
             supports_passive_turn_watcher: self.supports_passive_turn_watcher(),
+            supports_result_file_handoff: self.supports_result_file_handoff(),
             produces_readable_transcript: self.produces_readable_transcript(),
             supports_model_override: self.supports_model_override(),
             supports_effort_override: !matches!(effort_control, EffortControlKind::None),
             supports_extra_args: self.supports_extra_args(),
             supports_prefill: self.supports_prefill(),
+            accepts_initial_prompt: self.accepts_initial_prompt(),
             is_plain_terminal: self.is_plain_terminal(),
             effort_control,
             permission_modes: self.permission_modes(),

@@ -25,27 +25,43 @@ private fun usageTime(value: String): String = runCatching {
         .withLocale(Locale.getDefault()).withZone(ZoneId.systemDefault()).format(Instant.parse(value))
 }.getOrDefault(value)
 
+/**
+ * The desktop's provider usage meters.
+ *
+ * The list refreshes by pulling down, and the app-bar action stays the
+ * shared recovery affordance; a failed read keeps its own Retry, above the
+ * fold, so the screen never needs a scroll to recover.
+ */
 @Composable
 fun UsageScreen(api: BuildmeshApi, vm: BuildmeshViewModel) {
+    val state by vm.state.collectAsState()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val refresh = remember(api) { ListingRefresh() }
     var rows by remember(api) { mutableStateOf<List<JsonObject>?>(null) }
     var error by remember(api) { mutableStateOf("") }
     var busy by remember(api) { mutableStateOf(true) }
-    var reload by remember(api) { mutableIntStateOf(0) }
-    LaunchedEffect(api, reload, lifecycle) {
-        var force = reload > 0
+    var started by remember(api) { mutableStateOf(false) }
+    LaunchedEffect(api, refresh.reload, lifecycle, state.resourceRevision) {
+        // Every restart of this effect is a read the user asked for: the pull
+        // moves the screen's own counter and the app-bar action moves the
+        // shared resource revision. The first load is not one of them, and the
+        // lifecycle alone never restarts this effect.
+        var force = started
+        started = true
         lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             while (true) {
                 busy = true
                 try {
-                    val refresh = force
+                    val fresh = force
                     force = false
-                    rows = api.get("/api/usage?refresh=$refresh").objects()
+                    rows = api.get("/api/usage?refresh=$fresh").objects()
                     error = ""
+                    refresh.settle()
                 } catch (e: CancellationException) { throw e
                 } catch (e: Exception) {
                     if (e is ApiException && e.sessionRejected) { vm.unauthorized(); return@repeatOnLifecycle }
                     error = friendlyError(e)
+                    refresh.settle()
                 } finally { busy = false }
                 force = false
                 delay(60_000)
@@ -53,16 +69,20 @@ fun UsageScreen(api: BuildmeshApi, vm: BuildmeshViewModel) {
         }
     }
     Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text("Provider usage on your desktop", modifier = Modifier.weight(1f).padding(top = 12.dp))
-            TextButton(enabled = !busy, onClick = { reload++ }) { Text(if (busy) "Refreshing…" else "Refresh usage") }
-        }
+        Text("Provider usage on your desktop", modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp))
         if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-        if (error.isNotEmpty()) ErrorBanner(error + if (rows != null) " — showing last known data" else "") { error = "" }
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            if (rows == null) EmptyMessage(if (busy) "Loading usage…" else "Could not load usage. Tap Refresh usage to try again.")
-            else if (rows!!.isEmpty()) EmptyMessage("No usage meters available. Enable providers and sign in on the desktop.")
-            rows.orEmpty().forEach { UsageCard(it) }
+        if (error.isNotEmpty()) {
+            ErrorBanner(error + if (rows != null) " — showing last known data" else "") { error = "" }
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.End) {
+                TextButton(enabled = !busy, onClick = { refresh.request() }) { Text("Retry") }
+            }
+        }
+        PullToRefreshList(refresh, Modifier.weight(1f).fillMaxWidth()) {
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                if (rows == null) EmptyMessage(if (busy) "Loading usage…" else "Could not load usage. Pull down to try again, or use the refresh action in the app bar.")
+                else if (rows!!.isEmpty()) EmptyMessage("No usage meters available. Enable providers and sign in on the desktop.")
+                rows.orEmpty().forEach { UsageCard(it) }
+            }
         }
     }
 }

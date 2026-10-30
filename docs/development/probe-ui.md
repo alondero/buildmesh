@@ -117,8 +117,9 @@ share one destination but not one toolbar. The Lifecycle mode owns the header's
 Refresh; the discovered list is `ArchivedNodesTab`, which brings its own
 `ProbeToolbar` and Refresh, so the header renders its Refresh only in Lifecycle
 mode. The mode pair is a labelled segmented group whose active member owns a
-background and text colour, matching the Sidebar view switcher, and the
-repository filter renders only when it has an option to offer. Card timestamps
+background and text colour, so the current mode is visible rather than
+inferred, and the repository filter renders only when it has an option to
+offer. Card timestamps
 use `formatListTimestamp` (`src/lib/time.ts`) rather than the stored RFC 3339
 value, which carries Rust nanosecond precision.
 

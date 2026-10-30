@@ -32,6 +32,7 @@ import {
   launchChoices,
   launchFields,
   meshDefaultLabel,
+  meshDefaultProvider,
   MESH_DEFAULT_LABEL,
 } from "../../src/mobile/spawnMenu";
 
@@ -81,7 +82,7 @@ const plainOption = {
   id: "claude",
   label: "Claude Code",
   is_proxied: false,
-  capabilities: { supports_prefill: true },
+  capabilities: { supports_prefill: true, accepts_initial_prompt: true },
 } as Provider;
 
 /** A saved Launch Configuration: the row launches its own spawn option. */
@@ -229,11 +230,19 @@ describe("the phone's Spawn Menu (issue #2385)", () => {
     it("keeps the backend's order and drops the rows that cannot take a prompt", () => {
       const choices = launchChoices([
         plainOption,
-        { ...plainOption, id: "terminal", label: "Terminal", capabilities: { supports_prefill: false } },
+        { ...plainOption, id: "terminal", label: "Terminal", capabilities: { supports_prefill: false, accepts_initial_prompt: false } },
         { ...plainOption, id: "agy", label: "AGY" },
       ] as Provider[]);
 
       expect(choices.map((choice) => choice.id)).toEqual(["claude", "agy"]);
+    });
+
+    it("keeps a harness without startup prefill that takes a typed prompt", () => {
+      const choices = launchChoices([
+        { ...plainOption, id: "freebuff", label: "Freebuff", capabilities: { supports_prefill: false, accepts_initial_prompt: true } },
+      ] as Provider[]);
+
+      expect(choices.map((choice) => choice.id)).toEqual(["freebuff"]);
     });
 
     it("drops an unavailable row", () => {
@@ -279,6 +288,41 @@ describe("the phone's Spawn Menu (issue #2385)", () => {
           plainOption,
         ] as Provider[]),
       ).toBe(MESH_DEFAULT_LABEL);
+    });
+  });
+
+  describe("the mesh default provider", () => {
+    // The mark beside the split button's label is drawn from this row, so it
+    // must be the *pinned* Spawn Option.
+    it("resolves the mesh's pinned default Spawn Option", () => {
+      expect(
+        meshDefaultProvider({ default_provider: "claude" } as Mesh, [
+          plainOption,
+        ] as Provider[]),
+      ).toBe(plainOption);
+    });
+
+    it("resolves no row when the mesh pins no default the phone can see", () => {
+      // An app-wide default is invisible to the phone, so there is no row to
+      // draw a mark from: the label alone is the honest answer.
+      expect(
+        meshDefaultProvider({ default_provider: null } as Mesh, [
+          plainOption,
+        ] as Provider[]),
+      ).toBeNull();
+      expect(
+        meshDefaultProvider(null, [plainOption] as Provider[]),
+      ).toBeNull();
+    });
+
+    it("ignores a saved Launch Configuration row that carries the pinned id", () => {
+      // A saved configuration is a recipe, not a Spawn Option; the mark must
+      // not come from one.
+      expect(
+        meshDefaultProvider({ default_provider: "launch/saved-review" } as Mesh, [
+          savedConfiguration,
+        ] as Provider[]),
+      ).toBeNull();
     });
   });
 });

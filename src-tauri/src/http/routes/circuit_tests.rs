@@ -169,7 +169,7 @@ fn starting_a_review_uses_the_desktop_run_and_deduplicates_retries() {
     assert_eq!(launch.effort.as_deref(), Some("high"));
     assert_eq!(reply(run, Ok(())).status, "200 OK");
     cancel_core(run).unwrap();
-    for reviewer in ["terminal", "freebuff", "launch/deleted"] {
+    for reviewer in ["terminal", "launch/deleted"] {
         let refusal = start_review_core(
             node,
             StartNodeReviewRequest {
@@ -197,12 +197,12 @@ fn starting_a_review_uses_the_desktop_run_and_deduplicates_retries() {
         crate::circuit::context::CircuitContext::from_json(&saved_run.context_json).unwrap();
     assert_ne!(saved_context.get("review.provider"), Some("launch/deleted"));
     cancel_core(saved_run.id).unwrap();
-    for provider in ["dsh", "freebuff"] {
-        db::set_agent_node_provider(node, provider).unwrap();
-        let refusal = start_review_core(node, request()).unwrap_err().response();
-        assert_eq!(refusal.status, "409 Conflict");
-        assert!(text(&refusal).contains("no turn-completion signal"));
-    }
+    // A source with no lifecycle of its own (dsh, freebuff) is reviewable: it
+    // hands off through result files. Only the plain shell is refused.
+    db::set_agent_node_provider(node, "terminal").unwrap();
+    let refusal = start_review_core(node, request()).unwrap_err().response();
+    assert_eq!(refusal.status, "409 Conflict");
+    assert!(text(&refusal).contains("require an AI agent"));
 }
 
 fn text(response: &Response) -> String {

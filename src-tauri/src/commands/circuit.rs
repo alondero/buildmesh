@@ -909,7 +909,7 @@ pub(crate) fn trigger_circuit_from_node_now(
     }
     let source = crate::agent::provider::SpawnOptionId::from(node.provider.as_str());
     if crate::circuit::compatibility::reviewer_harness_reason(source.harness_id()).is_some() {
-        return Err("This agent's harness has no turn-completion signal. Start the review from an agent with a supported turn hook or transcript watcher.".into());
+        return Err("This agent's harness has no turn-completion signal. Start the review from an agent with a supported turn hook, transcript watcher or result-file handoff.".into());
     }
     let run_id =
         crate::db::create_node_circuit_run(node_id, circuit_id, max_rounds, reviewer_provider)?;

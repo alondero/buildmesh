@@ -38,6 +38,9 @@ const mesh = {
   created_at: "2026-06-11T00:00:00Z",
   scratchpad: "",
   sandbox: false,
+  // The mesh pins its own default Spawn Option, so the split buttons carry
+  // that provider's brand mark beside their label.
+  default_provider: "claude",
 } as Mesh;
 
 /** A second mesh, so a stored destination can differ from the preset one. */
@@ -63,7 +66,10 @@ const provider = {
   id: "claude",
   label: "Claude Code",
   is_proxied: false,
-  capabilities: { supports_prefill: true },
+  harness_id: "claude",
+  provider_id: null,
+  icon: "A",
+  capabilities: { supports_prefill: true, accepts_initial_prompt: true },
 } as Provider;
 
 const savedConfiguration = {
@@ -175,6 +181,27 @@ describe("the mesh card's spawn menu (issue #2385)", () => {
     expect(screen.getByRole("option", { name: "Mesh default" })).toBeTruthy();
     expect((screen.getByLabelText("Work in") as HTMLSelectElement).value).toBe(
       "1",
+    );
+  });
+
+  it("draws the mesh default's brand mark beside the split button's label", async () => {
+    render(
+      <NodeList
+        onOpenNode={vi.fn()}
+        onOpenAgentNodes={vi.fn()}
+        onOpenIssues={vi.fn()}
+        onOffline={vi.fn()}
+        onAuthFailed={vi.fn()}
+      />,
+    );
+
+    const start = await screen.findByTestId("mesh-spawn-1");
+    // The mark is the pinned default's registered brand, not a neutral dot.
+    expect(
+      start.querySelector(".spawn-split-brand")?.tagName.toLowerCase(),
+    ).toBe("svg");
+    expect(start.querySelector(".spawn-split-label")?.textContent).toBe(
+      "New agent",
     );
   });
 
@@ -480,6 +507,25 @@ describe("the Spawn Menu's side effects (issue #2385)", () => {
 });
 
 describe("the pull request card's spawn menu (issue #2385)", () => {
+  it("draws the mesh default's brand mark beside the split button's label", async () => {
+    render(
+      <PullRequestsScreen
+        mesh={mesh}
+        onBack={vi.fn()}
+        onAuthFailed={vi.fn()}
+      />,
+    );
+
+    const start = await screen.findByTestId("pr-spawn-12");
+    // The mark is the pinned default's registered brand, not a neutral dot.
+    expect(
+      start.querySelector(".spawn-split-brand")?.tagName.toLowerCase(),
+    ).toBe("svg");
+    expect(start.querySelector(".spawn-split-label")?.textContent).toBe(
+      "Claude Code",
+    );
+  });
+
   it("starts the mesh default from the main half", async () => {
     render(
       <PullRequestsScreen

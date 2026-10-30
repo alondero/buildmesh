@@ -89,11 +89,10 @@ describe('agent workflow title-bar control', () => {
     return render(<AgentReviewButton node={value} providerList={providers} />);
   }
 
-  // A harness with neither a native attention hook nor a passive turn watcher
-  // can never reach a yielded status, so `await_source` and `verdict` would
-  // park forever. The button must not mint that run.
+  // A plain shell can never reach a yielded status, so `await_source` and
+  // `verdict` would park forever. The button must not mint that run.
   it('disables the control and explains why when the node harness cannot yield a turn', () => {
-    renderButton({ ...node, provider: 'freebuff' });
+    renderButton({ ...node, provider: 'terminal' });
     const button = screen.getByRole('button', { name: 'Start review or circuit' }) as HTMLButtonElement;
     expect(button.disabled).toBe(true);
     expect(button.title).toContain('cannot run a review circuit');
@@ -129,17 +128,19 @@ describe('agent workflow title-bar control', () => {
     },
   );
 
-  it('disables the control for a legacy id that resolves to a blocked harness', () => {
-    renderButton({ ...node, provider: 'deepseek' });
-    expect((screen.getByRole('button', { name: 'Start review or circuit' }) as HTMLButtonElement).disabled).toBe(true);
+  // A harness with no hook or watcher hands off through the result file every
+  // circuit prompt asks it for, so it can be reviewed and can review.
+  it.each(['freebuff', 'perch', 'deepseek'])('enables the control for the result-file harness %p', provider => {
+    renderButton({ ...node, provider });
+    expect((screen.getByRole('button', { name: 'Start review or circuit' }) as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it('marks a reviewer harness that cannot yield a turn unavailable in the shared menu', () => {
+  it('offers a result-file harness as a reviewer in the shared menu', () => {
     renderButton(node, [...PROVIDERS, spawnOption('cline', 'Cline'), spawnOption('freebuff', 'Freebuff')]);
     fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
-    const blocked = screen.getByRole('menuitem', { name: /Freebuff/ });
-    expect(blocked.getAttribute('aria-disabled')).toBe('true');
-    expect(blocked.textContent).toContain('cannot be used as the reviewer');
+    const freebuff = screen.getByRole('menuitem', { name: /Freebuff/ });
+    expect(freebuff.getAttribute('aria-disabled')).toBe('false');
+    expect(freebuff.textContent).not.toContain('cannot be used as the reviewer');
     // Issue #1775: Cline carries a hook now, so its row is pickable.
     expect(screen.getByRole('menuitem', { name: /Cline/ }).getAttribute('aria-disabled')).toBe('false');
     // Terminal stays filtered out entirely — it is not an agent.

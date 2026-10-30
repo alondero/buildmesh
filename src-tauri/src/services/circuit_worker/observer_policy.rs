@@ -76,7 +76,7 @@ fn render(harness: &str, strategy: &ObservationStrategy) -> CircuitObserverCapab
         foreground,
         owned_work,
         final_report: notes.final_report.into(),
-        reconciliation: format!("{}. Stable yielded transcript reports can advance after input/session freshness checks and known-work checks; this does not establish complete native ownership coverage.", notes.reconciliation),
+        reconciliation: format!("{}. Stable yielded transcript reports can advance after input/session freshness checks and known-work checks; this does not establish complete native ownership coverage. A settled Circuit result file also ends a turn: it is the only turn signal of a harness without hooks or watchers, and recovers a lost signal after a quiet terminal otherwise.", notes.reconciliation),
         yielded_budget_ms: strategy.reconciliation.yielded_budget_ms,
         active_budget_ms: super::observation::ACTIVE_WAIT_MS as u32,
         coverage: strategy.coverage(),
@@ -84,6 +84,7 @@ fn render(harness: &str, strategy: &ObservationStrategy) -> CircuitObserverCapab
 }
 
 #[cfg(test)]
+// allow-test-in-production: this suite predates the sibling-test-file rule. Issue #2636 only revises its OpenCode assertions; moving the suite is out of scope.
 mod tests {
     use super::*;
 
@@ -113,12 +114,17 @@ mod tests {
                 "{id}"
             );
             if id == "opencode" {
-                // Issue #1899: explicit unsupported contract. No Circuit
-                // source is declared (Circuit execution stays Unverified), but
-                // the provenance records the inspected version, platform,
-                // hook/pull sources, and the missing ownership registry
-                // instead of the generic fallback.
+                // Issue #1899: the foreground is an explicit unsupported
+                // contract (Circuit execution stays Unverified), and the
+                // provenance records the inspected version, platform and hook
+                // source instead of the generic fallback. Issue #2636: native
+                // subagent sessions are the one thing the plugin does report,
+                // so owned work is declared, with the unvalidated modes named.
                 assert!(!strategy.has_foreground_source());
+                assert!(
+                    policy.foreground.starts_with("Unavailable:"),
+                    "child-session hooks must not make the foreground read as available"
+                );
                 assert!(
                     policy.foreground.contains("OpenCode"),
                     "must record the inspected harness version"
@@ -127,11 +133,24 @@ mod tests {
                     policy.foreground.contains("session.idle"),
                     "must name the hook source that was inspected"
                 );
-                assert_eq!(policy.coverage.owned_work, OwnedWorkKind::Unavailable);
+                assert_eq!(policy.coverage.owned_work, OwnedWorkKind::HookRegistry);
                 assert!(
-                    policy.owned_work.contains("child/background"),
-                    "must state the ownership coverage gap"
+                    !policy.owned_work.starts_with("Unavailable:"),
+                    "child sessions are reported"
                 );
+                for stated in [
+                    "child session",
+                    "task",
+                    "no registry",
+                    "background",
+                    "resumed",
+                ] {
+                    assert!(
+                        policy.owned_work.contains(stated),
+                        "owned-work provenance must state {stated:?}: {}",
+                        policy.owned_work
+                    );
+                }
                 assert_eq!(policy.yielded_budget_ms, 30_000);
             } else if id == "cline" {
                 // Issue #1902: same explicit-unsupported shape for Cline.

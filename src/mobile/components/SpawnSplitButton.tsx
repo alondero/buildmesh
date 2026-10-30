@@ -6,14 +6,25 @@
  * the surface's default launch, and the chevron half opens the menu so the
  * user can pick a different Spawn Option or saved Launch Configuration.
  *
+ * The main half carries the **default provider's brand mark** beside its
+ * label, the same mark the desktop's quick-spawn half shows (issue #2040): the
+ * icon is how the user tells *which* provider the default half will run before
+ * they tap it. The mark is drawn from the mesh's pinned default Spawn Option
+ * only — an app-wide default is invisible to the phone, so an unpinned mesh
+ * shows the **Mesh default** label with no mark rather than a wrong one.
+ *
  * The menu itself is *not* rendered here: it is a bottom sheet, and the
  * sheet is anchored to the app root rather than to the card the button sits
  * in. The surface that owns the button therefore owns the sheet too, and
  * passes the open state down so the chevron can advertise it.
  */
+import type { Provider } from "../api";
+import { ProviderIcon } from "../../components/Providers/ProviderIcon";
+
 export function SpawnSplitButton({
   label,
   busyLabel,
+  provider,
   onStart,
   onToggleMenu,
   menuOpen,
@@ -28,6 +39,11 @@ export function SpawnSplitButton({
   label: string;
   /** The main half's label while its launch is in flight. */
   busyLabel?: string;
+  /**
+   * The mesh's pinned default Spawn Option, when the phone can resolve one.
+   * Its brand mark is drawn beside the label; `null` leaves the label alone.
+   */
+  provider?: Provider | null;
   /** Runs the surface's default launch. */
   onStart: () => void;
   /** Opens or closes the Spawn Menu sheet. */
@@ -61,7 +77,29 @@ export function SpawnSplitButton({
         disabled={inert}
         aria-label={ariaLabel}
       >
-        {busy ? (busyLabel ?? "Starting…") : label}
+        {busy ? (
+          <span className="spawn-split-label">{busyLabel ?? "Starting…"}</span>
+        ) : (
+          <>
+            {provider && (
+              <span className="spawn-split-icon">
+                <ProviderIcon
+                  // A proxied row's mark is the account's, a native row's the
+                  // harness's — the same key the desktop's cluster and the
+                  // phone's provider picker use.
+                  providerId={provider.provider_id ?? provider.harness_id}
+                  // The wire glyph stands in for a harness with no registered
+                  // brand mark, the way the phone's node rows and provider
+                  // picker do.
+                  fallbackGlyph={provider.icon}
+                  title={provider.label}
+                  className="spawn-split-brand"
+                />
+              </span>
+            )}
+            <span className="spawn-split-label">{label}</span>
+          </>
+        )}
       </button>
       <button
         type="button"

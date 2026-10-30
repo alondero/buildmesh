@@ -8,7 +8,9 @@ import { AppBar, Sheet } from '../ui';
 import { SpawnSplitButton } from '../components/SpawnSplitButton';
 import { SpawnMenuSheet } from '../components/SpawnMenuSheet';
 import { useSpawnMenu } from '../useSpawnMenu';
-import { meshDefaultLabel, type LaunchChoice } from '../spawnMenu';
+import { meshDefaultLabel, meshDefaultProvider, type LaunchChoice } from '../spawnMenu';
+
+type StateFilter = 'open' | 'closed';
 
 function canMerge(pr: GitHubPullRequest) {
   return pr.state === 'open' && !pr.draft && pr.mergeable === true &&
@@ -75,6 +77,7 @@ function PullRequestList({ meshId, mesh, nodeId, onAuthFailed, menuPr, onMenuPrC
   onSpawningPrChange: (pr: number | null) => void;
 }) {
   const [feed, setFeed] = useState<GitHubPullRequestFeed | null>(null);
+  const [stateFilter, setStateFilter] = useState<StateFilter>('open');
   const [branch, setBranch] = useState('');
   const [error, setError] = useState('');
   const [spawnError, setSpawnError] = useState('');
@@ -84,6 +87,10 @@ function PullRequestList({ meshId, mesh, nodeId, onAuthFailed, menuPr, onMenuPrC
   const [busy, setBusy] = useState(false);
   const active = useRef(false);
   const version = useRef(0);
+  // Polling reads the filter through a ref: the polling hook keeps the
+  // latest `refresh` closure, so a filter change is picked up on the next
+  // tick even before the state update lands.
+  const filter = useRef<StateFilter>('open');
   const merging = useRef(false);
   // A launch is guarded by a ref, not by state: `setSpawningPr` is applied on
   // the next render, so two taps in the same tick would both read
@@ -106,7 +113,7 @@ function PullRequestList({ meshId, mesh, nodeId, onAuthFailed, menuPr, onMenuPrC
       // `signal` is the polling hook's dispose signal (issue #1576): an
       // unmounted screen cancels its own in-flight feed read.
       const [next, currentBranch] = await Promise.all([
-        listPulls(meshId, signal), nodeId === undefined ? Promise.resolve('') : gitBranch(nodeId, signal).then(b => b.branch),
+        listPulls(meshId, filter.current, signal), nodeId === undefined ? Promise.resolve('') : gitBranch(nodeId, signal).then(b => b.branch),
       ]);
       if (!owns()) return;
       setConfirm(current => {
@@ -124,6 +131,21 @@ function PullRequestList({ meshId, mesh, nodeId, onAuthFailed, menuPr, onMenuPrC
     }
   }
   useVisibilityPolling(refresh, 10000);
+
+  function changeFilter(next: StateFilter) {
+    if (next === filter.current) return;
+    filter.current = next;
+    setStateFilter(next);
+    // The old rows belong to the previous filter. Drop them so an open PR
+    // cannot linger under the "Closed" heading while the new read is in
+    // flight.
+    setFeed(null);
+    setConfirm(null);
+    setError('');
+    setNotice('');
+    onMenuPrChange?.(null);
+    void refresh();
+  }
 
   async function merge(pr: GitHubPullRequest) {
     if (merging.current || !canMerge(pr) || confirm !== pr.number) return;
@@ -178,24 +200,35 @@ function PullRequestList({ meshId, mesh, nodeId, onAuthFailed, menuPr, onMenuPrC
     pr.head_repo_clone_url === `${pr.url.split('/pull/')[0]}.git`)) ?? [];
   // The main half of the split button starts the mesh's own default.
   const defaultLabel = meshDefaultLabel(mesh, providers);
+  const defaultProvider = meshDefaultProvider(mesh, providers);
   return <section className="mobile-pulls" aria-label="Pull requests">
-    <div className="pulls-heading"><h2>{nodeId === undefined ? 'Open pull requests' : "This node’s pull request"}</h2>
+    <div className="pulls-heading"><h2>{nodeId === undefined ? (stateFilter === 'open' ? 'Open pull requests' : 'Closed pull requests') : "This node’s pull request"}</h2>
       <button className="chip-btn" disabled={busy} onClick={() => void refresh()}>Refresh PR status</button></div>
+    {nodeId === undefined && <div className="filter-chips" aria-label="Pull request state">
+      {(['open', 'closed'] as const).map(state => <button
+        key={state}
+        className="chip-btn"
+        aria-pressed={stateFilter === state}
+        disabled={busy}
+        onClick={() => changeFilter(state)}
+      >{state === 'open' ? 'Open' : 'Closed'}</button>)}
+    </div>}
     {error && <p role="alert" className="inline-error">{error}</p>}
     {spawnError && !menuPr && <p role="alert" className="inline-error">{spawnError}</p>}
     {spawnNotice && <p role="status">{spawnNotice}</p>}
     {notice && <p role="status">{notice}</p>}
     {!feed && !error && !notice && <p>Loading pull requests…</p>}
     {feed && !feed.completeness.complete && <p className="health-note">Showing first {feed.completeness.returned}{feed.completeness.reported_total !== null ? ` of ${feed.completeness.reported_total}` : ''} pull requests. Results are incomplete ({feed.completeness.incomplete_reason}). {nodeId !== undefined && 'This node’s PR may be missing from this list.'}</p>}
-    {feed && prs.length === 0 && <p>{nodeId === undefined ? 'No open pull requests in the returned results.' : !branch ? 'The node has no current branch.' : `No open pull request found for ${branch} in the returned results.`}</p>}
+    {feed && prs.length === 0 && <p>{nodeId === undefined ? `No ${stateFilter} pull requests in the returned results.` : !branch ? 'The node has no current branch.' : `No open pull request found for ${branch} in the returned results.`}</p>}
     {prs.map(pr => <article className="pull-request-card" key={pr.number}>
       <a href={pr.url} target="_blank" rel="noreferrer">PR #{pr.number}: {pr.title}</a>
-      <p>{pr.head_ref} · {pr.state} · {mergeLabel(pr)}</p>
+      <p>{pr.head_ref} · {pr.state}{pr.state === 'open' ? ` · ${mergeLabel(pr)}` : ''}</p>
       <p>Checks: {({ success: 'passing', failure: 'failing', error: 'error', pending: 'pending', expected: 'expected' } as Record<string, string>)[pr.checks_state ?? ''] ?? 'not reported'}</p>
       <p>Review: {({ approved: 'approved', changes_requested: 'changes requested', review_required: 'required' } as Record<string, string>)[pr.review_decision ?? ''] ?? 'no decision reported'}</p>
-      {nodeId === undefined && <SpawnSplitButton
+      {nodeId === undefined && stateFilter === 'open' && <SpawnSplitButton
         label={defaultLabel}
         busyLabel="Starting…"
+        provider={defaultProvider}
         testId={`pr-spawn-${pr.number}`}
         ariaLabel={`Start agent on pull request #${pr.number} with ${defaultLabel}`}
         busy={spawningPr === pr.number}

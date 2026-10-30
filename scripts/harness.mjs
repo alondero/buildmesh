@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import { execFileSync, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFileSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
@@ -12,19 +12,12 @@ import { acquireSlot, agentTestLimit, agentTestSlotDirectory, heavyGateEnv, heav
 import { selfReviewReport } from './self-review.mjs';
 import { conptyPrerequisite, failureLines, gatePassed, isolatedCommand, isolateTests, knownFlakes, readTestReport, validateFlakeIssues } from './harness-test-failures.mjs';
 import { fastGates, pathIncludeDrift, planChecks } from './harness-check.mjs';
+import { recordReview, reviewContext, validateReview, REVIEW_USAGE } from './harness-review.mjs';
+import { event, git, readJson, saveJson, statePath, taskAt } from './harness-state.mjs';
 import { runWorktreeDeps, WORKTREE_DEPS_USAGE } from './worktree-deps.mjs';
 
-const USAGE = 'harness start --spec <json> | update --spec <json> | status | metrics | check [--base <commit>] | verify [--base <commit>] [--full] | wait [--max-seconds <n>] | finish | evaluate [--case <id>] | checkpoint | record-rollback --ref <commit> | ' + WORKTREE_DEPS_USAGE;
+const USAGE = 'harness start --spec <json> | update --spec <json> | status | metrics | ' + REVIEW_USAGE + ' | check [--base <commit>] | verify [--base <commit>] [--full] | wait [--max-seconds <n>] | finish | evaluate [--case <id>] | checkpoint | record-rollback --ref <commit> | ' + WORKTREE_DEPS_USAGE;
 const EXIT = { PASS: 0, FAIL: 1, FLAKY: 1, BLOCKED: 2, TIMEOUT: 124 };
-const statePath = (root, name) => join(root, '.harness', name);
-const git = (root, ...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
-const readJson = (path) => existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : null;
-function saveJson(path, value) {
-  mkdirSync(dirname(path), { recursive: true });
-  const temporary = `${path}.${randomUUID()}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`);
-  renameSync(temporary, path);
-}
 function alive(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; }
 }
@@ -45,9 +38,6 @@ function lock(root, name = 'lock', action = null) {
   }
   writeFileSync(fd, JSON.stringify({ pid: process.pid, action, startedAt: new Date().toISOString() }));
   return () => { closeSync(fd); unlinkSync(path); };
-}
-function event(root, value) {
-  appendFileSync(statePath(root, 'events.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), ...value })}\n`);
 }
 function setPhase(task, phase) {
   if (task.phase === phase) return;
@@ -213,6 +203,29 @@ export function fingerprint(root, base, prefix = '') {
   }
   return hash.digest('hex');
 }
+// The content of a tree, without the environment and without the git state.
+//
+// The fingerprint answers "which tree, verified by which run": it hashes the
+// run identity, HEAD and the index, so it moves when the machine moves and
+// when the work is committed. A review answers a different question — "which
+// code was read" — and the reviewer and the implementer are separate
+// processes that are not required to share an environment. The repo actively
+// gives them different ones: `scripts/review-checkout.mjs` sets its own
+// CARGO_TARGET_DIR and clears TS_RS_EXPORT_DIR, and a task-local
+// CARGO_TARGET_DIR is the documented way to verify concurrent worktrees. An
+// approval bound to the environment-bound fingerprint could therefore not
+// match a receipt produced elsewhere, which is the one failure this ledger
+// exists to remove.
+export function contentTree(root, prefix = '') {
+  const hash = createHash('sha256');
+  for (const path of treePaths(root)) {
+    if (path.startsWith('.harness/') || !path.startsWith(prefix)) continue;
+    const { mode, data } = entryOf(root, path);
+    hash.update(`${path.length}:${path}\0${mode}\0${data.length}:`);
+    hash.update(data);
+  }
+  return hash.digest('hex');
+}
 // One content digest per working-tree file, read once so every gate's input hash
 // shares a single pass over the tree.
 function treeSnapshot(root) {
@@ -238,11 +251,6 @@ function gateInputs(gate, snapshot, identity, tree) {
     for (const entry of snapshot) if (gateReads(gate, entry.path)) hash.update(entry.line);
   }
   return hash.digest('hex');
-}
-function taskAt(root) {
-  const task = readJson(statePath(root, 'active-task.json'));
-  if (task && task.root !== root) throw new Error('BLOCKED: task belongs to a different worktree.');
-  return task;
 }
 function stringList(value, name) {
   if (!Array.isArray(value) || !value.length || value.some(item => typeof item !== 'string' || !item.trim())) throw new Error(`${name} must be a nonempty array of strings.`);
@@ -277,17 +285,30 @@ function update(root, spec) {
     if (spec[key] !== undefined && (!Array.isArray(spec[key]) || spec[key].some(item => typeof item !== 'string'))) throw new Error(`${key} must be an array of strings.`);
   }
   if (spec.nextAction !== undefined && (typeof spec.nextAction !== 'string' || !spec.nextAction.trim())) throw new Error('nextAction must be a nonempty string.');
-  if (spec.review !== undefined) {
-    const review = spec.review;
-    if (!review || typeof review.reviewer !== 'string' || !review.reviewer.trim() || typeof review.summary !== 'string' || !review.summary.trim() || !['APPROVE', 'REQUEST_CHANGES', 'BLOCKED'].includes(review.verdict) || !Array.isArray(review.findings) || review.findings.some(item => typeof item !== 'string')) throw new Error('review requires reviewer, summary, verdict (APPROVE/REQUEST_CHANGES/BLOCKED), and findings array.');
-  }
+  const { review, ...progress } = spec;
+  // The whole spec is checked before anything is written. A payload the
+  // ledger would refuse — an APPROVE that carries findings, a verdict the
+  // ledger does not know, a payload that is null — must not advance the task
+  // first and fail afterwards: `update` applies the spec or leaves the task
+  // untouched, so the task state and the event log agree about what happened
+  // (the test "an update with an invalid review leaves the task and the events
+  // untouched" covers it). The payload goes to the rule whole: the rule owns
+  // its shape, so a caller does not read fields off a payload that may be
+  // null.
+  const recorded = review === undefined ? null : validateReview(review, { prefix: 'review.' });
   if (spec.phase) setPhase(task, spec.phase);
-  Object.assign(task, spec);
+  Object.assign(task, progress);
   if (spec.evidence) task.evidenceTree = fingerprint(root, task.base);
-  if (spec.review) task.reviewTree = fingerprint(root, task.base);
   saveJson(statePath(root, 'active-task.json'), task);
+  // The ledger is the only writer of a verdict. A verdict recorded here is
+  // recorded through the same path the `review` command uses, so a round is
+  // appended and a recorded verdict has its round behind it (issue
+  // #2630; the test "a verdict recorded through update --spec appends a round
+  // to the ledger" covers it): a follow-up reviewer that reads the ledger then
+  // sees the verdict instead of an empty history.
+  if (recorded) recordReview(root, { verdict: recorded.verdict, reviewer: recorded.reviewer, summary: recorded.summary, finding: recorded.findings }, { fingerprint, changedPaths, contentTree, runIdentity, identityMismatch });
   event(root, { type: 'progress', taskId: task.id, phase: task.phase, nextAction: task.nextAction });
-  return task;
+  return taskAt(root) ?? task;
 }
 function npmCommand(root, args) {
   // npm supplies the real JS entrypoint; direct Node invocation avoids Windows
@@ -470,7 +491,11 @@ export async function verify(root, { base: requestedBase, full = false, plan = p
   // The gate cache is keyed on the stable identity: a probe that missed its
   // deadline must not invalidate a PASS that still applies (issue #2581).
   const identity = stableIdentity(root, base);
-  const receipt = { taskId: task?.id ?? null, root, base, head: git(root, 'rev-parse', 'HEAD').trim(), tree, full, paths, gatePlan: gates, gates: [], outcome: 'BLOCKED', startedAt: new Date().toISOString(), runIdentity: runIdentity(root, base) };
+  // The receipt carries both trees: `tree` names the run that certified it,
+  // `contentTree` names the code it certified. An approval is bound to the
+  // second one, because a reviewer and the implementer do not share a
+  // machine.
+  const receipt = { taskId: task?.id ?? null, root, base, head: git(root, 'rev-parse', 'HEAD').trim(), tree, contentTree: contentTree(root), full, paths, gatePlan: gates, gates: [], outcome: 'BLOCKED', startedAt: new Date().toISOString(), runIdentity: runIdentity(root, base) };
   // Advisory only, and printed first: a repair is cheapest before the slow gates have run against it.
   let selfReviewFlags = 0;
   if (selfReview) {
@@ -643,8 +668,29 @@ export function completion(root) {
   if (JSON.stringify(expected) !== JSON.stringify(receipt.gatePlan)) return { outcome: 'BLOCKED', reason: 'Required gate plan changed. Run npm run verify.' };
   if (receipt.outcome !== 'PASS') return { outcome: receipt.outcome, reason: receipt.reason ?? receipt.gates.find(row => row.outcome !== 'PASS')?.reason ?? 'Incomplete verification.' };
   if (receipt.gates.length !== expected.length || expected.some(gate => !receipt.gates.some(row => row.id === gate.id && gatePassed(row)))) return { outcome: 'BLOCKED', reason: 'Receipt does not include every required gate.' };
-  if (task.evidence.length !== task.criteria.length || task.evidence.some(value => !value.trim()) || task.review?.verdict !== 'APPROVE' || task.review.findings.length || task.evidenceTree !== receipt.tree || task.reviewTree !== receipt.tree || task.blockers.length) return { outcome: 'BLOCKED', reason: 'Record one evidence entry per acceptance criterion, independent APPROVE review with no unresolved findings for this tree, and resolve blockers with harness update.' };
+  if (task.evidence.length !== task.criteria.length || task.evidence.some(value => !value.trim()) || task.review?.verdict !== 'APPROVE' || task.review.findings.length || task.evidenceTree !== receipt.tree || task.blockers.length) return { outcome: 'BLOCKED', reason: 'Record one evidence entry per acceptance criterion, independent APPROVE review with no unresolved findings for this tree, and resolve blockers with harness update.' };
+  if (!reviewCovers(task, receipt)) return { outcome: 'BLOCKED', reason: reviewReason(root, task, receipt) };
   return { outcome: 'PASS', reason: 'Required gates are current; acceptance and review evidence are recorded.' };
+}
+// The approval must cover the code the receipt verified. The receipt's tree
+// hash also names the run that certified it, so an approval recorded by a
+// reviewer working in another environment would not match it; the content tree
+// is the question both sides can answer. A task whose approval predates the
+// content tree falls back to the environment-bound comparison.
+function reviewCovers(task, receipt) {
+  if (task.reviewContentTree && receipt.contentTree) return task.reviewContentTree === receipt.contentTree;
+  return task.reviewTree === receipt.tree;
+}
+// The review side of the same diagnosis staleReason gives the receipt side:
+// name what differs instead of reporting that an approval is missing.
+function reviewReason(root, task, receipt) {
+  if (task.reviewContentTree && receipt.contentTree && task.reviewContentTree !== receipt.contentTree) {
+    return 'The independent APPROVE does not cover the verified code: the tree changed after the approval was recorded. Re-record it with npm run harness -- review --verdict APPROVE --reviewer <name> --summary <text>.';
+  }
+  const differences = identityMismatch(task.reviewIdentity, runIdentity(root, task.base));
+  return differences.length
+    ? `The independent APPROVE was recorded in a different environment (${differences.join('; ')}). Re-record it here with npm run harness -- review --verdict APPROVE --reviewer <name> --summary <text>.`
+    : 'Record one evidence entry per acceptance criterion, independent APPROVE review with no unresolved findings for this tree, and resolve blockers with harness update.';
 }
 const MAX_SUMMARY_GATES = 8;
 const oneLine = (text, limit = 300) => String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, limit);
@@ -712,7 +758,16 @@ function status(root) {
   // move.
   const differs = receipt ? identityMismatch(receipt.runIdentity, runIdentity(root, receipt.base)) : [];
   const current = receipt ? receipt.tree === fingerprint(root, receipt.base) && differs.length === 0 : null;
-  return { branch: git(root, 'branch', '--show-current').trim(), root, gitStatus: git(root, 'status', '--short').trim(), task, verification: receipt ? { outcome: receipt.outcome, current, differs, gates: receipt.gates.map(row => `${row.id}:${row.outcome}`) } : null };
+  // The approval's binding, named. An approval recorded in another environment
+  // still covers the code, so the difference is reported rather than hidden:
+  // "the approval is missing" and "the approval was recorded elsewhere" are
+  // different problems with different repairs.
+  const review = task?.review ? {
+    verdict: task.review.verdict,
+    coversReceipt: receipt ? reviewCovers(task, receipt) : null,
+    environment: task.reviewIdentity ? identityMismatch(task.reviewIdentity, runIdentity(root, task.base)) : [],
+  } : null;
+  return { branch: git(root, 'branch', '--show-current').trim(), root, gitStatus: git(root, 'status', '--short').trim(), task, review, verification: receipt ? { outcome: receipt.outcome, current, differs, gates: receipt.gates.map(row => `${row.id}:${row.outcome}`) } : null };
 }
 function metrics(root) {
   const path = statePath(root, 'events.jsonl');
@@ -846,12 +901,15 @@ async function internalGate(root, name) {
   } else throw new Error('Unknown internal gate.');
 }
 function parse(argv) {
-  const options = { action: argv[0] };
+  const options = { action: argv[0], finding: [] };
   for (let i = 1; i < argv.length; i += 1) {
     const flag = argv[i];
     if (flag === '--full') options.full = true;
+    else if (flag === '--show') options.show = true;
     else if (flag === '--max-seconds' && Number(argv[i + 1]) > 0) options.maxSeconds = Number(argv[++i]);
-    else if (['--spec', '--base', '--case', '--ref'].includes(flag) && argv[i + 1]) options[flag.slice(2)] = argv[++i];
+    else if (flag === '--finding' && argv[i + 1]) options.finding.push(argv[++i]);
+    else if (flag === '--findings-file' && argv[i + 1]) options.findingsFile = argv[++i];
+    else if (['--spec', '--base', '--case', '--ref', '--verdict', '--reviewer', '--summary'].includes(flag) && argv[i + 1]) options[flag.slice(2)] = argv[++i];
     else throw new Error(USAGE);
   }
   return options;
@@ -874,6 +932,17 @@ async function main() {
     const options = parse(args);
     if (options.action === 'status') { console.log(JSON.stringify(status(root), null, 2)); return; }
     if (options.action === 'metrics') { console.log(JSON.stringify(metrics(root), null, 2)); return; }
+    // Reading the review ledger is advisory: a follow-up reviewer loads the last
+    // round without taking the lock, so it can run while a verify holds it.
+    // It reads the ledger and records no round, so it refuses the write flags
+    // rather than taking the read path and reporting success for a round it
+    // did not write.
+    if (options.action === 'review' && options.show) {
+      const writes = ['verdict', 'reviewer', 'summary', 'findingsFile'].filter(key => options[key] !== undefined);
+      if (writes.length || options.finding.length) throw new Error('review --show only reads the ledger; it cannot be combined with --verdict, --reviewer, --summary, --finding or --findings-file. Record the round with npm run harness -- review --verdict <verdict> --reviewer <name> --summary <text>.');
+      console.log(JSON.stringify(reviewContext(root, { fingerprint, changedPaths, contentTree, runIdentity, identityMismatch }), null, 2));
+      return;
+    }
     if (options.action === 'wait') {
       const result = await waitForVerify(root, { maxMs: (options.maxSeconds ?? 540) * 1000 });
       console.log(result.lines.join('\n'));
@@ -902,6 +971,8 @@ async function main() {
     if (options.action === 'start' || options.action === 'update') {
       if (!options.spec) throw new Error(USAGE);
       result = (options.action === 'start' ? start : update)(root, readJson(resolve(options.spec)));
+    } else if (options.action === 'review') {
+      result = recordReview(root, options, { fingerprint, changedPaths, contentTree, runIdentity, identityMismatch });
     } else if (options.action === 'verify') {
       if (!options.base && !taskAt(root)) throw new Error('BLOCKED: start a task or provide --base <commit>.');
       result = await verify(root, options);

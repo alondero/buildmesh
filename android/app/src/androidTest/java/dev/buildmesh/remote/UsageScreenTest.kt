@@ -20,7 +20,7 @@ import java.util.concurrent.TimeUnit
 class UsageScreenTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
 
-    @Test fun manualRefreshIsConsumedBeforeTheNextForegroundRead() {
+    @Test fun theAppBarRefreshForcesOneFreshReadAndTheNextForegroundReadIsNotForced() {
         val app = ApplicationProvider.getApplicationContext<Application>()
         SessionStore(app).clear()
         lateinit var vm: BuildmeshViewModel
@@ -40,7 +40,9 @@ class UsageScreenTest {
                 } }
                 compose.waitUntil(5000) { compose.onAllNodesWithText("Claude subscription").fetchSemanticsNodes().isNotEmpty() }
                 assertEquals("/api/usage?refresh=false", server.takeRequest(5, TimeUnit.SECONDS)?.path)
-                compose.onNodeWithText("Refresh usage").assertIsEnabled().performClick()
+                // The app-bar action is the shared recovery affordance, and a
+                // read the user asked for reads past the desktop's cache.
+                compose.runOnUiThread { vm.retry() }
                 compose.waitForIdle()
                 assertEquals("/api/usage?refresh=true", server.takeRequest(5, TimeUnit.SECONDS)?.path)
                 compose.waitForIdle()

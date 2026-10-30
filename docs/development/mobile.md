@@ -84,12 +84,15 @@ state, review decision and mergeability. The browser and native Android client
 read the live worktree branch from the git branch route and match it to the
 same-repository PR's `head_ref`; the node's stored base reference is not the
 source branch. Fork PRs with a coincidentally matching branch are excluded.
-The mesh's **Pull requests** shortcut lists open PRs without merge controls for
-unrelated work. An incomplete feed states its returned count, reported total
+The mesh's **Pull requests** shortcut switches between open and closed PRs
+without merge controls for unrelated work. Closed PRs are read-only and offer
+no spawn control. An incomplete feed states its returned count, reported total
 when available, and reason; absence from a truncated feed does not establish
 that a node has no PR.
 
-The clients poll while foregrounded and offer **Refresh PR status**. Unknown
+The clients poll while foregrounded. The browser offers **Refresh PR status**;
+the Android client refreshes by pulling down and keeps its own **Retry** on a
+failed read. Unknown
 mergeability, drafts, conflicts, policy blocks, behind-base branches, failing
 or pending checks, and required or changes-requested reviews disable merge.
 Missing check/review fields are shown as not reported, rather than passing or
@@ -454,6 +457,15 @@ The menu reaches the phone through three surfaces, each a split button
 - a **mesh** card — both halves open Capture with that mesh and the chosen
   launch already selected, because Capture is where the first prompt is
   written.
+
+The main half carries the **default provider's brand mark** beside its label,
+the same mark the desktop's quick-spawn half shows (issue #2040): the mark is
+how the user tells *which* provider the default half will run before they tap
+it. The mark comes from the mesh's **pinned** default Spawn Option only. An
+app-wide default is invisible to the phone, so an unpinned mesh keeps the
+**Mesh default** label with no mark rather than a wrong one, and a saved
+Launch Configuration is a recipe rather than a Spawn Option, so its row is not
+the mesh's default either.
 
 Capture offers **Mesh default** as its own choice, and a create request for
 it carries neither `provider` nor `configuration_id`.
