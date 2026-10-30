@@ -558,7 +558,8 @@ impl AgentProvider for AgyAdapter {
 }
 
 #[cfg(test)]
-mod tests { // allow-test-in-production: existing inline adapter tests; timeout repair only
+// allow-test-in-production: existing inline adapter tests; timeout repair only.
+mod tests {
     use super::*;
     use crate::agent::capabilities::{EffortControlKind, ResolvedAgentConfig};
     use crate::agent::launch::{
