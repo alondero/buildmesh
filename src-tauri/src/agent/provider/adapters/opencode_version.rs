@@ -93,8 +93,12 @@ fn probe_uncached(executable: &Path, timeout: Duration) -> Option<u64> {
         trailing_args: vec![],
         windows_shell: shell_for(Platform::current()),
     };
-    let mut command =
+    let command =
         crate::agent::spawn_environment::background_command(&recipe, Some(executable)).ok()?;
+    run_version_probe(command, timeout)
+}
+
+fn run_version_probe(mut command: std::process::Command, timeout: Duration) -> Option<u64> {
     command.env_remove("FORCE_COLOR").env("NO_COLOR", "1");
     let output = run_private_command(command, "OpenCode version", timeout).ok()?;
     output
@@ -161,13 +165,20 @@ fn drain(
     })
 }
 
+/// V1 discovery and launch preserve the pre-probe contract on unknown output;
+/// V2 requires a positively identified matching major.
+pub(crate) fn accepts_major(actual: Option<u64>, expected: u64) -> bool {
+    actual == Some(expected) || (expected == 1 && actual.is_none())
+}
+
 pub(crate) fn require_major(executable: &Path, expected: u64) -> Result<(), String> {
-    match probe(executable) {
-        Some(actual) if actual == expected => Ok(()),
-        // V1 historically launched without a version probe. Only a positively
-        // identified mismatch should break that existing launch contract.
-        None if expected == 1 => Ok(()),
-        actual => Err(format!("This harness requires OpenCode {expected}; executable {} reported major {actual:?}. Pin the matching CLI executable in Settings.", executable.display())),
+    let actual = probe(executable);
+    if accepts_major(actual, expected) {
+        return Ok(());
+    }
+    match actual {
+        Some(actual) => Err(format!("This harness requires OpenCode {expected}; executable {} reported major {actual}. Pin the matching CLI executable in Settings.", executable.display())),
+        None => Err(format!("Could not determine the OpenCode {expected} version for executable {}. Its --version probe failed, timed out, or returned unrecognized output. Check the CLI and retry.", executable.display())),
     }
 }
 

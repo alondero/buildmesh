@@ -86,6 +86,11 @@ detection cannot overwrite a pin edited while its probe was pending.
 Review regressions cover ANSI-coloured version output, concurrent pipe draining
 with a 1 MiB payload on each stream, executable-cache invalidation, and V1
 interactive/background launch compatibility on unknown or timed-out probes.
+Deferred discovery uses that same compatibility rule: an unknown probe result
+keeps the V1 profile and withholds V2. The detection regression failed before
+the shared-rule fix. A subprocess fixture also checks that the version probe
+removes an explicitly supplied `FORCE_COLOR` and sets `NO_COLOR=1` without
+changing the parent test process's environment.
 The ANSI case failed before its parser fix. The old poll-before-read helper
 timed out at 1 MiB per stream on this machine; 64 KiB per stream did not stall.
 

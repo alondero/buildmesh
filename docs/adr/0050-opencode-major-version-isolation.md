@@ -16,12 +16,12 @@ project config, so installing a V2 plugin in that file would break coexistence.
 Keep distinct `opencode` and `opencode2` identities. The initial detection
 sweep performs no version subprocess. A deferred native worker probes each
 resolved executable with a thirty-second deadline, including saved executable
-pins, and publishes only matching major versions. Results are cached by path,
-modification time and size; unknown results expire after five seconds. Unknown
-versions are withheld. Cross-runtime detection is withheld until its version
+pins, and applies the same compatibility rule as launch validation. Results
+are cached by path, modification time and size; unknown results expire after
+five seconds. An unknown V1 result is admitted for discovery and launch;
+only a positively identified mismatched major is refused. V2 requires a known
+matching major for both discovery and launch. Cross-runtime detection is withheld until its version
 gate is validated. Interactive and background preparation both use this cache.
-V1 rejects only a positively identified mismatch, preserving launches when a
-probe times out or returns unknown output. V2 requires a known matching major.
 The deferred worker merges only profile entries unchanged since its observation;
 a user pin edited during a probe wins over that stale result.
 After publishing the detection epoch, completion notifies open provider menus;

@@ -1,6 +1,16 @@
 use super::*;
 
 #[test]
+fn unknown_version_keeps_v1_visible_but_withholds_v2() {
+    let profiles = detect_profiles(&[PathBuf::from("/bin")], &[""], None, &|p| {
+        p == Path::new("/bin/opencode")
+    });
+    let confirmed = confirm_versions(profiles, &|_| None);
+    assert_eq!(confirmed.len(), 1);
+    assert_eq!(confirmed[0].harness, "opencode");
+}
+
+#[test]
 fn one_binary_probe_selects_exactly_one_major_and_caches_runtime_mirrors() {
     let profiles = detect_profiles(&[PathBuf::from("/bin")], &[""], None, &|p| {
         p == Path::new("/bin/opencode")
@@ -24,7 +34,6 @@ fn one_binary_probe_selects_exactly_one_major_and_caches_runtime_mirrors() {
             assert!(confirmed.is_empty());
         }
     }
-    assert!(confirm_versions(profiles, &|_| None).is_empty());
 }
 
 #[test]

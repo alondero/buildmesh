@@ -120,10 +120,24 @@ fn v1_interactive_and_background_launches_allow_unknown_and_timed_out_probes() {
         assert!(launch
             .command(dir.path(), &dir.path().join("result"), "hello")
             .is_ok());
-        assert!(super::super::opencode2::OPENCODE2
+        let error = super::super::opencode2::OPENCODE2
             .validate_executable(&executable)
-            .is_err());
+            .unwrap_err();
+        assert!(error.contains("Could not determine"), "{error}");
+        assert!(error.contains("retry"), "{error}");
+        assert!(!error.contains("Pin"), "{error}");
     }
+}
+
+#[test]
+fn version_probe_removes_forced_color_from_the_child_environment() {
+    let (_dir, executable) = fixture("console.log(process.env.FORCE_COLOR === undefined && process.env.NO_COLOR === '1' ? 'opencode v2.2.3' : 'unexpected probe environment');");
+    let mut command = fixture_command(&executable);
+    command
+        .arg("--version")
+        .env("FORCE_COLOR", "1")
+        .env("NO_COLOR", "0");
+    assert_eq!(run_version_probe(command, Duration::from_secs(5)), Some(2));
 }
 
 #[test]

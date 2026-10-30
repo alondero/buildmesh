@@ -32,7 +32,7 @@ struct Detectable {
     harness: &'static str,
     /// Binary stems to look for on `PATH` (platform extensions appended).
     binaries: &'static [&'static str],
-    /// A versioned tool is withheld until the deferred native probe confirms it.
+    /// A versioned tool is withheld until the deferred probe applies its compatibility rule.
     major_version: Option<u64>,
     /// Home-relative config dirs that also count as "installed" — a tool whose
     /// binary isn't on `PATH` but whose config dir exists is still offered, so a
@@ -254,7 +254,7 @@ fn resolve_binary_on_path(
 /// `executable` so the spawn path need not re-derive it; config-dir-only
 /// detections keep `executable: None` and the spawn re-resolves the stem.
 /// Versioned tools are candidates here; the startup publisher withholds them
-/// until the deferred native version probe confirms their major.
+/// until the deferred native version probe applies the launch-compatibility rule.
 pub fn detect_profiles(
     path_dirs: &[PathBuf],
     exts: &[&str],
@@ -505,7 +505,7 @@ pub fn detect_installed_profiles() -> Vec<HarnessProfile> {
         profiles.extend(detect_windows_from_wsl());
     }
     // No subprocess in setup's stat sweep. Versioned candidates are published
-    // only after a bounded probe on a separate worker has confirmed the major.
+    // only after a bounded worker probe applies the launch-compatibility rule.
     profiles.retain(|p| version_requirement(&p.harness).is_none());
     let _ = CURRENT_EXECUTABLES.set(
         executable_profiles
@@ -627,7 +627,9 @@ fn confirm_versions(
             let major = cache
                 .entry(path.to_path_buf())
                 .or_insert_with(|| probe(path));
-            *major == version_requirement(&p.harness) && confirmed_ids.insert(p.id.clone())
+            version_requirement(&p.harness).is_some_and(|expected| {
+                crate::agent::provider::adapters::opencode_version::accepts_major(*major, expected)
+            }) && confirmed_ids.insert(p.id.clone())
         })
         .collect()
 }
