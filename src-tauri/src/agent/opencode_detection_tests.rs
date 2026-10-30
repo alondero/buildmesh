@@ -11,7 +11,7 @@ fn unknown_version_keeps_v1_visible_but_withholds_v2() {
 }
 
 #[test]
-fn one_binary_probe_selects_exactly_one_major_and_caches_runtime_mirrors() {
+fn known_majors_select_the_matching_harness_with_one_probe_per_path() {
     let profiles = detect_profiles(&[PathBuf::from("/bin")], &[""], None, &|p| {
         p == Path::new("/bin/opencode")
     });

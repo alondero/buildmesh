@@ -622,9 +622,8 @@ sandbox request before API preparation, respecting the developer feature gate.
 Version results are cached by executable path, modification time and size.
 Discovery and launch share one compatibility rule: V2 requires a known major;
 V1 rejects only a known mismatch, remaining discoverable on unknown results.
-Ordinary V2 resume
-looks up its saved identity and creates it only on `SessionNotFoundError`, so
-a failed first create does not strand that node.
+Ordinary V2 resume looks up its saved identity and creates it only on
+`SessionNotFoundError`, so a failed first create does not strand that node.
 See [ADR-0050](../adr/0050-opencode-major-version-isolation.md).
 
 Deferred major-version detection publishes preferences and the detection epoch

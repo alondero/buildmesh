@@ -644,9 +644,11 @@ it on from the Overview tab.
 
 OpenCode and OpenCode 2 share the `opencode` command. Detection checks its
 major version after the initial startup scan, so the matching menu entry may
-appear a few seconds later. To keep both installed, pin each Harness Profile's
-executable to the corresponding major. Existing V1 nodes stay V1; Buildmesh
-refuses a mismatched native executable instead of silently upgrading a node.
+appear a few seconds later. An unknown result is still offered through the V1
+harness for compatibility; OpenCode 2 is withheld until a 2.x version is read.
+To keep both installed, pin each Harness Profile's executable to the
+corresponding major. Existing V1 nodes stay V1; Buildmesh refuses a known
+mismatched native executable instead of silently upgrading a node.
 OpenCode 2 currently requires a native runtime, with no WSL/Windows Interop
 launch preparation. Extra arguments are disabled to preserve its private server
 and session identity. An active developer OS sandbox is refused before API

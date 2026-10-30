@@ -20,12 +20,19 @@ pins, and applies the same compatibility rule as launch validation. Results
 are cached by path, modification time and size; unknown results expire after
 five seconds. An unknown V1 result is admitted for discovery and launch;
 only a positively identified mismatched major is refused. V2 requires a known
-matching major for both discovery and launch. Cross-runtime detection is withheld until its version
-gate is validated. Interactive and background preparation both use this cache.
+matching major for both discovery and launch. Cross-runtime detection is
+withheld until its version gate is validated. Interactive and background
+preparation both use this cache.
 The deferred worker merges only profile entries unchanged since its observation;
 a user pin edited during a probe wins over that stale result.
 After publishing the detection epoch, completion notifies open provider menus;
 the frontend invalidates both its IPC promise and shared menu snapshot.
+
+The unknown-version fallback preserves V1 compatibility but does not prove
+that the executable is V1. If a real V2 binary's probe fails, Buildmesh can
+offer and launch that binary through the V1 harness, with V1's attention
+plugin and session capture. A successfully parsed probe result is needed to
+distinguish the majors; V2 admission remains strict.
 
 V2 always uses `--standalone`. Buildmesh assigns a `ses_` identity and persists
 it before launch. A bounded `api --standalone` invocation prepares the session

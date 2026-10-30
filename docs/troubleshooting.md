@@ -182,7 +182,11 @@ typing outside Buildmesh.
 Check `opencode --version` in the same native runtime as the node. Use the
 **OpenCode 2** harness for 2.2.x and **OpenCode** for 1.18.3. Pin a separate
 executable in each Harness Profile if both majors are installed; restarting
-Buildmesh refreshes version detection. An unknown version is not detected.
+Buildmesh refreshes version detection. After the deferred probe, an unknown
+result is still shown and launchable through the V1 harness for compatibility.
+OpenCode 2 is not detected until the probe identifies a 2.x version. The V1
+fallback does not establish that the executable is V1; if you installed V2,
+resolve the failed probe before launching it through that entry.
 The default harness and existing node identities are not migrated automatically.
 
 OpenCode 2 currently refuses an active developer Mesh OS sandbox: API session
