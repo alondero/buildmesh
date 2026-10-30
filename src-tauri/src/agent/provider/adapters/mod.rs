@@ -28,6 +28,8 @@ pub mod dsh;
 pub mod freebuff;
 pub mod grok;
 mod hook_contract;
+#[cfg(test)]
+mod hook_test_support;
 pub mod kimi;
 pub mod mcode;
 pub mod muse;

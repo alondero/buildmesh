@@ -502,7 +502,7 @@ mod tests {
         // outer budget must also cover Invoke-WebRequest's own timeout.
         let request_timeout = Duration::from_secs(10);
         assert!(HOOK_COMMAND_WINDOWS.contains("-TimeoutSec 10 -Uri"));
-        let hook_budget = request_timeout + Duration::from_secs(120);
+        let hook_budget = super::super::hook_test_support::budget(request_timeout);
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -563,11 +563,7 @@ mod tests {
         } else {
             "/bin/sh"
         });
-        let cache_dir = tempfile::tempdir().unwrap();
-        shell.env(
-            "PSModuleAnalysisCachePath",
-            cache_dir.path().join("module-cache"),
-        );
+        let _cache_dir = super::super::hook_test_support::isolate_cache(&mut shell);
         if cfg!(windows) {
             shell.args(["-NoProfile", "-NonInteractive", "-Command", command]);
         } else {

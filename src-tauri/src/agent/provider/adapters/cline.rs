@@ -616,6 +616,7 @@ impl AgentProvider for ClineAdapter {
 }
 
 #[cfg(test)]
+// allow-test-in-production: moving the pre-existing adapter suite is outside this timeout repair.
 mod tests {
     use super::*;
 
@@ -1321,16 +1322,8 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
 
-        // Outer hang guard for the whole fixture — the verdict comes from
-        // the listener rendezvous below plus the content assertions, not
-        // from this clock. The subject really is a cold `powershell.exe`
-        // launching the provisioned hook, and that cold start once outran
-        // 20s under CPU contention (issue #2049), so the bound keeps a
-        // margin over the worst start-up seen; only a genuinely wedged
-        // child ever reaches it. The listener shares the same bound so a
-        // slow-but-healthy start is never mistaken for a hook that posts
-        // nothing.
-        const HOOK_BUDGET: Duration = Duration::from_secs(30);
+        assert!(CLINE_HOOK_SCRIPT_PS1.contains("-TimeoutSec 2 |"));
+        let hook_budget = super::super::hook_test_support::budget(Duration::from_secs(2));
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1339,7 +1332,7 @@ mod tests {
         // caller reports that alongside the hook's own stderr rather than
         // panicking inside this thread.
         let server = std::thread::spawn(move || -> Option<(String, Vec<u8>)> {
-            let deadline = Instant::now() + HOOK_BUDGET;
+            let deadline = Instant::now() + hook_budget;
             let mut stream = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,
@@ -1408,6 +1401,7 @@ mod tests {
             command.arg(&script);
             command
         };
+        let _cache_dir = super::super::hook_test_support::isolate_cache(&mut invocation);
         invocation
             .env("BUILDMESH_PORT", port.to_string())
             .env("BUILDMESH_SESSION_ID", "741")
@@ -1427,7 +1421,7 @@ mod tests {
         let output = crate::process_util::run_command_with_timeout(
             invocation,
             "cline attention hook",
-            HOOK_BUDGET,
+            hook_budget,
         )
         .unwrap();
         let request = server.join().unwrap();

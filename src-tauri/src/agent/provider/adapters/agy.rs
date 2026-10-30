@@ -869,7 +869,7 @@ mod tests {
         // Allow for shell and PowerShell startup under concurrent verification,
         // in addition to curl's own two-second request timeout.
         assert!(command.contains("--max-time 2 "));
-        let hook_budget = Duration::from_secs(2) + Duration::from_secs(120);
+        let hook_budget = super::super::hook_test_support::budget(Duration::from_secs(2));
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -923,11 +923,7 @@ mod tests {
         } else {
             "/bin/sh"
         });
-        let cache_dir = tempfile::tempdir().unwrap();
-        shell.env(
-            "PSModuleAnalysisCachePath",
-            cache_dir.path().join("module-cache"),
-        );
+        let _cache_dir = super::super::hook_test_support::isolate_cache(&mut shell);
         shell.args([if cfg!(windows) { "/c" } else { "-c" }, command]);
         shell
             .env("BUILDMESH_PORT", port.to_string())
