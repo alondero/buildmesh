@@ -114,7 +114,7 @@ impl EffectHost for FakeHost {
         self.stalled_task.borrow().clone()
     }
 
-    fn assistant_revision(&self, _node: &AgentNode) -> Option<String> {
+    fn assistant_revision(&self, _run_id: i64, _node: &AgentNode) -> Option<String> {
         self.report_revision.borrow().clone()
     }
 }
@@ -159,13 +159,17 @@ impl Scratch {
     }
 
     fn agent(&self) -> crate::models::AgentNode {
+        self.agent_on("grok")
+    }
+
+    fn agent_on(&self, provider: &str) -> crate::models::AgentNode {
         db::create_agent_node(db::NewAgentNode {
             mesh_id: self.mesh_id,
             name: &format!("dispatch-agent-{}-{}", std::process::id(), seq()),
             path: &self.path,
             branch: "work",
             env: EnvType::Windows,
-            provider: "grok",
+            provider,
             worktree_name: None,
             source_issue: None,
             source_pr: None,
@@ -525,6 +529,79 @@ fn inject_pty_effect_claims_then_writes_the_prompt() {
         .position(|kind| kind == "effect_result")
         .unwrap();
     assert!(claimed < submitted && submitted < acked);
+}
+
+/// A harness with no lifecycle of its own can only end a turn through its
+/// result file, so a prompt without a result contract still opens a turn that
+/// owes one. A harness with hooks keeps the contract-only behaviour.
+#[test]
+fn inject_pty_asks_a_file_only_harness_for_a_result_file() {
+    for (provider, owes_result) in [("freebuff", true), ("perch", true), ("grok", false)] {
+        let scratch = Scratch::new();
+        crate::preferences::init_for_tests(scratch.dir.path().join("app-data"));
+        let agent = scratch.agent_on(provider);
+        db::update_agent_node_status(agent.id, SessionStatus::Ready).unwrap();
+        let mut context = CircuitContext::new();
+        context.set("source.agent_id", agent.id.to_string());
+        let mut world = scratch.start(
+            one_node(
+                "inject",
+                CircuitNodeKind::InjectPty {
+                    prompt: "follow up".into(),
+                    target_node_id: Some("$source".into()),
+                },
+            ),
+            vec![running_step("inject", None)],
+            &[intent("inject", EffectKind::Prompt)],
+            context,
+            None,
+        );
+        let host = FakeHost::default();
+        *host.input_stamp_value.borrow_mut() = Some("stamp-1".into());
+        dispatch(
+            &mut world,
+            &host,
+            &[Effect::InjectPty {
+                node_id: "inject".into(),
+                prompt: "follow up".into(),
+                target_node_id: Some("$source".into()),
+            }],
+        );
+        assert_eq!(host.prompts.borrow().len(), 1, "{provider}");
+        let brief = std::fs::read_to_string(
+            crate::circuit::handoff::paths_in(
+                &crate::preferences::app_data_dir().expect("test app data dir"),
+                world.run_id,
+                "inject",
+                1,
+            )
+            .prompt,
+        )
+        .unwrap();
+        let owed = crate::circuit::handoff::expected_result(world.run_id, agent.id);
+        assert_eq!(owed.is_some(), owes_result, "{provider}");
+        assert_eq!(
+            brief.contains("write your final report"),
+            owes_result,
+            "{provider}: {brief}"
+        );
+        if let Some(owed) = owed {
+            assert!(owed.ends_with("inject-attempt1.result.md"), "{owed:?}");
+            assert_eq!(
+                host.assistant_revision(world.run_id, &agent),
+                None,
+                "the fake host has no transcript"
+            );
+            assert_eq!(
+                crate::services::circuit_worker::result_handoff::current_turn_revision(
+                    world.run_id,
+                    &agent
+                ),
+                Some(crate::services::circuit_worker::result_handoff::turn_revision(&owed)),
+                "{provider}: a file-only turn is named by the file it owes"
+            );
+        }
+    }
 }
 
 fn claimed_delivery(agent_id: i64, prefix: &str, task_id: Option<&str>) -> CircuitContext {

@@ -145,7 +145,8 @@ fun CircuitRunPanel(run: NodeCircuitRun, vm: BuildmeshViewModel, openTerminal: (
 fun reviewerLaunchOptions(providers: List<JsonObject>) = launchOptions(providers, needsPrompt = false).filter {
     val capabilities = it.objectAt("capabilities")
     it.text("harness_id") != "terminal" && (!it.flag("is_proxied") || it.objectAt("configuration") != null) &&
-        (capabilities?.flag("requires_attention_hook") == true || capabilities?.flag("supports_passive_turn_watcher") == true)
+        (capabilities?.flag("requires_attention_hook") == true || capabilities?.flag("supports_passive_turn_watcher") == true ||
+            capabilities?.flag("supports_result_file_handoff") == true)
 }
 
 fun startReviewRequest(circuitId: Long?, rounds: Long, reviewer: String) = StartNodeReviewRequest(

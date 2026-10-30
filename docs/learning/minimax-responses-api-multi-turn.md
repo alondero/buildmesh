@@ -31,7 +31,8 @@ Other verified facts:
 - `"strict": true` on function tools **is accepted** (echoed back in `response.created`).
 - Streaming SSE includes `event:` lines plus `data:` lines; `output_item.added` may carry a **partial** `arguments` string — only trust `response.function_call_arguments.done`.
 - Auth is checked **before routing**: an unauthenticated probe returns 401 for *any* path, so you cannot use a bad-key 401 to prove an endpoint exists. A valid-auth unknown/mis-shaped request surfaces as 500.
-- Model IDs drift (`MiniMax-M3[1m]` was retired); Buildmesh pins `MiniMax-M3` for Codex pairings and capability-checks anything else (`endpoint_model_descriptor`).
+- Model IDs drift (`MiniMax-M3[1m]` was retired). Buildmesh allowlists the Responses IDs MiniMax documents — `MiniMax-M3.1-Flash` (the default) and `MiniMax-M3` — for Codex pairings (`MINIMAX_RESPONSES_MODELS` in `pairing_compat.rs`) and capability-checks anything else (`endpoint_model_descriptor`). Add a new ID there when MiniMax's Responses reference lists one.
+- Reasoning differs per model ([responses-create](https://platform.minimax.io/docs/api-reference/responses-create)): `MiniMax-M3` only reasons when `effort` is set to something other than `none`; `MiniMax-M3.1-Flash` always reasons (default `max`) and `effort: "none"` is an HTTP 400. The launch catalogue therefore offers `none` for M3 only. Both need `model_supports_reasoning_summaries=true` so Codex keeps the `reasoning` field for an unknown model name.
 
 ## Debugging lesson
 

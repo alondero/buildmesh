@@ -292,9 +292,10 @@ preview is rejected instead of published (see the
 Node details also show the same-repository open PR for the live worktree
 branch, with checks, review decision and mergeability. **Squash and merge**
 requires confirmation, rechecks mergeability, and deletes the branch after
-merging. The mesh's **Pull requests** shortcut lists open PRs and discloses
-truncated results. Status refreshes while foregrounded, a pull re-reads it on
-demand, and a failed read keeps its own **Retry** at the top of the list. See
+merging. The mesh's **Pull requests** shortcut switches between open and closed
+PRs and discloses truncated results. Closed PRs are read-only: they offer no
+spawn or merge control. Status refreshes while foregrounded, a pull re-reads it
+on demand, and a failed read keeps its own **Retry** at the top of the list. See
 [PR status and squash merge](mobile.md#pr-status-and-squash-merge)
 for gates and recovery after an interrupted merge.
 

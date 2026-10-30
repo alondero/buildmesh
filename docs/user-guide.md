@@ -258,14 +258,18 @@ changes.
 
 ## Find agents that need attention
 
-Choose **Attention** in the sidebar to see nodes across repositories, grouped
-into **Failed sessions**, **Needs input**, and **Paused sessions**, in that
-order. Each heading shows its count; empty groups disappear. Cards name the
-repository and show the current question or permission request when the
-harness supplied one. **Open terminal** takes you to that
-session. Failed sessions also offer **Retry**; paused sessions offer **Resume**
-when a saved session identity is available. Return to **Workspace** to use the
-existing repository and drag order.
+An agent that needs you is marked where it lives. In the sidebar, a mesh whose
+agent is waiting on input, has failed, was lost, or is paused opens itself, so
+that agent is on screen without a click, and its status mark says which state
+it is in. The agent's row offers **Restart** for a failed session and **Resume**
+for a paused one that has a saved session identity.
+
+To work through them across repositories, open **Agent History** in the Probe
+panel. Its **Lifecycle** view lists agents from every repository; in the
+**All lifecycle states** dropdown, choose **Needs attention**, **Error**,
+**Lost** or **Suspended** to list exactly those. Each of those rows opens that
+agent's terminal, and offers **Retry** for a failed or lost one and **Resume**
+for a paused one.
 
 In **Filtered** view, use the header's **Filters** button for provider, status,
 sort and direction. The count shows matching nodes out of all loaded nodes.
@@ -547,15 +551,15 @@ count is whatever it was last known to be, so the two can disagree: the icon
 says the last sync did not finish, while `↓N` reports the last confirmed count.
 
 Meshes that currently have at least one open agent node sit at the top of
-the sidebar under an **Active** label, in your own drag order; every other
-mesh follows below, dimmed, in the same manual order. Nothing is hidden — all
-meshes stay visible and every row keeps its spawn control, so a mesh with
-nothing open is still a working row you can spawn from.
+the sidebar, in your own drag order; every other mesh follows below, dimmed,
+in the same manual order. The order is the signal — there is no heading above
+the top group. Nothing is hidden — all meshes stay visible and every row keeps
+its spawn control, so a mesh with nothing open is still a working row you can
+spawn from.
 
-Opening the first node in a mesh moves it into the top band; closing or
-archiving its last node returns it to its manual position. Dragging a mesh
-only changes your manual arrangement — it never changes which band the mesh
-is in.
+Opening the first node in a mesh moves it to the top; closing or archiving its
+last node returns it to its manual position. Dragging a mesh only changes your
+manual arrangement — it never changes whether the mesh sits at the top.
 
 ## Paste into a terminal
 
@@ -617,13 +621,25 @@ The current built-in catalog is:
 | Cursor | Yes | Hook | Effort control is not available through Buildmesh |
 | Kimi Code | Yes | Hook | Needs Kimi Code 0.27.0 or newer; has no transcript reader |
 | MiniMax Code | Yes | Hook | Reports completed turns and clears attention when another prompt starts; supports session model selection, no effort override; launched in Full Access |
-| DeepSeek Harness | Yes | None | Use the terminal for progress when no signal is available |
+| DeepSeek Harness | Yes | None | Use the terminal for progress when no signal is available. Circuits use its result file (below) |
 | Command Code | Yes | Passive watcher | Transcript-based lifecycle support is available. If typing does nothing, see [Command Code does not accept typing](troubleshooting.md#command-code-does-not-accept-typing) |
-| Freebuff | Yes | None | Model and effort overrides are not available |
+| Freebuff | Yes | None | Model and effort overrides are not available. Circuits use its result file (below) |
 | Cline | Yes | Hook | Needs Cline 3.0.62 or newer. Manage providers with `cline auth`; Buildmesh injects account credentials at spawn |
 | Meta Muse | Yes | Passive watcher | Native on Windows since v1.3.0; WSL guest otherwise. Reasoning effort is available as `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra` |
-| Perch | Yes | None | Interactive CLI. Model and effort overrides are available; there is no transcript reader. |
+| Perch | Yes | None | Interactive CLI. Model and effort overrides are available; there is no transcript reader. Circuits use its result file (below) |
 | Terminal | No | None | A plain shell; closing the app loses its live process |
+
+A harness with no attention signal can still run Autopilot Circuits, as the
+implementer or the reviewer. Every Circuit prompt sent to it ends by asking the
+agent to write its final report to a result file once it has finished, and
+Buildmesh treats that file, once it has stopped changing for a few seconds, as
+the end of the turn. The node then shows Ready. This is a lower-fidelity
+signal: Buildmesh cannot see a question, a permission prompt or background work
+from such a harness, so answer those in its terminal. If the agent finishes
+without writing the file, the Circuit waits; open its terminal and ask it to
+write the file named in its prompt. A review you start on one of these agents
+cannot tell when its current turn ends, so its first step waits until you move
+it on from the Overview tab.
 
 Capabilities can change with the installed CLI and runtime. Buildmesh hides
 controls that a harness cannot safely honor. After installing or removing a
@@ -1021,9 +1037,13 @@ Terminals keep their own size: use the title bar's **Zoom** control or
 
 **Probe spawn prompts** (Settings → Prompts) customise the initial prompt
 for agents spawned from the Probe's GitHub Issues and Pull Requests tabs.
-The node is created only when that harness can take an initial prompt.
-If the Mesh default cannot, the Issues tab shows an error toast; pick
-another harness from the spawn menu.
+Every agent harness can take one; only a plain Terminal cannot. A harness
+without a startup prompt option (Freebuff, Kimi Code, Perch, DeepSeek Harness)
+starts normally, and Buildmesh types the prompt into its terminal and presses
+Enter once its screen has finished drawing. If you start typing in that
+terminal first, Buildmesh leaves the prompt to you. If the Mesh default is a
+Terminal, the Issues tab shows an error toast; pick another harness from the
+spawn menu.
 The built-in templates appear as editable text, so you can adjust their wording
 directly. Changes save when you leave the editor. Click a placeholder button to
 insert it at the cursor or replace selected text; each button explains its value
@@ -1169,9 +1189,10 @@ is unavailable, type your task or use your keyboard's microphone.
 Android provides native Overview/Work, agent replies, task capture, issues,
 archive resume, changes and diffs. Pull an Android list down to refresh it:
 Issues, Archive, Changes, Pull requests and Usage re-read on the gesture, and
-the refresh button in the app bar reloads the screen you are on. A failed read
-offers **Retry** at the top of the list, so recovering does not depend on
-scrolling. Its terminal includes keyboard input, Esc/Tab/Ctrl+C and arrow
+the refresh button in the app bar reloads the screen you are on. The mesh
+**Pull requests** screen switches between open and closed pull requests; closed
+ones are read-only. A failed read offers **Retry** at the top of the list, so
+recovering does not depend on scrolling. Its terminal includes keyboard input, Esc/Tab/Ctrl+C and arrow
 keys, and reconnects when the app returns to the foreground. In either phone
 client, tap a terminal URL or hyperlink to open it in your phone's browser;
 drag to scroll without opening links.

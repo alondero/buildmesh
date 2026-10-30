@@ -182,7 +182,8 @@ Today Claude Code and Antigravity declare hooks, Codex declares hooks and a
 rollout pull, Command Code and Muse declare a passive watcher, OpenCode declares
 hooks for its native subagent (child) sessions only, and every other harness
 (including MiniMax Code, Grok and Cline) is unwired, so its missing evidence
-stays explicit and Circuit execution stays Unverified.
+stays explicit. A harness with no lifecycle at all completes its Circuit turns
+through [result-file turn completion](#result-file-turn-completion).
 
 Declaring hooks does not by itself declare a foreground source. `HookPush`
 carries a `foreground` flag naming whether its parser reports the foreground
@@ -221,6 +222,43 @@ after restart reads it with that same declaration. The operator diagnostics
 `coverage` is the contract and the prose fields are display text with the
 inspected version and platform. Adding a harness means declaring a strategy in
 its adapter, not editing the worker.
+
+## Result-file turn completion
+
+A harness with no attention hook, no passive watcher and no native pull
+(DeepSeek Harness, Freebuff, Perch) cannot tell a Circuit that its turn ended.
+It still writes files, so the [handoff file](circuits.md) a result contract
+already asks for is its turn signal. `HarnessCapabilities::supports_result_file_handoff`
+is true for every agent harness (only the plain shell cannot be asked), and
+`circuit::compatibility::harness_has_turn_signal` counts it, so the Autopilot
+and reviewer gates admit these harnesses. `completes_by_result_file_only` names
+the harnesses that have nothing else.
+
+| Stage | Behaviour | Owner |
+|---|---|---|
+| Prompt | A file-only harness owes a result file for every non-empty Circuit prompt, spawn or injected, contract or not; the instruction mentions the result line only where the gate requires one | `spawn.rs`, `dispatch.rs`, `circuit::handoff` |
+| Turn end | The lost-turn watchdog publishes Ready through the fenced `recover_ready` path once the owed file holds text, has been unchanged for `RESULT_SETTLE_MS` (5 s) and postdates the turn's lifecycle stamp | `result_handoff::finishes_turn`, `turn_classify::recover_result_turn` |
+| Report | A Ready agent whose harness has no readable report binds the result file as its report; the binding fingerprints the file and carries the session, incarnation and input fences | `readiness::prepare_result_handoff`, `with_result_file` |
+| Repair | A missing, blank or contract-violating file on a finished turn takes the ordinary bounded reminder path | Existing result-file repair |
+| Continuation | A file-only turn's revision is named by the file it owes, so classification and continuation delivery compare like with like | `result_handoff::current_turn_revision` |
+
+The same recovery runs for a harness that does report its lifecycle, as a
+fallback when that signal was lost. There the file must also be backed by a
+terminal quiet for `LOST_TURN_QUIET_MS` (one minute) and by no transcript
+activity newer than the file; a transcript that shows newer input, tools or a
+record still being written vetoes it. The Ready publication commits only if the
+lifecycle stamp and input ownership are unchanged and the run is not cancelled.
+
+The file proves a finished report and nothing more. Questions, permissions and
+background work from a file-only harness are never observed, so their owned-work
+and request evidence stays Unavailable, and the shared lifecycle veto still
+applies to whatever lifecycle report exists. A file-only agent that owes no
+result file for the step (for example the source of a title-bar review, whose
+current turn the Circuit did not prompt) gets the typed
+`TurnCompletionUnobservable` blocker at once instead of waiting out the active
+budget; the operator moves the step on from the Overview tab once the agent has
+finished. A file-only turn has no progress signal either, so the active wait
+budget still bounds a turn that never writes its file.
 
 ## Scheduling contract
 

@@ -265,6 +265,12 @@ pub struct HarnessCapabilities {
     /// Whether the harness has a passive transcript watcher that supplies
     /// standard turn lifecycle signals when no native attention hook exists.
     pub supports_passive_turn_watcher: bool,
+    /// Whether a Circuit can learn that this harness finished a turn from the
+    /// result file its prompt asks for (issue #2134's handoff file). Every
+    /// agent harness can write a file, so this is the turn signal of last
+    /// resort: it carries no question, permission, progress or owned-work
+    /// evidence, and a harness with a hook or watcher still uses those first.
+    pub supports_result_file_handoff: bool,
     /// Whether the harness writes a transcript the coordinator read API
     /// can parse into a Node Digest's rich layer (ADR-0008).
     pub produces_readable_transcript: bool,
@@ -287,6 +293,10 @@ pub struct HarnessCapabilities {
     pub supports_extra_args: bool,
     /// Whether `--prefill <text>` (or equivalent positional) is accepted.
     pub supports_prefill: bool,
+    /// Whether user-facing spawns may carry an initial prompt: on argv when
+    /// `supports_prefill`, otherwise typed into the PTY after startup. False
+    /// only for plain shells.
+    pub accepts_initial_prompt: bool,
     /// True for plain shell providers — LLM-specific paths (naming, the
     /// 3-second early-exit heuristic, etc.) all skip.
     pub is_plain_terminal: bool,
@@ -1052,7 +1062,8 @@ mod tests {
         assert!(!freebuff.supports_model_override);
         assert!(!freebuff.supports_effort_override);
         assert!(freebuff.supports_extra_args);
-        assert!(freebuff.supports_prefill);
+        assert!(!freebuff.supports_prefill);
+        assert!(freebuff.accepts_initial_prompt);
         assert!(!freebuff.is_plain_terminal);
         assert_eq!(freebuff.effort_control, EffortControlKind::None);
         assert_eq!(

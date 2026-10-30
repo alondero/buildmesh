@@ -4,9 +4,10 @@
  *
  * The real `Sidebar` renders against seeded mesh + agent-node stores and
  * the assertions target only what a user can observe: the order in which
- * mesh names appear, the single band label, and that inactive rows keep
- * their spawn affordance. No partition signature, memo boundary, or
- * component internal is asserted on.
+ * mesh names appear, the absence of a band label, the weight difference
+ * between an active and an inactive row, and that inactive rows keep their
+ * spawn affordance. No partition signature, memo boundary, or component
+ * internal is asserted on.
  *
  * Shares the mock shape of `sidebar-render-count.test.tsx` (per-file
  * mocks; async per-mesh hooks pinned so no background fetch can move a
@@ -177,15 +178,20 @@ describe('Sidebar mesh bands (issue #1939)', () => {
     expect(screen.queryByText('epsilon-archived')).toBeNull();
   });
 
-  it('renders one label for the active band and none for the inactive band', async () => {
+  it('renders no band label; the ordering and the row weight carry the distinction', async () => {
     render(<Sidebar />);
     await settleSidebar();
 
-    expect(screen.getAllByText('Active')).toHaveLength(1);
-    // The label heads the list: it precedes the first active mesh row.
-    const label = screen.getByText('Active');
-    const firstMesh = document.getElementById('mesh-item-name-2');
-    expect(label.compareDocumentPosition(firstMesh!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The list spends no vertical space on a heading. A mesh's position is
+    // the affordance, so the label that used to name the band is gone.
+    expect(screen.queryByText('Active')).toBeNull();
+
+    // What the label named is carried by the rows themselves: the mesh with
+    // an open node is at full weight, the quiet one below it is dimmed.
+    const active = document.getElementById('mesh-item-name-2')!;   // mesh-beta, one open node
+    const inactive = document.getElementById('mesh-item-name-1')!; // mesh-alpha, no open node
+    expect(active.className).toContain('text-text-primary');
+    expect(inactive.className).toContain('text-text-muted');
   });
 
   it('renders no label when no mesh has an open node, keeping manual order', async () => {
@@ -197,6 +203,11 @@ describe('Sidebar mesh bands (issue #1939)', () => {
     }
 
     expect(screen.queryByText('Active')).toBeNull();
+    // With no active mesh anywhere there is no band to distinguish, so no
+    // row is dimmed either — the whole list is the manual order.
+    for (const id of [1, 2, 3, 4, 5, 6]) {
+      expect(document.getElementById(`mesh-item-name-${id}`)!.className).toContain('text-text-primary');
+    }
     expect(meshOrder()).toEqual([
       'mesh-alpha',
       'mesh-beta',
