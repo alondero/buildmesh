@@ -9,6 +9,9 @@ metadata:
 
 # OpenCode harness vs Buildmesh capability contract (2026-08-26)
 
+This document describes **OpenCode 1** (`opencode`). OpenCode 2 has its own
+`opencode2` adapter; see [the V2 integration evidence](../research/opencode-v2-readiness.md).
+
 Primary question: can Buildmesh capture and resume OpenCode session IDs the way it does for Claude Code / Codex / Kimi? Secondary: which other Buildmesh-shaped harness capabilities OpenCode already has that the adapter still advertises as unsupported.
 
 Verified against:

@@ -386,7 +386,7 @@ pub fn parse_mcode_session_id(s: &str) -> Option<String> {
 /// here or their `cli_session_id` capture silently no-ops (issue #1797).
 pub fn parse_session_id_for_provider(provider: &str, raw: &str) -> Option<String> {
     match provider {
-        "opencode" => parse_opencode_session_id(raw),
+        "opencode" | "opencode2" => parse_opencode_session_id(raw),
         "kimi" => match raw.strip_prefix("session_") {
             Some(uuid) => parse_cli_session_id(uuid).map(|id| format!("session_{id}")),
             None => parse_cli_session_id(raw),

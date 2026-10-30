@@ -610,6 +610,22 @@ deliberately-set names above ever drift in.
 
 ## Harness hook config documents
 
+OpenCode 2 selects its managed project override through `OPENCODE_CONFIG` in
+the adapter's `launch_environment`; V1 does not read that per-node file.
+`new_session_id` supplies its `ses_` vocabulary. The blocking `prepare_session`
+seam runs before command construction and uses a private session API to apply
+the model or fork a regenerate. A returned fork id is persisted before argv is
+built. `model_override_via_session_api` keeps `--model` out of the full TUI;
+`background_model_args` retains the separate `run` CLI contract. Both launch
+paths call adapter-owned executable validation. V2 refuses an effective Mesh
+sandbox request before API preparation, respecting the developer feature gate.
+See [ADR-0050](../adr/0050-opencode-major-version-isolation.md).
+
+Deferred major-version detection publishes preferences and the detection epoch
+before emitting `provider-list-changed`. The frontend stream evicts the cached
+IPC provider-list promise before notifying menu consumers, so an initial list
+fetched while the CLI probe is pending cannot keep V2 hidden.
+
 Every adapter that injects a Buildmesh entry into a harness config does the same
 three things: read the user's document, merge Buildmesh's own entry into it, and
 persist the result without losing the user's content.

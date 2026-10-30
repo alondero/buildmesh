@@ -183,6 +183,11 @@ pub fn build_spawn_command_prepared(
         cmd.env_remove(k);
     }
     let mut command_wsl_env: Vec<&str> = Vec::new();
+    let launch_environment = adapter.launch_environment(resolved, session_id);
+    for (key, value) in &launch_environment {
+        cmd.env(key, value);
+        command_wsl_env.push(key);
+    }
     for (k, v) in prepared.environment.env_set {
         cmd.env(*k, *v);
         command_wsl_env.push(*k);

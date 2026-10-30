@@ -10,6 +10,59 @@ use crate::models::{EnvType, Provider};
 use crate::preferences::HarnessConfigValue;
 
 #[test]
+fn opencode2_commands_select_independent_node_config_files() {
+    use super::command::{build_spawn_command_prepared, SpawnCommandInput};
+    use super::reader::SessionIdMode;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().to_string_lossy().into_owned();
+    let resolved = crate::env::ResolvedPath {
+        host_path: path.clone(),
+        spawn_path: path.clone(),
+        raw_path: path,
+        env_type: EnvType::Windows,
+    };
+    let config = ResolvedAgentConfig {
+        model: Some("openrouter/particle-ai/particle-1".into()),
+        ..Default::default()
+    };
+    let mut configs = Vec::new();
+    for node_id in [1, 2] {
+        let command = build_spawn_command_prepared(SpawnCommandInput {
+            resolved: &resolved,
+            provider: Provider::OpenCode2,
+            routing: &crate::agent::launch_routing::PreparedLaunchRouting::environment(&[]),
+            session_id_mode: &SessionIdMode::Assign(format!("ses_node{node_id}")),
+            session_id: node_id,
+            config: &config,
+            prefill: Some("hello"),
+            sandbox: false,
+            resume_cause: super::ResumeCause::Explicit,
+        })
+        .unwrap();
+        let selected = command
+            .get_env("OPENCODE_CONFIG")
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(selected.ends_with(&format!(
+            "{node_id}{}opencode.json",
+            std::path::MAIN_SEPARATOR
+        )));
+        configs.push(selected);
+        let args: Vec<_> = command
+            .get_argv()
+            .iter()
+            .map(|a| a.to_string_lossy())
+            .collect();
+        assert!(args.iter().any(|a| a.contains("--standalone")));
+        assert!(!args
+            .iter()
+            .any(|a| a.as_ref() == "--model" || a.as_ref() == "--fork"));
+    }
+    assert_ne!(configs[0], configs[1]);
+}
+
+#[test]
 fn claude_prompted_spawn_submits_instead_of_staging_for_enter() {
     use super::command::{build_spawn_command_prepared, SpawnCommandInput};
     use super::reader::SessionIdMode;
@@ -384,7 +437,7 @@ fn capability_recipe_coherence() {
             "grok" => "grok-3",
             "agy" => "claude-sonnet",
             "cursor" => "claude-3-7-sonnet",
-            "opencode" => "anthropic/claude-sonnet-4-5",
+            "opencode" | "opencode2" => "anthropic/claude-sonnet-4-5",
             "anthropic" => "claude-sonnet-4-5",
             "terminal" => "irrelevant",
             _ => "model",
@@ -425,7 +478,7 @@ fn capability_recipe_coherence() {
             .unwrap_or_default();
         let has_model_flag = !model_flag.is_empty() && args.iter().any(|a| a == &model_flag);
         assert_eq!(
-            has_model_flag,
+            has_model_flag || adapter.model_override_via_session_api(),
             caps.supports_model_override,
             "model-flag / supports_model_override mismatch for {}: \
                  recipe has {} = {}, caps.supports_model_override = {}; args = {:?}",

@@ -235,6 +235,7 @@ pub fn open_pty_pair(rows: u16, cols: u16) -> Result<PtyPair, String> {
 }
 
 /// Session ID mode: either assign a new ID or resume an existing one.
+#[derive(Clone)]
 pub enum SessionIdMode {
     Assign(String),
     Resume(String),

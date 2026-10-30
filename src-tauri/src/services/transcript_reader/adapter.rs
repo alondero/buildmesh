@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use super::readers::{
     AgyAdapter, ClaudeCodeAdapter, ClineAdapter, CodexAdapter, CommandCodeAdapter, CursorAdapter,
-    GrokAdapter, McodeAdapter, MuseAdapter, OpenCodeAdapter,
+    GrokAdapter, McodeAdapter, MuseAdapter, OpenCode2Adapter, OpenCodeAdapter,
 };
 use super::types::{AssistantReport, Parsed, UnavailableReason};
 
@@ -158,8 +158,9 @@ static GROK_ADAPTER: GrokAdapter = GrokAdapter;
 static MCODE_ADAPTER: McodeAdapter = McodeAdapter;
 static MUSE_ADAPTER: MuseAdapter = MuseAdapter;
 static OPENCODE_ADAPTER: OpenCodeAdapter = OpenCodeAdapter;
+static OPENCODE2_ADAPTER: OpenCode2Adapter = OpenCode2Adapter;
 
-static ADAPTERS: [&'static dyn TranscriptAdapter; 10] = [
+static ADAPTERS: [&'static dyn TranscriptAdapter; 11] = [
     // The default adapter supplies token verification for compatible hooks.
     // This is NOT the
     // transcript-format resolver: `TranscriptFormat::for_harness` returns
@@ -176,6 +177,7 @@ static ADAPTERS: [&'static dyn TranscriptAdapter; 10] = [
     &GROK_ADAPTER,
     &MUSE_ADAPTER,
     &OPENCODE_ADAPTER,
+    &OPENCODE2_ADAPTER,
 ];
 
 /// Seam entry point: `catalog.dispatch(id)` proves the seam — not the old

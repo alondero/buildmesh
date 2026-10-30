@@ -1,5 +1,6 @@
 import { listen } from '@tauri-apps/api/event';
 import { createStreamSubscription } from './streamSubscription';
+import { setProviderListPromise } from '../providerCache';
 
 /**
  * Owner of the `provider-list-changed` live stream (issue #2531).
@@ -53,7 +54,12 @@ const subscription = createStreamSubscription<ProviderListChange>(
   async (notify) => {
     const unlisten = await listen<unknown>(PROVIDER_LIST_CHANGED_EVENT, ({ payload }) => {
       const change = toProviderListChange(payload);
-      if (change !== null) notify(change);
+      if (change !== null) {
+        // Deferred backend discovery did not pass through a Settings wrapper
+        // that would already have evicted the IPC promise cache.
+        setProviderListPromise(null);
+        notify(change);
+      }
     });
     return unlisten;
   },

@@ -76,6 +76,10 @@ export function frontendInScope(paths) {
 // `pathIncludeDrift` below, so a new `#[path]` fails the gate that runs on the
 // Rust diff itself, not only the one CI happens to run (review of PR #2232).
 export const RUST_PATH_INCLUDES = {
+  'src-tauri/src/agent/opencode_detection_tests.rs': 'agent::detection::opencode_detection_tests',
+  'src-tauri/src/agent/provider/adapters/opencode2_tests.rs': 'agent::provider::adapters::opencode2::tests',
+  'src-tauri/src/agent/provider/adapters/opencode_version_tests.rs': 'agent::provider::adapters::opencode_version::tests',
+  'src-tauri/src/services/transcript_reader/readers/opencode2_tests.rs': 'services::transcript_reader::readers::opencode2::tests',
   'src-tauri/src/git/trust_tests.rs': 'git::trust::tests',
   'src-tauri/src/db/circuit/review_configuration_tests.rs': 'db::circuit::review_configuration::tests',
   'src-tauri/src/db/circuit/artifacts_tests.rs': 'db::circuit::artifacts::tests',

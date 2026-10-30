@@ -889,6 +889,12 @@ fn run_profile_startup(
         Err(e) => tracing::warn!("Harness detection merge failed: {}", e),
     }
 
+    let detection_app = app.handle().clone();
+    agent::detection::start_versioned_detection(move || {
+        use tauri::Emitter;
+        let _ = detection_app.emit("provider-list-changed", ());
+    });
+
     if let Err(error) = services::agent_node::migrate_launch_history() {
         tracing::warn!("Launch history migration failed: {error}");
     }

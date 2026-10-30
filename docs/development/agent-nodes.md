@@ -229,7 +229,7 @@ Do not move this guard into the frontend or into `resolveSpawnAgentIntent`: it d
 - `Explicit` — the user pressed **Retry Resume** / **Resume**.
 - `Regenerate` — the user swapped Model Provider on the **same** harness. `decide_resume` accepted the captured `cli_session_id`, so the conversation is still reachable — but the run must not *keep writing to* the transcript it starts from, or a regenerate overwrites the very history it is regenerating against.
 
-`AgentProvider::resume_args_fork(id)` is the per-adapter opt-in for the last case and **defaults to `resume_args`**, so harnesses with no fork concept keep their existing in-place resume and no CLI sees a flag it does not know. OpenCode is the only override so far (`--session <id> --fork`). Two constraints hold the seam:
+`AgentProvider::resume_args_fork(id)` is the argv opt-in for the last case and **defaults to `resume_args`**, so harnesses with no fork flag keep their existing in-place argv. OpenCode 1 overrides it (`--session <id> --fork`). OpenCode 2 uses `prepare_session` to fork through its private API, persists the returned identity, then builds ordinary `--session <fork-id>` argv. Two constraints hold the argv seam:
 
 - The cause rides on `SessionIdModeRef::Resume { id, cause }` rather than as a separate launch flag, so "fork without a resume" is unrepresentable at the only place that builds argv.
 - Fork is a per-call-site decision keyed on the resume cause, **not** a `HarnessCapabilities` control, so `capability_recipe_coherence` (which asserts recipe flags agree with the advertised descriptor) is unchanged. Do not promote it to a capability without that test changing too.

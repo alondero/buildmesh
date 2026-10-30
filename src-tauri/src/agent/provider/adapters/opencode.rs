@@ -189,6 +189,24 @@ fn parse_circuit_hook(value: &serde_json::Value) -> Option<crate::circuit::strat
 }
 
 impl AgentProvider for OpenCodeAdapter {
+    fn prepare_session(
+        &self,
+        input: crate::agent::provider::SessionPreparation<'_>,
+    ) -> Result<Option<String>, String> {
+        if input.resolved.env_type == EnvType::Windows {
+            let fallback = crate::agent::detection::resolve_spawn_binary("opencode");
+            let executable = input
+                .executable
+                .or(fallback.as_deref())
+                .ok_or("OpenCode 1 executable is missing")?;
+            self.validate_executable(executable)?;
+        }
+        Ok(None)
+    }
+    fn validate_executable(&self, executable: &Path) -> Result<(), String> {
+        super::opencode_version::require_major(executable, 1)
+    }
+
     fn id(&self) -> &'static str {
         "opencode"
     }

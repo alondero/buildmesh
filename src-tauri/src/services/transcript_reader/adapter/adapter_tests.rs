@@ -10,7 +10,7 @@ fn only_minimax_code_declares_the_idle_wake_up_gap() {
     let readers = crate::services::transcript_reader::adapter::registered();
     assert_eq!(
         readers.len(),
-        10,
+        11,
         "the registry gained a reader; this contract must cover it"
     );
     let others: Vec<&str> = readers
@@ -18,7 +18,7 @@ fn only_minimax_code_declares_the_idle_wake_up_gap() {
         .map(|reader| reader.id())
         .filter(|id| *id != "mcode")
         .collect();
-    assert_eq!(others.len(), 9, "every non-mcode reader is covered");
+    assert_eq!(others.len(), 10, "every non-mcode reader is covered");
     for id in others {
         let reader = crate::services::transcript_reader::adapter::dispatch(id).expect("registered");
         assert_eq!(

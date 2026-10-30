@@ -59,7 +59,7 @@ fn dispatch(provider: &str) -> Option<Normalizer> {
             parse: agy::parse,
             classify: agy::classify,
         },
-        "opencode" => Normalizer {
+        "opencode" | "opencode2" => Normalizer {
             parse: opencode::parse,
             classify: opencode::classify,
         },

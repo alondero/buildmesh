@@ -616,7 +616,8 @@ The current built-in catalog is:
 | Claude Code | Yes | Hook | Model, effort, extra-argument, and prefill controls may be available |
 | Codex | Yes | Hook | Uses its own project trust and permission flow |
 | Antigravity | Yes | Hook | Requires a supported CLI version for attention hooks |
-| OpenCode | Yes | Hook | Attention arrives through a project plugin Buildmesh installs |
+| OpenCode | Yes | Hook | OpenCode 1 only; existing conversations keep their V1 harness |
+| OpenCode 2 | Yes | Hook | OpenCode 2.2.x, native runtime; private server per node, model overrides and regenerate through the session API |
 | Grok Code | Yes | Hook | Cross-runtime hooks need working Windows/WSL networking |
 | Cursor | Yes | Hook | Effort control is not available through Buildmesh |
 | Kimi Code | Yes | Hook | Needs Kimi Code 0.27.0 or newer; has no transcript reader |
@@ -640,6 +641,17 @@ without writing the file, the Circuit waits; open its terminal and ask it to
 write the file named in its prompt. A review you start on one of these agents
 cannot tell when its current turn ends, so its first step waits until you move
 it on from the Overview tab.
+
+OpenCode and OpenCode 2 share the `opencode` command. Detection checks its
+major version after the initial startup scan, so the matching menu entry may
+appear a few seconds later. To keep both installed, pin each Harness Profile's
+executable to the corresponding major. Existing V1 nodes stay V1; Buildmesh
+refuses a mismatched native executable instead of silently upgrading a node.
+OpenCode 2 currently requires a native runtime, with no WSL/Windows Interop
+launch preparation. Extra arguments are disabled to preserve its private server
+and session identity. An active developer OS sandbox is refused before API
+preparation; a saved sandbox setting is ignored when that developer feature is
+off. See [OpenCode 2 troubleshooting](troubleshooting.md#opencode-2-does-not-start-or-report-attention).
 
 Capabilities can change with the installed CLI and runtime. Buildmesh hides
 controls that a harness cannot safely honor. After installing or removing a
@@ -677,7 +689,8 @@ start a node from Buildmesh.
 | Codex | No hook file — the hooks ride the agent's own launch arguments | — |
 | Cursor | `.cursor/hooks.json` | Project directory |
 | Antigravity | `.agents/hooks.json` | Project directory |
-| OpenCode | `.opencode/plugins/buildmesh-attention.js` | Project directory |
+| OpenCode | `.opencode/plugins/buildmesh-attention.js` | Project directory (V1) |
+| OpenCode 2 | `.opencode/buildmesh-attention2/index.ts` and `.opencode/buildmesh2/<node-id>/opencode.json` | Project directory; only that node selects its managed config |
 | Grok Code | `.grok/hooks/buildmesh-attention.json` | Your user profile |
 | Kimi Code | `config.toml` in its configuration home | Configuration home |
 | MiniMax Code | `.claude-plugin/plugin.json` in its plugin directory | Configuration home |
@@ -1106,7 +1119,8 @@ auto mode because there is nobody to answer a prompt.
 | Antigravity | `--dangerously-skip-permissions` | Asks |
 | Codex | `--ask-for-approval never` | CLI default (asks); sandbox and hook trust unchanged |
 | Cursor | `--force` | Asks |
-| OpenCode | `--auto` | Asks |
+| OpenCode | `--auto` | Asks (V1) |
+| OpenCode 2 | `--auto`; explicit deny rules still apply | Asks; external directories remain denied |
 | Command Code | `--yolo` | Asks |
 | Meta Muse | `--disable-approval --disable-sandbox` | Asks (its own OS sandbox stays on) |
 | Perch | `--permission take_the_wheel` | Asks |

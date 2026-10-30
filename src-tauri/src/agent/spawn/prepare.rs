@@ -256,7 +256,7 @@ pub(super) async fn prepare_context(
                 if adapter.self_assigns_session_id() {
                     SessionIdMode::None
                 } else {
-                    let cli_uuid = uuid::Uuid::new_v4().to_string();
+                    let cli_uuid = adapter.new_session_id();
                     db::update_cli_session_id(session_id, &cli_uuid).map_err(|e| e.to_string())?;
                     tracing::info!("prepare_context: assigned cli_session_id={}", cli_uuid);
                     SessionIdMode::Assign(cli_uuid)

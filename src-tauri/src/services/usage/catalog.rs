@@ -81,6 +81,10 @@ pub(crate) fn native_harness(provider_id: &str) -> Option<&'static str> {
     dispatch(provider_id).and_then(|adapter| adapter.native_harness())
 }
 
+pub(crate) fn additional_native_harnesses(provider_id: &str) -> &'static [&'static str] {
+    dispatch(provider_id).map_or(&[], |adapter| adapter.additional_native_harnesses())
+}
+
 pub(crate) fn usage_page(provider_id: &str, usage: Option<&ProviderUsage>) -> Option<UsagePage> {
     // A subscription dashboard would describe a different allowance when the
     // reading explicitly says billing is owned by an external platform.

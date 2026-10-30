@@ -44,3 +44,5 @@ Use the next numeric filename and include:
 - [0047: Backend responsibility modules](0047-backend-responsibility-modules.md)
 
 - [0049: Retire the sidebar Attention view and the Active band label](0049-retire-sidebar-attention-view.md)
+
+- [0050: OpenCode major-version and node configuration isolation](0050-opencode-major-version-isolation.md)

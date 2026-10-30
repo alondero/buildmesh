@@ -32,6 +32,8 @@ struct Detectable {
     harness: &'static str,
     /// Binary stems to look for on `PATH` (platform extensions appended).
     binaries: &'static [&'static str],
+    /// A versioned tool is withheld until the deferred native probe confirms it.
+    major_version: Option<u64>,
     /// Home-relative config dirs that also count as "installed" — a tool whose
     /// binary isn't on `PATH` but whose config dir exists is still offered, so a
     /// shell-function or alias install still surfaces.
@@ -51,6 +53,7 @@ const DETECTABLE: &[Detectable] = &[
         name: "Meta Muse",
         harness: "muse",
         binaries: &["muse"],
+        major_version: None,
         config_dirs: &[],
     },
     Detectable {
@@ -58,6 +61,7 @@ const DETECTABLE: &[Detectable] = &[
         name: "Claude Code",
         harness: "anthropic",
         binaries: &["claude"],
+        major_version: None,
         config_dirs: &[".claude"],
     },
     Detectable {
@@ -65,6 +69,7 @@ const DETECTABLE: &[Detectable] = &[
         name: "Codex",
         harness: "codex",
         binaries: &["codex"],
+        major_version: None,
         config_dirs: &[".codex"],
     },
     Detectable {
@@ -75,6 +80,7 @@ const DETECTABLE: &[Detectable] = &[
         // binaries of that name (e.g. Grok's agent.exe) and offered Cursor
         // on machines without it. Alias installs are still caught via .cursor.
         binaries: &["cursor-agent"],
+        major_version: None,
         config_dirs: &[".cursor"],
     },
     Detectable {
@@ -92,13 +98,23 @@ const DETECTABLE: &[Detectable] = &[
         // false-positive Antigravity onto machines with only Gemini CLI
         // installed — the same class of bug the cursor-agent stem note
         // above documents.
+        major_version: None,
         config_dirs: &[".gemini/antigravity-cli", ".antigravity", ".antigravitycli"],
     },
     Detectable {
         id: "opencode",
-        name: "OpenCode",
+        name: "OpenCode 1",
         harness: "opencode",
         binaries: &["opencode"],
+        major_version: Some(1),
+        config_dirs: &[],
+    },
+    Detectable {
+        id: "opencode2",
+        name: "OpenCode 2",
+        harness: "opencode2",
+        binaries: &["opencode"],
+        major_version: Some(2),
         config_dirs: &[],
     },
     Detectable {
@@ -112,6 +128,7 @@ const DETECTABLE: &[Detectable] = &[
         // install that exposes only the config directory still counts as
         // installed — mirrors `.claude` / `.kimi` / `.mcode`.
         binaries: &["cline"],
+        major_version: None,
         config_dirs: &[".cline"],
     },
     Detectable {
@@ -119,6 +136,7 @@ const DETECTABLE: &[Detectable] = &[
         name: "Grok Code",
         harness: "grok",
         binaries: &["grok"],
+        major_version: None,
         config_dirs: &[".grok"],
     },
     Detectable {
@@ -126,6 +144,7 @@ const DETECTABLE: &[Detectable] = &[
         name: "Kimi Code",
         harness: "kimi",
         binaries: &["kimi"],
+        major_version: None,
         config_dirs: &[".kimi"],
     },
     Detectable {
@@ -133,6 +152,7 @@ const DETECTABLE: &[Detectable] = &[
         name: "MiniMax Code",
         harness: "mcode",
         binaries: &["mcode"],
+        major_version: None,
         config_dirs: &[".mcode", ".minimax-code"],
     },
     Detectable {
@@ -140,6 +160,7 @@ const DETECTABLE: &[Detectable] = &[
         name: "DeepSeek Harness",
         harness: "dsh",
         binaries: &["dsh"],
+        major_version: None,
         config_dirs: &[".dsh", ".deepseek-harness"],
     },
     Detectable {
@@ -150,6 +171,7 @@ const DETECTABLE: &[Detectable] = &[
         binaries: &["cmdc"],
         #[cfg(not(windows))]
         binaries: &["cmd"],
+        major_version: None,
         config_dirs: &[".commandcode"],
     },
     Detectable {
@@ -161,6 +183,7 @@ const DETECTABLE: &[Detectable] = &[
         // Codebuff. Global npm installs place `freebuff` (or `freebuff.cmd` on
         // Windows) in the npm prefix bin, while its configuration and upstream
         // state live in `~/.config/manicode/`. Either signal counts as installed.
+        major_version: None,
         config_dirs: &[".config/manicode"],
     },
     Detectable {
@@ -169,6 +192,7 @@ const DETECTABLE: &[Detectable] = &[
         harness: "perch",
         binaries: &["perch"],
         // perchai-cli keeps auth, threads, and settings under `~/.perch`.
+        major_version: None,
         config_dirs: &[".perch"],
     },
 ];
@@ -181,7 +205,7 @@ const WSL_EXCLUDED: &[&str] = &["cline"];
 
 /// True for a harness the WSL cross-runtime probes should skip.
 fn wsl_probed(tool: &Detectable) -> bool {
-    !WSL_EXCLUDED.contains(&tool.id)
+    tool.major_version.is_none() && !WSL_EXCLUDED.contains(&tool.id)
 }
 
 /// First `path_dirs` entry holding `binary` (plus any of `exts`), or `None`.
@@ -229,6 +253,8 @@ fn resolve_binary_on_path(
 /// stem is found, its resolved absolute path is recorded on the profile's
 /// `executable` so the spawn path need not re-derive it; config-dir-only
 /// detections keep `executable: None` and the spawn re-resolves the stem.
+/// Versioned tools are candidates here; the startup publisher withholds them
+/// until the deferred native version probe confirms their major.
 pub fn detect_profiles(
     path_dirs: &[PathBuf],
     exts: &[&str],
@@ -478,6 +504,9 @@ pub fn detect_installed_profiles() -> Vec<HarnessProfile> {
     if crate::env::is_wsl_host() {
         profiles.extend(detect_windows_from_wsl());
     }
+    // No subprocess in setup's stat sweep. Versioned candidates are published
+    // only after a bounded probe on a separate worker has confirmed the major.
+    profiles.retain(|p| version_requirement(&p.harness).is_none());
     let _ = CURRENT_EXECUTABLES.set(
         executable_profiles
             .iter()
@@ -486,6 +515,121 @@ pub fn detect_installed_profiles() -> Vec<HarnessProfile> {
     );
     observe_installations(profiles.iter().map(|profile| profile.id.clone()).collect());
     profiles
+}
+
+/// Start only after the synchronous preferences merge has finished. This worker
+/// caches probes per resolved executable, including the runtime mirror rows.
+pub(crate) fn start_versioned_detection(on_change: impl FnOnce() + Send + 'static) {
+    std::thread::spawn(move || {
+        let dirs = enriched_search_dirs();
+        let exts = path_exts();
+        let refs: Vec<_> = exts.iter().map(String::as_str).collect();
+        let mut versioned = detect_profiles(&dirs, &refs, None, &|p| p.exists());
+        versioned.retain(|p| version_requirement(&p.harness).is_some());
+        if cfg!(windows) {
+            let mirrors: Vec<_> = versioned
+                .iter()
+                .map(|p| runtime_profile(p, crate::models::EnvType::Windows))
+                .collect();
+            versioned.extend(mirrors);
+        }
+        // Capture the saved profiles before the slow probe. Publication compares
+        // them under the preferences update lock, so a newer pin cannot be lost.
+        let baseline = match crate::preferences::load() {
+            Ok(prefs) => prefs.harness_profiles,
+            Err(error) => {
+                tracing::warn!("Versioned detection preferences failed: {error}");
+                return;
+            }
+        };
+        let mut saved: Vec<_> = baseline
+            .iter()
+            .filter(|p| {
+                version_requirement(&p.harness).is_some()
+                    && !matches!(
+                        p.runtime,
+                        Some(crate::models::EnvType::Wsl | crate::models::EnvType::WindowsInterop)
+                    )
+                    && p.executable.is_some()
+            })
+            .cloned()
+            .collect();
+        saved.extend(versioned);
+        let confirmed = confirm_versions(saved, &|path| {
+            crate::agent::provider::adapters::opencode_version::probe(path)
+        });
+        if confirmed.is_empty() {
+            return;
+        }
+        let mut admitted = Vec::new();
+        if let Err(error) = crate::preferences::update(|prefs| {
+            admitted = merge_confirmed_versions(&baseline, &mut prefs.harness_profiles, confirmed);
+        }) {
+            tracing::warn!("Versioned harness detection merge failed: {error}");
+            return;
+        }
+        publish_versioned_profiles(admitted, on_change);
+    });
+}
+
+fn publish_versioned_profiles(profiles: Vec<HarnessProfile>, on_change: impl FnOnce()) {
+    let before = detection_snapshot();
+    let mut installed = before.installed;
+    installed.extend(profiles.into_iter().map(|p| p.id));
+    let after = observe_installations(installed);
+    if after.epoch != before.epoch {
+        on_change();
+    }
+}
+
+fn merge_confirmed_versions(
+    baseline: &[HarnessProfile],
+    current: &mut Vec<HarnessProfile>,
+    confirmed: Vec<HarnessProfile>,
+) -> Vec<HarnessProfile> {
+    let mut admitted = Vec::new();
+    for profile in confirmed {
+        let before = baseline.iter().find(|p| p.id == profile.id);
+        let now = current.iter().find(|p| p.id == profile.id);
+        if before != now {
+            continue;
+        }
+        if let Some(existing) = current.iter_mut().find(|p| p.id == profile.id) {
+            existing.executable = profile.executable;
+            admitted.push(existing.clone());
+        } else {
+            current.push(profile.clone());
+            admitted.push(profile);
+        }
+    }
+    admitted
+}
+
+fn version_requirement(harness: &str) -> Option<u64> {
+    DETECTABLE
+        .iter()
+        .find(|d| d.harness == harness)?
+        .major_version
+}
+
+fn confirm_versions(
+    profiles: Vec<HarnessProfile>,
+    probe: &dyn Fn(&Path) -> Option<u64>,
+) -> Vec<HarnessProfile> {
+    let mut cache = std::collections::HashMap::new();
+    let mut confirmed_ids = HashSet::new();
+    profiles
+        .into_iter()
+        .filter(|p| {
+            let Some(path) = p.executable.as_deref() else {
+                return false;
+            };
+            let major = cache
+                .entry(path.to_path_buf())
+                .or_insert_with(|| probe(path));
+            *major == version_requirement(&p.harness) && confirmed_ids.insert(p.id.clone())
+        })
+        .collect()
 }
 
 static NATIVE_WSL_PATH: std::sync::OnceLock<std::ffi::OsString> = std::sync::OnceLock::new();
@@ -1396,7 +1540,7 @@ mod tests {
             .map(|p| p.id)
             .collect();
         ids.sort();
-        assert_eq!(ids, vec!["codex", "opencode"]);
+        assert_eq!(ids, vec!["codex", "opencode", "opencode2"]);
     }
 
     #[test]
@@ -1742,6 +1886,7 @@ mod tests {
                 "cursor" => assert_eq!(provider, Provider::Cursor),
                 "agy" => assert_eq!(provider, Provider::Agy),
                 "opencode" => assert_eq!(provider, Provider::OpenCode),
+                "opencode2" => assert_eq!(provider, Provider::OpenCode2),
                 "cline" => assert_eq!(provider, Provider::Cline),
                 "grok" => assert_eq!(provider, Provider::Grok),
                 "kimi" => assert_eq!(provider, Provider::Kimi),
@@ -2040,3 +2185,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "opencode_detection_tests.rs"]
+mod opencode_detection_tests;

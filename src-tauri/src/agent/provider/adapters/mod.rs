@@ -32,6 +32,8 @@ pub mod kimi;
 pub mod mcode;
 pub mod muse;
 pub mod opencode;
+pub mod opencode2;
+pub(crate) mod opencode_version;
 pub mod perch;
 pub mod terminal;
 
@@ -48,5 +50,6 @@ pub use kimi::KIMI;
 pub use mcode::MCODE;
 pub use muse::MUSE;
 pub use opencode::OPENCODE;
+pub use opencode2::OPENCODE2;
 pub use perch::PERCH;
 pub use terminal::TERMINAL;

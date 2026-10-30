@@ -43,6 +43,7 @@ pub enum TranscriptFormat {
     Muse,
     Mcode,
     OpenCode,
+    OpenCode2,
     Cline,
 }
 
@@ -59,6 +60,7 @@ impl TranscriptFormat {
             "muse" => Some(Self::Muse),
             "mcode" => Some(Self::Mcode),
             "opencode" => Some(Self::OpenCode),
+            "opencode2" => Some(Self::OpenCode2),
             "cline" => Some(Self::Cline),
             _ => None,
         }
@@ -77,6 +79,7 @@ fn reader(format: TranscriptFormat) -> &'static dyn TranscriptReader {
         TranscriptFormat::Muse => &MuseAdapter,
         TranscriptFormat::Mcode => &McodeAdapter,
         TranscriptFormat::OpenCode => &OpenCodeAdapter,
+        TranscriptFormat::OpenCode2 => &OpenCode2Adapter,
         TranscriptFormat::Cline => &ClineAdapter,
     }
 }

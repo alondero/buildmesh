@@ -67,6 +67,7 @@ enum ReportSource {
         path: PathBuf,
         session_id: String,
         rows: Vec<(String, serde_json::Value)>,
+        v2: bool,
     },
     ResultFile {
         transcript: Option<Box<ReportSnapshot>>,
@@ -154,10 +155,8 @@ impl ReportSnapshot {
                 path,
                 session_id,
                 rows,
-            } => {
-                read_opencode_message_rows(path, session_id, OPENCODE_DIGEST_WINDOW).as_ref()
-                    == Some(rows)
-            }
+                v2,
+            } => read_store_rows(path, session_id, *v2).as_ref() == Some(rows),
             ReportSource::ResultFile {
                 transcript,
                 path,
@@ -212,13 +211,20 @@ pub(crate) fn read(
     node_path: &str,
 ) -> Result<ReportSnapshot, ReportReadError> {
     use ReportReadError as E;
-    if format == TranscriptFormat::OpenCode {
+    if matches!(
+        format,
+        TranscriptFormat::OpenCode | TranscriptFormat::OpenCode2
+    ) {
         // Resolve the env-aware SQLite store, then read it. The resolve/read
         // split mirrors `read_opencode_tail` and lets the store-backed read be
         // exercised against a temporary DB without touching `$HOME`.
         let (path, session_id) =
             opencode_resolve(Some(session_id), node_path).map_err(|_| E::NoTranscript)?;
-        return read_opencode_file(&path, session_id);
+        return if format == TranscriptFormat::OpenCode2 {
+            read_opencode2_file(&path, session_id)
+        } else {
+            read_opencode_file(&path, session_id)
+        };
     }
     if format == TranscriptFormat::Cline {
         // Issue #1776: Cline *has* a transcript reader (the Node Digest reads
@@ -246,20 +252,62 @@ pub(crate) fn read(
 /// degrade to `MalformedRecord` exactly like the file-backed readers rather than
 /// masquerading as "no report yet".
 fn read_opencode_file(path: &Path, session_id: &str) -> Result<ReportSnapshot, ReportReadError> {
+    read_opencode_store(path, session_id, false)
+}
+
+pub(crate) fn read_opencode2_file(
+    path: &Path,
+    session_id: &str,
+) -> Result<ReportSnapshot, ReportReadError> {
+    read_opencode_store(path, session_id, true)
+}
+
+fn read_store_rows(
+    path: &Path,
+    session_id: &str,
+    v2: bool,
+) -> Option<Vec<(String, serde_json::Value)>> {
+    if v2 {
+        super::readers::opencode2::read_rows(path, session_id, OPENCODE_DIGEST_WINDOW, false)
+    } else {
+        read_opencode_message_rows(path, session_id, OPENCODE_DIGEST_WINDOW)
+    }
+}
+
+fn read_opencode_store(
+    path: &Path,
+    session_id: &str,
+    v2: bool,
+) -> Result<ReportSnapshot, ReportReadError> {
     use ReportReadError as E;
-    let rows = read_opencode_message_rows(path, session_id, OPENCODE_DIGEST_WINDOW)
-        .ok_or(E::Unreadable)?;
-    let parsed = parse_opencode_messages(
-        &rows
-            .iter()
-            .map(|(_, value)| value.clone())
-            .collect::<Vec<_>>(),
-        1,
-    );
+    let rows = read_store_rows(path, session_id, v2).ok_or(E::Unreadable)?;
+    let dialogue: Vec<_> = rows
+        .iter()
+        .filter(|(_, v)| !v2 || v["info"]["role"] != "idle")
+        .cloned()
+        .collect();
+    let parsed = if v2 {
+        super::readers::opencode2::parse_messages(&rows, 1, types::MAX_TURN_TEXT)
+    } else {
+        parse_opencode_messages(
+            &dialogue
+                .iter()
+                .map(|(_, value)| value.clone())
+                .collect::<Vec<_>>(),
+            1,
+        )
+    };
     if parsed.saw_malformed {
         return Err(E::MalformedRecord);
     }
-    let (id, message) = rows.last().ok_or(E::NoReport)?;
+    if v2
+        && rows.last().is_some_and(|(_, v)| {
+            v["info"]["role"] == "idle" && v["info"]["outcome"] != "succeeded"
+        })
+    {
+        return Err(E::NoNativeCompletion);
+    }
+    let (id, message) = dialogue.last().ok_or(E::NoReport)?;
     if message.pointer("/info/role").and_then(|role| role.as_str()) != Some("assistant") {
         return Err(E::WorkInProgress);
     }
@@ -292,6 +340,7 @@ fn read_opencode_file(path: &Path, session_id: &str) -> Result<ReportSnapshot, R
             path: path.into(),
             session_id: session_id.into(),
             rows,
+            v2,
         },
     };
     if snapshot.is_current() {

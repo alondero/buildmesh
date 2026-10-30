@@ -11,6 +11,47 @@
 use super::*;
 
 #[test]
+fn a_migrated_v2_copy_cannot_replace_an_archived_v1_conversation() {
+    use crate::services::transcript_reader::readers::{opencode, opencode2};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("opencode.db");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    opencode::test_support::create_store(&conn);
+    opencode::test_support::insert_message(
+        &conn,
+        "fresh",
+        "ses_migrated",
+        200,
+        r#"{"info":{"role":"user"},"parts":[{"type":"text","text":"new V1 conversation"}]}"#,
+    );
+    conn.execute_batch("CREATE TABLE session_v2(id TEXT,directory TEXT,time_updated INTEGER,parent_id TEXT);CREATE TABLE session_message(id TEXT,session_id TEXT,type TEXT,seq INTEGER,data TEXT);INSERT INTO session_v2 VALUES('ses_migrated','/repo',100,NULL);INSERT INTO session_message VALUES('old','ses_migrated','user',0,'{\"text\":\"stale V2 copy\"}');").unwrap();
+    let node = crate::models::AgentNode {
+        id: 7,
+        provider: "opencode".into(),
+        cli_session_id: Some("ses_migrated".into()),
+        status: crate::models::SessionStatus::Archived,
+        ..Default::default()
+    };
+    let known = vec![node];
+    assert_eq!(
+        opencode2::discover(&path, "/repo", "/repo/.worktrees", &Default::default())
+            .unwrap()
+            .len(),
+        1
+    );
+    let excluded = opencode2_excluded_sessions(&known, &Default::default());
+    let mut discovered =
+        opencode2::discover(&path, "/repo", "/repo/.worktrees", &excluded).unwrap();
+    assert!(discovered.is_empty());
+    let durable = durable_archived_entries(&mut discovered, &known);
+    assert_eq!(durable.len(), 1);
+    assert_eq!(durable[0].provider.as_deref(), Some("opencode"));
+    assert_eq!(durable[0].node_id, Some(7));
+    let messages = opencode::read_opencode_messages(&path, "ses_migrated", 10).unwrap();
+    assert_eq!(messages[0]["parts"][0]["text"], "new V1 conversation");
+}
+
+#[test]
 fn encode_path_replaces_separators() {
     assert_eq!(
         encode_path("/Users/adam/src/buildmesh"),
