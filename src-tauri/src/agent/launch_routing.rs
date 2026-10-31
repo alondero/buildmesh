@@ -134,9 +134,19 @@ pub enum PreparedLaunchRouting {
     CodexProxy {
         harness_id: String,
         provider_id: String,
+        /// The provider account's display name — the label the Spawn Menu
+        /// shows for this route, and the name the launch warning uses.
+        account_name: String,
         profile_name: String,
         descriptor: crate::agent::provider::compatibility::EndpointModelDescriptor,
-        verification: preferences::PairingVerification,
+        /// The check that covers this route, when one exists on this runtime.
+        verification: Option<preferences::PairingVerification>,
+        /// Set when the route is not covered by a current successful check.
+        ///
+        /// The pairing verification is advisory: the route launches either
+        /// way, and this is what the spawn warns the user about while it
+        /// re-checks the pairing in the background.
+        advisory: Option<crate::services::provider_verification::VerificationAdvisory>,
         runtime: crate::models::EnvType,
         install: codex::CodexInstall,
         credential_reference: String,
@@ -162,9 +172,11 @@ impl std::fmt::Debug for PreparedLaunchRouting {
             Self::CodexProxy {
                 harness_id,
                 provider_id,
+                account_name,
                 profile_name,
                 descriptor,
                 verification,
+                advisory,
                 runtime,
                 install,
                 credential_reference,
@@ -173,9 +185,11 @@ impl std::fmt::Debug for PreparedLaunchRouting {
                 .debug_struct("CodexProxy")
                 .field("harness_id", harness_id)
                 .field("provider_id", provider_id)
+                .field("account_name", account_name)
                 .field("profile_name", profile_name)
                 .field("descriptor", descriptor)
                 .field("verification", verification)
+                .field("advisory", advisory)
                 .field("runtime", runtime)
                 .field("install", install)
                 .field("credential_reference", credential_reference)
@@ -243,6 +257,109 @@ impl PreparedLaunchRouting {
             Self::Native { .. } | Self::Environment { .. } => None,
         }
     }
+
+    /// Why this routing is not covered by a current successful pairing check,
+    /// when that is the case.
+    ///
+    /// The check is advisory: the route launches either way. The spawn reads
+    /// this to warn the user and to re-check the pairing in the background
+    /// while the session runs, instead of refusing to start.
+    pub fn verification_advisory(
+        &self,
+    ) -> Option<&crate::services::provider_verification::VerificationAdvisory> {
+        match self {
+            Self::CodexProxy { advisory, .. } => advisory.as_ref(),
+            Self::Native { .. } | Self::Environment { .. } => None,
+        }
+    }
+
+    /// The identity of the Codex route this routing points at, together with
+    /// the labels a launch warning needs.
+    ///
+    /// `None` for a routing that is not a Codex proxy route — only a Codex
+    /// route carries a pairing verification.
+    pub fn codex_route_identity(&self) -> Option<CodexRouteIdentity<'_>> {
+        match self {
+            Self::CodexProxy {
+                harness_id,
+                provider_id,
+                account_name,
+                runtime,
+                ..
+            } => Some(CodexRouteIdentity {
+                harness_id,
+                provider_id,
+                account_name,
+                runtime: *runtime,
+                runtime_label: match runtime {
+                    crate::models::EnvType::Wsl => "WSL",
+                    crate::models::EnvType::Windows | crate::models::EnvType::WindowsInterop => {
+                        "Windows"
+                    }
+                }
+                .to_string(),
+            }),
+            Self::Native { .. } | Self::Environment { .. } => None,
+        }
+    }
+}
+
+/// What a launch owes the user about a route whose pairing check is not
+/// current.
+///
+/// The decision is separated from its side effects (the warning event and the
+/// background re-check) so a test can pin it without a Tauri app.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerificationFollowUp {
+    /// Warn the user, and re-check the pairing in the background so the next
+    /// launch finds a current record.
+    WarnAndRecheck {
+        provider_id: String,
+        message: String,
+    },
+    /// Warn the user. The last check needs a credential or endpoint fix
+    /// first, so the pairing is not re-probed on this launch.
+    WarnOnly {
+        provider_id: String,
+        message: String,
+    },
+}
+
+impl PreparedLaunchRouting {
+    /// The follow-up this launch owes about the pairing check, if any.
+    ///
+    /// `None` when the route is covered by a current successful check — or
+    /// when it is not a Codex proxy route, which carries no pairing
+    /// verification of its own.
+    pub fn verification_follow_up(&self) -> Option<VerificationFollowUp> {
+        let advisory = self.verification_advisory()?;
+        let identity = self.codex_route_identity()?;
+        let message = advisory.warning(identity.account_name, &identity.runtime_label);
+        let provider_id = identity.provider_id.to_string();
+        Some(if advisory.wants_recheck() {
+            VerificationFollowUp::WarnAndRecheck {
+                provider_id,
+                message,
+            }
+        } else {
+            VerificationFollowUp::WarnOnly {
+                provider_id,
+                message,
+            }
+        })
+    }
+}
+
+/// The identity and labels of the Codex route a launch is about to use.
+#[derive(Debug, Clone)]
+pub struct CodexRouteIdentity<'a> {
+    pub harness_id: &'a str,
+    pub provider_id: &'a str,
+    pub account_name: &'a str,
+    pub runtime: crate::models::EnvType,
+    /// The runtime as the user knows it (`Windows`, `WSL`) — the name the
+    /// warning uses for the machine the route was checked on.
+    pub runtime_label: String,
 }
 
 pub fn prepare(
@@ -471,15 +588,15 @@ fn prepare_route(
     preferences::compatibility::preflight_pairing_env(Some(&pairing), &account.id)?;
     match provider {
         Provider::Codex => {
-            let verified = if verification.is_some() {
-                crate::services::provider_verification::verified_codex_snapshot(
+            let route = if verification.is_some() {
+                crate::services::provider_verification::codex_proxy_route_snapshot(
                     &pairing,
                     &account,
                     resolved.env_type,
                     verification,
                 )?
             } else {
-                crate::services::provider_verification::verified_codex_pairing(
+                crate::services::provider_verification::codex_proxy_route(
                     &pairing,
                     &account,
                     resolved.env_type,
@@ -489,24 +606,26 @@ fn prepare_route(
                 codex::stable_profile_name(&pairing.harness_id, &pairing.provider_id);
             codex::materialize_proxy_profile(
                 resolved.env_type,
-                &verified.install,
+                &route.install,
                 &profile_name,
                 &account.name,
-                &verified.descriptor.endpoint,
+                &route.descriptor.endpoint,
             )?;
-            // Codex's verified install path wins over the profile's bare
+            // Codex's resolved install path wins over the profile's bare
             // `executable` — it carries the npm-shim location after
-            // verification, which is what Codex's actual binary is.
+            // resolution, which is what Codex's actual binary is.
             Ok(PreparedLaunchRouting::CodexProxy {
                 harness_id: pairing.harness_id,
                 provider_id: pairing.provider_id,
+                account_name: account.name.clone(),
                 profile_name,
-                descriptor: verified.descriptor,
-                verification: verified.verification,
+                descriptor: route.descriptor,
+                verification: route.verification,
+                advisory: route.advisory,
                 runtime: resolved.env_type,
-                install: verified.install,
+                install: route.install,
                 credential_reference: codex::PROXY_CREDENTIAL_ENV.into(),
-                credential: verified.credential,
+                credential: route.credential,
             })
         }
         Provider::Anthropic | Provider::Cline => {
@@ -549,6 +668,10 @@ fn prepare_route(
         _ => Err("the selected harness does not support proxied providers".into()),
     }
 }
+
+#[cfg(test)]
+#[path = "launch_routing_tests.rs"]
+mod launch_routing_tests;
 
 #[cfg(test)]
 mod routing_cache_tests {

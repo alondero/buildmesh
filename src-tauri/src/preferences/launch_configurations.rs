@@ -417,28 +417,25 @@ fn resolve_plan(
     } else {
         None
     };
+    // The pairing verification is advisory: a route that was never checked,
+    // whose check went stale (a routine `codex-cli` npm update changes the
+    // installed version) or whose check failed still launches. The record is
+    // carried so the spawn can warn the user and re-check the pairing in the
+    // background — refusing to start on an unproven route would mean the
+    // user cannot even try the combination they configured.
     let verification = route.as_ref().and_then(|route| {
         prefs
             .pairing_verifications
             .iter()
-            .find(|v| {
+            .filter(|v| {
                 v.harness_id == route.harness_id
                     && v.provider_id == route.provider_id
                     && Some(v.endpoint.as_str()) == route.base_url.as_deref()
                     && Some(v.model_id.as_str()) == route.model_tiers.default.as_deref()
-                    && v.status == super::PairingVerificationStatus::Verified
             })
+            .max_by_key(|v| matches!(v.status, super::PairingVerificationStatus::Verified))
             .cloned()
     });
-    if require_available
-        && Provider::from_db_str(&harness.harness) != Provider::Cline
-        && route
-            .as_ref()
-            .is_some_and(|r| r.surface == super::ApiSurface::OpenAI)
-        && verification.is_none()
-    {
-        return Err("Provider Route is unverified or stale for this model; verify it in Launch Configurations".into());
-    }
     Ok(ResolvedLaunchPlan {
         configuration_id: configuration
             .map_or_else(|| format!("launch/{selection}"), |c| c.id.clone()),

@@ -190,6 +190,63 @@ describe('GroupedProviderMenu', () => {
     expect(ids).toEqual(['claude:minimax', 'claude:kimi']);
     expect(screen.getAllByRole('menuitem')).toHaveLength(2);
   });
+
+  it('shows a pairing-verification warning without disabling the row', async () => {
+    // ADR-0051 — the pairing verification warns, it does not gate. A route
+    // whose check is missing, stale or failed is still offered and still
+    // selectable; the row carries the caveat so the user can see it before
+    // the launch, not only after it.
+    const onSelect = vi.fn();
+    const providers = [
+      {
+        ...proxied('codex', 'minimax'),
+        verification_warning:
+          'Verification is out of date — the Codex CLI changed (0.166.0, previously 0.165.0)',
+      },
+    ];
+    render(<GroupedProviderMenu providers={providers} onSelect={onSelect} />);
+
+    expect(screen.getByText(/the Codex CLI changed/i)).toBeTruthy();
+
+    // The caveat does not disable the row: the user still launches.
+    const row = screen.getByRole('menuitem', { name: /minimax/i });
+    expect(row.hasAttribute('disabled')).toBe(false);
+    await userEvent.click(row);
+    expect(onSelect).toHaveBeenCalledWith('codex:minimax', false);
+  });
+
+  it('announces the caveat in the row\'s accessible name', () => {
+    // A screen reader announces the aria-label and suppresses the child text
+    // nodes, so a caveat that is only rendered as text is invisible to it.
+    const providers = [
+      {
+        ...proxied('codex', 'minimax'),
+        verification_warning: 'Not verified for this runtime yet',
+      },
+    ];
+    render(<GroupedProviderMenu providers={providers} onSelect={() => {}} />);
+    const row = screen.getByRole('menuitem', { name: /not verified for this runtime yet/i });
+    expect(row.getAttribute('aria-label')).toContain('Not verified for this runtime yet');
+  });
+
+  it('lets a fatal reason outrank the advisory caveat in the tooltip', () => {
+    // The row is disabled (`aria-disabled`) and the click handler returns
+    // early, so the tooltip must carry the reason it will not start — not an
+    // advisory that promises the session starts anyway.
+    const providers = [
+      {
+        ...proxied('codex', 'minimax'),
+        unavailable_reason: 'Provider Route is unavailable for this harness/runtime',
+        verification_warning: 'Not verified for this runtime yet',
+      },
+    ];
+    render(<GroupedProviderMenu providers={providers} onSelect={() => {}} />);
+    const row = screen.getByRole('menuitem', { name: /minimax/i });
+    expect(row.getAttribute('title')).toBe(
+      'Provider Route is unavailable for this harness/runtime',
+    );
+    expect(row.getAttribute('aria-disabled')).toBe('true');
+  });
 });
 
 describe('GroupedProviderMenu — WAI-ARIA menu semantics (issue #814)', () => {

@@ -254,7 +254,7 @@ export function ProvidersPane() {
       )}
 
       {!routingReady && <ResourceLoadStatus resource="routing" state={resources.routing} onRetry={() => retryResource('routing')} />}
-      {!providersLoaded && routingLoaded && <p className="mb-3 text-sm text-text-secondary">Saved routing choices are ready. Runtime checks are pending; routes needing verification stay unavailable. Confirm harness login before launching.</p>}
+      {!providersLoaded && routingLoaded && <p className="mb-3 text-sm text-text-secondary">Saved routing choices are ready. Runtime checks are pending; a route that has not been checked yet still launches — Buildmesh checks it in the background and warns you if the pairing does not work. Confirm harness login before launching.</p>}
       <SettingsSection
         title="Provider defaults"
         description={

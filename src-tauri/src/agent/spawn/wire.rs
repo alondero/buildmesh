@@ -87,6 +87,48 @@ pub(super) fn emit_provider_error(
     );
 }
 
+/// Payload of the `provider-warning` Tauri event. Emitted when a session
+/// starts on a route that is not covered by a current successful pairing
+/// check — the three `VerificationAdvisory` states: never verified, stale
+/// (the Codex CLI auto-updated), or the last check failed.
+///
+/// The pairing verification is advisory, so this is a warning rather than an
+/// error: the session is running, the user is told what is uncertain about
+/// it, and the backend re-checks the pairing in the background. The frontend
+/// surfaces it as a warning toast.
+///
+/// Generated to `src/types/generated/ProviderWarningPayload.ts`; the TS half is
+/// imported by `src/App.tsx`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "ProviderWarningPayload.ts")]
+pub struct ProviderWarningPayload {
+    #[ts(as = "i32")]
+    pub session_id: i64,
+    /// The harness that is running the session.
+    pub provider: crate::models::Provider,
+    /// The provider account the route points at (e.g. `minimax`).
+    pub provider_id: String,
+    pub message: String,
+}
+
+pub(super) fn emit_provider_warning(
+    app: &tauri::AppHandle,
+    session_id: i64,
+    provider: crate::models::Provider,
+    provider_id: &str,
+    message: &str,
+) {
+    let _ = app.emit(
+        "provider-warning",
+        ProviderWarningPayload {
+            session_id,
+            provider,
+            provider_id: provider_id.to_string(),
+            message: message.to_string(),
+        },
+    );
+}
+
 /// Payload of the `mesh-sync-warning` Tauri event. Emitted for any non-fatal
 /// auto-sync failure (network down, diverged history, repo unusable, PR-head
 /// unfetchable, PR SHA drift). The `outcome` discriminator drives the toast
