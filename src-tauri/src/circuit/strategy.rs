@@ -434,6 +434,20 @@ pub fn native_pull_for_source(source: &str) -> Option<NativePull> {
     })
 }
 
+/// The ownership gap a hook harness declares (`HookPush::ownership_gap`) for
+/// the lifecycle source its hooks record. `None` for any other source,
+/// including native pulls, which re-read their completion on every poll.
+pub fn hook_ownership_gap_for_source(source: &str) -> Option<&'static str> {
+    crate::models::Provider::all().iter().find_map(|provider| {
+        provider
+            .adapter()
+            .circuit_observation()
+            .hooks()
+            .filter(|hooks| hooks.source == source)
+            .and_then(|hooks| hooks.ownership_gap)
+    })
+}
+
 #[cfg(test)]
 // allow-test-in-production: this suite predates the sibling-test-file rule. Issue #2636 only revises the OpenCode guard assertions; moving the suite is out of scope.
 mod tests {

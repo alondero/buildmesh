@@ -1303,6 +1303,16 @@ pub(super) fn observe_gates_with(
                     });
                     continue;
                 }
+                // A hook reports an ownership gap once and its receipt is not
+                // read again, so the stored evidence settles the step: a
+                // recheck that found nothing new, or a step a previous release
+                // parked on the gap. Readiness below still judges the turn.
+                if view.ownership_gap_settlement_due(&step.node_id) {
+                    events.push(CircuitEvent::OwnershipGapHeld {
+                        node_id: step.node_id.clone(),
+                        attempt: step.attempt,
+                    });
+                }
                 if let Some(ClassifiedTurn {
                     agent_node_id,
                     classification,

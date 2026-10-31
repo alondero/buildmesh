@@ -153,16 +153,29 @@ the normal route to a report-based handoff. The evidence still records the gap,
 so lifecycle completion is never claimed. A process still launching
 (`Pending`/`Spawning`) is not reported as missing.
 
-Older releases parked the step on the gap with the gap text as its error. The
-gap, whether new or a repeat, returns such a persisted step to Running when the
-error matches the gap exactly; any other checkpoint stays. An operator Recheck
-saves the checkpoint it clears (`node.<id>.recheck_checkpoint`). If the recheck
-then sees only the same, already-recorded gap, it cannot resolve that
-checkpoint, so the step returns to Unverified with the saved checkpoint. A
-recheck saved before this change has no checkpoint text, so the restored
-checkpoint says the earlier checkpoint still applies and quotes the gap. Either
-answer stays put on later identical polls. The checkpoint is not hidden behind
-a Running step.
+Older releases parked the step on the gap with the gap text as its error. Such
+a persisted step returns to Running when its error matches the gap exactly; any
+other checkpoint stays. An operator Recheck saves the checkpoint it clears
+(`node.<id>.recheck_checkpoint`) and the evidence it is rechecking
+(`node.<id>.recheck_evidence`). If the recheck then finds only the same gap, it
+cannot resolve that checkpoint, so the step returns to Unverified with the saved
+checkpoint. A recheck saved before this change has no checkpoint text, so the
+restored checkpoint says the earlier checkpoint still applies and quotes the
+gap. Either answer stays put on later identical polls, so the checkpoint is not
+hidden behind a Running step.
+
+Both settlements need the gap to be seen again, and the two harnesses see it
+differently:
+
+- Codex's native pull re-reads its completion on every poll, so the repeated
+  gap arrives as a duplicate observation.
+- An Antigravity hook receipt is read once, past `observer.receipt_cursor`, and
+  never replayed. For hook harnesses the gate pass therefore asks
+  `RunView::ownership_gap_settlement_due` on every poll, which reads the
+  step's stored evidence (`lifecycle_invalidated` with ownership uncovered,
+  from a source whose harness declares the gap). When a settlement is due, the
+  pass emits `CircuitEvent::OwnershipGapHeld`, so a restart or a consumed
+  receipt does not strand the step.
 
 The waits that used to park stay bounded (known background work keeps its
 behaviour above). Readiness re-examines a Running step that holds a

@@ -117,7 +117,7 @@ pub(super) fn pending(view: &super::RunView) -> Result<Vec<super::CircuitEvent>,
     Ok(events)
 }
 
-fn resolve_receipt(
+pub(crate) fn resolve_receipt(
     run_id: i64,
     entry: crate::db::circuit::evidence::CircuitHistoryEntry,
     lookup: impl FnOnce(i64) -> rusqlite::Result<(Option<String>, Option<String>, Option<String>)>,

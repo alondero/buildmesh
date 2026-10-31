@@ -645,3 +645,71 @@ fn unreadable_result_defers_without_reminding_then_recovers_from_the_written_rep
     assert_eq!(run.context.get("node.producer.output"), Some(report));
     assert_eq!(run.context.get("node.step.result_reminders.1"), None);
 }
+
+/// The gate pass is what settles a hook-reported ownership gap: a hook
+/// receipt is consumed once, so on every poll the pass asks whether the stored
+/// evidence settles the step and, if so, says so. A step a previous release
+/// parked on the gap is released; a step parked for another reason is not.
+#[test]
+fn the_gate_pass_settles_a_stored_hook_ownership_gap_and_nothing_else() {
+    use crate::circuit::observation::{
+        CircuitObservation, ObservationIdentity, ObservedWorkFact, WorkEvidence,
+    };
+    let gap = crate::circuit::strategy::for_stored("agy")
+        .hooks()
+        .and_then(|hooks| hooks.ownership_gap)
+        .expect("Antigravity declares an ownership gap");
+    let identity = ObservationIdentity {
+        run_id: 1876,
+        step_id: "step".into(),
+        attempt: 1,
+        agent_node_id: 42,
+        session_incarnation: Some("7".into()),
+        session_id: Some("session".into()),
+        turn_id: None,
+        report_revision: None,
+    };
+    let mut evidence = WorkEvidence::default();
+    evidence.observe(
+        &identity,
+        &CircuitObservation {
+            identity: identity.clone(),
+            source: "agy_native_hook".into(),
+            source_id: Some("agy-stop".into()),
+            observed_at_ms: 10,
+            authoritative: false,
+            fact: ObservedWorkFact::OwnershipUnavailable { reason: gap.into() },
+        },
+    );
+    let parked = |error: &str| {
+        let mut run = view(spawn(), RunState::Running, StepStatus::Unverified, Some(42));
+        run.steps[0].error = Some(error.into());
+        run.context.set(
+            "node.step.evidence.1",
+            serde_json::to_string(&evidence).unwrap(),
+        );
+        run
+    };
+    let settles = |run: &RunView| {
+        let mut events = Vec::new();
+        super::turn_classify::observe_gates_with(run, &mut events, &mut Script::default());
+        events.iter().any(|event| {
+            matches!(event, CircuitEvent::OwnershipGapHeld { node_id, attempt: 1 } if node_id == "step")
+        })
+    };
+
+    let mut run = parked(gap);
+    assert!(settles(&run), "a step parked on the stored gap is settled");
+    let mut events = Vec::new();
+    super::turn_classify::observe_gates_with(&run, &mut events, &mut Script::default());
+    for event in &events {
+        advance(&mut run, event);
+    }
+    assert_eq!(run.steps[0].status, StepStatus::Running);
+    assert!(!settles(&run), "and then left alone");
+
+    assert!(
+        !settles(&parked("Prompt delivery is unverified: no echo")),
+        "an unrelated checkpoint is not settled by the gap"
+    );
+}

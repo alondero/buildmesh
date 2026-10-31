@@ -481,6 +481,60 @@ impl RunView {
                 })
     }
 
+    /// The ownership gap held by the stored evidence of the step's current
+    /// attempt, from a hook harness that declares one. Its gap marks the
+    /// lifecycle invalidated with ownership uncovered, and that holds until
+    /// ownership is covered; a conflict or open human request rules it out. A
+    /// hook receipt is read once, so this evidence is the lasting record.
+    fn held_ownership_gap(&self, node_id: &str) -> Option<&'static str> {
+        let step = self.step(node_id)?;
+        let evidence = self
+            .context
+            .get(&format!("node.{node_id}.evidence.{}", step.attempt))
+            .and_then(|json| serde_json::from_str::<super::observation::WorkEvidence>(json).ok())?;
+        if !evidence.lifecycle_invalidated
+            || evidence.ownership_covered
+            || evidence.conflicted
+            || evidence.has_human_wait()
+        {
+            return None;
+        }
+        evidence
+            .source_watermarks
+            .keys()
+            .find_map(|source| super::strategy::hook_ownership_gap_for_source(source))
+    }
+
+    /// Whether a pending operator recheck has seen no new evidence: the
+    /// step's evidence is what the recheck saved. A recheck recorded before
+    /// evidence was saved has only the stored evidence to go on.
+    fn recheck_evidence_unchanged(&self, node_id: &str) -> bool {
+        let Some(step) = self.step(node_id) else {
+            return false;
+        };
+        match self
+            .context
+            .get(&format!("node.{node_id}.recheck_evidence"))
+        {
+            None => true,
+            Some(saved) => {
+                self.context
+                    .get(&format!("node.{node_id}.evidence.{}", step.attempt))
+                    .unwrap_or_default()
+                    == saved
+            }
+        }
+    }
+
+    /// Whether the stored ownership gap would settle this step now. The worker
+    /// asks on every poll, so a gap reported once by a hook still releases a
+    /// step parked on it, and still answers a recheck, after a restart.
+    pub(crate) fn ownership_gap_settlement_due(&self, node_id: &str) -> bool {
+        self.held_ownership_gap(node_id).is_some_and(|gap| {
+            gap_settlement(self, node_id, gap, self.recheck_evidence_unchanged(node_id)).is_some()
+        })
+    }
+
     pub fn evidence_deadline_ms(&self, node_id: &str) -> Option<i64> {
         let step = self.step(node_id)?;
         if self.state != RunState::Running
@@ -1022,6 +1076,14 @@ pub enum CircuitEvent {
         node_id: String,
         attempt: i32,
         reason: String,
+    },
+    /// The worker found the step's stored evidence holding a declared
+    /// ownership gap that settles the step (`RunView::ownership_gap_settlement_due`).
+    /// A hook reports the gap once, so this, not a replayed receipt, is what
+    /// settles a recheck or a step a previous release parked on the gap.
+    OwnershipGapHeld {
+        node_id: String,
+        attempt: i32,
     },
     ObservationDeferred {
         node_id: String,
@@ -1830,6 +1892,18 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
         } => {
             if apply_observation(run, &mut t, expected, observation) {
                 finish_observed_step(run, &mut t, expected);
+            }
+        }
+        CircuitEvent::OwnershipGapHeld { node_id, attempt } => {
+            if run.state == RunState::Running
+                && run
+                    .step(node_id)
+                    .is_some_and(|step| step.attempt == *attempt)
+            {
+                if let Some(gap) = run.held_ownership_gap(node_id) {
+                    let answered = run.recheck_evidence_unchanged(node_id);
+                    reconcile_ownership_gap(run, &mut t, node_id, gap, answered);
+                }
             }
         }
         CircuitEvent::ObservationDeferred {
@@ -3314,43 +3388,45 @@ fn resume_observed_step(run: &mut RunView, t: &mut Transition, node_id: &str) {
 /// Prefix of a checkpoint restored by a recheck that found nothing new.
 const RECHECK_UNCHANGED: &str = "Evidence recheck found no new evidence";
 
-/// Settle a step after a declared ownership gap, which is not a checkpoint.
-///
-/// - A step still parked on this very gap (the previous release parked it
-///   there, and persisted runs keep that state) returns to Running.
-/// - A pending operator recheck that saw only the gap it had already recorded
-///   gets a definite answer: the checkpoint it was rechecking comes back,
-///   unless that checkpoint was this gap. Leaving the step Running would hide
-///   the checkpoint without resolving it.
-fn reconcile_ownership_gap(
-    run: &mut RunView,
-    t: &mut Transition,
+/// What a declared ownership gap does to a step. The gap is not a checkpoint.
+#[derive(Debug, PartialEq)]
+enum GapSettlement {
+    /// The step is still parked on this very gap (the previous release parked
+    /// it there, and persisted runs keep that state): return it to Running.
+    Resume,
+    /// A pending operator recheck found only the gap: restore the checkpoint
+    /// it was rechecking. Leaving the step Running would hide that checkpoint
+    /// without resolving it.
+    Restore(String),
+}
+
+/// Decide [`GapSettlement`] for a step whose evidence holds `gap`.
+/// `recheck_answered` says the gap is all a pending recheck has found.
+fn gap_settlement(
+    run: &RunView,
     node_id: &str,
     gap: &str,
-    repeated: bool,
-) {
-    let Some(step) = run.step(node_id) else {
-        return;
-    };
+    recheck_answered: bool,
+) -> Option<GapSettlement> {
+    let step = run.step(node_id)?;
     if step.outcome.is_some() {
-        return;
+        return None;
     }
     match step.status {
-        StepStatus::Unverified if step.error.as_deref() == Some(gap) => {
-            resume_observed_step(run, t, node_id);
-        }
+        StepStatus::Unverified if step.error.as_deref() == Some(gap) => Some(GapSettlement::Resume),
         StepStatus::Running
-            if repeated
+            if recheck_answered
                 && run.context.get(&format!("node.{node_id}.recheck_only")) == Some("1") =>
         {
             let checkpoint = run
                 .context
                 .get(&format!("node.{node_id}.recheck_checkpoint"))
-                .filter(|checkpoint| !checkpoint.is_empty())
-                .map(str::to_owned);
+                .filter(|checkpoint| !checkpoint.is_empty());
             let reason = match checkpoint {
-                Some(checkpoint) if checkpoint == gap => return,
-                Some(checkpoint) if checkpoint.starts_with(RECHECK_UNCHANGED) => checkpoint,
+                Some(checkpoint) if checkpoint == gap => return None,
+                Some(checkpoint) if checkpoint.starts_with(RECHECK_UNCHANGED) => {
+                    checkpoint.to_owned()
+                }
                 Some(checkpoint) => format!(
                     "{RECHECK_UNCHANGED}; the checkpoint still applies. Previous checkpoint: {checkpoint}"
                 ),
@@ -3361,9 +3437,35 @@ fn reconcile_ownership_gap(
                     "{RECHECK_UNCHANGED}; the earlier checkpoint still applies. The harness reported: {gap}"
                 ),
             };
+            Some(GapSettlement::Restore(reason))
+        }
+        _ => None,
+    }
+}
+
+/// Apply [`gap_settlement`]. A resumed step's recheck, if one was pending, has
+/// had its answer (the gap it parked on), so it is no longer pending; a later
+/// gap must not restore a checkpoint the step has moved past.
+fn reconcile_ownership_gap(
+    run: &mut RunView,
+    t: &mut Transition,
+    node_id: &str,
+    gap: &str,
+    recheck_answered: bool,
+) {
+    match gap_settlement(run, node_id, gap, recheck_answered) {
+        Some(GapSettlement::Resume) => {
+            resume_observed_step(run, t, node_id);
+            let key = format!("node.{node_id}.recheck_only");
+            if run.context.get(&key) == Some("1") {
+                run.context.set(&key, "0");
+                t.context_changed = true;
+            }
+        }
+        Some(GapSettlement::Restore(reason)) => {
             unverify_step(run, t, node_id, reason);
         }
-        _ => {}
+        None => {}
     }
 }
 
