@@ -455,6 +455,32 @@ impl RunView {
             && !self.report_has_known_blockers(node_id)
     }
 
+    /// Whether readiness must keep re-examining this step even though its
+    /// agent shows no finished turn. True for an Unverified step, and for a
+    /// Running step that an observation is holding: a recorded blocker that
+    /// clears on its own, or a settled foreground turn whose owned work the
+    /// harness cannot report. Those used to park the step Unverified; keeping
+    /// them Running must not change when Buildmesh re-examines them.
+    pub(crate) fn observation_pending(&self, node_id: &str) -> bool {
+        let Some(step) = self.step(node_id) else {
+            return false;
+        };
+        step.status == StepStatus::Unverified
+            || self
+                .context
+                .get(&format!("node.{node_id}.observation_blocker"))
+                .is_some_and(|json| !json.is_empty())
+            || self
+                .context
+                .get(&format!("node.{node_id}.evidence.{}", step.attempt))
+                .and_then(|json| {
+                    serde_json::from_str::<super::observation::WorkEvidence>(json).ok()
+                })
+                .is_some_and(|evidence| {
+                    evidence.foreground_terminated && !evidence.ownership_covered
+                })
+    }
+
     pub fn evidence_deadline_ms(&self, node_id: &str) -> Option<i64> {
         let step = self.step(node_id)?;
         if self.state != RunState::Running
@@ -1608,21 +1634,7 @@ fn apply_observation(
     };
     // A repeated fact is not new evidence. Recording it advanced the run
     // revision on every poll and made every operator action lose the race.
-    // Missing ownership can still park a running step; that write is the
-    // step row, not another observation.
     if disposition == D::Duplicate {
-        if !evidence.lifecycle_verified() && !evidence.has_human_wait() {
-            if let super::observation::ObservedWorkFact::OwnershipUnavailable { reason } =
-                &observation.fact
-            {
-                if run
-                    .step(&expected.step_id)
-                    .is_some_and(|step| step.status == StepStatus::Running)
-                {
-                    unverify_step(run, t, &expected.step_id, reason.clone());
-                }
-            }
-        }
         return false;
     }
     t.observations.push(RecordedObservation {
@@ -1656,7 +1668,20 @@ fn apply_observation(
                 .set(&format!("node.{}.output", expected.step_id), text.clone());
         }
     }
-    if matches!(disposition, D::Unavailable | D::Conflicting) && !evidence.has_human_wait() {
+    // A harness that declares it has no child/background registry (Codex
+    // native pull, Antigravity hooks) reports that gap on every settled turn.
+    // The evidence keeps it, so completion is never claimed as verified, but it
+    // is the normal route to a report-based handoff rather than something a
+    // person must act on: the handoff or the evidence window decides.
+    let declared_ownership_gap = disposition == D::Unavailable
+        && matches!(
+            observation.fact,
+            super::observation::ObservedWorkFact::OwnershipUnavailable { .. }
+        );
+    if matches!(disposition, D::Unavailable | D::Conflicting)
+        && !declared_ownership_gap
+        && !evidence.has_human_wait()
+    {
         let reason = match &observation.fact {
             super::observation::ObservedWorkFact::OwnershipUnavailable { reason } => reason.clone(),
             _ => "Lifecycle or owned-work evidence is unavailable or conflicting. Inspect the agent and Recheck evidence.".into(),
@@ -1815,6 +1840,13 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
             }
             let key = format!("node.{node_id}.observation_blocker");
             let encoded = serde_json::to_string(blocker).expect("observation blocker");
+            let previous = run
+                .context
+                .get(&key)
+                .filter(|json| !json.is_empty())
+                .and_then(|json| {
+                    serde_json::from_str::<super::observation::CircuitObservationBlocker>(json).ok()
+                });
             let mut reason = blocker.message();
             if matches!(
                 blocker,
@@ -1842,16 +1874,30 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 run.context.set(&key, encoded);
                 t.context_changed = true;
             }
-            let waiting_for_background = matches!(
-                blocker,
-                super::observation::CircuitObservationBlocker::KnownWorkOutstanding
-            );
-            if !waiting_for_background
-                && run.step(node_id).is_some_and(|step| {
-                    step.status != StepStatus::Unverified
-                        || step.error.as_deref() != Some(reason.as_str())
-                })
-            {
+            if blocker.clears_without_a_person() {
+                // An ordinary wait (still starting, still working, report not
+                // yet published) is not a checkpoint: the step stays Running and
+                // the evidence window bounds it. It does release a checkpoint the
+                // previous observation blocker raised, such as a draft the person
+                // has since submitted; any other checkpoint is not the observer's
+                // to release.
+                let parked_by_observer = previous.is_some_and(|previous| {
+                    run.step(node_id).is_some_and(|step| {
+                        step.status == StepStatus::Unverified
+                            && step.outcome.is_none()
+                            && step
+                                .error
+                                .as_deref()
+                                .is_some_and(|error| error.starts_with(&previous.message()))
+                    })
+                });
+                if parked_by_observer {
+                    resume_observed_step(run, &mut t, node_id);
+                }
+            } else if run.step(node_id).is_some_and(|step| {
+                step.status != StepStatus::Unverified
+                    || step.error.as_deref() != Some(reason.as_str())
+            }) {
                 unverify_step(run, &mut t, node_id, reason);
             }
         }
@@ -2281,10 +2327,21 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 return t;
             }
             if expired {
-                let detail = if reason.is_empty() {
-                    "Agent produced no new report"
-                } else {
-                    reason
+                // The step stays Running through a self-clearing observation
+                // wait, so its checkpoint names what that wait was for.
+                let held = run
+                    .context
+                    .get(&format!("node.{node_id}.observation_blocker"))
+                    .filter(|json| !json.is_empty())
+                    .and_then(|json| {
+                        serde_json::from_str::<super::observation::CircuitObservationBlocker>(json)
+                            .ok()
+                    })
+                    .map(|blocker| blocker.expired_wait_detail());
+                let detail = match held {
+                    Some(held) => held,
+                    None if reason.is_empty() => "Agent produced no new report".to_owned(),
+                    None => reason.trim_end_matches('.').to_owned(),
                 };
                 unverify_step(run, &mut t, node_id, format!("Evidence window ended after {}: {detail}. Recheck evidence after inspecting the agent.", describe_window(*timeout_ms)));
                 return t;
@@ -3221,6 +3278,25 @@ fn unverify_step(run: &mut RunView, t: &mut Transition, node_id: &str, reason: S
     write.error = Some(Some(reason));
     t.step_writes.push(write);
     true
+}
+
+/// Return an Unverified step to Running on the same attempt once the
+/// observation blocker that parked it has given way to an ordinary wait.
+/// Unlike `set_step`, this never starts a new attempt.
+fn resume_observed_step(run: &mut RunView, t: &mut Transition, node_id: &str) {
+    let Some(step) = run.step_mut(node_id) else {
+        return;
+    };
+    if step.status != StepStatus::Unverified {
+        return;
+    }
+    step.status = StepStatus::Running;
+    step.outcome = None;
+    step.error = None;
+    let mut write = StepWrite::for_existing(node_id, StepStatus::Running, step.attempt);
+    write.outcome = Some(None);
+    write.error = Some(None);
+    t.step_writes.push(write);
 }
 
 fn set_step(run: &mut RunView, t: &mut Transition, node_id: &str, status: StepStatus) {

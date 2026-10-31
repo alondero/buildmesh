@@ -1351,10 +1351,17 @@ fn codex_context_messages_allow_a_completed_report_to_recover_review() {
             },
         },
     );
+    // An unusable report is a wait, not a checkpoint: the step stays Running
+    // with the reason recorded, and its evidence window would name it if it
+    // never cleared.
     assert_eq!(
         run.step("await_source").unwrap().status,
-        StepStatus::Unverified
+        StepStatus::Running
     );
+    assert!(run
+        .context
+        .get("node.await_source.observation_blocker")
+        .is_some_and(|blocker| blocker.contains("report_unavailable")));
     let agent = AgentNode {
         id: 900,
         provider: "codex".into(),

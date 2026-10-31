@@ -125,6 +125,49 @@ Codex, Muse and Command Code report snapshots can carry that native completion
 fact; other adapters retain their supported observation paths. No generic
 terminal silence rule invents completion or background ownership.
 
+### Only a blocker a person must clear raises a checkpoint
+
+An Unverified Checkpoint raises the run's "needs you" badge, so it is reserved
+for a condition a person must act on. `CircuitObservationBlocker::clears_without_a_person`
+splits the typed blockers (exhaustively, so a new one must choose):
+
+- **Clears on its own:** session identity not yet discovered, report not yet
+  usable (newer tool activity, no finished turn, no published report, transcript
+  changing), report superseded by the current prompt, known background work.
+  The step stays Running; the blocker is still stored in
+  `node.<id>.observation_blocker` and recorded as an `observation_readiness`
+  history row.
+- **Needs a person:** a missing process after launch, terminal input draft,
+  paste or uncertainty, a human question, an unreadable result file, unavailable
+  lifecycle evidence, an evidence conflict, an unobservable turn end. These park
+  the step Unverified as before.
+
+A self-clearing blocker also releases a step that an earlier observation blocker
+had parked (its error starts with that blocker's message), for example a draft
+the person has since submitted. It never releases a checkpoint raised for
+another reason, such as an expired evidence window or an uncertain delivery.
+
+A harness-declared ownership gap (`OwnershipUnavailable`, used by Codex native
+pull and Antigravity hooks) on a settled turn is likewise not a checkpoint: it is
+the normal route to a report-based handoff. The evidence still records the gap,
+so lifecycle completion is never claimed. A process still launching
+(`Pending`/`Spawning`) is not reported as missing.
+
+The waits that used to park stay bounded (known background work keeps its
+behaviour above). Readiness re-examines a Running step that holds a
+recorded blocker or a settled turn exactly as it re-examined the same step while
+Unverified, so handoff decisions are unchanged. Because the step is Running, the
+evidence window (`WaitObserved`) keeps timing it: a step that stops making
+progress becomes an Unverified Checkpoint when the window ends, and a step that
+never becomes observable still fails fast after the first-observation window.
+That checkpoint names the recorded blocker it was waiting on
+(`CircuitObservationBlocker::expired_wait_detail`), so the reason is not lost.
+
+A month of the stable ledger (30 September to 31 October 2026) motivated this:
+389 of 483 runs showed an Unverified step for 30 seconds or longer, 68% of the
+782 Unverified hours were self-clearing waits, and fewer than 5% of episodes
+involved any operator action.
+
 ### Parked gates are re-judged on new evidence, not on every tick
 
 A classification that cannot be bound — a known blocker, a report that fails the

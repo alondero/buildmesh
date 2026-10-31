@@ -261,10 +261,10 @@ cannot establish a submission boundary.
 
 ## A completed Codex agent is waiting for a usable harness report
 
-A Circuit can remain **Unverified** after Codex finishes when an older Buildmesh
-report reader rejects valid system or developer context messages, such as those
-emitted during a model switch. The checkpoint says the transcript contains an
-unrecognised or malformed record. Rechecking the same transcript with that
+A Circuit can stop at an **Unverified Checkpoint** after Codex finishes, once its
+evidence window ends, when an older Buildmesh report reader rejects valid system
+or developer context messages, such as those emitted during a model switch. The
+checkpoint says the transcript contains an unrecognised or malformed record. Rechecking the same transcript with that
 reader cannot clear the problem.
 
 Update Buildmesh to a build containing the Codex context-message fix. The

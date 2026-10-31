@@ -216,7 +216,7 @@ A person's choice to reopen a failed Circuit Run at its failed step: retry the s
 _Avoid_: resume (that means restarting an archived agent session), skip
 
 **Unverified Checkpoint**:
-A Circuit Step whose outcome or owned work Buildmesh cannot currently verify, requiring evidence recheck or operator intervention. It is not itself a failure, a completion, or permission to proceed.
+A Circuit Step whose outcome or owned work Buildmesh cannot currently verify, requiring evidence recheck or operator intervention. It is not itself a failure, a completion, or permission to proceed. A wait that clears without a person (the agent is still starting, still working, or has not yet published this turn's report) is not a checkpoint: the step stays Running until that wait resolves or its evidence window ends.
 _Avoid_: failed step, stalled step
 
 **Operator-recorded Outcome**:

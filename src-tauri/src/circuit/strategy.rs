@@ -87,9 +87,11 @@ pub struct HookPush {
     /// Observation source recorded for question/permission facts.
     pub request_source: &'static str,
     /// `Some(reason)`: the harness has no child/background registry, so a
-    /// settled turn that reports none is an explicit ownership gap surfaced to
-    /// the operator. `None`: the harness may report a registry, and a turn
-    /// without one leaves ownership merely unknown.
+    /// settled turn that reports none is an explicit ownership gap. The step's
+    /// evidence records it (completion is never verified) and its diagnostics
+    /// name it; it is not itself a checkpoint, because report-based handoff is
+    /// the normal route for such a harness. `None`: the harness may report a
+    /// registry, and a turn without one leaves ownership merely unknown.
     pub ownership_gap: Option<&'static str>,
     /// Whether the parser reports the foreground turn (`Stop`,
     /// `UserPromptSubmit`). `false`: it reports child or background work only
