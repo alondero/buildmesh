@@ -221,6 +221,10 @@ fn additional_homes_lists_only_this_harness() {
     other.harness_id = "claude".into();
     let prefs = prefs_with(vec![login("work", "Work"), other]);
     let homes = additional_homes(&prefs, "codex");
-    assert_eq!(homes.len(), 1);
-    assert!(homes[0].ends_with("work"));
+    // Compare whole paths: `Path::ends_with` matches components, and Linux
+    // reads this Windows-style fixture as a single component.
+    assert_eq!(
+        homes,
+        vec![std::path::PathBuf::from(&login("work", "Work").home)]
+    );
 }
