@@ -94,17 +94,6 @@ fun workActivitiesByNeed(activities: List<WorkActivity>, runs: List<NodeCircuitR
     }
 
 @Composable
-fun WorkMeshHeader(mesh: JsonObject?, count: Int) {
-    Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(mesh?.text("name") ?: "Unknown mesh", Modifier.weight(1f),
-            style = MaterialTheme.typography.titleSmall, color = MeshColors.secondary,
-            maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Text("$count", style = MaterialTheme.typography.labelMedium, color = MeshColors.muted)
-    }
-}
-
-@Composable
 fun WorkActivityRows(activity: WorkActivity, state: RemoteState, motion: WorkGlyphMotion, openNode: (Long) -> Unit,
     closeNode: ((Long) -> Unit)? = null) {
     val paired = activity.members.size > 1

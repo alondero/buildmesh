@@ -127,7 +127,7 @@ class WorkListTest {
         compose.setContent { BuildmeshTheme {
             Surface(color = MeshColors.background) {
                 Box(Modifier.width(320.dp).fillMaxHeight().testTag("work")) {
-                    Dashboard(state, "Work", 0, {}, { opened += it }, { _, _ -> }, { _, _ -> })
+                    Dashboard(state, "Work", 1, {}, { opened += it }, { _, _ -> }, { _, _ -> })
                 }
             }
         } }
@@ -157,24 +157,24 @@ class WorkListTest {
         } finally { bitmap.recycle() }
     }
 
-    @Test fun reviewerFiltersKeepThePairAtLargeFontSizes() {
+    @Test fun aSelectedMeshKeepsItsPairAtLargeFontSizes() {
         compose.setContent { BuildmeshTheme {
             val density = LocalDensity.current.density
             CompositionLocalProvider(LocalDensity provides Density(density, 1.4f)) {
                 Surface(color = MeshColors.background) {
                     Box(Modifier.width(320.dp).fillMaxHeight()) {
-                        Dashboard(state, "Work", 0, {}, {}, { _, _ -> }, { _, _ -> })
+                        Dashboard(state, "Work", 1, {}, {}, { _, _ -> }, { _, _ -> })
                     }
                 }
             }
         } }
-        compose.onNodeWithText("Search agents or branches").performTextInput("Reviewer")
-        compose.onNodeWithText("Needs attention", substring = false).performClick()
-        compose.onNode(hasText("Reviewer") and hasClickAction() and !hasSetTextAction()).performScrollTo().assertIsDisplayed()
+        compose.onNode(hasText("Reviewer") and hasClickAction()).performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("Implementer with a long task name that should truncate").performScrollTo().assertIsDisplayed()
         compose.onNodeWithContentDescription("Paired group of 2 agents").assertExists()
-        compose.onNodeWithText("Standalone agent").assertDoesNotExist()
+        compose.onNodeWithText("Standalone agent").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("Website agent").assertDoesNotExist()
+        compose.onNodeWithText("Search agents or branches").assertDoesNotExist()
+        compose.onNodeWithText("All meshes").assertDoesNotExist()
     }
 
     @Test fun runningIsFilledAndIdleIsHollowInTheNativeWindow() {

@@ -207,6 +207,8 @@ fun PairScreen(invitation: String, busy: Boolean, pair: (String, String) -> Unit
     }
 }
 
+private val MeshSplitMinWidth = 600.dp
+
 @Composable
 fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) -> Unit, openNode: (Long) -> Unit, openMesh: (Long, String) -> Unit,
     openCapture: (Long, String) -> Unit,
@@ -217,11 +219,9 @@ fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) 
     // when the send failed, so a tapped chip retires only on an acceptance
     // and re-enables itself on a failure (issue #1966 review).
     answer: (nodeId: Long, sequence: String, onDone: (accepted: Boolean) -> Unit) -> Boolean = { _, _, _ -> false }) {
-    var query by rememberSaveable { mutableStateOf("") }
-    var attentionOnly by rememberSaveable { mutableStateOf(false) }
     var closingId by rememberSaveable { mutableStateOf<Long?>(null) }
     val closing = state.nodes.firstOrNull { it.number("id") == closingId && it.text("status") != "archived" }
-    if (tab == "Work" && closing != null && closeNode != null) AlertDialog(
+    if (closing != null && closeNode != null) AlertDialog(
         onDismissRequest = { closingId = null },
         title = { Text("Close ${closing.text("name")}?") },
         text = { Text("Stop this agent and remove it from Work? Its worktree and files will be kept.") },
@@ -235,47 +235,52 @@ fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) 
     val nodesByMesh = openNodes.groupBy { it.number("mesh_id") }
     // Match Sidebar.tsx: open nodes determine the band; both bands keep saved mesh order.
     val (activeMeshes, inactiveMeshes) = state.meshes.partition { nodesByMesh.containsKey(it.number("id")) }
-    val visible = openNodes.filter { node ->
-        (meshId == 0L || node.number("mesh_id") == meshId) &&
-            (!attentionOnly || circuitNeedsAttention(node, state.circuitRuns)) &&
-            (query.isBlank() || node.text("name").contains(query, true) || node.text("branch").contains(query, true))
+    val meshes = activeMeshes + inactiveMeshes
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        // A phone keeps the two steps apart. A tablet, an unfolded fold, or any
+        // window at least 600dp wide keeps the mesh list beside the agents.
+        val wide = maxWidth >= MeshSplitMinWidth
+        if (wide) {
+            Row(Modifier.fillMaxSize()) {
+                MeshDirectory(meshes, nodesByMesh, state, meshId, selectMesh, openMesh, openCapture, "Meshes",
+                    Modifier.width(280.dp).fillMaxHeight())
+                Box(Modifier.width(1.dp).fillMaxHeight().background(MeshColors.borderStrong))
+                MeshWork(state, meshId, openNode, openMesh, openTerminal, answer, closeNode, { closingId = it },
+                    Modifier.weight(1f).fillMaxHeight())
+            }
+        } else if (tab == "Overview") {
+            MeshDirectory(meshes, nodesByMesh, state, meshId, selectMesh, openMesh, openCapture, "Overview", Modifier.fillMaxSize())
+        } else {
+            MeshWork(state, meshId, openNode, openMesh, openTerminal, answer, closeNode, { closingId = it }, Modifier.fillMaxSize())
+        }
     }
-    val activities = if (tab == "Work") matchingWorkActivities(state, meshId, query, attentionOnly) else emptyList()
-    val glyphMotion = if (tab == "Work") rememberWorkGlyphMotion() else null
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+}
+
+@Composable
+private fun MeshDirectory(
+    meshes: List<JsonObject>,
+    nodesByMesh: Map<Long, List<JsonObject>>,
+    state: RemoteState,
+    selectedMeshId: Long,
+    selectMesh: (Long) -> Unit,
+    openMesh: (Long, String) -> Unit,
+    openCapture: (Long, String) -> Unit,
+    heading: String,
+    modifier: Modifier = Modifier,
+) {
+    LazyColumn(modifier, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item {
-            Text(if (tab == "Overview") "Overview" else "Your work", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-            Text("${openNodes.count { it.text("status") == "running" }} running · ${openNodes.count { circuitNeedsAttention(it, state.circuitRuns) }} need attention · ${state.meshes.size} meshes", color = MeshColors.secondary)
+            Text(heading, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         }
-        item {
-            Selector("Mesh", listOf(0L to "All meshes") + state.meshes.map { it.number("id") to it.text("name") }, meshId, selectMesh)
-            OutlinedTextField(colors = buildmeshTextFieldColors(), value = query, onValueChange = { query = it }, label = { Text("Search agents or branches") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-            FilterChip(selected = attentionOnly, onClick = { attentionOnly = !attentionOnly }, label = { Text("Needs attention") })
-        }
-        // The home screen's first surface: whoever is blocked on you, above the
-        // mesh list. The deck keeps the screen's mesh scope but ignores the
-        // search query and the attention chip — who is blocked on you is not
-        // something a search box should hide — the same stance the phone web
-        // deck takes by drawing from its unfiltered node list.
-        val deckScope = openNodes.filter { node -> meshId == 0L || node.number("mesh_id") == meshId }
-        val deckWaiting = if (tab == "Overview") waitingForInput(deckScope) else emptyList()
-        // …and those same nodes are excluded from the node cards below, or the
-        // Overview would render every waiting agent twice (once pinned, once
-        // as a card) — the rule src/mobile's NodeList applies. The Work tab is
-        // untouched: it has no deck and keeps these nodes as rows.
-        val cards = if (tab == "Overview") visible.filter { nodeInputRequest(it) == null } else visible
-        if (tab == "Overview") item(key = "waiting-for-input") {
-            AttentionDeck(deckScope, state.meshes, state.busy, openNode, openTerminal, answer)
-        }
-        if (tab == "Overview") items(activeMeshes + inactiveMeshes, key = { "mesh-${it.number("id")}" }) { mesh ->
+        items(meshes, key = { "mesh-${it.number("id")}" }) { mesh ->
             val members = nodesByMesh[mesh.number("id")].orEmpty()
-            Card(colors = CardDefaults.cardColors(containerColor = MeshColors.card)) {
+            val id = mesh.number("id")
+            Card(colors = CardDefaults.cardColors(containerColor = if (id == selectedMeshId) MeshColors.selection else MeshColors.card)) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Column(Modifier.weight(1f).clickable(role = Role.Button, onClickLabel = "View work in ${mesh.text("name")}") {
-                        query = ""
-                        attentionOnly = false
-                        openMesh(mesh.number("id"), "work")
+                        selectMesh(id)
+                        openMesh(id, "work")
                     }.heightIn(min = 48.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(mesh.text("name"), style = MaterialTheme.typography.titleMedium,
                             color = if (members.isEmpty()) MeshColors.muted else MeshColors.text,
@@ -286,45 +291,67 @@ fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) 
                     // prompt is written; an empty prompt opens a plain session.
                     SpawnSplitButton(meshDefaultName(mesh, state.providers), launchOptions(state.providers, needsPrompt = false),
                         "a task in ${mesh.text("name")}", true,
-                        { openCapture(mesh.number("id"), "") }, { openCapture(mesh.number("id"), it.text("id")) }, compact = true)
+                        { openCapture(id, "") }, { openCapture(id, it.text("id")) }, compact = true)
                 }
             }
         }
-        if (tab == "Work") {
-            val byMesh = activities.groupBy { it.root.number("mesh_id") }
-            // Keep resources reachable even when a mesh has no open or matching agents.
-            val meshOrder = state.meshes.filter { meshId == 0L || it.number("id") == meshId }.map { it.number("id") }
-            (meshOrder + byMesh.keys).distinct().forEach { id ->
-                val mesh = state.meshes.firstOrNull { it.number("id") == id }
-                val members = byMesh[id].orEmpty()
-                item(key = "work-mesh-$id") {
-                    Column {
-                        WorkMeshHeader(mesh, members.sumOf { it.members.size })
-                        if (mesh != null) FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            TextButton(onClick = { openMesh(id, "pulls") }) { Text("Pull requests") }
-                            TextButton(onClick = { openMesh(id, "issues") }) { Text("Issues") }
-                            TextButton(onClick = { openMesh(id, "archive") }) { Text("Archive") }
-                        }
-                    }
-                }
-                items(members, key = { "activity-${it.root.number("id")}" }) {
-                    WorkActivityRows(it, state, requireNotNull(glyphMotion), openNode,
-                        closeNode?.let { { id -> closingId = id } })
+        if (meshes.isEmpty()) item {
+            EmptyMessage(if (state.refreshing) "Loading agents…" else "No meshes yet. Add a repository on the desktop to start.")
+        }
+    }
+}
+
+@Composable
+private fun MeshWork(
+    state: RemoteState,
+    meshId: Long,
+    openNode: (Long) -> Unit,
+    openMesh: (Long, String) -> Unit,
+    openTerminal: (Long) -> Unit,
+    answer: (nodeId: Long, sequence: String, onDone: (accepted: Boolean) -> Unit) -> Boolean,
+    closeNode: ((Long) -> Unit)?,
+    onRequestClose: (Long) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val mesh = state.meshes.firstOrNull { it.number("id") == meshId }
+    val scope = if (mesh == null) emptyList() else state.nodes.filter {
+        it.text("status") != "archived" && it.number("mesh_id") == meshId
+    }
+    val grouped = if (mesh == null) emptyList() else matchingWorkActivities(state, meshId, "", false)
+    // A pair stays one bracket. A waiting agent who is on their own is pinned
+    // in the deck and left out of the rows, so that agent is not listed twice.
+    val pairedIds = grouped.filter { it.members.size > 1 }.flatMap { it.members }.map { it.number("id") }.toSet()
+    val deckScope = scope.filter { it.number("id") !in pairedIds }
+    val waitingIds = waitingForInput(deckScope).map { it.number("id") }.toSet()
+    val activities = grouped.mapNotNull { activity ->
+        if (activity.members.size > 1) activity
+        else if (activity.members.any { it.number("id") in waitingIds }) null
+        else activity
+    }
+    val glyphMotion = rememberWorkGlyphMotion()
+    LazyColumn(modifier, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (mesh == null) {
+            item { EmptyMessage("Select a mesh to see its agents.") }
+        } else {
+            item {
+                Text(mesh.text("name"), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            item {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { openMesh(meshId, "pulls") }) { Text("Pull requests") }
+                    TextButton(onClick = { openMesh(meshId, "issues") }) { Text("Issues") }
+                    TextButton(onClick = { openMesh(meshId, "archive") }) { Text("Archive") }
                 }
             }
-        }
-        if (if (tab == "Work") activities.isEmpty() else cards.isEmpty() && deckWaiting.isEmpty()) item { EmptyMessage(if (state.refreshing) "Loading agents…" else "No agents match this view. Capture a task to start one.") }
-        if (tab != "Work") items(cards.sortedByDescending { circuitNeedsAttention(it, state.circuitRuns) }, key = { "node-${it.number("id")}" }) { node ->
-            Card(onClick = { openNode(node.number("id")) }, colors = CardDefaults.cardColors(containerColor = MeshColors.card)) {
-                Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(node.text("name"), style = MaterialTheme.typography.titleMedium)
-                    Text(nodeLabel(node), color = MeshColors.status(node.text("status")))
-                    state.circuitRuns.firstOrNull { it.node_id == node.number("id") }?.let { run ->
-                        Text(circuitStatus(run), color = if (run.needs_you.isNotEmpty()) MeshColors.amber else MeshColors.secondary)
-                    }
-                    Text("${state.meshes.firstOrNull { it.number("id") == node.number("mesh_id") }?.text("name").orEmpty()} · ${node.text("branch")}", color = MeshColors.secondary)
-                    node.objectAt("lifecycle")?.text("message")?.takeIf { it.isNotBlank() }?.let { Text(it, maxLines = 3) }
-                }
+            if (waitingIds.isNotEmpty()) item(key = "waiting-for-input") {
+                AttentionDeck(deckScope, state.meshes, state.busy, openNode, openTerminal, answer)
+            }
+            items(activities, key = { "activity-${it.root.number("id")}" }) {
+                WorkActivityRows(it, state, glyphMotion, openNode, closeNode?.let { { id -> onRequestClose(id) } })
+            }
+            if (activities.isEmpty() && waitingIds.isEmpty()) item {
+                EmptyMessage(if (state.refreshing) "Loading agents…" else "No agents in this mesh yet.")
             }
         }
     }
