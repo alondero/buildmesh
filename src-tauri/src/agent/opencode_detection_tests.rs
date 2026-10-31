@@ -1,6 +1,53 @@
 use super::*;
 
 #[test]
+fn v2_alias_remains_discoverable_when_v1_precedes_it_on_path() {
+    let v1 = PathBuf::from("/legacy/opencode");
+    let v2 = PathBuf::from("/npm/opencode2");
+    let profiles = detect_profiles(
+        &[PathBuf::from("/legacy"), PathBuf::from("/npm")],
+        &[""],
+        None,
+        &|path| path == v1 || path == v2,
+    );
+    let confirmed = confirm_versions(profiles, &|path| {
+        if path == v1 {
+            Some(1)
+        } else if path == v2 {
+            Some(2)
+        } else {
+            None
+        }
+    });
+    let executables: Vec<_> = confirmed
+        .iter()
+        .map(|p| (p.harness.as_str(), p.executable.as_deref()))
+        .collect();
+    assert_eq!(
+        executables,
+        [
+            ("opencode", Some(v1.as_path())),
+            ("opencode2", Some(v2.as_path()))
+        ]
+    );
+}
+
+#[test]
+fn v2_alias_still_requires_a_confirmed_v2_major() {
+    let profiles = detect_profiles(&[PathBuf::from("/npm")], &[""], None, &|path| {
+        path == Path::new("/npm/opencode2")
+    });
+    assert_eq!(profiles.len(), 1, "the V2 alias is a discovery candidate");
+    for major in [None, Some(1), Some(3)] {
+        assert!(confirm_versions(profiles.clone(), &|_| major).is_empty());
+    }
+    assert_eq!(
+        confirm_versions(profiles, &|_| Some(2))[0].harness,
+        "opencode2"
+    );
+}
+
+#[test]
 fn unknown_version_keeps_v1_visible_but_withholds_v2() {
     let profiles = detect_profiles(&[PathBuf::from("/bin")], &[""], None, &|p| {
         p == Path::new("/bin/opencode")

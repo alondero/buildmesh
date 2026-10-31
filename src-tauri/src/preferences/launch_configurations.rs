@@ -207,14 +207,19 @@ pub fn resolve(
     selection: &str,
     overrides: &LaunchOverrides,
 ) -> Result<ResolvedLaunchPlan, String> {
-    resolve_plan(prefs, selection, overrides, true)
+    resolve_plan(prefs, selection, overrides, AvailabilityCheck::Detected)
 }
 
 pub fn resolve_for_edit(
     prefs: &AppPreferences,
     selection: &str,
 ) -> Result<ResolvedLaunchPlan, String> {
-    resolve_plan(prefs, selection, &Default::default(), false)
+    resolve_plan(
+        prefs,
+        selection,
+        &Default::default(),
+        AvailabilityCheck::Skip,
+    )
 }
 
 /// Freeze effective settings without probing installed processes or reading preferences.
@@ -224,22 +229,35 @@ pub fn capture(
     selection: &str,
     overrides: &LaunchOverrides,
 ) -> Result<ResolvedLaunchPlan, String> {
-    resolve_plan(prefs, selection, overrides, false)
+    resolve_plan(prefs, selection, overrides, AvailabilityCheck::Skip)
 }
 
 pub fn capture_legacy(
     prefs: &AppPreferences,
     selection: &str,
 ) -> Result<ResolvedLaunchPlan, String> {
-    resolve_plan(prefs, selection, &Default::default(), false)
+    resolve_plan(
+        prefs,
+        selection,
+        &Default::default(),
+        AvailabilityCheck::Skip,
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AvailabilityCheck {
+    Skip,
+    Detected,
+    SavedExecutable,
 }
 
 fn resolve_plan(
     prefs: &AppPreferences,
     selection: &str,
     overrides: &LaunchOverrides,
-    require_available: bool,
+    availability: AvailabilityCheck,
 ) -> Result<ResolvedLaunchPlan, String> {
+    let require_available = availability != AvailabilityCheck::Skip;
     let configuration = prefs
         .spawn_configurations
         .iter()
@@ -273,12 +291,15 @@ fn resolve_plan(
             "Harness is missing; reinstall it or select another configuration".to_string()
         })?;
     if require_available
-        && (crate::agent::detection::currently_installed_profiles(vec![harness.clone()]).is_empty()
-            || crate::agent::provider_menu::provider_info_for(
-                &harness,
-                crate::agent::provider::Platform::current(),
-            )
-            .is_none())
+        && (crate::agent::provider_menu::provider_info_for(
+            &harness,
+            crate::agent::provider::Platform::current(),
+        )
+        .is_none()
+            || (crate::agent::detection::currently_installed_profiles(vec![harness.clone()])
+                .is_empty()
+                && !(availability == AvailabilityCheck::SavedExecutable
+                    && crate::agent::detection::validate_saved_native_profile(&harness)?)))
     {
         return Err("Harness is unavailable; install it for the selected runtime".into());
     }
@@ -569,7 +590,12 @@ pub fn resolve_snapshot(
     };
     // The frozen login is part of the snapshot, not a live preference: a
     // resume returns to the home that holds the session.
-    let mut resolved = resolve(&prefs, &plan.configuration_id, overrides)?;
+    let mut resolved = resolve_plan(
+        &prefs,
+        &plan.configuration_id,
+        overrides,
+        AvailabilityCheck::SavedExecutable,
+    )?;
     resolved.harness_login = plan.harness_login.clone();
     Ok(resolved)
 }

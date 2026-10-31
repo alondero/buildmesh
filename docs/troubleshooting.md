@@ -180,9 +180,11 @@ typing outside Buildmesh.
 ## OpenCode 2 does not start or report attention
 
 Check `opencode --version` in the same native runtime as the node. Use the
-**OpenCode 2** harness for 2.2.x and **OpenCode** for 1.18.3. Pin a separate
-executable in each Harness Profile if both majors are installed; restarting
-Buildmesh refreshes version detection. After the deferred probe, an unknown
+**OpenCode 2** harness for 2.2.x and **OpenCode** for 1.18.3. V2 discovery tries
+the npm CLI's `opencode2` alias before `opencode`; check `opencode2 --version`
+if V1 takes precedence on PATH. Pin a separate executable in each Harness
+Profile when the alias is unavailable. Restarting Buildmesh refreshes version
+detection. After the deferred probe, an unknown
 result is still shown and launchable through the V1 harness for compatibility.
 OpenCode 2 is not detected until the probe identifies a 2.x version. The V1
 fallback does not establish that the executable is V1; if you installed V2,
@@ -213,9 +215,10 @@ Restart the node after correcting the config. Malformed managed config is
 reported rather than overwritten.
 
 V2 normally permits paths outside the project. Buildmesh adds an explicit
-`external_directory` **deny** rule to each managed node config. Enforcement
-against an actual out-of-project read or write remains unverified for the
-production interactive and background argv, including interactive `--auto`.
+`external_directory` **deny** rule to each managed node config. On Windows
+2.2.3, a full-TUI read outside the containing Git worktree was denied with
+`--auto`. OpenCode treats that worktree as internal even when the node starts
+in a subdirectory. External writes and other platforms remain unverified.
 This is a configured CLI rule, separate from the Mesh's OS sandbox. Background
 inference additionally configures tool deny rules in its own scratch project.
 WSL and Windows Interop V2 launches are not yet supported.

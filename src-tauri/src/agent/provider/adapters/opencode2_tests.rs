@@ -5,6 +5,47 @@ use crate::agent::{
     spawn::ResumeCause,
 };
 
+#[cfg(windows)]
+#[test]
+fn session_api_preserves_json_through_the_windows_cli_shim() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("api fixture.cjs");
+    std::fs::write(
+        &script,
+        r#"const body = process.argv[process.argv.indexOf('--data') + 1];
+process.stdout.write(JSON.stringify({ data: JSON.parse(body) }));"#,
+    )
+    .unwrap();
+    let node = crate::agent::detection::resolve_spawn_binary("node")
+        .expect("Node is required for the Windows CLI argument fixture");
+    let executable = dir.path().join("opencode2.cmd");
+    std::fs::write(
+        &executable,
+        format!(
+            "@echo off\r\n\"{}\" \"{}\" %*\r\n",
+            node.display(),
+            script.display()
+        ),
+    )
+    .unwrap();
+    let body = serde_json::json!({
+        "id": "ses_assigned",
+        "model": {"providerID": "custom", "id": "vendor/model"},
+        "oddQuote": "a single \" then (parentheses)",
+        "title": "spaces, quotes \" and \\\"; slash \\; newline\r\n; it's `literal` $() & | < > ^ ! %COMSPEC%"
+    });
+    let response = api(
+        &executable,
+        dir.path(),
+        &dir.path().join("opencode.json"),
+        "POST",
+        "/api/session",
+        body.clone(),
+    )
+    .unwrap();
+    assert_eq!(response["data"], body);
+}
+
 #[test]
 fn sandboxed_preparation_is_refused_before_project_plugins_can_execute() {
     let dir = tempfile::tempdir().unwrap();

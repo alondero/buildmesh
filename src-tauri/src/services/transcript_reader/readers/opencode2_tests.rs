@@ -4,6 +4,31 @@ use crate::services::transcript_reader::{
     report_snapshot::{read_opencode2_file, ReportReadError},
 };
 
+/// Manual acceptance against a completed native session, with read-only access.
+#[test]
+#[ignore = "requires BUILDMESH_OPENCODE2_REPORT_DB, _SESSION and _TEXT"]
+fn live_completed_report_snapshot() {
+    let required = |suffix| {
+        let key = format!("BUILDMESH_OPENCODE2_REPORT_{suffix}");
+        std::env::var(&key).unwrap_or_else(|_| panic!("set {key} for live OpenCode 2 acceptance"))
+    };
+    let path = PathBuf::from(required("DB"));
+    let session = required("SESSION");
+    let expected = required("TEXT");
+    let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let version: String = conn
+        .query_row(
+            "SELECT version FROM session_v2 WHERE id=?1",
+            [&session],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(version.starts_with("2."), "expected V2, found {version}");
+    let report = read_opencode2_file(&path, &session).expect("completed native report");
+    assert_eq!(report.text, expected, "native OpenCode {version}");
+    eprintln!("native OpenCode {version}: completed report matched");
+}
+
 fn store() -> (tempfile::TempDir, PathBuf, Connection) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("opencode.db");
@@ -18,6 +43,50 @@ fn message(conn: &Connection, id: &str, typ: &str, seq: i64, data: Value) {
         rusqlite::params![id, typ, seq, data.to_string()],
     )
     .unwrap();
+}
+
+#[test]
+fn tui_lifecycle_rows_do_not_hide_dialogue_or_invalidate_a_completed_report() {
+    let (_dir, path, conn) = store();
+    message(
+        &conn,
+        "agent-before",
+        "agent-switched",
+        0,
+        json!({"agent":"build"}),
+    );
+    message(&conn, "user", "user", 1, json!({"text":"hello"}));
+    message(
+        &conn,
+        "assistant",
+        "assistant",
+        2,
+        json!({"content":[{"type":"text","text":"Done"}],"time":{"completed":100}}),
+    );
+    message(&conn, "idle", "idle", 3, json!({"outcome":"succeeded"}));
+    message(
+        &conn,
+        "agent-after",
+        "agent-switched",
+        4,
+        json!({"agent":"build"}),
+    );
+    message(
+        &conn,
+        "model-after",
+        "model-switched",
+        5,
+        json!({"model":{"providerID":"custom","id":"model"}}),
+    );
+
+    let rows = read_rows(&path, "ses_testSession", 2, false).unwrap();
+    let parsed = parse_messages(&rows, 1, MAX_TURN_TEXT);
+    assert_eq!(parsed.last_assistant_message.as_deref(), Some("Done"));
+    assert!(!parsed.saw_malformed);
+    assert_eq!(
+        read_opencode2_file(&path, "ses_testSession").unwrap().text,
+        "Done"
+    );
 }
 
 #[test]

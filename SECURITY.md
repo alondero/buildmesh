@@ -156,9 +156,9 @@ anonymity.
 The OpenCode 2 harness starts a private server per node. Its managed project
 override configures an explicit `external_directory` deny because V2 otherwise
 allows it by default. Background inference also configures tool deny rules in
-its scratch project. Blocking an actual out-of-project read or write has not
-been verified with the production interactive or background argv, including
-interactive `--auto` mode. These are OpenCode permission rules, not OS
+its scratch project. Windows OpenCode 2.2.3 denied an out-of-worktree read in
+the full TUI with `--auto`; external writes and other platforms remain
+unverified. These are OpenCode permission rules, not OS
 confinement; the Mesh sandbox remains an independent control. User or
 organization policies and the CLI implementation remain part of that trust
 boundary. See [the decision](docs/adr/0050-opencode-major-version-isolation.md)
