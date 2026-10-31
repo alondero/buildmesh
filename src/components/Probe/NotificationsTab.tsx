@@ -3,12 +3,13 @@ import { useProbeResource } from '../../lib/probeResource';
 import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react';
 import { useToastStore } from '../../stores/toastStore';
 import { openBlockedCleanups, useBlockedCleanupStore } from '../../stores/blockedCleanupStore';
-import { isMeshSyncFailure, isWorktreeCleanup, needsAttention,
-  type MeshSyncNotificationAction, type Notification, type SyncEvidence, type WorktreeNotificationAction } from '../../lib/notifications';
+import { isAgentInput, isMeshSyncFailure, isWorktreeCleanup, needsAttention,
+  type AgentInputNotificationAction, type MeshSyncNotificationAction, type Notification, type SyncEvidence, type WorktreeNotificationAction } from '../../lib/notifications';
 import { runMeshSync } from '../../lib/meshSyncFeedback';
 import { refreshWorktreeNotifications } from '../../lib/worktreeNotifications';
 import { ProbeTabBody } from './ProbeTabBody';
 import { BellIcon } from './probeIcons';
+import { AgentInputLink } from '../Notifications/AgentInputLink';
 import './NotificationsTab.css';
 
 const BlockedCleanupDialog = lazy(() => import('../BlockedCleanupDialog/BlockedCleanupDialog')
@@ -123,23 +124,20 @@ export function NotificationsTab() {
   const activity = notices.filter(n => !needsAttention(n));
   const unread = notices.filter(n => !n.read).length;
   const clearable = activity.some(n => n.read);
-  // Split the attention set by action kind so each card receives the fields it
-  // actually renders. The two kinds are unrelated problems (a blocked worktree
-  // removal and a mesh that never reached upstream) and are recovered by
-  // different actions, so they must not share one card template. The
-  // predicates are typed on the whole notice, not just its action, because
-  // each card needs `notice` narrowed to read `action.meshName` / `action.detail`.
+  // Each recovery card receives only its own action fields.
   const cleanupAttention = attention.filter(
     (n): n is Notification & { action: WorktreeNotificationAction } => isWorktreeCleanup(n.action));
   const syncAttention = attention.filter(
     (n): n is Notification & { action: MeshSyncNotificationAction } => isMeshSyncFailure(n.action));
+  const inputAttention = attention.filter(
+    (n): n is Notification & { action: AgentInputNotificationAction } => isAgentInput(n.action));
 
   useEffect(() => {
     return () => useBlockedCleanupStore.getState().close();
   }, []);
 
   function resolve(notice: Notification) {
-    if (!notice.action) return;
+    if (!isWorktreeCleanup(notice.action)) return;
     useToastStore.getState().markNotificationRead(notice.id);
     setRecoveryMounted(true);
     openBlockedCleanups(notice.action.path);
@@ -159,7 +157,7 @@ export function NotificationsTab() {
     <ProbeTabBody>
       {notices.length === 0 ? <div className="notification-empty">
         <BellIcon /><h3>No notifications yet</h3>
-        <p>App toasts will appear here. Worktree problems will have a recovery action.</p>
+        <p>App toasts will appear here. Input requests and other problems will have an action.</p>
         {loading && <p role="status">Checking worktree problems…</p>}
       </div> : <>
         <section aria-label="Needs attention" className="notification-attention">
@@ -167,6 +165,14 @@ export function NotificationsTab() {
           {attention.length === 0 ? <p className="notification-caught-up">
             {error ? 'Worktree status is unavailable.' : loading ? 'Checking worktree problems…' : 'You’re all caught up.'}
           </p> : <>
+            {inputAttention.map(notice => <article key={notice.id} className="notification-attention-card">
+              <div className="notification-heading"><h4>Needs input</h4><NoticeTime notice={notice} /></div>
+              <AgentInputLink action={notice.action} className="notification-input-link">
+                <span className="block notification-node">{notice.action.agentName}</span>
+                <span className="block mt-1 text-text-secondary">{notice.message}</span>
+                <span className="block mt-2 text-accent-cyan">Open agent →</span>
+              </AgentInputLink>
+            </article>)}
             {syncAttention.map(notice => <SyncAttentionCard key={notice.id} notice={notice} />)}
             {cleanupAttention.map(notice => <WorktreeAttentionCard key={notice.id} notice={notice} onResolve={resolve} />)}
           </>}
@@ -182,6 +188,7 @@ export function NotificationsTab() {
                 <div className="notification-heading"><h4>{notice.provider}</h4><NoticeTime notice={notice} /></div>
                 <p>{notice.message}</p>
                 {notice.action?.resolution && <p className="notification-resolution">{notice.action.resolution}</p>}
+                {isAgentInput(notice.action) && <AgentInputLink action={notice.action} className="notification-link" />}
                 {!notice.read && <button type="button" className="notification-link" aria-label={`Mark ${notice.provider} notification as read`}
                   onClick={() => useToastStore.getState().markNotificationRead(notice.id)}>Mark read</button>}
               </div>

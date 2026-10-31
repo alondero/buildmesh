@@ -5,6 +5,9 @@ import type { ProviderWarningPayload } from './types/generated/ProviderWarningPa
 import type { ResumeFailedPayload } from './types/generated/ResumeFailedPayload';
 import type { WorktreeCleanupFailedPayload } from './types/generated/WorktreeCleanupFailedPayload';
 import type { CircuitAgentBlockedPayload } from './types/generated/CircuitAgentBlockedPayload';
+import { reportCircuitInput, watchAgentInputNotifications } from './lib/agentInputNotifications';
+import { isAgentInput } from './lib/notifications';
+import { AgentInputLink } from './components/Notifications/AgentInputLink';
 import { subscribeMeshSyncWarnings } from './lib/streams/meshSyncWarningStream';
 import { useGlobalShortcuts } from './hooks/useGlobalShortcuts';
 import { Sidebar } from './components/Sidebar/Sidebar';
@@ -301,23 +304,20 @@ function App() {
     return () => { void unlisten.then(fn => fn()); };
   }, []);
 
-  // Circuit needs-input notifications share the toast stack with Sync and
-  // Worktree. The inline action remains attached to the owning agent node.
+  // Keep a destination in both the toast and persisted notification history.
   useEffect(() => {
     const unlistenBlocked = listen<CircuitAgentBlockedPayload>(
       'circuit-agent-blocked',
-      (event) => {
-        addToast(
-          'Circuit',
-          `Agent on node ${event.payload.node_id} needs your input (issue #${event.payload.issue}).`,
-          'warning',
-        );
-      },
+      ({ payload }) => reportCircuitInput(payload),
     );
     return () => {
       unlistenBlocked.then((fn) => fn());
     };
   }, []);
+
+  useEffect(() => {
+    if (isReady) return watchAgentInputNotifications();
+  }, [isReady]);
 
   // Auto-dismiss toasts after TOAST_TTL_MS. A 1s tick is coarse
   // enough that it won't fight React's render cycle, fine enough
@@ -455,6 +455,13 @@ function App() {
               }`}
             >
               <div className="flex-1 min-w-0">
+                {isAgentInput(toast.action) ? <AgentInputLink action={toast.action}
+                  className="block w-full text-left cursor-pointer rounded-md hover:bg-bg-card-hover focus-visible:outline-2 focus-visible:outline-accent-cyan"
+                  onOpen={() => dismissToast(toast.id)}>
+                  <span className="block text-2xs font-bold uppercase text-status-warning">{toast.provider}</span>
+                  <span className="block text-xs text-text-secondary break-words">{toast.message}</span>
+                  <span className="block text-xs text-accent-cyan mt-2 min-h-6">Open agent →</span>
+                </AgentInputLink> : <>
                 <div
                   className={`text-2xs font-bold uppercase ${
                     isWarning ? 'text-status-warning' : isSuccess ? 'text-status-success' : isInfo ? 'text-text-secondary' : 'text-status-error'
@@ -463,6 +470,7 @@ function App() {
                   {toast.provider}
                 </div>
                 <div className="text-xs text-text-secondary break-words">{toast.message}</div>
+                </>}
               </div>
               <button
                 type="button"

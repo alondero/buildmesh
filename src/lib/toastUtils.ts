@@ -1,3 +1,5 @@
+import type { NotificationAction } from './notifications';
+
 // Pure helpers for the global error-toast stack in App.tsx.
 //
 // `dedupToasts` and `applyToastCap` are pure so App.tsx's `setToasts`
@@ -26,10 +28,12 @@ export interface Toast {
   message: string;
   createdAt: number;
   severity?: ToastSeverity;
+  action?: NotificationAction;
 }
 
-export function createToastKey(toast: Pick<Toast, 'provider' | 'message'>): string {
-  return `${toast.provider}:${toast.message.slice(0, KEY_MESSAGE_MAX)}`;
+export function createToastKey(toast: Pick<Toast, 'provider' | 'message' | 'action'>): string {
+  const target = toast.action?.kind === 'agent-input' ? `:agent:${toast.action.nodeId}` : '';
+  return `${toast.provider}:${toast.message.slice(0, KEY_MESSAGE_MAX)}${target}`;
 }
 
 // Replaces an existing toast with the same key when it's still on
@@ -55,7 +59,7 @@ export function dedupToasts(
   // severity — a follow-up error shouldn't get downgraded to whatever
   // level the toast originally arrived with.
   const next = existing.slice();
-  next[idx] = { ...existing[idx], createdAt: incoming.createdAt, severity: incoming.severity };
+  next[idx] = { ...incoming, id: existing[idx].id };
   return next;
 }
 

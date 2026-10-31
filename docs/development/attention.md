@@ -42,6 +42,17 @@ legacy attention-clear events do not carry authority to change client status.
 See [Agent Node status observation](node-status-observation.md) for
 ordering, health, recovery and harness capability limits.
 
+Circuit input alerts retain an `agent-input` destination in the toast and
+persisted notification history. `agentInputNotifications` formats the agent
+and Mesh names, omits absent issue numbers, and reconciles removed agents after
+a successful boot snapshot. A non-input status alone does not resolve a Circuit
+intervention: Ready agents can still need help with blocked or missing reports.
+Live reconciliation requires removal, renewed work or an input-to-other-status
+change.
+`AgentInputLink` uses the canonical `focusAgentNode` transition to select the
+Mesh, solo the agent and select its activity tab. Opening marks the notice
+read without answering or resolving the request.
+
 ### False-Yield Suppression (issue #878)
 
 MiniMax Code Stop reconciliation reads the node's canonical `messages.jsonl`
