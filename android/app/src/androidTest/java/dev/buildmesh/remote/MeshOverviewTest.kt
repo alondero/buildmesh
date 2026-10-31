@@ -8,12 +8,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
-import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.core.app.ApplicationProvider
-import androidx.test.espresso.Espresso.closeSoftKeyboard
 import kotlinx.serialization.json.Json
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
@@ -55,7 +56,11 @@ class MeshOverviewTest {
         } }
         compose.onNodeWithText("Empty mesh").performScrollTo().assertIsDisplayed()
         meshes.forEach { compose.onNodeWithText(it.text("path")).assertDoesNotExist() }
-        listOf("Issues", "Pull requests", "Archive").forEach { compose.onNodeWithText(it).assertDoesNotExist() }
+        listOf("Issues", "Pull requests", "Archive", "Buildmesh agent", "Waiting agent", "Website agent").forEach {
+            compose.onNodeWithText(it).assertDoesNotExist()
+        }
+        compose.onNodeWithText("All meshes").assertDoesNotExist()
+        compose.onNodeWithText("Search agents or branches").assertDoesNotExist()
         val title = compose.onNodeWithText("Website with a long mesh name").fetchSemanticsNode().boundsInRoot
         val spawn = compose.onNodeWithContentDescription("Start a task in Website with a long mesh name with Mesh default").fetchSemanticsNode().boundsInRoot
         val menu = compose.onNodeWithContentDescription("Choose how to start a task in Website with a long mesh name").fetchSemanticsNode().boundsInRoot
@@ -66,9 +71,9 @@ class MeshOverviewTest {
         saveScreenshot("mesh-overview")
     }
 
-    @Test fun workResourcesRemainAvailableForEmptyAndFilteredMeshes() {
+    @Test fun workResourcesRemainAvailableForAnEmptyMesh() {
         val state = mutableStateOf(RemoteState(meshes = meshes, nodes = nodes))
-        val selected = mutableStateOf(0L)
+        val selected = mutableStateOf(3L)
         val opened = mutableListOf<Pair<Long, String>>()
         compose.setContent { BuildmeshTheme {
             Surface(color = MeshColors.background) {
@@ -76,16 +81,14 @@ class MeshOverviewTest {
                     { id, target -> opened += id to target }, { _, _ -> })
             }
         } }
-        // All meshes includes resource links for the empty mesh, not just agent groups.
-        compose.onNodeWithText("Empty mesh", substring = false).performScrollTo().assertIsDisplayed()
-        compose.runOnIdle { selected.value = 3L }
         compose.onNodeWithText("Pull requests").performScrollTo().performClick()
         compose.onNodeWithText("Issues", substring = false).performClick()
         compose.onNodeWithText("Archive").performClick()
-        compose.onNodeWithText("No agents match this view. Capture a task to start one.").assertIsDisplayed()
+        compose.onNodeWithText("No agents in this mesh yet.").assertIsDisplayed()
+        compose.onNodeWithText("Buildmesh agent").assertDoesNotExist()
         compose.runOnIdle { selected.value = 1L }
-        compose.onNodeWithText("Search agents or branches").performScrollTo().performTextInput("no matches")
-        closeSoftKeyboard()
+        compose.onNodeWithText("Buildmesh agent").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Website agent").assertDoesNotExist()
         compose.onNodeWithText("Pull requests").performScrollTo().performClick()
         compose.onNodeWithText("Issues", substring = false).performClick()
         compose.onNodeWithText("Archive").performClick()
@@ -141,31 +144,25 @@ class MeshOverviewTest {
                 compose.runOnUiThread { vm.resume() }
                 compose.waitUntil(10000) { vm.state.value.meshes.size == 3 }
                 compose.runOnUiThread { vm.pause() }
-                compose.onNodeWithText("Search agents or branches").performTextInput("no matching agent")
-                closeSoftKeyboard()
-                compose.onNodeWithText("Needs attention", substring = false).performClick()
-                compose.onNodeWithText("Buildmesh", substring = false).performScrollTo().performClick()
-                compose.onNodeWithText("Your work").assertIsDisplayed()
-                compose.onNodeWithText("Mesh: Buildmesh").assertIsDisplayed()
-                compose.onNodeWithText("no matching agent").assertDoesNotExist()
-                compose.onNode(hasText("Needs attention") and SemanticsMatcher.keyIsDefined(SemanticsProperties.Selected)).assertIsNotSelected()
+                compose.onNodeWithText("Buildmesh agent").assertDoesNotExist()
+                compose.onNodeWithText("All meshes").assertDoesNotExist()
+                compose.onNodeWithText("Search agents or branches").assertDoesNotExist()
+                compose.onNodeWithText("Buildmesh").performScrollTo().performClick()
                 compose.onNodeWithText("Buildmesh agent").performScrollTo().assertIsDisplayed()
                 compose.onNodeWithText("Waiting agent").performScrollTo().assertIsDisplayed()
                 compose.onNodeWithText("Website agent").assertDoesNotExist()
+                compose.onNodeWithText("All meshes").assertDoesNotExist()
                 saveScreenshot("mesh-work")
 
-                compose.onNodeWithText("Mesh: Buildmesh").performScrollTo().performClick()
-                compose.onNodeWithText("All meshes", substring = false).performClick()
-                compose.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("Website agent"))
-                compose.onNodeWithText("Website agent").performClick()
+                compose.onNodeWithText("Buildmesh agent").performClick()
                 compose.onNodeWithText("Open terminal").assertIsDisplayed()
                 compose.onNodeWithContentDescription("Back").performClick()
                 compose.onNodeWithText("Overview", substring = false).performClick()
+                compose.onNodeWithText("Buildmesh agent").assertDoesNotExist()
                 compose.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("Empty mesh"))
                 compose.onNodeWithText("Empty mesh").performClick()
-                compose.onNodeWithText("Your work").assertIsDisplayed()
-                compose.onNodeWithText("Mesh: Empty mesh").assertIsDisplayed()
-                compose.onNodeWithText("No agents match this view. Capture a task to start one.").assertIsDisplayed()
+                compose.onNodeWithText("No agents in this mesh yet.").assertIsDisplayed()
+                compose.onNodeWithText("Website agent").assertDoesNotExist()
             } finally {
                 compose.runOnUiThread { vm.forget() }
                 store.clear()
@@ -282,17 +279,15 @@ class MeshOverviewTest {
                       "request":{"choices":["Staging","Production"]}}}
     """).obj()
 
-    // The phone home pins whoever is blocked on you above the mesh list, and the
+    // Work for the selected mesh pins whoever is blocked on you, and the
     // approval pair sends the same keystrokes the desktop semantic-turn banner
-    // and the browser deck send. The pinned copy is the only copy: the same
-    // nodes are excluded from the Overview node cards below, or a waiting agent
-    // would render twice on the very screen this deck heads.
+    // and the browser deck send. The pinned copy is the only copy.
     @Test fun waitingAgentsArePinnedWithOneTapApproval() {
         var answered: Pair<Long, String>? = null
         var opened = 0L
         compose.setContent { BuildmeshTheme {
             Surface(color = MeshColors.background) {
-                Dashboard(RemoteState(meshes = listOf(meshes[1]), nodes = listOf(waitingPermission)), "Overview", 0, {}, { opened = it }, { _, _ -> }, { _, _ -> })
+                Dashboard(RemoteState(meshes = listOf(meshes[1]), nodes = listOf(waitingPermission)), "Work", 2, {}, { opened = it }, { _, _ -> }, { _, _ -> })
                 { id, sequence, onDone -> answered = id to sequence; onDone(true); true }
             }
         } }
@@ -315,7 +310,7 @@ class MeshOverviewTest {
         var answered: Pair<Long, String>? = null
         compose.setContent { BuildmeshTheme {
             Surface(color = MeshColors.background) {
-                Dashboard(RemoteState(meshes = listOf(meshes[1]), nodes = listOf(waitingPermission)), "Overview", 0, {}, {}, { _, _ -> }, { _, _ -> })
+                Dashboard(RemoteState(meshes = listOf(meshes[1]), nodes = listOf(waitingPermission)), "Work", 2, {}, {}, { _, _ -> }, { _, _ -> })
                 { id, sequence, onDone -> answered = id to sequence; onDone(false); true }
             }
         } }
@@ -334,7 +329,7 @@ class MeshOverviewTest {
         var terminal = 0L
         compose.setContent { BuildmeshTheme {
             Surface(color = MeshColors.background) {
-                Dashboard(RemoteState(meshes = listOf(meshes[1]), nodes = listOf(waitingQuestion)), "Overview", 0, {}, { opened = it }, { _, _ -> }, { _, _ -> },
+                Dashboard(RemoteState(meshes = listOf(meshes[1]), nodes = listOf(waitingQuestion)), "Work", 2, {}, { opened = it }, { _, _ -> }, { _, _ -> },
                     openTerminal = { terminal = it }) { _, _, _ -> true }
             }
         } }
@@ -345,16 +340,41 @@ class MeshOverviewTest {
         compose.runOnIdle { assertEquals(13L, terminal); assertEquals(0L, opened) }
     }
 
-    // The Work tab already renders these nodes under their mesh, so the deck is
-    // the Overview tab's surface rather than a second copy of the same row.
+    // The deck is the only copy of a waiting agent. The rows under it do not
+    // repeat that agent.
     @Test fun theDeckDoesNotDuplicateTheWorkTabRows() {
         compose.setContent { BuildmeshTheme {
             Surface(color = MeshColors.background) {
-                Dashboard(RemoteState(meshes = listOf(meshes[1]), nodes = listOf(waitingPermission)), "Work", 0, {}, {}, { _, _ -> }, { _, _ -> }) { _, _, _ -> true }
+                Dashboard(RemoteState(meshes = listOf(meshes[1]), nodes = listOf(waitingPermission)), "Work", 2, {}, {}, { _, _ -> }, { _, _ -> }) { _, _, _ -> true }
             }
         } }
-        compose.onNodeWithText("Waiting for input").assertDoesNotExist()
-        compose.onNodeWithText("Waiting agent").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Waiting for input").assertIsDisplayed()
+        compose.onAllNodesWithText("Waiting agent").assertCountEquals(1)
+    }
+
+    @Test fun wideWindowShowsTheMeshListBesideTheSelectedMesh() {
+        val selected = mutableStateOf(0L)
+        // The phone window is about 411dp. Lower the density so those same pixels
+        // measure at least 720dp and the 600dp split lays out inside the real window.
+        val density = compose.activity.resources.displayMetrics.widthPixels / 720f
+        compose.setContent { BuildmeshTheme {
+            val fontScale = LocalDensity.current.fontScale
+            CompositionLocalProvider(LocalDensity provides Density(density, fontScale)) {
+                Surface(color = MeshColors.background) {
+                    Dashboard(RemoteState(meshes = meshes, nodes = nodes), "Overview", selected.value,
+                        { selected.value = it }, {},
+                        { id, target -> if (target == "work") selected.value = id },
+                        { _, _ -> })
+                }
+            }
+        } }
+        compose.onNodeWithText("Empty mesh").assertIsDisplayed()
+        compose.onNodeWithText("Buildmesh agent").assertDoesNotExist()
+        compose.onNodeWithText("All meshes").assertDoesNotExist()
+        compose.onNodeWithText("Buildmesh").performClick()
+        compose.onNodeWithText("Empty mesh").assertIsDisplayed()
+        compose.onNodeWithText("Buildmesh agent").assertIsDisplayed()
+        compose.onNodeWithText("Website agent").assertDoesNotExist()
     }
 
     @Test fun manyDotsWrapInsideTheMeshCard() {
