@@ -500,7 +500,25 @@ pub(crate) fn schedule_pairing_verification_for_runtime(
     provider_id: String,
     env_type: crate::models::EnvType,
 ) {
+    // A launch on a route whose check is not current schedules a background
+    // re-check, so two launches in quick succession would otherwise queue two
+    // probes against the same endpoint. The key names the route and the
+    // runtime it is probed on; the entry is released when the probe finishes.
+    let key = format!("{harness_id}:{provider_id}:{env_type:?}");
+    if !claim_verification_slot(&key) {
+        tracing::debug!(
+            harness_id,
+            provider_id,
+            env_type = ?env_type,
+            "a pairing verification for this route is already in flight"
+        );
+        return;
+    }
     tauri::async_runtime::spawn(async move {
+        // The guard releases the route on every exit path, including a
+        // panicking probe: a leaked entry would leave the route permanently
+        // un-re-checkable, and the next launch would silently stop verifying.
+        let _guard = InFlightVerification(key.clone());
         let result = crate::commands::run_blocking("verify_provider_pairing", move || {
             crate::services::provider_verification::verify_pairing_blocking(
                 &harness_id,
@@ -515,6 +533,43 @@ pub(crate) fn schedule_pairing_verification_for_runtime(
         }
     });
 }
+
+/// Claim the single in-flight slot for a route.
+///
+/// `false` means a probe for this route is already running, and the caller
+/// must not queue a second one.
+fn claim_verification_slot(key: &str) -> bool {
+    IN_FLIGHT_VERIFICATIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(key.to_string())
+}
+
+/// Release the in-flight slot for a route.
+fn release_verification_slot(key: &str) {
+    IN_FLIGHT_VERIFICATIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(key);
+}
+
+/// Releases a route from the in-flight set when dropped.
+struct InFlightVerification(String);
+
+impl Drop for InFlightVerification {
+    fn drop(&mut self) {
+        release_verification_slot(&self.0);
+    }
+}
+
+/// The pairing verifications currently running.
+///
+/// One entry per `(harness, provider, runtime)` route: a probe is HTTP-bound
+/// and takes seconds, and a launch that schedules one must not have a second
+/// launch queue a duplicate against the same endpoint.
+static IN_FLIGHT_VERIFICATIONS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
 /// The **Model Providers** offered by "Add proxied provider" under `harness_id`,
 /// surface-matched: only providers whose **Compatible API surface** that harness
@@ -959,6 +1014,10 @@ fn field_name(field: HarnessConfigField) -> &'static str {
         HarnessConfigField::Effort => "effort",
     }
 }
+
+#[cfg(test)]
+#[path = "preferences_tests.rs"]
+mod preferences_tests;
 
 #[cfg(test)]
 // allow-test-in-production: this suite predates the sibling-test-file rule; only its reviewer fixture changes because Freebuff and DeepSeek Harness became eligible reviewers, so moving the suite is out of scope.

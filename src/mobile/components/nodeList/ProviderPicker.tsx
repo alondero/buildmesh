@@ -53,6 +53,11 @@ export function ProviderPicker({
                 {row.unavailable_reason}
               </small>
             )}
+            {row.verification_warning && (
+              <small style={{ display: "block", color: "var(--amber)" }}>
+                {row.verification_warning}
+              </small>
+            )}
           </button>
         ))}
       </details>
@@ -129,6 +134,11 @@ export function ProviderPicker({
                       {native.unavailable_reason && (
                         <small style={{ display: "block" }}>
                           {native.unavailable_reason}
+                        </small>
+                      )}
+                      {native.verification_warning && (
+                        <small style={{ display: "block", color: "var(--amber)" }}>
+                          {native.verification_warning}
                         </small>
                       )}
                     </span>

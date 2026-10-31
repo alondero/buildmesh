@@ -143,7 +143,7 @@ export function GroupedProviderMenu({ providers, onSelect, filter, decorate, cla
                 aria-haspopup={configurable(option) ? 'menu' : undefined}
                 aria-expanded={configurable(option) ? submenu?.option.id === option.id : undefined}
                 aria-disabled={Boolean(option.unavailable_reason)}
-                title={option.unavailable_reason ?? undefined}
+                title={option.verification_warning ?? option.unavailable_reason ?? undefined}
                 onClick={(e) => { e.stopPropagation(); if (!option.unavailable_reason) onSelect(option.id, e.altKey); }}
                 onMouseEnter={(e) => { if (!editing.current) e.currentTarget.focus({ preventScroll: true }); }}
                 onFocus={() => syncCaretToFocus(option.id)}
@@ -164,7 +164,7 @@ export function GroupedProviderMenu({ providers, onSelect, filter, decorate, cla
                 }`}
               >
                 <ProviderIcon providerId={option.provider_id ?? option.harness_id} className="h-3.5 w-3.5 shrink-0" />
-                <span className="min-w-0 flex-1"><span className="block truncate">{option.label}</span>{option.unavailable_reason && <span className="block whitespace-normal text-text-secondary">{option.unavailable_reason}</span>}</span>
+                <span className="min-w-0 flex-1"><span className="block truncate">{option.label}</span>{option.unavailable_reason && <span className="block whitespace-normal text-text-secondary">{option.unavailable_reason}</span>}{option.verification_warning && <span className="block whitespace-normal text-status-warning">{option.verification_warning}</span>}</span>
               </button>
               {configurable(option) && <button type="button" tabIndex={-1} aria-label={`${option.label} configurations`}
                 aria-haspopup="menu" aria-expanded={submenu?.option.id === option.id}

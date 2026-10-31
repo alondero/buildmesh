@@ -80,6 +80,7 @@ fn profile_row(profile: &crate::preferences::HarnessProfile) -> ProviderInfo {
         configurations: Vec::new(),
         configuration: None,
         unavailable_reason: None,
+        verification_warning: None,
         effective_permission: None,
     }
 }
@@ -147,6 +148,7 @@ pub(super) fn provider_info_for_pairing(
         configurations: Vec::new(),
         configuration: None,
         unavailable_reason: None,
+        verification_warning: None,
         effective_permission: None,
     })
 }
@@ -564,6 +566,68 @@ fn stamp_effective_permission(
         .collect()
 }
 
+/// Stamp the pairing-verification warning onto the rows whose route is not
+/// covered by a current successful check.
+///
+/// The pairing verification is advisory: the row stays selectable and the
+/// session starts either way, because the user — not the last check —
+/// decides whether the combination works. The warning is the caveat shown
+/// next to the row so it is visible *before* the launch, not only after it.
+fn stamp_verification_warning(
+    mut menu: Vec<ProviderInfo>,
+    pairings: &[crate::preferences::ProviderPairing],
+    accounts: &[crate::preferences::ProviderAccount],
+    native_install: Option<&crate::agent::provider::adapters::codex::CodexInstall>,
+    foreign_install: Option<&crate::agent::provider::adapters::codex::CodexInstall>,
+    verifications: &[crate::preferences::PairingVerification],
+) -> Vec<ProviderInfo> {
+    use crate::services::provider_verification::VerificationAdvisory;
+    for row in &mut menu {
+        if !row.is_proxied {
+            continue;
+        }
+        let Some(pairing) = pairings
+            .iter()
+            .find(|pairing| format!("{}:{}", pairing.harness_id, pairing.provider_id) == row.id)
+        else {
+            continue;
+        };
+        let Some(account) = accounts
+            .iter()
+            .find(|account| account.id == pairing.provider_id)
+        else {
+            continue;
+        };
+        // A WSL row is checked against the WSL install; any other row
+        // against the host-native one — the pairing the launch resolves on
+        // this host.
+        let install = match row.runtime {
+            Some(crate::models::EnvType::Wsl) => foreign_install,
+            _ => native_install,
+        };
+        let Some(advisory) = crate::services::provider_verification::route_advisory_with(
+            pairing,
+            account,
+            install,
+            verifications,
+        ) else {
+            continue;
+        };
+        row.verification_warning = Some(match advisory {
+            VerificationAdvisory::Missing => {
+                "Not verified for this runtime yet — the session starts anyway".to_string()
+            }
+            VerificationAdvisory::Stale { reason } => {
+                format!("Verification is out of date — {reason}")
+            }
+            VerificationAdvisory::Failed { reason } => {
+                format!("The last verification failed — {reason}")
+            }
+        });
+    }
+    menu
+}
+
 /// Compose the Spawn Menu from one preferences snapshot and one detection
 /// snapshot.
 ///
@@ -643,7 +707,7 @@ fn available_providers_with_preferences(
     // attachment. Timed separately so cold Codex discovery is never blamed on
     // composition (or vice versa).
     let compose_started = Instant::now();
-    let pairings = snapshot
+    let pairings: Vec<crate::preferences::ProviderPairing> = snapshot
         .pairings()
         .iter()
         .filter(|pairing| {
@@ -676,12 +740,23 @@ fn available_providers_with_preferences(
     };
     let menu = compose_provider_menu(
         profiles,
-        accounts,
-        pairings,
+        accounts.clone(),
+        pairings.clone(),
         Platform::current(),
         distro.as_deref(),
         snapshot.harness_order(),
         snapshot.proxied_provider_order(),
+    );
+    // The pairing verification is advisory, so a route that is not covered by a
+    // current successful check still appears in the menu and still launches.
+    // The warning is what tells the user that before they click.
+    let menu = stamp_verification_warning(
+        menu,
+        &pairings,
+        &accounts,
+        native_codex.as_ref(),
+        wsl_codex.as_ref(),
+        snapshot.pairing_verifications(),
     );
     let menu = match snapshot.prefs.take() {
         Some(mut prefs) => {
@@ -783,7 +858,12 @@ fn configuration_menu(
         if row.unavailable_reason.is_none() && !available.contains(&configuration.spawn_option_id) {
             row.unavailable_reason = Some(
                 if id.is_proxied() && available.contains(id.harness_id()) {
-                    "Provider Route needs verification for this harness/runtime; open advanced routes".into()
+                    // The route is missing from the menu for a reason trying
+                    // again cannot fix — an incomplete provider account, or
+                    // no Codex CLI for this runtime. The pairing verification
+                    // is NOT one of those reasons: an unchecked route is still
+                    // offered and still launches.
+                    "Provider Route is unavailable for this harness/runtime; check the provider account and Codex CLI".into()
                 } else {
                     "Harness is unavailable; install and enable it".into()
                 },
@@ -899,7 +979,11 @@ pub(super) fn order_providers(
 }
 
 /// Routing preferences need labels and capabilities, not subprocess discovery.
-/// OpenAI routes remain visibly unavailable until the live menu verifies them.
+///
+/// OpenAI routes are offered here whether or not their pairing has been
+/// checked: the pairing verification is advisory, so a route that has not been
+/// checked is still a route the user can pick — it launches and Buildmesh
+/// checks it in the background.
 fn routing_options(
     prefs: &crate::preferences::AppPreferences,
     profiles: Vec<crate::preferences::HarnessProfile>,
@@ -935,25 +1019,7 @@ fn routing_options(
         &prefs.harness_order,
         &prefs.proxied_provider_order,
     );
-    let pending_routes = prefs
-        .provider_pairings
-        .iter()
-        .filter(|pairing| pairing.surface == crate::preferences::ApiSurface::OpenAI)
-        .map(|pairing| format!("{}:{}", pairing.harness_id, pairing.provider_id))
-        .collect::<std::collections::HashSet<_>>();
-    let mut menu = configuration_menu(menu, prefs, host);
-    for row in &mut menu {
-        let selection = row
-            .configuration
-            .as_ref()
-            .map(|configuration| configuration.spawn_option_id.as_str())
-            .unwrap_or(&row.id);
-        if pending_routes.contains(selection) && row.unavailable_reason.is_none() {
-            row.unavailable_reason =
-                Some("Runtime verification pending; retry provider checks if needed".into());
-        }
-    }
-    menu
+    configuration_menu(menu, prefs, host)
 }
 
 #[command]

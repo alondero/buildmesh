@@ -11,6 +11,132 @@
 use super::*;
 use crate::preferences::ProxiedProviderOrder;
 
+/// ADR-0051 — the pairing verification warns, it does not gate. A route whose
+/// check is missing or stale still appears in the Spawn Menu, still launches,
+/// and the row carries the caveat so the user can see it before the launch.
+#[test]
+fn an_unverified_proxied_row_carries_the_warning_instead_of_disappearing() {
+    let pairing = crate::preferences::ProviderPairing {
+        harness_id: "codex".into(),
+        provider_id: "minimax".into(),
+        surface: crate::preferences::ApiSurface::OpenAI,
+        base_url: Some("https://api.minimax.io/v1".into()),
+        model_tiers: crate::preferences::ModelTiers {
+            default: Some("MiniMax-M3".into()),
+            ..Default::default()
+        },
+    };
+    let account = crate::preferences::ProviderAccount {
+        id: "minimax".into(),
+        name: "MiniMax".into(),
+        enabled: true,
+        billing_mode: crate::preferences::BillingMode::PayAsYouGo,
+        claude_compatible: true,
+        api_key: Some("sentinel-key".into()),
+    };
+    let install = crate::agent::provider::adapters::codex::CodexInstall {
+        executable: r"C:\npm\codex.cmd".into(),
+        version: "0.166.0".into(),
+        runtime_identity: "native-windows".into(),
+        codex_home: r"C:\Users\u\.codex".into(),
+        wsl_distro: None,
+    };
+    let row = provider_info_for_pairing(&pairing, &account, &[], Platform::Windows)
+        .expect("a proxied row composes");
+    let menu = stamp_verification_warning(
+        vec![row],
+        std::slice::from_ref(&pairing),
+        std::slice::from_ref(&account),
+        Some(&install),
+        None,
+        &[],
+    );
+    let row = &menu[0];
+    assert!(
+        row.unavailable_reason.is_none(),
+        "the verification state must not disable the row"
+    );
+    let warning = row
+        .verification_warning
+        .as_deref()
+        .expect("an unchecked route carries the warning");
+    assert!(warning.contains("Not verified"), "{warning}");
+    assert!(warning.contains("starts anyway"), "{warning}");
+}
+
+/// A route covered by a current successful check carries no warning.
+#[test]
+fn a_verified_proxied_row_carries_no_warning() {
+    let pairing = crate::preferences::ProviderPairing {
+        harness_id: "codex".into(),
+        provider_id: "minimax".into(),
+        surface: crate::preferences::ApiSurface::OpenAI,
+        base_url: Some("https://api.minimax.io/v1".into()),
+        model_tiers: crate::preferences::ModelTiers {
+            default: Some("MiniMax-M3".into()),
+            ..Default::default()
+        },
+    };
+    let account = crate::preferences::ProviderAccount {
+        id: "minimax".into(),
+        name: "MiniMax".into(),
+        enabled: true,
+        billing_mode: crate::preferences::BillingMode::PayAsYouGo,
+        claude_compatible: true,
+        api_key: Some("sentinel-key".into()),
+    };
+    let install = crate::agent::provider::adapters::codex::CodexInstall {
+        executable: r"C:\npm\codex.cmd".into(),
+        version: "0.166.0".into(),
+        runtime_identity: "native-windows".into(),
+        codex_home: r"C:\Users\u\.codex".into(),
+        wsl_distro: None,
+    };
+    let descriptor = crate::preferences::endpoint_model_descriptor(&pairing);
+    let signature = crate::agent::provider::compatibility::pairing_signature(
+        &crate::agent::provider::compatibility::PairingSignatureInputs {
+            harness_id: &pairing.harness_id,
+            provider_id: &pairing.provider_id,
+            endpoint: &descriptor.endpoint,
+            model_id: &descriptor.model_id,
+            credential: account.api_key.as_deref().unwrap_or(""),
+            auth_mode: "bearer_env",
+            runtime: &install.runtime_identity,
+            executable: &install.executable,
+            codex_version: &install.version,
+        },
+    );
+    let record = crate::preferences::PairingVerification {
+        harness_id: "codex".into(),
+        provider_id: "minimax".into(),
+        pairing_signature: signature,
+        endpoint: descriptor.endpoint.clone(),
+        model_id: descriptor.model_id.clone(),
+        auth_mode: crate::agent::provider::compatibility::ProviderAuthMode::BearerEnv,
+        runtime: "native-windows".into(),
+        executable: r"C:\npm\codex.cmd".into(),
+        codex_version: "0.166.0".into(),
+        capability_result: crate::agent::provider::compatibility::CompatibilityDecision {
+            compatible: true,
+            reason: None,
+        },
+        status: crate::preferences::PairingVerificationStatus::Verified,
+        verified_at: Some(chrono::Utc::now()),
+        reason: None,
+    };
+    let row = provider_info_for_pairing(&pairing, &account, &[], Platform::Windows)
+        .expect("a proxied row composes");
+    let menu = stamp_verification_warning(
+        vec![row],
+        std::slice::from_ref(&pairing),
+        std::slice::from_ref(&account),
+        Some(&install),
+        None,
+        std::slice::from_ref(&record),
+    );
+    assert!(menu[0].verification_warning.is_none());
+}
+
 /// Issue #2151: the pure adapter-level core resolves the stored mode
 /// when valid, falls back to the unattended default when absent,
 /// blank, or stale — and reports `None` for harnesses with no modes.
@@ -77,6 +203,7 @@ fn stamp_effective_permission_uses_row_capabilities_and_prefs_snapshot() {
             configurations: Vec::new(),
             configuration: None,
             unavailable_reason: None,
+            verification_warning: None,
             effective_permission: None,
         }
     }
@@ -212,7 +339,7 @@ fn routing_catalog_matches_anthropic_launchability_without_probes() {
 }
 
 #[test]
-fn routing_catalog_has_native_capabilities_and_explains_unverified_routes() {
+fn routing_catalog_has_native_capabilities_and_offers_unverified_routes() {
     let mut prefs = crate::preferences::AppPreferences::default();
     prefs
         .provider_pairings
@@ -241,11 +368,11 @@ fn routing_catalog_has_native_capabilities_and_explains_unverified_routes() {
     let native = menu.iter().find(|row| row.id == "codex").unwrap();
     assert!(native.unavailable_reason.is_none());
     assert!(native.capabilities.supports_resume);
+    // The pairing verification is advisory: a route that was never checked is
+    // still offered and still selectable. Blocking it here is what made an
+    // unproven route unusable — the check is a warning, not a gate.
     let route = menu.iter().find(|row| row.id == "codex:custom").unwrap();
-    assert_eq!(
-        route.unavailable_reason.as_deref(),
-        Some("Runtime verification pending; retry provider checks if needed")
-    );
+    assert!(route.unavailable_reason.is_none());
     assert!(menu.iter().any(|row| row.id == "terminal"));
 }
 
@@ -416,6 +543,7 @@ fn row_native(id: &str) -> ProviderInfo {
         configurations: Vec::new(),
         configuration: None,
         unavailable_reason: None,
+        verification_warning: None,
         effective_permission: None,
     }
 }
@@ -910,6 +1038,7 @@ fn row_proxied(harness_id: &str, provider_id: &str) -> ProviderInfo {
         configurations: Vec::new(),
         configuration: None,
         unavailable_reason: None,
+        verification_warning: None,
         effective_permission: None,
     }
 }
@@ -1768,6 +1897,7 @@ fn memo_row() -> ProviderInfo {
         configurations: Vec::new(),
         configuration: None,
         unavailable_reason: None,
+        verification_warning: None,
         effective_permission: None,
     }
 }

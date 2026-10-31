@@ -258,6 +258,40 @@ Configurations in each harness submenu — only user-saved recipes appear, so a
 fresh install shows none. The backend also retains
 the pairing rows for selectors that still choose a provider route directly.
 
+### The pairing verification warns; it does not gate
+
+A Codex proxy route can
+carry a *pairing verification* — a proof, for one exact
+`(harness, provider, endpoint, model, credential, runtime, Codex build)`, that
+the Responses agent loop answered. That proof goes stale on its own: a routine
+`codex-cli` npm update changes the installed version, so the signature no
+longer matches and the record turns `Stale` (`stale_after_cli_update_reports_the_cli_change_not_routing`
+in `services::provider_verification_tests` pins that transition). **A stale,
+missing or failed verification is therefore a warning, not a launch gate** — the
+route still appears in the Spawn Menu, still launches, and the session runs. The
+user is the one who can say whether a provider/harness combination works, and
+refusing to start on an unproven route stops them from trying it at all (the
+failure recorded for session 6343: `pairing 'MiniMax' is not launchable: the
+Codex CLI changed`). What the state buys is a caveat the user can act on:
+
+- The Spawn Menu row carries `verification_warning` (`ProviderInfo`), which
+  names the reason next to the route.
+- A launch on such a route emits the `provider-warning` event
+  (`ProviderWarningPayload`), which the desktop surfaces as a warning toast.
+- An unchecked or stale route schedules a background pairing verification
+  while the session runs, so the next launch finds a current record instead of
+  asking the user to re-verify by hand. A *failed* check is not re-probed on
+  each launch — it needs a credential or endpoint fix first.
+
+The owner is `services::provider_verification`: `codex_proxy_route` returns the
+route plus a `VerificationAdvisory` (`Missing` / `Stale` / `Failed`), and
+`launchable_on_runtime_with` decides launchability from the route's
+*completeness* — account enabled, credential present, endpoint resolvable,
+capability contract compatible, a Codex install present — and not from the
+verification state: the records drive `route_advisory_with` instead. Those
+completeness failures still fail closed with their own reason; they are the
+ones trying again cannot fix.
+
 **The registries are independent.** The brand string may coincide across
 namespaces, but each registry is the single source of its own kind:
 

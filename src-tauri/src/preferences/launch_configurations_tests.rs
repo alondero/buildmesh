@@ -594,3 +594,60 @@ fn native_configuration_resolves_selected_values_before_defaults() {
     assert_eq!(plan.effort.as_deref(), Some("high"));
     assert!(plan.route.is_none());
 }
+
+#[test]
+fn an_unverified_openai_route_still_resolves_because_the_check_only_warns() {
+    // ADR-0051 — the pairing verification is advisory. An OpenAI-surface
+    // route that was never checked must resolve: the user decides whether
+    // the combination works, and refusing to resolve on an unproven route
+    // means they cannot even try the one they configured.
+    let prefs: super::super::AppPreferences = serde_json::from_value(serde_json::json!({
+        "harness_profiles": [{"id":"codex","name":"Codex","harness":"codex"}],
+        "provider_accounts": [{"id":"minimax","name":"MiniMax","enabled":true,"billing_mode":"pay_as_you_go","api_key":"private-key"}],
+        "provider_pairings": [{
+            "harness_id":"codex","provider_id":"minimax","surface":"openai",
+            "base_url":"https://api.minimax.io/v1",
+            "model_tiers":{"default":"MiniMax-M3"}
+        }]
+    })).unwrap();
+    let plan = resolve(&prefs, "codex:minimax", &LaunchOverrides::default())
+        .expect("an unverified route must still resolve");
+    assert!(plan.route.is_some(), "the route survives resolution");
+    assert!(
+        plan.verification.is_none(),
+        "there is no record to carry when the route was never checked"
+    );
+}
+
+#[test]
+fn a_stale_verification_is_carried_rather_than_refused() {
+    // The record survives the resolver so the spawn can warn the user with
+    // the reason (here: the Codex CLI changed under the route) and re-check
+    // the pairing in the background.
+    let mut prefs: super::super::AppPreferences = serde_json::from_value(serde_json::json!({
+        "harness_profiles": [{"id":"codex","name":"Codex","harness":"codex"}],
+        "provider_accounts": [{"id":"minimax","name":"MiniMax","enabled":true,"billing_mode":"pay_as_you_go","api_key":"private-key"}],
+        "provider_pairings": [{
+            "harness_id":"codex","provider_id":"minimax","surface":"openai",
+            "base_url":"https://api.minimax.io/v1",
+            "model_tiers":{"default":"MiniMax-M3"}
+        }]
+    })).unwrap();
+    prefs.pairing_verifications.push(
+        serde_json::from_value(serde_json::json!({
+            "harness_id":"codex","provider_id":"minimax","pairing_signature":"sig",
+            "endpoint":"https://api.minimax.io/v1","model_id":"MiniMax-M3",
+            "auth_mode":"bearer_env","runtime":"native-windows",
+            "executable":"codex.cmd","codex_version":"0.165.0",
+            "capability_result":{"compatible":true,"reason":null},
+            "status":"stale","verified_at":null,"reason":"the Codex CLI changed (0.166.0, previously 0.165.0)"
+        }))
+        .unwrap(),
+    );
+    let plan = resolve(&prefs, "codex:minimax", &LaunchOverrides::default())
+        .expect("a stale route must still resolve");
+    assert!(
+        plan.verification.is_some(),
+        "the record travels with the plan so the spawn can name the reason"
+    );
+}

@@ -437,6 +437,16 @@ pub struct ProviderInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub unavailable_reason: Option<String>,
+    /// Why this row's pairing is not covered by a current successful check,
+    /// when that is the case.
+    ///
+    /// The pairing verification is advisory: the row stays selectable and the
+    /// session starts either way — the user decides whether the combination
+    /// works. This is the caveat shown next to the row so the user can see it
+    /// before they commit to the launch, rather than after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub verification_warning: Option<String>,
     /// Resolved launch permission mode for this row's harness (issue
     /// #2151). `None` for harnesses with no permission flag. Present on
     /// every row of a harness that has modes (native and proxied share

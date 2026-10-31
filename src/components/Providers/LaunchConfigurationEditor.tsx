@@ -71,7 +71,7 @@ export function LaunchConfigurationEditor({ value, targets, onSave, onCancel, on
     : busyAction === 'verify' ? 'Verifying provider and model…'
     : busyAction === 'delete' ? 'Deleting configuration…'
     : verification
-      ? verification.inputs === inputs ? verification.message : 'Configuration changed; verify again before launching.'
+      ? verification.inputs === inputs ? verification.message : 'Configuration changed; verify again to confirm it still works.'
       : '';
   const selectTarget = (id: string) => {
     setDraft({ ...draft, spawn_option_id: id, harness_id: undefined, provider_route_id: undefined, model: null, effort: null, extra_args: null });
