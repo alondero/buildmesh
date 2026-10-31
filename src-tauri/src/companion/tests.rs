@@ -330,6 +330,7 @@ fn companion_creation_preserves_frozen_launch_overrides() {
         model: Some("gpt-5.6-sol".into()),
         effort: Some("high".into()),
         extra_args: None,
+        harness_login: None,
     });
     let request = tools::SpawnInput {
         issue_number: None,

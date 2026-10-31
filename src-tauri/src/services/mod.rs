@@ -15,6 +15,7 @@ pub mod create_operation;
 pub mod freebuff_usage;
 pub mod gh_auth_cache;
 pub mod github;
+pub mod harness_logins;
 pub(crate) mod http_client;
 pub mod legacy_retirement;
 pub mod mcode_session;

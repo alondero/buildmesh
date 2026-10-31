@@ -27,6 +27,11 @@ pub struct SpawnConfiguration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub resolved: Option<super::launch_configurations::ResolvedLaunchPlan>,
+    /// Harness Login this configuration always launches with (Codex only).
+    /// Absent means the login picked in the spawn menu, else the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub login_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -76,6 +81,19 @@ pub fn validate(mut value: SpawnConfiguration) -> Result<SpawnConfiguration, Str
     if value.extra_args.is_some() && !caps.supports_extra_args {
         return Err("This harness does not support extra arguments".into());
     }
+    value.login_id =
+        super::harness_logins::normalize_login_id(value.login_id.as_deref()).map(str::to_string);
+    if value.login_id.is_some() {
+        if !super::harness_logins::supports_logins(option.harness_id()) {
+            return Err("Only Codex configurations can choose a login".into());
+        }
+        if option.is_proxied() {
+            return Err(
+                "A Provider Route signs in with its own key; choose a login only for native Codex"
+                    .into(),
+            );
+        }
+    }
     Ok(value)
 }
 
@@ -115,6 +133,32 @@ pub fn resolve_saved(
     }
     let prefs = super::load().map_err(SpawnConfigurationError::Storage)?;
     resolve(&prefs, option, id).map_err(SpawnConfigurationError::Invalid)
+}
+
+/// Fold the login picked in the spawn menu into the configuration a new node
+/// is created from.
+///
+/// A picked saved configuration launches with the picked login instead of
+/// its pin. "Spawn with defaults" has no configuration, so the defaults are
+/// resolved here and frozen with the login — node creation then takes that
+/// plan verbatim. No pick returns `configuration` unchanged.
+pub fn with_login_pick(
+    prefs: &AppPreferences,
+    option: &str,
+    configuration: Option<SpawnConfiguration>,
+    login: Option<&str>,
+) -> Result<Option<SpawnConfiguration>, String> {
+    let Some(login) = login.map(str::trim).filter(|id| !id.is_empty()) else {
+        return Ok(configuration);
+    };
+    if let Some(mut value) = configuration {
+        value.login_id = Some(login.to_string());
+        value.resolved = None;
+        return Ok(Some(value));
+    }
+    let mut plan = super::launch_configurations::resolve(prefs, option, &Default::default())?;
+    super::launch_configurations::apply_login_pick(prefs, &mut plan, Some(login))?;
+    Ok(Some(super::launch_configurations::snapshot(plan)))
 }
 
 #[tauri::command]

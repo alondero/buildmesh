@@ -389,6 +389,7 @@ fn fixtures() -> Vec<Fixture> {
                     usage_tracked: true,
                     usage_page: None,
                     cached_at: Some(1_700_000_000),
+                    login: None,
                     usage: Some(crate::services::usage::ProviderUsage {
                         provider: "anthropic".to_string(),
                         logged_in: true,

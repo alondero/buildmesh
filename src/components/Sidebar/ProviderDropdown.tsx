@@ -25,7 +25,7 @@ interface ProviderDropdownProps {
    */
   dropdownKey: string;
   providers: SpawnOption[];
-  onSelect: (providerId: string, altKey: boolean, configurationId?: string) => void;
+  onSelect: (providerId: string, altKey: boolean, configurationId?: string, loginId?: string) => void;
   /**
    * Issue #814 — Escape closes the dropdown. The parent (e.g. the
    * sidebar's `SpawnButtonCluster`) owns the `isOpen` state, so it must
@@ -36,6 +36,8 @@ interface ProviderDropdownProps {
    */
   onClose?: () => void;
   configurationsEnabled?: boolean;
+  /** Offer the Codex login submenu; set only where `onSelect` forwards the login. */
+  loginsEnabled?: boolean;
   /** Optional footer rendered at the bottom of the menu (e.g. a
    *  worktree-gated modifier hint). Omitted when undefined. */
   footer?: ReactNode;
@@ -50,7 +52,7 @@ interface ProviderDropdownProps {
   menuId?: string;
 }
 
-export function ProviderDropdown({ dropdownKey, providers, onSelect, onClose, menuId, configurationsEnabled, footer }: ProviderDropdownProps) {
+export function ProviderDropdown({ dropdownKey, providers, onSelect, onClose, menuId, configurationsEnabled, loginsEnabled, footer }: ProviderDropdownProps) {
   // Issue #575 / ADR-0016 — render the harness-grouped, always-expanded
   // Spawn Menu. The backend-derived list is grouped by `group_key`
   // (== `harness_id`): each native harness is a clickable parent, and
@@ -114,7 +116,7 @@ export function ProviderDropdown({ dropdownKey, providers, onSelect, onClose, me
       {/* Issue #814 — forward `onClose` to `GroupedProviderMenu` so its
           keyboard handler (Escape → close) calls the same callback the
           parent's `useClickOutside` and outside-mousedown paths call. */}
-      <GroupedProviderMenu providers={providers} onSelect={onSelect} onClose={onClose} configurationsEnabled={configurationsEnabled} footer={footer} />
+      <GroupedProviderMenu providers={providers} onSelect={onSelect} onClose={onClose} configurationsEnabled={configurationsEnabled} loginsEnabled={loginsEnabled} footer={footer} />
     </div>
   );
 }

@@ -246,6 +246,10 @@ export function UsagePanel({
   // branch drives the "Not logged in" vs "No API key" copy in the
   // logged-out state.
   const keyed = account.claude_compatible;
+  // A provider with more than one Harness Login (Codex) shows one panel per
+  // login; the login names the panel and its controls.
+  const login = meter.login;
+  const subject = login ? `${account.name} (${login.label})` : account.name;
 
   const renderBody = () => {
     // Disabled-but-visible (e.g. the Settings-side AccountCard's row): no
@@ -273,7 +277,9 @@ export function UsagePanel({
         <div>
           <p className="text-xs text-status-warning">{keyed ? 'No API key' : 'Not logged in'}</p>
           <p className="text-2xs text-text-muted mt-1">
-            {keyed ? `Enter an API key for ${account.name} above` : `Run the ${account.name} CLI login first`}
+            {keyed ? `Enter an API key for ${account.name} above`
+              : login && login.id !== 'default' ? `Sign in to ${login.label} in Settings › Launch Configurations`
+              : `Run the ${account.name} CLI login first`}
           </p>
         </div>
       );
@@ -318,11 +324,16 @@ export function UsagePanel({
   return (
     <div
       className="border border-border-subtle rounded-lg p-3.5 bg-bg-card/30"
-      data-testid={`usage-panel-${account.id}`}
+      data-testid={login && login.id !== 'default' ? `usage-panel-${account.id}-${login.id}` : `usage-panel-${account.id}`}
     >
       <div className="flex items-center gap-2 mb-2 min-w-0" data-testid="usage-panel-header">
         <ProviderIcon providerId={account.id} className="h-4 w-4" />
         <span className="text-sm font-medium text-text-primary truncate min-w-0" title={account.name}>{account.name}</span>
+        {login && (
+          <span className="text-xs text-text-secondary truncate min-w-0" data-testid="usage-panel-login" title={login.email ?? login.label}>
+            {login.email ? `${login.label} · ${login.email}` : login.label}
+          </span>
+        )}
         {/* Provider destination, as an icon-only external link (the `↗`
             affordance `ProbeRow` uses): it sits in the header row so it
             costs no vertical space, and the hover tooltip plus
@@ -334,7 +345,7 @@ export function UsagePanel({
         {meter.usagePage?.url && (
           <SafeLink
             url={meter.usagePage.url}
-            ariaLabel={`${meter.usagePage.label} for ${account.name} on provider website`}
+            ariaLabel={`${meter.usagePage.label} for ${subject} on provider website`}
             title={`${meter.usagePage.label} — opens in your browser`}
             className="inline-flex items-center justify-center h-[18px] w-[18px] -my-1 shrink-0 rounded-sm text-text-muted hover:text-accent-cyan transition-colors text-xs leading-none focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-cyan"
           >
@@ -365,7 +376,7 @@ export function UsagePanel({
                 // own Refresh button just needs to not throw.
               }
             }}
-            aria-label={`Refresh usage for ${account.name}`}
+            aria-label={`Refresh usage for ${subject}`}
             className="ml-auto text-xs text-text-secondary hover:text-text-primary"
           >
             Refresh

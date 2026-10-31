@@ -148,7 +148,10 @@ fn the_probed_stem_is_the_adapter_recipe_binary() {
         let _ = ensure_spawn_binary_with(
             provider,
             EnvType::Windows,
-            &PreparedLaunchRouting::Native { executable: None },
+            &PreparedLaunchRouting::Native {
+                executable: None,
+                harness_home: None,
+            },
             &no_file,
             &|stem| {
                 *probed.borrow_mut() = stem.to_string();
@@ -191,7 +194,10 @@ fn terminal_is_exempt_because_a_shell_is_never_uninstalled() {
         super::preflight::ensure_spawn_binary(
             Provider::Terminal,
             EnvType::Windows,
-            &PreparedLaunchRouting::Native { executable: None },
+            &PreparedLaunchRouting::Native {
+                executable: None,
+                harness_home: None,
+            },
         ),
         Preflight::Ready
     ));
@@ -250,7 +256,11 @@ fn a_pinned_runtime_is_honoured_over_the_mesh_runtime() {
 #[test]
 fn native_and_environment_routings_pin_no_runtime() {
     assert_eq!(
-        PreparedLaunchRouting::Native { executable: None }.pinned_runtime(),
+        PreparedLaunchRouting::Native {
+            executable: None,
+            harness_home: None,
+        }
+        .pinned_runtime(),
         None
     );
     assert_eq!(
@@ -273,7 +283,10 @@ fn guest_mesh_runtimes_are_exempt() {
                 super::preflight::ensure_spawn_binary(
                     Provider::Anthropic,
                     env_type,
-                    &PreparedLaunchRouting::Native { executable: None },
+                    &PreparedLaunchRouting::Native {
+                        executable: None,
+                        harness_home: None,
+                    },
                 ),
                 Preflight::Ready
             ),
@@ -295,6 +308,7 @@ fn guest_mesh_runtimes_are_exempt() {
 fn host_native_missing_override_path_refuses_the_spawn() {
     let routing = PreparedLaunchRouting::Native {
         executable: Some(PathBuf::from(r"C:\definitely\not\here\missing-cli.exe")),
+        harness_home: None,
     };
     assert!(matches!(
         super::preflight::ensure_spawn_binary(Provider::Codex, EnvType::Windows, &routing),
@@ -314,7 +328,10 @@ fn host_native_unresolvable_bare_stem_refuses_the_spawn() {
     let verdict = ensure_spawn_binary_with(
         Provider::Anthropic,
         EnvType::Windows,
-        &PreparedLaunchRouting::Native { executable: None },
+        &PreparedLaunchRouting::Native {
+            executable: None,
+            harness_home: None,
+        },
         &no_file,
         &no_stem,
     );
@@ -336,7 +353,10 @@ fn host_native_resolvable_bare_stem_lets_the_spawn_proceed() {
     let verdict = ensure_spawn_binary_with(
         Provider::Anthropic,
         EnvType::Windows,
-        &PreparedLaunchRouting::Native { executable: None },
+        &PreparedLaunchRouting::Native {
+            executable: None,
+            harness_home: None,
+        },
         &no_file,
         &|_stem| Some(PathBuf::from("/opt/homebrew/bin/claude")),
     );

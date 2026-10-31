@@ -18,6 +18,7 @@ import type { PairingVerification } from '../../src/types/generated/PairingVerif
 import type { CoordinatorStatus } from '../../src/types/generated/CoordinatorStatus';
 import type { DeviceSession } from '../../src/types/generated/DeviceSession';
 import type { SpawnConfiguration } from '../../src/types/generated/SpawnConfiguration';
+import type { HarnessLoginStatus } from '../../src/types/generated/HarnessLoginStatus';
 import type { LaunchTarget } from '../../src/types/generated/LaunchTarget';
 import type { OpenCodeConsoleStatus } from '../../src/types/generated/OpenCodeConsoleStatus';
 import type { OpenPr } from '../../src/types/generated/OpenPr';
@@ -179,7 +180,7 @@ export function buildDefaultFixtures() {
       ad0025_account_pairings_migrated: true, naming_provider: null,
       circuit_agent_pool_size: null, circuit_classifier_provider: null,
       harness_defaults: {}, spawn_configurations: [], deleted_launch_configurations: [],
-      detached_provider_routes: [], worktree_directory: null, confirm_before_quit: true,
+      detached_provider_routes: [], harness_logins: [], worktree_directory: null, confirm_before_quit: true,
       issue_spawn_prompt: null, pr_spawn_prompt: null,
     } satisfies AppPreferences,
     get_probe_spawn_prompt_defaults: {
@@ -197,6 +198,7 @@ export function buildDefaultFixtures() {
     get_coordinator_status: { enabled: false, has_token: false } satisfies CoordinatorStatus,
     list_device_sessions: [] satisfies DeviceSession[],
     list_spawn_configurations: [] satisfies SpawnConfiguration[],
+    list_harness_logins: [] satisfies HarnessLoginStatus[],
     get_launch_targets: [] satisfies LaunchTarget[],
     get_opencode_console_status: {
       signed_in: false, workspaces: [], active_workspace_id: null,

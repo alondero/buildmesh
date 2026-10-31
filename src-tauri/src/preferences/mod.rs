@@ -25,6 +25,7 @@
 //! downstream crates continue to compile unchanged.
 
 pub mod compatibility;
+pub mod harness_logins;
 pub mod launch_catalog;
 pub mod launch_configurations;
 pub mod migrations;

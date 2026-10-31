@@ -30,6 +30,7 @@ pub(crate) mod adapters;
 pub(crate) mod cache;
 pub(crate) mod catalog;
 pub(crate) mod last_known;
+pub(crate) mod logins;
 pub(crate) mod outcome;
 pub mod types;
 

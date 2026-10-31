@@ -76,6 +76,9 @@ pub struct CreateAgentNodeRequest {
     configuration_id: Option<String>,
     #[serde(default)]
     initial_prompt: Option<String>,
+    /// Harness Login picked from the spawn menu's login submenu (Codex).
+    #[serde(default)]
+    login_id: Option<String>,
 }
 
 /// Create a new agent node.
@@ -97,22 +100,25 @@ pub async fn create_agent_node(
         use_worktree,
         configuration_id,
         initial_prompt,
+        login_id,
     } = payload.into_inner();
     // Offload: create locks SQLite, touches the filesystem, and may run
     // git worktree operations (issue #1380).
     crate::commands::run_blocking("create_agent_node", move || {
-        create_agent_node_blocking(
+        create_agent_node_with_login_blocking(
             mesh_id,
             &branch,
             provider.as_deref(),
             use_worktree,
             configuration_id.as_deref(),
             initial_prompt.as_deref(),
+            login_id.as_deref(),
         )
     })
     .await
 }
 
+#[cfg(test)] // allow-test-in-production: the prompt-gate test in http/routes/nodes.rs pins this desktop entry point.
 pub(crate) fn create_agent_node_blocking(
     mesh_id: i64,
     branch: &str,
@@ -121,11 +127,46 @@ pub(crate) fn create_agent_node_blocking(
     configuration_id: Option<&str>,
     initial_prompt: Option<&str>,
 ) -> Result<AgentNode, String> {
+    create_agent_node_with_login_blocking(
+        mesh_id,
+        branch,
+        provider,
+        use_worktree,
+        configuration_id,
+        initial_prompt,
+        None,
+    )
+}
+
+/// [`create_agent_node_blocking`] with the Harness Login picked in the spawn
+/// menu. `None` keeps the configuration's pinned login, else the default.
+pub(crate) fn create_agent_node_with_login_blocking(
+    mesh_id: i64,
+    branch: &str,
+    provider: Option<&str>,
+    use_worktree: Option<bool>,
+    configuration_id: Option<&str>,
+    initial_prompt: Option<&str>,
+    login_id: Option<&str>,
+) -> Result<AgentNode, String> {
+    let option = provider.unwrap_or("anthropic");
     let configuration = crate::preferences::spawn_configurations::resolve_saved(
-        provider.unwrap_or("anthropic"),
+        option,
         configuration_id.filter(|id| !id.trim().is_empty()),
     )
     .map_err(|error| error.to_string())?;
+    let configuration = match login_id.map(str::trim).filter(|id| !id.is_empty()) {
+        Some(login) => {
+            let prefs = crate::preferences::load()?;
+            crate::preferences::spawn_configurations::with_login_pick(
+                &prefs,
+                option,
+                configuration,
+                Some(login),
+            )?
+        }
+        None => configuration,
+    };
     services::agent_node::create_blocking_configured(
         services::agent_node::NodeCreateParams {
             mesh_id,
@@ -617,6 +658,10 @@ pub async fn regenerate_agent_node(
     })
     .await
 }
+
+#[cfg(test)]
+#[path = "agent_node_login_tests.rs"]
+mod login_tests;
 
 #[cfg(test)]
 mod tests {
