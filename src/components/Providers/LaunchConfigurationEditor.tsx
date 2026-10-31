@@ -7,6 +7,7 @@ import './launchConfigurations.css';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { EffortGuidance } from '../shared/EffortGuidance';
 import { Spinner } from '../shared/Spinner';
+import { useHarnessLogins } from '../../hooks/useHarnessLogins';
 
 // Verify, save, and delete share the fieldset lock; status text is derived separately.
 type BusyAction = 'save' | 'verify' | 'delete';
@@ -51,6 +52,11 @@ export function LaunchConfigurationEditor({ value, targets, onSave, onCancel, on
     return () => onDirtyChange?.(false);
   }, [dirty, onDirtyChange]);
   const target = targets.find((t) => t.id === draft.spawn_option_id);
+  // A login can be pinned only on a native harness that has more than one
+  // login; a Provider Route signs in with its own key.
+  const logins = useHarnessLogins();
+  const harnessLogins = target && !target.route ? logins.filter((login) => login.harness_id === target.harness_id) : [];
+  const pinnedLoginMissing = !!draft.login_id && !harnessLogins.some((login) => login.id === draft.login_id);
   const harnesses = [...new Map(targets.map((t) => [t.harness_id, t.harness_name])).entries()];
   const model = target?.models.find((m) => m.id === (draft.model ?? target.default_model));
   const efforts = model?.efforts ?? target?.efforts ?? [];
@@ -74,7 +80,7 @@ export function LaunchConfigurationEditor({ value, targets, onSave, onCancel, on
       ? verification.inputs === inputs ? verification.message : 'Configuration changed; verify again to confirm it still works.'
       : '';
   const selectTarget = (id: string) => {
-    setDraft({ ...draft, spawn_option_id: id, harness_id: undefined, provider_route_id: undefined, model: null, effort: null, extra_args: null });
+    setDraft({ ...draft, spawn_option_id: id, harness_id: undefined, provider_route_id: undefined, model: null, effort: null, extra_args: null, login_id: undefined });
     setEndpoint(null); setCustomModel(false); setVerification(null); setAdvancedNotice(false);
   };
   // A selected custom model makes its input required, so the disclosure refuses
@@ -105,6 +111,11 @@ export function LaunchConfigurationEditor({ value, targets, onSave, onCancel, on
         {!target && <option value="">Select a provider</option>}
         {targets.filter((t) => t.harness_id === target?.harness_id).map((t) => <option key={t.id} value={t.id}>{t.provider_name}</option>)}
       </select></label>
+      {(harnessLogins.length > 1 || draft.login_id) && <label>Login<select value={draft.login_id ?? ''} onChange={(e) => setDraft({ ...draft, login_id: e.target.value || undefined })}>
+        <option value="">Login picked in the spawn menu</option>
+        {harnessLogins.filter((login) => !login.is_default).map((login) => <option key={login.id} value={login.id}>{login.email ? `${login.label} (${login.email})` : login.label}</option>)}
+        {pinnedLoginMissing && <option value={draft.login_id}>{draft.login_id} (removed)</option>}
+      </select></label>}
       {route && <>
         <p>This provider will be paired with {target?.harness_name} when you save. Credentials come from Providers.</p>
         <label>Provider endpoint<input required type="url" value={route.base_url ?? ''} onChange={(e) => setEndpoint(e.target.value)} placeholder="https://provider.example/v1" /></label>

@@ -200,6 +200,17 @@ export async function loadUsage({ force }: ProbeLoadContext) {
   return { meters, accounts, refreshedAt: new Date() };
 }
 
+/**
+ * Toolbar count. A provider with more than one Harness Login shows a meter
+ * per login, so the count names providers and adds the meter total only when
+ * the two differ.
+ */
+export function usageCountLabel(meters: ProviderMeters[]): string {
+  const providers = new Set(meters.map(meter => meter.provider)).size;
+  const label = `${providers} provider${providers === 1 ? '' : 's'} tracked`;
+  return meters.length > providers ? `${label} (${meters.length} meters)` : label;
+}
+
 export function UsageTab() {
   const resource = useProbeResource(PROBE_TAB_DEFINITIONS.usage.load, { meshId: null }, 'host');
   const { error, attempted, refreshing: isRefreshing } = resource.state;
@@ -287,7 +298,7 @@ export function UsageTab() {
       >
         {hasRows && (
           <span className="text-xs text-text-muted shrink-0">
-            {`${rows.length} provider${rows.length === 1 ? '' : 's'} tracked`}
+            {usageCountLabel(rows.map(row => row.meter))}
           </span>
         )}
         {lastRefreshedAt !== null && <RefreshedAgo since={lastRefreshedAt} />}
@@ -338,7 +349,7 @@ export function UsageTab() {
           />
         ) : (
           rows.map(({ meter, account }) => (
-            <UsagePanel key={meter.provider} account={account} meter={meter} />
+            <UsagePanel key={`${meter.provider}:${meter.login?.id ?? ''}`} account={account} meter={meter} />
           ))
         )}
       </ProbeTabBody>

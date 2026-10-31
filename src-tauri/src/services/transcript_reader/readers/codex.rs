@@ -33,14 +33,12 @@ impl TranscriptAdapter for CodexAdapter {
     }
 
     fn locate(&self, ctx: LocateCtx<'_>) -> Option<PathBuf> {
-        // Session ids are global within the selected runtime home.
+        // Session ids are UUIDs, so searching every Harness Login home of the
+        // runtime finds the one rollout without knowing which login ran it.
         let runtime = env::runtime_for_spawn_path(ctx.node_path);
-        let home = env::codex_dir_for_env(runtime, ctx.node_path)?;
-        let home = PathBuf::from(env::to_host_path_for_runtime(
-            &home.to_string_lossy(),
-            runtime,
-        ));
-        find_codex_rollout_in(&home.join("sessions"), ctx.session_id)
+        crate::services::codex_session::sessions_dirs(runtime, ctx.node_path)
+            .iter()
+            .find_map(|dir| find_codex_rollout_in(dir, ctx.session_id))
     }
 
     fn parse(

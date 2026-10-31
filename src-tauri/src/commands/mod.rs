@@ -42,6 +42,7 @@ pub mod git;
 #[cfg(test)]
 pub mod git_tests;
 pub mod github;
+pub mod harness_logins;
 pub mod mesh;
 pub mod mesh_properties;
 #[cfg(test)]

@@ -548,7 +548,10 @@ mod tests {
         let cmd = build_spawn_command_prepared(SpawnCommandInput {
             resolved: &wsl_resolved(),
             provider: Provider::Codex,
-            routing: &PreparedLaunchRouting::Native { executable: None },
+            routing: &PreparedLaunchRouting::Native {
+                executable: None,
+                harness_home: None,
+            },
             session_id_mode: &SessionIdMode::None,
             session_id: SESSION_ID,
             config: &crate::agent::capabilities::ResolvedAgentConfig::default(),
@@ -620,6 +623,7 @@ mod tests {
             provider: Provider::Cline,
             routing: &PreparedLaunchRouting::Native {
                 executable: Some(fake_binary.clone()),
+                harness_home: None,
             },
             session_id_mode: &SessionIdMode::None,
             session_id: SESSION_ID,

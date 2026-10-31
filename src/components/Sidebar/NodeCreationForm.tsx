@@ -12,7 +12,7 @@ interface NodeCreationFormProps {
   isSpawning?: boolean;
   providers: SpawnOption[];
   onToggleDropdown: (mesh: Mesh) => void;
-  onSelectProvider: (mesh: Mesh, providerId: string, useWorktree?: boolean, configurationId?: string) => void;
+  onSelectProvider: (mesh: Mesh, providerId: string, useWorktree?: boolean, configurationId?: string, loginId?: string) => void;
   getDefaultProvider: (meshId: number) => Promise<string>;
 }
 
@@ -58,8 +58,9 @@ export function NodeCreationForm({
       menuFooter={mesh.use_worktree ? `${modifierKey} spawns in mesh root` : undefined}
       onToggleDropdown={() => onToggleDropdown(mesh)}
       onSpawnDefault={handleSpawnDefault}
-      onSelectProvider={(providerId, altKey, configurationId) =>
-        onSelectProvider(mesh, providerId, altKey ? false : undefined, configurationId)
+      loginsEnabled
+      onSelectProvider={(providerId, altKey, configurationId, loginId) =>
+        onSelectProvider(mesh, providerId, altKey ? false : undefined, configurationId, loginId)
       }
       getDefaultProvider={() => getDefaultProvider(mesh.id)}
     />

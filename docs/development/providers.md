@@ -808,6 +808,64 @@ For scoped project launch directories, use `env::node_working_path`; checkout
 ownership and Git watcher identity use separate helpers. See
 [Agent Node worktree support](agent-nodes.md#worktree-support-git2-based).
 
+## Harness Logins (more than one Codex subscription)
+
+Codex keeps one signed-in ChatGPT account per `CODEX_HOME` and writes refreshed
+tokens back to its `auth.json`, so swapping `auth.json` in place under a running
+agent is unsafe. A **Harness Login** is therefore a whole home folder.
+`preferences::harness_logins` owns the stored list
+(`AppPreferences.harness_logins`); the default login is the runtime's ordinary
+home, is never stored, and has the id `default`. Adding a login creates
+`~/.codex-accounts/<id>/` and copies `config.toml` and `AGENTS.md` from the
+default home once, never overwriting. Removing a login unpins every Launch
+Configuration that named it and leaves the folder on disk.
+`services::harness_logins` lists logins with their sign-in state (email, plan,
+and the ChatGPT person and workspace ids decoded from the `auth.json` id token;
+two logins with the same person in the same workspace are flagged as one
+subscription) and runs `codex login` with that login's `CODEX_HOME`: no window,
+the authorisation URL parsed from its output, the process tree held in a
+Windows job, and one sign-in at a time because `codex login` listens on a fixed
+local port. A sign-in older than 10 minutes is stopped the next time the login
+list is read; closing Settings mid-sign-in leaves `codex login` waiting until
+then, a new sign-in starts, or Buildmesh exits. The list polls the sign-in
+before it reads any `auth.json`, because `codex login` writes `auth.json`
+before it exits. A finished sign-in (and its error) is kept until
+`cancel_harness_login_sign_in` dismisses it or another sign-in starts.
+
+The login is chosen in one of two places. With more than one login the desktop
+Spawn Menu shows a login submenu between the native Codex row and its
+configurations (`HarnessLoginMenu`); a pick reaches `create_agent_node` as
+`loginId`, and `spawn_configurations::with_login_pick` folds it into the
+configuration (or, for defaults, a frozen default plan). A Launch Configuration
+can also pin `login_id`; a pinned configuration appears only under its own
+login, and an unpinned one under every login. Surfaces that create nodes through
+another path (issue and pull request spawns, archived resume, mobile) do not
+offer the submenu and launch with the configuration's pin or the default.
+`launch_configurations::resolve_plan` freezes the choice on
+`ResolvedLaunchPlan.harness_login` (id, label and home), so resume keeps the
+same account after the login is renamed. `launch_routing::prepare_snapshot`
+carries the home as `PreparedLaunchRouting::Native { harness_home }`;
+`launch_runtime()` hands it to trust provisioning and
+`spawn::command::native_login_home` sets `CODEX_HOME` for the launch. A WSL or
+Windows-interop launch with an additional login is refused
+(`harness_logins::runtime_refusal`): the guest resolves its own home, and
+running there would silently use the guest's default account. A Provider Route
+signs in with its own key, so a routed configuration cannot pin a login.
+
+Codex session discovery (`codex_session::sessions_dirs`) searches the default
+home first and then every login home (native runtimes only) as one selection,
+so an ambiguous fresh session split across homes stays ambiguous. The
+transcript reader takes the first of those homes that holds the session id.
+
+Usage follows the login. `commands::usage::get_provider_meters` reads each
+additional login from its own `auth.json` only (never the environment API key or
+the default home), caches it under its own usage identity, and keeps its
+last-known reading under `codex@<id>`; the default login keeps the `codex` key.
+`services::usage::logins::merge_login_rows` places the login rows after the
+default Codex row and, once an additional login produced a row, labels every
+Codex row with `ProviderMeters.login`, so the Usage tab and the mobile usage
+list show one labelled meter per login.
+
 ## The Spawn Menu derivation reads one preferences snapshot and one alias table
 
 Both production readers of the Spawn Menu — `available_providers` (the mobile

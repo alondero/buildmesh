@@ -72,7 +72,7 @@ export interface AgentNodeState {
   /// purges it — presence must not guard a removal (issue #1073
   /// pattern: a skipped fetch must never leave event state unapplied).
   refreshIfStale: (nodeIds?: number[]) => Promise<void>;
-  createAgentNode: (meshId: number, name: string, path: string, branch: string, provider?: string, useWorktree?: boolean, configurationId?: string, initialPrompt?: string) => Promise<AgentNode>;
+  createAgentNode: (meshId: number, name: string, path: string, branch: string, provider?: string, useWorktree?: boolean, configurationId?: string, initialPrompt?: string, loginId?: string) => Promise<AgentNode>;
   /// Insert a node the backend just created but that did not come back through
   /// `createAgentNode` (e.g. `create_pr_node`'s reviewer sibling). Insert-if-
   /// absent: the `node-created` listener's async `fetchAgentNodes` may have
@@ -91,7 +91,8 @@ export interface AgentNodeState {
   /// `spawnAgent` with `{ prefill }` in the same turn — Terminal
   /// auto-spawn is skipped because the node is already `spawning`.
   /// Omitted / whitespace means Fresh (Terminal auto-spawns as before).
-  selectProviderForMesh: (meshId: number, meshName: string, meshPath: string, providerId: string, useWorktree?: boolean, initialPrompt?: string, configurationId?: string) => Promise<AgentNode>;
+  /// `loginId` is the Harness Login picked in the spawn menu's login submenu.
+  selectProviderForMesh: (meshId: number, meshName: string, meshPath: string, providerId: string, useWorktree?: boolean, initialPrompt?: string, configurationId?: string, loginId?: string) => Promise<AgentNode>;
   deleteAgentNode: (id: number) => Promise<void>;
   /// Backend-driven retirement. The Circuit worker's `CloseAgentNode` effect
   /// and cancelled-run cleanup delete the row directly and emit `node-deleted`;

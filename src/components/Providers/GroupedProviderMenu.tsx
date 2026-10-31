@@ -4,6 +4,8 @@ import { ProviderIcon } from './ProviderIcon';
 import { groupByHarness } from '../../lib/groups';
 import { SpawnConfigurationMenu } from './SpawnConfigurationMenu';
 import { useAriaMenu } from '../../hooks/useAriaMenu';
+import { useHarnessLogins } from '../../hooks/useHarnessLogins';
+import { HarnessLoginMenu } from './HarnessLoginMenu';
 
 export interface GroupedProviderMenuProps {
   /** Frontend view of the Spawn Menu (ADR-0016). Already in harness
@@ -11,8 +13,9 @@ export interface GroupedProviderMenuProps {
    *  header. `SpawnOption` (issue #583) is the post-`mapBackendProviders`
    *  shape — same fields `ProviderDropdown`/`SpawnButtonCluster` pass in. */
   providers: SpawnOption[];
-  /** Called with `(providerId, altKey)` when the user picks a row. */
-  onSelect: (providerId: string, altKey: boolean, configurationId?: string) => void;
+  /** Called with `(providerId, altKey)` when the user picks a row; a pick
+   *  from the login submenu also carries the Harness Login id. */
+  onSelect: (providerId: string, altKey: boolean, configurationId?: string, loginId?: string) => void;
   /** Optional filter (e.g. the archived-resume picker filters to
    *  `resumable: true`). Applied before grouping so the harness header
    *  is hidden when *all* its rows are filtered out. */
@@ -28,6 +31,9 @@ export interface GroupedProviderMenuProps {
    */
   onClose?: () => void;
   configurationsEnabled?: boolean;
+  /** Offer the Codex login submenu when more than one login is configured.
+   *  Only spawn surfaces that pass the login on to node creation set this. */
+  loginsEnabled?: boolean;
   /** Optional footer rendered below the rows (e.g. a worktree-gated
    *  modifier hint). Omitted when undefined. */
   footer?: ReactNode;
@@ -36,10 +42,15 @@ export interface GroupedProviderMenuProps {
 /** Harness-grouped Spawn Menu. Parent rows launch defaults; their disclosure
  * opens capability-driven saved configurations. Pointer and keyboard share
  * the same active parent row. */
-export function GroupedProviderMenu({ providers, onSelect, filter, decorate, className, onClose, configurationsEnabled = true, footer }: GroupedProviderMenuProps) {
+export function GroupedProviderMenu({ providers, onSelect, filter, decorate, className, onClose, configurationsEnabled = true, loginsEnabled = false, footer }: GroupedProviderMenuProps) {
   const [submenu, setSubmenu] = useState<{ option: SpawnOption; anchor: HTMLElement; keyboard: boolean } | null>(null);
   const editing = useRef(false);
-  const configurable = (option: SpawnOption) => Boolean(configurationsEnabled && (
+  const logins = useHarnessLogins(loginsEnabled && configurationsEnabled);
+  // The login submenu replaces the configuration submenu on the native Codex
+  // row; a single login keeps the menu exactly as it was.
+  const choosesLogin = (option: SpawnOption) => logins.length > 1 && !option.is_proxied
+    && logins.some((login) => login.harness_id === option.harness_id);
+  const configurable = (option: SpawnOption) => choosesLogin(option) || Boolean(configurationsEnabled && (
     providers.some((row) => row.configuration && row.harness_id === option.harness_id)
     || (option.capabilities && (option.capabilities.supports_model_override
       || option.capabilities.supports_effort_override || option.capabilities.supports_extra_args))
@@ -166,7 +177,7 @@ export function GroupedProviderMenu({ providers, onSelect, filter, decorate, cla
                 <ProviderIcon providerId={option.provider_id ?? option.harness_id} className="h-3.5 w-3.5 shrink-0" />
                 <span className="min-w-0 flex-1"><span className="block truncate">{option.label}</span>{option.unavailable_reason && <span className="block whitespace-normal text-text-secondary">{option.unavailable_reason}</span>}{option.verification_warning && <span className="block whitespace-normal text-status-warning">{option.verification_warning}</span>}</span>
               </button>
-              {configurable(option) && <button type="button" tabIndex={-1} aria-label={`${option.label} configurations`}
+              {configurable(option) && <button type="button" tabIndex={-1} aria-label={choosesLogin(option) ? `${option.label} logins` : `${option.label} configurations`}
                 aria-haspopup="menu" aria-expanded={submenu?.option.id === option.id}
                 className="px-2 text-xs text-text-secondary hover:bg-bg-selection"
                 onClick={(e) => {
@@ -179,7 +190,12 @@ export function GroupedProviderMenu({ providers, onSelect, filter, decorate, cla
           ))}
         </div>
       ))}
-      {submenu && <SpawnConfigurationMenu key={submenu.option.id} {...submenu}
+      {submenu && choosesLogin(submenu.option) && <HarnessLoginMenu key={submenu.option.id} {...submenu}
+        logins={logins.filter((login) => login.harness_id === submenu.option.harness_id)}
+        decorate={decorate}
+        configurationRows={configurationRows}
+        onEditingChange={(value) => { editing.current = value; }} onSelect={onSelect} onClose={() => setSubmenu(null)} onDismiss={() => { setSubmenu(null); onClose?.(); }} />}
+      {submenu && !choosesLogin(submenu.option) && <SpawnConfigurationMenu key={submenu.option.id} {...submenu}
         decorate={decorate}
         configurationRows={configurationRows}
         onEditingChange={(value) => { editing.current = value; }} onSelect={onSelect} onClose={() => setSubmenu(null)} onDismiss={() => { setSubmenu(null); onClose?.(); }} />}

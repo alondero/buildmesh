@@ -65,17 +65,62 @@ pub fn find_id_for_directory_in(
         .map(|candidate| candidate.id)
 }
 
+#[cfg(test)] // allow-test-in-production: the single-folder form the inline capture tests pin.
 fn find_fresh_id_for_directory_in(
     sessions_dir: &Path,
     spawn_directory: &str,
     created_not_before_ms: i64,
 ) -> Option<String> {
-    let candidates = find_candidates(
-        sessions_dir,
+    find_fresh_id_in_dirs(
+        &[sessions_dir.to_path_buf()],
         spawn_directory,
         created_not_before_ms,
-        Some(created_not_before_ms),
-    );
+    )
+}
+
+/// Every rollout directory a Codex session for this runtime can live in: the
+/// runtime's ordinary home, then each additional Harness Login home. Only a
+/// native runtime can use an additional login, so WSL keeps one directory.
+pub(crate) fn sessions_dirs(env_type: EnvType, spawn_directory: &str) -> Vec<PathBuf> {
+    sessions_dirs_with(
+        crate::env::codex_sessions_dir(env_type, spawn_directory),
+        env_type,
+        crate::preferences::harness_logins::current_additional_homes("codex"),
+    )
+}
+
+pub(crate) fn sessions_dirs_with(
+    default_dir: Option<PathBuf>,
+    env_type: EnvType,
+    login_homes: Vec<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = default_dir.into_iter().collect();
+    if env_type == EnvType::Windows {
+        for home in login_homes {
+            let dir = home.join("sessions");
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+    }
+    dirs
+}
+
+/// Candidates from every directory, then one selection over all of them, so
+/// an ambiguous spawn stays ambiguous rather than being decided per folder.
+pub(crate) fn find_fresh_id_in_dirs(
+    sessions_dirs: &[PathBuf],
+    spawn_directory: &str,
+    created_not_before_ms: i64,
+) -> Option<String> {
+    let candidates = sessions_dirs.iter().flat_map(|dir| {
+        find_candidates(
+            dir,
+            spawn_directory,
+            created_not_before_ms,
+            Some(created_not_before_ms),
+        )
+    });
     crate::services::session_recovery::select_recovery_identity(
         candidates
             .into_iter()
@@ -124,18 +169,38 @@ pub(crate) fn find_historic_id_for_directory(
     anchor_ms: i64,
     recorded_start: bool,
 ) -> Option<String> {
-    let sessions_dir = crate::env::codex_sessions_dir(env_type, spawn_directory)?;
-    find_historic_id_for_directory_in(&sessions_dir, spawn_directory, anchor_ms, recorded_start)
+    let dirs = sessions_dirs(env_type, spawn_directory);
+    if dirs.is_empty() {
+        return None;
+    }
+    find_historic_id_in_dirs(&dirs, spawn_directory, anchor_ms, recorded_start)
 }
 
+#[cfg(test)] // allow-test-in-production: the single-folder form the recovery tests pin.
 pub(crate) fn find_historic_id_for_directory_in(
     sessions_dir: &Path,
     spawn_directory: &str,
     anchor_ms: i64,
     recorded_start: bool,
 ) -> Option<String> {
+    find_historic_id_in_dirs(
+        &[sessions_dir.to_path_buf()],
+        spawn_directory,
+        anchor_ms,
+        recorded_start,
+    )
+}
+
+pub(crate) fn find_historic_id_in_dirs(
+    sessions_dirs: &[PathBuf],
+    spawn_directory: &str,
+    anchor_ms: i64,
+    recorded_start: bool,
+) -> Option<String> {
     let cutoff = anchor_ms.saturating_sub(crate::services::session_recovery::CLOCK_SKEW_MS);
-    let candidates = find_candidates(sessions_dir, spawn_directory, cutoff, None);
+    let candidates = sessions_dirs
+        .iter()
+        .flat_map(|dir| find_candidates(dir, spawn_directory, cutoff, None));
     crate::services::session_recovery::select_recovery_identity(
         candidates
             .into_iter()
@@ -281,12 +346,11 @@ pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: Env
             if !crate::agent::process::PROCESS_REGISTRY.contains(&node_id) {
                 return;
             }
-            let Some(sessions_dir) = crate::env::codex_sessions_dir(env_type, &spawn_directory)
-            else {
+            let dirs = sessions_dirs(env_type, &spawn_directory);
+            if dirs.is_empty() {
                 tracing::warn!("codex session capture: no sessions directory for env {env_type:?}");
                 return;
-            };
-            let path = sessions_dir.clone();
+            }
             let directory = spawn_directory.clone();
             let expected_node = node.clone();
             // Keep the DB predicate, disk scan, and conditional write in one
@@ -297,7 +361,7 @@ pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: Env
                 if crate::db::cli_session_id_present(node_id).map_err(|error| error.to_string())? {
                     return Ok(CaptureAttempt::AlreadyStored);
                 }
-                let Some(id) = find_fresh_id_for_directory_in(&path, &directory, not_before) else {
+                let Some(id) = find_fresh_id_in_dirs(&dirs, &directory, not_before) else {
                     return Ok(CaptureAttempt::NotFound);
                 };
                 match crate::db::recover_live_cli_session_id(&expected_node, &id, generation) {
@@ -333,6 +397,10 @@ pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: Env
         tracing::warn!("codex session capture: gave up for node {node_id} in {spawn_directory}");
     });
 }
+
+#[cfg(test)]
+#[path = "codex_session_login_tests.rs"]
+mod login_tests;
 
 #[cfg(test)]
 mod tests {

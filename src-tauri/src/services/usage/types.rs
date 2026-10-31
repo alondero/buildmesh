@@ -169,6 +169,25 @@ pub struct ProviderMeters {
     #[serde(default, rename = "cachedAt", skip_serializing_if = "Option::is_none")]
     #[ts(optional, rename = "cachedAt", as = "Option<i32>")]
     pub cached_at: Option<i64>,
+    /// The Harness Login this reading belongs to. Set on every row of a
+    /// provider once it has more than one login (Codex), so two subscriptions
+    /// of the same provider render as two labelled meters. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub login: Option<MeterLogin>,
+}
+
+/// Which Harness Login a [`ProviderMeters`] row reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "MeterLogin.ts")]
+pub struct MeterLogin {
+    /// Login id; `default` for the runtime's ordinary Codex home.
+    pub id: String,
+    pub label: String,
+    /// Signed-in email from the login's own token, when it carries one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub email: Option<String>,
 }
 
 /// Failures that happen before we ever reach an endpoint: no credential on disk,

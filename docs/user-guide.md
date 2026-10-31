@@ -30,6 +30,7 @@ programs for you.
 - [Worktrees, branches, and review](#worktrees-branches-and-review)
 - [Project Settings and Repository](#project-settings-and-repository)
 - [Launch Configurations](#launch-configurations)
+- [Use more than one Codex login](#use-more-than-one-codex-login)
 - [Settings that matter](#settings-that-matter)
 - [When Buildmesh cannot read your settings](#when-buildmesh-cannot-read-your-settings)
 - [Harness permission modes](#harness-permission-modes)
@@ -979,6 +980,44 @@ later turn.
 If the selected configuration cannot be resolved, auto-naming retries on a later
 turn after you repair it. On Windows, Claude Code background work also checks
 the standard native and npm install locations when the app's PATH is stale.
+
+## Use more than one Codex login
+
+If you have more than one ChatGPT subscription, you can sign Codex in to each
+one and choose which to launch with.
+
+1. Open **Settings → Launch Configurations → Codex logins**, type a name (for example
+   `Work`) and choose **Add login**. Buildmesh creates a separate Codex folder
+   for it under `~/.codex-accounts/` and copies your current Codex settings
+   (`config.toml`) into it once.
+2. Choose **Sign in**. Your browser opens on whichever ChatGPT account it is
+   already signed in to, so switch accounts there first, or open the link shown
+   under the login in a private window. The login shows its email and plan once
+   the sign-in finishes. If two logins turn out to be the same ChatGPT account,
+   Buildmesh says so; sign one of them in again with the other account. If a
+   sign-in fails or times out, its error stays under the login until you
+   choose **Dismiss** or start another sign-in.
+
+With more than one login, hovering **Codex** in a sidebar or canvas spawn menu
+shows a login submenu. Click a login to spawn Codex with it, or open the login's
+submenu to pick a Launch Configuration. The node keeps that login when it
+resumes. To make a configuration always use one login, choose it under
+**Login** in the Launch Configuration editor; that configuration then appears
+only under its own login. Leave it on **Login picked in the spawn menu** to undo
+the pin. Spawns from the Issues and Pull Requests tabs, archived-node resume and
+the phone use the configuration's pin, or the default login.
+
+The **Usage** tab shows one Codex meter per login, each labelled with its name
+and email.
+
+Logins apply to native Windows launches. A Mesh opened from a WSL path keeps
+the WSL Codex login, and a launch that asks for another login there is refused
+with a message rather than running on the wrong account.
+
+To remove a login, choose **Remove**. Configurations pinned to it fall back to
+the login picked in the spawn menu. Its folder stays on disk, so adding a login
+with the same name later reuses its sign-in; delete the folder yourself to
+discard it.
 
 ## Settings that matter
 

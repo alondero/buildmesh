@@ -151,6 +151,7 @@ fn assemble_meters(
                     usage_tracked: tracked,
                     usage: None,
                     cached_at: None,
+                    login: None,
                 });
             }
             // Generic untracked: keep the "Usage not tracked" card.
@@ -161,6 +162,7 @@ fn assemble_meters(
                     usage_tracked: false,
                     usage: None,
                     cached_at: None,
+                    login: None,
                 });
             }
             // Enabled + tracked: drop iff no credential is configured AND
@@ -197,6 +199,7 @@ fn assemble_meters(
                             usage_tracked: tracked,
                             usage: Some(last_known.usage.clone()),
                             cached_at: Some(last_known.cached_at),
+                            login: None,
                         });
                     }
                 }
@@ -206,6 +209,7 @@ fn assemble_meters(
                     usage_tracked: tracked,
                     usage: Some(usage?.clone()),
                     cached_at: None,
+                    login: None,
                 });
             }
             // ADR-0037: the row would be hidden this round — no usable
@@ -220,6 +224,7 @@ fn assemble_meters(
                 usage_tracked: tracked,
                 usage: Some(last_known.usage.clone()),
                 cached_at: Some(last_known.cached_at),
+                login: None,
             })
         })
         .map(|mut meter| {
@@ -246,11 +251,18 @@ pub async fn get_provider_meters(
     // (same reason `GhAuthCache` is `Clone`).
     let last_known = last_known.inner().clone();
     let snapshot_cache = last_known.clone();
-    let (profiles, accounts, ids, configured_keys, previous) =
+    let (profiles, accounts, ids, configured_keys, previous, logins) =
         crate::commands::run_blocking("get_provider_meters_ids", move || {
             let profiles = preferences::harness_profiles();
             let accounts = Arc::new(preferences::provider_accounts());
             let ids = poll_ids(&accounts, &profiles);
+            // Additional Codex logins are read only while the Codex meter
+            // itself is polled (installed + enabled).
+            let logins = if ids.iter().any(|id| id == usage::logins::LOGIN_PROVIDER) {
+                codex_logins()
+            } else {
+                Vec::new()
+            };
             // Derive credential presence from the same effective account
             // snapshot the fetch workers receive. No worker reloads preferences.
             let configured_keys = configured_keyed_providers(&accounts);
@@ -259,7 +271,7 @@ pub async fn get_provider_meters(
             // is available before today's first fetch), and it keeps this
             // round's successful fetches out of this round's own fallback.
             let previous = snapshot_cache.snapshot();
-            Ok((profiles, accounts, ids, configured_keys, previous))
+            Ok((profiles, accounts, ids, configured_keys, previous, logins))
         })
         .await?;
 
@@ -284,6 +296,11 @@ pub async fn get_provider_meters(
             })
         })
         .collect();
+    let login_handles: Vec<_> = logins
+        .into_iter()
+        .map(|login| tauri::async_runtime::spawn_blocking(move || read_login(login, force_refresh)))
+        .collect();
+    let default_login_handle = tauri::async_runtime::spawn_blocking(default_meter_login);
 
     let mut usages: HashMap<String, ProviderUsage> = HashMap::new();
     let mut outcomes: HashMap<String, UsageOutcome> = HashMap::new();
@@ -299,6 +316,22 @@ pub async fn get_provider_meters(
         outcomes.insert(id.clone(), outcome);
         usages.insert(id, usage);
     }
+    let mut login_readings = Vec::new();
+    for handle in login_handles {
+        let reading = handle
+            .await
+            .map_err(|e| format!("usage fetch task failed: {}", e))?;
+        if reading.outcome.is_reading() {
+            readings.push((
+                usage::logins::last_known_key(&reading.login.id),
+                reading.usage.clone(),
+            ));
+        }
+        login_readings.push(reading);
+    }
+    let default_login = default_login_handle
+        .await
+        .map_err(|e| format!("usage fetch task failed: {}", e))?;
 
     // Remember what we actually learned, for a future round that cannot fetch.
     // One blocking hop for the whole batch (disk I/O must stay off the async
@@ -310,14 +343,71 @@ pub async fn get_provider_meters(
     })
     .await?;
 
-    Ok(assemble_meters(
+    let rows = assemble_meters(
         accounts.as_ref(),
         &profiles,
         &usages,
         &outcomes,
         &configured_keys,
         &previous,
+    );
+    let login_rows = login_readings
+        .into_iter()
+        .filter_map(|reading| usage::logins::login_row(reading, &previous))
+        .collect();
+    Ok(usage::logins::merge_login_rows(
+        rows,
+        default_login,
+        login_rows,
     ))
+}
+
+/// The stored additional Codex logins. A preferences read failure shows the
+/// default meter only.
+fn codex_logins() -> Vec<preferences::harness_logins::HarnessLogin> {
+    match preferences::load() {
+        Ok(prefs) => preferences::harness_logins::logins_for(&prefs, usage::logins::LOGIN_PROVIDER)
+            .into_iter()
+            .cloned()
+            .collect(),
+        Err(error) => {
+            tracing::warn!(
+                "usage: Codex logins unavailable, showing the default meter only: {error}"
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// Fetch one additional login's reading and label it from its own token.
+fn read_login(
+    login: preferences::harness_logins::HarnessLogin,
+    force_refresh: bool,
+) -> usage::logins::LoginReading {
+    let home = std::path::PathBuf::from(&login.home);
+    let (outcome, usage) =
+        usage::catalog::cached_codex_login_outcome_and_usage(&home, force_refresh);
+    let identity = usage::adapters::codex::read_login_identity(&home);
+    usage::logins::LoginReading {
+        login: usage::types::MeterLogin {
+            id: login.id,
+            label: login.label,
+            email: identity.email,
+        },
+        outcome,
+        usage,
+    }
+}
+
+/// The default login's label for its meter row, with the email from the
+/// runtime's ordinary Codex home.
+fn default_meter_login() -> usage::types::MeterLogin {
+    let identity = usage::adapters::codex::read_login_identity(&crate::env::codex_dir());
+    usage::types::MeterLogin {
+        id: preferences::harness_logins::DEFAULT_LOGIN_ID.to_string(),
+        label: usage::logins::DEFAULT_LOGIN_LABEL.to_string(),
+        email: identity.email,
+    }
 }
 
 #[command]

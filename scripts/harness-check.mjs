@@ -162,6 +162,13 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/services/usage/adapters/perch_tests.rs': 'services::usage::adapters::perch::tests',
   'src-tauri/src/services/provider_verification_tests.rs': 'services::provider_verification::tests',
   'src-tauri/src/agent/launch_routing_tests.rs': 'agent::launch_routing::launch_routing_tests',
+  'src-tauri/src/agent/launch_routing_cache_tests.rs': 'agent::launch_routing::routing_cache_tests',
+  'src-tauri/src/services/codex_session_login_tests.rs': 'services::codex_session::login_tests',
+  'src-tauri/src/commands/agent_node_login_tests.rs': 'commands::agent_node::login_tests',
+  'src-tauri/src/commands/harness_logins_tests.rs': 'commands::harness_logins::tests',
+  'src-tauri/src/preferences/harness_logins_tests.rs': 'preferences::harness_logins::tests',
+  'src-tauri/src/services/harness_logins_tests.rs': 'services::harness_logins::tests',
+  'src-tauri/src/services/usage/logins_tests.rs': 'services::usage::logins::tests',
   'src-tauri/src/commands/preferences_tests.rs': 'commands::preferences::preferences_tests',
 };
 

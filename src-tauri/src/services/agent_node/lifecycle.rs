@@ -277,7 +277,7 @@ pub fn regenerate_apply_blocking(
 ) -> Result<bool, AgentNodeError> {
     let node = db::get_agent_node_by_id(node_id)?;
     let prefs = crate::preferences::load().map_err(AgentNodeError::Backend)?;
-    let plan = crate::preferences::launch_configurations::resolve(
+    let mut plan = crate::preferences::launch_configurations::resolve(
         &prefs,
         new_provider,
         &Default::default(),
@@ -289,6 +289,18 @@ pub fn regenerate_apply_blocking(
         node.cli_session_id.as_deref(),
     )
     .is_some();
+    // A resumed session lives in the home of the Harness Login that started
+    // it, so a native resume keeps that login rather than the new plan's:
+    // an additional login, or `None` for the Default login. A node with no
+    // frozen plan has no recorded login, so the new plan's stands.
+    if resume && plan.route.is_none() {
+        if let Some(previous) = db::node_spawn_configuration(node_id, old_provider)
+            .map_err(|error| AgentNodeError::Backend(error.to_string()))?
+            .and_then(|value| value.resolved)
+        {
+            plan.harness_login = previous.harness_login;
+        }
+    }
     let runtime = plan.harness.runtime.unwrap_or_else(|| {
         crate::env::resolve_raw_path(&crate::env::node_working_path(&node).raw_path).env_type
     });

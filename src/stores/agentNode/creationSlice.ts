@@ -6,9 +6,9 @@ import * as api from '../../lib/tauri/agentNode';
 
 export function createCreationSlice(set: SetAgentNodeState, get: GetAgentNodeState, runtime: AgentNodeRuntime): Pick<AgentNodeState, 'createAgentNode' | 'adoptAgentNode' | 'selectProviderForMesh'> {
   return {
-  createAgentNode: async (meshId, name, path, branch, provider?: string, useWorktree?: boolean, configurationId?: string, initialPrompt?: string): Promise<AgentNode> => {
+  createAgentNode: async (meshId, name, path, branch, provider?: string, useWorktree?: boolean, configurationId?: string, initialPrompt?: string, loginId?: string): Promise<AgentNode> => {
     try {
-      const node = await api.createAgentNode(meshId, name, path, branch, provider, useWorktree, configurationId, initialPrompt);
+      const node = await api.createAgentNode(meshId, name, path, branch, provider, useWorktree, configurationId, initialPrompt, loginId);
       set((state) => ({
         nodesById: { ...state.nodesById, [node.id]: node },
         nodeIds: [...state.nodeIds, node.id],
@@ -32,7 +32,7 @@ export function createCreationSlice(set: SetAgentNodeState, get: GetAgentNodeSta
     }));
   },
 
-  selectProviderForMesh: async (meshId, meshName, meshPath, providerId, useWorktree?: boolean, initialPrompt?: string, configurationId?: string): Promise<AgentNode> => {
+  selectProviderForMesh: async (meshId, meshName, meshPath, providerId, useWorktree?: boolean, initialPrompt?: string, configurationId?: string, loginId?: string): Promise<AgentNode> => {
     // Create FIRST — only switch active mesh/node if creation succeeded.
     // The order is the invariant: pre-refactor this lived in three sequential
     // store calls in Sidebar.handleSelectProvider (#283), where a future hand
@@ -40,7 +40,7 @@ export function createCreationSlice(set: SetAgentNodeState, get: GetAgentNodeSta
     // "mesh selected but no node" state. Holding the order here makes the
     // invariant unit-testable and impossible to violate from a click handler.
     const { focusNode } = await import('../../lib/navigation');
-    const node = await get().createAgentNode(meshId, meshName, meshPath, 'main', providerId, useWorktree, configurationId, initialPrompt);
+    const node = await get().createAgentNode(meshId, meshName, meshPath, 'main', providerId, useWorktree, configurationId, initialPrompt, loginId);
     focusNode(node.id, { view: 'mesh', scope: 'node' });
     // Explicit create-then-spawn (issue #1413 review): the prompt rides
     // on this call, not a store-side dictionary the Terminal mount

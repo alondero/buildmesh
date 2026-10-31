@@ -405,6 +405,35 @@ export const deleteSpawnConfiguration = async (id: string): Promise<void> => {
   }
 };
 
+// ----- Harness Logins (additional Codex sign-ins) -------------------------
+import type { HarnessLogin } from '../../types/generated/HarnessLogin';
+import type { HarnessLoginRef } from '../../types/generated/HarnessLoginRef';
+import type { HarnessLoginStatus } from '../../types/generated/HarnessLoginStatus';
+import type { SignInState } from '../../types/generated/HarnessLoginSignIn';
+import type { MeterLogin } from '../../types/generated/MeterLogin';
+
+export type { HarnessLogin, HarnessLoginRef, HarnessLoginStatus, SignInState, MeterLogin };
+
+/** The default Codex login first, then every additional one. */
+export const listHarnessLogins = () => _invoke<HarnessLoginStatus[]>('list_harness_logins');
+export const addHarnessLogin = (label: string) =>
+  _invoke<HarnessLogin>('add_harness_login', { label });
+export const renameHarnessLogin = (id: string, label: string) =>
+  _invoke<HarnessLogin>('rename_harness_login', { id, label });
+export const removeHarnessLogin = async (id: string): Promise<void> => {
+  try {
+    await _invoke<void>('remove_harness_login', { id });
+  } finally {
+    // Removal unpins Launch Configurations, which the provider list carries.
+    setProviderListPromise(null);
+  }
+};
+/** Runs `codex login` for one login; poll `listHarnessLogins` for progress. */
+export const startHarnessLoginSignIn = (id: string) =>
+  _invoke<SignInState>('start_harness_login_sign_in', { id });
+export const cancelHarnessLoginSignIn = (id: string) =>
+  _invoke<void>('cancel_harness_login_sign_in', { id });
+
 import type { OpenCodeWorkspace } from '../../types/generated/OpenCodeWorkspace';
 import type { OpenCodeDeviceFlowStart } from '../../types/generated/OpenCodeDeviceFlowStart';
 import type { OpenCodeDeviceCodeStatus } from '../../types/generated/OpenCodeDeviceCodeStatus';
